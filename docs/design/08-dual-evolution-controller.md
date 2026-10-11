@@ -31,7 +31,7 @@ Fortis の Coordination API (§5) は**現時点で存在しない API を前提
 |---|---|---|
 | a | #10 は「DEC は Release の正本」、#12/#8(確定) は「Release 状態の正本は Fortis、DEC は Reconciler/Executor」 | **Fortis を正本**とする (#8 確定版が最新)。「DEC が正本を管理する」は「DEC が Fortis 上の Release 状態を唯一更新できる主体」の意味で読み替える。#10 側の記述更新が必要 (§14 未解決論点) |
 | b | #11 は Lease/Fencing の DB モデルを MariaDB 前提で記述、#12 は Release Lease を Fortis へ | Release/DEC Leader 系は Fortis。Run 系 Lease は #12 Phase 3 まで MariaDB。本書は Release 系のみ扱う |
-| c | #8 は「ローカル DB を持たない」、#12 は MariaDB を「DevelopmentRun・監査/Outbox」とする | DEC は MariaDB (A/B と共通依存になり得る) に**依存しない**。監査は DEC 専用の追記専用シンクへ (§10.1、要確認) |
+| c | #8 は「ローカル DB を持たない」、#12 は MariaDB を「DevelopmentRun・監査/Outbox」とする | DEC はローカル DB を持たず、MariaDB に**直接接続しない**。Journal 等の MariaDB 書込みは **Recorder サービス経由**、または **専用 Audit Sink** (追記専用) 経由とする (§10.1、#11/#12 と整合。どちらを採るかは要確認) |
 | d | #7 は「Controller の Lease」、#8 は「Leader Election は Fortis」 | #8 に従う |
 | e | #10 の `requestRelease/getRelease/requestRollback` は「Kivra 内部の抽象契約」 | §11 で DEC 側の具体契約案を提示し、#10 Adapter と対応づける |
 
@@ -44,7 +44,7 @@ Fortis の Coordination API (§5) は**現時点で存在しない API を前提
 5. **Stateless DEC**: DEC はローカル永続状態・独自リーダー選出・独自の正本を持たない。再起動時は Fortis と外部実態から再構築する。
 6. **外部 Fencing**: Fortis の epoch だけでは K8s への遅延リクエストを止められないため、Deployment Executor が最新 epoch を検証する。
 7. **ロールバック可能性の事前証明**: Rollback 不可能な変更 (非互換スキーマ等) は STAGING に入る前に拒否する。
-8. **Exactly-once を主張しない**: 副作用は冪等キー + 照合 (reconcile) で至る。曖昧なら停止して照合する。
+8. **Exactly-once を主張しない**: 副作用は冪等キー + 照合 (reconcile) で対処する。曖昧なら停止して照合する。
 
 ## 2. コンポーネント構成と信頼境界
 
@@ -516,7 +516,7 @@ Fortis が使えないと DEC は canary を Rollback できず、問題のあ�
 
 - 記録対象: Release 要求、全状態遷移 (誰/どの epoch/どの根拠)、PolicyDecision、承認の参照と失効、Executor の全実行 (opId)、Health 判定、Pause/Quarantine/設定変更、break-glass 全操作、Leader 交代
 - 追記専用・改ざん検知 (ハッシュチェーン等)。DEC/Executor は追記のみ、A/B は読取のみ (または不可)
-- DEC は MariaDB (Run 履歴用、A/B と共通依存) に**依存しない** (#8 のステートレス要件と、#7 の「共通基盤の同時故障防止」より)。DEC 専用の Audit Sink (例: 別ストレージの追記専用ログ) を提案。具体基盤は **要確認** (§14 論点 8)。#12 の「他の DB には監査/履歴のみ」は、本 Audit Sink を指すと解釈する
+- DEC は MariaDB (Run 履歴用、A/B と共通依存) に**依存しない** (#8 のステートレス要件と、#7 の「共通基盤の同時故障防止」より)。DEC の記録書込みは、**Recorder サービス経由 (Recorder が MariaDB へ書く)** または **DEC 専用の Audit Sink (例: 別ストレージの追記専用ログ)** のいずれかとし、DEC 自身はローカル DB・DB ドライバを持たない。具体基盤は **要確認** (§14 論点 8)。#12 の「他の DB には監査/履歴のみ」は、Recorder 経由の書込みまたは本 Audit Sink を指すと解釈する
 - 監査は「遷移前に PREPARED、遷移後に確定」の順で追記し、遷移が Fortis に記録されたが監査が欠けた場合は Reconcile 時に補完 (`releaseId+generation` で重複排除)
 
 ### 10.2 承認と失効

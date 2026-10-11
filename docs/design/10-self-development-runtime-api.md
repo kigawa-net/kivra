@@ -202,8 +202,9 @@ CREATE TABLE development_runs (
   next_retry_at       DATETIME(6)  NULL,
   created_at          DATETIME(6)  NOT NULL,
   updated_at          DATETIME(6)  NOT NULL,
+  active_flag         TINYINT AS (IF(state IN ('COMPLETED','FAILED','CANCELLED'), NULL, 1)) STORED,
   CONSTRAINT ck_not_self CHECK (developer_instance <> target_instance),
-  UNIQUE KEY uk_active_task (task_id, active_flag),                -- 同一 task の同時 active Run を1つに(active_flag は生成列: 終端なら NULL)
+  UNIQUE KEY uk_active_task (task_id, active_flag),                -- 同一 task の同時 active Run を1つに(終端なら NULL で重複許容)
   KEY ix_runs_recover (state, lease_expires_at),
   KEY ix_runs_retry (state, next_retry_at)
 );
@@ -290,7 +291,7 @@ CREATE TABLE inbox_events (                -- Kivra が受信する側(Webhook/N
 
 設計メモ:
 
-- `uk_active_task` は「同一タスクの二重 Run」を防ぐ。実装は MariaDB の生成列(`active_flag = IF(state IN ('COMPLETED','FAILED','CANCELLED'), NULL, 1)`)で行う想定。MariaDB の部分ユニーク制約の扱いは**要確認**(NULL を重複許容するユニーク挙動に依存)。
+- `uk_active_task` は「同一タスクの二重 Run」を防ぐ。`active_flag` 生成列(終端状態で NULL)で実現する想定。MariaDB の部分ユニーク制約の扱いは**要確認**(NULL を重複許容するユニーク挙動に依存)。
 - `ck_not_self` により、DB レベルで自己開発を拒否する(アプリ検証の二重化)。
 - Run 状態更新・`development_events` 追記・`outbox_events` 追記は**同一トランザクション**(Transactional Outbox, #11)。
 - `branch` は `kivra/run-<runId>` と決定的に決める。これが GitHub 側の照合キーになる(§6.2)。

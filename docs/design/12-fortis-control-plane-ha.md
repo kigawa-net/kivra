@@ -2,17 +2,18 @@
 
 - 対象 Issue: kigawa-net/kivra#12
 - 関連(Kivra): #1 Core, #7 Dual Evolution Architecture, #8 DEC, #9 Pipeline, #10 Runtime/API, #11 Consistency
-- 関連(Fortis): kigawa-net/fortis#27(Edge), #28〜#34(Coordination 設計群), #17/#18(Raft/Recovery), #21(MVCC), #25(Hardening)
+- 関連(Fortis): kigawa-net/fortis#27(Edge), #28〜#34(Coordination 設計群。#31 = Lock & Fencing), #17/#18(Raft/Snapshot/Recovery), #21(MVCC), #25(Hardening), #35(本番デプロイ・クラスタ運用。Backup/DR), #36(Cluster Lifecycle Controller。Recovery Manifest・旧 Cluster Fencing)
 - 状態: 設計案(ドラフト)。本書の「要確認」は未確定事項で、実装前にレビューで確定する
 - 調査基準日: 2026-10-12(Fortis は `feature/raft` 先頭 `db9c5e3` を参照)
 
 ## 0. 要約
 
 1. Fortis は **Coordination Control Plane** として、DEC のリーダー選出・Session/Lease・Release Lock・Fencing Token・Release State の**権威的ストア**を担う。DEC はステートレスな Reconciler で、リーダー選出を自前実装しない(#12 / #8 の確定事項)。
-2. Fortis 単独では旧 DEC の遅延要求を止められない。**Deployment Executor が (electionEpoch, fencingToken) を自前の永続状態で検証して拒否する**(外部 Fencing)。これを本設計の中心的安全機構とする。
+2. Fortis 単独では旧 DEC の遅延要求を止められない。**Deployment Executor が世代 `(incarnation, electionEpoch, fencingToken)` を自前の永続 `maxSeen` で検証して拒否し、実行先への書込は Executor の単一 writer に限る**(外部 Fencing。受理→実行→確定の順序規則・バリア・キャンセルは §5.3 の規範要件)。これを本設計の中心的安全機構とする。
 3. Fortis の Quorum を失ったら新規 Release・Lease 更新・権威的状態変更を全停止(fail-closed)。既存の A/B サービスは動かし続ける。
 4. Fortis の **現状は本番不可**(§2)。Coordination API(Session/Lease/Election/Lock/Fencing)は設計 Issue 段階でコードは存在しない。受入ゲート(§11)を通るまで Fortis を本番の依存にしない。それまで DEC は「人手承認 + 単一 Executor 排他」の暫定運用(§12 Phase 0)で動かす。
-5. Fortis をバックアップから復元すると Fencing Token が巻き戻り得る。**cluster incarnation を Token に含める**ことを Fortis への要求事項とする(§4.5)。
+5. Fortis をバックアップから復元すると Fencing Token が巻き戻り得る。`incarnation` をバックアップ内に保存するだけでは同じ値に戻るため、**Fortis の外にある巻き戻し不能な Incarnation Authority(または管理者署名 Recovery Manifest 連鎖)・旧 Cluster の隔離・新 Epoch 確定前の Executor fail-closed** を要件とする。辞書順 tuple だけには依存しない(§4.5)。
+6. Release の排他は **Session Lock(調整権限。Leader 交代で失効)** と **永続 Release Reservation(同時 Release 不可・対象・進捗。Session に紐づかない)** に分離する(§6.3。#8 §5.5 と同一の記述)。
 
 ## 1. 責務分担(権威ストアの一覧)
 
@@ -114,7 +115,8 @@ flowchart LR
 | prefix | 内容 | 書込み主体 |
 | --- | --- | --- |
 | `/kivra/v1/dec/election/` | DEC Leader 選出(election 名 `dec-leader`) | DEC replica(Election API 経由) |
-| `/kivra/v1/locks/release/prod` | Production Release のグローバル Lock | Leader DEC |
+| `/kivra/v1/locks/release/prod` | Production Release の **Session Lock**(調整権限。Session に紐づく。§6.3) | Leader DEC |
+| `/kivra/v1/reservations/release-prod` | **Release Reservation**(同時 Release 不可・対象・進捗の所有者。Session に紐づかない。§6.3) | Leader DEC(CAS) |
 | `/kivra/v1/locks/target/{A\|B}` | A/B 更新対象ごとの Lock と Fencing Counter | Leader DEC |
 | `/kivra/v1/releases/{releaseId}` | Release State(後述) | Leader DEC(CAS) |
 | `/kivra/v1/runs/{runId}/lease` | DevelopmentRun 実行 Lease(Phase 3 で任意の差替え。MVP は MariaDB の LeaseStore。§13-1) | Kivra Worker |
@@ -122,6 +124,7 @@ flowchart LR
 | `/kivra/v1/refs/approval/{id}` | 高リスク変更の承認検証 ID | 承認系の ID を DEC が記録 |
 
 - Namespace ごとに principal を分離する(Fortis #34 の RBAC/mTLS が前提): DEC Service Account のみ `dec`/`locks`/`releases` に書込み可、A/B の Service Account は**書込み不可**(読取りのみ)。A/B が Control Plane 状態を変更できないことは #7 の必須要件。
+- #8 の `/dec/*` キーとの対応: `/dec/release-lock` = `locks/release/prod`、`/dec/release-reservation` = `reservations/release-prod`、`/dec/targets/{A|B}/token` = `locks/target/{A|B}` の Fencing Counter。#8 の `lockToken` は本書の `fencingToken`。
 - Fortis 内部の Raft Leader と DEC の election leader は別概念(Fortis #28/#29 明記)。本書で単に「Leader」と言う場合は DEC Leader を指す。
 
 ### 4.2 API 契約(Kivra が必要とする操作)
@@ -154,27 +157,41 @@ ReleaseState {
   artifactDigest   : immutable digest
   policyDecisionRef: Policy 判定の参照 ID
   approvalRef?     : 高リスク変更の承認検証 ID
-  electionEpoch    : この Release を最後に進めた DEC Leader の epoch
-  lockToken        : 取得した Release Lock の Fencing Token
+  incarnation      : 発行時の Fortis incarnation(§4.5)
+  electionEpoch    : この Release を最後に進めた DEC Leader の epoch(Reservation.ownerEpoch と同値)
+  fencingToken     : 取得した Session Lock の Fencing Token(#8 の `lockToken`。Reservation.ownerToken と同値)
   generation       : 状態更新ごとに +1(CAS 用。Fortis revision とは別に論理世代を持つ)
   rollbackTo?      : 検証済み安定版の digest
 }
 ```
 
-- 更新は必ず CAS(`expectedRevision`)で行い、**#8 の遷移表に反する遷移は DEC 側で拒否**したうえで Fortis に送る。
+- 更新は必ず CAS(`expectedRevision`)で行い、さらに §6.3 の進行条件(Reservation の `ownerEpoch`/`ownerToken` 一致・自 Session の Lock 有効)を含める。**#8 の遷移表に反する遷移は DEC 側で拒否**したうえで Fortis に送る。
 - 巨大な履歴は持たず、遷移履歴は MariaDB の監査へ Outbox 経由で出す(§7)。
 
-### 4.5 epoch / Fencing Token の定義
+### 4.5 epoch / Fencing Token の定義と incarnation の永続単調性
 
 | 名称 | 発行元 | 単位 | 用途 |
 | --- | --- | --- | --- |
-| `incarnation` | Fortis(cluster 初期化・**バックアップからの復元ごと**に増加) | クラスタ | Token 巻き戻り防止(下記) |
+| `incarnation` | **Incarnation Authority** (Fortis とそのバックアップの外。下記 INC-1) | クラスタ (復元ごとに +1) | バックアップ復元による世代の巻き戻り防止 |
 | `electionEpoch` | Election API | election 名 | DEC Leader の世代 |
-| `fencingToken` | Lock API | リソース(`release/prod`, `target/A`, `target/B`) | 副作用の順序づけ |
+| `fencingToken` | Lock API | リソース (`release/prod`, `target/A`, `target/B`) | 副作用の順序づけ |
 
-- Executor に渡す「世代」は **`(incarnation, electionEpoch, fencingToken)` の辞書順タプル**とする。
-- **Fortis への要求事項:** 障害復旧でスナップショット/バックアップから復元した場合、復元前に発行済みの Token が再発行され得る(Executor が既に大きい Token を見ている)。これを防ぐため、復元時は `incarnation` を必ずインクリメントする、もしくは Counter を安全マージン分だけジャンプさせる。この要件は Fortis #29/#31 には明記がないため、**Fortis 側へのフィードバック Issue が必要**(§14)。
-- Release 本文にも `releaseId + digest + (incarnation, epoch, token)` を含め、署名する(署名主体・鍵管理は **要確認**: DEC の外側にある Secret 管理に置く)。
+Executor に渡す世代は `(incarnation, electionEpoch, fencingToken)` とするが、**辞書順 tuple の比較だけで安全性を保証しない** (INC-4)。
+
+**問題:** `incarnation` を Fortis の Raft state やバックアップの中だけに保存すると、同じバックアップを何度復元しても同じ値に戻る (巻き戻る)。したがって増加の権威は Fortis の外に置く。
+
+- **INC-1 Incarnation Authority**: Fortis とそのバックアップから独立し、**巻き戻し不能**な世代の権威を置く。次のいずれか (または併用。選定は**要確認**): (a) 追記専用 (WORM) で世代を CAS により増加のみ許す権威ストア。保管先は Fortis と別の障害ドメイン。(b) **管理者署名 Recovery Manifest** のハッシュ連鎖 — 各 Manifest = `{clusterId, incarnation (直前 + 1), 直前 Manifest の hash, 復元元 Backup の ID/checksum, 旧 Cluster 隔離の確認, 承認者署名}`。Manifest は Fortis #36 の「独立 Recovery Manifest」と同一のものとする。**要確認**: #36 の Manifest と #35 の Backup 項目 (Snapshot/Cluster ID/Membership/Session/Lock/Election/Fencing Counter/Revision) に `incarnation` の欄が現状無い (本文の記載を確認できなかった)。Fortis 側へ追加を要求する (§14 F2)。
+- **INC-2 Fortis の起動検証**: Fortis は復元後の起動時に、バックアップ内の値ではなく Authority/Manifest の最新 `incarnation` で起動し、不一致なら Coordination API の提供を拒否する (fail-closed)。Cluster ID は復元で変えない (#35 が Cluster ID の勝手な再生成を禁止)。`incarnation` は Cluster ID とは別の概念。
+- **INC-3 復元手順 (順序固定)**:
+  1. **旧 Cluster の隔離**: 旧 Cluster の mTLS 証明書/identity の失効、ネットワーク遮断、旧 Voter データディスクの再参加禁止 (#35/#36 の旧 Cluster Fencing)。隔離の確認を Manifest に含める。
+  2. DEC 全 replica を停止 (新規 Release 無効)、Executor を `FROZEN` (全要求拒否)。**この間、Executor は fail-closed**。
+  3. 管理者が Authority の最新値と Executor の `maxSeen.incarnation`、旧 Cluster が発行した最大値の観測値から `I' = max(...) + 1` を決め、Manifest に署名して追記する。
+  4. Backup を復元し、Fortis が Manifest 検証を通過して `I'` で起動する。新 `electionEpoch` / `fencingToken` は `I'` の下で確定する (Counter を安全マージン分前進させてもよいが、安全性はこれに依存しない)。
+  5. **新 Epoch の確定前は Executor が fail-closed のまま**: 管理者認証付きの `advance incarnation` で Manifest を Executor に提示し、署名と連鎖を検証した後に `maxSeen = (I', 0, 0)` を永続化する。これが完了するまで、Fortis が新 Epoch を確定していても DEC の apply は全て拒否される。
+  6. DEC の再開は人間が承認する。新 Leader は照合 (§6.2) を行い、復元点以降に失われた Reservation/ReleaseState を GitOps/K8s/Journal から再構築する。確定できないものは `QUARANTINED`。
+- **INC-4 辞書順 tuple に依存しない受理規則**: Executor は (a) `incarnation` が Manifest 連鎖で承認済みの**現在値と等しい**要求のみ受理する (未承認の大きい値は拒否。誤った/悪意ある Cluster が大きい値で `maxSeen` を押し上げ、正規系を締め出すことを防ぐ)。(b) 小さい `incarnation` は常に拒否。(c) `(electionEpoch, fencingToken)` の辞書順比較は同一 `incarnation` の内側でのみ行う。
+- **INC-5 maxSeen 喪失時**: Fortis の読取りだけから再構築しない (巻き戻った Fortis を信じてしまうため)。Authority/Manifest 連鎖の最新 `incarnation` + Fortis の linearizable read (clusterId・`incarnation` が Authority と一致) + 管理者承認、の全てを満たすまで全要求を拒否する。
+- Release 本文にも `releaseId + digest + 世代` を含めて署名する (署名主体・鍵管理は **要確認**: DEC の外側の Secret 管理)。
 
 ## 5. 外部 Fencing(Deployment Executor)
 
@@ -191,25 +208,46 @@ sequenceDiagram
   DEC->>F: acquireLock(release/prod) + CAS Release State(PROMOTING)
   F-->>DEC: fencingToken=T, epoch=E, revision=R
   DEC->>EX: apply(releaseId, digest, (I,E,T), 署名)
-  EX->>EX: 自前ストアで target ごとの maxSeen を CAS 検証 (新 tuple >= maxSeen)
+  EX->>EX: 自前ストアで target ごとの maxSeen を検証 (incarnation 一致 かつ 同一 incarnation 内で (E,T) >= maxSeen)
   alt 旧 tuple または署名不正
     EX-->>DEC: REJECT(STALE_EPOCH)
   else 受理
-    EX->>EX: maxSeen = tuple を永続化(適用前に fsync)
-    EX->>G: digest 固定の manifest を適用
+    EX->>EX: maxSeen = tuple + Operation ACCEPTED を永続化(fsync 後に応答。EX-1)
+    EX->>G: target 単一 worker が digest 固定の manifest を適用(EX-2/EX-3)
     EX-->>DEC: ACCEPTED(operationId)
   end
 ```
 
 - Executor は **自前の永続ストア(Fortis に依存しない)** に `target ごとの maxSeen tuple` と `適用済み releaseId` を持つ。これにより、Fortis 全断時も旧 DEC の遅延要求を拒否できる。
 - 同一 tuple・同一 releaseId の再送は冪等に受理する(結果を返す)。同一 tuple で別 digest は拒否。
-- Executor が maxSeen を失った場合(ストア消失)は、**Fortis から現在の epoch/token を LINEARIZABLE 読みして再構築するまで全要求を拒否**する(fail-closed)。
+- Executor が maxSeen を失った場合(ストア消失)は、**§4.5 INC-5 の条件(Authority/Manifest 連鎖 + Fortis の LINEARIZABLE 読み + 管理者承認)を満たすまで全要求を拒否**する(fail-closed)。Fortis の読取りだけで再構築しない。
 - 入口の一点でしか Fencing できない構成は迂回に弱い。Executor 以外に K8s/GitOps へ書込み可能な主体は、DEC の Service Account から除去する(§9)。GitOps 側(ArgoCD / リポジトリ保護ルール)が Executor 以外からの変更を拒否する構成は **要確認**。
-- Kubernetes/GitHub は Fencing 非対応のため、ここで述べた Executor ゲートが唯一の Fencing となる(#11「Fencing 非対応の外部 API は照合・隔離で対処」と整合)。
+- Kubernetes/GitHub は Fencing 非対応のため、ここで述べた Executor ゲートが唯一の Fencing となる(#11「Fencing 非対応の外部 API は照合・隔離で対処」と整合)。受理後の実行競合の扱いは §5.3。
 
 ### 5.2 Executor 自体の可用性
 
 Executor は単一障害点になり得る。当面は単一インスタンス + 永続ボリュームとし、Executor 停止時は新規リリースが止まるだけ(既存サービスは影響なし)。多重化する場合は maxSeen ストアの整合が必要になるため、MVP では多重化しない(**要確認**)。
+
+### 5.3 外部 Fencing の規範要件(受理 → 実行 → 確定の競合)
+
+**規範要件 (MUST)。#8 §5.3 と #12 §5.3 は同一の記述とする。** 用語: 世代 = `(incarnation, electionEpoch, fencingToken)` (#8 の `lockToken` = #12 の `fencingToken`)。
+
+- **EX-1 Executor の永続 maxSeen**: Executor は target ごと (`release/prod` を含む) に `maxSeen` 世代を、自前の耐久ストア (fsync、Fortis 非依存、DEC から書込不可) に持つ。受理判定は「`maxSeen` との比較」と「`maxSeen` の更新・永続化」を 1 つの原子操作とし、永続化完了後にのみ ACCEPTED を返す。Fortis の linearizable read は補助的な追加検証であり**必須判定ではない** (Fortis 断でも旧世代を拒否できること)。
+- **EX-2 実行先の単一 writer**: GitOps リポジトリ / Kubernetes / ArgoCD への書込資格は Executor のみが持つ (DEC・A/B・通常運用者の書込権限は除去。break-glass は Executor を `FROZEN` にしてから行う)。Executor 内部では target ごとに直列化された**単一 worker** で実行し、target あたり同時に進行中の操作は最大 1。Executor 自体も MVP では単一インスタンス (多重化は maxSeen ストアの整合設計が前提)。
+- **EX-3 受理 → 実行 → 確定の順序規則**: (1) 受理: 署名検証 → `maxSeen` 比較・更新を永続化 → Operation 記録 `ACCEPTED`。(2) 実行: `IN_FLIGHT` を記録し、**各外部書込の直前に** worker 内で「自 op の世代 == `maxSeen`」を再確認する。GitOps 書込は「期待する親 commit」付きの条件付き書込とし、manifest に `release-id` と世代の annotation を埋める。(3) 確定: 結果 (`CONFIRMED` / `UNKNOWN`) を永続化してから応答する。確定時点で自 op の世代 != `maxSeen` なら `SUPERSEDED` として「実際に何を書いたか」を返し、当該 Release の成功とは扱わない。
+- **EX-4 バリア (新世代の最初の要求)**: 新世代の最初の要求 (照合完了時の `no-op apply` = barrier) は、`maxSeen` を引き上げた後、当該 target の旧世代 in-flight 操作が (i) 完了、(ii) 安全点で中止、(iii) 結果不明と確定、のいずれかになるまで worker 上で待機する (drain)。barrier 応答は `{drain 結果, 観測した GitOps/K8s 実態}` を返す。新 Leader は barrier 応答を受けるまで照合を完了させず、新世代の apply を発行しない。これにより、**新 Epoch の受理後に旧操作が書込を確定し得る窓は「受理 〜 drain 完了」に限られ、その間の書込結果は必ず新 Leader に報告され、新世代の操作はその後にしか始まらない**。
+- **EX-5 キャンセル**: 新世代の受理時、旧世代の in-flight 操作へ cancel を通知し、次の安全点 (外部書込のステップ境界) で停止させる。すでに発行済みで取り消せない外部書込 (git push 等) は完了/失敗を待つ (上限タイムアウト付き。超過は `UNKNOWN`)。`UNKNOWN` を含む barrier 応答を受けた新 Leader は Release を `QUARANTINED` にして人手確認とする。`maxSeen` 更新後に旧世代の操作を新規開始・再開することは決してない。
+- **EX-6 Executor 復旧**: 再起動時は `ACCEPTED` / `IN_FLIGHT` の操作を**再実行せず**、まず GitOps/K8s の実態と照合して結果を確定 (`UNKNOWN` 含む) してから新規受理を再開する。世代 < `maxSeen` の op は照合のみ。同一世代・同一 releaseId の再送は冪等に受理し、同一世代で別 digest は拒否する。`maxSeen` ストア消失時は #12 §4.5 INC-5 に従い fail-closed。
+- **EX-7 要求の真正性**: 要求は署名付き `(releaseId, digest, 世代)` とし、Executor は要求パラメータではなく署名検証済みの値で実行する。
+
+検証した競合窓と残余リスク:
+
+| 窓 | 結果 |
+|---|---|
+| 旧 Executor 操作が新 Epoch 受理後に書込を確定 | EX-3 の直前再確認で大半は止まる。再確認通過後に発行済みの書込は取り消せないが、EX-4 の drain が完了するまで新世代の操作は開始されず、結果は barrier 応答で新 Leader に報告される。報告なしに書込が確定することはない |
+| 旧 DEC の遅延 apply が maxSeen 更新後に到達 | EX-1 で拒否 (Fortis 断でも成立) |
+| 旧世代 op の途中で Executor が再起動 | EX-6: 再実行せず照合してから再開 |
+| Executor を経由しない書込 (ArgoCD の手動 sync、人手の kubectl 等) | EX-2 の権限除去が前提。残る場合は GitOps の「期待する親 commit」CAS と annotation で検出する。GitOps サーバ側 (pre-receive hook 等) での世代検証の可否は**要確認** |
 
 ## 6. DEC Leader Election・Release Lock・復旧
 
@@ -239,14 +277,40 @@ stateDiagram-v2
 - 未完了 Release(phase が STABLE/QUARANTINED/RECOVERED 以外)を Fortis から列挙する。
 - 各 Release について GitOps の宣言、Kubernetes の実稼働 digest、Executor の `適用済み releaseId` を読む。
 - 判定: 実態が Release State と一致 → 継続。実態が先行(Executor は適用済みだが State が未更新)→ State を CAS で追いつかせる。実態が不明/矛盾 → **Release を `QUARANTINED` にし、新規リリースを停止して人手確認**(自動再試行より停止を優先: #11 の方針)。
-- 照合の完了時に、Leader 自身が新しい epoch で Executor の maxSeen を引き上げる(`no-op apply`)。これで旧 Leader の遅延要求が以後確実に拒否される。
+- 照合の完了時に、Leader 自身が新しい世代で barrier apply(`no-op apply`。§5.3 EX-4)を発行し、Executor の maxSeen を引き上げる。応答(drain 結果・実態)を受けるまで照合は完了しない。これで旧 Leader の遅延要求が以後確実に拒否され、旧世代の in-flight 書込は新 Leader に報告される。
 
-### 6.3 Release Lock の取扱い
+### 6.3 Release Lock の取扱い(Session Lock と Release Reservation)
 
-- 本番昇格は `release/prod` Lock を取得した Leader のみが実行可能。A/B 同時昇格禁止(#7/#11)はこの Lock で直列化し、さらに `target/{A|B}` Lock で更新対象を排他する。
-- Lock と Release State は Session に紐づく。Leader 交代時に Lock は Session 失効で解放されるが、**Release State は残る**。新 Leader は復元フェーズで Lock を再取得し、新しい Token で続行する。
-- Lock 解放と Release State 更新を同時に行いたい場合は、`conditionalBatch`(単一 Raft Group)を使う。複数 Group をまたぐ操作は設計しない(Fortis の Txn は本番不可)。
-- 切替中リリース(Leader 交代の瞬間に PROMOTING 途中): 新 Leader は §6.2 の照合に従う。Executor が旧 Token で受理済みで途中なら、結果を `operationId` で照合して継続/ロールバックを判断する。
+**所有モデル (確定案)。#8 §5.5 と #12 §6.3 は同一の記述とする。** Release の排他を、性質の異なる 2 つの状態に分離する。
+
+| 状態 | 表すもの | Session との関係 | #8 のキー | #12 のキー |
+|---|---|---|---|---|
+| **Session Lock** (`release/prod`) | 調整権限: 「いま Release を進めてよい DEC Leader は誰か」 | **Session に紐づく**。Leader 交代・Session 失効で Fortis が同一 Raft 適用で無効化する。新 Leader が campaign 後に**新しい fencingToken で再取得**する | `/dec/release-lock` | `/kivra/v1/locks/release/prod` |
+| **Release Reservation** (永続 Release State/予約) | 同時 Release 不可・対象 (A/B)・進捗の所有者: 「どの Release が進行中か」 | **Session に紐づかない**。終端状態への CAS でのみ解除する | `/dec/release-reservation` | `/kivra/v1/reservations/release-prod` |
+
+Reservation は `{releaseId, target, ownerEpoch, ownerToken, generation}` を持つ。Release の phase・成果物などの進捗の正本は ReleaseState (#8 §3.2 / #12 §4.4) で、Reservation の `releaseId` が指す。Reservation が存在する間は**他の Release を開始できない** (A/B 同時更新・同一対象の複数 Release の禁止)。以下、「CAS」は Fortis の単一 Raft Group 内の `conditionalBatch` (複数キーの原子的条件付き更新) を指す。
+
+**原子的に更新するもの (4 種):**
+
+1. **開始**: [自 Session が Session Lock を保持 ∧ `target/{t}` Lock 取得 ∧ Reservation が空] → Reservation 作成 + ReleaseState を `PROPOSED → VALIDATING`。
+2. **引継ぎ** (Leader 交代後): [自 Session が新 Token T' で Session Lock を保持 ∧ Reservation.releaseId == R ∧ Reservation.generation == g] → `ownerEpoch = E'`、`ownerToken = T'`、`generation = g+1`、ReleaseState の `electionEpoch` / `fencingToken` を同時更新。この CAS が成功するまで Reservation の owner は旧 Leader のまま。
+3. **進行**: ReleaseState の**全ての更新**は、`expectedRevision` に加えて [Reservation.ownerEpoch == 自 E ∧ Reservation.ownerToken == 自 T ∧ 自 Session の Lock が有効] を条件に含める。
+4. **終了**: [ReleaseState → 終端状態 (`STABLE` / `RECOVERED` / `QUARANTINED` / `REJECTED`) ∧ Reservation 削除 ∧ Session Lock 解放 (`target/{t}` Lock を含む)] を同一 batch で行う。中間状態のまま Reservation だけ・Lock だけが空になることを防ぐ。
+
+**旧 Leader の遅延要求の遮断 (多層):**
+
+- Fortis 側: Session 失効で Lock は無効化される。旧 Leader の状態更新は進行 CAS の `ownerToken` 条件で `STALE_EPOCH` / `REVISION_MISMATCH` となる。新 Token は旧 Token より厳密に大きい。
+- Executor 側: 新 Leader は引継ぎ CAS の後、照合完了時に barrier apply (#8 §5.3 / #12 §5.3 EX-4) で Executor の `maxSeen` を新世代に引き上げる。以降、旧世代の要求は Fortis の可否に関係なく拒否される。**これが最終防衛**である。
+- 旧 Leader の自己停止 (KeepAlive 失敗で全副作用を中断) は補助であり、安全性の根拠にしない。
+
+**再取得後の継続:** 新 Leader は引継ぎ CAS の後、Executor の `適用済み releaseId` / Operation 状態と GitOps・Kubernetes の実態を、Reservation と ReleaseState に照合する (#8 §5.7 / #12 §6.2)。一致 → 継続。実態が先行 → ReleaseState を CAS で追従。不明・矛盾 → `QUARANTINED`。照合 (と barrier) が完了するまで、barrier 以外の外部副作用は行わない。
+
+**乖離状態の扱い:** Session Lock のみ失効し Reservation が残る = 通常の Leader 交代 (新規 Release は Reservation により開始できない)。Reservation の上書きは開始 CAS の条件 (Reservation が空) により不可能。Reservation の強制解除は break-glass の管理者のみ (監査必須)。`WAITING_APPROVAL` 中は Reservation を保持し、Session Lock は手放してよい (Leader 交代・停止が人手待ちを妨げず、他 Release は Reservation で抑止される)。
+
+**Fortis への要求・責務 (要確認を含む):** Fortis #31 の MVP は Session Lock と Fencing Counter (リソース単位・Snapshot/Restart 後も不逆行) を扱う。Reservation は Fortis の汎用 KV レコードとして Kivra が定義するが、(a) Lock レコードと KV レコードを**同一 conditionalBatch で原子更新できること**、(b) Session 失効が Lock のみを無効化し KV レコードに影響しないこと、は #28/#29/#31 のスコープに含まれるか**要確認**。#17 (Snapshot/Restart) はこれらの永続状態が再起動で失われないことのみを担い、バックアップ復元時の逆行は #12 §4.5 の incarnation で扱う。
+
+- A/B 同時昇格禁止(#7/#11)は Reservation(同時 Release 不可)と `target/{A|B}` Lock(更新対象の排他)で実現する。複数 Group をまたぐ操作は設計しない(Fortis の Txn は本番不可)。
+- 切替中リリース(Leader 交代の瞬間に PROMOTING 途中): 新 Leader は §6.2 の照合に従う。Executor が旧世代で受理済みで途中なら、barrier 応答と `operationId` の照合で継続/ロールバックを判断する。
 
 ### 6.4 障害時の振る舞い
 
@@ -356,8 +420,8 @@ sequenceDiagram
 1. 状況判定: Quorum 喪失(一時的分断/ Voter 障害) か データ喪失か。
 2. DEC: 全 replica を停止もしくはスタンバイ固定(`new release disabled` モード)。A/B の既存サービスは稼働継続。
 3. **一時的 Quorum 喪失**: Voter を復旧(または Voter を 1 台再構築して Raft に再参加)。Quorum 回復後、DEC が復元フェーズ(§6.2)を実施。
-4. **データ喪失**: 直近 Snapshot/Backup から復元し、**`incarnation` を増加**(§4.5)。復元点以降の Release/Lock 状態は失われているため、MariaDB の Journal と GitOps/K8s/Executor の実態から Release State を再構築。確定できないものは QUARANTINED。
-5. Executor の maxSeen(新 incarnation を下回る要求を拒否する)を更新し、DEC の再開は人間が承認して行う。
+4. **データ喪失**: §4.5 INC-3 の手順(旧 Cluster の隔離 → DEC 停止・Executor `FROZEN` → Incarnation Authority/Recovery Manifest で `incarnation` を増加 → Backup 復元)に従う。`incarnation` はバックアップ内の値に依存しない。復元点以降の Release/Reservation/Lock 状態は失われているため、MariaDB の Journal と GitOps/K8s/Executor の実態から再構築。確定できないものは QUARANTINED。
+5. **新 Epoch の確定前は Executor が fail-closed**。管理者認証付きの `advance incarnation` で Executor の maxSeen を `(I', 0, 0)` にしてから、DEC の再開を人間が承認して行う(§4.5 INC-3.5)。
 6. 再発防止のレビューを実施。
 
 ### 10.2 Backup 要件
@@ -381,21 +445,24 @@ sequenceDiagram
 | T8 | A/B 同時昇格を要求 | 後続は `LOCK_BUSY`。Release は直列 |
 | T9 | 二重リリース: 同一 Release を 2 Leader が実行 | Executor が片方のみ受理 |
 | T10 | Fortis 内部 Raft Leader 交代中の CAS | 結果 `OUTCOME_UNKNOWN` を requestId で正しく照合 |
-| T11 | Fortis をバックアップから復元 | `incarnation` 増加、Executor が旧 Token を拒否、新 Token が受理される |
-| T12 | Executor の maxSeen ストア消失 | Fortis から再構築するまで全拒否 |
+| T11 | Fortis をバックアップから復元(同じバックアップを 2 回復元する場合を含む) | `incarnation` は Authority/Manifest 由来で毎回増加し巻き戻らない。旧 Cluster 隔離済み。Executor は新 Epoch 確定後も `advance incarnation` 完了まで全拒否し、完了後に旧 Token を拒否・新 Token を受理。未承認の大きい `incarnation` は拒否(INC-4) |
+| T12 | Executor の maxSeen ストア消失 | INC-5 の条件(Authority + Fortis 照合 + 管理者承認)を満たすまで全拒否 |
 | T13 | MariaDB 停止/復帰 | Journal を書けない間は副作用を実行しない。復帰後に再照合 |
 | T14 | クロックスキュー(DEC・Executor・Fortis 各ノード) | 安全性が時計に依存していないことを確認 |
 | T15 | Network partition: DEC(A 側)が Fortis 多数派側と隔離 | 隔離された DEC は昇格・更新不可 |
 | T16 | DEC replica のスケールアウト/ローリング更新 | Leader が不必要に頻繁に交代せず、Release 継続 |
 | T17 | break-glass 実行後の再統合 | `MANUAL_OVERRIDE` として実態と一致 |
+| T18 | 旧世代 op が IN_FLIGHT(git push 発行済み)の間に新世代の barrier を受理 | 旧 op の結果が barrier 応答で報告される。新世代の apply は drain 完了後にのみ開始。`UNKNOWN` なら `QUARANTINED`(EX-3〜EX-5) |
+| T19 | Executor を IN_FLIGHT 中に再起動 | 再実行せず実態照合後に受理再開(EX-6) |
+| T20 | Session Lock 失効後に旧 Leader が Reservation を進行 CAS / 別 Release の開始 CAS | `ownerToken` 不一致・Reservation 非空で拒否(§6.3)。新 Leader の引継ぎ CAS の前後で二重進行なし |
 
-E2E は T4〜T9, T15(追加完了条件「旧 Leader 遅延要求・Lease 喪失・分断・切替中リリースの E2E」)。T1〜T3, T10, T11 は Fortis 側の障害注入(#25)と共通化する。整合性検査には Jepsen 系の履歴検証(線形化チェック)を使うかは **要確認**。
+E2E は T4〜T9, T15, T18〜T20(追加完了条件「旧 Leader 遅延要求・Lease 喪失・分断・切替中リリースの E2E」)。T1〜T3, T10, T11 は Fortis 側の障害注入(#25)と共通化する。整合性検査には Jepsen 系の履歴検証(線形化チェック)を使うかは **要確認**。
 
 ### 11.2 本番採用ゲート(すべて満たすまで本番制御プレーンとして使わない)
 
 1. Fortis の Raft 基盤(#17/#18)が完了し、PR #8 のレビュー指摘(Raft bypass・MVCC GC・Meta revision・Durable Transaction 等)が解消されて main にマージ済み。
 2. Coordination API(Session/Lease/Election/Lock/Fencing/CAS)の実装と、Fortis 側の障害注入・整合性検査が通過。
-3. `incarnation`(復元後の Token 単調性)が Fortis に実装されている。
+3. `incarnation`(復元後の世代単調性)が Incarnation Authority/Recovery Manifest(Fortis の外)で運用され、Fortis の起動検証(INC-2)と Executor の `advance incarnation`(INC-3.5)が実装・ドリル済み。
 4. 認証認可・mTLS・証明書ローテーション(#25/#34)が有効。
 5. §11.1 の T1〜T17 が全て合格。
 6. WAN ベンチ(§8)で KeepAlive/TTL/election timeout の値が確定。
@@ -438,7 +505,7 @@ Issue の Phase 1〜5 を踏襲し、「Phase 0」を追加する。
 - Fortis の外部 API 形式(gRPC/HTTP 等、#33)と Kivra クライアントの言語・ライブラリ(Kivra の実装言語は #1 では未決)。
 - Raft Leader の拠点優先指定の可否。KeepAlive/TTL/election timeout の最終値(Fortis #30 の仮値: tick 100ms、TTL 30 秒相当、heartbeat 5 秒)。
 - Tick ベース TTL は実時間を保証しないため、「Lease が切れていることを前提にした安全性」は不可。**Leader が Quorum を失った後、Session が実時間でどれだけ生き延びるか**の上限を運用で許容できるか(§6.4 の外部 Fencing で吸収する前提)。
-- Fortis への要求(`incarnation`、requestId 照合、`getOperationStatus`)が Fortis #28〜#31 のスコープに入るか。
+- Fortis への要求(`incarnation` の Authority 連携、requestId 照合、`getOperationStatus`、Lock と KV の同一 batch 原子更新)が Fortis #28〜#31/#35/#36 のスコープに入るか。Incarnation Authority の実体(WORM ストア / Manifest 連鎖)の選定。GitOps サーバ側での世代検証の可否(§5.3)。
 - 採用ゲートの RTO/RPO・シャドー期間などの数値目標。
 - 完了条件「DEC のリーダー選出コード/永続状態の廃止」の読み替え(§6.5)の可否。
 - Jepsen 相当の線形化検査の導入可否。
@@ -451,7 +518,7 @@ Kivra リポジトリ(kigawa-net/kivra)側と Fortis リポジトリ側に分け
 ### Fortis 側(kigawa-net/fortis へ起票。既存 #28〜#34 に紐づけ)
 
 - F1. Coordination API(Session/Election/Lock/CAS)の Raft State Machine 実装(#28〜#31)
-- F2. `incarnation`・Fencing Counter の復元耐性(バックアップ復元後の Token 単調性)
+- F2. `incarnation`・Fencing Counter の復元耐性(Authority/Recovery Manifest 連携。#35 の Backup 項目・#36 の Recovery Manifest への `incarnation` 追加。#31 本文が明記する Counter 不逆行は Lock 削除後・Snapshot/Restart 後まで。バックアップ復元は**要確認**)
 - F3. `getOperationStatus` / requestId 冪等・OUTCOME_UNKNOWN の契約
 - F4. Quorum 喪失 fail-closed・Leader 優先配置・WAN 向けタイマー設定
 - F5. Namespace RBAC/mTLS(#34)とクライアント SDK(#33)の Kivra 要件反映
@@ -461,8 +528,8 @@ Kivra リポジトリ(kigawa-net/kivra)側と Fortis リポジトリ側に分け
 
 - K1. Fortis Coordination クライアント層と契約テスト(モック Fortis 付き)
 - K2. DEC: Leader Election 統合・スタンバイ・復元フェーズ(ローカル永続状態なしを CI で検査)
-- K3. DEC: Release Lock・Release State(CAS)・状態遷移(#8 の遷移表に準拠)
-- K4. Deployment Executor: epoch/Token 検証・maxSeen ストア・freeze 機能・署名検証
+- K3. DEC: Session Lock と Release Reservation(§6.3 の 4 種の原子 CAS)・Release State(CAS)・状態遷移(#8 の遷移表に準拠)
+- K4. Deployment Executor: 世代検証・永続 maxSeen ストア・単一 writer・受理→実行→確定とバリア/キャンセル(§5.3)・`advance incarnation`・freeze 機能・署名検証
 - K5. Operation Journal/Outbox 連携・再照合(#11 と調整。Recorder 案の判断)
 - K6. 権限モデル(Service Account/Namespace/GitOps 保護)と break-glass 手順・訓練
 - K7. 障害注入 E2E(§11.1 T4〜T9, T15〜T17)と Chaos 基盤

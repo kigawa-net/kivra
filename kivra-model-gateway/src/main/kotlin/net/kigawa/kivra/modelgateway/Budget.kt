@@ -16,7 +16,7 @@ sealed interface ReserveResult {
 
 /**
  * Reserve / commit / release budget control over a scope hierarchy (design 05 section 7). In-memory;
- * persistence and multi-instance sharing are out of scope. Limits are fixed at construction so a caller
+ * persistence and multi-instance sharing are out of scope, so this is NOT a production hard limit. Limits are fixed at construction so a caller
  * (agent) has no way to raise its own limit. Unknown scopes are denied (fail closed).
  */
 class BudgetController(
@@ -29,6 +29,13 @@ class BudgetController(
     private val committed = HashMap<String, BigDecimal>()
     private val reservations = HashMap<String, Reservation>()
     private val settledKeys = HashSet<String>()
+
+    /**
+     * Reservations whose TTL elapsed before commit/release. The provider call may still be running and may
+     * be billed, so the reserved amount is conservatively charged to `committed` (never silently dropped)
+     * and the key stays here so a late [commit] can true it up to the actual cost.
+     */
+    private val lapsed = HashMap<String, Reservation>()
 
     @Synchronized
     fun usage(scopeId: String): BudgetUsage {
@@ -56,7 +63,9 @@ class BudgetController(
     @Synchronized
     fun reserve(key: String, scopes: List<String>, amount: BigDecimal): ReserveResult {
         purgeExpired()
-        if (key in reservations || key in settledKeys) return ReserveResult.Reserved // idempotent
+        // A key that is already reserved, lapsed or settled has been (or is being) spent: never hand out a second
+        // reservation for it, otherwise a repeated key could reach the provider with no budget accounting.
+        if (key in reservations || key in lapsed || key in settledKeys) return ReserveResult.Denied("", "duplicate reservation key")
         denial(scopes, amount)?.let { return it }
         reservations[key] = Reservation(scopes, amount, clock.instant().plus(reservationTtl))
         return ReserveResult.Reserved
@@ -65,6 +74,11 @@ class BudgetController(
     /** Settle with the actual cost, or with the reserved amount when [actual] is null (estimated). Idempotent. */
     @Synchronized
     fun commit(key: String, actual: BigDecimal?) {
+        lapsed.remove(key)?.let { r ->
+            settledKeys.add(key)
+            if (actual != null) for (s in r.scopes) committed[s] = (committed[s] ?: BigDecimal.ZERO) - r.amount + actual
+            return
+        }
         val r = reservations.remove(key) ?: return
         if (!settledKeys.add(key)) return
         val amount = actual ?: r.amount
@@ -73,6 +87,11 @@ class BudgetController(
 
     @Synchronized
     fun release(key: String) {
+        lapsed.remove(key)?.let { r ->
+            settledKeys.add(key)
+            for (s in r.scopes) committed[s] = (committed[s] ?: BigDecimal.ZERO) - r.amount // definitively not billed
+            return
+        }
         if (reservations.remove(key) != null) settledKeys.add(key)
     }
 
@@ -91,6 +110,14 @@ class BudgetController(
 
     private fun purgeExpired() {
         val now = clock.instant()
-        reservations.entries.removeIf { it.value.expiresAt <= now }
+        val it = reservations.entries.iterator()
+        while (it.hasNext()) {
+            val (key, r) = it.next()
+            if (r.expiresAt <= now) {
+                it.remove()
+                lapsed[key] = r
+                for (s in r.scopes) committed[s] = (committed[s] ?: BigDecimal.ZERO) + r.amount
+            }
+        }
     }
 }

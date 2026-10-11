@@ -67,7 +67,7 @@ class BudgetControllerTest {
         assertTrue(b.softExceeded(path))
     }
 
-    @Test fun reservationsExpireAfterTtl() {
+    @Test fun expiredReservationStaysChargedUntilSettled() {
         var now = Instant.parse("2026-10-12T00:00:00Z")
         val clock = object : Clock() {
             override fun getZone() = ZoneOffset.UTC
@@ -78,6 +78,43 @@ class BudgetControllerTest {
         b.reserve("k", path, bd("4"))
         assertFalse(b.canReserve(path, bd("1")))
         now = now.plusSeconds(61)
+        assertFalse(b.canReserve(path, bd("1"))) // lapsed reservation is not forgiven (possible in-flight billing)
+        b.release("k")                            // only a definitive release refunds it
         assertTrue(b.canReserve(path, bd("4")))
+    }
+
+    @Test fun settledOrDuplicateKeyIsNeverReservedAgain() {
+        val b = BudgetController(limits)
+        assertEquals(ReserveResult.Reserved, b.reserve("k", path, bd("1")))
+        assertTrue(b.reserve("k", path, bd("1")) is ReserveResult.Denied) // still reserved
+        b.commit("k", bd("1"))
+        assertTrue(b.reserve("k", path, bd("1")) is ReserveResult.Denied) // settled
+        assertEquals(bd("1"), b.usage("task").committed)
+    }
+
+    private class MutableClock(var now: Instant) : Clock() {
+        override fun getZone() = ZoneOffset.UTC
+        override fun withZone(zone: java.time.ZoneId?) = this
+        override fun instant() = now
+    }
+
+    @Test fun expiredReservationIsChargedConservativelyAndTrueUpOnLateCommit() {
+        val clock = MutableClock(Instant.parse("2026-10-12T00:00:00Z"))
+        val b = BudgetController(limits, clock, Duration.ofMinutes(5))
+        b.reserve("k", path, bd("3"))
+        clock.now = clock.now.plusSeconds(600)
+        assertEquals(BudgetUsage(bd("3"), bd("0")), b.usage("task")) // not dropped
+        b.commit("k", bd("1.2"))                                      // late commit trues up
+        assertEquals(bd("1.2"), b.usage("task").committed)
+        assertEquals(bd("1.2"), b.usage("org").committed)
+    }
+
+    @Test fun lateCommitWithoutActualKeepsEstimateAndLateReleaseRefunds() {
+        val clock = MutableClock(Instant.parse("2026-10-12T00:00:00Z"))
+        val b = BudgetController(limits, clock, Duration.ofMinutes(1))
+        b.reserve("a", path, bd("2")); b.reserve("r", path, bd("1"))
+        clock.now = clock.now.plusSeconds(120)
+        b.commit("a", null); b.release("r")
+        assertEquals(bd("2"), b.usage("task").committed)
     }
 }

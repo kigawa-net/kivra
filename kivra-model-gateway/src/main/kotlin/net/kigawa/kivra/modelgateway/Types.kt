@@ -69,7 +69,10 @@ data class ModelRequest(
     val principal: String,
     val purpose: Purpose,
     val messages: List<Message>,
-    /** Mandatory; there is no default so callers must classify explicitly (fail closed). */
+    /**
+     * Mandatory; there is no default so callers must classify explicitly (fail closed). Must be the authentic
+     * classification fixed by the trusted Orchestrator / Policy Gateway, never a value an Agent can lower.
+     */
     val dataClass: DataClass,
     /** Budget scope path from the outermost (org) to the innermost (task / execution). */
     val budgetScopes: List<String>,

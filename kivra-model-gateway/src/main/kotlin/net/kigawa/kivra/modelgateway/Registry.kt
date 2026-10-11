@@ -122,13 +122,18 @@ object RegistryLoader {
                 req(dh, "sourceUrl", ctx),
             )
         } else DataHandling(status)
+        val endpoint = req(m, "endpoint", ctx)
+        val uri = runCatching { java.net.URI(endpoint) }.getOrNull()
+        if (uri == null || !"https".equals(uri.scheme, ignoreCase = true) || uri.host == null || uri.userInfo != null) {
+            throw RegistryException("$ctx: endpoint must be an https URL without userinfo")
+        }
         return ProviderEntry(
             id = id,
             adapter = req(m, "adapter", ctx),
             trustZone = enumOf(TrustZone::class.java, req(m, "trustZone", ctx), ctx),
             dataHandling = handling,
             enabled = m["enabled"] as? Boolean ?: false,
-            endpoint = req(m, "endpoint", ctx),
+            endpoint = endpoint,
             credentialRef = req(m, "credentialRef", ctx),
         )
     }

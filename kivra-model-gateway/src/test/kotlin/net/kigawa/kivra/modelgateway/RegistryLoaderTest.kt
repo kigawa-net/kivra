@@ -63,4 +63,10 @@ class RegistryLoaderTest {
     @Test fun disabledByDefaultWhenFlagMissing() {
         assertFalse(RegistryLoader.fromYaml(base.replace(Regex("\\s*enabled: true"), "")).providers.getValue("p").enabled)
     }
+
+    @Test fun nonHttpsOrUserinfoEndpointIsRejected() {
+        for (bad in listOf("http://x.test", "https://u:p@x.test", "ftp://x.test", "x.test")) {
+            assertFailsWith<RegistryException>(bad) { RegistryLoader.fromYaml(base.replace("endpoint: https://x.test", "endpoint: $bad")) }
+        }
+    }
 }

@@ -74,7 +74,7 @@ class AnthropicProviderTest : ModelProviderContract() {
 
     private fun build(s: Scenario, captured: MutableList<HttpRequestData>? = null): AnthropicProvider {
         val engine = MockEngine { req -> captured?.add(req); reply(s, req) }
-        val creds = if (s == Scenario.NO_CREDENTIAL) CredentialSource { null } else CredentialSource { if (it == target.provider.credentialRef) API_KEY else null }
+        val creds = if (s == Scenario.NO_CREDENTIAL) CredentialSource { null } else CredentialSource { API_KEY }
         return AnthropicProvider(HttpClient(engine), creds, providerId = "contract")
     }
 
@@ -229,8 +229,39 @@ data: {"type":"message_stop"}
         assertEquals(listOf("a-1", "b-2"), models.map { it.providerModelName })
     }
 
-    @Test fun envCredentialSourceReadsOnlyNamedVariable() {
-        val c = EnvCredentialSource(mapOf("ANTHROPIC_API_KEY" to "k", "EMPTY" to " "))
-        assertEquals("k", c.get("ANTHROPIC_API_KEY")); assertNull(c.get("EMPTY")); assertNull(c.get("OTHER"))
+    private fun prov(endpoint: String, ref: String = "ANTHROPIC_API_KEY") =
+        provider("anthropic").copy(endpoint = endpoint, credentialRef = ref)
+    private val binding = CredentialBinding("anthropic", "api.anthropic.com", "ANTHROPIC_API_KEY", "SECRET_A")
+    private val env = mapOf("SECRET_A" to "k", "OTHER_SECRET" to "leak", "EMPTY" to " ")
+
+    @Test fun boundCredentialSourceReleasesSecretOnlyForBoundHttpsHost() {
+        val c = BoundCredentialSource(listOf(binding), env)
+        assertEquals("k", c.get(prov("https://api.anthropic.com")))
+        assertEquals("k", c.get(prov("https://API.anthropic.com:443/")))
+        assertNull(c.get(prov("http://api.anthropic.com")))            // not TLS
+        assertNull(c.get(prov("https://evil.example.test")))           // other host
+        assertNull(c.get(prov("https://api.anthropic.com.evil.test"))) // suffix trick
+        assertNull(c.get(prov("https://api.anthropic.com@evil.test"))) // userinfo trick
+        assertNull(c.get(prov("https://api.anthropic.com:8443")))
+        assertNull(c.get(prov("not a uri")))
+    }
+
+    @Test fun registryCannotSelectAnotherSecretOrUnboundProvider() {
+        val c = BoundCredentialSource(listOf(binding), env)
+        assertNull(c.get(prov("https://api.anthropic.com", ref = "OTHER_SECRET")))
+        assertNull(c.get(provider("unbound").copy(endpoint = "https://api.anthropic.com", credentialRef = "ANTHROPIC_API_KEY")))
+        assertNull(BoundCredentialSource(listOf(binding.copy(secretEnvVar = "EMPTY")), env).get(prov("https://api.anthropic.com")))
+    }
+
+    @Test fun providerDoesNotFollowRedirectsWithApiKey() = runTest {
+        val seen = mutableListOf<String>()
+        val engine = MockEngine { req ->
+            seen.add(req.url.host)
+            respond("", HttpStatusCode.Found, headersOf(HttpHeaders.Location, "https://evil.example.test/steal"))
+        }
+        val p = AnthropicProvider(HttpClient(engine), { API_KEY }, "contract")
+        runCatching { p.invoke(request(), target, CallContext("req-1", "a1", "d")) }
+        assertEquals(1, seen.size)
+        assertTrue(seen.none { it.contains("evil") })
     }
 }

@@ -36,11 +36,13 @@ import kotlinx.serialization.json.putJsonArray
 
 /** Adapter for the Anthropic Messages API. Never talks to the network unless an [HttpClient] with a real engine is given. */
 class AnthropicProvider(
-    private val client: HttpClient,
+    client: HttpClient,
     private val credentials: CredentialSource,
     override val providerId: String = "anthropic",
     private val apiVersion: String = "2023-06-01",
 ) : ModelProvider {
+    // Never follow redirects: the API key header must not be forwarded to another host.
+    private val client: HttpClient = client.config { followRedirects = false }
 
     companion object {
         const val STRUCTURED_TOOL_NAME = "kivra_structured_output"
@@ -57,12 +59,12 @@ class AnthropicProvider(
     }
 
     private fun key(target: ResolvedTarget): String =
-        credentials.get(target.provider.credentialRef)
+        credentials.get(target.provider)
             ?: throw GatewayException(GatewayError(ErrorKind.AUTH, "credential '${target.provider.credentialRef}' is not configured", code = "NO_CREDENTIAL"))
 
     /** Local check only (credential configured); makes no network call and incurs no cost. */
     override suspend fun health(target: ResolvedTarget): ProviderHealth =
-        if (credentials.get(target.provider.credentialRef) != null) ProviderHealth(ProviderHealthState.UP)
+        if (credentials.get(target.provider) != null) ProviderHealth(ProviderHealthState.UP)
         else ProviderHealth(ProviderHealthState.DOWN, "credential not configured")
 
     /** Lists models available to the credential (free call). Used for registry sync. */

@@ -2,7 +2,8 @@
 # NOTE: prices, context sizes and dataHandling below are PLACEHOLDERS. Confirm them against the
 # provider's primary sources before use (design 05 section 16-6). While dataHandling.status is UNKNOWN
 # the provider is not used for INTERNAL or more sensitive data. No secrets belong here: credentialRef
-# is only the NAME of the environment variable holding the API key.
+# is only a logical label: the secret's env var and the allowed endpoint host are fixed by the trusted
+# administrator's CredentialBinding (not in this file), and endpoint must be https.
 registryVersion: "2026-10-12-example"
 
 providers:

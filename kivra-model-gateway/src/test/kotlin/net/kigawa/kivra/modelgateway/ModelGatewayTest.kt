@@ -272,4 +272,87 @@ class ModelGatewayTest {
         val g = gateway(listOf(m), mapOf("ext" to FakeProvider("ext", ok(m))))
         assertEquals(ErrorKind.CAPABILITY_UNSUPPORTED, assertFailsWith<GatewayException> { g.stream(request()).toList() }.error.kind)
     }
+
+    // ---- requestId idempotency / stream terminal contract ----
+
+    @Test fun repeatedRequestIdReplaysResponseWithoutProviderCallOrSecondCharge() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m)); val b = budget()
+        val g = gateway(listOf(m), mapOf("ext" to fake), b)
+        val first = g.invoke(request())
+        repeat(9) { assertEquals(first, g.invoke(request())) }
+        assertEquals(1, fake.calls)
+        assertEquals(0, BigDecimal("0.0105").compareTo(b.usage("task").committed))
+    }
+
+    @Test fun sameRequestIdWithDifferentPayloadIsRejected() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m))
+        val g = gateway(listOf(m), mapOf("ext" to fake))
+        g.invoke(request())
+        val e = assertFailsWith<GatewayException> { g.invoke(request(text = "other")) }
+        assertEquals("REQUEST_ID_REUSED", e.error.code); assertEquals(1, fake.calls)
+    }
+
+    @Test fun inFlightDuplicateRequestIdIsRejected() = runTest {
+        val m = model("m", "ext"); val gate = CompletableDeferred<Unit>()
+        val fake = FakeProvider("ext") { gate.await(); okResponse(m.ref) }
+        val g = gateway(listOf(m), mapOf("ext" to fake))
+        val first = async { g.invoke(request()) }
+        runCurrent()
+        val e = assertFailsWith<GatewayException> { g.invoke(request()) }
+        assertEquals("DUPLICATE_REQUEST", e.error.code)
+        gate.complete(Unit); first.await()
+        assertEquals(1, fake.calls)
+    }
+
+    @Test fun failedAfterProviderCallRequestIdCannotBeResent() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext") { fail(ErrorKind.AUTH) }
+        val g = gateway(listOf(m), mapOf("ext" to fake))
+        assertFailsWith<GatewayException> { g.invoke(request()) }
+        val e = assertFailsWith<GatewayException> { g.invoke(request()) }
+        assertEquals("DUPLICATE_REQUEST", e.error.code); assertEquals(1, fake.calls)
+    }
+
+    @Test fun budgetDeniedBeforeAnyProviderCallDoesNotBurnRequestId() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m))
+        val g = gateway(listOf(m), mapOf("ext" to fake), budget(hard = "0.0001"))
+        repeat(2) { assertEquals("BUDGET", assertFailsWith<GatewayException> { g.invoke(request()) }.error.code) }
+        assertEquals(0, fake.calls)
+    }
+
+    private fun streamOf(m: ModelEntry, chunks: suspend kotlinx.coroutines.flow.FlowCollector<StreamChunk>.() -> Unit) =
+        object : ModelProvider by FakeProvider("ext", ok(m)) {
+            override val providerId = "ext"
+            override fun stream(req: ModelRequest, target: ResolvedTarget, ctx: CallContext) = kotlinx.coroutines.flow.flow(chunks)
+        }
+
+    @Test fun streamEndingWithoutFinishedFailsTruncatedAndSettlesConservatively() = runTest {
+        val m = model("m", "ext"); val b = budget()
+        val g = ModelGateway(registryOf(listOf(ext), listOf(m)), mapOf("ext" to streamOf(m) { }), b, AlwaysHealthy, audit, GatewayMetrics.NOOP, GatewayConfig(), sleep = { })
+        val events = g.stream(request()).toList()
+        val f = assertIs<ModelEvent.Failed>(events.single())
+        assertEquals("TRUNCATED_STREAM", f.error.code)
+        assertEquals(0, BigDecimal.ZERO.compareTo(b.usage("task").reserved))
+        assertTrue(b.usage("task").committed > BigDecimal.ZERO)
+    }
+
+    @Test fun duplicateFinishedAndErrorAfterFinishedYieldExactlyOneTerminal() = runTest {
+        val m = model("m", "ext"); val b = budget()
+        val p = streamOf(m) {
+            emit(StreamChunk.Text("hi")); emit(StreamChunk.Finished(okResponse(m.ref))); emit(StreamChunk.Finished(okResponse(m.ref)))
+            fail(ErrorKind.TRANSIENT)
+        }
+        val g = ModelGateway(registryOf(listOf(ext), listOf(m)), mapOf("ext" to p), b, AlwaysHealthy, audit, GatewayMetrics.NOOP, GatewayConfig(), sleep = { })
+        val events = g.stream(request()).toList()
+        assertEquals(1, events.count { it is ModelEvent.Completed || it is ModelEvent.Failed })
+        assertIs<ModelEvent.Completed>(events.last())
+        assertEquals(0, BigDecimal("0.0105").compareTo(b.usage("task").committed))
+    }
+
+    @Test fun repeatedStreamRequestIdIsRejected() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m))
+        val g = gateway(listOf(m), mapOf("ext" to fake))
+        g.stream(request()).toList()
+        assertFailsWith<GatewayException> { g.stream(request()).toList() }
+        assertEquals(1, fake.calls)
+    }
 }

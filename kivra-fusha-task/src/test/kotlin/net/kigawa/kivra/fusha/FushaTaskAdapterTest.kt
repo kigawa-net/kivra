@@ -177,6 +177,72 @@ class FushaTaskAdapterTest {
         assertEquals(0, n)
     }
 
+    @Test fun `get with mismatched response id is PROTOCOL`() = runTest {
+        // Request task 1 but the server answers with task 2.
+        val h = Harness(MockEngine { respond(T2, HttpStatusCode.OK, JSON_HEADERS) })
+        val e = assertFailsWith<TaskProviderException> { h.adapter.get(ContractFixture.id(1)) }
+        assertEquals(TaskErrorKind.PROTOCOL, e.kind)
+    }
+
+    @Test fun `get with non-positive response id is PROTOCOL`() = runTest {
+        val h = Harness(MockEngine { respond(T1.replaceFirst("\"id\":1,", "\"id\":0,"), HttpStatusCode.OK, JSON_HEADERS) })
+        assertEquals(TaskErrorKind.PROTOCOL, assertFailsWith<TaskProviderException> { h.adapter.get(ContractFixture.id(1)) }.kind)
+    }
+
+    @Test fun `non-positive requested id is rejected without a request`() = runTest {
+        var n = 0
+        val h = Harness(MockEngine { n++; fakeServer(it) })
+        assertEquals(TaskErrorKind.REJECTED, assertFailsWith<TaskProviderException> { h.adapter.get(net.kigawa.kivra.core.TaskId("fusha:${ContractFixture.ENV}:0")) }.kind)
+        assertEquals(0, n)
+    }
+
+    @Test fun `list with duplicate ids fails closed`() = runTest {
+        val h = Harness(MockEngine { respond("[$T1,$T2,$T1]", HttpStatusCode.OK, JSON_HEADERS) })
+        assertEquals(TaskErrorKind.PROTOCOL, assertFailsWith<TaskProviderException> { h.adapter.list() }.kind)
+    }
+
+    @Test fun `list with invalid id fails closed`() = runTest {
+        val h = Harness(MockEngine { respond("[$T1," + T2.replaceFirst("\"id\":2,", "\"id\":-5,") + "]", HttpStatusCode.OK, JSON_HEADERS) })
+        assertEquals(TaskErrorKind.PROTOCOL, assertFailsWith<TaskProviderException> { h.adapter.list() }.kind)
+    }
+
+    @Test fun `redirect to another host is not followed and token is not forwarded`() = runTest {
+        val seen = mutableListOf<HttpRequestData>()
+        val h = Harness(MockEngine {
+            seen += it
+            respond("", HttpStatusCode.Found, headersOf(HttpHeaders.Location, "https://evil.example/steal"))
+        })
+        val e = assertFailsWith<TaskProviderException> { h.adapter.get(ContractFixture.id(1)) }
+        assertEquals(TaskErrorKind.PROTOCOL, e.kind)
+        assertEquals(1, seen.size)
+        assertTrue(seen.none { it.url.host == "evil.example" })
+    }
+
+    @Test fun `base url validation`() {
+        fun cfg(url: String, insecure: Boolean = false) =
+            FushaTaskConfig(baseUrl = url, environment = "dev", staticToken = "tok", allowInsecureHttp = insecure)
+        cfg("https://fusha.example/api/v1")
+        cfg("http://localhost:8787/api/v1")
+        cfg("http://127.0.0.1:8787/api/v1")
+        cfg("http://[::1]:8787/api/v1")
+        cfg("http://remote.example/api/v1", insecure = true)
+        listOf(
+            "http://remote.example/api/v1",
+            "ftp://fusha.example/api/v1",
+            "https://user:pw@fusha.example/api/v1",
+            "https://fusha.example/api/v1?token=x",
+            "https://fusha.example/api/v1#frag",
+            "https:///api/v1",
+            "not a url",
+        ).forEach { u -> assertFailsWith<IllegalArgumentException>(u) { cfg(u) } }
+    }
+
+    @Test fun `token provider and config strings never contain the token`() {
+        val cfg = config()
+        assertTrue("tok" !in cfg.toString().replace("staticToken", ""))
+        assertTrue("secret-token" !in StaticTokenProvider("secret-token").toString())
+    }
+
     @Test fun `config toString hides token`() {
         assertTrue(!config().toString().contains("tok\""), config().toString())
         assertTrue(!config().toString().contains("staticToken=tok"))

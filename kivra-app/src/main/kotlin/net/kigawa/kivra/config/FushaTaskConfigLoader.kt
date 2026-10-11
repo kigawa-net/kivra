@@ -15,5 +15,6 @@ object FushaTaskConfigLoader {
         maxRetries = config.property("kivra.fusha.maxRetries").getString().toInt(),
         initialBackoff = Duration.ofMillis(config.property("kivra.fusha.initialBackoffMillis").getString().toLong()),
         maxBackoff = Duration.ofMillis(config.property("kivra.fusha.maxBackoffMillis").getString().toLong()),
+        allowInsecureHttp = config.propertyOrNull("kivra.fusha.allowInsecureHttp")?.getString()?.toBoolean() ?: false,
     )
 }

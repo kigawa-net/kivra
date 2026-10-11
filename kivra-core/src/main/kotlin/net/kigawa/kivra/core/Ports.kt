@@ -109,7 +109,12 @@ class TaskProviderException(
 interface TaskProvider {
     val capabilities: Set<TaskCapability>
 
-    /** Returns null when the task does not exist or is not visible (fusha-task hides the difference). */
+    /**
+     * Returns null when the task does not exist OR is not visible (NOT_FOUND_OR_NOT_VISIBLE; fusha-task hides the
+     * difference). null is therefore NOT proof of deletion: callers must not auto Cancel/Delete or emit a confirmed
+     * DISAPPEARED on it, only after reconciliation or human confirmation.
+     * Implementations must fail closed (PROTOCOL) if the returned task id differs from the requested one.
+     */
     suspend fun get(id: TaskId): TaskSnapshot?
 
     /** fusha-task has no paging: the full visible set is returned. */

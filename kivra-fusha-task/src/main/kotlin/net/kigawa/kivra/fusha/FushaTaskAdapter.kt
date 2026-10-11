@@ -44,7 +44,13 @@ import kotlin.random.Random
  * is unverified (issue #27 boundary note). 要確認: enable in a later phase once both are confirmed.
  *
  * Retry policy: GET only; network errors, timeouts, 429 and 5xx are retried with exponential backoff + jitter;
- * 401 triggers one token refresh and one retry; 400/403 are never retried.
+ * 401 triggers one token refresh and one retry; 400/403 are never retried. Redirects are never followed (3xx is a
+ * PROTOCOL error) so the bearer token cannot leak to another host.
+ *
+ * Contract note (NOT_FOUND_OR_NOT_VISIBLE): `get() == null` means "missing OR not visible to this credential"; the
+ * two are indistinguishable. It is NOT evidence that the task was deleted. Callers (Poller #28, Admission #26) must
+ * not auto Cancel/Delete/DISAPPEARED-confirm on it; require reconciliation (e.g. absence from a full list under the
+ * same credential, repeated) or human confirmation first.
  */
 class FushaTaskAdapter(
     private val config: FushaTaskConfig,
@@ -65,7 +71,18 @@ class FushaTaskAdapter(
         val response = request("$base/tasks/$numeric")
         return when {
             response.status == HttpStatusCode.NotFound -> null
-            response.status.value in 200..299 -> decode<FushaTaskDto>(response).toSnapshot()
+            response.status.value in 200..299 -> {
+                val dto = decode<FushaTaskDto>(response)
+                // Fail closed when the server answers with a different resource than requested.
+                if (dto.id != numeric) {
+                    throw TaskProviderException(
+                        TaskErrorKind.PROTOCOL,
+                        "fusha-task returned task ${dto.id} for requested task $numeric",
+                        response.status.value,
+                    )
+                }
+                dto.toSnapshot()
+            }
             else -> throw classify(response.status.value)
         }
     }
@@ -76,7 +93,20 @@ class FushaTaskAdapter(
             filter.viewId?.let { parameter("viewId", it) }
         }
         return when {
-            response.status.value in 200..299 -> decode<List<FushaTaskDto>>(response).map { it.toSnapshot() }
+            response.status.value in 200..299 -> {
+                // Fail closed: one invalid or duplicated id makes the whole listing untrustworthy, so no partial result.
+                val dtos = decode<List<FushaTaskDto>>(response)
+                val seen = HashSet<Long>()
+                for (dto in dtos) {
+                    if (dto.id <= 0) {
+                        throw TaskProviderException(TaskErrorKind.PROTOCOL, "fusha-task list contains non-positive task id ${dto.id}", response.status.value)
+                    }
+                    if (!seen.add(dto.id)) {
+                        throw TaskProviderException(TaskErrorKind.PROTOCOL, "fusha-task list contains duplicate task id ${dto.id}", response.status.value)
+                    }
+                }
+                dtos.map { it.toSnapshot() }
+            }
             // list 404 means "view not found" (not "task not found"): surface it instead of returning empty.
             else -> throw classify(response.status.value)
         }
@@ -98,8 +128,10 @@ class FushaTaskAdapter(
         if (!v.startsWith(idPrefix)) {
             throw TaskProviderException(TaskErrorKind.REJECTED, "TaskId '$v' does not belong to environment '${config.environment}'")
         }
-        return v.removePrefix(idPrefix).toLongOrNull()
+        val n = v.removePrefix(idPrefix).toLongOrNull()
             ?: throw TaskProviderException(TaskErrorKind.REJECTED, "TaskId '$v' has a non-numeric id")
+        if (n <= 0) throw TaskProviderException(TaskErrorKind.REJECTED, "TaskId '$v' must be a positive id")
+        return n
     }
 
     private suspend inline fun <reified T> decode(response: HttpResponse): T = try {
@@ -117,6 +149,9 @@ class FushaTaskAdapter(
     }
 
     private fun FushaTaskDto.toSnapshot(): TaskSnapshot {
+        if (id <= 0 || nextTaskIds.any { it <= 0 } || relatedTaskIds.any { it <= 0 }) {
+            throw TaskProviderException(TaskErrorKind.PROTOCOL, "task $id contains a non-positive task id")
+        }
         val updated = try {
             Instant.parse(updatedAt)
         } catch (e: DateTimeParseException) {
@@ -206,6 +241,8 @@ class FushaTaskAdapter(
         fun createClient(config: FushaTaskConfig, engine: HttpClientEngine? = null): HttpClient {
             val setup: io.ktor.client.HttpClientConfig<*>.() -> Unit = {
                 expectSuccess = false
+                // Never follow redirects: Authorization must not be forwarded to another host. 3xx is surfaced as PROTOCOL.
+                followRedirects = false
                 install(ContentNegotiation) { json(json) }
                 install(HttpTimeout) {
                     requestTimeoutMillis = config.requestTimeout.toMillis()

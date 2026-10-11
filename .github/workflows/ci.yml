@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # H2 (MODE=MySQL): fast tests without external services.
+      - name: Test (H2)
+        run: ./gradlew test --no-daemon
+
+      # MariaDB 11: the same suite, including Flyway migration, unique / lease / transaction / Outbox concurrency.
+      # Each test creates and drops its own schema (see TestDb).
+      - name: Test (MariaDB 11, migrations and concurrency)
+        env:
+          KIVRA_TEST_DB: mariadb
+          KIVRA_TEST_MARIADB_URL: jdbc:mariadb://127.0.0.1:3306/
+          KIVRA_TEST_MARIADB_USER: root
+          KIVRA_TEST_MARIADB_PASSWORD: test
+        run: ./gradlew :kivra-app:test --rerun-tasks --no-daemon
+
+      - name: Build
+        run: ./gradlew build --no-daemon
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: "**/build/reports/tests/"

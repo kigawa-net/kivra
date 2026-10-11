@@ -3,15 +3,17 @@ package net.kigawa.kivra.db
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.datetime
 
-/** Exposed definitions mirroring db/migration/V1__core_schema.sql. The migration is the source of truth for DDL. */
+/** Exposed definitions mirroring db/migration/V1__core_schema.sql and V2__reconciliation_evidence_and_outbox_claim.sql. The migration is the source of truth for DDL. */
 
-object TaskRunsTable : Table("task_runs") {
+object DevelopmentRunsTable : Table("development_runs") {
     val runId = char("run_id", 26)
     val taskId = varchar("task_id", 128)
     val taskUpdatedAt = datetime("task_updated_at").nullable()
     val state = varchar("state", 32)
+    val currentStage = varchar("current_stage", 32).nullable()
     val stateReason = varchar("state_reason", 64).nullable()
     val attempt = integer("attempt").default(0)
+    val planRevision = integer("plan_revision").default(0)
     val leaseOwner = varchar("lease_owner", 64).nullable()
     val leaseGeneration = long("lease_generation").default(0)
     val leaseExpiresAt = datetime("lease_expires_at").nullable()
@@ -28,9 +30,23 @@ object TaskRunsTable : Table("task_runs") {
     override val primaryKey = PrimaryKey(runId)
 }
 
+object StageExecutionsTable : Table("stage_executions") {
+    val stageExecId = char("stage_exec_id", 26)
+    val runId = char("run_id", 26).references(DevelopmentRunsTable.runId)
+    val stage = varchar("stage", 32)
+    val attemptNo = integer("attempt_no")
+    val leaseGeneration = long("lease_generation")
+    val status = varchar("status", 16)
+    val errorClass = varchar("error_class", 32).nullable()
+    val errorDetail = text("error_detail").nullable()
+    val startedAt = datetime("started_at")
+    val finishedAt = datetime("finished_at").nullable()
+    override val primaryKey = PrimaryKey(stageExecId)
+}
+
 object AgentsTable : Table("agents") {
     val agentId = char("agent_id", 26)
-    val runId = char("run_id", 26).references(TaskRunsTable.runId)
+    val runId = char("run_id", 26).references(DevelopmentRunsTable.runId)
     val role = varchar("role", 64)
     val state = varchar("state", 32)
     val version = long("version").default(0)
@@ -41,7 +57,7 @@ object AgentsTable : Table("agents") {
 
 object ExecutionSessionsTable : Table("execution_sessions") {
     val sessionId = char("session_id", 26)
-    val runId = char("run_id", 26).references(TaskRunsTable.runId)
+    val runId = char("run_id", 26).references(DevelopmentRunsTable.runId)
     val agentId = char("agent_id", 26).references(AgentsTable.agentId).nullable()
     val state = varchar("state", 32)
     val workspaceId = varchar("workspace_id", 128).nullable()
@@ -54,9 +70,9 @@ object ExecutionSessionsTable : Table("execution_sessions") {
     override val primaryKey = PrimaryKey(sessionId)
 }
 
-object OperationJournalTable : Table("operation_journal") {
+object ExternalOperationsTable : Table("external_operations") {
     val opId = char("op_id", 26)
-    val runId = char("run_id", 26).references(TaskRunsTable.runId)
+    val runId = char("run_id", 26).references(DevelopmentRunsTable.runId)
     val opType = varchar("op_type", 48)
     val idempotencyKey = varchar("idempotency_key", 128)
     val externalSystem = varchar("external_system", 16)
@@ -71,6 +87,11 @@ object OperationJournalTable : Table("operation_journal") {
     val lastErrorClass = varchar("last_error_class", 32).nullable()
     val lastError = text("last_error").nullable()
     val reconcileAttempts = integer("reconcile_attempts").default(0)
+    val evidenceObservation = varchar("evidence_observation", 16).nullable()
+    val evidenceRef = varchar("evidence_ref", 255).nullable()
+    val evidenceObservedAt = datetime("evidence_observed_at").nullable()
+    val providerCapability = varchar("provider_capability", 32).nullable()
+    val transitionReason = varchar("transition_reason", 64).nullable()
     val version = long("version").default(0)
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at")
@@ -91,6 +112,8 @@ object OutboxEventsTable : Table("outbox_events") {
     val nextAttemptAt = datetime("next_attempt_at")
     val createdAt = datetime("created_at")
     val publishedAt = datetime("published_at").nullable()
+    val claimedBy = varchar("claimed_by", 64).nullable()
+    val claimExpiresAt = datetime("claim_expires_at").nullable()
     override val primaryKey = PrimaryKey(eventId)
 }
 
@@ -105,7 +128,7 @@ object InboxEventsTable : Table("inbox_events") {
 
 object AuditEventsTable : Table("audit_events") {
     val eventId = char("event_id", 26)
-    val runId = char("run_id", 26).references(TaskRunsTable.runId).nullable()
+    val runId = char("run_id", 26).references(DevelopmentRunsTable.runId).nullable()
     val seq = long("seq")
     val occurredAt = datetime("occurred_at")
     val actor = varchar("actor", 128)

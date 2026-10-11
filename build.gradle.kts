@@ -30,5 +30,8 @@ subprojects {
 
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()
+        // H2's NOW() follows the JVM zone; production sessions are UTC (see README).
+        systemProperty("user.timezone", "UTC")
+        jvmArgs("-Duser.timezone=UTC")
     }
 }

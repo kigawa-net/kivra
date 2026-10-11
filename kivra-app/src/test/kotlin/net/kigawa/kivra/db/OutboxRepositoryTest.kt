@@ -1,6 +1,9 @@
 package net.kigawa.kivra.db
 
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -13,19 +16,121 @@ import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.transactions.transaction
 
 private val TTL = Duration.ofSeconds(30)
+private val CLAIM_TTL = Duration.ofSeconds(30)
 
 class OutboxRepositoryTest {
     @Test
-    fun `pending events are returned per run in version order and published once`() = TestDb().use { db ->
+    fun `claimed events are delivered per run in version order and published once`() = TestDb().use { db ->
         val run = db.runs.create("task-1", "test")
         val lease = db.leases.acquire(run.runId, "w", TTL)!!
-        val id = db.outbox.appendFenced(lease, 5, "Custom", "{}")
+        val id5 = db.outbox.appendFenced(lease, 5, "Custom", "{}")
 
-        val pending = db.outbox.fetchPending(10)
-        assertEquals(listOf(0L, 5L), pending.map { it.aggregateVersion })
-        assertTrue(db.outbox.markPublished(id))
-        assertFalse(db.outbox.markPublished(id), "second publisher must lose the CAS")
-        assertEquals(listOf(0L), db.outbox.fetchPending(10).map { it.aggregateVersion })
+        // Version 5 waits behind version 0 of the same run.
+        val first = db.outbox.claim("pub-a", 10, CLAIM_TTL)
+        assertEquals(listOf(0L), first.map { it.aggregateVersion })
+        assertTrue(db.outbox.markPublished(first.single().eventId, "pub-a"))
+        assertFalse(db.outbox.markPublished(first.single().eventId, "pub-a"), "already published")
+
+        val second = db.outbox.claim("pub-a", 10, CLAIM_TTL)
+        assertEquals(listOf(id5), second.map { it.eventId })
+        assertTrue(db.outbox.claim("pub-b", 10, CLAIM_TTL).isEmpty(), "a live claim is exclusive")
+    }
+
+    @Test
+    fun `only the claim holder can publish or fail an event`() = TestDb().use { db ->
+        db.runs.create("task-1", "test")
+        val e = db.outbox.claim("pub-a", 1, CLAIM_TTL).single()
+        assertFalse(db.outbox.markPublished(e.eventId, "pub-b"))
+        assertNull(db.outbox.markFailed(e.eventId, "pub-b", Duration.ZERO, 3))
+        assertTrue(db.outbox.markPublished(e.eventId, "pub-a"))
+    }
+
+    @Test
+    fun `a crashed publisher's expired claim is taken over and the old publisher is rejected`() = TestDb().use { db ->
+        db.runs.create("task-1", "test")
+        val e = db.outbox.claim("pub-a", 1, CLAIM_TTL).single() // pub-a crashes here, never reports back
+        assertTrue(db.outbox.claim("pub-b", 1, CLAIM_TTL).isEmpty(), "claim still live")
+        db.expireClaim(e.eventId)
+        val again = db.outbox.claim("pub-b", 1, CLAIM_TTL).single()
+        assertEquals(e.eventId, again.eventId, "at-least-once: the same event is delivered again")
+        // pub-a wakes up late: neither its publish nor its failure may touch the row now owned by pub-b.
+        assertFalse(db.outbox.markPublished(e.eventId, "pub-a"))
+        assertNull(db.outbox.markFailed(e.eventId, "pub-a", Duration.ZERO, 3))
+        assertEquals(0, db.count("outbox_events", "event_id = '${e.eventId}' AND publish_attempts > 0"))
+        assertTrue(db.outbox.markPublished(e.eventId, "pub-b"))
+    }
+
+    @Test
+    fun `an expired claim cannot be used to publish even if nobody took over`() = TestDb().use { db ->
+        db.runs.create("task-1", "test")
+        val e = db.outbox.claim("pub-a", 1, CLAIM_TTL).single()
+        db.expireClaim(e.eventId)
+        assertFalse(db.outbox.markPublished(e.eventId, "pub-a"))
+        assertNull(db.outbox.markFailed(e.eventId, "pub-a", Duration.ZERO, 3))
+    }
+
+    @Test
+    fun `concurrent publishers never claim the same event`() = TestDb().use { db ->
+        val events = 24
+        repeat(events) { db.runs.create("task-$it", "test") } // one event per run: no ordering constraint
+        val pool = Executors.newFixedThreadPool(4)
+        try {
+            val claimed = (1..4).map { p ->
+                pool.submit<List<String>> {
+                    buildList {
+                        repeat(10) {
+                            val batch = try { db.outbox.claim("pub-$p", 5, CLAIM_TTL) } catch (e: Exception) { emptyList() }
+                            addAll(batch.map { it.eventId })
+                        }
+                    }
+                }
+            }.flatMap { it.get(60, TimeUnit.SECONDS) }
+            assertEquals(claimed.size, claimed.toSet().size, "an event was claimed twice: $claimed")
+            assertEquals(events, claimed.size)
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `concurrent failure reports do not lose an attempt and DEAD is reached exactly once`() = TestDb().use { db ->
+        db.runs.create("task-1", "test")
+        val e = db.outbox.claim("pub-a", 1, CLAIM_TTL).single()
+        // Two threads race to report the same failure for the same claim: exactly one may count.
+        val pool = Executors.newFixedThreadPool(2)
+        val start = CountDownLatch(1)
+        try {
+            val results = (1..2).map {
+                pool.submit<OutboxStatus?> {
+                    start.await()
+                    try { db.outbox.markFailed(e.eventId, "pub-a", Duration.ZERO, 2) } catch (ex: Exception) { null }
+                }
+            }
+            start.countDown()
+            val statuses = results.map { it.get(30, TimeUnit.SECONDS) }
+            assertEquals(1, statuses.count { it == OutboxStatus.PENDING }, "statuses=$statuses")
+            assertEquals(1, db.count("outbox_events", "event_id = '${e.eventId}' AND publish_attempts = 1"))
+        } finally {
+            pool.shutdownNow()
+        }
+        // Second delivery attempt by a new publisher after a crash + expiry reaches the limit: DEAD.
+        val again = db.outbox.claim("pub-b", 1, CLAIM_TTL).single()
+        assertEquals(OutboxStatus.DEAD, db.outbox.markFailed(again.eventId, "pub-b", Duration.ZERO, 2))
+        assertEquals(1, db.count("outbox_events", "event_id = '${e.eventId}' AND status = 'DEAD' AND publish_attempts = 2"))
+        assertTrue(db.outbox.claim("pub-c", 1, CLAIM_TTL).isEmpty(), "DEAD is terminal")
+    }
+
+    @Test
+    fun `crash then DEAD migration then later versions are not blocked`() = TestDb().use { db ->
+        val run = db.runs.create("task-1", "test")
+        val lease = db.leases.acquire(run.runId, "w", TTL)!!
+        db.outbox.appendFenced(lease, 1, "Custom", "{}")
+        val e0 = db.outbox.claim("pub-a", 1, CLAIM_TTL).single() // version 0; pub-a crashes
+        db.expireClaim(e0.eventId)
+        val retry = db.outbox.claim("pub-b", 1, CLAIM_TTL).single()
+        assertEquals(e0.eventId, retry.eventId)
+        assertEquals(OutboxStatus.DEAD, db.outbox.markFailed(retry.eventId, "pub-b", Duration.ZERO, 1))
+        assertEquals(listOf(1L), db.outbox.claim("pub-b", 5, CLAIM_TTL).map { it.aggregateVersion })
     }
 
     @Test
@@ -61,11 +166,13 @@ class OutboxRepositoryTest {
     @Test
     fun `failed deliveries back off and become DEAD at the attempt limit`() = TestDb().use { db ->
         val run = db.runs.create("task-1", "test")
-        val id = db.outbox.fetchPending(1).single().eventId
-        assertEquals(OutboxStatus.PENDING, db.outbox.markFailed(id, Duration.ofHours(1), maxAttempts = 2))
-        assertTrue(db.outbox.fetchPending(10).isEmpty(), "backed-off event is not due")
-        assertEquals(OutboxStatus.DEAD, db.outbox.markFailed(id, Duration.ofHours(1), maxAttempts = 2))
-        assertNull(db.outbox.markFailed(id, Duration.ofHours(1), maxAttempts = 2), "DEAD is terminal")
+        val id = db.outbox.claim("pub", 1, CLAIM_TTL).single().eventId
+        assertEquals(OutboxStatus.PENDING, db.outbox.markFailed(id, "pub", Duration.ofHours(1), maxAttempts = 2))
+        assertTrue(db.outbox.claim("pub", 10, CLAIM_TTL).isEmpty(), "backed-off event is not due")
+        db.makeDue(id)
+        db.outbox.claim("pub", 10, CLAIM_TTL).single()
+        assertEquals(OutboxStatus.DEAD, db.outbox.markFailed(id, "pub", Duration.ofHours(1), maxAttempts = 2))
+        assertNull(db.outbox.markFailed(id, "pub", Duration.ofHours(1), maxAttempts = 2), "DEAD is terminal")
         assertEquals(1, db.count("outbox_events", "status = 'DEAD' AND aggregate_id = '${run.runId}'"))
     }
 

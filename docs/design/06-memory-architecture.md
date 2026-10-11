@@ -476,7 +476,7 @@ recl に Redact が無い場合、削除要求は完全には満たせない。�
 
 | ID | 内容 | 期待 |
 |---|---|---|
-| T-ISO-1 | project A の Agent が project B の Memory を検索 | 0 件。監査に deny も残らない結果は無い(deny 記録) |
+| T-ISO-1 | project A の Agent が project B の Memory を検索 | 0 件。deny が監査に記録される |
 | T-ISO-2 | Qdrant に旧 Scope のゴースト点を残して検索 | recl の再検証で除外(recl#6)。Kivra の post-filter でも二重に除外 |
 | T-SENS-1 | `confidential` Memory を外部モデル向け Bundle に含める要求 | omitted(sensitivity) になる |
 | T-SEC-1 | 書込候補に API キー・秘密鍵が含まれる | 保存されない、監査に検出記録のみ |

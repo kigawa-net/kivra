@@ -23,8 +23,8 @@
 | 論点 | #10 | #11 / #12 | 本書での扱い |
 |---|---|---|---|
 | DevelopmentRun の正本 | Kivra DB | MariaDB | **MariaDB**。一致している |
-| Run実行Lease/generation | Run所有権としてDB | #12: Fortis が権威的に保持(Phase 3 で移行) | `LeaseStore` 抽象を置き、**MVP は MariaDB 実装、Fortis 実装は #12 の Phase 3 で差し替え**。Fortis は「本番採用不可」前提 (#12) なので既存の安全な手段を維持する |
-| Release の正本 | DEC | #8/#12: DEC はステートレス、Release状態の正本は Fortis | Kivra から見た Release の**参照先は DEC の API**(`getRelease`)。DEC の裏側が Fortis か否かは Kivra の契約に影響させない |
+| Run実行Lease/generation | Run所有権としてDB | #12: Fortis が権威的に保持(Phase 3 で移行) | `LeaseStore` 抽象を置き、**MVP は MariaDB 実装、Fortis 実装は #12 の Phase 3 で任意に差し替え**。Fortis は「本番採用不可」前提 (#12) なので既存の安全な手段を維持する |
+| Release の正本 | **正本は Fortis、責務主体は DEC**(#8/#12 確定。DEC はステートレス) | 同左 | Kivra から見た Release の**参照先は DEC の API**(`getRelease`)。Kivra は Release 状態の正本を持たない |
 | 状態の重複保持 | fusha-task の進捗は正本ではない | #9: fusha-task状態を重複して持たない | Run は Kivra 内部の実行状態のみ。fusha-task には**投影(project)**するだけ |
 | DEC と Release Lease | #11: Run / 変更対象 / Production Release の Lease は別管理 | 同 | Run Lease は本書、変更対象・本番Release Lease は DEC/Fortis 側。Kivra は Release Lease を**保持しない** |
 
@@ -50,8 +50,8 @@ flowchart LR
   FT[fusha-task<br/>タスク/依存/進捗の正本]
   EX[exkes<br/>Workspace/Runtime/Execution の正本]
   GH[GitHub<br/>PR/Commit/CI/Merge の正本]
-  DEC[DEC<br/>Release の正本]
-  FO[Fortis<br/>Lease/epoch 将来]
+  DEC[DEC<br/>Release の責務主体<br/>(正本は Fortis)]
+  FO[Fortis<br/>Release 状態・Release Lease・epoch の正本<br/>Run Lease は任意の将来差替え]
   Orch --> DB
   Rec --> DB
   Pub --> DB
@@ -60,7 +60,7 @@ flowchart LR
   Orch -->|DecAdapter| DEC
   Pub -->|TaskProvider 投影| FT
   Orch -.->|LeaseStore(将来)| FO
-  DEC -.-> FO
+  DEC --> FO
 ```
 
 | データ | 正本 | Kivra の保持物 |
@@ -69,8 +69,8 @@ flowchart LR
 | DevelopmentRun / Stage / Attempt / Checkpoint / Operation Journal / 監査 | **Kivra MariaDB** | 全部 |
 | Workspace / Runtime / Execution | exkes | 参照ID、最後に観測した状態 |
 | Branch / PR / CI / Merge | GitHub | PR番号、headSha、観測した check 結果 |
-| Release(状態・段階・rollback) | DEC | `releaseId`、最後に観測した phase |
-| Run 実行Lease(将来) | Fortis (#12 Phase 3 以降) | `generation` のローカルコピー |
+| Release(状態・段階・rollback) | 正本は Fortis(責務主体は DEC。#8/#12) | `releaseId`、最後に観測した phase(キャッシュ) |
+| Run 実行Lease | MVP は MariaDB の LeaseStore。Fortis 実装への差替えは #12 Phase 3 で任意 | `generation`(Fortis 実装時は発行値のローカルコピー) |
 
 「最後に観測した状態」は**キャッシュ**であり、判断(特に不可逆操作)の前に必ず外部を再取得する。
 
@@ -126,7 +126,7 @@ stateDiagram-v2
 補足:
 
 - **MERGE の位置**: #10 の状態列には MERGE がなく、#9 のパイプラインには MERGE がある。本書では `PULL_REQUEST` Stage の内部サブステップ(`PR_OPENED → CI_PASSED → MERGED`)として扱い、Run 状態は増やさない。サブステップは `execution_checkpoints` と `external_operations` で追跡する。
-- **RELEASING 内部の進行は DEC が正本**: Kivra の Run は `RELEASING` に居る間、DEC の `getRelease` を観測するだけで、staging/canary 等の内部状態を自前で遷移させない。DEC の phase は Run 側に `releasePhaseObserved` として記録するのみ(#8 の STAGING/CANARY/PROMOTING/OBSERVING/STABLE/ROLLING_BACK/QUARANTINED は参照用。#8 が確定していない間は**要確認**)。
+- **RELEASING 内部の進行の正本は Fortis、更新責務は DEC**: Kivra の Run は `RELEASING` に居る間、DEC の `getRelease` を観測するだけで、staging/canary 等の内部状態を自前で遷移させない。DEC が返す phase は Run 側に `releasePhaseObserved` として記録するのみ(#8 の STAGING/CANARY/PROMOTING/OBSERVING/STABLE/ROLLING_BACK/QUARANTINED は参照用。#8 が確定していない間は**要確認**)。
 - `RECONCILIATION_REQUIRED` と `QUARANTINED` は #11 の Operation 状態と区別する(Run 状態 vs Operation 状態)。
 - 終端: `COMPLETED / FAILED / CANCELLED`。`QUARANTINED` は人手操作でのみ出る(修復タスクを fusha-task に起票)。
 
@@ -701,7 +701,7 @@ MVP は 1-6, 8, 10, 11(exkes は 7 の暫定対処で、DEC は 9 のフェイ�
 
 ### 未解決論点
 
-1. **Run Lease の正本の移行時期**: #12 は Fortis に移す前提だが、Fortis は本番不可。MariaDB 実装を恒久の fallback として残すか、Fortis 採用後に廃止するか。
+1. **Run Lease の Fortis 移行**: MVP は MariaDB の LeaseStore(確定)。Fortis 実装への差替えは #12 Phase 3 で任意。Fortis は本番不可のため、MariaDB 実装を恒久の fallback として残すか、Fortis 採用後に廃止するかは Phase 3 判断時に決める。
 2. **変更対象(target)の開発排他**: 同一 target への複数 Run の並行 DEVELOPING を許すか(#11 の「変更対象の Lease」)。本書では制限のみ示し、モデルは #11 に委ねる。
 3. **片側系統停止時の Run 引継ぎ**: A が停止している間の「A 開発者の Run」を B が実行してよいか(#7/#8 の復旧タスク担当との関係)。
 4. **merge 後の失敗**: merge は成功したが DEC release が失敗した場合の扱い(main には既に入っている)。Run を FAILED にして revert PR を別 Run にするか、DEC の rollback で GitOps だけ戻すか。**main と本番のずれ**を許容する期間と通知。

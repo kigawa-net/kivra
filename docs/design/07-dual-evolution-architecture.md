@@ -127,16 +127,16 @@ flowchart TB
 | タスク定義・依存・進捗 | fusha-task (target/executor/release 等の追加メタは Kivra 側で紐づけ) |
 | Workspace / Execution | exkes |
 | PR / Commit / CI / Merge | GitHub |
-| 本番 Release 状態・Lease・Fencing・DEC Leader | Fortis (DEC は Fortis の Coordination クライアント。Issue #8 確定事項) |
+| 本番 Release 状態・Production Release Lease・Fencing・DEC Leader | Fortis (DEC は Fortis の Coordination クライアント。Issue #8 確定事項) |
 | DevelopmentRun 詳細・Operation Journal・Outbox・監査 | MariaDB (#11) |
 | 長期記憶・改善根拠・設計判断 | recl |
 | デプロイ実体 | GitOps repo / Kubernetes (Release 状態との照合対象) |
 
-注: Issue #10 は「DEC は Release の正本」、Issue #8 は「Release 状態の正本は Fortis、DEC の RAM はキャッシュ」と記述している。本書は **論理的な責務主体は DEC、物理的な永続正本は Fortis** と解釈して統一する (未解決論点 U-1)。
+注: Release 状態の **正本は Fortis、責務主体は DEC** (DEC の RAM はキャッシュ) で確定。#8 / #12 と同じ表現に揃え、#10 もこれに合わせて修正する (U-1 解決済)。DEC はローカル DB を持たず、Journal 等の MariaDB 書込は Recorder 経由または専用 Audit Sink を通す (#8/#11/#12)。
 
 ### 4.2 Kivra 内の責務 (Evolution Engine との関係: 必須項目12)
 
-Evolution Engine は **改善の発見・提案・実装計画・開発担当割当の提案** までを担い、昇格・排他・ロールバックは担わない。Issue #6 は Memory 設計であり、Issue 本文に「Evolution Engine の定義」は含まれていない (確認済: #6 本文に該当節なし)。#7 の「Issue #6に定義するEvolution Engine」は参照先誤りの可能性があり、**Evolution Engine の正式定義の置き場を #9 とする案** を提示する (要確認 / U-2)。
+Evolution Engine は **改善の発見・提案・実装計画・開発担当割当の提案** までを担い、昇格・排他・ロールバックは担わない。Issue #6 は Memory 設計であり、Issue 本文に「Evolution Engine の定義」は含まれていない。Evolution Engine の正式定義の参照先は **#9 (Self-Development Pipeline)** とする (#7 の旧記述「Issue #6に定義するEvolution Engine」は #9 に読み替える。U-2 解決済)。
 
 | 責務 | Evolution Engine | Orchestrator (#3) | DEC (#8) |
 |---|---|---|---|
@@ -283,7 +283,7 @@ WAITING_APPROVAL は Issue #8 の列挙に無く、#10 の Run 状態にある�
 | Production Release Lease | グローバル (A/B 共通) | 実行中 Release | A/B 同時更新禁止 (INV-3) |
 | Run Lease | DevelopmentRun 単位 | Orchestrator Worker | 開発作業の重複防止 |
 
-各 Lease は `holder, epoch(単調増加), expiresAt, version` を持ち、更新は **Fortis の linearizable read + CAS** のみ (get+put の非原子実装は禁止。#12 に従う)。
+各 Lease は `holder, epoch(単調増加), expiresAt, version` を持つ。DEC Leader Lease / Production Release Lease の更新は **Fortis の linearizable read + CAS** のみ (get+put の非原子実装は禁止。#12 に従う)。Run Lease は MVP では **MariaDB の LeaseStore** (条件付き更新) で実装し、Fortis 実装への差し替えは #12 Phase 3 で任意 (#10/#11/#12 と整合)。
 
 ### 7.2 Fencing
 
@@ -470,8 +470,8 @@ DEC 全 Replica 停止中も A/B の既存サービスは維持され、新規�
 
 ## 15. 未解決論点
 
-- **U-1**: Release 正本の表現 (#8 は Fortis、#10 は DEC)。本書は「責務主体=DEC、永続正本=Fortis」で統一。#10 の記述修正を推奨。
-- **U-2**: 「Issue #6 に定義する Evolution Engine」は #6 本文に見当たらない。定義の置き場 (#9 案) を決める。
+- **U-1 (解決済)**: Release 正本は Fortis、責務主体は DEC。#10 を修正して統一。
+- **U-2 (解決済)**: Evolution Engine の定義の参照先は #9。
 - **U-3**: DEC 状態機械に WAITING_APPROVAL を追加するか (#8 に追記要)。
 - **U-4**: 外部 fencing の具体方式 (署名付き Release メタデータ + Admission/Executor 検証 など)。
 - **U-5**: Fortis に Coordination API を追加するか、KV+CAS で Lease を実装するか。

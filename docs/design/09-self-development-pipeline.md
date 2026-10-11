@@ -58,7 +58,8 @@ flowchart LR
   EX[exkes<br/>隔離 Workspace / Execution]
   GH[GitHub<br/>PR / CI / Ruleset / Merge]
   POL[独立 Policy Evaluator<br/>(DEC 側, #8)]
-  DEC[DEC<br/>Release の実行・Rollback]
+  DEC[DEC<br/>昇格・Rollback の判定]
+  EXE[独立 Deployment Executor<br/>唯一の GitOps/K8s 書込権限<br/>epoch/token と Release/Digest を検証]
   RC[recl<br/>評価・改善履歴]
   ORC --> RUN
   ORC --> ADP
@@ -69,14 +70,15 @@ flowchart LR
   ADP --> RC
   GH -- CI 成果物/署名 --> POL
   POL --> DEC
-  DEC -- GitOps --> TGT[対象系統 Y の Deployment]
+  DEC -- 判断結果: 実行要求のみ (書込まない) --> EXE
+  EXE -- 検証通過時のみ GitOps/K8s 書込 --> TGT[対象系統 Y の Deployment]
 ```
 
 信頼境界:
 
 - **信頼しない入力**: Agent の報告、PR 本文、Tool 出力、コミットメッセージ。これらは承認根拠にならない。
 - **信頼できる根拠**: GitHub の Required Checks 結果(独立した CI Runner が生成)、署名付き成果物の digest、独立 Policy Evaluator の決定(`policyDecisionRef`)、DEC の Release 状態。
-- 開発担当系統 X は「提案(PR)」までを行える。対象系統 Y への本番昇格は X からは実行不可(DEC が X の権限と無関係に実行。#7/#8)。
+- 開発担当系統 X は「提案(PR)」までを行える。対象系統 Y への本番昇格は X からは実行不可(昇格は DEC が X の権限と無関係に判定し、GitOps/K8s への実書込は独立 Deployment Executor のみが行う。DEC 自身も書込権限を持たない。#7 INV-2 / #8 / #12)。
 
 状態の正本(#10 と一致):
 
@@ -315,7 +317,7 @@ DEC の API は #8 の成果物待ちでありローカルに実装もない。�
 
 | フィールド | 説明 |
 |---|---|
-| `releaseRequestId` | Kivra 側で決定的に生成(`runId` + `releaseSeq`)。**DEC が重複受理を検出する冪等キー**(DEC が受け付けるか要確認) |
+| `releaseRequestId` | Kivra 側で決定的に生成(`runId` + `releaseSeq`)。**DEC が重複受理を検出する冪等キー**。再送時は request payload hash も同一であること(同一 requestId かつ hash 一致なら既存 `releaseId` を返し、hash 不一致は拒否)を DEC が権威的に保証する必要がある。**この契約は要確認(未確定)であり、確定まで自動再送しない(§7.1)** |
 | `targetInstance` | A/B(`developerInstance` と異なること) |
 | `repository`, `mergeCommitSha` | マージ済みの不変参照 |
 | `artifact` | `digest`(immutable)、署名参照、SBOM 参照(採用時) |
@@ -401,11 +403,27 @@ CI は **Kivra/Agent が編集可能な設定(ワークフロー、テスト定�
 | PR 作成 | 1 分 | 3 回 | head ブランチで既存 PR 検索(§5.3) | PR を close |
 | CI 待ち | 60 分 | ポーリング(再 trigger は 1 回まで) | `headSha` 一致検証 | PR を close |
 | MERGE | 1 分 | 不明時は照合のみ(再実行しない) | `merge(prRef, expectedHeadSha)`。再実行時は PR の merged 状態/merge commit を確認 | **revert PR を新 Run として起票**(履歴の書き換えはしない) |
-| RELEASE 依頼 | 1 分 | 不明時は `releaseRequestId` で照合、無ければ再依頼 | `releaseRequestId`(DEC の受理仕様は要確認) | `requestRollback(releaseId, reason)` |
-| RELEASE 待ち | DEC 側のタイムアウトに従う + Run 側の上限(案 24 時間) | ポーリング継続 | `getRelease` は読み取り | DEC が実施 |
+| RELEASE 依頼 | 1 分 | **不明時は自動再送しない**。照合し、結果が「受理済み」以外なら UNKNOWN/RECONCILIATION_REQUIRED で保留(§7.1) | `releaseRequestId` + request payload hash(DEC の冪等契約は §5.4 で**要確認**。確定までは冪等と扱わない) | `requestRollback(releaseId, reason)` |
+| RELEASE 待ち | DEC 側のタイムアウトに従う + Run 側の上限(案 24 時間) | ポーリング継続 | `getRelease` は読み取り | DEC が判定し、実書込は Executor が実施 |
 | VERIFY | 観測期間 + 1 時間 | 3 回 | 読み取りのみ | なし |
 | fusha-task 更新 | 1 分 | 5 回(Outbox) | 遷移 ID を含むコメントの重複検出(§5.1) | 追加コメントで訂正(削除しない) |
 | recl 保存 | 1 分 | 5 回(Outbox) | `runId`+`eventSeq`(要確認) | なし |
+
+### 7.1 RELEASE 依頼が UNKNOWN になったときの安全手順
+
+**「照合で見つからない」は「未受付の確定」ではない。** 次の理由で、最初の要求が受理済み・処理中でも見つからないことがある。
+
+- 受付直後の検索/一覧の反映遅延(照会が結果整合の場合)。
+- timeout した時点では DEC の State 反映前だったが、その後に反映される(要求は DEC 内で処理中)。
+- 照合 API 側の障害・部分障害(空応答や Fortis 読取不能を「無し」と誤解する)。
+- 別 epoch / 別 DEC Leader への切替で、旧 Leader が受けた要求の可視性が変わる。
+
+よって「無ければ再依頼」は採用しない。安全な動作は次のとおり。
+
+1. **自動再送の前提条件**: DEC が「同一 `releaseRequestId` かつ request payload hash 一致の再送は冪等(既存 `releaseId` を返す)、hash 不一致は拒否」を権威的に保証する(#8 で確定し API 仕様に明記)まで、UNKNOWN 結果を自動再送しない。この契約は現時点で未確認であり、確定するまで Release 重複防止は成立しているとは扱わない。
+2. **保留**: Operation Journal の該当エントリを UNKNOWN → RECONCILIATION_REQUIRED とし、Run を保留(新規 RELEASE 依頼を出さない)。照合結果の確認と再送可否は人間が判断する(照合専用の読取は繰り返してよい)。
+3. **再送可能になった後の再検証**: 冪等再送が保証された後でも、再送前に DEC が(a) 既存 Release の有無・状態、(b) 現在の global Release State / Production Release Lock が同一の権威状態(同じ epoch・linearizable な読取)で一貫していること、を再検証する。不一致・読取不能なら fail-closed で再送せず保留を継続する。
+4. **書込主体の分離**: 再送が受理されても、GitOps/K8s への書込は独立 Deployment Executor が `(incarnation, epoch, token)` と Release/Digest を検証して行う(§2 の図)。Kivra の再送や DEC の判断が書込を直接起こすことはない。
 
 共通ルール:
 
@@ -464,7 +482,7 @@ Run 状態遷移ごとに Outbox イベント(`eventId`, `runId`, `taskId`, `fro
 | DEVELOP | exkes: label `kivra.runId` の Workspace/Execution | 実行中なら監視再開、完了なら成果(push 済み SHA)を確認、不明なら隔離 |
 | PR/CI | GitHub: `kivra/run-{runId}` の PR と `headSha` | PR あり → 再利用、無し → 作成 |
 | MERGE | GitHub: PR の merged 状態 | merged なら merge SHA を記録して RELEASE へ。head 不一致なら TESTING |
-| RELEASE | DEC: `releaseRequestId` | 受理済みなら `releaseId` 取得・監視再開。不明・競合は保留して人間エスカレーション |
+| RELEASE | DEC: `releaseRequestId`(+ payload hash)。照会は global Release State/Lock と同じ権威状態を読む | 受理済み(同一 hash)なら `releaseId` 取得・監視再開。**見つからない場合も未受付とは確定せず**、不明・競合・hash 不一致・読取不能は UNKNOWN/RECONCILIATION_REQUIRED で保留して人間エスカレーション。自動再送しない(§7.1) |
 
 3. 照合結果で Checkpoint を前進/保持。副作用が不明な操作は **自動再実行せず UNKNOWN → RECONCILIATION_REQUIRED**(#11)。
 4. 旧 Worker が復帰しても、`generation` 不一致で Run の更新が CAS により拒否される(外部への副作用は Journal の `generation` を確認、外部がフェンシング非対応の場合は §7 の照合で防ぐ)。

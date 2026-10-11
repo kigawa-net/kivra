@@ -42,14 +42,14 @@ DEC (Dual Evolution Controller) の詳細アルゴリズムは #8、パイプラ
 | ID | 不変条件 |
 |---|---|
 | INV-1 | 系統 X は自分自身への本番昇格を承認・実行できない。X の改変案は X が提案できても、X を対象とする Release は他方 Y が開発し、DEC が昇格する。 |
-| INV-2 | 本番昇格の権限は DEC のみが持つ。A/B の Service Account はデプロイ権限・GitOps 書込権限を持たない。 |
+| INV-2 | 本番**昇格の判定権限**は DEC のみが持つ。GitOps / Kubernetes への**実書込権限は独立した Deployment Executor のみ**が持ち、DEC は GitOps/K8s への書込資格情報を持たない。A/B の Service Account はデプロイ権限・GitOps 書込権限・昇格判定権限のいずれも持たない。 |
 | INV-3 | 本番に影響する更新は常に最大1件 (グローバル Release Lease)。更新対象でない側が安定していることが開始条件。 |
 | INV-4 | 昇格根拠は信頼できる CI 成果物・独立 Policy 判定・独立観測のみ。Agent 報告、PR 説明、相手系統の監視結果は根拠にしない。 |
 | INV-5 | 判定に必要な値が欠落・不明・取得不能ならば fail-closed (昇格しない / 新規更新を止める)。既存サービスは維持。 |
 | INV-6 | A/B から変更・停止できない共通 Control Plane (§4.3) が存在する。 |
 | INV-7 | 高リスク変更 (Policy・認証認可・Secret・基盤・DEC 自身・共通 DB) は独立した人間承認なしに自動適用しない。 |
 | INV-8 | 全リリースは immutable な artifact digest で固定し、ロールバック先も既知正常 digest で固定する。 |
-| INV-9 | 外部副作用は冪等キー・実行世代 (fencing) を持つ。旧世代の実行は実行側で拒否される。 |
+| INV-9 | 外部副作用は冪等キー・実行世代 (fencing) を持つ。Fencing は 3 層境界 (DEC が判断 / Fortis が権威状態と epoch・token を供給 / Executor が `(incarnation, epoch, token)` と Release・Digest を検証して書込) で成立し、旧世代の実行は実書込主体である Executor で拒否される (§7.2)。 |
 
 ## 3. デプロイ構成と信頼境界
 
@@ -93,8 +93,8 @@ flowchart TB
   GH -->|"CI成果物+署名"| DEC
   DEC <--> POL
   DEC <--> MON
-  DEC -->|"epoch+Release ID+digest"| EXE
-  EXE --> GO --> K8S
+  DEC -->|"判断結果: 実行要求 (epoch+token+Release ID+digest)。DEC は書込まない"| EXE
+  EXE -->|"唯一の書込経路 (検証後のみ)"| GO --> K8S
   DEC <--> VA & VB & VC
   MON -.観測.-> KA & KB
 ```
@@ -106,10 +106,10 @@ flowchart TB
 | 主体 | 信頼 | 許可 | 禁止 |
 |---|---|---|---|
 | Kivra A / B (Agent含む) | 低〜中 (AI生成物は未検証入力) | fusha-task 更新(最小権限)、exkes Workspace 作成(自系統の開発用)、対象リポジトリへの PR 作成、recl 読書 | デプロイ、GitOps 書込、Policy/承認/Secret 変更、自系統への昇格、DEC 操作 (Release 要求の提出を除く) |
-| DEC | 高 | Release 状態遷移、GitOps への digest 反映要求、Rollback、Quarantine | 昇格根拠の自己生成、Policy 自己変更、コード変更 |
+| DEC | 高 | 昇格・Rollback の**判定**、Release 状態遷移 (Fortis CAS)、Executor への実行要求 (epoch/token/Release ID/digest 付き)、Quarantine 判断 | GitOps/K8s への直接書込 (資格情報を持たない)、昇格根拠の自己生成、Policy 自己変更、コード変更 |
 | Policy Engine / 承認系 | 最高 (DEC 外に保護) | リスク分類、承認結果発行 | AI からの書込 |
 | 独立 Health Monitor | 高 | 両系統と共通依存の観測 | 系統自身の自己申告を入力にしない |
-| Deployment Executor | 高 | GitOps/K8s への適用 | 旧 epoch / 未署名 Release ID の実行 |
+| Deployment Executor | 高 | **唯一の GitOps/K8s 書込主体**。`(incarnation, epoch, token)` と Release/Digest を検証した要求のみ書込 (単一 writer) | 旧世代・未署名 Release ID・digest 不一致の実行、昇格判定 (DEC の判断なしに自発的に書かない) |
 | 人間承認者 | 最高 | 高リスク承認、break-glass | - |
 
 ### 3.3 A/B の ID・権限・データ境界
@@ -145,7 +145,7 @@ Evolution Engine は **改善の発見・提案・実装計画・開発担当割
 | 開発担当/対象系統の決定 | 提案 | 実行 | 検証 (INV-1 違反は拒否) |
 | 実装・テスト・レビューの実行 | 指示 | ○ (Agent起動) | - |
 | リスク分類 | 申告のみ (参考値) | - | 独立再計算 (確定) |
-| 昇格・Rollback | ✕ | ✕ | ○ |
+| 昇格・Rollback の判定 (実書込は Executor) | ✕ | ✕ | ○ |
 | 経験の recl 保存 | ○ | ○ | 結果通知のみ |
 
 ### 4.3 共通 Control Plane と「A/B から変更・停止できない」仕組み (必須項目11)
@@ -154,7 +154,7 @@ Evolution Engine は **改善の発見・提案・実装計画・開発担当割
 
 1. **別リポジトリ・別保護ルール**: Control Plane コードは A/B が開発する Kivra 本体リポジトリと分離し、変更は常に高リスク (人間承認必須)。A/B の Bot に Write 権限を与えない (PR 作成のみ可能な場合も承認不可)。
 2. **別 namespace・別 RBAC・別 SA**: A/B の SA は Control Plane namespace に対する RBAC を持たない。NetworkPolicy で A/B → Control Plane は Release 要求 API (認証付き、読取+要求提出のみ) のみ許可。
-3. **GitOps 保護**: Control Plane 用 Application/パスは A/B の GitOps パスと分離し、A/B 用パスへの書込は DEC 経由のみ。ArgoCD の Project 権限で A/B 管理対象外リソースの同期を拒否。
+3. **GitOps 保護**: Control Plane 用 Application/パスは A/B の GitOps パスと分離し、A/B 用パスへの書込は Deployment Executor 経由のみ (DEC の判断+検証済み要求が前提。DEC 自身は書かない)。ArgoCD の Project 権限で A/B 管理対象外リソースの同期を拒否。
 4. **停止不能性**: DEC は Stateless 複数 Replica (PDB / 別ノード配置)。Deployment を A/B が scale/delete できない。DEC が停止しても A/B の既存サービスは継続 (§9)。
 5. **自己更新の特例**: Control Plane 自身の更新は INV-7 により人間承認+手動昇格とし、自動パイプラインに乗せない。
 
@@ -184,6 +184,7 @@ sequenceDiagram
   participant EX as exkes
   participant GH as GitHub/CI
   participant DEC as DEC
+  participant EXE as Deployment Executor
   participant PE as Policy Engine
   participant KB as Kivra B (target)
   EVA->>FT: タスク取得 (target=B)
@@ -196,7 +197,9 @@ sequenceDiagram
   DEC->>PE: リスク分類・承認条件
   PE-->>DEC: 判定 (低/中: 自動 / 高: 人間承認待ち)
   DEC->>DEC: Lease+Fencing 取得 (§7)
-  DEC->>KB: staging → canary → production (digest 固定)
+  DEC->>EXE: staging → canary → production の実行要求 (digest 固定, epoch/token 付き)
+  EXE->>EXE: (incarnation, epoch, token) と Release/Digest を検証
+  EXE->>KB: 検証通過時のみ GitOps/K8s へ書込
   DEC->>DEC: 独立評価・監視期間 (§8)
   DEC-->>FT: 結果反映 (STABLE / ROLLED_BACK)
   DEC-->>EVA: 通知 (結果のみ、判定根拠は DEC が保持)
@@ -240,7 +243,7 @@ WAITING_APPROVAL は Issue #8 の列挙に無く、#10 の Run 状態にある�
 
 1. Release が OBSERVING の間は developer 側 (A) の次の本番 Release 要求は受け付けない。A の開発 (PR作成まで) は継続可。
 2. STABLE 到達後、target 側 (B) の「担当可能」条件 = DEC の独立ヘルスチェック合格 + 直近 N 件の Release 失敗率が閾値以下。満たすまで B は開発担当にならない (A が連続開発担当を続ける案もあるが、A の連続失敗上限で停止: §9)。
-3. 片側が異常 (DEGRADED) の場合: 正常側が異常側の復旧タスクを担当できるが、デプロイは DEC が実行 (INV-2)。
+3. 片側が異常 (DEGRADED) の場合: 正常側が異常側の復旧タスクを担当できるが、昇格・復旧の判定は DEC、GitOps/K8s への実書込は Executor のみが行う (INV-2)。
 4. 交代は状態 `developerRole` (Fortis保持の Role Lease) の CAS 更新で行い、更新はグローバル Lease 保持者のみ。
 
 ## 6. Release Track、artifact、互換性、共有コンポーネント (必須項目3)
@@ -249,7 +252,7 @@ WAITING_APPROVAL は Issue #8 の列挙に無く、#10 の Run 状態にある�
 
 - 系統ごとに独立した Track: `track/A`, `track/B`。各 Track は現行の `stable` digest と `candidate` digest、`lastKnownGood` digest を持つ (Fortis 保持)。
 - A/B は **異なるバージョンを保持できる**。ただし互換性窓 (§6.2) 内に限る。窓を超える乖離が発生したら、新規 Release を止めて先行系統を待たせる (またはロールバック)。
-- 全デプロイは `image@sha256:...` 固定。tag 参照・latest 禁止 (INV-8)。GitOps 反映は DEC が digest を書く。
+- 全デプロイは `image@sha256:...` 固定。tag 参照・latest 禁止 (INV-8)。GitOps への digest 反映は、DEC の判断に基づき Deployment Executor のみが書く (DEC は書かない)。
 
 ### 6.2 互換性ルール
 
@@ -267,7 +270,7 @@ WAITING_APPROVAL は Issue #8 の列挙に無く、#10 の Run 状態にある�
 | S-2 | 共有コードは A/B で同一コミットを同時ビルドしない。A と B の更新は同一 PR・同一 digest で束ねない。共有ライブラリの変更は先に片側 (その Release の target 側) のみへ適用し、安定確認後に他方へ。 |
 | S-3 | DB migration は expand → migrate → contract の三段階を別 Release に分割。expand は N-1 コードと互換、contract は両系統が新コードで STABLE になった後のみ。 |
 | S-4 | 破壊的 migration (列削除、型変更) は高リスクで人間承認必須。ロールバック不能な場合は事前バックアップ確認 (fail-closed)。 |
-| S-5 | migration は DEC が実行順序を制御し、A/B のアプリ起動時の自動 migrate は禁止 (shadowJar+Flyway で無音スキップした既知の落とし穴があるため、起動方式は `installDist` を使う。個人メモの知見)。 |
+| S-5 | migration の実行順序は DEC が判断し、実行は Deployment Executor 経由とし、A/B のアプリ起動時の自動 migrate は禁止 (shadowJar+Flyway で無音スキップした既知の落とし穴があるため、起動方式は `installDist` を使う。個人メモの知見)。 |
 | S-6 | 共通 DB スキーマは系統接頭辞または別 schema で分離し、片系統の migration が他系統データに触れない。共通テーブルは S-3 に従う。 |
 | S-7 | Fortis の更新は Quorum を維持できる 1 Voter ずつのローリング。Fortis 自身の更新は高リスク (Control Plane)。 |
 
@@ -285,10 +288,18 @@ WAITING_APPROVAL は Issue #8 の列挙に無く、#10 の Run 状態にある�
 
 各 Lease は `holder, epoch(単調増加), expiresAt, version` を持つ。DEC Leader Lease / Production Release Lease の更新は **Fortis の linearizable read + CAS** のみ (get+put の非原子実装は禁止。#12 に従う)。Run Lease は MVP では **MariaDB の LeaseStore** (条件付き更新) で実装し、Fortis 実装への差し替えは #12 Phase 3 で任意 (#10/#11/#12 と整合)。
 
-### 7.2 Fencing
+### 7.2 Fencing (3 層境界)
 
-1. DEC は Release 開始時に Fortis から epoch (fencing token) を得て、Release ID と対応させる。
-2. Deployment Executor は `((incarnation, epoch, token), releaseId, target, digest)` を、Executor 自身の**永続 maxSeen**で検証し、古い世代は拒否 (Fortis 非依存)。実行先への書込は Executor の単一 writer のみ。受理→実行→確定の順序・バリア・キャンセルは #8 §5.3 / #12 §5.3 の規範要件。バックアップ復元時の世代逆行は #12 §4.5 (Fortis 外の Incarnation Authority)。Fortis 内部の fencing だけでは、K8s/GitOps に届いた旧要求は止まらない (Issue #8)。
+Fencing は次の 3 層で責務を分け、1 層だけでは成立しない。
+
+| 層 | 主体 | 責務 |
+|---|---|---|
+| 判断 | DEC (Stateless, Leader のみ) | 昇格可否を判定し、Fortis から epoch/token を得て Release ID と対応付け、Executor へ実行要求を送る。**GitOps/K8s には書かない。** |
+| 権威状態 | Fortis (提案 API。§7.4) | Leader/Lease/Token/Release 状態の線形化可能な正本。ただし Fortis 単独の fencing は K8s/GitOps に届いた旧要求を止められない。 |
+| 検証・書込 | Deployment Executor | 要求の `(incarnation, epoch, token)` と Release/Digest を検証し、通った場合のみ唯一の writer として GitOps/K8s へ書く。 |
+
+1. DEC は Release 開始時に Fortis から epoch (fencing token) を得て、Release ID と対応させ、判断結果として Executor に渡す。
+2. Deployment Executor は `((incarnation, epoch, token), releaseId, target, digest)` を、Executor 自身の**永続 maxSeen**で検証し、古い世代は拒否 (Fortis 非依存)。実行先への書込は Executor の単一 writer のみ (DEC は書込主体ではない)。受理→実行→確定の順序・バリア・キャンセルは #8 §5.3 / #12 §5.3 の規範要件。バックアップ復元時の世代逆行は #12 §4.5 (Fortis 外の Incarnation Authority)。Fortis 内部の fencing だけでは、K8s/GitOps に届いた旧要求は止まらない (Issue #8)。
 3. 検証手段 (候補): GitOps コミットに署名付き Release メタデータ (epoch, releaseId) を含め、ArgoCD / Admission Webhook / Executor が現在の epoch と比較。具体方式は未確定 (U-4)。
 
 ### 7.3 分断・障害時の挙動
@@ -350,8 +361,8 @@ Staging 環境の実体は (要確認)。exkes は stg/main の 2 環境ポリ�
 
 Rollback 手順:
 
-1. DEC が Release を FAILED にし ROLLING_BACK へ。
-2. GitOps 上の対象 Track の digest を `lastKnownGood` に戻すコミット (署名付き) を DEC が作成 (実行は Executor、epoch 付き)。
+1. DEC が Release を FAILED にし ROLLING_BACK へ (判定のみ。状態遷移は Fortis CAS)。
+2. DEC が `lastKnownGood` への復帰を判断し、Executor に実行要求 (epoch/token/Release ID/既知正常 digest 付き) を出す。Executor が検証後、GitOps 上の対象 Track の digest を戻す署名付きコミットを作成・書込する (DEC はコミットを作成しない)。
 3. ArgoCD の同期と K8s ロールアウト完了を独立 Monitor が確認。
 4. 復帰確認後 RECOVERED。復帰不能・状態不明は QUARANTINED とし、新規 Release 停止、人間通知。
 
@@ -390,8 +401,9 @@ DEC 全 Replica 停止中も A/B の既存サービスは維持され、新規�
 |---|---|---|---|
 | PR 作成 | ○ (開発担当のみ) | - | ○ |
 | Merge | ✕ (Ruleset+DEC Policy 経由の自動マージ Bot のみ) | 条件付 | ○ |
-| Release 要求 | 提出のみ | 受理・実行 | ○ |
-| Rollback | 要求のみ | 実行 | ○ |
+| Release 要求 | 提出のみ | 受理・判定 (書込は Executor に要求) | ○ |
+| Rollback | 要求のみ | 判定・Executor へ実行要求 | ○ |
+| GitOps/K8s 実書込 | ✕ | ✕ (資格情報なし) | ○ (break-glass のみ) / Deployment Executor |
 | Policy/承認/Secret/Control Plane 変更 | ✕ | ✕ | ○ (二人承認が望ましい) |
 | break-glass | ✕ | ✕ | ○ |
 

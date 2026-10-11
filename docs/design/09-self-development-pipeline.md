@@ -86,7 +86,7 @@ flowchart LR
 | DevelopmentRun / Stage / Attempt / Checkpoint | Kivra DB(MariaDB) |
 | Workspace / Execution | exkes |
 | PR / Commit / CI / Merge | GitHub |
-| Release 状態(RELEASING 内部) | DEC(最終的な協調状態は Fortis。#8/#12) |
+| Release 状態(RELEASING 内部) | 正本は Fortis、責務主体は DEC(#8/#12) |
 | 評価・経験記憶 | recl |
 
 ## 3. 状態モデル
@@ -128,7 +128,7 @@ Stage は #10 の実行状態名に対応づける。
 | TEST/REVIEW | TESTING, REVIEWING | 回帰・セキュリティテスト、独立レビュー |
 | PR/CI | PULL_REQUEST | PR 作成、CI 結果のひも付け |
 | MERGE | PULL_REQUEST → WAITING_APPROVAL(必要時) | Policy 判定、人間承認、自動マージ |
-| RELEASE | RELEASING | DEC へ依頼し、結果を監視(内部状態は DEC が正本) |
+| RELEASE | RELEASING | DEC へ依頼し、結果を監視(内部状態の正本は Fortis、更新責務は DEC) |
 | VERIFY/LEARN | VERIFYING → COMPLETED | 運用評価、fusha-task 更新、recl 保存 |
 
 終端・分岐: `FAILED`, `CANCELLED`, `RETRY_WAITING`(#10 の定義に従う)。

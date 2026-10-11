@@ -26,13 +26,13 @@ Kivra A/B・複数 Orchestrator/Worker が、exkes・fusha-task・GitHub・DEC �
 | タスク定義・進捗・依存関係 | fusha-task | #2, #9 |
 | Workspace / Runtime / Execution | exkes | 確認済: exkes 自身が MariaDB を正本とする (`exkes-common` の V1〜V3 migration) |
 | PR / Commit / CI / Merge | GitHub | #9 |
-| Release 状態・Release 排他・DEC Leader | DEC / Fortis (#8, #12 の「設計変更(確定)」) | Kivra は参照・要求のみ。正本を持たない |
+| Release 状態・Release 排他・DEC Leader | 正本は Fortis、責務主体は DEC (#8, #12 の「設計変更(確定)」) | Kivra は参照・要求のみ。正本を持たない。DEC はローカル DB を持たず、Journal 等の MariaDB 書込みは Recorder 経由または専用 Audit Sink 経由 (#8/#12) |
 | DevelopmentRun 詳細・Stage・Operation Journal・Outbox・監査 | Kivra MariaDB | #10, #11, #12 |
-| Run 実行 Lease・owner/generation | 移行期は Kivra MariaDB、Fortis 受入試験後に Fortis (#12 Phase 3) | 3.4 の LeaseStore 抽象で両対応 |
+| Run 実行 Lease・owner/generation | MVP は Kivra MariaDB の LeaseStore。Fortis 実装への差替えは #12 Phase 3 で任意 | 3.4 の LeaseStore 抽象で両対応 |
 
 ### 1.2 Issue 間の食い違いと本書の扱い
 
-- **#11 本文は「Run/Journal の正本は MariaDB」「Production Release の所有権を管理」と書くが、#8/#12 の確定変更で Release 状態・排他の正本は Fortis/DEC に移った。** 本書は #8/#12 を優先する。Kivra は Production Release Lease を発行・保持しない。Kivra が持つのは `releaseId` と `requestRelease` の journal だけで、排他の強制は DEC と外部 Fencing (Deployment Executor) が行う。
+- **#11 本文は「Run/Journal の正本は MariaDB」「Production Release の所有権を管理」と書くが、#8/#12 の確定変更で Release 状態・排他の正本は Fortis (責務主体は DEC) に移った。** 本書は #8/#12 を優先する。Kivra は Production Release Lease を発行・保持しない。Kivra が持つのは `releaseId` と `requestRelease` の journal だけで、排他の強制は DEC と外部 Fencing (Deployment Executor) が行う。
 - **#12 は「Fortis の現行開発状況では本番移行不可」とする。** ロードマップ (`fortis/docs/roadmap.md`) でも MVCC/Transaction/Meta は部分実装で、`fortis/docs/architecture.md` §6 に Lease/TTL API は無く、compare-and-set は「必要に応じて追加」、Idempotency Key も「別途定義」とされる (確認済)。したがって Run Lease は MariaDB 実装で先行し、Fortis へは差し替え可能な抽象 (3.4) で備える。
 - **#10 の状態名は変更しない。** 本書が追加する「隔離 (quarantine)」は Run の状態ではなく `hold_reason` 列 (NULL でなければ自動進行を停止) で表す。
 - #4 は NATS JetStream を Coordination Bus の「評価して決定する候補」としている。本書は NATS 無しでも成立する設計 (Outbox/Inbox は DB 完結) とし、NATS は配送最適化として後付け可能にする。
@@ -52,7 +52,7 @@ flowchart LR
   X[exkes]
   T[fusha-task]
   G[GitHub]
-  D[DEC<br/>Release排他・epoch・正本]
+  D[DEC<br/>Release排他・epoch の責務主体<br/>正本は Fortis]
   W -- Lease/CAS --> DB
   W -. 将来 .-> F
   W -- journal経由 --> X
@@ -76,7 +76,7 @@ flowchart LR
 
 | 種類 | 対象 | 管理主体 | 目的 |
 | --- | --- | --- | --- |
-| Run Lease | 1 DevelopmentRun | Kivra (移行期 MariaDB → 将来 Fortis) | 同一 Run を同時に進める Worker を 1 つに限定 |
+| Run Lease | 1 DevelopmentRun | Kivra (MVP は MariaDB、Fortis 差替えは #12 Phase 3 で任意) | 同一 Run を同時に進める Worker を 1 つに限定 |
 | Target Change Lock | 変更対象 (`targetInstance` + `repository` + 対象ブランチ系列) | Kivra (同上) | 同一対象への並行変更 Run を制限 (競合 PR・並行 merge の抑止) |
 | Production Release Lease | 本番昇格 | **DEC / Fortis (Kivra は持たない)** | A/B 同時昇格禁止・全体直列化 (#7, #8, #12) |
 
@@ -158,7 +158,7 @@ Worker の自己 Fencing: Worker は **自分の単調時計** で `localMonoton
 
 `resource_leases` も同じ形 (`scope_key` 単位、generation 単調) で acquire/renew/release する。Run が TARGET_CHANGE を取得できない場合は Run を `RETRY_WAITING` (#10) に置いて待機する。
 
-### 3.4 LeaseStore 抽象 (Fortis 移行の備え)
+### 3.4 LeaseStore 抽象 (Fortis 差替えの備え。差替えは任意)
 
 ```text
 interface LeaseStore {
@@ -169,7 +169,7 @@ interface LeaseStore {
 ```
 
 - 実装 1 (MVP): MariaDB (上記)。
-- 実装 2 (Fortis 受入試験後): Fortis の Lease/CAS API。Fortis 側の API・TTL 機能は現時点で存在しないため、契約は #12 側で確定する (要確認)。
+- 実装 2 (任意。#12 Phase 3 で Fortis 受入試験後): Fortis の Lease/CAS API。Fortis 側の API・TTL 機能は現時点で存在しないため、契約は #12 側で確定する (要確認)。
 - **どちらの実装でも、Run 行に `lease_generation` を書き戻し、`fencedUpdate` は「受け取った token ≥ DB に記録済みの token」かつ「owner 一致」で受理する。** こうすれば Lease の発行元が変わってもローカル DB の拒否ロジックは不変。Fortis の MVCC version は「グループローカルでグローバル順序は仮定しない」(`fortis/docs/architecture.md`) ので、token は同一 Lease キー内で単調であることだけを要求する。
 
 ### 3.5 障害ケース
@@ -429,7 +429,7 @@ stateDiagram-v2
 | 外部に該当オブジェクト無し + 操作が冪等 | RESUMED (RETRYABLE として再実行) |
 | 外部に該当オブジェクト無し + 非冪等 + 識別子が一意に引ける | RESUMED |
 | 重複/複数ヒット、他者所有、head SHA 不一致 | QUARANTINED |
-| DEC が Release を保持 (phase 進行中) | WATCHING: DEC が正本。Kivra は `getRelease` を監視するのみ |
+| DEC が Release を保持 (phase 進行中) | WATCHING: 正本は Fortis (更新責務は DEC)。Kivra は `getRelease` を監視するのみ |
 | DEC 照会不能 / Fortis quorum 喪失 | 保持 (Lease は維持しつつ進行停止)。上限時間超過で QUARANTINED |
 | `cancel_requested=1` | ABORTED: 取消可能な外部操作を取消 (取消も Journal 経由) |
 
@@ -625,7 +625,7 @@ MVP は 1→2→3→(4,5,6)→8→9→11 (DEC 未確定なら 7 はモック)。
 1. **A が停止している間の A の Run の扱い**: Run は developer 系統の DB が持つため、B が引き継げない。引き継ぎを許すなら Run 記録の共有/複製が要り、#7 の共通基盤故障防止と衝突する。MVP は「引き継がない (A 復帰まで凍結)」を提案。
 2. **merge と Release の境界**: merge が DEC の昇格起点となる場合、merge 時点で「Release 可能か」を確認すべきか (7.2 の 3)。DEC 側のトリガ仕様 (#8/#9) に依存。
 3. **Lease を MariaDB から Fortis へ移す際の切替**: 同一 Run で実装 1→2 の移行を安全に行う手順 (ドレイン後に generation を引き継ぐ等) は #12 Phase 3 と合わせて詰める。
-4. **Run Lease を Fortis に置く価値**: MariaDB 単一障害ドメインでの Fencing で足りる場合、Run Lease は MariaDB のまま据え置くという選択もある (Fortis は DEC の Release/Leader に限定)。#12 の Phase 3 を実施するか再評価が必要。
+4. **Run Lease を Fortis に置く価値**: MVP は MariaDB の LeaseStore (確定)。MariaDB 単一障害ドメインでの Fencing で足りる場合は MariaDB のまま据え置き (Fortis は DEC の Release/Leader に限定)。Fortis 実装への差替えは #12 Phase 3 で任意とし、実施の要否はその時点で再評価する。
 5. **Execution (AGENT) の「自動再実行」可否**: 副作用が重く、既定は自動再実行なしとしたが、コスト/可用性のバランスは運用で調整が必要。
 6. **孤児リソースの回収方針**: 検出は自動、削除は人手承認とした。TTL 付き自動回収を許すかは Policy (#1) 次第。
 7. **Kivra の MariaDB 論理バックアップ復元時の外部整合**: 6.4 の 5 は検出のみ。自動修復は対象外。

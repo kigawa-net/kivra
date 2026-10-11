@@ -10,6 +10,7 @@ application {
 
 dependencies {
     implementation(project(":kivra-core"))
+    implementation(project(":kivra-fusha-task"))
 
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)

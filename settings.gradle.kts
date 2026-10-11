@@ -14,6 +14,7 @@ dependencyResolutionManagement {
 rootProject.name = "kivra"
 
 include(
+    "kivra-fusha-task",
     "kivra-core",
     "kivra-app",
 )

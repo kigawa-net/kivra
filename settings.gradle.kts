@@ -15,5 +15,6 @@ rootProject.name = "kivra"
 
 include(
     "kivra-core",
+    "kivra-github",
     "kivra-app",
 )

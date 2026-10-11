@@ -9,6 +9,7 @@
 | モジュール | 内容 |
 |---|---|
 | `kivra-core` | ドメイン型、状態機械（DevelopmentRun / Agent / ExecutionSession / OperationStatus）、Port インターフェース（ExecutionPort / TaskProvider / MemoryPort / SchedulePort、定義のみ）、`LeaseStore` |
+| `kivra-github` | GitHub Adapter（#34）。`GitHubPort` + Ktor HTTP 実装。ブランチ・PR・Checks・レビュー取得まで。Merge / force push / main への push は Port に存在しない（人間のみ）。Tool Gateway（#32）とは未結線 |
 | `kivra-app` | Ktor アプリ、設定読込、`/health`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease のリポジトリ |
 
 DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列。V2 は未マージのため編集中、マージ後は V3 以降のみ追加）。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。
@@ -105,3 +106,22 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
   今回の契約（Run / Operation の状態機械、証拠規則、Proof 規則、PR_ONLY 完了規則、Outbox の claim token 規則）は Storage に依存しない要件として維持する。
 - **Outbox / Audit**: Run の状態遷移・監査イベント（ハッシュ連鎖）・Outbox イベントを同一トランザクションで書く。
 - テストは既定で H2（MODE=MySQL）、`KIVRA_TEST_DB=mariadb` で MariaDB 11 実機（上記）。CI は両方を実行する。
+
+## GitHub Adapter（`kivra-github`、Issue #34）
+
+- **決定的ブランチ名** `kivra/run-<runId>`。PR 本文に `kivra-run:<runId>` と `kivra-head-sha:<sha>` を埋め込み、head ブランチで open/closed PR を検索して照合する（`ensurePullRequest`）。マーカーの無い PR が同じ head にあれば `FOREIGN_OBJECT` で隔離（採用しない）。
+- **POST は自動再送しない**: タイムアウト・I/O エラー・5xx は `GitHubResult.Unknown`。`ensure*` は直後に名前で照合し、見つかれば採用、見つからなければ `Unknown` のまま返す。GET のみ 5xx / I/O で最大 3 回リトライ、401 はトークンを破棄して 1 回だけ再試行。
+- **失敗分類**: AUTH / PERMISSION / RATE_LIMITED（`retryAfterSeconds`）/ NOT_FOUND / CONFLICT / VALIDATION / SERVER_ERROR / NETWORK / IDENTITY_MISMATCH / FOREIGN_OBJECT / PROTOCOL。
+- **対象同一性検証**: レスポンスの owner/repo・PR 番号・head ブランチ・SHA（Check Run の `head_sha`、Status の `sha`）が要求と一致しなければ `IDENTITY_MISMATCH`（PR #47 レビューの教訓）。
+- **認証**: `TokenProvider` 差し込み口。`InstallationTokenProvider`（キャッシュ + 期限前更新）、`JwtSigner`（`RsaJwtSigner` は PKCS#8 PEM。鍵は設定の参照先から読み、リポジトリにコミットしない）。
+- Merge は M3 では人間。Port のテストが merge/force/push/delete/update 系メソッドの不在を固定する。
+
+### 要確認（外部仕様・未検証。実 GitHub には接続していない）
+
+- 対象リポジトリの Ruleset / Required Checks の実態。`CheckRunsSummary.allPassed` は「全 Run 完了かつ失敗なし、かつ空でない」だけで、Required Checks 名との突合は呼び出し側（Policy）の責務。
+- Reviewer Agent（App / Bot）の承認が必須レビューに数えられるか。`getReviews` は生の state と `commitId` を返すだけで、承認の有効性判定はしない（古い SHA の APPROVED を流用しないこと、#49）。
+- Kivra 用 GitHub App の発行方法と最終的なトークン方式（#1 §10 M3）。GitHub の秘密鍵は PKCS#1 で配布されるため PKCS#8 への変換が必要。
+- 同一 head/base の open PR 重複が GitHub 側で拒否される（422 "already exists"）前提。メッセージ文言に依存した CONFLICT 判定は実機確認が必要。
+- `GET /git/ref/heads/...` の 404 はリポジトリ欠如と区別できないため、404 時に `GET /repos/{o}/{r}` で確認している。
+- Check Run / Status の件数上限・ページング挙動（最大 10 ページで打ち切り、超過時は `complete=false`）。
+- Tool Gateway / Operation Journal への結線は #32・#25 側（本モジュールは DB・状態機械に依存しない）。

@@ -2,15 +2,15 @@
 
 自己開発型 kigawa 補助 AI。設計の正本は GitHub Issue（設計 #9〜#12、および #60 / #61 / #64）。本リポジトリに `docs/design/` は無い（設計文書は別 PR / Issue で管理）。
 
-現在は M0（Core 骨格と DB スキーマ）まで。Adapter / Orchestrator / Policy 等は後続マイルストーン。
+現在は M0（Core 骨格と DB スキーマ）、M1 の ExecutionPort（#29）、M2 の Agent Manager 最小実装（#30）まで。Adapter / Orchestrator / Policy 等は後続マイルストーン。
 
 ## 構成
 
 | モジュール | 内容 |
 |---|---|
-| `kivra-core` | ドメイン型、状態機械（DevelopmentRun / Agent / ExecutionSession / OperationStatus）、Port インターフェース（ExecutionPort / TaskProvider / MemoryPort / SchedulePort、定義のみ）、`LeaseStore` |
-| `kivra-exkes` | `ExecutionPort`（具体型）、`ExkesAdapter`（Ktor クライアント、Bearer は `TokenProvider`）、`FakeExecutionPort`、共通契約テスト。DB・Run 状態機械には依存しない（#29）。exkes 側の不足機能は [docs/exkes-requests.md](docs/exkes-requests.md) |
-| `kivra-app` | Ktor アプリ、設定読込、`/health`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease のリポジトリ |
+| `kivra-core` | ドメイン型、状態機械（DevelopmentRun / Agent / ExecutionSession / OperationStatus）、Port インターフェース（TaskProvider / MemoryPort / SchedulePort、定義のみ）、`LeaseStore` |
+| `kivra-exkes` | `ExecutionPort`（唯一の定義。core のプレースホルダは #30 で削除）、`ExkesAdapter`（Ktor クライアント、Bearer は `TokenProvider`）、`FakeExecutionPort`、共通契約テスト。DB・Run 状態機械には依存しない（#29）。exkes 側の不足機能は [docs/exkes-requests.md](docs/exkes-requests.md) |
+| `kivra-app` | Ktor アプリ、設定読込、`/health`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease / Agent のリポジトリ、`net.kigawa.kivra.agent.AgentManager`（M2: 1 Run に 1 Agent / 1 Workspace、Lease 保持下で ExecutionPort 経由に Workspace→Runtime→Execution を起動し、各副作用を Operation Journal に記録。UNKNOWN は照合のみで再送しない。Hold・Lease 喪失で停止、Cancel は回収後に CANCELLED。#30） |
 
 DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列。V2 は未マージのため編集中、マージ後は V3 以降のみ追加）。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。
 

@@ -14,9 +14,8 @@ fun interface TokenProvider {
 }
 
 /**
- * Port to exkes (Workspace / Runtime / Execution). Concrete counterpart of the placeholder interface
- * in kivra-core Ports.kt (that one has no UNKNOWN / Unsupported channel and takes IdempotencyKeys that
- * exkes cannot honour); aligning core is left to #30 once this contract is agreed.
+ * Port to exkes (Workspace / Runtime / Execution). The single ExecutionPort of Kivra: the earlier placeholder
+ * in kivra-core (no UNKNOWN / Unsupported channel, IdempotencyKeys exkes cannot honour) was removed in #30.
  *
  * Contract shared by [FakeExecutionPort] and [ExkesAdapter] (see ExecutionPortContractTest):
  *  - create* are "look up, then create": they never create a second resource for the same stable

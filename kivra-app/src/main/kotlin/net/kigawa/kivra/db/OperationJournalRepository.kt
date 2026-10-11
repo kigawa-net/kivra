@@ -107,18 +107,22 @@ class OperationJournalRepository(
     private val trustedIssuers: Set<String> = TrustedEvidenceIssuers.DEFAULT,
 ) {
 
-    fun prepare(lease: Lease, op: PrepareOperation): JournalEntry {
+    /**
+     * [allowCancelRequested] is for the wind-down of a cancelled run only (stop / delete of what the run created):
+     * a pending Cancel then no longer rejects journal writes, while Hold and lease loss still do.
+     */
+    fun prepare(lease: Lease, op: PrepareOperation, allowCancelRequested: Boolean = false): JournalEntry {
         try {
-            return transaction(database) { prepareInTx(lease, op) }
+            return transaction(database) { prepareInTx(lease, op, allowCancelRequested) }
         } catch (e: ExposedSQLException) {
             if (!e.isUniqueViolation()) throw e
             // Lost an insert race for the same key (cannot happen under one valid lease, but stay safe): adopt the winner.
-            return transaction(database) { prepareInTx(lease, op) }
+            return transaction(database) { prepareInTx(lease, op, allowCancelRequested) }
         }
     }
 
-    private fun Transaction.prepareInTx(lease: Lease, op: PrepareOperation): JournalEntry {
-        requireLease(lease)
+    private fun Transaction.prepareInTx(lease: Lease, op: PrepareOperation, allowCancelRequested: Boolean): JournalEntry {
+        requireLease(lease, allowCancelRequested)
         val existing = ExternalOperationsTable.selectAll().where {
             (ExternalOperationsTable.runId eq lease.runId.value) and
                 (ExternalOperationsTable.opType eq op.opType) and
@@ -172,7 +176,8 @@ class OperationJournalRepository(
         errorClass: String? = null,
         error: String? = null,
         nextActionAt: LocalDateTime? = null,
-    ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Plain, externalRef, errorClass, error, nextActionAt)
+        allowCancelRequested: Boolean = false,
+    ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Plain, externalRef, errorClass, error, nextActionAt, allowCancelRequested)
 
     /**
      * Leaves UNKNOWN / RECONCILIATION_REQUIRED on the strength of an observation of the real external state.
@@ -190,7 +195,8 @@ class OperationJournalRepository(
         evidence: ReconciliationEvidence,
         externalRef: String? = null,
         nextActionAt: LocalDateTime? = null,
-    ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Evidence(evidence), externalRef, null, null, nextActionAt)
+        allowCancelRequested: Boolean = false,
+    ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Evidence(evidence), externalRef, null, null, nextActionAt, allowCancelRequested)
 
     /**
      * IN_FLIGHT -> RETRYABLE, only with a [NotSentProof] from a trusted issuer that the call never left the process.
@@ -232,8 +238,9 @@ class OperationJournalRepository(
         errorClass: String?,
         error: String?,
         nextActionAt: LocalDateTime?,
+        allowCancelRequested: Boolean = false,
     ): JournalEntry = transaction(database) {
-        requireLease(lease)
+        requireLease(lease, allowCancelRequested)
         val row = ExternalOperationsTable.selectAll().where {
             (ExternalOperationsTable.opId eq opId) and (ExternalOperationsTable.runId eq lease.runId.value)
         }.firstOrNull() ?: throw NoSuchElementException("operation $opId not found in run ${lease.runId}")
@@ -356,6 +363,12 @@ class OperationJournalRepository(
 
     fun get(opId: String): JournalEntry? = transaction(database) {
         ExternalOperationsTable.selectAll().where { ExternalOperationsTable.opId eq opId }.firstOrNull()?.toEntry()
+    }
+
+    /** All operations of a run, in ULID order. Read-only, needs no lease. */
+    fun listByRun(runId: RunId): List<JournalEntry> = transaction(database) {
+        ExternalOperationsTable.selectAll().where { ExternalOperationsTable.runId eq runId.value }
+            .orderBy(ExternalOperationsTable.opId).map { it.toEntry() }
     }
 
     fun findByKey(runId: RunId, opType: String, idempotencyKey: String): JournalEntry? = transaction(database) {

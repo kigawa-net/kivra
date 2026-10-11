@@ -24,7 +24,7 @@ Issue #12 / #8 / #10 / #11 の記述を突き合わせた結果を下表に示�
 | Production Release Lock・generation | Fortis | Lock API |
 | A/B 更新対象ごとの Fencing Token | Fortis | リソース単位で単調増加 |
 | Release State(phase / target / artifactDigest / epoch / policyDecisionRef) | Fortis | 条件付き更新。#8 確定 |
-| DevelopmentRun 実行 Lease | **要確認**(§13-1) | #11 は MariaDB、#12 Phase 3 は Fortis |
+| DevelopmentRun 実行 Lease | **MVP は MariaDB の LeaseStore**(#10/#11)。Fortis 実装への差替えは Phase 3 で任意(§13-1) | #11 の LeaseStore 抽象で両対応 |
 | A/B ヘルスの観測結果 | 監視系 | Fortis は稼働世代・参照のみ保持 |
 | 高リスク変更の承認 | 承認系(DEC 外) | Fortis は検証 ID の参照のみ |
 | DevelopmentRun 詳細・Operation Journal・Outbox・監査 | MariaDB | #11。Release の正本にはしない |
@@ -117,7 +117,7 @@ flowchart LR
 | `/kivra/v1/locks/release/prod` | Production Release のグローバル Lock | Leader DEC |
 | `/kivra/v1/locks/target/{A\|B}` | A/B 更新対象ごとの Lock と Fencing Counter | Leader DEC |
 | `/kivra/v1/releases/{releaseId}` | Release State(後述) | Leader DEC(CAS) |
-| `/kivra/v1/runs/{runId}/lease` | DevelopmentRun 実行 Lease(Phase 3。§13-1 要確認) | Kivra Worker |
+| `/kivra/v1/runs/{runId}/lease` | DevelopmentRun 実行 Lease(Phase 3 で任意の差替え。MVP は MariaDB の LeaseStore。§13-1) | Kivra Worker |
 | `/kivra/v1/refs/health/{A\|B}` | 稼働世代・ヘルス観測への参照(値は監視系が正本) | Health Monitor |
 | `/kivra/v1/refs/approval/{id}` | 高リスク変更の承認検証 ID | 承認系の ID を DEC が記録 |
 
@@ -290,7 +290,7 @@ sequenceDiagram
 - 各ステップは `releaseId + step` から決定的に作る `requestId` を使い、再実行しても二重適用しない。
 - Journal が書けないまま Fortis だけ更新された場合(DEC が間に落ちた): 新 Leader の復元フェーズで「Fortis 上に未完了 Release があるが Journal に記録がない」を検出し、Journal を補完(`RECONCILIATION_REQUIRED`)してから続行する。
 - Outbox は MariaDB トランザクション内で書き、NATS へは at-least-once で配信、消費側で重複排除する(#11)。NATS のイベントは「通知」であり、受信側が権威的な状態を必要とするなら Fortis を LINEARIZABLE 読みで照合する(#12)。
-- Operation Journal の状態名は #11 に準拠(`PREPARED / IN_FLIGHT / UNKNOWN / CONFIRMED / RETRYABLE / FAILED / RECONCILIATION_REQUIRED`)。DEC の Journal と Run の Journal を同一テーブルにするかは **要確認**(#8 の「DEC は DB を持たない」と衝突するため、DEC は Journal 書込みを専用の Recorder サービス経由にする案を §13-2 に挙げる)。
+- Operation Journal の状態名は #11 に準拠(`PREPARED / IN_FLIGHT / UNKNOWN / CONFIRMED / RETRYABLE / FAILED / RECONCILIATION_REQUIRED`)。DEC の Journal と Run の Journal を同一テーブルにするかは **要確認**(#8 の「DEC は DB を持たない」と衝突するため、DEC は Journal 等の MariaDB 書込みを Recorder サービス経由、または専用 Audit Sink 経由とし、DEC 自身はローカル DB を持たない。#8/#11 と整合)。
 
 ### 7.2 再照合マトリクス
 
@@ -424,9 +424,9 @@ Issue の Phase 1〜5 を踏襲し、「Phase 0」を追加する。
 
 ### 13.1 Issue 間の矛盾(要確認)
 
-1. **DevelopmentRun の Lease の正本**: #11 は「Run 単位の Lease・世代番号・CAS で古い Worker のローカル更新を拒否」を **MariaDB の CAS** として設計している(「DevelopmentRun と Operation Journal の Source of Truth は MariaDB」)。#12 は「DevelopmentRun 実行 Lease・owner/generation」を **Fortis が保持**し Phase 3 で移行するとある。**本書の提案:** Run の状態遷移・履歴の正本は MariaDB のままとし、Phase 3 では「Run の実行所有権(Lease)のみ」を Fortis に移すか、あるいは Fortis には移さず MariaDB CAS を維持するかを #11 とあわせて決める。Run Lease の消失が起こす被害(重複実行)は本番障害(Release の二重適用)より軽く、Phase 3 は**任意(オプション)**とする案を推奨。
-2. **Release State の正本と DEC のステートレス性**: #10 は「RELEASING 内部の進行は DEC が正本で管理」、#8 確定は「Release 状態の正本は Fortis、DEC はステートレス」。#8 確定が新しいため Fortis を正本とし、#10 の「DEC が正本」は「DEC の責務として Fortis に正本を保持させる」の意味と解釈する。#10 の文言修正が必要。
-3. **Journal の置き場所**: #11 は Operation Journal を MariaDB(Kivra 側)に置く。#8 は DEC に「ローカル DB を持たない」と要求する。DEC の Journal 書込みを MariaDB に直接行うことが「ローカル DB」に当たるかの解釈が必要(§7.1 の Recorder 案を推奨)。
+1. **DevelopmentRun の Lease の正本(確定)**: Run の状態遷移・履歴・実行 Lease の MVP 実装は MariaDB の LeaseStore(#10/#11)。Fortis 実装への差替えは Phase 3 で**任意(オプション)**とする。Run Lease の消失が起こす被害(重複実行)は本番障害(Release の二重適用)より軽いため、Phase 3 を実施するかは Fortis 採用判定後に再評価する。
+2. **Release State の正本と DEC のステートレス性(確定)**: Release 状態の正本は Fortis、責務主体は DEC(DEC の RAM はキャッシュ、ステートレス)。#10/#9/#7/#11 の文言は本方針に修正済み。
+3. **Journal の置き場所(確定)**: DEC はローカル DB を持たない。DEC の Journal 等の MariaDB 書込みは Recorder サービス経由、または専用 Audit Sink 経由とする(§7.1。#8/#11 と整合)。Recorder と Audit Sink のどちらを採るかは実装 Issue で決める。
 4. **#12 本文の旧記述**: 配置案の「DEC は複数 Replica + Leader Election」は DEC 内選出を示唆するが、「設計変更(確定)」で Fortis の Election API を使う方式に上書きされている。本書は後者に従う。
 
 ### 13.2 未解決論点・要確認(一覧)

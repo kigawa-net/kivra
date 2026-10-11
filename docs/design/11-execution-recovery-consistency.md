@@ -510,8 +510,8 @@ DEC は現時点でローカルにコードが存在せず (`/home/kigawa/dev/ki
 
 | # | 不変条件 | 保証する仕組み | 本書での検証結果 |
 | --- | --- | --- | --- |
-| I1 | 同時に有効な本番 Release は高々 1 つ | DEC/Fortis の Release Lease + 外部 Fencing (#8/#12) | Kivra は Release Lease を持たず要求のみ → Kivra 側の欠陥で破れない。強制点は DEC 側 (T-DEC-1) |
-| I2 | 旧 Worker/旧 DEC の要求は適用されない | DEC: Executor が epoch/Release ID を検証 (#12)。Kivra: Run generation で `fencedUpdate` 拒否 | 層ごとに独立。Kivra の Fencing は DEC の epoch を代替しない (3.6) |
+| I1 | 同時に有効な本番 Release は高々 1 つ | DEC/Fortis の Release Lease (Session Lock + 永続 Release Reservation。#8 §5.5 / #12 §6.3) + 外部 Fencing (#8/#12) | Kivra は Release Lease を持たず要求のみ → Kivra 側の欠陥で破れない。強制点は DEC 側 (T-DEC-1) |
+| I2 | 旧 Worker/旧 DEC の要求は適用されない | DEC: Executor が世代/Release ID を永続 maxSeen で検証し、実行先は Executor の単一 writer のみ (#8 §5.3 / #12 §5.3)。Kivra: Run generation で `fencedUpdate` 拒否 | 層ごとに独立。Kivra の Fencing は DEC の epoch を代替しない (3.6) |
 | I3 | 自己昇格不可 | Kivra: `developerInstance != targetInstance` 検査 / DEC: 独立検査 (#7) | 二重化済み。DEC 側未実装のため要確認 |
 | I4 | `requestRelease` の再送で二重 Release にならない | `releaseId` 決定的 + DEC 側の冪等契約 | **DEC 契約が前提 (未確認)**。不成立なら Kivra は再送せず `getRelease` 照合のみとする |
 | I5 | 状態不明では進めない | fail-closed (4.6, 7.2) | 設計済み |

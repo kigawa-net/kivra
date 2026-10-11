@@ -139,15 +139,17 @@ renew(lease):
   n = exec("UPDATE development_runs
               SET lease_expires_at = NOW(6) + INTERVAL :ttl SECOND, version = version + 1
             WHERE run_id = :runId AND lease_owner = :me AND lease_generation = :gen
-              AND lease_expires_at >= NOW(6)")          -- 期限切れ後の復活 renew は禁止
+              AND lease_expires_at > NOW(6)             -- 期限切れ後の復活 renew は禁止 (#10 §5.2 と同一契約)
+              AND state NOT IN (terminal states)")
   if n == 0: lease.markLost(); abortLocalWork()          -- 以降このLeaseで書かない
   else lease.localMonotonicDeadline = t_before_request + ttl - margin
 
 fencedUpdate(lease, expectedVersion, changes):           -- Run 状態更新はすべてこの形
   n = exec("UPDATE development_runs SET <changes>, version = version + 1
             WHERE run_id = :runId AND lease_generation = :gen AND lease_owner = :me
+              AND lease_expires_at > NOW(6)             -- 期限切れ・次所有者未取得の旧 Worker も拒否 (#10 §5.2)
               AND version = :expectedVersion")
-  if n == 0: reload(); if generation/owner が変わった: lease.markLost() else: VersionConflict (再読込して再判断)
+  if n == 0: reload(); if generation/owner が変わった、または期限切れ: lease.markLost() else: VersionConflict (再読込して再判断)
 
 release(lease):  -- 正常終了時。generation は変えない
   UPDATE development_runs SET lease_owner = NULL, lease_expires_at = NULL, version = version + 1
@@ -170,7 +172,15 @@ interface LeaseStore {
 
 - 実装 1 (MVP): MariaDB (上記)。
 - 実装 2 (任意。#12 Phase 3 で Fortis 受入試験後): Fortis の Lease/CAS API。Fortis 側の API・TTL 機能は現時点で存在しないため、契約は #12 側で確定する (要確認)。
-- **どちらの実装でも、Run 行に `lease_generation` を書き戻し、`fencedUpdate` は「受け取った token ≥ DB に記録済みの token」かつ「owner 一致」で受理する。** こうすれば Lease の発行元が変わってもローカル DB の拒否ロジックは不変。Fortis の MVCC version は「グループローカルでグローバル順序は仮定しない」(`fortis/docs/architecture.md`) ので、token は同一 Lease キー内で単調であることだけを要求する。
+- **MariaDB 実装 (MVP)**: `fencedUpdate` は 3.3 のとおり `lease_generation` 一致 + `lease_owner` 一致 + `lease_expires_at > NOW(6)` で受理する。generation は MariaDB が採番する。
+- **Fortis 実装へ差し替える場合**: 「受け取った token ≥ DB に記録済みの token」という単純な数値比較は**採用しない**。バックアップ復元後の token 巻戻りや別 incarnation の値を識別できないため (#12 INC-1〜5)。採用する場合は次の受入条件をすべて満たすこと。
+  1. **権威的発行**: 新世代の token が権威的な Fortis から発行されたこと (clusterId と `incarnation` が Incarnation Authority / Recovery Manifest 連鎖の現在値と一致、#12 INC-2/INC-4)。未承認の大きい `incarnation` や `maxSeen` を押し上げるだけの値は拒否する。
+  2. **incarnation を含む比較**: 比較は `(incarnation, electionEpoch, fencingToken)` で行い、`incarnation` が承認済みの現在値と**等しい**場合のみ、同一 incarnation 内で `(electionEpoch, fencingToken)` を辞書順比較する。小さい `incarnation` は常に拒否 (INC-4)。DB 行には incarnation も保存する (列追加が必要)。
+  3. **移行切替点での旧 Owner 排除**: 切替時に全 Run の MariaDB Lease を失効 (`lease_owner = NULL`) し、旧実装の Worker を停止/隔離してから Fortis 実装で再取得させる。切替点の token 空間 (実装種別 + incarnation) を DB に記録し、旧空間の token は以後すべて拒否する。
+  4. **DB 側更新の原子性**: Fortis token の DB 行への反映と、Run 状態更新は 1 文の CAS (または同一トランザクション) で行う。反映前の Worker は Run を書き込めない。
+  5. **単一所有権**: 移行後は MariaDB 側の期限 (`lease_expires_at`) を所有権の独立した権威にしない (二重権威の禁止)。所有権の権威は Fortis の Lease のみで、DB 行は Fortis token の反映先とする。期限条件は「DB 行の token が Fortis の最新 token と一致」に置換する (#10 §5.4 と同一ルール)。
+  6. Fortis のバックアップ復元・maxSeen 喪失時は #12 INC-3/INC-5 に従い fail-closed とし、全 Run を Recovery 経由で再取得する。
+- Fortis の MVCC version は「グループローカルでグローバル順序は仮定しない」(`fortis/docs/architecture.md`) ので、token の同一 Lease キー内の単調性だけに依存せず、上記 1〜2 の incarnation 検証を必須とする。初期 MVP は MariaDB のままとする。
 
 ### 3.5 障害ケース
 
@@ -278,7 +288,7 @@ execute(op):
 | GitHub ブランチ push | `kivra/<runId 短縮>/<logical_key>` | ref 更新は期待 SHA 付き (force-with-lease 相当) | ref の現在 SHA を取得し、期待 SHA と比較 | SHA 不一致なら隔離 |
 | GitHub PR 作成 | head ブランチ名が一意キー | 同一 head/base のオープン PR は GitHub 側で重複不可の想定 (要確認) | `head=<branch>` でオープン/クローズ PR を検索。PR 本文に `kivra-op:<op_id>` を入れ照合 | 同一 head に自分のマーカーでない PR があれば隔離 |
 | GitHub merge | `prRef` + `expectedHeadSha` | `sha` 指定付き merge は head 不一致で拒否される想定 (要確認)。merged 済み PR への再 merge は無害 | PR の `merged` と `merge_commit_sha`、base ブランチ履歴で確認 | merged かつ head SHA が期待と異なる → RECONCILIATION_REQUIRED (**自動で巻き戻さない**) |
-| DEC `requestRelease` | `releaseId = rel-<runId 短縮>-<digest 先頭12>` (targetInstance・artifact digest・Run から決定的) | **DEC は未実装/未確認。DEC に「releaseId を冪等キーとし、同一キーで内容が違えば拒否」を契約として要求する (要確認)** | `getRelease(releaseId)`。DEC が正本 | DEC が照会不能なら Run を保留 (fail-closed) |
+| DEC `requestRelease` | `releaseId = rel-<runId 短縮>-<digest 先頭12>` (targetInstance・artifact digest・Run から決定的) | **DEC は未実装/未確認。DEC に「releaseId を冪等キーとし、同一キーで内容が違えば拒否」を契約として要求する (要確認)** | `getRelease(releaseId)`。**Release State の正本は Fortis**。DEC API は参照窓口で、DEC 内の DB/RAM は正本ではない | DEC が照会不能なら Run を保留 (fail-closed) |
 | DEC `requestRollback` | `rollbackId = <releaseId>:rb` | 同上 (DEC 契約) | `getRelease` の phase | 自動 Rollback 判断は DEC が主。Kivra の要求は補助 |
 | fusha-task 更新 `PATCH /tasks/:id` | taskId (「期待値」を保存) | 確認済: PATCH は read-modify-write で**楽観ロックも冪等キーも無い** (`MariaDbTaskRepository.update`)。同値の再適用は無害だが、並行更新は後勝ちで上書き (Lost Update) | 取得して期待値と比較。同値なら CONFIRMED | 他者が変更した形跡があれば上書きせず保留 |
 | fusha-task コメント `POST /tasks/:id/comments` | 本文に `kivra-op:<op_id>` を埋め込む | 冪等ではない | コメント一覧からマーカー検索してから投稿 | 検索〜投稿間のレースで重複はあり得る (閲覧上の重複のみ。許容) |

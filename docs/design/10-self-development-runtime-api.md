@@ -318,17 +318,27 @@ UPDATE development_runs
    AND (lease_owner IS NULL OR lease_expires_at < NOW(6));
 -- affected rows = 1 なら成功。SELECT generation で新世代を取得。
 
--- 更新(heartbeat)
+-- 更新(heartbeat)。期限内かつ非終端 state の場合のみ延長できる
 UPDATE development_runs
-   SET lease_expires_at = NOW(6) + INTERVAL :ttl SECOND
- WHERE run_id = :run AND lease_owner = :worker AND generation = :gen;
--- 0 行なら Lease 喪失: 直ちに全ての外部操作を中断し、Run から手を引く
+   SET lease_expires_at = NOW(6) + INTERVAL :ttl SECOND, version = version + 1
+ WHERE run_id = :run AND lease_owner = :worker AND generation = :gen
+   AND lease_expires_at > NOW(6)
+   AND state NOT IN ('COMPLETED','FAILED','CANCELLED','QUARANTINED');
+-- 0 行なら Lease 喪失: 直ちに全ての外部操作を中断し、Run から手を引く。
+-- 期限切れ後は、次所有者が未取得でも旧 Worker は renew で復活できない。
+-- 再獲得は新たな acquire(generation + 1)のみ。renew による再獲得・generation 据置の再開は禁止
 
--- 状態遷移(CAS)
+-- 状態遷移(CAS)。generation 一致だけでは「期限切れだが次所有者が未取得」の旧 Worker を防げないため、
+-- owner と期限(DB 時刻)も必須条件にする
 UPDATE development_runs
    SET state = :to, current_stage = :stage, version = version + 1, updated_at = NOW(6)
- WHERE run_id = :run AND generation = :gen AND version = :ver AND state = :from;
+ WHERE run_id = :run AND generation = :gen AND version = :ver AND state = :from
+   AND lease_owner = :worker AND lease_expires_at > NOW(6);
 ```
+
+- Run に対する他の全ての書き込み(Operation 記録・Checkpoint 追加・Outbox 追記、§5.1)も同じ `lease_owner = :worker AND generation = :gen AND lease_expires_at > NOW(6)` を WHERE に含める(同一トランザクション内で行を `SELECT ... FOR UPDATE` するか、Run 行への条件付き UPDATE を先頭に置いて 0 行なら全体を rollback する)。
+- 取得 CAS(`lease_expires_at < NOW(6)`)と renew(`> NOW(6)`)は排他的な条件で、`lease_expires_at = NOW(6)` ちょうどの境界では両方とも不成立となる(安全側。次の acquire は期限を過ぎてから成立する)。
+- #11 の Lease 疑似コード(`renew` / `fencedUpdate`)は本節と同一の契約とする。差異が生じた場合は本節の「期限内かつ owner 一致」を必須とする側に揃える。
 
 - 期限判定は **DB サーバ時刻(`NOW(6)`)**のみ使う。Worker のローカル時計は使わない(clock skew 対策)。
 - Worker は自身の Lease 残り時間が `ttl/3` を下回ったら外部副作用を新規に開始しない(Lease 失効後に旧 Worker が副作用を出す窓を縮める)。
@@ -343,7 +353,15 @@ DB の generation は**ローカル更新**しか守らない。Lease 失効後�
 
 ### 5.4 Fortis への将来移行
 
-`LeaseStore` インターフェースを置く(`acquire(runId, owner) -> Lease(gen)`, `renew`, `release`, `validate(gen)`)。MVP は MariaDB 実装。#12 の Phase 3 で Fortis 実装(linearizable read + CAS)に差し替える。その場合でも `development_runs.generation` は Fortis 発行値をローカルにコピーして更新条件に使う(DB 側で単調増加を検証し、巻き戻りは拒否)。Fortis は本番採用不可(#12)なので、移行は #12 の採用ゲートを通過するまで行わない。
+`LeaseStore` インターフェースを置く(`acquire(runId, owner) -> Lease(gen)`, `renew`, `release`, `validate(gen)`)。MVP は MariaDB 実装。#12 の Phase 3 で Fortis 実装(linearizable read + CAS)に差し替える。Fortis は本番採用不可(#12)なので、移行は #12 の採用ゲートを通過するまで行わない。
+
+**単一所有権ルール(移行後)**: MariaDB の `lease_expires_at`/`lease_owner` と Fortis の Lease を**両方とも所有権の権威にしない**(二重の権威は split-brain の原因になる)。移行後の権威は次のとおり一つに定める。
+
+1. **所有権の権威は Fortis の Lease(Token)のみ**。所有者の決定・期限・renew の可否は Fortis が判定する。`development_runs` の `lease_owner`/`generation`/`lease_expires_at` は Fortis Token の**反映先(ミラー)であり、所有権を独自に付与・延長しない**。移行後、MariaDB 側の acquire/renew SQL(§5.2)は使用禁止とする(コード上で LeaseStore 実装を排他的に選択する)。
+2. **反映の CAS**: Worker は Fortis から Token `(incarnation, electionEpoch, fencingToken)` と owner を得たら、`development_runs` へ「Token が authoritative と検証済みで、かつ DB に記録済みの Token より厳密に新しい」場合のみ 1 文の CAS で反映する。Token の比較は #12 INC-4 に従い、**`incarnation` が Recovery Manifest 連鎖で承認済みの現在値と等しい**場合に限り、同一 incarnation 内で `(electionEpoch, fencingToken)` の辞書順比較を行う。数値の大小だけで受理しない(未承認の大きい値・バックアップ復元後の巻戻りを排除するため。#12 INC-1〜5)。
+3. **期限条件の置換**: 移行後の Run 書き込みの WHERE は `lease_expires_at > NOW(6)` の代わりに「DB 行に反映済みの Token が Fortis の最新 Token と一致」を要求する。Fortis が期限切れ/喪失を返した Worker は書き込めない。反映前(Fortis 取得〜DB 反映の間)の Worker は Run を書き込まず、反映に失敗したら Lease 喪失とみなす。
+4. **移行切替点**: 切替時は全 Run の MariaDB Lease を一括で失効(`lease_owner = NULL`)し、Worker 停止・Recovery 経由で Fortis から再取得する。切替の前後で旧 Owner の書き込みが通らないよう、切替時に generation(MariaDB 由来)より新しい Token 空間へ移ったことを DB 行に記録する(詳細な受入条件は #11 §3.4)。
+5. #11 の LeaseStore 契約および fortis#29/#31、#12 の incarnation(INC-1〜5)と矛盾する場合は、Fortis 側の取り決めを優先して本節を改訂する。
 
 ## 6. Adapter 契約
 

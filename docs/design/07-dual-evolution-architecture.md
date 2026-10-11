@@ -280,7 +280,7 @@ WAITING_APPROVAL は Issue #8 の列挙に無く、#10 の Run 状態にある�
 | Lease | 範囲 | 保持者 | 目的 |
 |---|---|---|---|
 | DEC Leader Lease | DEC 全体 | DEC Replica 1つ | 判断主体を単一化 |
-| Production Release Lease | グローバル (A/B 共通) | 実行中 Release | A/B 同時更新禁止 (INV-3) |
+| Production Release Lease | グローバル (A/B 共通)。**Session Lock (調整権限。Leader 交代で失効) と永続 Release Reservation (同時 Release 不可・対象・進捗。Session に紐づかない) の 2 層**で構成 (#8 §5.5 / #12 §6.3) | 実行中 Release | A/B 同時更新禁止 (INV-3) |
 | Run Lease | DevelopmentRun 単位 | Orchestrator Worker | 開発作業の重複防止 |
 
 各 Lease は `holder, epoch(単調増加), expiresAt, version` を持つ。DEC Leader Lease / Production Release Lease の更新は **Fortis の linearizable read + CAS** のみ (get+put の非原子実装は禁止。#12 に従う)。Run Lease は MVP では **MariaDB の LeaseStore** (条件付き更新) で実装し、Fortis 実装への差し替えは #12 Phase 3 で任意 (#10/#11/#12 と整合)。
@@ -288,7 +288,7 @@ WAITING_APPROVAL は Issue #8 の列挙に無く、#10 の Run 状態にある�
 ### 7.2 Fencing
 
 1. DEC は Release 開始時に Fortis から epoch (fencing token) を得て、Release ID と対応させる。
-2. Deployment Executor は `(epoch, releaseId, target, digest)` を検証し、最新 epoch より古いものは拒否。Fortis 内部の fencing だけでは、K8s/GitOps に届いた旧要求は止まらない (Issue #8)。
+2. Deployment Executor は `((incarnation, epoch, token), releaseId, target, digest)` を、Executor 自身の**永続 maxSeen**で検証し、古い世代は拒否 (Fortis 非依存)。実行先への書込は Executor の単一 writer のみ。受理→実行→確定の順序・バリア・キャンセルは #8 §5.3 / #12 §5.3 の規範要件。バックアップ復元時の世代逆行は #12 §4.5 (Fortis 外の Incarnation Authority)。Fortis 内部の fencing だけでは、K8s/GitOps に届いた旧要求は止まらない (Issue #8)。
 3. 検証手段 (候補): GitOps コミットに署名付き Release メタデータ (epoch, releaseId) を含め、ArgoCD / Admission Webhook / Executor が現在の epoch と比較。具体方式は未確定 (U-4)。
 
 ### 7.3 分断・障害時の挙動

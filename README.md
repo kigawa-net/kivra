@@ -11,7 +11,7 @@
 | `kivra-core` | ドメイン型、状態機械（DevelopmentRun / Agent / ExecutionSession / OperationStatus）、Port インターフェース（ExecutionPort / TaskProvider / MemoryPort / SchedulePort、定義のみ）、`LeaseStore` |
 | `kivra-app` | Ktor アプリ、設定読込、`/health`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease のリポジトリ |
 
-DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列。V2 は未マージのため編集中、マージ後は V3 以降のみ追加）。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。
+DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列、V3 approvals。V2 は未マージのため編集中、マージ後は V4 以降のみ追加）。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。
 
 ## ビルド・テスト
 
@@ -105,3 +105,14 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
   今回の契約（Run / Operation の状態機械、証拠規則、Proof 規則、PR_ONLY 完了規則、Outbox の claim token 規則）は Storage に依存しない要件として維持する。
 - **Outbox / Audit**: Run の状態遷移・監査イベント（ハッシュ連鎖）・Outbox イベントを同一トランザクションで書く。
 - テストは既定で H2（MODE=MySQL）、`KIVRA_TEST_DB=mariadb` で MariaDB 11 実機（上記）。CI は両方を実行する。
+
+## Approval Gate / Audit 永続層（M3, #33）
+
+- `ApprovalRepository`（`ApprovalConsumer` 実装）: 操作ダイジェストに束縛した承認の依頼・承認・却下・失効。期限は DB 時計、`consume` は
+  `status='APPROVED' AND digest=? AND expires_at>NOW(6)` の条件付き UPDATE 1 本で 1 回限り（同時実行でも勝者 1 件）。
+  承認者は `HumanApprover`（人間の subject のみ。Agent/Orchestrator の `Principal` からは作れない）で、申請 Agent と同一なら不可（four-eyes、DB の CHECK 制約でも担保）。
+- `DbAuditSink`（`AuditSink` 実装）: ハッシュ連鎖の `audit_events` へ run 行ロック下で追記し、コミット後に true。保存できなければ false なので Gateway は INTENT_ALLOWED で Deny する。
+  run に紐付かない記録（無効トークン等）は連鎖に載せられず false（拒否のみに影響）。
+- `OrphanIntentReaper`: INTENT_ALLOWED の後に終端記録（EXECUTED/FAILED/UNKNOWN/DENIED/ABANDONED）が無い孤立 INTENT を猶予後に閉じる。
+  承認が必要で未消費なら `ABANDONED`（副作用なし・承認は再利用可）、それ以外は `UNKNOWN`（照合必須、推測で再実行しない）。定期実行の配線は未実装。
+- 監査ログの更新・削除: アプリのコードに API は無い。DB ロール側で `audit_events` に INSERT/SELECT のみ付与する運用が必要（マイグレーションでは強制していない）。

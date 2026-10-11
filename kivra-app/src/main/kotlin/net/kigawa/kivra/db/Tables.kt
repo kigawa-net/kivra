@@ -1,0 +1,123 @@
+package net.kigawa.kivra.db
+
+import org.jetbrains.exposed.sql.Table
+import org.jetbrains.exposed.sql.javatime.datetime
+
+/** Exposed definitions mirroring db/migration/V1__core_schema.sql. The migration is the source of truth for DDL. */
+
+object TaskRunsTable : Table("task_runs") {
+    val runId = char("run_id", 26)
+    val taskId = varchar("task_id", 128)
+    val taskUpdatedAt = datetime("task_updated_at").nullable()
+    val state = varchar("state", 32)
+    val stateReason = varchar("state_reason", 64).nullable()
+    val attempt = integer("attempt").default(0)
+    val leaseOwner = varchar("lease_owner", 64).nullable()
+    val leaseGeneration = long("lease_generation").default(0)
+    val leaseExpiresAt = datetime("lease_expires_at").nullable()
+    val holdReason = varchar("hold_reason", 64).nullable()
+    val cancelRequested = bool("cancel_requested").default(false)
+    val nextRetryAt = datetime("next_retry_at").nullable()
+    val budgetJson = text("budget_json").nullable()
+    val traceId = varchar("trace_id", 64).nullable()
+    val version = long("version").default(0)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+
+    // active_flag is a generated column and is intentionally not mapped.
+    override val primaryKey = PrimaryKey(runId)
+}
+
+object AgentsTable : Table("agents") {
+    val agentId = char("agent_id", 26)
+    val runId = char("run_id", 26).references(TaskRunsTable.runId)
+    val role = varchar("role", 64)
+    val state = varchar("state", 32)
+    val version = long("version").default(0)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(agentId)
+}
+
+object ExecutionSessionsTable : Table("execution_sessions") {
+    val sessionId = char("session_id", 26)
+    val runId = char("run_id", 26).references(TaskRunsTable.runId)
+    val agentId = char("agent_id", 26).references(AgentsTable.agentId).nullable()
+    val state = varchar("state", 32)
+    val workspaceId = varchar("workspace_id", 128).nullable()
+    val runtimeId = varchar("runtime_id", 128).nullable()
+    val executionId = varchar("execution_id", 128).nullable()
+    val observedStatus = varchar("observed_status", 32).nullable()
+    val version = long("version").default(0)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(sessionId)
+}
+
+object OperationJournalTable : Table("operation_journal") {
+    val opId = char("op_id", 26)
+    val runId = char("run_id", 26).references(TaskRunsTable.runId)
+    val opType = varchar("op_type", 48)
+    val idempotencyKey = varchar("idempotency_key", 128)
+    val externalSystem = varchar("external_system", 16)
+    val stableRef = varchar("stable_ref", 255)
+    val externalRef = varchar("external_ref", 255).nullable()
+    val requestHash = char("request_hash", 64)
+    val status = varchar("status", 32)
+    val attempt = integer("attempt").default(0)
+    val maxAttempts = integer("max_attempts").default(3)
+    val leaseGeneration = long("lease_generation")
+    val nextActionAt = datetime("next_action_at").nullable()
+    val lastErrorClass = varchar("last_error_class", 32).nullable()
+    val lastError = text("last_error").nullable()
+    val reconcileAttempts = integer("reconcile_attempts").default(0)
+    val version = long("version").default(0)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(opId)
+}
+
+object OutboxEventsTable : Table("outbox_events") {
+    val eventId = char("event_id", 26)
+    val aggregateType = varchar("aggregate_type", 32)
+    val aggregateId = char("aggregate_id", 26)
+    val aggregateVersion = long("aggregate_version")
+    val eventType = varchar("event_type", 64)
+    val schemaVersion = integer("schema_version").default(1)
+    val payload = text("payload")
+    val traceId = varchar("trace_id", 64).nullable()
+    val status = varchar("status", 16).default("PENDING")
+    val publishAttempts = integer("publish_attempts").default(0)
+    val nextAttemptAt = datetime("next_attempt_at")
+    val createdAt = datetime("created_at")
+    val publishedAt = datetime("published_at").nullable()
+    override val primaryKey = PrimaryKey(eventId)
+}
+
+object InboxEventsTable : Table("inbox_events") {
+    val consumerName = varchar("consumer_name", 64)
+    val eventId = varchar("event_id", 128)
+    val aggregateId = varchar("aggregate_id", 64)
+    val aggregateVersion = long("aggregate_version")
+    val processedAt = datetime("processed_at")
+    override val primaryKey = PrimaryKey(consumerName, eventId)
+}
+
+object AuditEventsTable : Table("audit_events") {
+    val eventId = char("event_id", 26)
+    val runId = char("run_id", 26).references(TaskRunsTable.runId).nullable()
+    val seq = long("seq")
+    val occurredAt = datetime("occurred_at")
+    val actor = varchar("actor", 128)
+    val agentId = char("agent_id", 26).nullable()
+    val action = varchar("action", 64)
+    val resource = varchar("resource", 255).nullable()
+    val decisionId = varchar("decision_id", 64).nullable()
+    val approvalId = varchar("approval_id", 64).nullable()
+    val result = varchar("result", 32)
+    val traceId = varchar("trace_id", 64).nullable()
+    val payload = text("payload").nullable()
+    val prevHash = char("prev_hash", 64).nullable()
+    val hash = char("hash", 64)
+    override val primaryKey = PrimaryKey(eventId)
+}

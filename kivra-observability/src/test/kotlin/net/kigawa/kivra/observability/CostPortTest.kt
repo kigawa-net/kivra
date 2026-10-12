@@ -10,7 +10,7 @@ class CostPortTest {
 
     @Test
     fun `usage accumulates and unpriced calls are counted separately`() {
-        val ledger = InMemoryCostLedger()
+        val ledger = TestOnlyInMemoryCostLedger()
         ledger.add(run, UsageAmount(100, 20, 500))
         ledger.add(run, UsageAmount(10, 5, null))
         ledger.add(run, UsageAmount(1, 1, 250))
@@ -20,14 +20,51 @@ class CostPortTest {
     }
 
     @Test
-    fun `budget is exceeded only above the known-cost limit`() {
-        val ledger = InMemoryCostLedger()
+    fun `knownCostExceeded is true only above the known-cost limit`() {
+        val ledger = TestOnlyInMemoryCostLedger()
         val policy = BudgetPolicy { if (it.kind == CostScopeKind.RUN) 1000 else null }
         ledger.add(run, UsageAmount(0, 0, 1000))
-        assertFalse(BudgetCheck.exceeded(ledger, policy, run))
+        assertFalse(BudgetCheck.knownCostExceeded(ledger, policy, run))
         ledger.add(run, UsageAmount(0, 0, 1))
-        assertTrue(BudgetCheck.exceeded(ledger, policy, run))
-        assertFalse(BudgetCheck.exceeded(ledger, policy, CostScope(CostScopeKind.USER, "u")))
+        assertTrue(BudgetCheck.knownCostExceeded(ledger, policy, run))
+        assertFalse(BudgetCheck.knownCostExceeded(ledger, policy, CostScope(CostScopeKind.USER, "u")))
+    }
+
+    @Test
+    fun `unpriced calls make verdict UNKNOWN_COST even when knownCostExceeded is false`() {
+        val ledger = TestOnlyInMemoryCostLedger()
+        val policy = BudgetPolicy { 1000 }
+        ledger.add(run, UsageAmount(10, 10, 500))
+        ledger.add(run, UsageAmount(10, 10, null))
+        assertFalse(BudgetCheck.knownCostExceeded(ledger, policy, run))
+        assertEquals(BudgetVerdict.UNKNOWN_COST, BudgetCheck.verdict(ledger, policy, run))
+    }
+
+    @Test
+    fun `known cost above the limit is EXCEEDED`() {
+        val ledger = TestOnlyInMemoryCostLedger()
+        val policy = BudgetPolicy { 1000 }
+        ledger.add(run, UsageAmount(0, 0, 1001))
+        assertEquals(BudgetVerdict.EXCEEDED, BudgetCheck.verdict(ledger, policy, run))
+        ledger.add(run, UsageAmount(0, 0, null))
+        assertEquals(BudgetVerdict.EXCEEDED, BudgetCheck.verdict(ledger, policy, run))
+    }
+
+    @Test
+    fun `priced usage within the limit is WITHIN_KNOWN_LIMIT`() {
+        val ledger = TestOnlyInMemoryCostLedger()
+        val policy = BudgetPolicy { 1000 }
+        ledger.add(run, UsageAmount(1, 1, 1000))
+        assertEquals(BudgetVerdict.WITHIN_KNOWN_LIMIT, BudgetCheck.verdict(ledger, policy, run))
+    }
+
+    @Test
+    fun `missing limit or no usage fails closed as UNKNOWN_COST`() {
+        val ledger = TestOnlyInMemoryCostLedger()
+        val noLimit = BudgetPolicy { null }
+        ledger.add(run, UsageAmount(1, 1, 1))
+        assertEquals(BudgetVerdict.UNKNOWN_COST, BudgetCheck.verdict(ledger, noLimit, run))
+        assertFalse(BudgetCheck.knownCostExceeded(ledger, noLimit, run))
     }
 
     @Test

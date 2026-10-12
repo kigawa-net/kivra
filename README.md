@@ -9,7 +9,7 @@
 | モジュール | 内容 |
 |---|---|
 | `kivra-core` | ドメイン型、状態機械（DevelopmentRun / Agent / ExecutionSession / OperationStatus）、Port インターフェース（ExecutionPort / TaskProvider / MemoryPort / SchedulePort、定義のみ）、`LeaseStore` |
-| `kivra-observability` | Trace 土台（`Tracer` / `SpanExporter` Port）、メトリクス（`MetricsRegistry`、Prometheus 形式）、指標カタログ、コスト Port、秘密を出さない属性フィルタ。外部依存なし（[docs/observability.md](docs/observability.md)） |
+| `kivra-observability` | Trace 土台（`Tracer` / `SpanExporter` Port）、メトリクス（`MetricsRegistry`、Prometheus 形式）、指標カタログ、コスト Port（観測専用。`BudgetCheck.verdict` の `WITHIN_KNOWN_LIMIT` も承認ではない。Issue #73）、秘密を出さない属性フィルタ。外部依存なし（[docs/observability.md](docs/observability.md)） |
 | `kivra-app` | Ktor アプリ、設定読込、`/health`、`/metrics`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease のリポジトリ |
 
 DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列。V2 は未マージのため編集中、マージ後は V3 以降のみ追加）。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。

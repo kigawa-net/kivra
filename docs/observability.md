@@ -53,8 +53,11 @@
 ## 4. コストの Port
 
 - `CostLedger`（`add` / `total`）: scope は `RUN` / `AGENT` / `USER`。`UsageAmount.costMicros` が null の呼び出しは `unpricedCalls` として別計上する（既知コストだけで予算を判定すると過小評価するため）。
-- `BudgetPolicy` / `BudgetCheck.exceeded`: 上限超過の検知。
-- 永続化はしない。`InMemoryCostLedger` はテスト・開発用で、本番の集計基盤ではない。
+- **本モジュールのコスト系 API は観測専用であり、支出の承認(admission)に使ってはならない**（Issue #73）。
+  - `BudgetCheck.knownCostExceeded`: 既知コストのみの比較。未価格呼出し・部分ストリーム・応答喪失・会計 commit 失敗は考慮しない。旧名 `exceeded` は削除済み。
+  - `BudgetCheck.verdict`: `BudgetVerdict { WITHIN_KNOWN_LIMIT, EXCEEDED, UNKNOWN_COST }` を返す。上限未設定・`unpricedCalls > 0` は既知コストが上限以下でも `UNKNOWN_COST`。既知コストが上限超なら `EXCEEDED`。`WITHIN_KNOWN_LIMIT` も承認ではない。
+  - 承認 (ALLOW / DENY) の判定は #35 / #69 の durable gate の範囲で、本モジュールは提供しない。
+- 永続化はしない。`TestOnlyInMemoryCostLedger`（`internal`）はテスト専用で、本番の admission・集計基盤には使わない。durable な reserve / commit / release は #35 / #69 / #70 の範囲。
 - Model Gateway（#35）の `GatewayMetrics` / `AuditSink` との接続は未対応（#35 が main 相当に入ってから Adapter を書く）。
 
 ## 5. /metrics エンドポイント
@@ -71,6 +74,8 @@
 - 別ポート / loopback 限定の metrics Listener（上記 §5）は未実装。
 - 収集基盤（OpenTelemetry / Prometheus 等）の採用有無（設計 #1 §8、#5 §16-8）。
 - Provider 側の実コスト照合 API の有無（#5 §16-7）。通貨と単位（`kivra_model_cost_micros_total`）。
+- コストの承認ゲート（durable reserve/commit/release、crash/retry 処理、E2E「価格不明で外部 POST なし」）は未対応。#35 / #48 / #69 / #70 側で扱う（Issue #73）。
+- `UsageAmount` / `CostTotal` は通貨を持たないため、通貨・単位の混在は検出できない（未対応。Issue #73）。
 - `run_events` 実行履歴と監査ログ本体（#33）は DB スキーマ依存のため本 PR の対象外。
 - 完了条件「1 つの Run を traceId で fusha-task から GitHub PR まで追跡」は各 Adapter（#34 等）の伝播実装待ち。
 - ダッシュボード・Kill Switch・障害注入テストは対象外。

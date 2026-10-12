@@ -52,8 +52,8 @@ CI（`.github/workflows/ci.yml`、JDK 21）は `./gradlew test`（H2）→ Maria
 
 ## 観測
 
-`GET /metrics` は Prometheus text format を返す。認証なし・内部ネットワーク前提。
-要確認: 認証の要否、別ポート化、収集基盤（Prometheus / OpenTelemetry）の採用。指標の一覧と秘密の扱いは [docs/observability.md](docs/observability.md)。
+`GET /metrics`（Prometheus text format）は既定で無効。`KIVRA_METRICS_ENABLED=true` と `KIVRA_METRICS_BEARER_TOKEN`（必須、未設定なら起動失敗）の両方で有効化し、`Authorization: Bearer <token>` で呼ぶ。別ポート化は未実装。
+要確認: 別ポート（loopback）化の要否、収集基盤（Prometheus / OpenTelemetry）の採用、Metrics の実計測への結線（未対応）。指標の一覧と秘密の扱いは [docs/observability.md](docs/observability.md)。
 
 ## 設定
 
@@ -66,6 +66,8 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
 | `KIVRA_DB_USER` / `KIVRA_DB_PASSWORD` | `kivra` / `change-this-in-production` | DB 認証情報（本番では必ず上書き） |
 | `KIVRA_LEASE_TTL_SECONDS` | 30 | Run Lease の TTL |
 | `KIVRA_LEASE_GRACE_SECONDS` | 5 | 期限切れ後、奪取を許可するまでの猶予 |
+| `KIVRA_METRICS_ENABLED` | false | `/metrics` の有効化（true のとき `KIVRA_METRICS_BEARER_TOKEN` が必須） |
+| `KIVRA_METRICS_BEARER_TOKEN` | （空） | `/metrics` の Bearer トークン |
 
 時刻は UTC。MariaDB のセッションを UTC にする（既定の URL は設定済み）。
 

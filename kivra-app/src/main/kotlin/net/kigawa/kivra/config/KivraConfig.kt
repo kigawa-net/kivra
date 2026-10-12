@@ -3,6 +3,28 @@ package net.kigawa.kivra.config
 import io.ktor.server.config.ApplicationConfig
 import java.time.Duration
 
+/**
+ * `/metrics` is off by default. When enabled it is served on the API listener and requires a
+ * fixed bearer token (fail-closed: enabling without a token refuses to start).
+ */
+data class MetricsConfig(
+    val enabled: Boolean,
+    val bearerToken: String?,
+) {
+    init {
+        require(!enabled || !bearerToken.isNullOrBlank()) {
+            "kivra.metrics.bearerToken (KIVRA_METRICS_BEARER_TOKEN) is required when kivra.metrics.enabled is true"
+        }
+    }
+
+    companion object {
+        fun from(config: ApplicationConfig): MetricsConfig = MetricsConfig(
+            enabled = config.propertyOrNull("kivra.metrics.enabled")?.getString()?.toBooleanStrict() ?: false,
+            bearerToken = config.propertyOrNull("kivra.metrics.bearerToken")?.getString()?.takeIf { it.isNotBlank() },
+        )
+    }
+}
+
 data class DatabaseConfig(
     val jdbcUrl: String,
     val user: String,
@@ -22,6 +44,7 @@ data class LeaseConfig(
 data class KivraConfig(
     val database: DatabaseConfig,
     val lease: LeaseConfig,
+    val metrics: MetricsConfig,
 ) {
     companion object {
         fun from(config: ApplicationConfig): KivraConfig = KivraConfig(
@@ -34,6 +57,7 @@ data class KivraConfig(
                 ttl = Duration.ofSeconds(config.property("kivra.lease.ttlSeconds").getString().toLong()),
                 grace = Duration.ofSeconds(config.property("kivra.lease.graceSeconds").getString().toLong()),
             ),
+            metrics = MetricsConfig.from(config),
         )
     }
 }

@@ -100,4 +100,77 @@ class MetricsRegistryTest {
             MetricSpec("h_seconds", MetricType.HISTOGRAM, "s", "x", buckets = emptyList())
         }
     }
+
+    @Test
+    fun `series cap drops new label sets, keeps existing ones updating and counts the drops`() {
+        val spec = MetricSpec("kivra_test_total", MetricType.COUNTER, "1", "test", setOf("provider"), maxSeries = 3)
+        val registry = MetricsRegistry(listOf(spec))
+        val counter = registry.counter("kivra_test_total")
+        repeat(10) { counter.increment(mapOf("provider" to "p$it")) }
+        counter.increment(mapOf("provider" to "p0"), by = 4.0)
+
+        val text = registry.renderPrometheus()
+        val samples = text.lines().filter { it.startsWith("kivra_test_total{") }
+        assertEquals(3, samples.size)
+        assertContains(text, "kivra_test_total{provider=\"p0\"} 5\n")
+        assertFalse(text.contains("provider=\"p9\""))
+        assertContains(text, "${MetricsRegistry.DROPPED_SERIES_NAME}{metric=\"kivra_test_total\"} 7\n")
+    }
+
+    @Test
+    fun `random high-cardinality values stay bounded in memory and output`() {
+        val registry = MetricsRegistry()
+        val counter = registry.counter("kivra_provider_request_total")
+        val random = java.util.Random(42)
+        repeat(20_000) {
+            counter.increment(mapOf("provider" to "p-${random.nextLong()}", "outcome" to "o-${random.nextLong()}"))
+        }
+        val text = registry.renderPrometheus()
+        val samples = text.lines().filter { it.startsWith("kivra_provider_request_total{") }
+        assertTrue(samples.size <= MetricSpec.DEFAULT_MAX_SERIES)
+        assertContains(text, "${MetricsRegistry.DROPPED_SERIES_NAME}{metric=\"kivra_provider_request_total\"} ")
+        assertTrue(text.length < 64 * 1024, "exposition grew to ${text.length} bytes")
+    }
+
+    @Test
+    fun `values outside an enumeration are recorded as other`() {
+        val spec = MetricSpec(
+            "kivra_test_total", MetricType.COUNTER, "1", "test", setOf("outcome"),
+            labelValues = mapOf("outcome" to setOf("completed", "failed")),
+        )
+        val registry = MetricsRegistry(listOf(spec))
+        val counter = registry.counter("kivra_test_total")
+        counter.increment(mapOf("outcome" to "completed"))
+        counter.increment(mapOf("outcome" to "run-01HZRUNXYZ reason: something free-form"))
+        val text = registry.renderPrometheus()
+        assertContains(text, "kivra_test_total{outcome=\"completed\"} 1\n")
+        assertContains(text, "kivra_test_total{outcome=\"other\"} 1\n")
+        assertFalse(text.contains("free-form"))
+    }
+
+    @Test
+    fun `enumeration must refer to a declared label`() {
+        assertFailsWith<IllegalArgumentException> {
+            MetricSpec("kivra_test_total", MetricType.COUNTER, "1", "x", emptySet(), labelValues = mapOf("outcome" to setOf("a")))
+        }
+    }
+
+    @Test
+    fun `identifier-like label keys are never catalog labels and identifier values create no extra series`() {
+        val declared = MetricCatalog.ALL.flatMap { it.labels }.toSet()
+        assertTrue(declared.none { it in MetricCatalog.FORBIDDEN_LABEL_KEYS }, "forbidden label in catalog: ${declared.intersect(MetricCatalog.FORBIDDEN_LABEL_KEYS)}")
+
+        val registry = MetricsRegistry()
+        val counter = registry.counter("kivra_run_total")
+        repeat(100) { counter.increment(mapOf("outcome" to "completed", "runId" to "01HZRUN$it", "executionId" to "exec-$it")) }
+        val text = registry.renderPrometheus()
+        assertEquals(1, text.lines().count { it.startsWith("kivra_run_total{") })
+        assertFalse(text.contains("01HZRUN"))
+        assertFalse(text.contains("exec-"))
+    }
+
+    @Test
+    fun `dropped series meta counter is always exposed`() {
+        assertContains(MetricsRegistry().renderPrometheus(), "# TYPE ${MetricsRegistry.DROPPED_SERIES_NAME} counter\n")
+    }
 }

@@ -7,6 +7,11 @@ package net.kigawa.kivra.observability
  * Label policy: only low-cardinality enums (outcome, provider, model, purpose, ...). Never put
  * runId, executionId, agentId, taskId, traceId, tenant, prompt or token values in a label; those belong
  * in span attributes (see [AttributeFilter.SPAN_ATTRIBUTE_ALLOWLIST]).
+ *
+ * Cardinality bound: every family has a [MetricSpec.maxSeries] cap (default
+ * [MetricSpec.DEFAULT_MAX_SERIES]). Label value enumerations (`labelValues`) are not declared yet
+ * because the value domains (outcome, provider, model, ...) are not fixed in code; until then the cap
+ * is the only bound on those keys.
  */
 object MetricCatalog {
     private val LONG_SECONDS = listOf(1.0, 5.0, 30.0, 60.0, 300.0, 900.0, 3600.0, 14400.0, 86400.0)
@@ -38,7 +43,7 @@ object MetricCatalog {
     )
     val EXECUTION_DURATION = MetricSpec(
         "kivra_execution_duration_seconds", MetricType.HISTOGRAM, "s",
-        "exkes Execution wall time", setOf("outcome"), LONG_SECONDS,
+        "Execution wall time", setOf("outcome"), LONG_SECONDS,
     )
 
     // Approval / safety
@@ -50,7 +55,7 @@ object MetricCatalog {
     // Operation / recovery (UNKNOWN and Reaper, design #1 section 9.2 and #63)
     val OPERATION_UNKNOWN_TOTAL = MetricSpec(
         "kivra_operation_unknown_total", MetricType.COUNTER, "1",
-        "External operations that entered UNKNOWN (fail-closed)", setOf("operation_class"),
+        "Cumulative count of operations that entered UNKNOWN (fail-closed); not the current unresolved count, see kivra_recovery_queue_depth", setOf("operation_class"),
     )
     val REAPER_DETECTED_TOTAL = MetricSpec(
         "kivra_reaper_detected_total", MetricType.COUNTER, "1",
@@ -91,6 +96,15 @@ object MetricCatalog {
     val MODEL_UNPRICED_CALLS_TOTAL = MetricSpec(
         "kivra_model_unpriced_calls_total", MetricType.COUNTER, "1",
         "Model calls whose cost could not be determined", setOf("provider", "model"),
+    )
+
+    /**
+     * Label keys that must never be used as metric labels (high-cardinality identifiers or bodies).
+     * Checked by MetricsRegistryTest against [ALL].
+     */
+    val FORBIDDEN_LABEL_KEYS: Set<String> = setOf(
+        "runId", "run_id", "executionId", "execution_id", "agentId", "agent_id", "taskId", "task_id",
+        "traceId", "trace_id", "tenant", "tenantId", "prompt", "token", "reason_message",
     )
 
     /** Every metric declared above. Registering a new one means adding it here. */

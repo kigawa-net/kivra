@@ -15,6 +15,9 @@
 - `MetricsRegistry`: カウンタ（`counter`）・ゲージ（`gauge`）・ヒストグラム（`histogram`）。`renderPrometheus()` が text format 0.0.4 を返す。
 - 外部依存なし（Micrometer は未採用。採用は収集基盤の決定後）。
 - 名前・型・単位・ラベルは `MetricCatalog` が正。未宣言の名前は参照時に例外（配線ミスを起動時に検出）。記録側は例外を投げない。
+- **カーディナリティ上限**: 各ファミリに `MetricSpec.maxSeries`（既定 64）。上限に達した後の新しいラベル組は記録せず捨て、`kivra_metrics_dropped_series_total{metric="..."}` を増やす。既存の Series は更新され続ける。
+- **列挙値**: `MetricSpec.labelValues` で値を列挙したキーは、列挙外の値を `other` に集約する。現在の `MetricCatalog` は列挙を宣言していない（outcome / provider / model 等の値域が code 上で未確定のため）。そのため現時点で上限は `maxSeries` だけが効く。値域が確定したら列挙を追加すること。
+- 禁止ラベルキー（`runId` / `executionId` / `agentId` / `taskId` / `traceId` / tenant / prompt / token 等）は `MetricCatalog.FORBIDDEN_LABEL_KEYS` に列挙し、テストで catalog に現れないことを確認する。
 
 ### 指標一覧
 
@@ -56,11 +59,16 @@
 
 ## 5. /metrics エンドポイント
 
-- `kivra-app` の `/health` の隣に `/metrics`（`text/plain; version=0.0.4`）。
-- 認証なし。内部ネットワーク前提。認証の要否・別ポート化は要確認（README 参照）。
+- `/metrics`（`text/plain; version=0.0.4`）は **既定で無効**（`kivra.metrics.enabled` = false）。無効時は登録されず 404。
+- 有効化するには `kivra.metrics.enabled = true`（環境変数 `KIVRA_METRICS_ENABLED`）と `kivra.metrics.bearerToken`（環境変数 `KIVRA_METRICS_BEARER_TOKEN`）の両方が必要。トークン未設定で有効化すると起動に失敗する（fail-closed）。
+- 有効時は `Authorization: Bearer <token>` が必要。欠落・不一致は 401、一致で 200。トークン比較は定数時間（`MessageDigest.isEqual`）。
+- 通常 API の Listener に同居する（トークンで保護）。**別ポート・loopback 限定の Listener は未実装**（`kivra.metrics.port` は存在しない）。Prometheus の scrape 設定とトークン配布・ローテーションは運用側の決定事項。
 
 ## 6. 未対応・要確認
 
+- **Metrics の実計測への結線は未対応**: `Application.module()` は `MetricsRegistry` を生成して `/metrics` に渡すだけで、Run / Journal / Provider / Budget / Approval の Producer には DI していない。現在の `/metrics` は HELP/TYPE 中心で実 Kivra の指標を表さない。Producer 側の結線は #60 / #61 / #62 / #63 / #35（Model Gateway）の Adapter 統合後に行う。それまで「M0 Observability E2E 完了」とは判断しない。
+- `kivra_operation_unknown_total` は UNKNOWN に入った累計 Counter であり、現時点で未解決の UNKNOWN 数ではない（未解決数の Gauge は `kivra_recovery_queue_depth` 側で別途結線する）。
+- 別ポート / loopback 限定の metrics Listener（上記 §5）は未実装。
 - 収集基盤（OpenTelemetry / Prometheus 等）の採用有無（設計 #1 §8、#5 §16-8）。
 - Provider 側の実コスト照合 API の有無（#5 §16-7）。通貨と単位（`kivra_model_cost_micros_total`）。
 - `run_events` 実行履歴と監査ログ本体（#33）は DB スキーマ依存のため本 PR の対象外。

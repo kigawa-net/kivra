@@ -11,6 +11,8 @@ application {
 dependencies {
     implementation(project(":kivra-core"))
     implementation(project(":kivra-observability"))
+    implementation(project(":kivra-fusha-task"))
+    implementation(project(":kivra-fusha-poller"))
 
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)

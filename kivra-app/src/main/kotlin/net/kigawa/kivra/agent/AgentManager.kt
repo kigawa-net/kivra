@@ -272,6 +272,7 @@ class AgentManager(
      */
     private fun workspaceOp(ctx: Ctx): Op<Workspace> {
         val name = KivraNaming.workspaceName(ctx.runId.value)
+        val runLabels = KivraNaming.runLabels(ctx.runId.value)
         return Op(
             opType = "EXKES_CREATE_WORKSPACE",
             key = "run:${ctx.runId}:workspace",
@@ -281,7 +282,13 @@ class AgentManager(
             refOf = { it.id.value },
             observe = {
                 when (val r = port.findWorkspaceByName(name)) {
-                    is PortResult.Ok -> r.value?.let { Observed.Exists(it.id.value) } ?: Observed.Absent(replaySafe = false)
+                    is PortResult.Ok -> when (val ws = r.value) {
+                        null -> Observed.Absent(replaySafe = false)
+                        // Same name AND our run labels = our own effect (adopt). Same name with other labels = someone
+                        // else's Workspace: not adopted, goes to RECONCILIATION_REQUIRED.
+                        else -> if (ws.labels.entries.containsAll(runLabels.entries)) Observed.Exists(ws.id.value)
+                        else Observed.Undetermined("workspace $name exists with labels ${ws.labels} (not this run's)")
+                    }
                     else -> Observed.Undetermined(r.toString())
                 }
             },

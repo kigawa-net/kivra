@@ -24,7 +24,9 @@ import net.kigawa.kivra.exkes.ExecutionPort
 import net.kigawa.kivra.exkes.ExecutionSpec
 import net.kigawa.kivra.exkes.ExecutionState
 import net.kigawa.kivra.exkes.FakeExecutionPort
+import net.kigawa.kivra.exkes.KivraNaming
 import net.kigawa.kivra.exkes.PortResult
+import net.kigawa.kivra.exkes.RuntimeSpec
 import net.kigawa.kivra.exkes.Runtime
 import net.kigawa.kivra.exkes.RuntimeId
 import net.kigawa.kivra.exkes.RuntimeState
@@ -50,6 +52,21 @@ class TestPort(val fake: FakeExecutionPort = FakeExecutionPort()) : ExecutionPor
     var unsupportedStopRuntime = false
     private var getExecutionCalls = 0
     val mutatingCalls = mutableListOf<String>()
+    private val failures = HashMap<String, Pair<Boolean, PortResult<Nothing>>>()
+
+    /** The next call of [op] answers HTTP 409. [afterEffect] = the POST was applied before the 409 (our own earlier POST). */
+    fun injectConflict(op: String, afterEffect: Boolean) = injectFailure(op, afterEffect, PortResult.Conflict("injected: 409 for $op"))
+
+    /** The next call of [op] answers [result]; [afterEffect] = the effect was applied before the answer. */
+    fun injectFailure(op: String, afterEffect: Boolean, result: PortResult<Nothing>) {
+        failures[op] = afterEffect to result
+    }
+
+    private suspend fun <T> conflicting(op: String, call: suspend () -> PortResult<T>): PortResult<T> {
+        val (afterEffect, result) = failures.remove(op) ?: return call()
+        if (afterEffect) call()
+        return result
+    }
 
     override suspend fun createWorkspace(spec: WorkspaceSpec): PortResult<Workspace> {
         mutatingCalls += "createWorkspace"
@@ -57,8 +74,11 @@ class TestPort(val fake: FakeExecutionPort = FakeExecutionPort()) : ExecutionPor
             transientCreateWorkspace--
             return PortResult.Transient("connection refused")
         }
-        return fake.createWorkspace(spec)
+        return conflicting("createWorkspace") { fake.createWorkspace(spec) }
     }
+
+    override suspend fun createRuntime(workspace: WorkspaceId, spec: RuntimeSpec): PortResult<Runtime> =
+        conflicting("createRuntime") { fake.createRuntime(workspace, spec) }
 
     override suspend fun getWorkspace(id: WorkspaceId): PortResult<Workspace> {
         val r = fake.getWorkspace(id)
@@ -77,7 +97,7 @@ class TestPort(val fake: FakeExecutionPort = FakeExecutionPort()) : ExecutionPor
     override suspend fun startExecution(runtime: RuntimeId, spec: ExecutionSpec): PortResult<Execution> {
         mutatingCalls += "startExecution"
         if (unsupportedStartExecution) return PortResult.Unsupported("agent execution")
-        val r = fake.startExecution(runtime, spec)
+        val r = conflicting("startExecution") { fake.startExecution(runtime, spec) }
         if (crashAfterStartExecution) {
             crashAfterStartExecution = false
             throw SimulatedCrash()
@@ -179,6 +199,97 @@ class AgentManagerTest {
         assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port, "worker-B").run(runId, PROFILE) })
         assertEquals(1, port.mutatingCalls.count { it == "createWorkspace" })
         assertEquals(DevelopmentRunState.PREPARING, db.runState(runId))
+    }
+
+    @Test
+    fun `createWorkspace 409 caused by our own earlier POST is adopted - never FAILED`() = TestDb().use { db ->
+        val port = TestPort().also { it.injectConflict("createWorkspace", afterEffect = true) }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.Completed>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(1, port.fake.postCounts["createWorkspace"])
+        val ws = db.ops(runId).getValue("EXKES_CREATE_WORKSPACE")
+        assertEquals(OperationStatus.CONFIRMED, ws.status)
+        assertEquals("EXISTS", ws.evidenceObservation)
+    }
+
+    @Test
+    fun `createWorkspace 409 with a same-name Workspace of another owner is RECONCILIATION_REQUIRED, never adopted or FAILED`() = TestDb().use { db ->
+        val port = TestPort().also { it.injectConflict("createWorkspace", afterEffect = false) }
+        val runId = db.preparingRun()
+        // someone else's Workspace under our name: the labels do not carry this run
+        runBlocking { port.fake.createWorkspace(WorkspaceSpec(KivraNaming.workspaceName(runId.value), mapOf("owner" to "someone-else"))) }
+        val rr = assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals("EXKES_CREATE_WORKSPACE", rr.opType)
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.journal.get(rr.opId)!!.status)
+        assertEquals(1, port.mutatingCalls.count { it == "createWorkspace" })
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port, "worker-B").run(runId, PROFILE) })
+        assertEquals(1, port.mutatingCalls.count { it == "createWorkspace" })
+        assertEquals(DevelopmentRunState.PREPARING, db.runState(runId))
+    }
+
+    @Test
+    fun `createWorkspace 409 with nothing found is RECONCILIATION_REQUIRED, not FAILED`() = TestDb().use { db ->
+        val port = TestPort().also { it.injectConflict("createWorkspace", afterEffect = false) }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.ops(runId).getValue("EXKES_CREATE_WORKSPACE").status)
+        assertEquals(1, port.mutatingCalls.count { it == "createWorkspace" })
+    }
+
+    @Test
+    fun `createWorkspace 400 rejection is not trusted as no-effect - reconciled, never FAILED`() = TestDb().use { db ->
+        val port = TestPort().also {
+            it.injectFailure("createWorkspace", afterEffect = false, PortResult.Rejected(400, "VALIDATION", "bad name"))
+        }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.ops(runId).getValue("EXKES_CREATE_WORKSPACE").status)
+    }
+
+    @Test
+    fun `createWorkspace 404 on a create is reconciled by lookup, never FAILED`() = TestDb().use { db ->
+        val port = TestPort().also { it.injectFailure("createWorkspace", afterEffect = false, PortResult.NotFound) }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.ops(runId).getValue("EXKES_CREATE_WORKSPACE").status)
+    }
+
+    @Test
+    fun `createRuntime 409 caused by our own earlier POST is adopted from the label listing`() = TestDb().use { db ->
+        val port = TestPort().also { it.injectConflict("createRuntime", afterEffect = true) }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.Completed>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(1, port.fake.postCounts["createRuntime"])
+        assertEquals("EXISTS", db.ops(runId).getValue("EXKES_CREATE_RUNTIME").evidenceObservation)
+    }
+
+    @Test
+    fun `createRuntime 409 with nothing found is RECONCILIATION_REQUIRED and never resent`() = TestDb().use { db ->
+        val port = TestPort().also { it.injectConflict("createRuntime", afterEffect = false) }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port, "worker-B").run(runId, PROFILE) })
+        assertEquals(0, port.fake.postCounts["createRuntime"] ?: 0)
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.ops(runId).getValue("EXKES_CREATE_RUNTIME").status)
+    }
+
+    @Test
+    fun `startExecution 409 caused by our own earlier POST is adopted from the execution listing`() = TestDb().use { db ->
+        val port = TestPort().also { it.injectConflict("startExecution", afterEffect = true) }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.Completed>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(1, port.fake.postCounts["startExecution"])
+        assertEquals("EXISTS", db.ops(runId).getValue("EXKES_START_EXECUTION").evidenceObservation)
+    }
+
+    @Test
+    fun `startExecution 409 with nothing found is RECONCILIATION_REQUIRED and never resent`() = TestDb().use { db ->
+        val port = TestPort().also { it.injectConflict("startExecution", afterEffect = false) }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(1, port.mutatingCalls.count { it == "startExecution" })
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.ops(runId).getValue("EXKES_START_EXECUTION").status)
+        assertEquals(DevelopmentRunState.DEVELOPING, db.runState(runId))
     }
 
     @Test

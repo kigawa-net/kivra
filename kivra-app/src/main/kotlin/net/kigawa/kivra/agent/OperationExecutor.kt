@@ -12,7 +12,6 @@ import net.kigawa.kivra.core.NotSentProof
 import net.kigawa.kivra.core.OperationStatus
 import net.kigawa.kivra.core.ProviderCapability
 import net.kigawa.kivra.core.ReconciliationEvidence
-import net.kigawa.kivra.core.RejectedProof
 import net.kigawa.kivra.db.JournalEntry
 import net.kigawa.kivra.db.OperationJournalRepository
 import net.kigawa.kivra.db.PrepareOperation
@@ -71,7 +70,9 @@ fun sha256Hex(text: String): String =
  *    it is only looked up. EXISTS adopts (CONFIRMED). Anything else goes to RECONCILIATION_REQUIRED and stops.
  *    exkes lookups are LOOKUP_BY_STABLE_REF only, so an absence never justifies RETRYABLE (create ops are never resent).
  *  - only [PortResult.Transient] (adapter-proven: the request was never sent) is retried, via `markNotSent` with a
- *    [NotSentProof] issued by [ISSUER]. Every other failure stays UNKNOWN or is rejected with a [RejectedProof].
+ *    [NotSentProof] issued by [ISSUER]. Every other failure stays UNKNOWN and is reconciled: nothing here marks a
+ *    mutating call FAILED, because no trusted REJECTED_NO_EFFECT contract exists yet (M0 #43). A 409 may be our own
+ *    earlier POST, and a 4xx or 404 on a POST is not proof that nothing happened.
  *  - the attempt budget is enforced by the journal: RETRYABLE -> IN_FLIGHT may come back as FAILED
  *    (MAX_ATTEMPTS_EXCEEDED), and nothing is sent unless the returned status is IN_FLIGHT.
  */
@@ -142,11 +143,6 @@ internal class OperationExecutor(
         fun proofRef(kind: String) = "$kind:${op.stableRef}".take(250)
         fun move(to: OperationStatus, ref: String? = null, cls: String? = null, msg: String? = null) =
             journal.transition(lease, e.opId, e.version, to, externalRef = ref, errorClass = cls, error = msg, allowCancelRequested = allowCancel)
-        fun rejected(cls: String, msg: String?) = journal.markRejected(
-            lease, e.opId, e.version,
-            RejectedProof(lease.runId, e.opId, e.requestHash, ISSUER, proofRef("rejected"), now()),
-            errorClass = cls, error = msg, allowCancelRequested = allowCancel,
-        )
         fun notSent(msg: String) = journal.markNotSent(
             lease, e.opId, e.version,
             NotSentProof(lease.runId, e.opId, e.requestHash, ISSUER, proofRef("not-sent"), now()),
@@ -156,9 +152,14 @@ internal class OperationExecutor(
             is PortResult.Ok -> Settled(move(OperationStatus.CONFIRMED, op.refOf(r.value)), null)
             PortResult.NotFound ->
                 if (op.notFoundIsSuccess) Settled(move(OperationStatus.CONFIRMED, cls = null, msg = "already gone (404)"), null)
-                else Settled(rejected("NOT_FOUND", "target not found"), null)
-            is PortResult.Conflict -> Settled(rejected("CONFLICT", r.message), null)
-            is PortResult.Rejected -> Settled(rejected("REJECTED", "HTTP ${r.httpStatus} ${r.code ?: ""} ${r.message}".trim()), null)
+                // A 404 on a create is not proof of "no effect": reconcile by lookup (absent -> RECONCILIATION_REQUIRED).
+                else Settled(move(OperationStatus.UNKNOWN, cls = "NOT_FOUND", msg = "404 on a mutating call: reconciling"), null)
+            // 409 may be our own earlier POST (name / label already taken by us): reconcile, never FAILED.
+            is PortResult.Conflict -> Settled(move(OperationStatus.UNKNOWN, cls = "CONFLICT", msg = r.message), null)
+            // Not a proven no-effect answer (no REJECTED_NO_EFFECT contract): reconcile, never FAILED.
+            is PortResult.Rejected -> Settled(
+                move(OperationStatus.UNKNOWN, cls = "REJECTED", msg = "HTTP ${r.httpStatus} ${r.code ?: ""} ${r.message}".trim()), null,
+            )
             // Adapter-proven: the request never left the process (connect refused / connect timeout / DNS / token failure).
             is PortResult.Transient -> Settled(notSent(r.message), null)
             is PortResult.Unknown -> Settled(move(OperationStatus.UNKNOWN, cls = "UNKNOWN", msg = r.message), null)

@@ -171,10 +171,9 @@ class ModelGateway(
                     while (true) {
                         val attemptId = "${req.requestId}-a${++attemptNo}"
                         val key = "${req.requestId}/$attemptId"
-                        val est = Estimator.maxCost(req, target.model)!!
-                        val denied = budget.reserve(key, req.budgetScopes, est)
+                        val denied = budget.reserve(key, req.budgetScopes, reservation(req, target))
                         if (denied is ReserveResult.Denied) {
-                            lastError = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = "BUDGET")
+                            lastError = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = denied.code)
                             auditAttempt(req, attemptId, ref, decision, Usage.ZERO, null, 0, null, lastError)
                             break
                         }
@@ -202,9 +201,8 @@ class ModelGateway(
                                         val s = seq++
                                         // Booking failures become a terminal Failed(OUTCOME_UNKNOWN); the requestId is never released.
                                         val terminal = try {
-                                            val cost = CostCalculator.cost(chunk.response.usage, target.model.price!!, CostBasis.ACTUAL)
+                                            val cost = book(key, req, target, chunk.response.usage, chunk.response.usageComplete)
                                             val resp = chunk.response.copy(cost = cost)
-                                            budget.commit(key, cost.amount)
                                             ledger.complete(req.requestId, null)
                                             health.recordSuccess(ref.providerId)
                                             auditAttempt(req, attemptId, ref, decision, resp.usage, cost, resp.latencyMs, resp.finishReason, null)
@@ -294,9 +292,9 @@ class ModelGateway(
             while (true) {
                 val attemptId = "${req.requestId}-a${++attemptNo}"
                 val key = "${req.requestId}/$attemptId"
-                val denied = budget.reserve(key, req.budgetScopes, Estimator.maxCost(req, target.model)!!)
+                val denied = budget.reserve(key, req.budgetScopes, reservation(req, target))
                 if (denied is ReserveResult.Denied) {
-                    last = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = "BUDGET")
+                    last = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = denied.code)
                     auditAttempt(req, attemptId, ref, decision, Usage.ZERO, null, 0, null, last)
                     break
                 }
@@ -337,8 +335,7 @@ class ModelGateway(
                 // A response was received: the call is billed. Booking failures are fail-closed (see [unrecorded]).
                 flight.responseReceived = true
                 val cost = try {
-                    val c = CostCalculator.cost(resp.usage, target.model.price!!, CostBasis.ACTUAL)
-                    budget.commit(key, c.amount)
+                    val c = book(key, req, target, resp.usage, resp.usageComplete)
                     health.recordSuccess(ref.providerId)
                     auditAttempt(req, attemptId, ref, decision, resp.usage, c, resp.latencyMs, resp.finishReason, null)
                     c
@@ -350,6 +347,33 @@ class ModelGateway(
             }
         }
         throw GatewayException(last ?: GatewayError(ErrorKind.TRANSIENT, "all candidates failed"))
+    }
+
+    /**
+     * Budget amount to reserve for a call (upper bound). An unpriced model is refused, never reserved as zero, so the
+     * provider is not called. Routing already excludes unpriced models; this keeps the invariant local to the reservation.
+     */
+    private fun reservation(req: ModelRequest, target: ResolvedTarget): BudgetAmount =
+        Estimator.maxBudgetAmount(req, target.model, registry.registryVersion)
+            ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price; provider not called")
+
+    /**
+     * Books a completed provider call. With complete usage, the actual cost is committed and bound to its price revision,
+     * model and requestId. Without it (missing usage, partial stream), the estimate is committed conservatively and the
+     * call is recorded as unpriced, so the next admission on these scopes is UNKNOWN_COST.
+     */
+    private fun book(key: String, req: ModelRequest, target: ResolvedTarget, usage: Usage, usageComplete: Boolean): Cost {
+        val rev = registry.registryVersion
+        if (!usageComplete) {
+            val est = reservation(req, target)
+            budget.commit(key, null)
+            return Cost(est.amount, est.currency, CostBasis.ESTIMATED, est.unit, rev, target.model.ref, req.requestId)
+        }
+        val price = target.model.price ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price")
+        val cost = CostCalculator.cost(usage, price, CostBasis.ACTUAL)
+            .copy(priceRevision = rev, model = target.model.ref, requestId = req.requestId)
+        budget.commit(key, BudgetAmount(cost.amount, cost.currency, cost.unit, rev, target.model.ref))
+        return cost
     }
 
     /** Exponential backoff with full jitter, never shorter than a provider-supplied Retry-After. */

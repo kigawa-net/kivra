@@ -99,8 +99,24 @@ data class Usage(val inputTokens: Long = 0, val outputTokens: Long = 0, val cach
 
 enum class CostBasis { ACTUAL, ESTIMATED }
 
-data class Cost(val amount: BigDecimal, val currency: String, val basis: CostBasis) {
-    companion object { fun zero(currency: String = "USD") = Cost(BigDecimal.ZERO, currency, CostBasis.ESTIMATED) }
+/**
+ * A cost bound to the evidence it was computed from. [unit] is whole currency units; [priceRevision] is the registry
+ * revision whose price produced [amount]; [model] and [requestId] identify the call. Amounts are only summed when
+ * currency and unit match (see [BudgetAmount]).
+ */
+data class Cost(
+    val amount: BigDecimal,
+    val currency: String,
+    val basis: CostBasis,
+    val unit: String = UNIT_CURRENCY_UNITS,
+    val priceRevision: String? = null,
+    val model: ModelRef? = null,
+    val requestId: String? = null,
+) {
+    companion object {
+        const val UNIT_CURRENCY_UNITS = "currency_units"
+        fun zero(currency: String = "USD") = Cost(BigDecimal.ZERO, currency, CostBasis.ESTIMATED)
+    }
 }
 
 data class GatewayWarning(val code: String, val message: String)
@@ -117,6 +133,11 @@ data class ModelResponse(
     val latencyMs: Long,
     val routingDecisionId: String,
     val warnings: List<GatewayWarning> = emptyList(),
+    /**
+     * True only when the provider reported complete usage (input and output tokens). When false, [cost] is the
+     * conservative estimate and the call is recorded as unpriced by the budget.
+     */
+    val usageComplete: Boolean = false,
 )
 
 sealed interface ModelEvent {

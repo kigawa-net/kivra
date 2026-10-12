@@ -12,8 +12,10 @@ import java.util.UUID
  */
 enum class ExclusionReason {
     SECRET_DATA, TRUST_ZONE_DENIED, DATA_HANDLING_UNCONFIRMED, LOCALITY,
-    CAPABILITY_MISSING, CONTEXT_TOO_SMALL, PROVIDER_NOT_ALLOWED, LIFECYCLE, PRICE_UNKNOWN,
-    BUDGET, UNHEALTHY, QUALITY_BELOW_MIN,
+    CAPABILITY_MISSING, CONTEXT_TOO_SMALL, PROVIDER_NOT_ALLOWED, LIFECYCLE,
+    /** The cost cannot be established (unpriced model, currency/unit mismatch, or unpriced usage recorded). */
+    UNKNOWN_COST,
+    BUDGET_POLICY_MISSING, BUDGET, UNHEALTHY, QUALITY_BELOW_MIN,
 }
 
 data class CandidateTrace(val model: ModelRef, val exclusion: ExclusionReason?, val score: Double? = null) {
@@ -119,9 +121,15 @@ class RoutingEngine(
         if (p.id in req.requirements.deniedProviders || (allowed != null && p.id !in allowed)) return ExclusionReason.PROVIDER_NOT_ALLOWED
         if (!p.enabled || p.id !in availableProviders || m.lifecycle != Lifecycle.ACTIVE || (m.retireAt != null && !m.retireAt.isAfter(today)))
             return ExclusionReason.LIFECYCLE
-        // 5. Budget (price must be known).
-        val cost = Estimator.maxCost(req, m) ?: return ExclusionReason.PRICE_UNKNOWN
-        if (!budget.canReserve(req.budgetScopes, cost)) return ExclusionReason.BUDGET
+        // 5. Budget. The cost must be known in the budget's currency and unit: an unknown cost is never treated as zero.
+        val amount = Estimator.maxBudgetAmount(req, m, registry.registryVersion) ?: return ExclusionReason.UNKNOWN_COST
+        budget.admission(req.budgetScopes, amount)?.let { denied ->
+            return when (denied.code) {
+                BudgetDenial.UNKNOWN_COST -> ExclusionReason.UNKNOWN_COST
+                BudgetDenial.BUDGET_POLICY_MISSING -> ExclusionReason.BUDGET_POLICY_MISSING
+                else -> ExclusionReason.BUDGET
+            }
+        }
         // 6. Health.
         if (!health.isAvailable(p.id)) return ExclusionReason.UNHEALTHY
         // 7. Quality floor.
@@ -131,8 +139,14 @@ class RoutingEngine(
     }
 
     private fun rejectionFor(traces: List<CandidateTrace>): GatewayError {
+        // Any candidate that reached the cost check and could not be priced makes the cost unknown: reported as such.
+        if (traces.any { it.exclusion == ExclusionReason.UNKNOWN_COST }) {
+            return GatewayError(ErrorKind.POLICY_DENIED, "cost is unknown; provider not called", code = "UNKNOWN_COST")
+        }
         val deepest = traces.mapNotNull { it.exclusion }.maxOrNull()
         return when (deepest) {
+            ExclusionReason.BUDGET_POLICY_MISSING ->
+                GatewayError(ErrorKind.POLICY_DENIED, "no budget policy for the request's budget scopes", code = "BUDGET_POLICY_MISSING")
             ExclusionReason.CAPABILITY_MISSING ->
                 GatewayError(ErrorKind.CAPABILITY_UNSUPPORTED, "no model supports the required capabilities", code = "NO_ROUTE")
             ExclusionReason.BUDGET -> GatewayError(ErrorKind.POLICY_DENIED, "budget exceeded", code = "BUDGET")

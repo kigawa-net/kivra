@@ -59,6 +59,16 @@ object Estimator {
         val price = model.price ?: return null
         return CostCalculator.cost(Usage(inputTokens(req), outputTokens(req, model).toLong()), price, CostBasis.ESTIMATED).amount
     }
+
+    /**
+     * Upper-bound amount for budget admission, bound to the price revision and model. Null when the model has no price:
+     * an unknown cost is never admitted as zero.
+     */
+    fun maxBudgetAmount(req: ModelRequest, model: ModelEntry, priceRevision: String): BudgetAmount? {
+        val price = model.price ?: return null
+        val c = CostCalculator.cost(Usage(inputTokens(req), outputTokens(req, model).toLong()), price, CostBasis.ESTIMATED)
+        return BudgetAmount(c.amount, c.currency, c.unit, priceRevision, model.ref)
+    }
 }
 
 object CostCalculator {

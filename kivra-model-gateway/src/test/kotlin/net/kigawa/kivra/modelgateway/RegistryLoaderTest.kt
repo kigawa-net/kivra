@@ -60,6 +60,13 @@ class RegistryLoaderTest {
         assertFailsWith<RegistryException> { RegistryLoader.fromYaml(base.replace("capabilities: [TEXT]", "capabilities: [TELEPORT]")) }
     }
 
+    @Test fun unknownPlaceholderPriceLoadsAsUnpricedModel() {
+        val placeholder = base + "\n    price: { inputPerMtok: UNKNOWN, outputPerMtok: UNKNOWN }"
+        assertEquals(null, RegistryLoader.fromYaml(placeholder).models.single().price)
+        val scalar = base + "\n    price: UNKNOWN"
+        assertEquals(null, RegistryLoader.fromYaml(scalar).models.single().price)
+    }
+
     @Test fun disabledByDefaultWhenFlagMissing() {
         assertFalse(RegistryLoader.fromYaml(base.replace(Regex("\\s*enabled: true"), "")).providers.getValue("p").enabled)
     }

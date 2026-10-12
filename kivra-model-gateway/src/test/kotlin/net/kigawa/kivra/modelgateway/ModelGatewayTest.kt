@@ -306,9 +306,11 @@ class ModelGatewayTest {
 
     @Test fun failedAfterProviderCallRequestIdCannotBeResent() = runTest {
         val m = model("m", "ext"); val fake = FakeProvider("ext") { fail(ErrorKind.AUTH) }
-        val g = gateway(listOf(m), mapOf("ext" to fake))
+        val ledger = InMemoryRequestLedger()
+        val g = gateway(listOf(m), mapOf("ext" to fake), ledger = ledger)
         assertFailsWith<GatewayException> { g.invoke(request()) }
-        val e = assertFailsWith<GatewayException> { g.invoke(request()) }
+        // A fresh budget isolates the requestId check: the unpriced record would otherwise deny first (UNKNOWN_COST).
+        val e = assertFailsWith<GatewayException> { gateway(listOf(m), mapOf("ext" to fake), budget(), ledger = ledger).invoke(request()) }
         assertEquals("DUPLICATE_REQUEST", e.error.code); assertEquals(1, fake.calls)
     }
 
@@ -383,14 +385,15 @@ class ModelGatewayTest {
     @Test fun postSendFailureIsNotRetriedOrFallenBackAndChargesEstimate() = runTest {
         val a = model("a", "ext", tier = QualityTier.S); val b = model("b", "ext2")
         val fa = FakeProvider("ext") { fail(ErrorKind.TRANSIENT) }; val fb = FakeProvider("ext2", ok(b))
-        val bud = budget()
-        val g = gateway(listOf(a, b), mapOf("ext" to fa, "ext2" to fb), bud)
+        val bud = budget(); val ledger = InMemoryRequestLedger()
+        val g = gateway(listOf(a, b), mapOf("ext" to fa, "ext2" to fb), bud, ledger = ledger)
         val e = assertFailsWith<GatewayException> { g.invoke(request()) }
         assertEquals(ErrorKind.OUTCOME_UNKNOWN, e.error.kind)
         assertEquals(1, fa.calls); assertEquals(0, fb.calls); assertTrue(sleeps.isEmpty())
         assertEquals(0, BigDecimal.ZERO.compareTo(bud.usage("task").reserved))
         assertTrue(bud.usage("task").committed > BigDecimal.ZERO, "a possibly billed call is charged at the estimate")
-        val again = assertFailsWith<GatewayException> { g.invoke(request()) }
+        // Fresh budget isolates the requestId check: the unpriced record would otherwise deny first (UNKNOWN_COST).
+        val again = assertFailsWith<GatewayException> { gateway(listOf(a, b), mapOf("ext" to fa, "ext2" to fb), budget(), ledger = ledger).invoke(request()) }
         assertEquals("DUPLICATE_REQUEST", again.error.code); assertEquals(1, fa.calls)
     }
 
@@ -480,4 +483,87 @@ class ModelGatewayTest {
         assertFailsWith<IllegalStateException> { ModelGateway(reg, providers, budget()) }
         assertNotNull(ModelGateway(reg, providers, budget(), devAllowInMemoryLedger = true))
     }
+
+    /** Streams some text, then fails after output, without a terminal event: a partial stream. Counts provider calls. */
+    private class PartialStreamProvider(override val providerId: String) : ModelProvider {
+        var calls = 0
+        override suspend fun health(target: ResolvedTarget) = ProviderHealth(ProviderHealthState.UP)
+        override suspend fun listModels(target: ResolvedTarget) = emptyList<ProviderModelInfo>()
+        override suspend fun invoke(req: ModelRequest, target: ResolvedTarget, ctx: CallContext): ModelResponse { calls++; fail(ErrorKind.TRANSIENT) }
+        override fun stream(req: ModelRequest, target: ResolvedTarget, ctx: CallContext) = kotlinx.coroutines.flow.flow<StreamChunk> {
+            calls++
+            emit(StreamChunk.Text("partial")); fail(ErrorKind.TRANSIENT)
+        }
+    }
+
+    @Test fun unpricedModelNeverCallsProviderAndNeverReserves() = runTest {
+        val m = model("m", "ext", price = null); val fake = FakeProvider("ext", ok(m)); val b = budget()
+        val g = gateway(listOf(m), mapOf("ext" to fake), b)
+        val e = assertFailsWith<GatewayException> { g.invoke(request()) }
+        assertEquals(ErrorKind.POLICY_DENIED, e.error.kind); assertEquals("UNKNOWN_COST", e.error.code)
+        assertEquals(0, fake.calls)
+        assertEquals(BudgetUsage(BigDecimal.ZERO, BigDecimal.ZERO, 0), b.usage("task"))
+        assertEquals("UNKNOWN_COST", audit.records.single().errorCode)
+    }
+
+    @Test fun unpricedModelIsRefusedOnStreamToo() = runTest {
+        val m = model("m", "ext", price = null); val fake = FakeProvider("ext", ok(m))
+        val g = gateway(listOf(m), mapOf("ext" to fake))
+        val e = assertFailsWith<GatewayException> { g.stream(request()).toList() }
+        assertEquals("UNKNOWN_COST", e.error.code); assertEquals(0, fake.calls)
+    }
+
+    @Test fun currencyMismatchIsRefusedWithoutProviderCall() = runTest {
+        val m = model("m", "ext", price = Price(BigDecimal("3"), BigDecimal("15"), currency = "EUR"))
+        val fake = FakeProvider("ext", ok(m))
+        val g = gateway(listOf(m), mapOf("ext" to fake), budget())
+        val e = assertFailsWith<GatewayException> { g.invoke(request()) }
+        assertEquals("UNKNOWN_COST", e.error.code); assertEquals(0, fake.calls)
+    }
+
+    @Test fun missingBudgetPolicyIsRefusedWithoutProviderCall() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m))
+        val g = gateway(listOf(m), mapOf("ext" to fake), budget())
+        assertEquals("BUDGET_POLICY_MISSING", assertFailsWith<GatewayException> { g.invoke(request(scopes = listOf("nope"))) }.error.code)
+        assertEquals("BUDGET_POLICY_MISSING", assertFailsWith<GatewayException> { g.invoke(request(id = "r2", scopes = emptyList())) }.error.code)
+        assertEquals(0, fake.calls)
+    }
+
+    @Test fun completeUsageCommitsActualCostBoundToEvidence() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m)); val b = budget()
+        val g = gateway(listOf(m), mapOf("ext" to fake), b)
+        val r = g.invoke(request(id = "r1"))
+        assertEquals(CostBasis.ACTUAL, r.cost.basis)
+        assertEquals("test-v1", r.cost.priceRevision); assertEquals(m.ref, r.cost.model); assertEquals("r1", r.cost.requestId)
+        assertEquals("USD", r.cost.currency); assertEquals(Cost.UNIT_CURRENCY_UNITS, r.cost.unit)
+        assertEquals(0, r.cost.amount.compareTo(b.usage("task").committed))
+        assertEquals(0L, b.usage("task").unpricedCalls)
+    }
+
+    @Test fun partialStreamIsCommittedConservativelyAndBlocksNextAdmission() = runTest {
+        val m = model("m", "ext"); val p = PartialStreamProvider("ext"); val b = budget()
+        val g = ModelGateway(registryOf(listOf(ext), listOf(m)), mapOf("ext" to p), b, AlwaysHealthy, audit, sleep = { }, devAllowInMemoryLedger = true)
+        val events = g.stream(request(id = "s1")).toList()
+        assertEquals(ErrorKind.OUTCOME_UNKNOWN, assertIs<ModelEvent.Failed>(events.last()).error.kind)
+        val u = b.usage("task")
+        assertEquals(0, BigDecimal.ZERO.compareTo(u.reserved))
+        assertTrue(u.committed > BigDecimal.ZERO, "a partial stream is charged at the estimate")
+        assertEquals(1L, u.unpricedCalls)
+        // Known spend is far below the limit, yet the next admission must not allow spending.
+        val e = assertFailsWith<GatewayException> { g.invoke(request(id = "r2")) }
+        assertEquals("UNKNOWN_COST", e.error.code); assertEquals(1, p.calls)
+    }
+
+    @Test fun responseWithoutCompleteUsageCommitsEstimateAndBlocksNextAdmission() = runTest {
+        val m = model("m", "ext"); val b = budget()
+        val fake = FakeProvider("ext") { okResponse(m.ref).copy(usageComplete = false) }
+        val g = gateway(listOf(m), mapOf("ext" to fake), b)
+        val r = g.invoke(request(id = "r1"))
+        assertEquals(CostBasis.ESTIMATED, r.cost.basis)
+        assertTrue(b.usage("task").committed > BigDecimal.ZERO)
+        assertEquals(1L, b.usage("task").unpricedCalls)
+        val e = assertFailsWith<GatewayException> { g.invoke(request(id = "r2")) }
+        assertEquals("UNKNOWN_COST", e.error.code); assertEquals(1, fake.calls)
+    }
+
 }

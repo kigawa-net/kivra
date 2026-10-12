@@ -138,12 +138,16 @@ object RegistryLoader {
         )
     }
 
+    private fun isUnknownPlaceholder(p: Map<*, *>): Boolean =
+        listOf("inputPerMtok", "outputPerMtok").any { p[it]?.toString()?.trim().equals("UNKNOWN", ignoreCase = true) }
+
     private fun model(m: Map<*, *>): ModelEntry {
         val id = req(m, "id", "model")
         val ctx = "model $id"
         val caps = (m["capabilities"] as? List<*> ?: throw RegistryException("$ctx: capabilities is required"))
             .map { enumOf(Capability::class.java, it.toString(), ctx) }.toSet()
-        val price = (m["price"] as? Map<*, *>)?.let {
+        // A placeholder price ("UNKNOWN") means the model is unpriced: it is loaded without a price and excluded from routing.
+        val price = (m["price"] as? Map<*, *>)?.takeUnless(::isUnknownPlaceholder)?.let {
             Price(
                 inputPerMtok = BigDecimal(req(it, "inputPerMtok", ctx)),
                 outputPerMtok = BigDecimal(req(it, "outputPerMtok", ctx)),

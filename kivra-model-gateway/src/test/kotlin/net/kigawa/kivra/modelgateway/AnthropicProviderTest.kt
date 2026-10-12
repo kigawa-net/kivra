@@ -33,6 +33,9 @@ private val jsonHeaders = headersOf(HttpHeaders.ContentType, "application/json")
 private val sseHeaders = headersOf(HttpHeaders.ContentType, "text/event-stream")
 
 private fun textBody() = """{"id":"msg_1","type":"message","role":"assistant","model":"contract-model-name","content":[{"type":"text","text":"Hello"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":5,"cache_read_input_tokens":3}}"""
+/** Same reply without any usage block: the provider must not report the cost as known. */
+private fun textNoUsageBody() = textBody().replace(""","usage":{"input_tokens":12,"output_tokens":5,"cache_read_input_tokens":3}""", "")
+private fun sseNoUsage() = sseText().replace(""","usage":{"input_tokens":10,"output_tokens":1}""", "").replace(""","usage":{"output_tokens":7}""", "")
 private fun toolBody() = """{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Tokyo"}}],"stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":9}}"""
 private fun sseText() = """
 event: message_start
@@ -62,6 +65,8 @@ class AnthropicProviderTest : ModelProviderContract() {
     private fun MockRequestHandleScope.reply(s: Scenario, req: HttpRequestData): HttpResponseData = when (s) {
         Scenario.TEXT -> if (req.body.toString().contains("\"stream\":true") || (req.body as? TextContent)?.text?.contains("\"stream\":true") == true)
             respond(sseText(), HttpStatusCode.OK, sseHeaders) else respond(textBody(), HttpStatusCode.OK, jsonHeaders)
+        Scenario.NO_USAGE -> if (req.body.toString().contains("\"stream\":true") || (req.body as? TextContent)?.text?.contains("\"stream\":true") == true)
+            respond(sseNoUsage(), HttpStatusCode.OK, sseHeaders) else respond(textNoUsageBody(), HttpStatusCode.OK, jsonHeaders)
         Scenario.TOOL_CALL -> respond(toolBody(), HttpStatusCode.OK, jsonHeaders)
         Scenario.RATE_LIMITED -> respond("""{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}""", HttpStatusCode.TooManyRequests,
             headersOf(HttpHeaders.ContentType to listOf("application/json"), HttpHeaders.RetryAfter to listOf("2")))
@@ -132,6 +137,15 @@ class AnthropicProviderTest : ModelProviderContract() {
 
     @Test fun cachedTokensAreReported() = runTest {
         assertEquals(Usage(12, 5, 3), providerFor(Scenario.TEXT).invoke(request(), target, ctx).usage)
+    }
+
+    @Test fun usageIsFlaggedCompleteOnlyWhenTokenCountsArrive() = runTest {
+        assertTrue(providerFor(Scenario.TEXT).invoke(request(), target, ctx).usageComplete)
+        val complete = providerFor(Scenario.TEXT).stream(request(), target, ctx).toList().last() as StreamChunk.Finished
+        assertTrue(complete.response.usageComplete)
+        assertFalse(providerFor(Scenario.NO_USAGE).invoke(request(), target, ctx).usageComplete)
+        val partial = providerFor(Scenario.NO_USAGE).stream(request(), target, ctx).toList().last() as StreamChunk.Finished
+        assertFalse(partial.response.usageComplete)
     }
 
     @Test fun retryAfterHeaderIsCarriedOnRateLimit() = runTest {

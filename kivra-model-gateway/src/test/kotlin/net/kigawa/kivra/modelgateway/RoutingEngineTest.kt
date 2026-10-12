@@ -96,9 +96,21 @@ class RoutingEngineTest {
         assertTrue(e.route(request()).selected.isEmpty())
     }
 
+    @Test fun unpricedOnlyRouteIsRejectedAsUnknownCost() {
+        val d = engine(listOf(model("nop", "ext", price = null))).route(request())
+        assertTrue(d.selected.isEmpty())
+        assertEquals("UNKNOWN_COST", d.rejection!!.code)
+        assertEquals(ErrorKind.POLICY_DENIED, d.rejection!!.kind)
+    }
+
+    @Test fun missingBudgetPolicyIsRejectedAsPolicyNotBudget() {
+        val d = engine(listOf(model("m", "ext"))).route(request(scopes = listOf("nope")))
+        assertEquals("BUDGET_POLICY_MISSING", d.rejection!!.code)
+    }
+
     @Test fun modelWithoutPriceIsExcludedFailClosed() {
         val d = engine(listOf(model("nop", "ext", price = null))).route(request())
-        assertEquals(ExclusionReason.PRICE_UNKNOWN, d.candidates.single().exclusion)
+        assertEquals(ExclusionReason.UNKNOWN_COST, d.candidates.single().exclusion)
     }
 
     @Test fun budgetExceededRejectsAsBudgetPolicyDenial() {
@@ -139,7 +151,7 @@ class RoutingEngineTest {
 
     @Test fun softBudgetExceededShiftsToCost() {
         val b = BudgetController(mapOf("task" to BudgetLimit(BigDecimal("100"), soft = BigDecimal("0.0001"))))
-        b.reserve("k", listOf("task"), BigDecimal("0.001")); b.commit("k", null)
+        b.reserve("k", listOf("task"), BudgetAmount(BigDecimal("0.001"))); b.commit("k", BudgetAmount(BigDecimal("0.001")))
         val cheap = model("cheap", "ext", tier = QualityTier.C, price = Price(BigDecimal("0.1"), BigDecimal("0.1")))
         val strong = model("strong", "ext", tier = QualityTier.S)
         val d = engine(listOf(strong, cheap), b = b).route(request())

@@ -133,6 +133,7 @@ class AnthropicProvider(
                 requestId = ctx.requestId, attemptId = ctx.attemptId, selected = target.model.ref, message = message,
                 structured = null, finishReason = acc.finishReason, usage = acc.usage, cost = Cost.zero(),
                 latencyMs = (System.nanoTime() - started) / 1_000_000, routingDecisionId = ctx.routingDecisionId,
+                usageComplete = acc.usageComplete,
             ),
         ))
     }
@@ -232,6 +233,7 @@ class AnthropicProvider(
             message = Message(Role.ASSISTANT, parts), structured = structured,
             finishReason = if (structured != null && finish == FinishReason.TOOL_CALL) FinishReason.STOP else finish,
             usage = parseUsage(obj["usage"]), cost = Cost.zero(), latencyMs = latencyMs, routingDecisionId = ctx.routingDecisionId,
+            usageComplete = hasTokens(obj["usage"], "input_tokens") && hasTokens(obj["usage"], "output_tokens"),
         )
     }
 
@@ -242,6 +244,9 @@ class AnthropicProvider(
         "refusal" -> FinishReason.CONTENT_FILTER
         else -> FinishReason.STOP
     }
+
+    private fun hasTokens(u: JsonElement?, key: String): Boolean =
+        ((u as? JsonObject)?.get(key) as? JsonPrimitive)?.longOrNull != null
 
     private fun parseUsage(u: JsonElement?): Usage {
         val o = (u as? JsonObject) ?: return Usage.ZERO
@@ -268,6 +273,10 @@ class AnthropicProvider(
         var usage = Usage.ZERO
         var finishReason = FinishReason.STOP
         var finished = false
+        /** Input and output token counts were both reported (message_start carries input; output may come later). */
+        private var sawInput = false
+        private var sawOutput = false
+        val usageComplete: Boolean get() = finished && sawInput && sawOutput
 
         fun toMessage(): Message {
             val all = ArrayList<Part>()
@@ -280,7 +289,10 @@ class AnthropicProvider(
             val out = ArrayList<StreamChunk>()
             when (ev["type"]?.jsonPrimitive?.contentOrNull) {
                 "message_start" -> {
-                    usage = parseUsage(ev["message"]?.jsonObject?.get("usage"))
+                    val u = ev["message"]?.jsonObject?.get("usage")
+                    usage = parseUsage(u)
+                    sawInput = sawInput || hasTokens(u, "input_tokens")
+                    sawOutput = sawOutput || hasTokens(u, "output_tokens")
                     out.add(StreamChunk.UsageUpdate(usage))
                 }
                 "content_block_start" -> {
@@ -322,6 +334,7 @@ class AnthropicProvider(
                     ev["delta"]?.jsonObject?.get("stop_reason")?.takeIf { it !is JsonNull }?.let { finishReason = mapStop(it.jsonPrimitive.content) }
                     val u = ev["usage"] as? JsonObject
                     if (u != null) {
+                        sawOutput = sawOutput || hasTokens(u, "output_tokens")
                         val outTokens = (u["output_tokens"] as? JsonPrimitive)?.longOrNull ?: usage.outputTokens
                         usage = usage.copy(outputTokens = outTokens)
                         out.add(StreamChunk.UsageUpdate(usage))

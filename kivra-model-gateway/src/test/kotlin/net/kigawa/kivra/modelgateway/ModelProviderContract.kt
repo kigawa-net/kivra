@@ -8,7 +8,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
-enum class Scenario { TEXT, TOOL_CALL, RATE_LIMITED, SERVER_ERROR, UNAUTHORIZED, BAD_REQUEST, NO_CREDENTIAL, CONNECTION_RESET }
+enum class Scenario { TEXT, TOOL_CALL, RATE_LIMITED, SERVER_ERROR, UNAUTHORIZED, BAD_REQUEST, NO_CREDENTIAL, CONNECTION_RESET, NO_USAGE }
 
 /**
  * Adapter conformance suite (acceptance criterion: shared contract tests). Every adapter test class extends this

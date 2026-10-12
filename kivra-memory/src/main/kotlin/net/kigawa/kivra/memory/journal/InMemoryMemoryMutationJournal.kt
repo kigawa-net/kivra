@@ -41,7 +41,8 @@ class InMemoryMemoryMutationJournal(
     }
 
     private fun bind(stored: MutationIntent, incoming: MutationIntent, row: MutationRecord): PrepareResult = when {
-        stored.identity != incoming.identity || stored.requestId != incoming.requestId || stored.kind != incoming.kind ->
+        stored.identity != incoming.identity || stored.requestId != incoming.requestId || stored.kind != incoming.kind ||
+            stored.executionId != incoming.executionId || stored.expectedRevision != incoming.expectedRevision ->
             PrepareResult.Conflict(ConflictCode.IDENTITY_MISMATCH)
         stored.payloadDigest != incoming.payloadDigest -> PrepareResult.Conflict(ConflictCode.DIGEST_MISMATCH)
         else -> PrepareResult.Existing(row)

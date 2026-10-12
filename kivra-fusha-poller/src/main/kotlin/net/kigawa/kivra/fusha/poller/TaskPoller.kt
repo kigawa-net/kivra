@@ -11,6 +11,7 @@ import net.kigawa.kivra.core.TaskProvider
 import net.kigawa.kivra.core.TaskProviderException
 import net.kigawa.kivra.core.TaskSnapshot
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import kotlin.random.Random
 
@@ -84,8 +85,17 @@ class TaskPoller(
     private val _health = MutableStateFlow<PollerHealth>(PollerHealth.Starting)
     val health: StateFlow<PollerHealth> = _health.asStateFlow()
 
-    /** Fail-closed gate for new admissions: true only after a successful poll and while not degraded. */
-    fun admissionAllowed(): Boolean = _health.value is PollerHealth.Healthy
+    /**
+     * Admission requires a RECENT successful poll, not merely the last Healthy state.
+     * If the background loop is stopped or stalled, no new tasks may be admitted forever
+     * based on an old snapshot. Two scheduled intervals plus jitter is the bounded age.
+     */
+    fun admissionAllowed(): Boolean {
+        val healthy = _health.value as? PollerHealth.Healthy ?: return false
+        val age = Duration.between(healthy.lastSuccessAt, clock.instant())
+        val maxAge = config.interval.multipliedBy(2).plus(config.jitter)
+        return !age.isNegative && age <= maxAge
+    }
 
     suspend fun pollOnce(): PollResult {
         val now = clock.instant()

@@ -26,14 +26,15 @@ object FakeProjector {
         return RunSummary(runId, null, progress, attention, completionMode, revision)
     }
 
-    fun replay(state: OperationStatus, verifiedReason: ReplayReason? = null): ReplayEligibility =
-        when {
-            state != OperationStatus.RETRYABLE -> ReplayEligibility(false, ReplayReason.NOT_APPLICABLE)
-            verifiedReason == null -> ReplayEligibility(false, ReplayReason.EVIDENCE_REQUIRED)
-            else -> ReplayEligibility(verifiedReason in setOf(
-                ReplayReason.VERIFIED_NOT_SENT,
-                ReplayReason.AUTHORITATIVE_ABSENCE,
-                ReplayReason.AUTHORITATIVE_IDEMPOTENCY,
-            ), verifiedReason)
-        }
+    /**
+     * Fake data cannot issue an authoritative replay decision. A reason enum is
+     * display metadata, NOT proof. Only a trusted Evidence Authority backed by
+     * an authenticated, subject-bound reference may later enable a real action.
+     * See Kivra #82 and #79. Phase 0 intentionally exposes no command API.
+     */
+    fun replay(state: OperationStatus): ReplayEligibility =
+        if (state == OperationStatus.RETRYABLE)
+            ReplayEligibility(false, ReplayReason.EVIDENCE_REQUIRED)
+        else
+            ReplayEligibility(false, ReplayReason.NOT_APPLICABLE)
 }

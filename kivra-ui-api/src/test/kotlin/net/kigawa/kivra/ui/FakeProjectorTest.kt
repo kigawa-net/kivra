@@ -2,6 +2,7 @@ package net.kigawa.kivra.ui
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import net.kigawa.kivra.core.DevelopmentRunState
@@ -28,6 +29,16 @@ class FakeProjectorTest {
         )
         assertTrue(Attention.RECONCILIATION_REQUIRED in view.attention)
         assertFalse(FakeProjector.replay(OperationStatus.RECONCILIATION_REQUIRED).allowed)
+    }
+
+    @Test
+    fun `phase zero DTO rejects any caller-minted replay approval`() {
+        for (reason in ReplayReason.entries) {
+            assertFailsWith<IllegalArgumentException> {
+                ReplayEligibility(allowed = true, reason = reason)
+            }
+        }
+        assertFalse(ReplayEligibility(false, ReplayReason.VERIFIED_NOT_SENT).allowed)
     }
 
     @Test

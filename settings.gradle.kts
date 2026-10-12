@@ -19,6 +19,7 @@ include(
     "kivra-fusha-poller",
     "kivra-core",
     "kivra-exkes",
+    "kivra-policy",
     "kivra-app",
     "kivra-ui-api",
 )

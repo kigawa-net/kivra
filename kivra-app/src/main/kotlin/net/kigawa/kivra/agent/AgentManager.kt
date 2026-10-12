@@ -28,6 +28,7 @@ import net.kigawa.kivra.exkes.ExecutionSpec
 import net.kigawa.kivra.exkes.ExecutionState
 import net.kigawa.kivra.exkes.KivraNaming
 import net.kigawa.kivra.exkes.PortResult
+import net.kigawa.kivra.exkes.kindCode
 import net.kigawa.kivra.exkes.Runtime
 import net.kigawa.kivra.exkes.RuntimeId
 import net.kigawa.kivra.exkes.RuntimeSpec
@@ -294,7 +295,7 @@ class AgentManager(
                         else -> if (ws.labels.entries.containsAll(runLabels.entries)) Observed.Exists(ws.id.value)
                         else Observed.Undetermined("workspace $name exists with labels ${ws.labels} (not this run's)")
                     }
-                    else -> Observed.Undetermined(r.toString())
+                    else -> Observed.Undetermined(r.kindCode())
                 }
             },
         )
@@ -319,7 +320,7 @@ class AgentManager(
                         1 -> Observed.Exists(r.value.single().id.value)
                         else -> Observed.Undetermined("${r.value.size} runtimes carry labels $labels")
                     }
-                    else -> Observed.Undetermined(r.toString())
+                    else -> Observed.Undetermined(r.kindCode())
                 }
             },
         )
@@ -344,7 +345,7 @@ class AgentManager(
                         1 -> Observed.Exists(r.value.single().id.value)
                         else -> Observed.Undetermined("${r.value.size} executions on runtime ${rt.value}")
                     }
-                    else -> Observed.Undetermined(r.toString())
+                    else -> Observed.Undetermined(r.kindCode())
                 }
             },
         )
@@ -364,7 +365,7 @@ class AgentManager(
                 is PortResult.Ok ->
                     if (r.value.state in setOf(RuntimeState.STOPPING, RuntimeState.STOPPED, RuntimeState.DELETING, RuntimeState.DELETED, RuntimeState.EXPIRED, RuntimeState.FAILED)) Observed.Exists(rt.value)
                     else Observed.Absent(replaySafe = true) // stopping twice is harmless
-                else -> Observed.Undetermined(r.toString())
+                else -> Observed.Undetermined(r.kindCode())
             }
         },
     )
@@ -383,7 +384,7 @@ class AgentManager(
                 is PortResult.Ok ->
                     if (r.value.state == WorkspaceState.DELETING || r.value.state == WorkspaceState.DELETED) Observed.Exists(ws.value)
                     else Observed.Absent(replaySafe = true)
-                else -> Observed.Undetermined(r.toString())
+                else -> Observed.Undetermined(r.kindCode())
             }
         },
     )

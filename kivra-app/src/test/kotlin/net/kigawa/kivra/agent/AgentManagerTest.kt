@@ -231,6 +231,29 @@ class AgentManagerTest {
         }
     }
 
+    @Test
+    fun `provider rejection text and exception text never reach journal, audit, outbox or run state`() = TestDb().use { db ->
+        val secret = "Authorization: Bearer DO-NOT-STORE-REJECT"
+        val port = TestPort().also {
+            it.injectFailure("createWorkspace", afterEffect = false, PortResult.Rejected(400, "VALIDATION_ERROR", secret))
+        }
+        val runId = db.preparingRun()
+        runBlocking { db.manager(port).run(runId, PROFILE) }
+        assertFalse(db.allPersistedText().contains("DO-NOT-STORE-REJECT"), "a provider rejection leaked into persisted state")
+    }
+
+    @Test
+    fun `provider unknown outcome with a secret-bearing cause never reaches persisted state`() = TestDb().use { db ->
+        val secret = "Authorization: Bearer DO-NOT-STORE-CAUSE"
+        val port = TestPort().also {
+            it.injectFailure("createWorkspace", afterEffect = false, PortResult.Unknown("transport failed", IllegalStateException(secret)))
+        }
+        val runId = db.preparingRun()
+        runBlocking { db.manager(port).run(runId, PROFILE) }
+        assertFalse(db.allPersistedText().contains("DO-NOT-STORE-CAUSE"), "a Throwable message leaked into persisted state")
+        assertFalse(PortResult.Unknown("transport failed", IllegalStateException(secret)).toString().contains("DO-NOT-STORE-CAUSE"))
+    }
+
     private fun TestDb.agentsOf(runId: RunId) = AgentRepository(database).agentsOf(runId)
     private fun TestDb.ops(runId: RunId) = journal.listByRun(runId).associateBy { it.opType }
     private fun TestDb.runState(runId: RunId) = runs.get(runId)!!.state

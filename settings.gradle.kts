@@ -16,4 +16,5 @@ rootProject.name = "kivra"
 include(
     "kivra-core",
     "kivra-app",
+    "kivra-observability",
 )

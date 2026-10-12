@@ -117,7 +117,7 @@ fun ExecutionSessionState.leaveUnknownOn(observed: ExecutionSessionState): Execu
  * After a timeout / connection loss / crash the external side effect may already have happened, so an
  * `UNKNOWN` entry must never be re-dispatched on a guess. Its only evidence-free exit is
  * `RECONCILIATION_REQUIRED`. Every way back to a settled state (CONFIRMED / RETRYABLE / FAILED) is listed in
- * [evidenceGated] and is only possible with a persisted [ReconciliationEvidence] (observed external state).
+ * [evidenceGated] and is only possible with a [VerifiedEvidenceRef] that the [TrustedEvidenceAuthority] resolves for this operation.
  */
 enum class OperationStatus : StateMachine<OperationStatus> {
     PREPARED, IN_FLIGHT, UNKNOWN, RETRYABLE, RECONCILIATION_REQUIRED, CONFIRMED, FAILED;
@@ -127,7 +127,7 @@ enum class OperationStatus : StateMachine<OperationStatus> {
      *
      * IN_FLIGHT means the external call may have reached the other side, so there is no evidence-free way out except
      * CONFIRMED (the success response) and UNKNOWN (timeout / connection loss / crash). Leaving IN_FLIGHT for RETRYABLE
-     * needs a [NotSentProof] and for FAILED needs a [RejectedProof]; both are only accepted by the dedicated
+     * needs a verified NOT_SENT ref and for FAILED a verified REJECTED ref; both are only accepted by the dedicated
      * OperationJournalRepository.markNotSent / markRejected APIs, never by the generic transition().
      */
     override val next: Set<OperationStatus>
@@ -140,7 +140,7 @@ enum class OperationStatus : StateMachine<OperationStatus> {
             CONFIRMED, FAILED -> emptySet()
         }
 
-    /** Transitions that additionally require [ReconciliationEvidence] (design #11 section 4.1: "照合で..."). */
+    /** Transitions that additionally require a verified reconciliation ref (design #11 section 4.1: "照合で..."). */
     val evidenceGated: Set<OperationStatus>
         get() = when (this) {
             UNKNOWN -> setOf(CONFIRMED, RETRYABLE, FAILED)
@@ -183,75 +183,6 @@ enum class ProviderCapability {
 }
 
 /**
- * Observation of the real external state, persisted as the reason of a transition out of UNKNOWN /
- * RECONCILIATION_REQUIRED. It is bound to one operation: [runId], [opId] and [requestHash] must match the stored
- * row, and [issuer] must be on the trusted issuer allowlist (checked by the repository). [evidenceRef] points at the
- * artifact (response id, log line, ticket); [observedAt] must not be in the future and must not predate the moment
- * the operation entered its current status.
- */
-data class ReconciliationEvidence(
-    val runId: RunId,
-    val opId: String,
-    val requestHash: String,
-    val issuer: String,
-    val observation: ExternalObservation,
-    val evidenceRef: String,
-    val observedAt: java.time.LocalDateTime,
-    val providerCapability: ProviderCapability,
-) {
-    init {
-        requireProofFields(issuer, evidenceRef)
-    }
-
-    /** Whether this evidence justifies moving an UNKNOWN / RECONCILIATION_REQUIRED entry to [to]. */
-    fun justifies(to: OperationStatus): Boolean = when (to) {
-        OperationStatus.CONFIRMED -> observation == ExternalObservation.EXISTS
-        OperationStatus.FAILED -> observation == ExternalObservation.FAILED_CONFIRMED
-        // Re-dispatch only when the lookup authoritatively establishes absence, or the API deduplicates on our key.
-        // A non-authoritative "not found" (LOOKUP_BY_STABLE_REF, MANUAL_OPERATOR) never justifies RETRYABLE.
-        OperationStatus.RETRYABLE -> observation == ExternalObservation.ABSENT &&
-            (providerCapability == ProviderCapability.AUTHORITATIVE_ABSENCE ||
-                providerCapability == ProviderCapability.AUTHORITATIVE_IDEMPOTENCY)
-        else -> false
-    }
-}
-
-/**
- * Proof that a call was never sent (for example a connection refused before the request left the process).
- * The only way to move IN_FLIGHT -> RETRYABLE. Like [ReconciliationEvidence] it is bound to the operation and must
- * come from an issuer on the trusted allowlist; the repository verifies this, so adapters are the only intended issuers.
- */
-data class NotSentProof(
-    val runId: RunId,
-    val opId: String,
-    val requestHash: String,
-    val issuer: String,
-    val evidenceRef: String,
-    val observedAt: java.time.LocalDateTime,
-) {
-    init {
-        requireProofFields(issuer, evidenceRef)
-    }
-}
-
-/**
- * Proof that the external system explicitly rejected the request (for example a validation error that has no
- * side effect). The only way to move IN_FLIGHT -> FAILED. Same binding and issuer rules as [NotSentProof].
- */
-data class RejectedProof(
-    val runId: RunId,
-    val opId: String,
-    val requestHash: String,
-    val issuer: String,
-    val evidenceRef: String,
-    val observedAt: java.time.LocalDateTime,
-) {
-    init {
-        requireProofFields(issuer, evidenceRef)
-    }
-}
-
-/**
  * Verified GitHub merge result for a PR_ONLY run (`completePrOnlyRun`). Must show `merged == true` for the PR head
  * that the run recorded; a close without merge, a merge of another head, or an unknown result never completes the run.
  */
@@ -268,11 +199,6 @@ data class PrMergeEvidence(
     init {
         requireProofFields(issuer, evidenceRef)
     }
-}
-
-/** Issuers whose evidence / proofs are accepted. Adapters only; a human decision uses the `operator-console` issuer. */
-object TrustedEvidenceIssuers {
-    val DEFAULT: Set<String> = setOf("exkes-adapter", "fusha-task-adapter", "github-adapter", "operator-console")
 }
 
 private fun requireProofFields(issuer: String, evidenceRef: String) {

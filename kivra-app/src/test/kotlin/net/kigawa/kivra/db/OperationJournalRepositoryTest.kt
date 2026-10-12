@@ -124,6 +124,26 @@ class OperationJournalRepositoryTest {
     }
 
     @Test
+    fun `idempotent prepare refuses cross-tenant or provider-contract rebind even with matching digest`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val original = db.journal.prepare(lease, op())
+        val mismatches = listOf(
+            op().copy(tenantId = "tenant-2"),
+            op().copy(providerContractVersion = "2026-02"),
+            op().copy(externalSystem = "OTHER_PROVIDER"),
+            op().copy(stableRef = "other-workspace"),
+        )
+        for (changed in mismatches) {
+            assertFailsWith<OperationBindingMismatchException> { db.journal.prepare(lease, changed) }
+        }
+        val adopted = db.journal.prepare(lease, op())
+        assertEquals(original.opId, adopted.opId)
+        assertEquals(original.tenantId, adopted.tenantId)
+        assertEquals(original.providerContractVersion, adopted.providerContractVersion)
+        assertEquals(1, db.count("external_operations"))
+    }
+
+    @Test
     fun `the database enforces uniqueness of run, type and idempotency key`() = TestDb().use { db ->
         val lease = db.leasedRun()
         val entry = db.journal.prepare(lease, op())

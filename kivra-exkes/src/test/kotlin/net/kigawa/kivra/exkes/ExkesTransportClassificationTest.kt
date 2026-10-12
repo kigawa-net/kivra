@@ -50,7 +50,7 @@ class ExkesTransportClassificationTest {
         val filler = List(4) { java.net.Socket().apply { runCatching { connect(java.net.InetSocketAddress("127.0.0.1", server.localPort), 200) } } }
         try {
             val r = adapter("http://127.0.0.1:${server.localPort}", connect = 300.milliseconds).stopRuntime(runtime)
-            assertIs<PortResult.Transient>(r, "connect timeout on a POST: $r cause=${(r as? PortResult.Unknown)?.cause?.javaClass}")
+            assertIs<PortResult.Transient>(r, "connect timeout on a POST: ${r.kindCode()}")
         } finally {
             filler.forEach { it.close() }
             server.close()

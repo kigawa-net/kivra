@@ -39,20 +39,43 @@ data class GitHubAdapterConfig(
     val trustedApiHosts: Set<String> = setOf("api.github.com"),
 ) {
     init {
+        // Messages are fixed strings and the URI parse failure is not chained: both could echo the configured URL.
         val uri = try {
             java.net.URI(apiBase)
-        } catch (e: Exception) {
-            throw IllegalArgumentException("invalid GitHub API base URL", e)
+        } catch (_: Exception) {
+            throw IllegalArgumentException("invalid GitHub API base URL")
         }
         require(uri.scheme.equals("https", ignoreCase = true) && !uri.isOpaque &&
             uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null) {
             "GitHub API base URL must be HTTPS without credentials, query or fragment"
         }
-        require(uri.host != null && uri.host.lowercase() in trustedApiHosts.map { it.lowercase() }) {
+        require(uri.port == -1 || uri.port == 443) { "GitHub API base URL must use the default HTTPS port" }
+        val host = uri.host?.lowercase()
+        require(host != null && isPublicDnsName(host)) {
+            "GitHub API host must be a DNS name (no IP literal, localhost or internal name)"
+        }
+        require(host in trustedApiHosts.map { it.lowercase() }) {
             "GitHub API endpoint is not in the approved host allowlist"
         }
-        require(uri.rawPath.orEmpty().split('/').none { it == "." || it == ".." }) {
+        require(trustedApiHosts.all { isPublicDnsName(it.lowercase()) }) {
+            "trusted API host allowlist entries must be DNS names"
+        }
+        require(uri.rawPath.orEmpty().split('/').none { it == "." || it == ".." || it.contains('\\') }) {
             "GitHub API URL must not contain path traversal"
+        }
+    }
+
+    private companion object {
+        private val IPV4 = Regex("""\d{1,3}(\.\d{1,3}){3}""")
+
+        /** Accepts a multi-label DNS name only; rejects IP literals (v4/v6), single-label and local/internal names. */
+        fun isPublicDnsName(h: String): Boolean {
+            if (h.isEmpty() || h.contains(':') || h.startsWith('[') || IPV4.matches(h)) return false
+            if (!h.contains('.') || h.endsWith('.')) return false
+            if (h == "localhost" || h.endsWith(".localhost") || h.endsWith(".local") ||
+                h.endsWith(".internal") || h.endsWith(".localdomain") || h.endsWith(".lan")
+            ) return false
+            return h.split('.').all { it.isNotEmpty() && it.all { c -> c.isLetterOrDigit() || c == '-' } }
         }
     }
 }
@@ -141,7 +164,8 @@ class HttpGitHubAdapter(
             is Transport.Error -> GitHubResult.Unknown(operation, t.message)
             is Transport.Ok -> when {
                 t.raw.status in 200..299 -> GitHubResult.Success(t.raw)
-                t.raw.status >= 500 -> GitHubResult.Unknown(operation, "HTTP ${t.raw.status}")
+                // The server received the POST but we did not follow the redirect: the outcome is unknown.
+                t.raw.status >= 500 || t.raw.status in 300..399 -> GitHubResult.Unknown(operation, "HTTP ${t.raw.status}")
                 else -> {
                     if (t.raw.status == 401) tokens.invalidate()
                     classify(t.raw)
@@ -149,25 +173,30 @@ class HttpGitHubAdapter(
             }
         }
 
+    /**
+     * Maps a non-2xx response to a fixed machine-readable code. The provider's body (`message`, raw text) is read only
+     * for classification and is never copied into the result, logs or audit.
+     */
     private fun classify(r: Raw): GitHubResult.Failure {
-        val message = runCatching { json.parseToJsonElement(r.body).jsonObject["message"]?.jsonPrimitive?.contentOrNull }.getOrNull()
-            ?: r.body.take(200)
+        val providerText = runCatching { json.parseToJsonElement(r.body).jsonObject["message"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+            .orEmpty()
         val retryAfter = r.headers["retry-after"]?.toLongOrNull()
             ?: r.headers["x-ratelimit-reset"]?.toLongOrNull()?.let { (it - System.currentTimeMillis() / 1000).coerceAtLeast(0) }
         val rateLimited = r.status == 429 ||
             (r.status == 403 && (r.headers["x-ratelimit-remaining"] == "0" || r.headers.containsKey("retry-after") ||
-                message.contains("rate limit", ignoreCase = true)))
+                providerText.contains("rate limit", ignoreCase = true)))
         val kind = when {
             rateLimited -> GitHubFailureKind.RATE_LIMITED
+            r.status in 300..399 -> GitHubFailureKind.REDIRECT
             r.status == 401 -> GitHubFailureKind.AUTH
             r.status == 403 -> GitHubFailureKind.PERMISSION
             r.status == 404 -> GitHubFailureKind.NOT_FOUND
             r.status == 409 -> GitHubFailureKind.CONFLICT
-            r.status == 422 && message.contains("already exists", ignoreCase = true) -> GitHubFailureKind.CONFLICT
+            r.status == 422 && providerText.contains("already exists", ignoreCase = true) -> GitHubFailureKind.CONFLICT
             r.status >= 500 -> GitHubFailureKind.SERVER_ERROR
             else -> GitHubFailureKind.VALIDATION
         }
-        return GitHubResult.Failure(kind, message, r.status, if (kind == GitHubFailureKind.RATE_LIMITED) retryAfter else null)
+        return GitHubResult.Failure(kind, kind.code, r.status, if (kind == GitHubFailureKind.RATE_LIMITED) retryAfter else null)
     }
 
     // ---- parsing / identity verification ----
@@ -176,7 +205,8 @@ class HttpGitHubAdapter(
 
     private fun protocol(what: String) = GitHubResult.Failure(GitHubFailureKind.PROTOCOL, "unexpected response shape: $what")
 
-    private fun mismatch(what: String) = GitHubResult.Failure(GitHubFailureKind.IDENTITY_MISMATCH, what)
+    /** Response disagrees with the request. The response-derived detail is deliberately not kept. */
+    private fun mismatch() = GitHubResult.Failure(GitHubFailureKind.IDENTITY_MISMATCH, GitHubFailureKind.IDENTITY_MISMATCH.code)
 
     private fun JsonObject.str(vararg path: String): String? {
         var cur: JsonElement = this
@@ -201,7 +231,7 @@ class HttpGitHubAdapter(
     private fun parseBranchRef(repo: RepoRef, branch: String, raw: Raw): GitHubResult<BranchInfo> {
         val o = parse(raw) as? JsonObject ?: return protocol("ref")
         val ref = o.str("ref") ?: return protocol("ref.ref")
-        if (ref != "refs/heads/$branch") return mismatch("requested branch $branch but response is $ref")
+        if (ref != "refs/heads/$branch") return mismatch()
         val sha = o.str("object", "sha")?.takeIf { sha40.matches(it) } ?: return protocol("ref.object.sha")
         return GitHubResult.Success(BranchInfo(repo, branch, sha))
     }
@@ -212,7 +242,7 @@ class HttpGitHubAdapter(
         val headSha = o.str("head", "sha")?.takeIf { sha40.matches(it) } ?: return protocol("pr.head.sha")
         val baseRef = o.str("base", "ref") ?: return protocol("pr.base.ref")
         val baseRepo = o.str("base", "repo", "full_name") ?: return protocol("pr.base.repo.full_name")
-        if (!sameRepo(baseRepo, repo)) return mismatch("requested repo $repo but PR belongs to $baseRepo")
+        if (!sameRepo(baseRepo, repo)) return mismatch()
         val state = when (o.str("state")) {
             "open" -> PullRequestState.OPEN
             "closed" -> PullRequestState.CLOSED
@@ -259,7 +289,7 @@ class HttpGitHubAdapter(
         return when (val r = post("createBranch", "${repoPath(repo)}/git/refs", body)) {
             is GitHubResult.Success -> parseBranchRef(repo, branch, r.value).let { res ->
                 // The new ref must point at the requested base.
-                if (res is GitHubResult.Success && res.value.headSha != baseSha) mismatch("created branch sha ${res.value.headSha} != requested $baseSha") else res
+                if (res is GitHubResult.Success && res.value.headSha != baseSha) mismatch() else res
             }
             is GitHubResult.Failure -> r
             is GitHubResult.Unknown -> r
@@ -312,7 +342,7 @@ class HttpGitHubAdapter(
                 val o = parse(r.value) as? JsonObject ?: return protocol("pr")
                 when (val pr = parsePr(repo, o)) {
                     is GitHubResult.Success ->
-                        if (pr.value.headRef != request.head) mismatch("requested head ${request.head} but PR head is ${pr.value.headRef}") else pr
+                        if (pr.value.headRef != request.head) mismatch() else pr
                     else -> pr
                 }
             }
@@ -325,7 +355,7 @@ class HttpGitHubAdapter(
         when (val r = get("${repoPath(repo)}/pulls/$number")) {
             is GitHubResult.Success -> {
                 val o = parse(r.value) as? JsonObject ?: return protocol("pr")
-                if (o.long("number")?.toInt() != number) mismatch("requested PR #$number but response is #${o.long("number")}")
+                if (o.long("number")?.toInt() != number) mismatch()
                 else parsePr(repo, o)
             }
             is GitHubResult.Failure -> r
@@ -352,7 +382,7 @@ class HttpGitHubAdapter(
                 }
                 // GitHub ignores a malformed head filter and returns everything: verify, never trust the filter.
                 if (pr.headRef != headBranch || !sameRepo(o.str("head", "repo", "full_name"), repo)) {
-                    return mismatch("PR #${pr.number} head ${o.str("head", "label")} does not match requested $repo:$headBranch")
+                    return mismatch()
                 }
                 out += pr
             }
@@ -425,7 +455,7 @@ class HttpGitHubAdapter(
             for (el in arr) {
                 val c = el as? JsonObject ?: return protocol("check run")
                 val headSha = c.str("head_sha") ?: return protocol("head_sha")
-                if (headSha != sha) return mismatch("requested sha $sha but check run ${c.long("id")} is for $headSha")
+                if (headSha != sha) return mismatch()
                 runs += CheckRun(
                     id = c.long("id") ?: return protocol("check id"),
                     name = c.str("name") ?: return protocol("check name"),
@@ -460,8 +490,8 @@ class HttpGitHubAdapter(
         }
         val o = parse(raw) as? JsonObject ?: return protocol("status")
         val respSha = o.str("sha") ?: return protocol("status.sha")
-        if (respSha != sha) return mismatch("requested sha $sha but status is for $respSha")
-        if (!sameRepo(o.str("repository", "full_name"), repo)) return mismatch("status belongs to ${o.str("repository", "full_name")}, requested $repo")
+        if (respSha != sha) return mismatch()
+        if (!sameRepo(o.str("repository", "full_name"), repo)) return mismatch()
         val contexts = (o["statuses"] as? JsonArray)?.associate {
             val s = it.jsonObject
             (s.str("context") ?: return protocol("status context")) to (s.str("state") ?: return protocol("status state"))
@@ -483,7 +513,7 @@ class HttpGitHubAdapter(
                 // pull_request_url ends with /repos/{owner}/{repo}/pulls/{number}: verify the target.
                 val url = o.str("pull_request_url")
                 if (url != null && !url.endsWith("/repos/${repo.owner}/${repo.repo}/pulls/$number", ignoreCase = true)) {
-                    return mismatch("requested $repo#$number but review belongs to $url")
+                    return mismatch()
                 }
                 out += Review(
                     id = o.long("id") ?: return protocol("review id"),

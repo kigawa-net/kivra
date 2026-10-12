@@ -156,6 +156,15 @@ enum class GitHubFailureKind {
     FOREIGN_OBJECT,
     /** Response body unparseable. */
     PROTOCOL,
+    /**
+     * 3xx. Redirects are never followed (a bearer token must not reach another origin). On a POST this is
+     * reported as [GitHubResult.Unknown] instead, because the server did receive the request.
+     */
+    REDIRECT,
+    ;
+
+    /** Fixed machine-readable code stored in [GitHubResult.Failure.message]. Never provider text. */
+    val code: String get() = "GITHUB_$name"
 }
 
 sealed interface GitHubResult<out T> {

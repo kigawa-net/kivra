@@ -387,6 +387,66 @@ class HttpGitHubAdapterTest {
     }
 
     @Test
+    fun `API origin rejects IP literals local names non-default ports and bad allowlist entries`() {
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://127.0.0.1") }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://[::1]/api", trustedApiHosts = setOf("[::1]")) }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://localhost", trustedApiHosts = setOf("localhost")) }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://ghe.internal", trustedApiHosts = setOf("ghe.internal")) }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://intranet", trustedApiHosts = setOf("intranet")) }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://api.github.com:8443") }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://10.0.0.5", trustedApiHosts = setOf("10.0.0.5")) }
+        // The allowlist must not add an IP literal even when the apiBase host matches it.
+        assertFailsWithIllegalArgument {
+            GitHubAdapterConfig(apiBase = "https://api.github.com", trustedApiHosts = setOf("api.github.com", "192.168.1.1"))
+        }
+        // A configured URL must not be echoed in the startup exception.
+        val bad = "https://user:SECRET-PASS@api.github.com/?token=SECRET-QUERY"
+        val ex = try { GitHubAdapterConfig(apiBase = bad); null } catch (e: IllegalArgumentException) { e }
+        assertNotNull(ex)
+        assertFalse(ex.toString().contains("SECRET"))
+        assertNull(ex.cause)
+    }
+
+    @Test
+    fun `provider response body and bearer token never appear in failure results`() = runTest {
+        val secretBody = """{"message":"bad Bearer tok1 leaked-body-text https://evil.example/x"}"""
+        val f = Fake { respond(secretBody, HttpStatusCode.Forbidden, JSON_H) }
+        val r = assertIs<GitHubResult.Failure>(f.adapter.getPullRequest(REPO, 7))
+        assertEquals(GitHubFailureKind.PERMISSION, r.kind)
+        assertEquals("GITHUB_PERMISSION", r.message)
+        assertFalse(r.toString().contains("tok1"))
+        assertFalse(r.toString().contains("leaked-body-text"))
+        assertFalse(r.toString().contains("evil.example"))
+    }
+
+    @Test
+    fun `response-derived mismatch details are not copied into results`() = runTest {
+        val f = Fake { respond(prJson(repo = "attacker/repo"), HttpStatusCode.OK, JSON_H) }
+        val r = assertIs<GitHubResult.Failure>(f.adapter.getPullRequest(REPO, 7))
+        assertEquals(GitHubFailureKind.IDENTITY_MISMATCH, r.kind)
+        assertEquals("GITHUB_IDENTITY_MISMATCH", r.message)
+        assertFalse(r.toString().contains("attacker"))
+    }
+
+    @Test
+    fun `GET redirect is a REDIRECT failure and is not followed`() = runTest {
+        val f = Fake { respond("", HttpStatusCode.TemporaryRedirect, headersOf(HttpHeaders.Location, "https://evil.example/")) }
+        val r = assertIs<GitHubResult.Failure>(f.adapter.getBranch(REPO, "main"))
+        assertEquals(GitHubFailureKind.REDIRECT, r.kind)
+        assertEquals(1, f.requests.size)
+    }
+
+    @Test
+    fun `POST redirect is Unknown and never re-sent`() = runTest {
+        for (status in listOf(HttpStatusCode.Found, HttpStatusCode.TemporaryRedirect, HttpStatusCode.PermanentRedirect)) {
+            val f = Fake { respond("", status, headersOf(HttpHeaders.Location, "https://evil.example/")) }
+            assertIs<GitHubResult.Unknown>(f.adapter.createBranch(REPO, "kivra/run-r1", SHA))
+            assertEquals(1, f.count(HttpMethod.Post), "status $status")
+            assertEquals(1, f.requests.size, "status $status")
+        }
+    }
+
+    @Test
     fun `rsa signer produces a three part jwt`() {
         val kp = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
         val pem = "-----BEGIN PRIVATE KEY-----\n" + java.util.Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(kp.private.encoded) + "\n-----END PRIVATE KEY-----"

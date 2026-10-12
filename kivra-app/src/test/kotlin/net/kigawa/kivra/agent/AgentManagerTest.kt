@@ -5,6 +5,7 @@ import java.time.LocalDateTime
 import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -204,7 +205,8 @@ class AgentManagerTest {
     }
 
     @Test
-    fun `untrusted provider and lookup exceptions never enter the durable operation journal`() = TestDb().use { db ->
+    fun `untrusted provider and lookup exceptions never enter the durable operation journal`() {
+        TestDb().use { db ->
         val runId = db.preparingRun()
         val lease = db.leases.acquire(runId, "error-redaction-test", Duration.ofSeconds(30))!!
         val secret = "Authorization: Bearer DO-NOT-STORE-THIS"
@@ -226,6 +228,7 @@ class AgentManagerTest {
         assertEquals(OperationStatus.RECONCILIATION_REQUIRED, journalRow.status)
         assertEquals("PROVIDER_LOOKUP_UNDETERMINED", journalRow.lastError)
         assertFalse(journalRow.lastError?.contains("DO-NOT-STORE-THIS") == true)
+        }
     }
 
     private fun TestDb.agentsOf(runId: RunId) = AgentRepository(database).agentsOf(runId)

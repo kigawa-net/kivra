@@ -95,16 +95,33 @@ data class ContextBundle(
         )
 
         /**
-         * Minimal assembly (the real Context Assembler is a later milestone): drops entries above
-         * [maxSensitivity] (counted in `omitted`) and flags degraded recall with `MEMORY_UNAVAILABLE`.
+         * Minimal assembly (the real Context Assembler is a later milestone). The provider's result is NOT trusted:
+         * every entry is re-verified against [ctx] here (scope ACL, ACTIVE status, sensitivity cap). Anything that
+         * fails is dropped fail-closed and only counted in `omitted`. Degraded recall is flagged `MEMORY_UNAVAILABLE`.
          */
         fun from(ctx: AccessContext, recall: RecallResult, maxSensitivity: Sensitivity = Sensitivity.INTERNAL, bundleId: String = UUID.randomUUID().toString()): ContextBundle {
-            val (ok, tooSensitive) = recall.entries.partition { it.sensitivity <= maxSensitivity }
+            val ok = ArrayList<MemoryEntry>()
+            var unauthorized = 0
+            var stale = 0
+            var tooSensitive = 0
+            for (e in recall.entries) {
+                when {
+                    !ctx.permitsEntry(e) -> unauthorized++
+                    e.status != MemoryStatus.ACTIVE -> stale++
+                    e.sensitivity > maxSensitivity -> tooSensitive++
+                    else -> ok += e
+                }
+            }
+            val omitted = buildList {
+                if (tooSensitive > 0) add(Omitted(OmitReason.SENSITIVITY, tooSensitive))
+                if (stale > 0) add(Omitted(OmitReason.STALE, stale))
+                if (unauthorized > 0) add(Omitted(OmitReason.UNAUTHORIZED, unauthorized))
+            }
             return ContextBundle(
                 bundleId = bundleId, traceId = ctx.traceId, executionId = ctx.executionId, taskId = ctx.taskId,
                 maxSensitivity = maxSensitivity,
                 sections = if (ok.isEmpty()) emptyList() else listOf(ContextSection("memory", ok.map(::item))),
-                omitted = if (tooSensitive.isEmpty()) emptyList() else listOf(Omitted(OmitReason.SENSITIVITY, tooSensitive.size)),
+                omitted = omitted,
                 warnings = recall.warnings,
             )
         }
@@ -115,10 +132,18 @@ data class ContextBundle(
 data class HandoffResolution(val entries: List<MemoryEntry>, val unauthorizedOrMissing: Int)
 
 /**
+ * True only when the entry has at least one scope and EVERY scope is within [AccessContext.allowedScopes].
+ * A multi-scope entry that reaches outside the caller's permission is refused as a whole.
+ */
+internal fun AccessContext.permitsEntry(e: MemoryEntry): Boolean = e.scope.isNotEmpty() && e.scope.all(::permits)
+
+/**
  * Handoffs carry references only; the receiver re-fetches with its own [AccessContext] and inherits nothing from
- * the sender (design #6 section 5.4). Identity is verified: a response for a different id is dropped.
+ * the sender (design #6 section 5.4). A handoff is bound to its receiver ([HandoffRecord.toExecutionId]): any other
+ * execution is refused outright. Identity is verified: a response for a different id is dropped.
  */
 suspend fun MemoryProvider.resolveHandoff(handoff: HandoffRecord, ctx: AccessContext): HandoffResolution {
+    if (handoff.toExecutionId != ctx.executionId) return HandoffResolution(emptyList(), handoff.memoryRefs.size)
     var missing = 0
     val out = ArrayList<MemoryEntry>()
     for (ref in handoff.memoryRefs) {
@@ -127,7 +152,7 @@ suspend fun MemoryProvider.resolveHandoff(handoff: HandoffRecord, ctx: AccessCon
         } catch (ex: MemoryException) {
             null
         }
-        if (e == null || e.id != ref.memoryId || e.status != MemoryStatus.ACTIVE || e.scope.none { ctx.permits(it) }) missing++ else out += e
+        if (e == null || e.id != ref.memoryId || e.status != MemoryStatus.ACTIVE || !ctx.permitsEntry(e)) missing++ else out += e
     }
     return HandoffResolution(out, missing)
 }

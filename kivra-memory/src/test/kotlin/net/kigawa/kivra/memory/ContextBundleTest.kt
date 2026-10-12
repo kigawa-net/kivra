@@ -49,6 +49,38 @@ class ContextBundleTest {
     }
 
     @Test
+    fun `entries outside the caller's scope are dropped even when the provider returned them`() = runTest {
+        val inTenant = recall("jdk in-project note").entries.single()
+        val foreign = inTenant.copy(summary = "cross-tenant text", scope = listOf(ScopeRef.project("t2", "other")))
+        val mixed = inTenant.copy(summary = "mixed-scope text", scope = listOf(T.project, ScopeRef.project("t2", "other")))
+        val empty = inTenant.copy(summary = "unscoped text", scope = emptyList())
+        val b = ContextBundle.from(ctx, RecallResult(listOf(foreign, mixed, empty, inTenant), false))
+        assertEquals(listOf(inTenant.id), b.sections.single().items.map { it.citationId.memoryId })
+        assertEquals(listOf(Omitted(OmitReason.UNAUTHORIZED, 3)), b.omitted)
+        val out = b.render()
+        assertFalse(out.contains("cross-tenant text"))
+        assertFalse(out.contains("mixed-scope text"))
+        assertFalse(out.contains("unscoped text"))
+    }
+
+    @Test
+    fun `a provider injecting another tenant's memory cannot leak it into the bundle`() = runTest {
+        val tenantB = T.ctx(T.otherTenant)
+        val store = FakeMemoryPort()
+        store.save(T.entry(scope = T.otherTenant, summary = "tenant-b secret note"), T.key("b"), tenantB)
+        // a faulty / replaced Provider ignores the caller's scope and returns tenant B's INTERNAL memory
+        val leaky = object : MemoryProvider by store {
+            override suspend fun search(q: MemoryQuery, ctx: AccessContext): List<MemoryHit> =
+                store.search(MemoryQuery("tenant-b", listOf(T.otherTenant)), tenantB)
+        }
+        val recalled = MemoryService(leaky).recall(MemoryQuery("jdk", listOf(T.project)), ctx)
+        val b = ContextBundle.from(ctx, recalled)
+        assertTrue(b.sections.isEmpty())
+        assertEquals(listOf(Omitted(OmitReason.UNAUTHORIZED, 1)), b.omitted)
+        assertFalse(b.render().contains("tenant-b secret note"))
+    }
+
+    @Test
     fun `degraded recall yields an empty bundle with an explicit warning`() {
         val b = ContextBundle.from(ctx, RecallResult.degraded())
         assertTrue(b.sections.isEmpty())

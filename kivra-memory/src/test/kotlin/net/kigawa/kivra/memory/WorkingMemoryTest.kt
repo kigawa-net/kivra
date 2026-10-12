@@ -8,6 +8,7 @@ import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 class MutableClock(var now: Instant) : Clock() {
@@ -50,10 +51,31 @@ class WorkingMemoryTest {
     @Test
     fun `handoff carries references and expires`() = runTest {
         wm.putHandoff(handoff())
-        val got = wm.getHandoff("h1")!!
+        val got = wm.getHandoff("h1", T.ctx(T.project, exec = "exec-2"))!!
         assertEquals(listOf(CitationId.of(MemoryId("m1"), 1)), got.memoryRefs)
         clock.advance(Duration.ofHours(2))
-        assertNull(wm.getHandoff("h1"))
+        assertNull(wm.getHandoff("h1", T.ctx(T.project, exec = "exec-2")))
+    }
+
+    @Test
+    fun `handoff is refused to any execution other than its bound receiver`() = runTest {
+        wm.putHandoff(handoff()) // to exec-2, from exec-1
+        // another attempt in the same project (not the receiver) must not see goal/doneSummary/artifacts
+        assertNull(wm.getHandoff("h1", T.ctx(T.project, exec = "exec-3")))
+        // the sender is not the receiver either
+        assertNull(wm.getHandoff("h1", T.ctx(T.project, exec = "exec-1")))
+        assertNotNull(wm.getHandoff("h1", T.ctx(T.project, exec = "exec-2")))
+    }
+
+    @Test
+    fun `resolveHandoff refuses a handoff object presented by another execution`() = runTest {
+        val fake = FakeMemoryPort(clock)
+        val id = fake.save(T.entry(), T.key("k"), T.ctx(T.project))
+        val h = handoff().copy(memoryRefs = listOf(CitationId.of(id, 1)))
+        // exec-3 holds the record object (e.g. leaked from logs or a shared store) but is not the receiver
+        val other = fake.resolveHandoff(h, T.ctx(T.project, exec = "exec-3"))
+        assertEquals(0, other.entries.size)
+        assertEquals(1, other.unauthorizedOrMissing)
     }
 
     @Test
@@ -103,6 +125,6 @@ class WorkingMemoryTest {
                 FakeMemoryPort().also { it.save(T.entry(), T.key("k"), ctx) }.get(MemoryId("mem-1"), ctx)
         }
         val h = handoff().copy(memoryRefs = listOf(CitationId.of(MemoryId("not-mem-1"), 1)))
-        assertEquals(1, wrong.resolveHandoff(h, T.ctx(T.project)).unauthorizedOrMissing)
+        assertEquals(1, wrong.resolveHandoff(h, T.ctx(T.project, exec = "exec-2")).unauthorizedOrMissing)
     }
 }

@@ -154,7 +154,8 @@ class MemoryService(
                 return RememberOutcome.Saved(provider.save(entry, key, ctx))
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: MemoryException) {
+            } catch (ex: Exception) {
+                val e = asMemoryException(ex)
                 when (e.kind) {
                     MemoryErrorKind.UNAVAILABLE -> onFailure()
                     MemoryErrorKind.OUTCOME_UNKNOWN -> {
@@ -204,7 +205,8 @@ class MemoryService(
                 audit.record(MemoryAuditEvent(MemoryAuditType.WRITE_FLUSHED, w.ctx.executionId, w.ctx.traceId, mapOf("key" to w.key.value)))
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: MemoryException) {
+            } catch (ex: Exception) {
+                val e = asMemoryException(ex)
                 if (e.kind == MemoryErrorKind.UNAVAILABLE ||
                     (e.kind == MemoryErrorKind.OUTCOME_UNKNOWN && MemoryCapability.IDEMPOTENT_SAVE in provider.capabilities)
                 ) {
@@ -228,6 +230,14 @@ class MemoryService(
 
     private companion object {
         val TRANSPORT_FAILURES = setOf(MemoryErrorKind.UNAVAILABLE, MemoryErrorKind.OUTCOME_UNKNOWN, MemoryErrorKind.PROTOCOL)
+
+        /**
+         * A write that failed with an unexpected exception may or may not have been applied, so it is classified as
+         * an ambiguous outcome (never blindly re-sent unless the provider is idempotent). The message carries only the
+         * exception class name, never content.
+         */
+        fun asMemoryException(e: Exception): MemoryException =
+            e as? MemoryException ?: MemoryException(MemoryErrorKind.OUTCOME_UNKNOWN, "unexpected provider failure (${e.javaClass.simpleName})", e)
     }
 }
 

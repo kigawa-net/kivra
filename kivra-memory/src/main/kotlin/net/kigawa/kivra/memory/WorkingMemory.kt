@@ -13,7 +13,8 @@ import java.time.Instant
 data class HandoffRecord(
     val handoffId: String,
     val fromExecutionId: String,
-    val toExecutionId: String? = null,
+    /** The receiver this handoff is bound to. Only this execution may read the handoff (fail-closed). */
+    val toExecutionId: String,
     val taskId: String,
     val createdAt: Instant,
     val ttl: Duration,
@@ -26,7 +27,7 @@ data class HandoffRecord(
     val checkpointRef: String? = null,
 ) {
     init {
-        require(handoffId.isNotBlank() && fromExecutionId.isNotBlank() && taskId.isNotBlank()) { "ids must not be blank" }
+        require(handoffId.isNotBlank() && fromExecutionId.isNotBlank() && toExecutionId.isNotBlank() && taskId.isNotBlank()) { "ids must not be blank" }
         require(!ttl.isNegative && !ttl.isZero && ttl <= MAX_TTL) { "ttl must be within (0, 7d]" }
         require(goal.isNotBlank()) { "goal required" }
         require(memoryRefs.size <= 100 && artifactRefs.size <= 100 && openQuestions.size <= 100 && constraints.size <= 100) { "too many entries" }
@@ -53,7 +54,9 @@ interface WorkingMemoryStore {
     suspend fun put(executionId: String, key: String, value: String)
     suspend fun get(executionId: String, key: String): String?
     suspend fun putHandoff(record: HandoffRecord)
-    suspend fun getHandoff(handoffId: String): HandoffRecord?
+
+    /** Returns the handoff only when [AccessContext.executionId] is its bound receiver; otherwise `null`. */
+    suspend fun getHandoff(handoffId: String, ctx: AccessContext): HandoffRecord?
 
     /** Starts the retention window: 24h after success, 7d after failure (kept for investigation). */
     suspend fun finish(executionId: String, failed: Boolean)
@@ -109,8 +112,8 @@ class InMemoryWorkingMemory(
         mutex.withLock { handoffs[record.handoffId] = record }
     }
 
-    override suspend fun getHandoff(handoffId: String): HandoffRecord? = mutex.withLock {
-        handoffs[handoffId]?.takeIf { it.expiresAt.isAfter(clock.instant()) }
+    override suspend fun getHandoff(handoffId: String, ctx: AccessContext): HandoffRecord? = mutex.withLock {
+        handoffs[handoffId]?.takeIf { it.toExecutionId == ctx.executionId && it.expiresAt.isAfter(clock.instant()) }
     }
 
     override suspend fun finish(executionId: String, failed: Boolean) {

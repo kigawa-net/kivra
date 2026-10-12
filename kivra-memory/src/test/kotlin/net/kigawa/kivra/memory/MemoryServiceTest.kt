@@ -1,10 +1,13 @@
 package net.kigawa.kivra.memory
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.runTest
+import net.kigawa.kivra.core.IdempotencyKey
 import java.time.Duration
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
@@ -50,6 +53,40 @@ class MemoryServiceTest {
             override suspend fun search(q: MemoryQuery, ctx: AccessContext): List<MemoryHit> = error("boom")
         }
         assertTrue(service(buggy).recall(q, ctx).degraded)
+    }
+
+    /** A provider whose writes fail with an exception the adapter did not anticipate; it does not claim idempotency. */
+    private fun unexpectedWriteFailure(e: Throwable) = object : MemoryProvider by fake {
+        override val capabilities: Set<MemoryCapability> get() = emptySet()
+        override suspend fun save(e2: NewMemoryEntry, key: IdempotencyKey, ctx: AccessContext): MemoryId = throw e
+    }
+
+    @Test
+    fun `unexpected exceptions on writes are an ambiguous outcome and never crash the core`() = runTest {
+        val outcome = service(unexpectedWriteFailure(IllegalStateException("boom"))).remember(T.entry(), ctx)
+        assertEquals(RememberOutcome.Rejected(MemoryErrorKind.OUTCOME_UNKNOWN), outcome)
+        val last = events.last()
+        assertEquals(MemoryAuditType.WRITE_DROPPED_AMBIGUOUS, last.type)
+        // audit carries ids and kinds only, never content
+        assertFalse(last.detail.values.any { it.contains("Build kivra") || it.contains("boom") })
+    }
+
+    @Test
+    fun `unexpected exceptions during flush drop the write as ambiguous without throwing`() = runTest {
+        val queue = InMemoryWriteQueue()
+        fake.failure = down
+        service(fake, queue).remember(T.entry(), ctx)
+        fake.failure = null
+        val report = service(unexpectedWriteFailure(IllegalStateException("boom")), queue).flush()
+        assertEquals(1, report.dropped)
+        assertEquals(0, queue.size())
+    }
+
+    @Test
+    fun `cancellation is never swallowed by the degradation layer`() = runTest {
+        assertFailsWith<CancellationException> {
+            service(unexpectedWriteFailure(CancellationException("cancelled"))).remember(T.entry(), ctx)
+        }
     }
 
     @Test

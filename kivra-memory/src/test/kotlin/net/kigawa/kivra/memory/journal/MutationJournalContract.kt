@@ -67,6 +67,23 @@ abstract class MutationJournalContract {
     }
 
     @Test
+    fun `same operation cannot adopt another execution or expected content revision`() = runBlocking {
+        val j = newJournal()
+        val original = intent()
+        assertIs<PrepareResult.Prepared>(j.prepare(original))
+        assertEquals(
+            PrepareResult.Conflict(ConflictCode.IDENTITY_MISMATCH),
+            j.prepare(original.copy(executionId = "exec-other")),
+        )
+        assertEquals(
+            PrepareResult.Conflict(ConflictCode.IDENTITY_MISMATCH),
+            j.prepare(original.copy(expectedRevision = 1L)),
+        )
+        assertIs<PrepareResult.Existing>(j.prepare(original.copy(writerGeneration = 2L)))
+        assertEquals(0L, j.get(original.operationId)!!.ownerGeneration - original.writerGeneration)
+    }
+
+    @Test
     fun `same operation under another tenant or principal is a conflict and never adopted`() = runBlocking {
         val j = newJournal()
         j.prepare(intent())

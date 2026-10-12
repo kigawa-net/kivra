@@ -127,7 +127,7 @@ internal class OperationExecutor(
                     } catch (e: CancellationException) {
                         throw e // the row stays IN_FLIGHT: whoever resumes treats it as UNKNOWN
                     } catch (e: Exception) {
-                        PortResult.Unknown("call threw ${e::class.simpleName}: ${e.message}", e)
+                        PortResult.Unknown("OPERATION_CALL_EXCEPTION", e)
                     }
                     val settled = settle(lease, op, inFlight, result, allowCancel)
                     if (settled.stop != null) return settled.stop
@@ -179,21 +179,21 @@ internal class OperationExecutor(
             PortResult.NotFound ->
                 if (op.notFoundIsSuccess) Settled(move(OperationStatus.CONFIRMED, cls = null, msg = "already gone (404)"), null)
                 // A 404 on a create is not proof of "no effect": reconcile by lookup (absent -> RECONCILIATION_REQUIRED).
-                else Settled(move(OperationStatus.UNKNOWN, cls = "NOT_FOUND", msg = "404 on a mutating call: reconciling"), null)
+                else Settled(move(OperationStatus.UNKNOWN, cls = "NOT_FOUND", msg = "PROVIDER_NOT_FOUND"), null)
             // 409 may be our own earlier POST (name / label already taken by us): reconcile, never FAILED.
-            is PortResult.Conflict -> Settled(move(OperationStatus.UNKNOWN, cls = "CONFLICT", msg = r.message), null)
+            is PortResult.Conflict -> Settled(move(OperationStatus.UNKNOWN, cls = "CONFLICT", msg = "PROVIDER_CONFLICT"), null)
             // Not a proven no-effect answer (no REJECTED_NO_EFFECT contract): reconcile, never FAILED.
             is PortResult.Rejected -> Settled(
-                move(OperationStatus.UNKNOWN, cls = "REJECTED", msg = "HTTP ${r.httpStatus} ${r.code ?: ""} ${r.message}".trim()), null,
+                move(OperationStatus.UNKNOWN, cls = "REJECTED", msg = "PROVIDER_REJECTED_HTTP_${r.httpStatus}"), null,
             )
             // Adapter-proven: the request never left the process (connect refused / connect timeout / DNS / token failure).
-            is PortResult.Transient -> Settled(notSent(r.message), null)
-            is PortResult.Unknown -> Settled(move(OperationStatus.UNKNOWN, cls = "UNKNOWN", msg = r.message), null)
+            is PortResult.Transient -> Settled(notSent("PROVIDER_PRE_DISPATCH_FAILURE"), null)
+            is PortResult.Unknown -> Settled(move(OperationStatus.UNKNOWN, cls = "UNKNOWN", msg = "PROVIDER_OUTCOME_UNKNOWN"), null)
             is PortResult.IdentityMismatch ->
-                Settled(move(OperationStatus.UNKNOWN, cls = "IDENTITY_MISMATCH", msg = "expected ${r.expected}, got ${r.actual}"), null)
+                Settled(move(OperationStatus.UNKNOWN, cls = "IDENTITY_MISMATCH", msg = "PROVIDER_IDENTITY_MISMATCH"), null)
             // Answered locally by the adapter before any request is built, so nothing was sent.
             is PortResult.Unsupported -> {
-                val settled = notSent("${r.capability}${r.workaround?.let { " (workaround: $it)" } ?: ""}")
+                val settled = notSent("PROVIDER_UNSUPPORTED")
                 Settled(settled, OpOutcome.WaitingDependency("exkes does not support ${r.capability}"))
             }
         }
@@ -210,7 +210,7 @@ internal class OperationExecutor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Observed.Undetermined("lookup threw ${e::class.simpleName}: ${e.message}")
+            Observed.Undetermined("LOOKUP_EXCEPTION")
         }
         // exkes list / label lookups are never AUTHORITATIVE_ABSENCE, so an absence cannot justify RETRYABLE (M0 rule).
         // Only an observed EXISTS is evidence: it adopts the effect and is never re-created.
@@ -227,7 +227,7 @@ internal class OperationExecutor(
                 if (entry.status == OperationStatus.UNKNOWN) {
                     journal.transition(
                         lease, entry.opId, entry.version, OperationStatus.RECONCILIATION_REQUIRED,
-                        errorClass = "NEEDS_RECONCILIATION", error = observed.toString().take(200), allowCancelRequested = allowCancel,
+                        errorClass = "NEEDS_RECONCILIATION", error = "PROVIDER_LOOKUP_UNDETERMINED", allowCancelRequested = allowCancel,
                     )
                 }
                 Reconciled.Stop(OpOutcome.ReconciliationRequired(entry.opId, op.opType))

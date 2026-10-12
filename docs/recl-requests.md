@@ -28,7 +28,7 @@ Mock の成功は Production Provider 検証ではない。
 - 検索がキーワード(sparse)を含むか(recl#6 は dense のみ記載)。
 - soft delete 済み・supersede 済み Context の取得時の status 表現(`active` / `superseded` / `deleted`)。
 - 認証: API Token の発行・失効・Scope 束縛、機械向け認証の方式。
-- レート制限(429 を「未適用」と扱う前提)と、5xx 時に処理が適用済みかどうか(Adapter は「結果不明」と扱う)。
+- レート制限 HTTP 429 と 5xx は、Mutation が未送信・未適用である証拠にならない。Adapter は変更系 429 を `OUTCOME_UNKNOWN` として保持し、自動再送を禁止する（Kivra #75）。読み取り系 GET は別途再試行可能。
 - `health` の有無(Qdrant のみ障害時に pinned / ID 取得が継続できるか、§4.4)。
 
 ## recl 設計書との差分(2026-10-12 時点で確認した事実)

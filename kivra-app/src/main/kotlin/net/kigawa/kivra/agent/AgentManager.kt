@@ -18,6 +18,7 @@ import net.kigawa.kivra.db.AgentRecord
 import net.kigawa.kivra.db.AgentRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.OperationJournalRepository
+import net.kigawa.kivra.db.RequestHashMismatchException
 import net.kigawa.kivra.db.SessionRecord
 import net.kigawa.kivra.exkes.Execution
 import net.kigawa.kivra.exkes.ExecutionId
@@ -39,13 +40,25 @@ import kotlin.time.TimeSource
 
 /** Result of one [AgentManager.run] pass. Everything except Completed / Failed / Cancelled leaves the run to be resumed. */
 sealed interface AgentRunOutcome {
-    /** The Agent finished; the Run moved on to [runState] (TESTING). [cleanupPending]: stopping the Runtime is not confirmed. */
-    data class Completed(val runState: DevelopmentRunState, val cleanupPending: Boolean) : AgentRunOutcome
+    /** The Agent finished and its Runtime is verified stopped; the Run moved on to [runState] (TESTING). */
+    data class Completed(val runState: DevelopmentRunState) : AgentRunOutcome
     data class Failed(val reason: String, val willRetry: Boolean) : AgentRunOutcome
     data object Cancelled : AgentRunOutcome
 
-    /** Cancel requested but an external side effect is still unresolved: no terminal state is forced (design #46). */
-    data class CancelPending(val unresolvedOpIds: List<String>) : AgentRunOutcome
+    /**
+     * Cancel requested but an external side effect is still unresolved, or the teardown is not confirmed
+     * ([teardownConfirmed] = false): no terminal state is forced (design #46, #60 Stop/DELETE Completion Proof).
+     */
+    data class CancelPending(val unresolvedOpIds: List<String>, val teardownConfirmed: Boolean = true) : AgentRunOutcome
+
+    /**
+     * The Runtime / Workspace of the current attempt is not verified stopped (Stop unsupported / UNKNOWN / still STOPPING).
+     * The Run keeps its state: no TESTING, no RETRY_WAITING, no new Agent until a later pass confirms the teardown.
+     */
+    data class CleanupPending(val reason: String) : AgentRunOutcome
+
+    /** A resumed Agent would continue with a different profile than the one its journaled requests were made with. Nothing sent. */
+    data class ProfileMismatch(val reason: String) : AgentRunOutcome
 
     /** An administrator Hold stopped this worker; nothing further was sent. */
     data class Halted(val reason: String) : AgentRunOutcome
@@ -100,6 +113,9 @@ class AgentManager(
                     execute(ctx)
                 } catch (e: LeaseLostException) {
                     onHalt(ctx, e)
+                } catch (e: RequestHashMismatchException) {
+                    // Raised by the journal before any call is made: the same key was journaled with another profile / request.
+                    AgentRunOutcome.ProfileMismatch(e.message ?: "request hash mismatch")
                 }
             } finally {
                 runCatching { leases.release(lease) } // false when the lease is already gone: fine
@@ -173,7 +189,7 @@ class AgentManager(
             when {
                 ctx.agent.state == AgentState.COMPLETED && run.state == DevelopmentRunState.DEVELOPING -> return finishCompleted(ctx)
                 ctx.agent.state == AgentState.FAILED && run.state in setOf(DevelopmentRunState.PREPARING, DevelopmentRunState.DEVELOPING) ->
-                    return applyFailurePolicy(ctx, "previous attempt failed")
+                    return settleFailedAttempt(ctx, "previous attempt failed")
             }
         }
         val open = if (ctx.hasAgent && !ctx.agent.state.isTerminal) ctx.agent else null
@@ -249,6 +265,11 @@ class AgentManager(
 
     // ------------------------------------------------------------------ operations
 
+    /**
+     * Create ops: an ABSENT lookup is NOT replay-safe. "Look up, then create" is not atomic on exkes (a lost POST may still
+     * land, or the listing may lag), and exkes gives no server-side idempotency for name / label. So an ABSENT never
+     * licenses a resend; the outcome goes to RECONCILIATION_REQUIRED (#44, #60 Replay Proof).
+     */
     private fun workspaceOp(ctx: Ctx): Op<Workspace> {
         val name = KivraNaming.workspaceName(ctx.runId.value)
         return Op(
@@ -260,7 +281,7 @@ class AgentManager(
             refOf = { it.id.value },
             observe = {
                 when (val r = port.findWorkspaceByName(name)) {
-                    is PortResult.Ok -> r.value?.let { Observed.Exists(it.id.value) } ?: Observed.Absent(replaySafe = true) // create = look up, then create
+                    is PortResult.Ok -> r.value?.let { Observed.Exists(it.id.value) } ?: Observed.Absent(replaySafe = false)
                     else -> Observed.Undetermined(r.toString())
                 }
             },
@@ -282,7 +303,7 @@ class AgentManager(
             observe = {
                 when (val r = port.findRuntimesByLabel(ws, labels)) {
                     is PortResult.Ok -> when (r.value.size) {
-                        0 -> Observed.Absent(replaySafe = true) // create = look up by label, then create
+                        0 -> Observed.Absent(replaySafe = false) // label lookup is not atomic with the create: never a licence to resend
                         1 -> Observed.Exists(r.value.single().id.value)
                         else -> Observed.Undetermined("${r.value.size} runtimes carry labels $labels")
                     }
@@ -395,12 +416,17 @@ class AgentManager(
 
     // ------------------------------------------------------------------ completion, failure, cancel
 
+    /**
+     * SUCCEEDED of the Execution is not, by itself, proof that the Agent is isolated (#60): the Runtime must be observed
+     * STOPPED before the Run may leave DEVELOPING. Otherwise the Run stays put (CleanupPending) and the next pass retries.
+     */
     private suspend fun finishCompleted(ctx: Ctx): AgentRunOutcome {
         if (ctx.agent.state == AgentState.RUNNING) setAgent(ctx, AgentState.COMPLETED)
-        val clean = teardown(ctx, deleteWorkspace = false) // the Workspace stays: the next stage (test / review) works on it
-        if (clean) releaseSession(ctx)
+        // The Workspace stays: the next stage (test / review) works on it.
+        if (!teardown(ctx, deleteWorkspace = false)) return AgentRunOutcome.CleanupPending("runtime stop not confirmed after COMPLETED")
+        releaseSession(ctx)
         ensureRun(ctx, DevelopmentRunState.TESTING, "AGENT_${ctx.attempt}_COMPLETED")
-        return AgentRunOutcome.Completed(DevelopmentRunState.TESTING, cleanupPending = !clean)
+        return AgentRunOutcome.Completed(DevelopmentRunState.TESTING)
     }
 
     private suspend fun failAttempt(ctx: Ctx, reason: String): AgentRunOutcome {
@@ -409,8 +435,13 @@ class AgentManager(
             AgentState.STARTING, AgentState.RUNNING -> setAgent(ctx, AgentState.FAILED)
             else -> Unit
         }
-        val clean = teardown(ctx, config.deleteWorkspaceOnFailure)
-        if (clean) releaseSession(ctx)
+        return settleFailedAttempt(ctx, reason)
+    }
+
+    /** A failed attempt may start a retry only after its Runtime is confirmed stopped; otherwise it waits as CleanupPending. */
+    private suspend fun settleFailedAttempt(ctx: Ctx, reason: String): AgentRunOutcome {
+        if (!teardown(ctx, config.deleteWorkspaceOnFailure)) return AgentRunOutcome.CleanupPending(reason)
+        releaseSession(ctx)
         return applyFailurePolicy(ctx, reason)
     }
 
@@ -424,16 +455,43 @@ class AgentManager(
 
     /**
      * Stops the Runtime of the current attempt (and deletes the Workspace when asked), journaled like everything else.
-     * Returns whether everything it needed to do is confirmed. A teardown that is UNKNOWN is left for reconciliation / the Reaper (#31).
+     * Returns true only when the completion is VERIFIED by a fresh read: the Runtime observed STOPPED (or gone), and for a
+     * delete the Workspace observed DELETED (or gone). A 202 / STOPPING / Unsupported / UNKNOWN is not proof, so the
+     * caller must not treat the attempt as cleaned up. The Workspace is not deleted while its Runtime is unconfirmed.
      */
     private suspend fun teardown(ctx: Ctx, deleteWorkspace: Boolean): Boolean {
         val s = ctx.session ?: return true
-        var clean = true
         val ws = s.workspaceId?.let(::WorkspaceId)
         val rt = s.runtimeId?.let { ws?.let { w -> RuntimeId(w, it) } }
-        if (rt != null) clean = ops.perform(ctx.lease, stopRuntimeOp(ctx, rt), ctx.allowCancel, true) { guard(ctx) } is OpOutcome.Done && clean
-        if (deleteWorkspace && ws != null) clean = ops.perform(ctx.lease, deleteWorkspaceOp(ctx, ws), ctx.allowCancel, true) { guard(ctx) } is OpOutcome.Done && clean
+        var clean = true
+        if (rt != null) {
+            val stopped = ops.perform(ctx.lease, stopRuntimeOp(ctx, rt), ctx.allowCancel, true) { guard(ctx) } is OpOutcome.Done
+            clean = stopped && awaitGone(ctx, { port.getRuntime(rt) }) { it.state == RuntimeState.STOPPED || it.state == RuntimeState.DELETED }
+        }
+        if (deleteWorkspace && ws != null && clean) {
+            val deleted = ops.perform(ctx.lease, deleteWorkspaceOp(ctx, ws), ctx.allowCancel, true) { guard(ctx) } is OpOutcome.Done
+            clean = deleted && awaitGone(ctx, { port.getWorkspace(ws) }) { it.state == WorkspaceState.DELETED }
+        }
         return clean
+    }
+
+    /**
+     * Re-reads until [gone] holds or the target is NotFound (= gone). Transient / Unknown reads are ridden out until
+     * [AgentManagerConfig.teardownTimeout]; any other answer is not a confirmation and stops the wait at once.
+     */
+    private suspend fun <T> awaitGone(ctx: Ctx, get: suspend () -> PortResult<T>, gone: (T) -> Boolean): Boolean {
+        val mark = TimeSource.Monotonic.markNow()
+        while (true) {
+            guard(ctx)
+            when (val r = get()) {
+                PortResult.NotFound -> return true
+                is PortResult.Ok -> if (gone(r.value)) return true
+                is PortResult.Transient, is PortResult.Unknown -> Unit
+                else -> return false
+            }
+            if (mark.elapsedNow().inWholeMilliseconds >= config.teardownTimeout.toMillis()) return false
+            delay(config.pollInterval.toMillis().coerceAtLeast(1))
+        }
     }
 
     private fun releaseSession(ctx: Ctx) {
@@ -448,15 +506,17 @@ class AgentManager(
     private suspend fun windDownCancel(ctx: Ctx): AgentRunOutcome {
         ctx.allowCancel = true
         reload(ctx)
+        var torndown = true
         if (ctx.hasAgent) {
             resolvePending(ctx)
             reload(ctx)
-            teardown(ctx, config.deleteWorkspaceOnCancel)
+            torndown = teardown(ctx, config.deleteWorkspaceOnCancel)
         }
         val unresolved = journal.listByRun(ctx.runId).filter {
             it.status in setOf(OperationStatus.IN_FLIGHT, OperationStatus.UNKNOWN, OperationStatus.RECONCILIATION_REQUIRED)
         }
-        if (unresolved.isNotEmpty()) return AgentRunOutcome.CancelPending(unresolved.map { it.opId })
+        // Never CANCELLED while an external side effect is unresolved or a Runtime / Workspace is not verified gone (#60).
+        if (unresolved.isNotEmpty() || !torndown) return AgentRunOutcome.CancelPending(unresolved.map { it.opId }, torndown)
         if (ctx.hasAgent) {
             when (ctx.agent.state) {
                 AgentState.CREATED -> { setAgent(ctx, AgentState.STARTING); setAgent(ctx, AgentState.FAILED) }

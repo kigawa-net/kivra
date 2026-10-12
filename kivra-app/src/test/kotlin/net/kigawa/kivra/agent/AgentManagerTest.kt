@@ -44,6 +44,9 @@ class TestPort(val fake: FakeExecutionPort = FakeExecutionPort()) : ExecutionPor
     var transientCreateWorkspace = 0
     var unsupportedStartExecution = false
     var crashAfterStartExecution = false
+    /** The Runtime never leaves STOPPING (the stop is accepted but not observed to complete). */
+    var stuckStopping = false
+    var unsupportedStopRuntime = false
     private var getExecutionCalls = 0
     val mutatingCalls = mutableListOf<String>()
 
@@ -59,12 +62,14 @@ class TestPort(val fake: FakeExecutionPort = FakeExecutionPort()) : ExecutionPor
     override suspend fun getWorkspace(id: WorkspaceId): PortResult<Workspace> {
         val r = fake.getWorkspace(id)
         if (r is PortResult.Ok && r.value.state == WorkspaceState.CREATING) fake.setWorkspaceState(id, WorkspaceState.READY)
+        if (r is PortResult.Ok && r.value.state == WorkspaceState.DELETING) fake.setWorkspaceState(id, WorkspaceState.DELETED)
         return fake.getWorkspace(id)
     }
 
     override suspend fun getRuntime(id: RuntimeId): PortResult<Runtime> {
         val r = fake.getRuntime(id)
         if (r is PortResult.Ok && r.value.state == RuntimeState.CREATING) fake.setRuntimeState(id, RuntimeState.RUNNING)
+        if (r is PortResult.Ok && r.value.state == RuntimeState.STOPPING && !stuckStopping) fake.setRuntimeState(id, RuntimeState.STOPPED)
         return fake.getRuntime(id)
     }
 
@@ -89,6 +94,7 @@ class TestPort(val fake: FakeExecutionPort = FakeExecutionPort()) : ExecutionPor
 
     override suspend fun stopRuntime(id: RuntimeId): PortResult<Runtime> {
         mutatingCalls += "stopRuntime"
+        if (unsupportedStopRuntime) return PortResult.Unsupported("stopRuntime")
         return fake.stopRuntime(id)
     }
 
@@ -129,7 +135,7 @@ class AgentManagerTest {
         val port = TestPort()
         val runId = db.preparingRun()
         val out = runBlocking { db.manager(port).run(runId, PROFILE) }
-        assertEquals(AgentRunOutcome.Completed(DevelopmentRunState.TESTING, cleanupPending = false), out)
+        assertEquals(AgentRunOutcome.Completed(DevelopmentRunState.TESTING), out)
         assertEquals(DevelopmentRunState.TESTING, db.runState(runId))
         val agent = db.agentsOf(runId).single()
         assertEquals(AgentState.COMPLETED, agent.state)
@@ -160,15 +166,77 @@ class AgentManagerTest {
     }
 
     @Test
-    fun `lost createWorkspace response without effect is replayed only on persisted ABSENT evidence`() = TestDb().use { db ->
+    fun `lost createWorkspace response is never replayed on an ABSENT lookup - not atomic, so reconciliation is required`() = TestDb().use { db ->
+        // The POST was lost before it took effect: nothing exists, yet an ABSENT lookup proves nothing (#44 / #60).
         val port = TestPort().also { it.fake.injectUnknown("createWorkspace", afterEffect = false) }
         val runId = db.preparingRun()
-        assertIs<AgentRunOutcome.Completed>(runBlocking { db.manager(port).run(runId, PROFILE) })
-        assertEquals(2, port.mutatingCalls.count { it == "createWorkspace" })
-        assertEquals(1, port.fake.postCounts["createWorkspace"]) // the lost one never reached the server
-        val ws = db.ops(runId).getValue("EXKES_CREATE_WORKSPACE")
-        assertEquals("ABSENT", ws.evidenceObservation)
-        assertEquals(2, ws.attempt)
+        val rr = assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port, "worker-A").run(runId, PROFILE) })
+        assertEquals("EXKES_CREATE_WORKSPACE", rr.opType)
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.journal.get(rr.opId)!!.status)
+        assertEquals(1, port.mutatingCalls.count { it == "createWorkspace" })
+        // a late-arriving or a second worker must not resend either
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port, "worker-B").run(runId, PROFILE) })
+        assertEquals(1, port.mutatingCalls.count { it == "createWorkspace" })
+        assertEquals(DevelopmentRunState.PREPARING, db.runState(runId))
+    }
+
+    @Test
+    fun `lost createRuntime response is never replayed on an ABSENT label lookup`() = TestDb().use { db ->
+        val port = TestPort().also { it.fake.injectUnknown("createRuntime", afterEffect = false) }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port, "worker-B").run(runId, PROFILE) })
+        // the lost POST never reached the fake (0 effects); a resend would have made it 1
+        assertEquals(0, port.fake.postCounts["createRuntime"] ?: 0)
+        assertEquals(DevelopmentRunState.PREPARING, db.runState(runId))
+    }
+
+    @Test
+    fun `a Runtime stop accepted but not observed STOPPED keeps the Run in DEVELOPING - no TESTING on SUCCEEDED alone`() = TestDb().use { db ->
+        val port = TestPort().also { it.stuckStopping = true }
+        val runId = db.preparingRun()
+        val config = TEST_CONFIG.copy(teardownTimeout = Duration.ofMillis(50))
+        assertIs<AgentRunOutcome.CleanupPending>(runBlocking { db.manager(port, config = config).run(runId, PROFILE) })
+        assertEquals(DevelopmentRunState.DEVELOPING, db.runState(runId))
+        assertEquals(AgentState.COMPLETED, db.agentsOf(runId).single().state)
+        // a later pass only re-verifies: no second stop, and TESTING once the Runtime is observed STOPPED
+        port.stuckStopping = false
+        assertEquals(AgentRunOutcome.Completed(DevelopmentRunState.TESTING), runBlocking { db.manager(port, config = config).run(runId, PROFILE) })
+        assertEquals(1, port.mutatingCalls.count { it == "stopRuntime" })
+        assertEquals(1, port.fake.postCounts["createRuntime"])
+    }
+
+    @Test
+    fun `a failed attempt whose Runtime is not confirmed stopped is not retried - no new Agent or Runtime`() = TestDb().use { db ->
+        val port = TestPort().also { it.executionResult = ExecutionState.FAILED; it.stuckStopping = true }
+        val runId = db.preparingRun()
+        val config = TEST_CONFIG.copy(teardownTimeout = Duration.ofMillis(50))
+        assertIs<AgentRunOutcome.CleanupPending>(runBlocking { db.manager(port, config = config).run(runId, PROFILE) })
+        assertEquals(DevelopmentRunState.DEVELOPING, db.runState(runId)) // not RETRY_WAITING
+        assertEquals(listOf(AgentState.FAILED), db.agentsOf(runId).map { it.state })
+        assertEquals(1, port.fake.postCounts["createRuntime"])
+    }
+
+    @Test
+    fun `Cancel is not CANCELLED while the Runtime stop is unsupported, and the Workspace is not deleted`() = TestDb().use { db ->
+        val port = TestPort().also { it.executionResult = null; it.unsupportedStopRuntime = true }
+        val runId = db.preparingRun()
+        port.onGetExecution = { n -> if (n == 2) db.runs.requestCancel(runId, "admin") }
+        val pending = assertIs<AgentRunOutcome.CancelPending>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(false, pending.teardownConfirmed)
+        assertEquals(DevelopmentRunState.DEVELOPING, db.runState(runId))
+        assertEquals(null, port.fake.postCounts["deleteWorkspace"])
+    }
+
+    @Test
+    fun `a resumed run with a different profile version is refused before any request is sent`() = TestDb().use { db ->
+        val port = TestPort().also { it.crashAfterStartExecution = true }
+        val runId = db.preparingRun()
+        assertFailsWith<SimulatedCrash> { runBlocking { db.manager(port, "worker-A").run(runId, PROFILE) } }
+        val changed = PROFILE.copy(version = "2")
+        assertIs<AgentRunOutcome.ProfileMismatch>(runBlocking { db.manager(port, "worker-B").run(runId, changed) })
+        assertEquals(1, port.fake.postCounts["createRuntime"])
+        assertEquals(1, port.mutatingCalls.count { it == "startExecution" })
     }
 
     @Test

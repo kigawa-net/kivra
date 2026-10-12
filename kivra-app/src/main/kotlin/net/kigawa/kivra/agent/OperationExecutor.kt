@@ -22,8 +22,9 @@ sealed interface Observed {
     data class Exists(val ref: String?) : Observed
 
     /**
-     * Nothing there. [replaySafe] = a replay cannot create a second effect (the call is "look up, then create" on a
-     * stable name / label, or naturally idempotent). false = the request may still land later, so it is never resent.
+     * Nothing there. [replaySafe] = a replay cannot create a second effect: only for teardown ops that are harmless to
+     * repeat (stop / delete, where "already gone" is success). Create ops are NEVER replay-safe: "look up, then create"
+     * is not atomic on exkes and a lost POST may still land (#44, #60). false = never resent.
      */
     data class Absent(val replaySafe: Boolean) : Observed
 
@@ -67,7 +68,7 @@ fun sha256Hex(text: String): String =
  *  - an UNKNOWN result (or an IN_FLIGHT row left by a dead worker, which is UNKNOWN by definition) is never resent;
  *    it is only looked up. EXISTS adopts, ABSENT with a safe replay becomes RETRYABLE through persisted evidence,
  *    anything else goes to RECONCILIATION_REQUIRED and stops;
- *  - only [PortResult.Transient] (provably no effect) is retried, at most `maxOperationAttempts` times.
+ *  - only [PortResult.Transient] (adapter-proven: the request was never sent) is retried, at most `maxOperationAttempts` times.
  */
 internal class OperationExecutor(
     private val journal: OperationJournalRepository,

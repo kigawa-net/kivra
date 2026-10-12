@@ -14,6 +14,8 @@ data class AgentManagerConfig(
     val pollInterval: Duration = Duration.ofSeconds(1),
     val workspaceReadyTimeout: Duration = Duration.ofMinutes(5),
     val runtimeReadyTimeout: Duration = Duration.ofMinutes(5),
+    /** How long a teardown waits to observe the Runtime STOPPED / Workspace DELETED before it stays CleanupPending. */
+    val teardownTimeout: Duration = Duration.ofMinutes(5),
     /** Used when the profile has no timeout of its own. */
     val executionTimeout: Duration = Duration.ofMinutes(60),
     /** Runs this manager instance drives at the same time. */

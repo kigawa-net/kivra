@@ -84,7 +84,8 @@ class HttpGitHubAdapter(
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
-        Transport.Error("${e::class.simpleName}: ${e.message}")
+        // Exception messages from HTTP engines may contain URLs, headers or secrets: retain only the type.
+        Transport.Error("GitHub transport failure (${e::class.simpleName ?: "Exception"})")
     }
 
     /** GET with retry on 5xx / I/O and one token refresh on 401. Returns the raw 2xx response or a classified failure. */

@@ -13,6 +13,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.policy.*
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -24,7 +25,7 @@ private fun human(subject: String = "kc-user-1", expiresAt: Instant = Instant.no
 private class Fixture(val db: TestDb) {
     val audits = db.audit
     private val database = db.database
-    val run = db.runs.create("task-1", "test")
+    val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
     val runId = run.runId.value
     val principal = Principal(runId, AGENT, Role.DEVELOPER, setOf("k8s.*", "fusha.*", "approval.*", "audit.*", "policy.*"))
     val approvals = ApprovalRepository(db.database, db.audit)

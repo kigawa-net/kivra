@@ -16,6 +16,9 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import net.kigawa.kivra.core.IdempotencyKey
 import net.kigawa.kivra.core.JobRef
@@ -34,10 +37,11 @@ class AiSchedulerAdapterTest {
         rec: Rec = Rec(),
         tokens: ScheduleTokenProvider = ScheduleTokenProvider.NoAuth,
         config: AiSchedulerConfig = cfg,
+        dedup: TriggerDedupStore = InMemoryTriggerDedupStore(),
         handler: suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData,
     ): AiSchedulerAdapter {
         val engine = MockEngine { req -> rec.reqs += req; handler(req) }
-        return AiSchedulerAdapter(aiSchedulerHttpClient(engine, config), config, tokens, backoff = {})
+        return AiSchedulerAdapter(aiSchedulerHttpClient(engine, config), config, tokens, backoff = {}, dedup = dedup)
     }
 
     private fun MockRequestHandleScope.ok(body: String, status: HttpStatusCode = HttpStatusCode.OK) = respond(body, status, jsonH)
@@ -202,13 +206,14 @@ class AiSchedulerAdapterTest {
     }
 
     @Test fun `bearer is sent only when provided, 401 on GET refreshes once, secrets never leak`() = runTest {
+        val httpsCfg = AiSchedulerConfig("https://ai-scheduler.internal:8443")
         val rec = Rec()
         var tok = "tok-1"
         val provider = object : ScheduleTokenProvider {
             override suspend fun token() = tok
             override fun invalidate() { tok = "tok-2" }
         }
-        val a = adapter(rec, provider) { req -> if (req.headers[HttpHeaders.Authorization] == "Bearer tok-2") ok(jobJson("j1")) else respond("no", HttpStatusCode.Unauthorized) }
+        val a = adapter(rec, provider, httpsCfg) { req -> if (req.headers[HttpHeaders.Authorization] == "Bearer tok-2") ok(jobJson("j1")) else respond("no", HttpStatusCode.Unauthorized) }
         a.getJob(JobRef("j1"))
         assertEquals(listOf("Bearer tok-1", "Bearer tok-2"), rec.reqs.map { it.headers[HttpHeaders.Authorization] })
 
@@ -216,11 +221,11 @@ class AiSchedulerAdapterTest {
         adapter(none) { ok(jobJson("j1")) }.getJob(JobRef("j1"))
         assertEquals(null, none.reqs.single().headers[HttpHeaders.Authorization])
 
-        val denied = adapter(tokens = StaticScheduleTokenProvider("S3CRET")) { respond("S3CRET body", HttpStatusCode.Unauthorized) }
+        val denied = adapter(tokens = StaticScheduleTokenProvider("S3CRET"), config = httpsCfg) { respond("S3CRET body", HttpStatusCode.Unauthorized) }
         val e = assertFailsWith<ScheduleAuthException> { denied.getJob(JobRef("j1")) }
         assertFalse(e.message!!.contains("S3CRET"))
         assertFalse(StaticScheduleTokenProvider("S3CRET").toString().contains("S3CRET"))
-        assertFalse(adapter(tokens = StaticScheduleTokenProvider("S3CRET")) { ok("{}") }.toString().contains("S3CRET"))
+        assertFalse(adapter(tokens = StaticScheduleTokenProvider("S3CRET"), config = httpsCfg) { ok("{}") }.toString().contains("S3CRET"))
     }
 
     @Test fun `write 401 is an auth failure, not UNKNOWN`() = runTest {
@@ -251,5 +256,92 @@ class AiSchedulerAdapterTest {
         val a = adapter(rec) { ok("[]") }
         assertFailsWith<IllegalArgumentException> { a.upsertJob(JobSpec("random-name", null, null), key) }
         assertEquals(0, rec.reqs.size)
+    }
+
+    // ---- review regressions (triggerNow claim, upsert duplicates, safe destination) ----
+
+    @Test fun `concurrent triggerNow with the same key sends exactly one POST`() = runTest {
+        val rec = Rec()
+        val a = adapter(rec) { delay(100); ok(execJson("e1", "j1", "SCHEDULED"), HttpStatusCode.Created) }
+        val k = IdempotencyKey("tick:race")
+        val results = (1..2).map { async { runCatching { a.triggerNow(JobRef("j1"), k) } } }.awaitAll()
+        assertEquals(1, rec.count(HttpMethod.Post))
+        assertEquals(1, results.count { it.isSuccess })
+        assertTrue(results.single { it.isFailure }.exceptionOrNull() is ScheduleConflictException)
+    }
+
+    @Test fun `a restarted adapter sharing the durable claim store does not resend a completed key`() = runTest {
+        val store = InMemoryTriggerDedupStore()
+        val rec = Rec()
+        val k = IdempotencyKey("tick:restart")
+        val first = adapter(rec, dedup = store) { ok(execJson("e1", "j1", "SCHEDULED"), HttpStatusCode.Created) }
+        assertEquals(ScheduleExecutionRef("e1"), first.triggerNow(JobRef("j1"), k))
+        val second = adapter(rec, dedup = store) { ok(execJson("e2", "j1", "SCHEDULED"), HttpStatusCode.Created) }
+        assertEquals(ScheduleExecutionRef("e1"), second.triggerNow(JobRef("j1"), k))
+        assertEquals(1, rec.count(HttpMethod.Post))
+    }
+
+    @Test fun `a malformed body after a 2xx keeps the key UNKNOWN and is never re-sent`() = runTest {
+        val rec = Rec()
+        val a = adapter(rec) { ok("not json", HttpStatusCode.Created) }
+        val k = IdempotencyKey("tick:parse")
+        assertFailsWith<ScheduleRejectedException> { a.triggerNow(JobRef("j1"), k) }
+        assertFailsWith<ScheduleUnknownException> { a.triggerNow(JobRef("j1"), k) }
+        assertEquals(1, rec.count(HttpMethod.Post))
+    }
+
+    @Test fun `cancellation during the POST keeps the key UNKNOWN`() = runTest {
+        val rec = Rec()
+        val a = adapter(rec) { throw kotlinx.coroutines.CancellationException("caller cancelled") }
+        val k = IdempotencyKey("tick:cancel")
+        assertFailsWith<kotlinx.coroutines.CancellationException> { a.triggerNow(JobRef("j1"), k) }
+        assertFailsWith<ScheduleUnknownException> { a.triggerNow(JobRef("j1"), k) }
+        assertEquals(1, rec.count(HttpMethod.Post))
+    }
+
+    @Test fun `a 4xx refusal releases the key so a deliberate retry can send`() = runTest {
+        val rec = Rec()
+        var n = 0
+        val a = adapter(rec) { if (n++ == 0) respond("", HttpStatusCode.BadRequest) else ok(execJson("e1", "j1", "SCHEDULED"), HttpStatusCode.Created) }
+        val k = IdempotencyKey("tick:refused")
+        assertFailsWith<ScheduleRejectedException> { a.triggerNow(JobRef("j1"), k) }
+        assertEquals(ScheduleExecutionRef("e1"), a.triggerNow(JobRef("j1"), k))
+        assertEquals(2, rec.count(HttpMethod.Post))
+    }
+
+    @Test fun `a 5xx on triggerNow keeps the key UNKNOWN`() = runTest {
+        val rec = Rec()
+        val a = adapter(rec) { respond("boom", HttpStatusCode.BadGateway) }
+        val k = IdempotencyKey("tick:5xx")
+        assertFailsWith<ScheduleUnknownException> { a.triggerNow(JobRef("j1"), k) }
+        assertFailsWith<ScheduleUnknownException> { a.triggerNow(JobRef("j1"), k) }
+        assertEquals(1, rec.count(HttpMethod.Post))
+    }
+
+    @Test fun `upsert fails closed when the name is duplicated after the create`() = runTest {
+        val rec = Rec()
+        var gets = 0
+        val a = adapter(rec) { req ->
+            if (req.method == HttpMethod.Get) {
+                gets++
+                ok(if (gets == 1) "[]" else "[${jobJson("j1")},${jobJson("j2")}]")
+            } else ok(jobJson("j1"), HttpStatusCode.Created)
+        }
+        assertFailsWith<ScheduleConflictException> { a.upsertJob(spec, key) }
+        assertEquals(1, rec.count(HttpMethod.Post))
+    }
+
+    @Test fun `a Bearer token over plain http is refused at construction`() {
+        assertFailsWith<IllegalArgumentException> {
+            adapter(tokens = StaticScheduleTokenProvider("S3CRET")) { ok("{}") }
+        }
+        adapter(tokens = StaticScheduleTokenProvider("S3CRET"), config = AiSchedulerConfig("https://x.internal")) { ok("{}") }
+    }
+
+    @Test fun `a client that follows redirects is refused at construction`() {
+        val engine = MockEngine { respond("{}", HttpStatusCode.OK, jsonH) }
+        val following = io.ktor.client.HttpClient(engine) { followRedirects = true }
+        assertFailsWith<IllegalArgumentException> { AiSchedulerAdapter(following, cfg, backoff = {}, dedup = InMemoryTriggerDedupStore()) }
+        assertNotNull(AiSchedulerAdapter(aiSchedulerHttpClient(engine, cfg), cfg, backoff = {}, dedup = InMemoryTriggerDedupStore()))
     }
 }

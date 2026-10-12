@@ -2,7 +2,9 @@ package net.kigawa.kivra.scheduler
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
+import io.ktor.client.plugins.HttpRedirect
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.pluginOrNull
 import io.ktor.client.request.header
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
@@ -14,8 +16,6 @@ import io.ktor.http.contentType
 import java.time.Instant
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -26,9 +26,9 @@ import net.kigawa.kivra.core.ScheduleExecutionRef
 import net.kigawa.kivra.core.ScheduleExecutionStatus
 
 /**
- * @property baseUrl ai-scheduler base URL. Must be https, unless [allowInsecureHttp] is set: ai-scheduler is
- *   in-cluster, network-limited and unauthenticated in Phase 1, so plain http is accepted only by explicit opt-in.
- *   Userinfo / query / fragment are rejected.
+ * @property baseUrl ai-scheduler base URL. Must be https, unless [allowInsecureHttp] is set. Plain http is only for an
+ *   explicit, unauthenticated, network-limited (loopback or in-cluster) deployment: the adapter also refuses to send a
+ *   Bearer token over http. Userinfo / query / fragment are rejected.
  * @property placeholderPrompt / provider / model: ai-scheduler requires an AI prompt+model on every job even though
  *   Kivra only wants a wake-up. These are configuration, never derived from task content.
  */
@@ -43,7 +43,6 @@ data class AiSchedulerConfig(
     val maxGetAttempts: Int = 3,
     val requestTimeoutMillis: Long = 15_000,
     val connectTimeoutMillis: Long = 5_000,
-    val maxRememberedKeys: Int = 1024,
 ) {
     init {
         val url = runCatching { Url(baseUrl) }.getOrNull() ?: throw IllegalArgumentException("invalid baseUrl")
@@ -52,7 +51,7 @@ data class AiSchedulerConfig(
         }
         require(url.user == null && url.password == null) { "baseUrl must not contain credentials" }
         require(url.parameters.isEmpty() && url.fragment.isEmpty()) { "baseUrl must not contain query or fragment" }
-        require(maxGetAttempts >= 1 && maxRememberedKeys >= 1) { "invalid limits" }
+        require(maxGetAttempts >= 1) { "invalid limits" }
     }
 }
 
@@ -74,7 +73,7 @@ fun aiSchedulerHttpClient(engine: HttpClientEngine, config: AiSchedulerConfig): 
  *   [ScheduleIdentityMismatchException].
  * - Writes (POST/PATCH) are sent exactly once. Timeout / transport error / 5xx yields [ScheduleUnknownException]; the
  *   adapter never resends. Reconciliation for job creation is by the deterministic job name (see [upsertJob]);
- *   for `triggerNow` the same key is refused in-process after an unknown outcome.
+ *   `triggerNow` is claimed in [dedup] before the POST (see [triggerNow]).
  * - Any 3xx is a failure (and the factory [aiSchedulerHttpClient] does not follow redirects).
  * - Tokens, prompts and response bodies are never put into exception messages or `toString`.
  *
@@ -87,7 +86,16 @@ class AiSchedulerAdapter(
     private val config: AiSchedulerConfig,
     private val tokens: ScheduleTokenProvider = ScheduleTokenProvider.NoAuth,
     private val backoff: suspend (attempt: Int) -> Unit = { delay(200L * (1L shl (it - 1))) },
+    /** Durable claim store for `triggerNow`. Production must pass a persistent implementation (see [TriggerDedupStore]). */
+    private val dedup: TriggerDedupStore,
 ) : ScheduleClient {
+    init {
+        require(!(config.baseUrl.startsWith("http:") && tokens !== ScheduleTokenProvider.NoAuth)) {
+            "a Bearer token must not be sent over plain http"
+        }
+        require(client.pluginOrNull(HttpRedirect) == null) { "the HttpClient must not follow redirects" }
+    }
+
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     // ---- wire types (only fields Kivra needs; prompt/output/error are never read) ----
@@ -109,10 +117,6 @@ class AiSchedulerAdapter(
     @Serializable private class ReqEnabled(val enabled: Boolean)
 
     private class Raw(val status: Int, val body: String)
-
-    private val keyLock = Mutex()
-    private val triggerDone = LruMap<String, ScheduleExecutionRef>(config.maxRememberedKeys)
-    private val triggerUnknown = LruMap<String, Boolean>(config.maxRememberedKeys)
 
     // ---- transport ----
     private suspend fun send(method: HttpMethod, path: String, body: String?, idempotencyKey: String?): Raw? {
@@ -214,9 +218,17 @@ class AiSchedulerAdapter(
     /**
      * Idempotent by deterministic name: list jobs and look for [JobSpec.name] first; create only when absent. After an
      * UNKNOWN create the next call finds the job by name instead of creating a second one. The create POST is
-     * never resent automatically. (Two concurrent creators can still race: ai-scheduler names are not unique; run
-     * this under the Orchestrator's leader lease.) Changing the trigger of an existing job is not possible via
-     * PATCH and raises [ScheduleConflictException].
+     * never resent automatically. Changing the trigger of an existing job is not possible via PATCH and raises
+     * [ScheduleConflictException].
+     *
+     * Fail-closed on duplicates: more than one job with the name, before or after the POST, raises
+     * [ScheduleConflictException]. Nothing is deleted automatically (ai-scheduler has no DELETE).
+     *
+     * **Known residual race (not fixed here):** ai-scheduler job names are not unique server-side, so lookup-then-POST
+     * is not atomic. Two creators that both see "absent" both POST, and the post-create check only *detects* the
+     * duplicate; it cannot prevent it. The precondition is that only one Kivra process runs this at a time, i.e. it
+     * runs under the Orchestrator's Leader Lease, including the old owner's in-flight POST. A permanent fix needs a
+     * server-side unique name or Idempotency-Key support in ai-scheduler (docs/ai-scheduler-requests.md).
      */
     override suspend fun upsertJob(spec: JobSpec, key: IdempotencyKey): JobRef {
         require(JobNaming.isValid(spec.name)) { "job name must follow kivra:fusha:{env}:{id}" }
@@ -241,6 +253,8 @@ class AiSchedulerAdapter(
         val resp = write("upsertJob", HttpMethod.Post, "/v1/jobs", body, k)
         val job = toJob("upsertJob", null, parse("upsertJob", resp))
         if (job.name != spec.name) throw ScheduleIdentityMismatchException("upsertJob: response is for a different job name")
+        // Detect a concurrent creator that raced past our lookup. Detection only: the duplicate is not removed here.
+        if (jobsByName(spec.name).size > 1) throw ScheduleConflictException("upsertJob: duplicate job created concurrently")
         return job.ref
     }
 
@@ -265,30 +279,58 @@ class AiSchedulerAdapter(
     override suspend fun deleteJob(ref: JobRef) = setEnabled("deleteJob", ref, false)
 
     /**
-     * Single POST, never auto-resent. The real API ignores the key, so duplicates are suppressed here in-process
-     * (same key -> same execution) and after an UNKNOWN outcome the same key is refused (fail-closed) instead of being
-     * re-sent: ai-scheduler cannot list a job's executions, so Kivra cannot confirm whether it ran.
+     * Single POST, never auto-resent, and at most one execution per `(job, key)`.
+     *
+     * The claim is atomic and happens before the POST: [TriggerDedupStore.tryClaim] is one conditional write, so two
+     * concurrent callers cannot both send. Outcomes after the claim:
+     * - 2xx with a valid body: DONE, same ref for the same key from then on (no POST).
+     * - Refused by ai-scheduler before execution (4xx, 3xx not followed): claim released, a deliberate retry may send.
+     * - Transport error, timeout, 5xx, cancellation, or any failure after a 2xx (parse / identity check): UNKNOWN. The
+     *   same key is refused with [ScheduleUnknownException] until reconciled. ai-scheduler cannot list a job's
+     *   executions, so Kivra cannot confirm it from its side.
+     * - A concurrent call while IN_FLIGHT gets [ScheduleConflictException] and does not send.
+     *
+     * Persistence: the claim must survive restarts (see [TriggerDedupStore]); the in-process LRU this replaces could
+     * evict an UNKNOWN key and re-open a duplicate.
      */
     override suspend fun triggerNow(ref: JobRef, key: IdempotencyKey): ScheduleExecutionRef {
         val i = id(ref.id)
         val k = key(key)
-        val memo = "$i|$k"
-        keyLock.withLock {
-            triggerDone[memo]?.let { return it }
-            if (triggerUnknown[memo] == true) {
-                throw ScheduleUnknownException("triggerNow", "earlier attempt with this key had an unknown outcome; reconcile before retrying")
+        val claimKey = "$i|$k"
+        dedup.tryClaim(claimKey)?.let { existing ->
+            return when (existing.state) {
+                ClaimState.DONE -> ScheduleExecutionRef(existing.result ?: throw ScheduleUnknownException("triggerNow", "claim has no execution id"))
+                ClaimState.IN_FLIGHT -> throw ScheduleConflictException("triggerNow: the same key is already in flight")
+                ClaimState.UNKNOWN -> throw ScheduleUnknownException("triggerNow", "earlier attempt with this key had an unknown outcome; reconcile before retrying")
             }
         }
-        val resp = try {
-            write("triggerNow", HttpMethod.Post, "/v1/jobs/$i/executions", null, k)
-        } catch (e: ScheduleUnknownException) {
-            keyLock.withLock { triggerUnknown[memo] = true }
+        val r = try {
+            send(HttpMethod.Post, "/v1/jobs/$i/executions", null, k)
+        } catch (e: Throwable) {
+            dedup.markUnknown(claimKey)
             throw e
         }
-        val w = parse<WireExecution>("triggerNow", resp)
-        val eid = w.id ?: throw ScheduleIdentityMismatchException("triggerNow: response has no id")
-        if (w.jobId != i) throw ScheduleIdentityMismatchException("triggerNow: response is for a different job")
-        return ScheduleExecutionRef(eid).also { keyLock.withLock { triggerDone[memo] = it } }
+        if (r == null || r.status >= 500) {
+            dedup.markUnknown(claimKey)
+            throw ScheduleUnknownException("triggerNow", if (r == null) "transport error or timeout" else "HTTP ${r.status}")
+        }
+        if (r.status !in 200..299) {
+            // Refused before any execution was created: safe to release.
+            if (r.status == 401) tokens.invalidate()
+            dedup.release(claimKey)
+            fail("triggerNow", r.status)
+        }
+        try {
+            val w = parse<WireExecution>("triggerNow", r.body)
+            val eid = w.id ?: throw ScheduleIdentityMismatchException("triggerNow: response has no id")
+            if (w.jobId != i) throw ScheduleIdentityMismatchException("triggerNow: response is for a different job")
+            dedup.complete(claimKey, eid)
+            return ScheduleExecutionRef(eid)
+        } catch (e: Throwable) {
+            // The execution exists (2xx) even though we could not read it back: never release.
+            dedup.markUnknown(claimKey)
+            throw e
+        }
     }
 
     override suspend fun getExecutionDetail(ref: ScheduleExecutionRef): ScheduleExecution {
@@ -313,13 +355,4 @@ class AiSchedulerAdapter(
     }
 
     override fun toString() = "AiSchedulerAdapter(baseUrl=${config.baseUrl}, tokens=$tokens)"
-}
-
-/** Small bounded LRU (access-ordered) used for in-process key memory. Callers synchronize. */
-private class LruMap<K, V>(private val max: Int) {
-    private val m = object : LinkedHashMap<K, V>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>) = size > max
-    }
-    operator fun get(k: K): V? = m[k]
-    operator fun set(k: K, v: V) { m[k] = v }
 }

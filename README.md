@@ -105,4 +105,9 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
 - **将来の作り直し（#64）**: 最終ストレージが Fortis になれば、この SQL 実装（`FOR UPDATE` / `NOW(6)` / 生成列 / claim のロック）は作り直しになり得る。
   今回の契約（Run / Operation の状態機械、証拠規則、Proof 規則、PR_ONLY 完了規則、Outbox の claim token 規則）は Storage に依存しない要件として維持する。
 - **Outbox / Audit**: Run の状態遷移・監査イベント（ハッシュ連鎖）・Outbox イベントを同一トランザクションで書く。
+- **SchedulePort の前提（#38）**: 起動の重複抑止（`TriggerDedupStore`）と `triggerNow` の重複抑止は、どちらも永続・原子的な claim が必要。
+  `InMemoryTriggerDedupStore` は開発・テスト専用で、本番では使わない（再起動で消えるため、再送で二重起動し得る）。永続実装（Operation Journal 相当の一意キー）は未実装。
+  claim が IN_FLIGHT のまま残った場合は起動時に UNKNOWN へ移し、照合されるまで再起動しない。
+  `upsertJob` は名前で一意でなく lookup→POST が原子的でないため、**Leader Lease 下で単一 Worker が実行すること**が前提。重複は作成後の検出で fail-closed（Conflict）にするが、防止はしない。
+  ai-scheduler 側の一意制約または Idempotency-Key 対応が入るまでの残存リスク。平文 HTTP は Bearer なし・明示 opt-in のクラスタ内/loopback のみ。
 - テストは既定で H2（MODE=MySQL）、`KIVRA_TEST_DB=mariadb` で MariaDB 11 実機（上記）。CI は両方を実行する。

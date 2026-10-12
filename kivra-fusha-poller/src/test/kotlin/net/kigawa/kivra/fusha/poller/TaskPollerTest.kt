@@ -21,6 +21,22 @@ class TaskPollerTest {
         TaskPoller(p, s, c, clock)
 
     @Test
+    fun `healthy health state expires when background polling stops`() = runTest {
+        val provider = ScriptedProvider().apply { put(task(1)) }
+        val poller = poller(provider, RecordingSink())
+        assertFalse(poller.admissionAllowed())
+        poller.pollOnce()
+        assertTrue(poller.admissionAllowed())
+
+        // Two 30-second intervals plus 5-second jitter have elapsed without an observation.
+        clock.now = clock.now.plusSeconds(66)
+        assertFalse(poller.admissionAllowed(), "stale healthy snapshot must not authorize admission")
+
+        poller.pollOnce()
+        assertTrue(poller.admissionAllowed(), "fresh confirmed poll restores admission")
+    }
+
+    @Test
     fun `first poll discovers scoped tasks and an unchanged poll emits nothing`() = runTest {
         val p = ScriptedProvider().apply { put(task(1)); put(task(2)) }
         val s = RecordingSink()

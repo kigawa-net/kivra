@@ -11,8 +11,8 @@ import java.time.Instant
  * in tests). Production must use the M0 `external_operations` adapter (not yet implemented, see the status mapping in
  * MutationJournal.kt).
  *
- * The constructor fails fast when [environment] (default: `KIVRA_ENVIRONMENT`) is anything other than unset or
- * `dev` / `test` / `local`, so a production start cannot silently run with this journal.
+ * An EXPLICIT `KIVRA_ENVIRONMENT` of `dev` / `test` / `local` is required. Missing environment is
+ * NOT assumed to be local: production deployments without the flag must fail closed.
  */
 class InMemoryMemoryMutationJournal(
     private val trustedIssuers: Set<String> = emptySet(),
@@ -21,7 +21,7 @@ class InMemoryMemoryMutationJournal(
 ) : MemoryMutationJournalPort {
     init {
         val env = environment?.trim()?.lowercase()
-        check(env == null || env in DEV_ENVIRONMENTS) {
+        check(env in DEV_ENVIRONMENTS) {
             "InMemoryMemoryMutationJournal is dev/test only (non-durable, not CAS across processes); refusing to start with KIVRA_ENVIRONMENT=$env"
         }
     }

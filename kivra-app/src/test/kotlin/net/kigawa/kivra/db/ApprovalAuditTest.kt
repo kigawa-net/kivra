@@ -24,6 +24,7 @@ private fun human(subject: String = "kc-user-1", expiresAt: Instant = Instant.no
 
 private class Fixture(val db: TestDb) {
     val audits = db.audit
+    val outbox = db.outbox
     private val database = db.database
     val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
     val runId = run.runId.value
@@ -311,18 +312,89 @@ class ApprovalAuditTest {
         assertTrue(chainOk())
     }
 
-    @Test
-    fun `external anchor reveals tail truncation that the chain alone cannot detect`() = fixture {
+    private class FakeAnchor(var fail: Boolean = false) : AuditHeadAnchor {
+        val calls = mutableListOf<String>()
+        val stored = linkedMapOf<String, AuditHead>()
+        override fun publish(head: AuditHead, idempotencyKey: String) {
+            calls += idempotencyKey
+            if (fail) throw IllegalStateException("anchor down")
+            stored.putIfAbsent(idempotencyKey, head)
+        }
+    }
+
+    private fun Fixture.recordTwo() {
         fun rec(o: AuditOutcome) = AuditRecord("d-anc", runId, AGENT, "k8s.apply", "ns:prod", o, "r", null, "dg")
         sink.record(rec(AuditOutcome.INTENT_ALLOWED))
         sink.record(rec(AuditOutcome.EXECUTED))
-        val published = mutableListOf<AuditHead>()
-        val anchored = anchorAuditHead(db.database, audits, RunId(runId)) { published += it }
-        assertEquals(published.single(), anchored)
+    }
+
+    private fun Fixture.enqueue() = transaction(db.database) { enqueueAuditHeadAnchor(this, audits, outbox, RunId(runId)) }
+
+    @Test
+    fun `a failing anchor publish does not roll back the transaction that enqueued the head`() = fixture {
+        recordTwo()
+        val enqueued = enqueue()
+        assertEquals(3L, enqueued!!.seq, "run creation, INTENT_ALLOWED and EXECUTED")
+        val anchor = FakeAnchor(fail = true)
+        val publisher = AuditAnchorPublisher(outbox, anchor, "pub-a", backoff = Duration.ZERO)
+        assertEquals(0, publisher.publishDue())
+        assertEquals(1, anchor.calls.size)
+        assertEquals(1, db.count("outbox_events", "aggregate_type = 'AUDIT_ANCHOR' AND status = 'PENDING' AND publish_attempts = 1"))
+        assertEquals(3, db.count("audit_events"), "the audit chain is untouched by the failed publish")
+        assertTrue(chainOk())
+    }
+
+    @Test
+    fun `an anchor enqueued in a transaction that rolls back leaves no outbox row`() = fixture {
+        recordTwo()
+        assertFailsWith<IllegalStateException> {
+            transaction(db.database) {
+                enqueueAuditHeadAnchor(this, audits, outbox, RunId(runId))
+                error("boom")
+            }
+        }
+        assertEquals(0, db.count("outbox_events", "aggregate_type = 'AUDIT_ANCHOR'"))
+    }
+
+    @Test
+    fun `redelivery after a lost mark reuses the idempotency key and does not duplicate the anchor`() = fixture {
+        recordTwo()
+        enqueue()
+        val anchor = FakeAnchor()
+        val publisher = AuditAnchorPublisher(outbox, anchor, "pub-a")
+        assertEquals(1, publisher.publishDue())
+        // markPublished was lost: the row goes back to PENDING and is delivered again
+        transaction(db.database) { execUpdate("UPDATE outbox_events SET status = 'PENDING', published_at = NULL WHERE aggregate_type = 'AUDIT_ANCHOR'") }
+        assertEquals(1, publisher.publishDue())
+        assertEquals(2, anchor.calls.size)
+        assertEquals(anchor.calls[0], anchor.calls[1], "the same idempotency key is presented on redelivery")
+        assertEquals(1, anchor.stored.size, "the external store holds one copy")
+        assertEquals(0, publisher.publishDue(), "nothing is due after PUBLISHED")
+    }
+
+    @Test
+    fun `re-enqueueing the same head is idempotent and a rewritten head at the same seq is refused`() = fixture {
+        recordTwo()
+        enqueue()
+        enqueue()
+        assertEquals(1, db.count("outbox_events", "aggregate_type = 'AUDIT_ANCHOR'"))
+        transaction(db.database) { execUpdate("UPDATE audit_events SET hash = ? WHERE result = 'EXECUTED'", "f".repeat(64)) }
+        assertFailsWith<IllegalStateException> { enqueue() }
+    }
+
+    @Test
+    fun `external anchor reveals tail truncation that the chain alone cannot detect`() = fixture {
+        recordTwo()
+        enqueue()
+        val anchor = FakeAnchor()
+        val publisher = AuditAnchorPublisher(outbox, anchor, "pub-a")
+        assertEquals(1, publisher.publishDue())
         // a DB administrator removes the newest event
         transaction(db.database) { execUpdate("DELETE FROM audit_events WHERE result = 'EXECUTED'") }
         assertTrue(chainOk(), "documented limit: deleting the newest event leaves a valid chain")
-        val now = anchorAuditHead(db.database, audits, RunId(runId)) {}
-        assertFalse(now == anchored, "the externally anchored head no longer matches")
+        enqueue()
+        assertEquals(1, publisher.publishDue())
+        assertEquals(3L, anchor.stored.values.maxOf { it.seq }, "the external copy still records seq 3")
+        assertEquals(2L, transaction(db.database) { audits.head(this, RunId(runId)) }!!.seq, "the database head is now seq 2")
     }
 }

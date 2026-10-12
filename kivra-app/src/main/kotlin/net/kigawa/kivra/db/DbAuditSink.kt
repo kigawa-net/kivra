@@ -46,14 +46,6 @@ class DbAuditSink(private val database: Database, private val audit: AuditReposi
     }
 }
 
-/**
- * Hook for external anchoring: reads the current head of [runId] and hands it to [anchor]. Returns null when the run has
- * no events. This module does not schedule it; a deployment calls it periodically and stores the anchored heads outside
- * the application database.
- */
-fun anchorAuditHead(database: Database, audit: AuditRepository, runId: RunId, anchor: AuditHeadAnchor): AuditHead? =
-    transaction(database) { audit.head(this, runId)?.also { anchor.publish(it) } }
-
 /** An INTENT_ALLOWED record that has no terminal record for the same decision. */
 data class OrphanIntent(val runId: String, val decisionId: String, val approvalId: String?, val action: String, val resource: String)
 

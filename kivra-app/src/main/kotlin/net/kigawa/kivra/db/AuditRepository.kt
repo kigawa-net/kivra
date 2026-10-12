@@ -30,7 +30,12 @@ data class AuditHead(val runId: String, val seq: Long, val hash: String)
  * the chain only detects modification of events that remain; it cannot detect deletion of the newest events.
  */
 fun interface AuditHeadAnchor {
-    fun publish(head: AuditHead)
+    /**
+     * Delivers [head] to the external store. Called only from [AuditAnchorPublisher], outside any application
+     * transaction, and possibly more than once for the same head: implementations MUST dedupe on [idempotencyKey]
+     * (the outbox `event_id`, stable across redeliveries).
+     */
+    fun publish(head: AuditHead, idempotencyKey: String)
 }
 
 /**

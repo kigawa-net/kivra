@@ -42,6 +42,9 @@ enum class MutationCapability { DISABLED, ENABLED }
 
 private val SAFE_ID = Regex("[A-Za-z0-9._:-]{1,128}")
 private val SAFE_REF = Regex("[A-Za-z0-9._:/-]{1,256}")
+
+/** Opaque `prefix-<uuid>` pointers carry no content; the entropy heuristic misfires on them at random (flaky rejections). */
+private val OPAQUE_UUID_REF = Regex("[a-z]{2,8}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 private val REQUEST_ID = Regex("[A-Za-z0-9-]{1,64}")
 private val DIGEST = Regex("sha256:[0-9a-f]{64}")
 private val REASON_CODE = Regex("[A-Z_]{1,64}")
@@ -117,7 +120,9 @@ data class MutationEvidence(
     init {
         require(SAFE_ID.matches(operationId) && SAFE_ID.matches(issuer)) { "invalid evidence binding" }
         require(DIGEST.matches(payloadDigest)) { "invalid evidence digest" }
-        require(SAFE_REF.matches(evidenceRef) && !SecretFilter.containsSecret(evidenceRef)) { "invalid evidence ref" }
+        require(SAFE_REF.matches(evidenceRef) && (OPAQUE_UUID_REF.matches(evidenceRef) || !SecretFilter.containsSecret(evidenceRef))) {
+            "invalid evidence ref"
+        }
     }
 }
 

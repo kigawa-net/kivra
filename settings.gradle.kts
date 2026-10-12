@@ -14,7 +14,9 @@ dependencyResolutionManagement {
 rootProject.name = "kivra"
 
 include(
+    "kivra-memory",
     "kivra-core",
     "kivra-github",
     "kivra-app",
+    "kivra-ui-api",
 )

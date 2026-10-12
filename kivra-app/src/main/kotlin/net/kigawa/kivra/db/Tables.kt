@@ -22,6 +22,12 @@ object DevelopmentRunsTable : Table("development_runs") {
     val nextRetryAt = datetime("next_retry_at").nullable()
     val budgetJson = text("budget_json").nullable()
     val traceId = varchar("trace_id", 64).nullable()
+    val completionMode = varchar("completion_mode", 16)
+    val prRepository = varchar("pr_repository", 255).nullable()
+    val prHeadSha = varchar("pr_head_sha", 64).nullable()
+    val completionMergeSha = varchar("completion_merge_sha", 64).nullable()
+    val completionEvidenceRef = varchar("completion_evidence_ref", 255).nullable()
+    val completionObservedAt = datetime("completion_observed_at").nullable()
     val version = long("version").default(0)
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at")
@@ -90,6 +96,7 @@ object ExternalOperationsTable : Table("external_operations") {
     val evidenceObservation = varchar("evidence_observation", 16).nullable()
     val evidenceRef = varchar("evidence_ref", 255).nullable()
     val evidenceObservedAt = datetime("evidence_observed_at").nullable()
+    val evidenceIssuer = varchar("evidence_issuer", 64).nullable()
     val providerCapability = varchar("provider_capability", 32).nullable()
     val transitionReason = varchar("transition_reason", 64).nullable()
     val version = long("version").default(0)
@@ -114,6 +121,7 @@ object OutboxEventsTable : Table("outbox_events") {
     val publishedAt = datetime("published_at").nullable()
     val claimedBy = varchar("claimed_by", 64).nullable()
     val claimExpiresAt = datetime("claim_expires_at").nullable()
+    val claimToken = varchar("claim_token", 36).nullable()
     override val primaryKey = PrimaryKey(eventId)
 }
 

@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class StatesTest {
@@ -41,15 +42,68 @@ class StatesTest {
     }
 
     @Test
+    fun `IN_FLIGHT has no evidence-free exit except CONFIRMED and UNKNOWN`() {
+        // A timeout / 503 after sending does not prove non-execution, so RETRYABLE and FAILED need a proof API.
+        assertEquals(setOf(OperationStatus.CONFIRMED, OperationStatus.UNKNOWN), OperationStatus.IN_FLIGHT.next)
+        assertFalse(OperationStatus.IN_FLIGHT.canTransitionTo(OperationStatus.RETRYABLE))
+        assertFalse(OperationStatus.IN_FLIGHT.canTransitionTo(OperationStatus.FAILED))
+    }
+
+    @Test
     fun `evidence must match the target state`() {
-        fun ev(o: ExternalObservation, c: ProviderCapability = ProviderCapability.LOOKUP_BY_STABLE_REF) =
-            ReconciliationEvidence(o, "ref", java.time.LocalDateTime.now(), c)
+        fun ev(o: ExternalObservation, c: ProviderCapability = ProviderCapability.AUTHORITATIVE_ABSENCE) =
+            ReconciliationEvidence(RunId("r"), "op", "h", "exkes-adapter", o, "ref", java.time.LocalDateTime.now(), c)
         assertTrue(ev(ExternalObservation.EXISTS).justifies(OperationStatus.CONFIRMED))
         assertFalse(ev(ExternalObservation.EXISTS).justifies(OperationStatus.RETRYABLE), "exists: never resend")
         assertTrue(ev(ExternalObservation.ABSENT).justifies(OperationStatus.RETRYABLE))
+        assertTrue(ev(ExternalObservation.ABSENT, ProviderCapability.AUTHORITATIVE_IDEMPOTENCY).justifies(OperationStatus.RETRYABLE))
         assertFalse(ev(ExternalObservation.ABSENT, ProviderCapability.MANUAL_OPERATOR).justifies(OperationStatus.RETRYABLE))
         assertTrue(ev(ExternalObservation.FAILED_CONFIRMED).justifies(OperationStatus.FAILED))
-        assertFailsWith<IllegalArgumentException> { ReconciliationEvidence(ExternalObservation.EXISTS, " ", java.time.LocalDateTime.now(), ProviderCapability.LOOKUP_BY_STABLE_REF) }
+        assertFailsWith<IllegalArgumentException> {
+            ReconciliationEvidence(RunId("r"), "op", "h", "exkes-adapter", ExternalObservation.EXISTS, " ", java.time.LocalDateTime.now(), ProviderCapability.LOOKUP_BY_STABLE_REF)
+        }
+    }
+
+    @Test
+    fun `a plain lookup miss never justifies a re-dispatch (exkes POST has no Idempotency-Key)`() {
+        // LOOKUP_BY_STABLE_REF list/get that finds nothing is only eventual-consistency evidence.
+        val notFound = ReconciliationEvidence(
+            RunId("r"), "op", "h", "exkes-adapter", ExternalObservation.ABSENT, "list:kivra-run-x", java.time.LocalDateTime.now(),
+            ProviderCapability.LOOKUP_BY_STABLE_REF,
+        )
+        assertFalse(notFound.justifies(OperationStatus.RETRYABLE))
+    }
+
+    @Test
+    fun `proofs require a non-blank issuer and evidence reference`() {
+        assertFailsWith<IllegalArgumentException> {
+            NotSentProof(RunId("r"), "op", "h", "", "ref", java.time.LocalDateTime.now())
+        }
+        assertFailsWith<IllegalArgumentException> {
+            RejectedProof(RunId("r"), "op", "h", "exkes-adapter", "x".repeat(256), java.time.LocalDateTime.now())
+        }
+        assertTrue("exkes-adapter" in TrustedEvidenceIssuers.DEFAULT)
+    }
+
+    @Test
+    fun `execution session UNKNOWN is left only on an observed state, never by a blind re-request`() {
+        assertTrue(ExecutionSessionState.UNKNOWN.next.isEmpty())
+        assertFalse(ExecutionSessionState.UNKNOWN.isTerminal, "UNKNOWN is not terminal: it can be observed out of")
+        assertFalse(ExecutionSessionState.UNKNOWN.canTransitionTo(ExecutionSessionState.PROVISIONING), "no evidence-free exit")
+        assertFalse(ExecutionSessionState.UNKNOWN.canTransitionTo(ExecutionSessionState.REQUESTED), "no evidence-free exit")
+        assertEquals(ExecutionSessionState.PROVISIONING, ExecutionSessionState.UNKNOWN.leaveUnknownOn(ExecutionSessionState.PROVISIONING))
+        assertEquals(ExecutionSessionState.EXECUTING, ExecutionSessionState.UNKNOWN.leaveUnknownOn(ExecutionSessionState.EXECUTING))
+        assertNull(ExecutionSessionState.UNKNOWN.leaveUnknownOn(ExecutionSessionState.REQUESTED), "a REQUESTED observation does not re-request")
+        assertNull(ExecutionSessionState.READY.leaveUnknownOn(ExecutionSessionState.EXECUTING), "only UNKNOWN has observed exits")
+    }
+
+    @Test
+    fun `PR_ONLY runs complete only through the PR completion sources, never from VERIFYING or RELEASING`() {
+        assertEquals(setOf(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.WAITING_APPROVAL), DevelopmentRunState.prOnlyCompletionSources)
+        for (from in DevelopmentRunState.prOnlyCompletionSources) {
+            assertFalse(from.canTransitionTo(DevelopmentRunState.COMPLETED), "$from -> COMPLETED is not a generic transition")
+        }
+        assertTrue(DevelopmentRunState.VERIFYING.canTransitionTo(DevelopmentRunState.COMPLETED), "RELEASE path is unchanged")
     }
 
     @Test

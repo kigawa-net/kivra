@@ -18,6 +18,8 @@ private val TERMINAL_SQL = DevelopmentRunState.terminalNames.joinToString(",") {
  * Run Lease on the `development_runs` row (design #10 section 5.2 / #11 section 3.3).
  *
  * - acquire: only for a non-terminal, non-held run (or one whose lease expired more than `grace` ago); bumps `lease_generation`.
+ *   In the same transaction it sweeps the IN_FLIGHT operations left by earlier generations to UNKNOWN (restart sweep), so no
+ *   caller can take over a run without the sweep.
  * - renew: requires owner + generation match, `lease_expires_at > NOW`, no hold and no cancel request. An expired lease can never be
  *   revived by renew; the only way back is a new acquire (generation + 1).
  * - Expiry is judged by the DB clock only. At exactly `lease_expires_at = NOW` neither acquire nor renew
@@ -25,33 +27,39 @@ private val TERMINAL_SQL = DevelopmentRunState.terminalNames.joinToString(",") {
  */
 class SqlLeaseStore(
     private val database: Database,
-    @Suppress("unused") private val clock: Clock = Clock.systemUTC(),
+    private val clock: Clock = Clock.systemUTC(),
 ) : LeaseStore {
 
     override fun acquire(runId: RunId, owner: String, ttl: Duration, grace: Duration): Lease? =
         transaction(database) {
-            val updated = execUpdate(
-                """
-                UPDATE development_runs
-                   SET lease_owner = ?,
-                       lease_generation = lease_generation + 1,
-                       lease_expires_at = ${DbTime.nowPlusSeconds()},
-                       version = version + 1
-                 WHERE run_id = ?
-                   AND state NOT IN ($TERMINAL_SQL)
-                   AND hold_reason IS NULL
-                   AND (lease_owner IS NULL OR lease_expires_at < ${DbTime.nowMinusSeconds()})
-                """.trimIndent(),
-                owner, ttl.seconds, runId.value, grace.seconds,
-            )
-            if (updated == 0) return@transaction null
-            // The row is locked by our own UPDATE until commit, so this read is the generation we just assigned.
-            val generation = execQuery(
-                "SELECT lease_generation FROM development_runs WHERE run_id = ? AND lease_owner = ?",
-                runId.value, owner,
-            ) { it.getLong(1) }.single()
-            Lease(runId, owner, generation)
+            val lease = acquireInTx(runId, owner, ttl, grace) ?: return@transaction null
+            sweepStaleInFlight(lease, clock)
+            lease
         }
+
+    private fun Transaction.acquireInTx(runId: RunId, owner: String, ttl: Duration, grace: Duration): Lease? {
+        val updated = execUpdate(
+            """
+            UPDATE development_runs
+               SET lease_owner = ?,
+                   lease_generation = lease_generation + 1,
+                   lease_expires_at = ${DbTime.nowPlusSeconds()},
+                   version = version + 1
+             WHERE run_id = ?
+               AND state NOT IN ($TERMINAL_SQL)
+               AND hold_reason IS NULL
+               AND (lease_owner IS NULL OR lease_expires_at < ${DbTime.nowMinusSeconds()})
+            """.trimIndent(),
+            owner, ttl.seconds, runId.value, grace.seconds,
+        )
+        if (updated == 0) return null
+        // The row is locked by our own UPDATE until commit, so this read is the generation we just assigned.
+        val generation = execQuery(
+            "SELECT lease_generation FROM development_runs WHERE run_id = ? AND lease_owner = ?",
+            runId.value, owner,
+        ) { it.getLong(1) }.single()
+        return Lease(runId, owner, generation)
+    }
 
     override fun renew(lease: Lease, ttl: Duration): Boolean = transaction(database) {
         execUpdate(

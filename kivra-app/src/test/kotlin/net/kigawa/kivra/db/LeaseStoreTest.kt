@@ -1,5 +1,6 @@
 package net.kigawa.kivra.db
 
+import net.kigawa.kivra.core.RunCompletionMode
 import java.time.Duration
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -19,7 +20,7 @@ private val TTL = Duration.ofSeconds(30)
 class LeaseStoreTest {
     @Test
     fun `acquire assigns generation 1 and blocks a second owner while valid`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val a = assertNotNull(db.leases.acquire(run.runId, "worker-a", TTL))
         assertEquals(1, a.generation)
         assertNull(db.leases.acquire(run.runId, "worker-b", TTL))
@@ -28,7 +29,7 @@ class LeaseStoreTest {
 
     @Test
     fun `renew extends a valid lease without changing the generation`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val a = db.leases.acquire(run.runId, "worker-a", TTL)!!
         assertTrue(db.leases.renew(a, TTL))
         assertEquals(1, db.runs.get(run.runId)!!.leaseGeneration)
@@ -36,7 +37,7 @@ class LeaseStoreTest {
 
     @Test
     fun `renew is rejected for wrong owner or wrong generation`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val a = db.leases.acquire(run.runId, "worker-a", TTL)!!
         assertFalse(db.leases.renew(a.copy(owner = "worker-b"), TTL))
         assertFalse(db.leases.renew(a.copy(generation = a.generation + 1), TTL))
@@ -44,7 +45,7 @@ class LeaseStoreTest {
 
     @Test
     fun `an expired lease cannot be revived by renew even if nobody took it over`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val a = db.leases.acquire(run.runId, "worker-a", TTL)!!
         db.expireLease(run.runId.value)
         assertFalse(db.leases.renew(a, TTL))
@@ -53,7 +54,7 @@ class LeaseStoreTest {
 
     @Test
     fun `an expired owner cannot transition the run even before a new owner acquires`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val a = db.leases.acquire(run.runId, "worker-a", TTL)!!
         val current = db.runs.get(run.runId)!!
         db.expireLease(run.runId.value)
@@ -63,7 +64,7 @@ class LeaseStoreTest {
 
     @Test
     fun `takeover after expiry bumps the generation and fences the old worker`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val a = db.leases.acquire(run.runId, "worker-a", TTL)!!
         db.expireLease(run.runId.value)
         val b = assertNotNull(db.leases.acquire(run.runId, "worker-b", TTL))
@@ -77,7 +78,7 @@ class LeaseStoreTest {
 
     @Test
     fun `grace delays takeover of a recently expired lease`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         db.leases.acquire(run.runId, "worker-a", TTL)!!
         db.expireLease(run.runId.value, seconds = 2)
         assertNull(db.leases.acquire(run.runId, "worker-b", TTL, grace = Duration.ofSeconds(5)))
@@ -86,7 +87,7 @@ class LeaseStoreTest {
 
     @Test
     fun `release keeps the generation monotonic`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val a = db.leases.acquire(run.runId, "worker-a", TTL)!!
         assertTrue(db.leases.release(a))
         assertFalse(db.leases.release(a), "already released")
@@ -96,7 +97,7 @@ class LeaseStoreTest {
 
     @Test
     fun `terminal runs cannot be leased or renewed`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val lease = db.leases.acquire(run.runId, "w", TTL)!!
         val cancelled = db.runs.transition(lease, db.runs.get(run.runId)!!.version, DevelopmentRunState.CANCELLED, "w")
         assertEquals(DevelopmentRunState.CANCELLED, cancelled.state)
@@ -107,14 +108,14 @@ class LeaseStoreTest {
 
     @Test
     fun `a run on hold cannot be acquired`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         db.runs.hold(run.runId, "AUTH", "admin")
         assertNull(db.leases.acquire(run.runId, "w", TTL))
     }
 
     @Test
     fun `hold after acquire stops the running worker everywhere and clearing it resumes`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val lease = db.leases.acquire(run.runId, "old-worker", TTL)!!
         val op = db.journal.prepare(lease, PrepareOperation("EXKES_CREATE_WORKSPACE", "k1", "EXKES", "ref", "a".repeat(64)))
         val v = db.runs.get(run.runId)!!.version
@@ -140,7 +141,7 @@ class LeaseStoreTest {
 
     @Test
     fun `cancel request stops the worker except for acknowledging the cancel`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val lease = db.leases.acquire(run.runId, "w", TTL)!!
         val requested = db.runs.requestCancel(run.runId, "admin")
         assertTrue(requested.cancelRequested)
@@ -156,7 +157,7 @@ class LeaseStoreTest {
 
     @Test
     fun `cancel of a run whose worker is gone is completed by the administrator path`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         db.leases.acquire(run.runId, "w", TTL)!!
         db.runs.requestCancel(run.runId, "admin")
         assertFalse(db.runs.cancelUnowned(run.runId, "admin"), "the worker still holds a valid lease")
@@ -167,7 +168,7 @@ class LeaseStoreTest {
 
     @Test
     fun `cancel cannot be requested once the run is releasing`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         db.leases.acquire(run.runId, "w", TTL)!!
         db.forceState(run.runId.value, DevelopmentRunState.RELEASING)
         assertFailsWith<InvalidTransitionException> { db.runs.requestCancel(run.runId, "admin") }

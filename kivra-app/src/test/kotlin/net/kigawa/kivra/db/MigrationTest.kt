@@ -1,5 +1,6 @@
 package net.kigawa.kivra.db
 
+import net.kigawa.kivra.core.RunCompletionMode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -28,7 +29,7 @@ class MigrationTest {
 
     @Test
     fun `stage attempts are unique per run, stage and attempt number`() = TestDb().use { db ->
-        val run = db.runs.create("task-1", "test")
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         fun insert() = transaction(db.database) {
             execUpdate(
                 "INSERT INTO stage_executions (stage_exec_id, run_id, stage, attempt_no, lease_generation, status, started_at) VALUES (?, ?, 'DEVELOP', 1, 1, 'RUNNING', NOW(6))",

@@ -3,6 +3,7 @@ package net.kigawa.kivra.db
 import java.time.Clock
 import java.time.Duration
 import java.time.LocalDateTime
+import java.util.UUID
 import net.kigawa.kivra.core.Lease
 import net.kigawa.kivra.core.OutboxStatus
 import net.kigawa.kivra.core.RunId
@@ -25,6 +26,8 @@ data class OutboxEvent(
     val status: OutboxStatus,
     val publishAttempts: Int,
     val nextAttemptAt: LocalDateTime,
+    /** Set on events returned by [OutboxRepository.claim]: the token of this claim. Must be presented to markPublished / markFailed. */
+    val claimToken: String? = null,
 )
 
 /**
@@ -37,7 +40,9 @@ data class OutboxEvent(
  *   is slow the claim expires and another publisher delivers the event again, so a consumer can see an event more
  *   than once and MUST dedupe on `event_id` (see `inbox_events`). Exactly-once is not promised.
  * - **Per-run order.** Only the lowest-version PENDING event of a run is claimable. Across runs there is no order.
- * - `markPublished` / `markFailed` succeed only for the claim holder with a live claim; `markFailed` is CAS on
+ * - Every claim gets a fresh `claim_token`. `markPublished` / `markFailed` succeed only for the claim that currently holds
+ *   `(publisher_id, claim_token)` and is still live, so a stalled attempt of the same publisher_id cannot report on a
+ *   later claim (ABA). `markFailed` is CAS on
  *   `publish_attempts` under a row lock (no lost update), becomes DEAD at `maxAttempts`, and DEAD never blocks later events.
  */
 class OutboxRepository(private val database: Database, private val clock: Clock = Clock.systemUTC()) {
@@ -96,16 +101,17 @@ class OutboxRepository(private val database: Database, private val clock: Clock 
             limit,
         ) { it.getString(1) }
         candidates.mapNotNull { id ->
+            val token = UUID.randomUUID().toString()
             val won = execUpdate(
                 """
                 UPDATE outbox_events
-                   SET claimed_by = ?, claim_expires_at = ${DbTime.nowPlusSeconds()}
+                   SET claimed_by = ?, claim_expires_at = ${DbTime.nowPlusSeconds()}, claim_token = ?
                  WHERE event_id = ? AND status = 'PENDING'
                    AND (claim_expires_at IS NULL OR claim_expires_at <= ${DbTime.NOW})
                 """.trimIndent(),
-                publisherId, claimTtl.seconds, id,
+                publisherId, claimTtl.seconds, token, id,
             ) == 1
-            if (won) OutboxEventsTable.selectAll().where { OutboxEventsTable.eventId eq id }.single().toEvent() else null
+            if (won) OutboxEventsTable.selectAll().where { OutboxEventsTable.eventId eq id }.single().toEvent().copy(claimToken = token) else null
         }
     }
 
@@ -114,13 +120,13 @@ class OutboxRepository(private val database: Database, private val clock: Clock 
      * possibly taken over, or already published). A false result after a successful send is expected under
      * at-least-once delivery: the event may be delivered again, which is why consumers dedupe on `event_id`.
      */
-    fun markPublished(eventId: String, publisherId: String): Boolean = transaction(database) {
+    fun markPublished(eventId: String, publisherId: String, claimToken: String): Boolean = transaction(database) {
         execUpdate(
             """
-            UPDATE outbox_events SET status = 'PUBLISHED', published_at = ?, claimed_by = NULL, claim_expires_at = NULL
-             WHERE event_id = ? AND status = 'PENDING' AND claimed_by = ? AND claim_expires_at > ${DbTime.NOW}
+            UPDATE outbox_events SET status = 'PUBLISHED', published_at = ?, claimed_by = NULL, claim_expires_at = NULL, claim_token = NULL
+             WHERE event_id = ? AND status = 'PENDING' AND claimed_by = ? AND claim_token = ? AND claim_expires_at > ${DbTime.NOW}
             """.trimIndent(),
-            utcNow(clock), eventId, publisherId,
+            utcNow(clock), eventId, publisherId, claimToken,
         ) == 1
     }
 
@@ -129,11 +135,19 @@ class OutboxRepository(private val database: Database, private val clock: Clock 
      * The row is locked and updated with CAS on `publish_attempts`, so concurrent callers cannot lose an
      * increment. Returns null if the caller does not hold a live claim or the event is no longer PENDING.
      */
-    fun markFailed(eventId: String, publisherId: String, backoff: Duration, maxAttempts: Int): OutboxStatus? = transaction(database) {
+    fun markFailed(
+        eventId: String,
+        publisherId: String,
+        claimToken: String,
+        backoff: Duration,
+        maxAttempts: Int,
+    ): OutboxStatus? = transaction(database) {
         val row = OutboxEventsTable.selectAll().where { OutboxEventsTable.eventId eq eventId }.forUpdate().firstOrNull()
             ?: return@transaction null
         val expires = row[OutboxEventsTable.claimExpiresAt]
-        if (row[OutboxEventsTable.status] != OutboxStatus.PENDING.name || row[OutboxEventsTable.claimedBy] != publisherId || expires == null) {
+        if (row[OutboxEventsTable.status] != OutboxStatus.PENDING.name || row[OutboxEventsTable.claimedBy] != publisherId ||
+            row[OutboxEventsTable.claimToken] != claimToken || expires == null
+        ) {
             return@transaction null
         }
         val attempts = row[OutboxEventsTable.publishAttempts]
@@ -141,11 +155,12 @@ class OutboxRepository(private val database: Database, private val clock: Clock 
         val updated = execUpdate(
             """
             UPDATE outbox_events
-               SET status = ?, next_attempt_at = ${DbTime.nowPlusSeconds()}, claimed_by = NULL, claim_expires_at = NULL, publish_attempts = ?
-             WHERE event_id = ? AND status = 'PENDING' AND claimed_by = ? AND publish_attempts = ?
+               SET status = ?, next_attempt_at = ${DbTime.nowPlusSeconds()}, claimed_by = NULL, claim_expires_at = NULL, claim_token = NULL,
+                   publish_attempts = ?
+             WHERE event_id = ? AND status = 'PENDING' AND claimed_by = ? AND claim_token = ? AND publish_attempts = ?
                AND claim_expires_at > ${DbTime.NOW}
             """.trimIndent(),
-            next.name, backoff.seconds, attempts + 1, eventId, publisherId, attempts,
+            next.name, backoff.seconds, attempts + 1, eventId, publisherId, claimToken, attempts,
         )
         if (updated == 1) next else null
     }

@@ -152,7 +152,8 @@ class OperationJournalRepository(
             if (existing[ExternalOperationsTable.externalSystem] != op.externalSystem ||
                 existing[ExternalOperationsTable.stableRef] != op.stableRef ||
                 existing[ExternalOperationsTable.tenantId] != op.tenantId ||
-                existing[ExternalOperationsTable.providerContractVersion] != op.providerContractVersion
+                existing[ExternalOperationsTable.providerContractVersion] != op.providerContractVersion ||
+                existing[ExternalOperationsTable.maxAttempts] != op.maxAttempts
             ) {
                 throw OperationBindingMismatchException("idempotency key reused with a different operation binding")
             }

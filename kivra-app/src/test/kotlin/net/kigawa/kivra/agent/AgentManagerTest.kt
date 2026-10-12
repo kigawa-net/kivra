@@ -203,6 +203,31 @@ class AgentManagerTest {
         return PipelineObservedAuthority(evidence)
     }
 
+    @Test
+    fun `untrusted provider and lookup exceptions never enter the durable operation journal`() = TestDb().use { db ->
+        val runId = db.preparingRun()
+        val lease = db.leases.acquire(runId, "error-redaction-test", Duration.ofSeconds(30))!!
+        val secret = "Authorization: Bearer DO-NOT-STORE-THIS"
+        val call = Op<Unit>(
+            opType = "EXKES_CREATE_WORKSPACE",
+            key = "redaction-guard",
+            stableRef = "workspace-redaction",
+            requestHash = "a".repeat(64),
+            call = { PortResult.Unknown("provider error $secret") },
+            refOf = { null },
+            observe = { throw IllegalStateException("lookup failure $secret") },
+        )
+        val executor = OperationExecutor(db.journal, db.pipelineAuthority(), "tenant-1", "2026-01", 3, Duration.ZERO)
+        val result = runBlocking {
+            executor.perform(lease, call, allowCancel = false, allowDispatch = true, guard = {})
+        }
+        assertIs<OpOutcome.ReconciliationRequired>(result)
+        val journalRow = db.journal.listByRun(runId).single()
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, journalRow.status)
+        assertEquals("PROVIDER_LOOKUP_UNDETERMINED", journalRow.lastError)
+        assertFalse(journalRow.lastError?.contains("DO-NOT-STORE-THIS") == true)
+    }
+
     private fun TestDb.agentsOf(runId: RunId) = AgentRepository(database).agentsOf(runId)
     private fun TestDb.ops(runId: RunId) = journal.listByRun(runId).associateBy { it.opType }
     private fun TestDb.runState(runId: RunId) = runs.get(runId)!!.state

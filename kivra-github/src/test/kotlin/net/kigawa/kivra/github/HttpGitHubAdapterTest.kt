@@ -69,6 +69,21 @@ class HttpGitHubAdapterTest {
     }
 
     @Test
+    fun `GitHub API endpoint requires HTTPS and an approved origin`() {
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "http://api.github.com") }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://unapproved.example") }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://user:pass@api.github.com") }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://api.github.com?token=secret") }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://api.github.com/#unsafe") }
+        assertFailsWithIllegalArgument { GitHubAdapterConfig(apiBase = "https://api.github.com/../evil") }
+        val enterprise = GitHubAdapterConfig(
+            apiBase = "https://github.enterprise.example/api/v3",
+            trustedApiHosts = setOf("github.enterprise.example"),
+        )
+        assertEquals("https://github.enterprise.example/api/v3", enterprise.apiBase)
+    }
+
+    @Test
     fun `bearer authenticated GitHub API redirects are never followed`() = runTest {
         val f = Fake {
             respond(

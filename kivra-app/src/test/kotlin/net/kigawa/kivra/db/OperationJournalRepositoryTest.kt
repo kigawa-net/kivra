@@ -132,6 +132,7 @@ class OperationJournalRepositoryTest {
             op().copy(providerContractVersion = "2026-02"),
             op().copy(externalSystem = "OTHER_PROVIDER"),
             op().copy(stableRef = "other-workspace"),
+            op().copy(maxAttempts = 99),
         )
         for (changed in mismatches) {
             assertFailsWith<OperationBindingMismatchException> { db.journal.prepare(lease, changed) }

@@ -9,5 +9,7 @@ dependencies {
     runtimeOnly(libs.ktor.client.cio)
 
     testImplementation(libs.ktor.client.mock)
+    // Real engine for transport classification tests (refused / DNS / connect timeout / mid-request loss).
+    testImplementation(libs.ktor.client.cio)
     testImplementation(libs.kotlinx.coroutines.test)
 }

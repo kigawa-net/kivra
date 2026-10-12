@@ -208,7 +208,8 @@ class OperationJournalRepository(
         expectedVersion: Long,
         proof: NotSentProof,
         nextActionAt: LocalDateTime? = null,
-    ): JournalEntry = applyTransition(lease, opId, expectedVersion, OperationStatus.RETRYABLE, Gate.NotSent(proof), null, null, null, nextActionAt)
+        allowCancelRequested: Boolean = false,
+    ): JournalEntry = applyTransition(lease, opId, expectedVersion, OperationStatus.RETRYABLE, Gate.NotSent(proof), null, null, null, nextActionAt, allowCancelRequested)
 
     /** IN_FLIGHT -> FAILED, only with a [RejectedProof] from a trusted issuer that the external system explicitly refused. */
     fun markRejected(
@@ -218,7 +219,8 @@ class OperationJournalRepository(
         proof: RejectedProof,
         errorClass: String? = null,
         error: String? = null,
-    ): JournalEntry = applyTransition(lease, opId, expectedVersion, OperationStatus.FAILED, Gate.Rejected(proof), null, errorClass, error, null)
+        allowCancelRequested: Boolean = false,
+    ): JournalEntry = applyTransition(lease, opId, expectedVersion, OperationStatus.FAILED, Gate.Rejected(proof), null, errorClass, error, null, allowCancelRequested)
 
     /** Why a status change is allowed. Only [Plain] comes without a proof, and it never reaches the proof-only edges. */
     private sealed interface Gate {

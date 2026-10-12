@@ -13,6 +13,7 @@ import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.ExecutionSessionState
 import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.OperationStatus
+import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.AgentRepository
 import net.kigawa.kivra.db.TestDb
@@ -118,7 +119,7 @@ private val TEST_CONFIG = AgentManagerConfig(
 
 class AgentManagerTest {
     private fun TestDb.preparingRun(): RunId {
-        val run = runs.create("task-${System.nanoTime()}", "test")
+        val run = runs.create("task-${System.nanoTime()}", "test", RunCompletionMode.RELEASE)
         forceState(run.runId.value, DevelopmentRunState.PREPARING)
         return run.runId
     }
@@ -425,7 +426,7 @@ class AgentManagerTest {
 
     @Test
     fun `a run that is not in a runnable state is refused`() = TestDb().use { db ->
-        val run = db.runs.create("task-x", "test")
+        val run = db.runs.create("task-x", "test", RunCompletionMode.RELEASE)
         assertEquals(AgentRunOutcome.NotRunnable(DevelopmentRunState.CREATED), runBlocking { db.manager(TestPort()).run(run.runId, PROFILE) })
     }
 

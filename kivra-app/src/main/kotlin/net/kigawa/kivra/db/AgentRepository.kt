@@ -9,6 +9,7 @@ import net.kigawa.kivra.core.Lease
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.VersionConflictException
 import net.kigawa.kivra.core.canTransitionTo
+import net.kigawa.kivra.core.leaveUnknownOn
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.and
@@ -124,7 +125,13 @@ class AgentRepository(private val database: Database, private val clock: Clock =
         if (row[ExecutionSessionsTable.version] != expectedVersion) {
             throw VersionConflictException("session $sessionId is at version ${row[ExecutionSessionsTable.version]}, expected $expectedVersion")
         }
-        if (to != null && !from.canTransitionTo(to)) throw InvalidTransitionException("session $sessionId: $from -> $to is not allowed")
+        // UNKNOWN is left only towards the exkes state that was actually observed (ExecutionSessionState.leaveUnknownOn).
+        if (to != null && from == ExecutionSessionState.UNKNOWN && from.leaveUnknownOn(to) == null) {
+            throw InvalidTransitionException("session $sessionId: UNKNOWN -> $to is not an observed state")
+        }
+        if (to != null && from != ExecutionSessionState.UNKNOWN && !from.canTransitionTo(to)) {
+            throw InvalidTransitionException("session $sessionId: $from -> $to is not allowed")
+        }
         val n = ExecutionSessionsTable.update({ (ExecutionSessionsTable.sessionId eq sessionId) and (ExecutionSessionsTable.version eq expectedVersion) }) {
             if (to != null) it[state] = to.name
             if (workspaceId != null) it[ExecutionSessionsTable.workspaceId] = workspaceId

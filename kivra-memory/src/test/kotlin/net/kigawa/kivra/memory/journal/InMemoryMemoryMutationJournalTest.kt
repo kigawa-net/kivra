@@ -15,8 +15,9 @@ class InMemoryMemoryMutationJournalTest : MutationJournalContract() {
     }
 
     @Test
-    fun `starts when unset or explicitly dev, test or local`() {
-        InMemoryMemoryMutationJournal(environment = null)
+    fun `starts only when explicitly dev, test or local`() {
+        assertFailsWith<IllegalStateException> { InMemoryMemoryMutationJournal(environment = null) }
+        assertFailsWith<IllegalStateException> { InMemoryMemoryMutationJournal(environment = "") }
         InMemoryMemoryMutationJournal(environment = "dev")
         InMemoryMemoryMutationJournal(environment = "test")
         InMemoryMemoryMutationJournal(environment = "local")

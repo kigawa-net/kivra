@@ -41,6 +41,9 @@ data class GitHubAdapterConfig(
 fun githubHttpClient(engine: HttpClientEngine, config: GitHubAdapterConfig = GitHubAdapterConfig()): HttpClient =
     HttpClient(engine) {
         expectSuccess = false
+        // GitHub API responses must never redirect a bearer-authenticated request to another origin.
+        // Redirects are returned as non-2xx and classified by the adapter, not followed.
+        followRedirects = false
         install(HttpTimeout) {
             requestTimeoutMillis = config.requestTimeoutMillis
             connectTimeoutMillis = config.connectTimeoutMillis

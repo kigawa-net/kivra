@@ -80,7 +80,7 @@ abstract class MutationJournalContract {
             j.prepare(original.copy(expectedRevision = 1L)),
         )
         assertIs<PrepareResult.Existing>(j.prepare(original.copy(writerGeneration = 2L)))
-        assertEquals(0L, j.get(original.operationId)!!.ownerGeneration - original.writerGeneration)
+        assertEquals(original.writerGeneration, j.get(original.operationId)!!.ownerGeneration)
     }
 
     @Test

@@ -68,7 +68,9 @@ import kotlin.random.Random
  * Safety rules enforced here (lessons from earlier adapter reviews):
  *  - https only, bearer token only to the configured host; redirects are NEVER followed (3xx = PROTOCOL error);
  *  - only GET is retried; POST / PATCH / DELETE are never auto re-sent. Re-delivery of a failed save is the job of
- *    the Write Queue with the same idempotency key, and only when [MemoryCapability.IDEMPOTENT_SAVE] is declared;
+ *    the Write Queue with the same idempotency key, but only for UNAVAILABLE (not applied). OUTCOME_UNKNOWN saves are
+ *    held for reconciliation and are NOT re-sent, even when [MemoryCapability.IDEMPOTENT_SAVE] is declared, until the
+ *    persistent Operation Journal (M0 `external_operations`) is connected;
  *  - response identity is verified (requested id == returned id, version advanced, scopes within the caller's
  *    allowed scopes); search hits outside the requested scopes / sensitivity / kinds are dropped (defence in depth);
  *  - request / response bodies, memory text and the token never appear in exception messages;

@@ -8,7 +8,7 @@
 
 | # | 要求(要確認) | 理由 | Adapter の暫定挙動 / 現状の実装 |
 |---|---|---|---|
-| 1 | **冪等な save**: クライアント指定 `Idempotency-Key`(または content-hash 重複検出) | Orchestrator 再起動・Write Queue 再送での二重保存防止 | `ReclConfig.idempotentSaveConfirmed=false` が既定。この間は結果不明(タイムアウト/5xx)の save を再送せず破棄して監査(`WRITE_DROPPED_AMBIGUOUS`)。`Idempotency-Key` ヘッダと本文 `idempotency_key` を送るが、尊重されるかは未確認 |
+| 1 | **冪等な save**: クライアント指定 `Idempotency-Key`(または content-hash 重複検出) | Orchestrator 再起動・Write Queue 再送での二重保存防止 | 結果不明(タイムアウト/5xx)の save は、`idempotentSaveConfirmed` の値に関係なく再送しない（永続 Journal 連携まで再送しない）。破棄せず要照合として保持し、監査は件数のみ(`WRITE_HELD_RECONCILE`)。`Idempotency-Key` ヘッダと本文 `idempotency_key` を送るが、尊重されるかは未確認 |
 | 2 | **構造化メタデータ**(kind, provenance, confidence, sensitivity, retention)の保存と、kind / sensitivity での検索フィルタ | Memory 種別と機密区分の制御 | 専用フィールドがある前提の JSON を送る。無い場合は Scope 風タグ文字列へのエンコード案(設計 #6 §3.2 (a))に切り替える。検索結果は Adapter 側でも kind / sensitivity を再フィルタ |
 | 3 | **Redact / 物理削除 API**、および削除の Qdrant・`context_revisions` への伝播保証 | 秘密・個人情報の混入時の消去(§7.3) | `ReclConfig.redactSupported=false` が既定で `DeleteMode.REDACT` は `UNSUPPORTED`。soft delete に黙って格下げしない |
 | 4 | **Scope 階層**(prefix 検索)の仕様明示 | `tenant:/project:/exec:` の写像(§3.3) | Kivra が許可 Scope の集合を計算し、`AccessContext.allowedScopes` の範囲内でのみ問い合わせる。階層非対応なら上位 Scope を明示列挙する必要がある。Adapter は応答の Scope が許可範囲内かを検証し、外れた結果は破棄/拒否 |

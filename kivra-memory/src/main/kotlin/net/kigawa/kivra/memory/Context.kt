@@ -1,5 +1,6 @@
 package net.kigawa.kivra.memory
 
+import java.time.Clock
 import java.time.Instant
 import java.util.UUID
 
@@ -139,11 +140,13 @@ internal fun AccessContext.permitsEntry(e: MemoryEntry): Boolean = e.scope.isNot
 
 /**
  * Handoffs carry references only; the receiver re-fetches with its own [AccessContext] and inherits nothing from
- * the sender (design #6 section 5.4). A handoff is bound to its receiver ([HandoffRecord.toExecutionId]): any other
- * execution is refused outright. Identity is verified: a response for a different id is dropped.
+ * the sender (design #6 section 5.4). A handoff is bound to its receiver ([HandoffRecord.toExecutionId]) and to its
+ * task ([HandoffRecord.taskId]), and expires at [HandoffRecord.expiresAt]: any other execution, other task or an
+ * expired handoff is refused outright (all references counted as missing). Identity is verified: a response for a
+ * different id is dropped.
  */
-suspend fun MemoryProvider.resolveHandoff(handoff: HandoffRecord, ctx: AccessContext): HandoffResolution {
-    if (handoff.toExecutionId != ctx.executionId) return HandoffResolution(emptyList(), handoff.memoryRefs.size)
+suspend fun MemoryProvider.resolveHandoff(handoff: HandoffRecord, ctx: AccessContext, clock: Clock = Clock.systemUTC()): HandoffResolution {
+    if (!handoff.isBoundTo(ctx, clock.instant())) return HandoffResolution(emptyList(), handoff.memoryRefs.size)
     var missing = 0
     val out = ArrayList<MemoryEntry>()
     for (ref in handoff.memoryRefs) {
@@ -155,4 +158,21 @@ suspend fun MemoryProvider.resolveHandoff(handoff: HandoffRecord, ctx: AccessCon
         if (e == null || e.id != ref.memoryId || e.status != MemoryStatus.ACTIVE || !ctx.permitsEntry(e)) missing++ else out += e
     }
     return HandoffResolution(out, missing)
+}
+
+/**
+ * Bundle creation from a handoff. Uses the same binding check as [resolveHandoff] (receiver, task, expiry) before
+ * anything is fetched; returns `null` when the handoff is not bound to [ctx], so no bundle is produced for a
+ * refused handoff. Memory is re-verified against [ctx] by [ContextBundle.from].
+ */
+suspend fun MemoryProvider.handoffBundle(
+    handoff: HandoffRecord,
+    ctx: AccessContext,
+    maxSensitivity: Sensitivity = Sensitivity.INTERNAL,
+    clock: Clock = Clock.systemUTC(),
+    bundleId: String = UUID.randomUUID().toString(),
+): ContextBundle? {
+    if (!handoff.isBoundTo(ctx, clock.instant())) return null
+    val resolved = resolveHandoff(handoff, ctx, clock)
+    return ContextBundle.from(ctx, RecallResult(resolved.entries, degraded = false), maxSensitivity, bundleId)
 }

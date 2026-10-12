@@ -46,6 +46,14 @@ data class HandoffRecord(
 }
 
 /**
+ * Single fail-closed binding check used by EVERY handoff path (store read, reference resolution, bundle creation).
+ * The handoff is readable only by its bound receiver execution, only within the same task, and only before
+ * [HandoffRecord.expiresAt]. Anything else is treated as absent.
+ */
+internal fun HandoffRecord.isBoundTo(ctx: AccessContext, now: Instant): Boolean =
+    toExecutionId == ctx.executionId && taskId == ctx.taskId && expiresAt.isAfter(now)
+
+/**
  * Working Memory (design #6 section 5.5): per-execution scratch space on the Kivra side. It is NOT a source of
  * truth and never touches recl, so it is unaffected by recl outages. Secrets are rejected on write (checkpoints
  * must not contain secrets either).
@@ -55,7 +63,10 @@ interface WorkingMemoryStore {
     suspend fun get(executionId: String, key: String): String?
     suspend fun putHandoff(record: HandoffRecord)
 
-    /** Returns the handoff only when [AccessContext.executionId] is its bound receiver; otherwise `null`. */
+    /**
+     * Returns the handoff only when [AccessContext.executionId] is its bound receiver, [AccessContext.taskId] matches
+     * the handoff's task and it has not expired; otherwise `null`.
+     */
     suspend fun getHandoff(handoffId: String, ctx: AccessContext): HandoffRecord?
 
     /** Starts the retention window: 24h after success, 7d after failure (kept for investigation). */
@@ -113,7 +124,7 @@ class InMemoryWorkingMemory(
     }
 
     override suspend fun getHandoff(handoffId: String, ctx: AccessContext): HandoffRecord? = mutex.withLock {
-        handoffs[handoffId]?.takeIf { it.toExecutionId == ctx.executionId && it.expiresAt.isAfter(clock.instant()) }
+        handoffs[handoffId]?.takeIf { it.isBoundTo(ctx, clock.instant()) }
     }
 
     override suspend fun finish(executionId: String, failed: Boolean) {

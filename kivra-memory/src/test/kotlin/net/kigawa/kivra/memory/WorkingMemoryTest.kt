@@ -73,9 +73,47 @@ class WorkingMemoryTest {
         val id = fake.save(T.entry(), T.key("k"), T.ctx(T.project))
         val h = handoff().copy(memoryRefs = listOf(CitationId.of(id, 1)))
         // exec-3 holds the record object (e.g. leaked from logs or a shared store) but is not the receiver
-        val other = fake.resolveHandoff(h, T.ctx(T.project, exec = "exec-3"))
+        val other = fake.resolveHandoff(h, T.ctx(T.project, exec = "exec-3"), clock)
         assertEquals(0, other.entries.size)
         assertEquals(1, other.unauthorizedOrMissing)
+    }
+
+    private val otherTask get() = T.ctx(T.project, exec = "exec-2").copy(taskId = "task-2")
+
+    @Test
+    fun `getHandoff refuses another task for the same receiver execution`() = runTest {
+        wm.putHandoff(handoff()) // task-1
+        assertNull(wm.getHandoff("h1", otherTask))
+        assertNotNull(wm.getHandoff("h1", T.ctx(T.project, exec = "exec-2")))
+    }
+
+    @Test
+    fun `resolveHandoff refuses another task and an expired handoff`() = runTest {
+        val fake = FakeMemoryPort(clock)
+        val id = fake.save(T.entry(), T.key("k"), T.ctx(T.project))
+        val h = handoff().copy(memoryRefs = listOf(CitationId.of(id, 1)))
+        val wrongTask = fake.resolveHandoff(h, otherTask, clock)
+        assertEquals(0, wrongTask.entries.size)
+        assertEquals(1, wrongTask.unauthorizedOrMissing)
+        assertEquals(1, fake.resolveHandoff(h, T.ctx(T.project, exec = "exec-2"), clock).entries.size)
+        clock.advance(Duration.ofHours(2))
+        val expired = fake.resolveHandoff(h, T.ctx(T.project, exec = "exec-2"), clock)
+        assertEquals(0, expired.entries.size)
+        assertEquals(1, expired.unauthorizedOrMissing)
+    }
+
+    @Test
+    fun `handoff bundle is created only for the bound receiver, its task and before expiry`() = runTest {
+        val fake = FakeMemoryPort(clock)
+        val id = fake.save(T.entry(), T.key("k"), T.ctx(T.project))
+        val h = handoff().copy(memoryRefs = listOf(CitationId.of(id, 1)))
+        val receiver = T.ctx(T.project, exec = "exec-2")
+        assertNull(fake.handoffBundle(h, receiver.copy(taskId = "task-2"), clock = clock)) // other task
+        assertNull(fake.handoffBundle(h, T.ctx(T.project, exec = "exec-3"), clock = clock)) // other execution
+        val bundle = assertNotNull(fake.handoffBundle(h, receiver, clock = clock))
+        assertEquals(listOf(CitationId.of(id, 1)), bundle.sections.single().items.map { it.citationId })
+        clock.advance(Duration.ofHours(2))
+        assertNull(fake.handoffBundle(h, receiver, clock = clock)) // expired
     }
 
     @Test
@@ -109,11 +147,11 @@ class WorkingMemoryTest {
         val sender = T.ctx(T.project)
         val id = fake.save(T.entry(), T.key("k"), sender)
         val h = handoff().copy(memoryRefs = listOf(CitationId.of(id, 1), CitationId.of(MemoryId("gone"), 1)))
-        val receiverAllowed = fake.resolveHandoff(h, T.ctx(T.project, exec = "exec-2"))
+        val receiverAllowed = fake.resolveHandoff(h, T.ctx(T.project, exec = "exec-2"), clock)
         assertEquals(listOf(id), receiverAllowed.entries.map { it.id })
         assertEquals(1, receiverAllowed.unauthorizedOrMissing)
         // a receiver without access gets nothing: the sender's permissions are not inherited
-        val receiverDenied = fake.resolveHandoff(h, T.ctx(T.otherTenant, exec = "exec-2"))
+        val receiverDenied = fake.resolveHandoff(h, T.ctx(T.otherTenant, exec = "exec-2"), clock)
         assertEquals(0, receiverDenied.entries.size)
         assertEquals(2, receiverDenied.unauthorizedOrMissing)
     }
@@ -125,6 +163,6 @@ class WorkingMemoryTest {
                 FakeMemoryPort().also { it.save(T.entry(), T.key("k"), ctx) }.get(MemoryId("mem-1"), ctx)
         }
         val h = handoff().copy(memoryRefs = listOf(CitationId.of(MemoryId("not-mem-1"), 1)))
-        assertEquals(1, wrong.resolveHandoff(h, T.ctx(T.project, exec = "exec-2")).unauthorizedOrMissing)
+        assertEquals(1, wrong.resolveHandoff(h, T.ctx(T.project, exec = "exec-2"), clock).unauthorizedOrMissing)
     }
 }

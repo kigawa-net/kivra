@@ -62,24 +62,29 @@ class MemoryServiceTest {
     }
 
     @Test
-    fun `unexpected exceptions on writes are an ambiguous outcome and never crash the core`() = runTest {
-        val outcome = service(unexpectedWriteFailure(IllegalStateException("boom"))).remember(T.entry(), ctx)
-        assertEquals(RememberOutcome.Rejected(MemoryErrorKind.OUTCOME_UNKNOWN), outcome)
+    fun `unexpected exceptions on writes are an ambiguous outcome held for reconciliation and never crash the core`() = runTest {
+        val queue = InMemoryWriteQueue()
+        val s = service(unexpectedWriteFailure(IllegalStateException("boom")), queue)
+        assertEquals(RememberOutcome.HeldForReconciliation, s.remember(T.entry(), ctx))
+        assertEquals(0, queue.size())
+        assertEquals(1, s.heldForReconciliation().size)
         val last = events.last()
-        assertEquals(MemoryAuditType.WRITE_DROPPED_AMBIGUOUS, last.type)
-        // audit carries ids and kinds only, never content
+        assertEquals(MemoryAuditType.WRITE_HELD_RECONCILE, last.type)
+        // audit carries the count only, never keys or content
+        assertEquals(mapOf("count" to "1"), last.detail)
         assertFalse(last.detail.values.any { it.contains("Build kivra") || it.contains("boom") })
     }
 
     @Test
-    fun `unexpected exceptions during flush drop the write as ambiguous without throwing`() = runTest {
+    fun `unexpected exceptions during flush hold the write for reconciliation without throwing`() = runTest {
         val queue = InMemoryWriteQueue()
         fake.failure = down
         service(fake, queue).remember(T.entry(), ctx)
         fake.failure = null
-        val report = service(unexpectedWriteFailure(IllegalStateException("boom")), queue).flush()
-        assertEquals(1, report.dropped)
+        val s = service(unexpectedWriteFailure(IllegalStateException("boom")), queue)
+        assertEquals(FlushReport(0, 0, 0, 1), s.flush())
         assertEquals(0, queue.size())
+        assertEquals(1, s.heldForReconciliation().size)
     }
 
     @Test
@@ -157,31 +162,57 @@ class MemoryServiceTest {
     }
 
     @Test
-    fun `ambiguous outcome without idempotent save is not re-sent`() = runTest {
+    fun `ambiguous outcome without idempotent save is held and not re-sent`() = runTest {
         val noIdem = object : MemoryProvider by fake {
             override val capabilities: Set<MemoryCapability> = emptySet()
-            override suspend fun save(e: NewMemoryEntry, key: net.kigawa.kivra.core.IdempotencyKey, ctx: AccessContext): MemoryId =
+            override suspend fun save(e: NewMemoryEntry, key: IdempotencyKey, ctx: AccessContext): MemoryId =
                 throw MemoryException(MemoryErrorKind.OUTCOME_UNKNOWN, "timeout after send")
         }
         val queue = InMemoryWriteQueue()
         val s = service(noIdem, queue)
-        assertEquals(RememberOutcome.Rejected(MemoryErrorKind.OUTCOME_UNKNOWN), s.remember(T.entry(), ctx))
+        assertEquals(RememberOutcome.HeldForReconciliation, s.remember(T.entry(), ctx))
         assertEquals(0, queue.size())
-        assertEquals(MemoryAuditType.WRITE_DROPPED_AMBIGUOUS, events.last().type)
+        assertEquals(1, s.heldForReconciliation().size)
+        assertEquals(MemoryAuditType.WRITE_HELD_RECONCILE, events.last().type)
+        assertEquals(FlushReport(0, 0, 0, 0), s.flush())
     }
 
     @Test
-    fun `ambiguous outcome with idempotent save is queued and re-sent`() = runTest {
+    fun `ambiguous outcome is never re-sent even when the provider declares idempotent save`() = runTest {
+        var saves = 0
         val flaky = object : MemoryProvider by fake {
-            var first = true
-            override suspend fun save(e: NewMemoryEntry, key: net.kigawa.kivra.core.IdempotencyKey, ctx: AccessContext): MemoryId {
-                if (first) { first = false; throw MemoryException(MemoryErrorKind.OUTCOME_UNKNOWN, "timeout after send") }
+            override suspend fun save(e: NewMemoryEntry, key: IdempotencyKey, ctx: AccessContext): MemoryId {
+                saves++
+                if (saves == 1) throw MemoryException(MemoryErrorKind.OUTCOME_UNKNOWN, "timeout after send")
                 return fake.save(e, key, ctx)
             }
         }
-        val s = service(flaky, threshold = 100)
-        assertEquals(RememberOutcome.Queued, s.remember(T.entry(), ctx))
-        assertEquals(1, s.flush().flushed)
+        assertTrue(MemoryCapability.IDEMPOTENT_SAVE in flaky.capabilities)
+        val queue = InMemoryWriteQueue()
+        val s = service(flaky, queue, threshold = 100)
+        assertEquals(RememberOutcome.HeldForReconciliation, s.remember(T.entry(), ctx))
+        assertEquals(0, queue.size())
+        assertEquals(FlushReport(0, 0, 0, 0), s.flush())
+        assertEquals(1, saves) // no re-send, not even after the provider recovers
+        assertEquals(0, fake.size())
+        assertEquals(1, s.heldForReconciliation().size)
+    }
+
+    @Test
+    fun `queued write whose re-send is outcome-unknown is held, not re-sent after recovery`() = runTest {
+        fake.failure = down
+        val queue = InMemoryWriteQueue()
+        val s = service(queue = queue, threshold = 100)
+        s.remember(T.entry(), ctx)
+        fake.failure = MemoryException(MemoryErrorKind.OUTCOME_UNKNOWN, "timeout after send")
+        assertEquals(FlushReport(0, 0, 0, 1), s.flush())
+        assertEquals(0, queue.size())
+        assertEquals(1, s.heldForReconciliation().size)
+        assertEquals(mapOf("count" to "1"), events.last().detail)
+        fake.failure = null
+        assertEquals(FlushReport(0, 0, 0, 0), s.flush())
+        assertEquals(0, fake.size())
+        assertEquals(1, s.heldForReconciliation().size)
     }
 
     @Test

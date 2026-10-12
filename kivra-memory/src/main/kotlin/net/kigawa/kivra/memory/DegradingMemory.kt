@@ -12,7 +12,8 @@ import java.time.Instant
 
 enum class MemoryAuditType {
     READ_DEGRADED, WRITE_QUEUED, WRITE_FLUSHED, WRITE_DROPPED_OVERFLOW, WRITE_DROPPED_EXPIRED, WRITE_DROPPED_PERMANENT,
-    WRITE_DROPPED_AMBIGUOUS, WRITE_DROPPED_ATTEMPTS, SECRET_DETECTED,
+    /** An outcome-unknown write was held for reconciliation (never re-sent). Detail carries the count only. */
+    WRITE_HELD_RECONCILE, WRITE_DROPPED_ATTEMPTS, SECRET_DETECTED,
 }
 
 /** Audit record. [detail] carries only ids, counts and kinds, never memory content or secret values. */
@@ -85,19 +86,29 @@ sealed interface RememberOutcome {
     data class Rejected(val kind: MemoryErrorKind) : RememberOutcome
     /** Queue full: dropped and audited. */
     data object Dropped : RememberOutcome
+    /**
+     * The provider reported OUTCOME_UNKNOWN: the save may or may not have been applied. It is NOT queued and NOT
+     * re-sent (even when the provider declares IDEMPOTENT_SAVE) until reconciliation is possible through the
+     * persistent Operation Journal (M0 `external_operations`). It is kept for reconciliation, not discarded.
+     */
+    data object HeldForReconciliation : RememberOutcome
 }
 
-data class FlushReport(val flushed: Int, val remaining: Int, val dropped: Int)
+/** [held] = writes whose outcome is unknown and that were kept for reconciliation during this flush (never re-sent). */
+data class FlushReport(val flushed: Int, val remaining: Int, val dropped: Int, val held: Int = 0)
 
 /**
  * Degradation layer between the Core and a [MemoryProvider] (design #6 section 4.4, issue #37 "縮退"):
  * recl unreachable / unimplemented never stops the Core.
  *  - reads: any failure, timeout or open circuit returns an EMPTY result flagged `degraded` (long-term memory is
  *    treated as empty, `MEMORY_UNAVAILABLE` is surfaced to the Agent);
- *  - writes: delivery failures are parked in the [WriteQueue] and re-sent with the SAME idempotency key;
- *    permanent refusals are reported, not retried;
- *  - an ambiguous outcome (request may have been applied) is re-sent only if the provider declares
- *    `IDEMPOTENT_SAVE`; otherwise it is dropped + audited, because a blind re-POST could duplicate the entry.
+ *  - writes: delivery failures that are definitely NOT applied (`UNAVAILABLE`) are parked in the [WriteQueue] and
+ *    re-sent with the SAME idempotency key; permanent refusals are reported, not retried;
+ *  - an ambiguous outcome (`OUTCOME_UNKNOWN`: the request may have been applied, including unexpected exceptions) is
+ *    NEVER re-sent. It is held for reconciliation and only counted in the audit log, regardless of whether the
+ *    provider declares `IDEMPOTENT_SAVE`. Automatic re-sending of such writes is disabled until the persistent
+ *    Operation Journal (M0 `external_operations`) is connected: a durable reconciliation (not a blind re-POST) must
+ *    decide whether the write was applied.
  * Memory is advisory: callers must not make authorization decisions from it.
  */
 class MemoryService(
@@ -113,8 +124,25 @@ class MemoryService(
 ) {
     private val flushMutex = Mutex()
     private val stateMutex = Mutex()
+    private val heldMutex = Mutex()
+    private val held = LinkedHashMap<String, QueuedWrite>()
     private var consecutiveFailures = 0
     private var openUntil: Instant = Instant.MIN
+
+    /**
+     * Writes whose outcome is unknown, held for reconciliation. They are never returned to the [WriteQueue] and never
+     * re-sent by this class. Read-only snapshot for the future reconciliation step (persistent Operation Journal).
+     */
+    suspend fun heldForReconciliation(): List<QueuedWrite> = heldMutex.withLock { held.values.toList() }
+
+    private suspend fun holdForReconciliation(w: QueuedWrite) {
+        val count = heldMutex.withLock {
+            held[w.key.value] = w
+            held.size
+        }
+        // Audit carries the count only: no keys, no content.
+        audit.record(MemoryAuditEvent(MemoryAuditType.WRITE_HELD_RECONCILE, w.ctx.executionId, w.ctx.traceId, mapOf("count" to count.toString())))
+    }
 
     suspend fun recall(q: MemoryQuery, ctx: AccessContext): RecallResult =
         guardedRead(ctx, "search") { provider.search(q, ctx).map { it.entry } }
@@ -160,10 +188,8 @@ class MemoryService(
                     MemoryErrorKind.UNAVAILABLE -> onFailure()
                     MemoryErrorKind.OUTCOME_UNKNOWN -> {
                         onFailure()
-                        if (MemoryCapability.IDEMPOTENT_SAVE !in provider.capabilities) {
-                            audit.record(MemoryAuditEvent(MemoryAuditType.WRITE_DROPPED_AMBIGUOUS, ctx.executionId, ctx.traceId, mapOf("key" to key.value)))
-                            return RememberOutcome.Rejected(e.kind)
-                        }
+                        holdForReconciliation(QueuedWrite(key, entry, ctx, clock.instant()))
+                        return RememberOutcome.HeldForReconciliation
                     }
                     else -> return RememberOutcome.Rejected(e.kind).also {
                         audit.record(MemoryAuditEvent(MemoryAuditType.WRITE_DROPPED_PERMANENT, ctx.executionId, ctx.traceId, mapOf("key" to key.value, "kind" to e.kind.name)))
@@ -183,10 +209,14 @@ class MemoryService(
         }
     }
 
-    /** Re-sends queued writes (call periodically). Stops at the first transport failure. Never throws on provider errors. */
+    /**
+     * Re-sends queued writes (call periodically). Stops at the first `UNAVAILABLE` (definitely not applied). A queued
+     * write whose re-send returns OUTCOME_UNKNOWN is held for reconciliation, never re-sent. Never throws on provider errors.
+     */
     suspend fun flush(): FlushReport = flushMutex.withLock {
         var flushed = 0
         var dropped = 0
+        var heldNow = 0
         val now = clock.instant()
         for (w in queue.snapshot()) {
             if (w.enqueuedAt.plus(queueTtl).isBefore(now) || w.attempts >= maxAttempts) {
@@ -207,19 +237,23 @@ class MemoryService(
                 throw e
             } catch (ex: Exception) {
                 val e = asMemoryException(ex)
-                if (e.kind == MemoryErrorKind.UNAVAILABLE ||
-                    (e.kind == MemoryErrorKind.OUTCOME_UNKNOWN && MemoryCapability.IDEMPOTENT_SAVE in provider.capabilities)
-                ) {
+                if (e.kind == MemoryErrorKind.UNAVAILABLE) {
                     onFailure()
                     break
                 }
                 queue.remove(w.key)
+                if (e.kind == MemoryErrorKind.OUTCOME_UNKNOWN) {
+                    // The re-send may have been applied: hold for reconciliation, do not retry (regardless of IDEMPOTENT_SAVE).
+                    onFailure()
+                    holdForReconciliation(w)
+                    heldNow++
+                    continue
+                }
                 dropped++
-                val type = if (e.kind == MemoryErrorKind.OUTCOME_UNKNOWN) MemoryAuditType.WRITE_DROPPED_AMBIGUOUS else MemoryAuditType.WRITE_DROPPED_PERMANENT
-                audit.record(MemoryAuditEvent(type, w.ctx.executionId, w.ctx.traceId, mapOf("key" to w.key.value, "kind" to e.kind.name)))
+                audit.record(MemoryAuditEvent(MemoryAuditType.WRITE_DROPPED_PERMANENT, w.ctx.executionId, w.ctx.traceId, mapOf("key" to w.key.value, "kind" to e.kind.name)))
             }
         }
-        FlushReport(flushed, queue.size(), dropped)
+        FlushReport(flushed, queue.size(), dropped, heldNow)
     }
 
     private suspend fun isOpen(): Boolean = stateMutex.withLock { clock.instant().isBefore(openUntil) }

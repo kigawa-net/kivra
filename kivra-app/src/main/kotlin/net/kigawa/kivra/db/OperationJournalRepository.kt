@@ -322,7 +322,8 @@ class OperationJournalRepository(
         val evidence = try {
             authority.resolve(ref, subject, purpose)
         } catch (e: EvidenceRefusedException) {
-            throw InvalidTransitionException("operation $opId: evidence refused: ${e.message}")
+            // Provider/Authority exception bodies can carry tokens or context content; never surface them via Journal errors.
+            throw InvalidTransitionException("operation $opId: EVIDENCE_REFUSED")
         }
         // Defense in depth: the Authority must answer for exactly this subject and purpose.
         if (evidence.subject != subject || evidence.purpose != purpose || evidence.ref != ref) {

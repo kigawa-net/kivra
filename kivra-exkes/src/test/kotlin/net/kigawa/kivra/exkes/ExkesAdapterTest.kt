@@ -48,6 +48,32 @@ class ExkesAdapterTest {
     }
 
     @Test
+    fun `429 on a mutating POST is UNKNOWN and sent exactly once`() = runTest {
+        val (sim, a) = setup()
+        sim.override = { req -> if (req.method == HttpMethod.Post) reply(429, "slow down") else null }
+        val r = a.createWorkspace(WorkspaceSpec("kivra-run-1"))
+        assertIs<PortResult.Unknown>(r)
+        assertEquals(OperationStatus.UNKNOWN, r.toOperationStatus())
+        assertEquals(1, sim.requestsOf(HttpMethod.Post).size, "exkes saw the POST, so it must not be resent")
+    }
+
+    @Test
+    fun `429 on a mutating DELETE is UNKNOWN`() = runTest {
+        val (sim, a) = setup()
+        sim.override = { req -> if (req.method == HttpMethod.Delete) reply(429, "") else null }
+        assertIs<PortResult.Unknown>(a.deleteWorkspace(WorkspaceId("x")))
+        assertEquals(1, sim.requestsOf(HttpMethod.Delete).size)
+    }
+
+    @Test
+    fun `429 on a GET is Transient`() = runTest {
+        val (sim, a) = setup()
+        sim.override = { reply(429, "") }
+        assertIs<PortResult.Transient>(a.getWorkspace(WorkspaceId("x")))
+        assertEquals(1, sim.requestsOf(HttpMethod.Get).size)
+    }
+
+    @Test
     fun `connection refused is Transient because nothing was sent`() = runTest {
         val (sim, a) = setup()
         sim.override = { throw ConnectException("refused") }

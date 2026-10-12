@@ -19,8 +19,10 @@ sealed interface PortResult<out T> {
     data class Rejected(val httpStatus: Int, val code: String?, val message: String) : PortResult<Nothing>
 
     /**
-     * The request provably did not take effect (connection refused / 429) so it MAY be repeated by the
-     * caller. Never returned for a request that could have reached exkes.
+     * The request provably did not take effect, so the caller MAY repeat it. Returned ONLY when nothing was
+     * sent: connection refused, connect timeout, DNS resolution failure, token acquisition failure.
+     * Also returned for a 429 on a read-only GET (idempotent, safe to repeat). A 429 on a mutating call is
+     * [Unknown]: exkes has seen the request, so its effect is not known to be absent.
      */
     data class Transient(val message: String) : PortResult<Nothing>
 

@@ -21,6 +21,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import java.net.ConnectException
+import java.net.UnknownHostException
+import java.nio.channels.UnresolvedAddressException
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -313,6 +315,10 @@ class ExkesAdapter(
             return PortResult.Transient("connect timeout: ${e.message}") // request never reached the server
         } catch (e: ConnectException) {
             return PortResult.Transient("connection refused: ${e.message}")
+        } catch (e: UnresolvedAddressException) {
+            return PortResult.Transient("DNS resolution failed: ${e.message}") // no socket was opened
+        } catch (e: UnknownHostException) {
+            return PortResult.Transient("DNS resolution failed: ${e.message}") // no socket was opened
         } catch (e: CancellationException) {
             if (e.javaClass.simpleName == "HttpRequestTimeoutException") return ambiguous("request timeout", e)
             throw e
@@ -329,7 +335,9 @@ class ExkesAdapter(
             }
             status == 404 -> PortResult.NotFound
             status == 409 -> PortResult.Conflict(errorOf(text)?.message ?: "conflict")
-            status == 429 -> PortResult.Transient("429 too many requests")
+            // 429 is an HTTP response: exkes has seen the request. A mutating call is therefore UNKNOWN, not
+            // "not sent"; a GET is idempotent and may be retried by the caller (Transient).
+            status == 429 -> ambiguous("429 too many requests", null)
             status in 400..499 -> {
                 val err = errorOf(text)
                 PortResult.Rejected(status, err?.code, err?.message ?: "HTTP $status")

@@ -102,6 +102,9 @@ data class PrepareOperation(
 /** The same idempotency key was reused with different request content: a bug, never retried (design #11 section 4.2). */
 class RequestHashMismatchException(message: String) : RuntimeException(message)
 
+/** Existing idempotency key belongs to a different immutable provider/tenant contract. Never adopt it. */
+class OperationBindingMismatchException(message: String) : RuntimeException(message)
+
 /**
  * Operation Journal (design #11 section 4). Records external side effects before they happen.
  *
@@ -143,6 +146,15 @@ class OperationJournalRepository(
         if (existing != null) {
             if (existing[ExternalOperationsTable.requestHash] != op.requestHash) {
                 throw RequestHashMismatchException("idempotency key ${op.idempotencyKey} reused with a different request")
+            }
+            // Request digest equality does NOT imply equality of the authenticated subject.
+            // A duplicate key may only adopt the exact same immutable operation binding.
+            if (existing[ExternalOperationsTable.externalSystem] != op.externalSystem ||
+                existing[ExternalOperationsTable.stableRef] != op.stableRef ||
+                existing[ExternalOperationsTable.tenantId] != op.tenantId ||
+                existing[ExternalOperationsTable.providerContractVersion] != op.providerContractVersion
+            ) {
+                throw OperationBindingMismatchException("idempotency key reused with a different operation binding")
             }
             return existing.toEntry()
         }

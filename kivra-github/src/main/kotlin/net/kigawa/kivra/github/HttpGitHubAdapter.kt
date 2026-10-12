@@ -35,7 +35,27 @@ data class GitHubAdapterConfig(
     val requestTimeoutMillis: Long = 30_000,
     val connectTimeoutMillis: Long = 10_000,
     val maxPages: Int = 10,
-)
+    /** An operator-approved host allowlist. GHES installations must opt in explicitly. */
+    val trustedApiHosts: Set<String> = setOf("api.github.com"),
+) {
+    init {
+        val uri = try {
+            java.net.URI(apiBase)
+        } catch (e: Exception) {
+            throw IllegalArgumentException("invalid GitHub API base URL", e)
+        }
+        require(uri.scheme.equals("https", ignoreCase = true) && !uri.isOpaque &&
+            uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null) {
+            "GitHub API base URL must be HTTPS without credentials, query or fragment"
+        }
+        require(uri.host != null && uri.host.lowercase() in trustedApiHosts.map { it.lowercase() }) {
+            "GitHub API endpoint is not in the approved host allowlist"
+        }
+        require(uri.rawPath.orEmpty().split('/').none { it == "." || it == ".." }) {
+            "GitHub API URL must not contain path traversal"
+        }
+    }
+}
 
 /** Builds the HTTP client with timeouts. Tests pass a MockEngine here. */
 fun githubHttpClient(engine: HttpClientEngine, config: GitHubAdapterConfig = GitHubAdapterConfig()): HttpClient =

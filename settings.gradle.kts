@@ -15,6 +15,9 @@ rootProject.name = "kivra"
 
 include(
     "kivra-memory",
+    "kivra-fusha-task",
+    "kivra-fusha-poller",
     "kivra-core",
     "kivra-app",
+    "kivra-ui-api",
 )

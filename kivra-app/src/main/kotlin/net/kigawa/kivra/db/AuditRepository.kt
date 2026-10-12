@@ -21,15 +21,27 @@ data class AuditEntry(
     val payload: String? = null,
 )
 
+/** The newest event of a run's chain. Copy it out of the database to detect truncation (see [AuditHeadAnchor]). */
+data class AuditHead(val runId: String, val seq: Long, val hash: String)
+
+/**
+ * Port for an external anchor: a copy of the chain head delivered to a store that the application database's
+ * administrators cannot rewrite silently (WORM storage, a separate log account, a signed note). Without such an anchor
+ * the chain only detects modification of events that remain; it cannot detect deletion of the newest events.
+ */
+fun interface AuditHeadAnchor {
+    fun publish(head: AuditHead)
+}
+
 /**
  * Append-only audit log, hash-chained per run (design #1 section 6.5).
  * [append] must run inside the same transaction as the state change it records
  * (design #1 section 5.4). The caller holds the run row lock, which serializes `seq` assignment.
  * There is intentionally no update / delete API.
  */
-class AuditRepository(private val clock: Clock = Clock.systemUTC()) {
+open class AuditRepository(private val clock: Clock = Clock.systemUTC()) {
 
-    fun append(tx: Transaction, runId: RunId, entry: AuditEntry): String = with(tx) {
+    open fun append(tx: Transaction, runId: RunId, entry: AuditEntry): String = with(tx) {
         val last = AuditEventsTable
             .selectAll()
             .where { AuditEventsTable.runId eq runId.value }
@@ -59,6 +71,16 @@ class AuditRepository(private val clock: Clock = Clock.systemUTC()) {
             it[AuditEventsTable.hash] = hash
         }
         eventId
+    }
+
+    /** Latest event of [runId] as (seq, hash), or null when the run has no events. */
+    fun head(tx: Transaction, runId: RunId): AuditHead? = with(tx) {
+        AuditEventsTable.selectAll()
+            .where { AuditEventsTable.runId eq runId.value }
+            .orderBy(AuditEventsTable.seq, SortOrder.DESC)
+            .limit(1)
+            .firstOrNull()
+            ?.let { AuditHead(runId.value, it[AuditEventsTable.seq], it[AuditEventsTable.hash]) }
     }
 
     /** Recomputes the chain of a run and returns true when no event was altered, removed from the middle or reordered. */

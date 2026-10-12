@@ -37,7 +37,7 @@ class PolicyGatewayTest {
             verifier = { if (it == "tok") dev else null },
             status = { _, _ -> active },
             engine = engine,
-            approvals = { id, d -> approvalDigests[id] == d && consumed.add(id) },
+            approvals = { id, d, _ -> approvalDigests[id] == d && consumed.add(id) },
             audit = { if (auditUp) { audits += it; true } else false },
             bindings = b,
         )
@@ -72,7 +72,7 @@ class PolicyGatewayTest {
 
     @Test fun tokenScopeLimitsActions() {
         val narrow = dev.copy(scopes = setOf("fusha.*"))
-        val g = ToolGateway({ narrow }, { _, _ -> true }, PolicyEngine.parse(policy), { _, _ -> false }, { audits += it; true },
+        val g = ToolGateway({ narrow }, { _, _ -> true }, PolicyEngine.parse(policy), { _, _, _ -> false }, { audits += it; true },
             mapOf("github.pr.create" to ToolBinding(decoder("github.pr.create"), ToolHandler { _, _ -> "x" })))
         assertIs<ToolResult.Denied>(g.call(pr("kigawa-net/a")))
     }
@@ -150,7 +150,7 @@ class PolicyGatewayTest {
 
     @Test fun unregisteredHandlerDenied() {
         val p = PolicyEngine.parse("""{"rules":[{"action":"x.y","roles":["DEVELOPER"],"risk":"LOW"}]}""")
-        val g = ToolGateway({ dev.copy(scopes = setOf("x.*")) }, { _, _ -> true }, p, { _, _ -> false }, { audits += it; true }, emptyMap())
+        val g = ToolGateway({ dev.copy(scopes = setOf("x.*")) }, { _, _ -> true }, p, { _, _, _ -> false }, { audits += it; true }, emptyMap())
         assertIs<ToolResult.Denied>(g.call(req("x.y")))
     }
 
@@ -214,14 +214,14 @@ class PolicyGatewayTest {
     }
 
     @Test fun throwingAuditSinkAlsoFailsClosed() {
-        val g = ToolGateway({ dev }, { _, _ -> true }, PolicyEngine.parse(policy), { _, _ -> true }, { error("audit down") }, bindings())
+        val g = ToolGateway({ dev }, { _, _ -> true }, PolicyEngine.parse(policy), { _, _, _ -> true }, { error("audit down") }, bindings())
         assertIs<ToolResult.Denied>(g.call(req("fusha.comment")))
         assertTrue(executed.isEmpty())
     }
 
     @Test fun resultRecordFailureAfterExecutionIsUnknown() {
         var n = 0
-        val g = ToolGateway({ dev }, { _, _ -> true }, PolicyEngine.parse(policy), { _, _ -> true }, { n++ == 0 }, bindings())
+        val g = ToolGateway({ dev }, { _, _ -> true }, PolicyEngine.parse(policy), { _, _, _ -> true }, { n++ == 0 }, bindings())
         assertIs<ToolResult.Unknown>(g.call(req("fusha.comment")))
         assertEquals(1, executed.size)
     }

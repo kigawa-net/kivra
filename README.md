@@ -108,11 +108,26 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
 
 ## Approval Gate / Audit 永続層（M3, #33）
 
-- `ApprovalRepository`（`ApprovalConsumer` 実装）: 操作ダイジェストに束縛した承認の依頼・承認・却下・失効。期限は DB 時計、`consume` は
+- `ApprovalRepository`（`ApprovalConsumer` 実装）: 承認の依頼・承認・却下・失効。`consume(approvalId, digest, decisionId)` は
   `status='APPROVED' AND digest=? AND expires_at>NOW(6)` の条件付き UPDATE 1 本で 1 回限り（同時実行でも勝者 1 件）。
-  承認者は `HumanApprover`（人間の subject のみ。Agent/Orchestrator の `Principal` からは作れない）で、申請 Agent と同一なら不可（four-eyes、DB の CHECK 制約でも担保）。
-- `DbAuditSink`（`AuditSink` 実装）: ハッシュ連鎖の `audit_events` へ run 行ロック下で追記し、コミット後に true。保存できなければ false なので Gateway は INTENT_ALLOWED で Deny する。
-  run に紐付かない記録（無効トークン等）は連鎖に載せられず false（拒否のみに影響）。
-- `OrphanIntentReaper`: INTENT_ALLOWED の後に終端記録（EXECUTED/FAILED/UNKNOWN/DENIED/ABANDONED）が無い孤立 INTENT を猶予後に閉じる。
-  承認が必要で未消費なら `ABANDONED`（副作用なし・承認は再利用可）、それ以外は `UNKNOWN`（照合必須、推測で再実行しない）。定期実行の配線は未実装。
-- 監査ログの更新・削除: アプリのコードに API は無い。DB ロール側で `audit_events` に INSERT/SELECT のみ付与する運用が必要（マイグレーションでは強制していない）。
+  状態更新と `audit_events` への追記は **同一 TX（run 行ロック下）** で行い、監査が書けなければ状態更新もロールバックして false（fail-closed）。
+  期限切れ掃除 `expireDue` も EXPIRED ごとに監査を同一 TX で書く。
+- 承認者は `VerifiedHuman` のみ。信頼された認証基盤が検証した人間の資格を表す型で、コンストラクタは private、生成は `internal fun issue` だけ。
+  文字列の subject から直接作る経路は無い。資格の生成は `HumanAssertionVerifier`（port）の実装に任せる。資格の有効期限は承認時に検査する。
+  Agent / Orchestrator の `Principal` からは作れず、申請 Agent と同一なら不可（four-eyes。DB の CHECK 制約でも担保）。
+  **制限**: 境界はプロセス内であり、人間の同一性の真正性は `HumanAssertionVerifier` 実装（OIDC の署名・iss・aud・exp 検証）に依存する。
+  OIDC の verifier アダプタは本 PR に含まれず未実装。
+- `OrphanIntentReaper`: 猶予後の孤立 INTENT（終端記録なし）を閉じる。
+  - `ABANDONED` は「承認が必要かつ未消費」かつ `ExecutionPhaseAuthority`（実行側の権威的な状態照会）が `NOT_STARTED` を返した場合のみ。
+    その後 `consume` は同じ decisionId を拒否するため、閉じた決定の handler は開始できない（承認自体は別の decisionId で再利用可）。
+  - それ以外（承認消費済み、承認不要、`STARTED`、未確認、照会の例外）はすべて `UNKNOWN`（照合必須。推測で再実行しない）。
+  - `ExecutionPhaseAuthority` の本番実装（Gateway / Coordinator 側の実行フェーズ store と、開始との原子的な CAS）と、定期実行の配線は未実装。
+- 監査ログ（ハッシュ連鎖 `audit_events`）の保証範囲:
+  - 検知できるもの: 残っているイベントの改変、途中の削除、並べ替え（`verifyChain`）。
+  - **検知できないもの**: DB 書込み権限を持つ主体はハッシュを再計算できるため、改竄の隠蔽は防げない。
+    **最新イベントの末尾切り詰め、および run の全イベント削除は、チェーン単独では検知できない**（残ったチェーンは有効のまま）。
+  - 外部アンカー用フック: `anchorAuditHead(database, audit, runId, anchor: AuditHeadAnchor)` が現在の head（seq・hash）を取得して
+    `anchor` に渡す。アンカー先（WORM ストア、別アカウントのログ、署名付きノート等）への保存と定期実行は未実装。
+    保存済みの head と現在の head を比べれば末尾切り詰めを検知できる。
+  - 運用で必要な前提: 運用 DB ロールに `audit_events` の UPDATE / DELETE を付与しない（マイグレーションでは強制していない）。
+    強い監査保証を Admission 条件にするには、外部アンカーの実装と権限分離が前提になる。

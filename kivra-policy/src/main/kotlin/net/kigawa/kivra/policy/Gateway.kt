@@ -8,8 +8,12 @@ fun interface TokenVerifier { fun verify(token: String): Principal? }
 /** Checks the Run and Agent are still active. Port so this module does not depend on the Run state machine. */
 fun interface RunAgentStatus { fun isActive(runId: String, agentId: String): Boolean }
 
-/** Port to #33's Approval service: atomically validates and consumes an approval for this digest. */
-fun interface ApprovalConsumer { fun consume(approvalId: String, digest: OperationDigest): Boolean }
+/**
+ * Port to #33's Approval service: atomically validates and consumes an approval for this digest.
+ * [decisionId] is the decision whose INTENT_ALLOWED record was written; an implementation must refuse (false) when that
+ * decision has already been closed as ABANDONED by the orphan reaper, so the handler can never start for it.
+ */
+fun interface ApprovalConsumer { fun consume(approvalId: String, digest: OperationDigest, decisionId: String): Boolean }
 
 /**
  * Port to #33's Audit log / decision journal. Returns true only when the record is DURABLY stored.
@@ -121,7 +125,7 @@ class ToolGateway(
 
         if (needsApproval) {
             val id = request.approvalId!!
-            val ok = try { approvals.consume(id, opDigest) } catch (e: Exception) { false }
+            val ok = try { approvals.consume(id, opDigest, decisionId) } catch (e: Exception) { false }
             if (!ok) return deny("approval '$id' is not valid for this exact operation")
         }
 

@@ -23,11 +23,12 @@ import kotlinx.coroutines.test.runTest
 import net.kigawa.kivra.core.IdempotencyKey
 import net.kigawa.kivra.core.JobRef
 import net.kigawa.kivra.core.JobSpec
+import net.kigawa.kivra.core.ScheduleWriterLease
 import net.kigawa.kivra.core.ScheduleExecutionRef
 
 class AiSchedulerAdapterTest {
     private val base = "http://ai-scheduler.internal:8080"
-    private val cfg = AiSchedulerConfig(baseUrl = base, allowInsecureHttp = true)
+    private val cfg = AiSchedulerConfig(baseUrl = base, allowInsecureHttp = true, devAllowInMemoryDedup = true)
     private val name = JobNaming.build("prod", "tick")
     private val jsonH = headersOf(HttpHeaders.ContentType, "application/json")
 
@@ -50,6 +51,7 @@ class AiSchedulerAdapterTest {
     private fun execJson(id: String, job: String = "j1", status: String = "RUNNING") =
         """{"id":"$id","jobId":"$job","status":"$status","output":"SECRET-OUT","scheduledAt":"2026-10-12T00:00:00Z"}"""
 
+    private val writer = ScheduleWriterLease("test-writer", 1)
     private val spec get() = JobSpec(name, "*/5 * * * *", null)
     private val key = IdempotencyKey("upsert:$name")
 
@@ -58,7 +60,7 @@ class AiSchedulerAdapterTest {
         val a = adapter(rec) { req ->
             if (req.method == HttpMethod.Get) ok("[]") else ok(jobJson("j1"), HttpStatusCode.Created)
         }
-        assertEquals(JobRef("j1"), a.upsertJob(spec, key))
+        assertEquals(JobRef("j1"), a.upsertJob(spec, key, writer))
         val post = rec.reqs.single { it.method == HttpMethod.Post }
         assertEquals(key.value, post.headers["Idempotency-Key"])
         assertTrue(post.url.toString().endsWith("/v1/jobs"))
@@ -67,7 +69,7 @@ class AiSchedulerAdapterTest {
     @Test fun `upsert finds existing job by name and does not POST`() = runTest {
         val rec = Rec()
         val a = adapter(rec) { ok("[${jobJson("other", "kivra:fusha:prod:x")},${jobJson("j1")}]") }
-        assertEquals(JobRef("j1"), a.upsertJob(spec, key))
+        assertEquals(JobRef("j1"), a.upsertJob(spec, key, writer))
         assertEquals(0, rec.count(HttpMethod.Post))
     }
 
@@ -80,29 +82,29 @@ class AiSchedulerAdapterTest {
                 else -> { created = true; throw java.io.IOException("timeout") }
             }
         }
-        assertFailsWith<ScheduleUnknownException> { a.upsertJob(spec, key) }
+        assertFailsWith<ScheduleUnknownException> { a.upsertJob(spec, key, writer) }
         assertEquals(1, rec.count(HttpMethod.Post))
-        assertEquals(JobRef("j1"), a.upsertJob(spec, key))
+        assertEquals(JobRef("j1"), a.upsertJob(spec, key, writer))
         assertEquals(1, rec.count(HttpMethod.Post), "no second create")
     }
 
     @Test fun `5xx on write is UNKNOWN and never resent`() = runTest {
         val rec = Rec()
         val a = adapter(rec) { req -> if (req.method == HttpMethod.Get) ok("[]") else respond("boom", HttpStatusCode.BadGateway) }
-        assertFailsWith<ScheduleUnknownException> { a.upsertJob(spec, key) }
+        assertFailsWith<ScheduleUnknownException> { a.upsertJob(spec, key, writer) }
         assertEquals(1, rec.count(HttpMethod.Post))
     }
 
     @Test fun `upsert rejects trigger change and duplicate names`() = runTest {
         val a = adapter { ok("[${jobJson("j1")}]") }
-        assertFailsWith<ScheduleConflictException> { a.upsertJob(JobSpec(name, "0 * * * *", null), key) }
+        assertFailsWith<ScheduleConflictException> { a.upsertJob(JobSpec(name, "0 * * * *", null), key, writer) }
         val b = adapter { ok("[${jobJson("j1")},${jobJson("j2")}]") }
-        assertFailsWith<ScheduleConflictException> { b.upsertJob(spec, key) }
+        assertFailsWith<ScheduleConflictException> { b.upsertJob(spec, key, writer) }
     }
 
     @Test fun `create response with different name is an identity mismatch`() = runTest {
         val a = adapter { req -> if (req.method == HttpMethod.Get) ok("[]") else ok(jobJson("j1", "kivra:fusha:prod:evil"), HttpStatusCode.Created) }
-        assertFailsWith<ScheduleIdentityMismatchException> { a.upsertJob(spec, key) }
+        assertFailsWith<ScheduleIdentityMismatchException> { a.upsertJob(spec, key, writer) }
     }
 
     @Test fun `getJob verifies id and hides prompt`() = runTest {
@@ -206,7 +208,7 @@ class AiSchedulerAdapterTest {
     }
 
     @Test fun `bearer is sent only when provided, 401 on GET refreshes once, secrets never leak`() = runTest {
-        val httpsCfg = AiSchedulerConfig("https://ai-scheduler.internal:8443")
+        val httpsCfg = AiSchedulerConfig("https://ai-scheduler.internal:8443", devAllowInMemoryDedup = true)
         val rec = Rec()
         var tok = "tok-1"
         val provider = object : ScheduleTokenProvider {
@@ -254,7 +256,7 @@ class AiSchedulerAdapterTest {
     @Test fun `upsert rejects non-conforming job names without any request`() = runTest {
         val rec = Rec()
         val a = adapter(rec) { ok("[]") }
-        assertFailsWith<IllegalArgumentException> { a.upsertJob(JobSpec("random-name", null, null), key) }
+        assertFailsWith<IllegalArgumentException> { a.upsertJob(JobSpec("random-name", null, null), key, writer) }
         assertEquals(0, rec.reqs.size)
     }
 
@@ -327,7 +329,7 @@ class AiSchedulerAdapterTest {
                 ok(if (gets == 1) "[]" else "[${jobJson("j1")},${jobJson("j2")}]")
             } else ok(jobJson("j1"), HttpStatusCode.Created)
         }
-        assertFailsWith<ScheduleConflictException> { a.upsertJob(spec, key) }
+        assertFailsWith<ScheduleConflictException> { a.upsertJob(spec, key, writer) }
         assertEquals(1, rec.count(HttpMethod.Post))
     }
 
@@ -335,7 +337,7 @@ class AiSchedulerAdapterTest {
         assertFailsWith<IllegalArgumentException> {
             adapter(tokens = StaticScheduleTokenProvider("S3CRET")) { ok("{}") }
         }
-        adapter(tokens = StaticScheduleTokenProvider("S3CRET"), config = AiSchedulerConfig("https://x.internal")) { ok("{}") }
+        adapter(tokens = StaticScheduleTokenProvider("S3CRET"), config = AiSchedulerConfig("https://x.internal", devAllowInMemoryDedup = true)) { ok("{}") }
     }
 
     @Test fun `a client that follows redirects is refused at construction`() {
@@ -343,5 +345,52 @@ class AiSchedulerAdapterTest {
         val following = io.ktor.client.HttpClient(engine) { followRedirects = true }
         assertFailsWith<IllegalArgumentException> { AiSchedulerAdapter(following, cfg, backoff = {}, dedup = InMemoryTriggerDedupStore()) }
         assertNotNull(AiSchedulerAdapter(aiSchedulerHttpClient(engine, cfg), cfg, backoff = {}, dedup = InMemoryTriggerDedupStore()))
+    }
+
+    // ---- triggerNow: only proven client refusals release the claim (P1 review) ----
+
+    @Test fun `triggerNow releases the key only on proven client refusals`() = runTest {
+        for (code in listOf(400, 401, 403, 404, 422)) {
+            var n = 0
+            val rec = Rec()
+            val a = adapter(rec) { if (n++ == 0) respond("", HttpStatusCode.fromValue(code)) else ok(execJson("e1", "j1", "SCHEDULED"), HttpStatusCode.Created) }
+            val k = IdempotencyKey("refused:$code")
+            assertFailsWith<ScheduleException>("HTTP $code") { a.triggerNow(JobRef("j1"), k) }
+            assertEquals(ScheduleExecutionRef("e1"), a.triggerNow(JobRef("j1"), k), "HTTP $code released")
+            assertEquals(2, rec.count(HttpMethod.Post), "HTTP $code")
+        }
+    }
+
+    @Test fun `triggerNow keeps the key UNKNOWN for 3xx 408 409 429 and 5xx and never resends it`() = runTest {
+        for (code in listOf(301, 302, 307, 408, 409, 429, 500, 503)) {
+            val rec = Rec()
+            val a = adapter(rec) { respond("", HttpStatusCode.fromValue(code), headersOf(HttpHeaders.Location, "http://evil.example/")) }
+            val k = IdempotencyKey("unknown:$code")
+            assertFailsWith<ScheduleUnknownException>("HTTP $code first") { a.triggerNow(JobRef("j1"), k) }
+            assertFailsWith<ScheduleUnknownException>("HTTP $code second") { a.triggerNow(JobRef("j1"), k) }
+            assertEquals(1, rec.count(HttpMethod.Post), "HTTP $code must not be re-POSTed")
+        }
+    }
+
+    // ---- fail-fast: in-memory dedup store only with an explicit dev opt-in ----
+
+    private fun bareAdapter(config: AiSchedulerConfig, dedup: TriggerDedupStore): AiSchedulerAdapter =
+        AiSchedulerAdapter(aiSchedulerHttpClient(MockEngine { respond("{}", HttpStatusCode.OK, jsonH) }, config), config, backoff = {}, dedup = dedup)
+
+    @Test fun `adapter refuses the in-memory dedup store at startup unless devAllowInMemoryDedup is set`() {
+        val prod = AiSchedulerConfig(base, allowInsecureHttp = true)
+        assertFailsWith<IllegalStateException> { bareAdapter(prod, InMemoryTriggerDedupStore()) }
+        assertNotNull(bareAdapter(prod.copy(devAllowInMemoryDedup = true), InMemoryTriggerDedupStore()))
+    }
+
+    @Test fun `adapter accepts any non-in-memory store without the dev flag`() {
+        // A delegating wrapper is not an InMemoryTriggerDedupStore; stands in for a durable implementation in tests.
+        val durable = object : TriggerDedupStore by InMemoryTriggerDedupStore() {}
+        assertNotNull(bareAdapter(AiSchedulerConfig(base, allowInsecureHttp = true), durable))
+    }
+
+    @Test fun `trigger handler refuses the in-memory dedup store at startup unless allowed for dev`() {
+        assertFailsWith<IllegalStateException> { ScheduleTriggerHandler(InMemoryTriggerDedupStore()) { } }
+        assertNotNull(ScheduleTriggerHandler(InMemoryTriggerDedupStore(), true) { })
     }
 }

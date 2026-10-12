@@ -10,6 +10,7 @@ import net.kigawa.kivra.core.JobRef
 import net.kigawa.kivra.core.JobSpec
 import net.kigawa.kivra.core.ScheduleExecutionRef
 import net.kigawa.kivra.core.ScheduleExecutionStatus
+import net.kigawa.kivra.core.ScheduleWriterLease
 
 /**
  * In-memory SchedulePort (+ [ScheduleClient]) for Orchestrator tests: no network. Jobs are keyed by their
@@ -38,7 +39,7 @@ class FakeScheduleClient(private val clock: Clock = Clock.systemUTC()) : Schedul
         result
     }
 
-    override suspend fun upsertJob(spec: JobSpec, key: IdempotencyKey): JobRef = guarded("upsertJob", write = true) {
+    override suspend fun upsertJob(spec: JobSpec, key: IdempotencyKey, writer: ScheduleWriterLease): JobRef = guarded("upsertJob", write = true) {
         require(JobNaming.isValid(spec.name)) { "job name must follow kivra:fusha:{env}:{id}" }
         require(spec.cron == null || spec.runAt == null) { "cron and runAt are mutually exclusive" }
         val existing = jobs.values.firstOrNull { it.name == spec.name }

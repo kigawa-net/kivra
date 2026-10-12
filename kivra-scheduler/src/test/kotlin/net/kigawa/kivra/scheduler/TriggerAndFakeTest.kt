@@ -10,6 +10,9 @@ import kotlinx.coroutines.test.runTest
 import net.kigawa.kivra.core.IdempotencyKey
 import net.kigawa.kivra.core.JobRef
 import net.kigawa.kivra.core.JobSpec
+import net.kigawa.kivra.core.ScheduleWriterLease
+
+private val writer = ScheduleWriterLease("test-writer", 1)
 
 class TriggerAndFakeTest {
     private val ref = JobRef("j1")
@@ -17,7 +20,7 @@ class TriggerAndFakeTest {
 
     @Test fun `same (jobId, scheduledAt) starts only once, even concurrently`() = runTest {
         var starts = 0
-        val h = ScheduleTriggerHandler(InMemoryTriggerDedupStore()) { starts++ }
+        val h = ScheduleTriggerHandler(InMemoryTriggerDedupStore(), true) { starts++ }
         val results = (1..10).map { async { h.handle(ScheduleTrigger(ref, at)) } }.awaitAll()
         assertEquals(1, results.count { it == TriggerOutcome.ACCEPTED })
         assertEquals(1, starts)
@@ -28,7 +31,7 @@ class TriggerAndFakeTest {
     @Test fun `a start that is provably not started releases the claim so redelivery can retry`() = runTest {
         var fail = true
         var starts = 0
-        val h = ScheduleTriggerHandler(InMemoryTriggerDedupStore()) {
+        val h = ScheduleTriggerHandler(InMemoryTriggerDedupStore(), true) {
             if (fail) throw TriggerNotStartedException("nothing committed") else starts++
         }
         assertFailsWith<TriggerNotStartedException> { h.handle(ScheduleTrigger(ref, at)) }
@@ -40,7 +43,7 @@ class TriggerAndFakeTest {
 
     @Test fun `an exception after a possible side effect keeps the claim UNKNOWN and holds redelivery`() = runTest {
         var calls = 0
-        val h = ScheduleTriggerHandler(InMemoryTriggerDedupStore()) { calls++; error("commit response lost") }
+        val h = ScheduleTriggerHandler(InMemoryTriggerDedupStore(), true) { calls++; error("commit response lost") }
         assertFailsWith<IllegalStateException> { h.handle(ScheduleTrigger(ref, at)) }
         assertEquals(TriggerOutcome.HELD_UNKNOWN, h.handle(ScheduleTrigger(ref, at)))
         assertEquals(TriggerOutcome.HELD_UNKNOWN, h.handle(ScheduleTrigger(ref, at)))
@@ -49,7 +52,7 @@ class TriggerAndFakeTest {
 
     @Test fun `cancellation after a possible side effect is treated like any other unknown outcome`() = runTest {
         var calls = 0
-        val h = ScheduleTriggerHandler(InMemoryTriggerDedupStore()) { calls++; throw kotlinx.coroutines.CancellationException("worker moved") }
+        val h = ScheduleTriggerHandler(InMemoryTriggerDedupStore(), true) { calls++; throw kotlinx.coroutines.CancellationException("worker moved") }
         assertFailsWith<kotlinx.coroutines.CancellationException> { h.handle(ScheduleTrigger(ref, at)) }
         assertEquals(TriggerOutcome.HELD_UNKNOWN, h.handle(ScheduleTrigger(ref, at)))
         assertEquals(1, calls)
@@ -58,8 +61,8 @@ class TriggerAndFakeTest {
     @Test fun `a restart that shares the durable store does not start a completed trigger again`() = runTest {
         val store = InMemoryTriggerDedupStore() // stands in for the durable table: the handler is recreated, the store is not
         var calls = 0
-        assertEquals(TriggerOutcome.ACCEPTED, ScheduleTriggerHandler(store) { calls++ }.handle(ScheduleTrigger(ref, at)))
-        assertEquals(TriggerOutcome.DUPLICATE, ScheduleTriggerHandler(store) { calls++ }.handle(ScheduleTrigger(ref, at)))
+        assertEquals(TriggerOutcome.ACCEPTED, ScheduleTriggerHandler(store, true) { calls++ }.handle(ScheduleTrigger(ref, at)))
+        assertEquals(TriggerOutcome.DUPLICATE, ScheduleTriggerHandler(store, true) { calls++ }.handle(ScheduleTrigger(ref, at)))
         assertEquals(1, calls)
     }
 
@@ -80,10 +83,10 @@ class TriggerAndFakeTest {
 
     @Test fun `poller turns lastRunAt into deduped triggers and survives ai-scheduler being down`() = runTest {
         val fake = FakeScheduleClient()
-        val job = fake.upsertJob(JobSpec("kivra:fusha:test:tick", "* * * * *", null), IdempotencyKey("k"))
+        val job = fake.upsertJob(JobSpec("kivra:fusha:test:tick", "* * * * *", null), IdempotencyKey("k"), writer)
         fake.triggerNow(job, IdempotencyKey("t1"))
         var starts = 0
-        val poller = SchedulePoller(fake, ScheduleTriggerHandler(InMemoryTriggerDedupStore()) { starts++ })
+        val poller = SchedulePoller(fake, ScheduleTriggerHandler(InMemoryTriggerDedupStore(), true) { starts++ })
         assertEquals(1, poller.poll(listOf(job)).accepted)
         assertEquals(1, poller.poll(listOf(job)).duplicates)
         fake.down = true
@@ -94,9 +97,9 @@ class TriggerAndFakeTest {
 
     @Test fun `poller reports held UNKNOWN triggers separately`() = runTest {
         val fake = FakeScheduleClient()
-        val job = fake.upsertJob(JobSpec("kivra:fusha:test:tick", "* * * * *", null), IdempotencyKey("k"))
+        val job = fake.upsertJob(JobSpec("kivra:fusha:test:tick", "* * * * *", null), IdempotencyKey("k"), writer)
         fake.triggerNow(job, IdempotencyKey("t1"))
-        val poller = SchedulePoller(fake, ScheduleTriggerHandler(InMemoryTriggerDedupStore()) { error("lost") })
+        val poller = SchedulePoller(fake, ScheduleTriggerHandler(InMemoryTriggerDedupStore(), true) { error("lost") })
         assertEquals(setOf(job), poller.poll(listOf(job)).failures.keys) // first sink call fails, claim is UNKNOWN
         val second = poller.poll(listOf(job))
         assertEquals(1, second.heldUnknown)
@@ -106,16 +109,16 @@ class TriggerAndFakeTest {
     @Test fun `fake upsert is idempotent by name and triggerNow by key`() = runTest {
         val fake = FakeScheduleClient()
         val s = JobSpec("kivra:fusha:test:tick", "* * * * *", null)
-        assertEquals(fake.upsertJob(s, IdempotencyKey("a")), fake.upsertJob(s, IdempotencyKey("b")))
+        assertEquals(fake.upsertJob(s, IdempotencyKey("a"), writer), fake.upsertJob(s, IdempotencyKey("b"), writer))
         assertEquals(1, fake.jobCount())
-        val j = fake.upsertJob(s, IdempotencyKey("a"))
+        val j = fake.upsertJob(s, IdempotencyKey("a"), writer)
         assertEquals(fake.triggerNow(j, IdempotencyKey("k")), fake.triggerNow(j, IdempotencyKey("k")))
         assertEquals(1, fake.listExecutions(j).size)
     }
 
     @Test fun `fake lifecycle pause cancel retry and unknown injection`() = runTest {
         val fake = FakeScheduleClient()
-        val j = fake.upsertJob(JobSpec("kivra:fusha:test:t2", null, null), IdempotencyKey("a"))
+        val j = fake.upsertJob(JobSpec("kivra:fusha:test:t2", null, null), IdempotencyKey("a"), writer)
         fake.pauseJob(j)
         assertEquals(false, fake.getJob(j).enabled)
         fake.resumeJob(j)

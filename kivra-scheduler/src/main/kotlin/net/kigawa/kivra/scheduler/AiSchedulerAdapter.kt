@@ -24,6 +24,7 @@ import net.kigawa.kivra.core.JobRef
 import net.kigawa.kivra.core.JobSpec
 import net.kigawa.kivra.core.ScheduleExecutionRef
 import net.kigawa.kivra.core.ScheduleExecutionStatus
+import net.kigawa.kivra.core.ScheduleWriterLease
 
 /**
  * @property baseUrl ai-scheduler base URL. Must be https, unless [allowInsecureHttp] is set. Plain http is only for an
@@ -43,6 +44,11 @@ data class AiSchedulerConfig(
     val maxGetAttempts: Int = 3,
     val requestTimeoutMillis: Long = 15_000,
     val connectTimeoutMillis: Long = 5_000,
+    /**
+     * DEV / TEST ONLY. Allows [InMemoryTriggerDedupStore]. Without it the adapter refuses to start with an in-memory
+     * store, because a restart would forget UNKNOWN / DONE claims and re-open duplicate starts.
+     */
+    val devAllowInMemoryDedup: Boolean = false,
 ) {
     init {
         val url = runCatching { Url(baseUrl) }.getOrNull() ?: throw IllegalArgumentException("invalid baseUrl")
@@ -81,15 +87,23 @@ fun aiSchedulerHttpClient(engine: HttpClientEngine, config: AiSchedulerConfig): 
  * exists server side, and a manual execution uses `now`); the header is sent so that enabling it is a server-only
  * change. See docs/ai-scheduler-requests.md.
  */
+/** HTTP statuses that prove ai-scheduler refused the request before creating an execution (the only ones that release a claim). */
+private val PROVEN_REFUSAL_STATUSES = setOf(400, 401, 403, 404, 422)
+
 class AiSchedulerAdapter(
     private val client: HttpClient,
     private val config: AiSchedulerConfig,
     private val tokens: ScheduleTokenProvider = ScheduleTokenProvider.NoAuth,
     private val backoff: suspend (attempt: Int) -> Unit = { delay(200L * (1L shl (it - 1))) },
-    /** Durable claim store for `triggerNow`. Production must pass a persistent implementation (see [TriggerDedupStore]). */
+    /**
+     * Durable claim store for `triggerNow`. Production must pass a persistent implementation (see [TriggerDedupStore]).
+     * **未対応:** no persistent implementation exists yet (it needs the M0 Journal contract change), so an
+     * [InMemoryTriggerDedupStore] is refused at construction unless [AiSchedulerConfig.devAllowInMemoryDedup] is set.
+     */
     private val dedup: TriggerDedupStore,
 ) : ScheduleClient {
     init {
+        requireDurableTriggerDedup(dedup, config.devAllowInMemoryDedup)
         require(!(config.baseUrl.startsWith("http:") && tokens !== ScheduleTokenProvider.NoAuth)) {
             "a Bearer token must not be sent over plain http"
         }
@@ -224,13 +238,13 @@ class AiSchedulerAdapter(
      * Fail-closed on duplicates: more than one job with the name, before or after the POST, raises
      * [ScheduleConflictException]. Nothing is deleted automatically (ai-scheduler has no DELETE).
      *
-     * **Known residual race (not fixed here):** ai-scheduler job names are not unique server-side, so lookup-then-POST
-     * is not atomic. Two creators that both see "absent" both POST, and the post-create check only *detects* the
-     * duplicate; it cannot prevent it. The precondition is that only one Kivra process runs this at a time, i.e. it
-     * runs under the Orchestrator's Leader Lease, including the old owner's in-flight POST. A permanent fix needs a
-     * server-side unique name or Idempotency-Key support in ai-scheduler (docs/ai-scheduler-requests.md).
+     * **Precondition ([writer]):** the caller must hold the single-writer lease. ai-scheduler job names are not unique
+     * server-side, so lookup-then-POST is not atomic: two writers that both see "absent" both POST. The post-create check
+     * only *detects* the duplicate and cannot prevent it. A previous leader's in-flight POST is not fenced by a new
+     * lease alone, so a permanent fix needs a server-side unique name or Idempotency-Key support in ai-scheduler
+     * (docs/ai-scheduler-requests.md). **未対応:** the lease implementation (#36) does not exist yet.
      */
-    override suspend fun upsertJob(spec: JobSpec, key: IdempotencyKey): JobRef {
+    override suspend fun upsertJob(spec: JobSpec, key: IdempotencyKey, writer: ScheduleWriterLease): JobRef {
         require(JobNaming.isValid(spec.name)) { "job name must follow kivra:fusha:{env}:{id}" }
         require(spec.cron == null || spec.runAt == null) { "cron and runAt are mutually exclusive" }
         val k = key(key)
@@ -284,8 +298,10 @@ class AiSchedulerAdapter(
      * The claim is atomic and happens before the POST: [TriggerDedupStore.tryClaim] is one conditional write, so two
      * concurrent callers cannot both send. Outcomes after the claim:
      * - 2xx with a valid body: DONE, same ref for the same key from then on (no POST).
-     * - Refused by ai-scheduler before execution (4xx, 3xx not followed): claim released, a deliberate retry may send.
-     * - Transport error, timeout, 5xx, cancellation, or any failure after a 2xx (parse / identity check): UNKNOWN. The
+     * - Clearly refused before execution ([PROVEN_REFUSAL_STATUSES]: 400, 401, 403, 404, 422): claim released, a
+     *   deliberate retry may send.
+     * - Anything else that is not 2xx (3xx not followed, 408, 409, 429, 5xx, other 4xx), transport error, timeout,
+     *   cancellation, or any failure after a 2xx (parse / identity check): UNKNOWN. The
      *   same key is refused with [ScheduleUnknownException] until reconciled. ai-scheduler cannot list a job's
      *   executions, so Kivra cannot confirm it from its side.
      * - A concurrent call while IN_FLIGHT gets [ScheduleConflictException] and does not send.
@@ -310,15 +326,21 @@ class AiSchedulerAdapter(
             dedup.markUnknown(claimKey)
             throw e
         }
-        if (r == null || r.status >= 500) {
+        if (r == null) {
             dedup.markUnknown(claimKey)
-            throw ScheduleUnknownException("triggerNow", if (r == null) "transport error or timeout" else "HTTP ${r.status}")
+            throw ScheduleUnknownException("triggerNow", "transport error or timeout")
         }
         if (r.status !in 200..299) {
-            // Refused before any execution was created: safe to release.
-            if (r.status == 401) tokens.invalidate()
-            dedup.release(claimKey)
-            fail("triggerNow", r.status)
+            if (r.status in PROVEN_REFUSAL_STATUSES) {
+                // Clearly rejected by the client-side contract: nothing was created, so the key may be retried.
+                if (r.status == 401) tokens.invalidate()
+                dedup.release(claimKey)
+                fail("triggerNow", r.status)
+            }
+            // 3xx, 408, 409, 429, 5xx and anything else do not prove that nothing was started (a proxy, a retry layer or
+            // a conflicting execution may have acted). Keep the key UNKNOWN and never resend it automatically.
+            dedup.markUnknown(claimKey)
+            throw ScheduleUnknownException("triggerNow", "HTTP ${r.status}: outcome not proven, held until reconciled")
         }
         try {
             val w = parse<WireExecution>("triggerNow", r.body)

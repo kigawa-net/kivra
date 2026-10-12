@@ -65,7 +65,10 @@ enum class ClaimState { IN_FLIGHT, DONE, UNKNOWN }
 
 data class Claim(val state: ClaimState, val result: String? = null)
 
-/** DEV / TEST ONLY. Not durable, not shared between processes, and it keeps every key (no eviction). */
+/**
+ * DEV / TEST ONLY. Not durable, not shared between processes, and it keeps every key (no eviction).
+ * Refused at startup by [requireDurableTriggerDedup] unless the caller explicitly allows it for dev/tests.
+ */
 class InMemoryTriggerDedupStore : TriggerDedupStore {
     private val claims = ConcurrentHashMap<String, Claim>()
 
@@ -84,6 +87,17 @@ class InMemoryTriggerDedupStore : TriggerDedupStore {
     }
 }
 
+/**
+ * Fail-fast guard run at construction (i.e. at startup). A process must not start with [InMemoryTriggerDedupStore]
+ * unless [allowInMemoryForDev] is set explicitly: its claims vanish on restart and would re-open duplicate starts.
+ * **未対応:** a persistent [TriggerDedupStore] backed by the M0 `external_operations` unique key is not implemented yet.
+ */
+fun requireDurableTriggerDedup(store: TriggerDedupStore, allowInMemoryForDev: Boolean) {
+    check(store !is InMemoryTriggerDedupStore || allowInMemoryForDev) {
+        "a durable TriggerDedupStore is required; InMemoryTriggerDedupStore is dev/test only (persistent store: 未対応)"
+    }
+}
+
 enum class TriggerOutcome {
     /** Started by this call. */
     ACCEPTED,
@@ -95,8 +109,19 @@ enum class TriggerOutcome {
     HELD_UNKNOWN,
 }
 
-/** The body of the Kivra "start endpoint" (HTTP exposure is wired later). */
-class ScheduleTriggerHandler(private val dedup: TriggerDedupStore, private val sink: ScheduleTriggerSink) {
+/**
+ * The body of the Kivra "start endpoint" (HTTP exposure is wired later). Fails at construction when [dedup] is an
+ * in-memory store and [allowInMemoryForDev] is not set (see [requireDurableTriggerDedup]).
+ */
+class ScheduleTriggerHandler(
+    private val dedup: TriggerDedupStore,
+    allowInMemoryForDev: Boolean = false,
+    private val sink: ScheduleTriggerSink,
+) {
+    init {
+        requireDurableTriggerDedup(dedup, allowInMemoryForDev)
+    }
+
     suspend fun handle(trigger: ScheduleTrigger): TriggerOutcome {
         val key = trigger.dedupKey
         dedup.tryClaim(key)?.let { existing ->

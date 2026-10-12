@@ -31,13 +31,22 @@ M1 が既存 DDL を置換することになる。
 6. 後退遷移・終端・RELEASING の扱いは #9 §3.3 に従う(TESTING / REVIEWING から DEVELOPING、PULL_REQUEST から TESTING、
    RELEASING は CANCELLED 不可で DEC への rollback 依頼のみ、終端からの遷移なし)。
 
+7. **RunCompletionMode**(M8 追記、2026-10-12): Run は Admission 時に `PR_ONLY` か `RELEASE` を決め、以後変更しない(列 `completion_mode`、更新経路なし)。
+   - `RELEASE`: 従来どおり RELEASING → VERIFYING → COMPLETED(DEC 経由)。
+   - `PR_ONLY`(M8 vertical slice): PR を人間が GitHub で merge して完了する。RELEASING / VERIFYING には入らず、DEC への依頼もしない。
+     COMPLETED は汎用 `transition()` からは到達できず、`completePrOnlyRun()` だけが PULL_REQUEST / WAITING_APPROVAL から行う。
+     完了には GitHub の検証済み証拠(`merged == true`、Merge SHA、Repository、Head SHA、Evidence ref)が必要で、Head SHA は run が
+     `bindPullRequest()` で記録した PR head と一致しなければならない。close のみ・別 head の merge・結果未確定では完了しない。
+   - 完了時は `RunCompleted` Outbox を 1 回だけ追加する(重複完了は終端の run に対する lease 喪失で拒否)。
+
 ## V1 マイグレーションを置換した理由
 
 `V1__core_schema.sql` を新規マイグレーション(V2)で `task_runs` から改名・変換するのではなく **V1 自体を置換**した。
 理由: M0 PR は Draft で未マージ、どの環境にも V1 を適用していない(`flyway_schema_history` が存在しない)ため、
 改名用の移行を残すと「存在しなかった旧スキーマ」を永久に履歴へ残すことになる。
 **マージ後(V1 が適用され得る後)は V1 を変更せず、必ず新しい Vn を追加する**(Flyway のチェックサム検証が壊れる)。
-V2(`reconciliation_evidence_and_outbox_claim`)は置換ではなく列追加として分けてある。
+V2(`reconciliation_evidence_and_outbox_claim`)は置換ではなく列追加として分けてある。V2 は未マージ・未適用のため、
+PR #43 の修正(claim token、RunCompletionMode、PR 証拠列)は V2 を直接編集して入れた。マージ後は V2 を変更せず V3 以降を追加する。
 
 ## M0 では実装せず後続に残すもの(スキーマを増やしすぎないため)
 

@@ -88,7 +88,7 @@ class ReclAdapterTest {
 
     @Test
     fun `POST is never auto re-sent`() = runTest {
-        for ((status, kind) in listOf(HttpStatusCode.ServiceUnavailable to MemoryErrorKind.OUTCOME_UNKNOWN, HttpStatusCode.TooManyRequests to MemoryErrorKind.UNAVAILABLE)) {
+        for ((status, kind) in listOf(HttpStatusCode.ServiceUnavailable to MemoryErrorKind.OUTCOME_UNKNOWN, HttpStatusCode.TooManyRequests to MemoryErrorKind.OUTCOME_UNKNOWN)) {
             var calls = 0
             val engine = MockEngine { calls++; respond("{}", status, headersOf(HttpHeaders.ContentType, "application/json")) }
             val ex = assertFailsWith<MemoryException> { adapter(engine).save(T.entry(), T.key("k"), ctx) }
@@ -101,6 +101,49 @@ class ReclAdapterTest {
         assertFailsWith<MemoryException> { a.update(MemoryId("m1"), 1, MemoryPatch(summary = "x"), ctx) }
         assertFailsWith<MemoryException> { a.delete(MemoryId("m1"), DeleteMode.SOFT, ctx) }
         assertEquals(3, calls)
+    }
+
+    @Test
+    fun `rate limited save is held for reconciliation and flush does not retry the POST`() = runTest {
+        var posts = 0
+        val engine = MockEngine {
+            posts++
+            respond("{}", HttpStatusCode.TooManyRequests, jsonHeaders)
+        }
+        val service = net.kigawa.kivra.memory.MemoryService(adapter(engine))
+        assertEquals(
+            net.kigawa.kivra.memory.RememberOutcome.HeldForReconciliation,
+            service.remember(T.entry(), ctx, T.key("429-save")),
+        )
+        assertEquals(1, posts)
+        assertEquals(1, service.heldForReconciliation().size)
+        val report = service.flush()
+        assertEquals(0, report.flushed)
+        assertEquals(0, report.remaining)
+        assertEquals(1, posts, "HTTP 429 must not authorize a duplicate POST")
+    }
+
+    @Test
+    fun `rate limited PATCH and DELETE are ambiguous mutation outcomes`() = runTest {
+        var calls = 0
+        val engine = MockEngine {
+            calls++
+            respond("{}", HttpStatusCode.TooManyRequests, jsonHeaders)
+        }
+        val a = adapter(engine)
+        assertEquals(
+            MemoryErrorKind.OUTCOME_UNKNOWN,
+            assertFailsWith<MemoryException> {
+                a.update(MemoryId("m1"), 1, MemoryPatch(summary = "x"), ctx)
+            }.kind,
+        )
+        assertEquals(
+            MemoryErrorKind.OUTCOME_UNKNOWN,
+            assertFailsWith<MemoryException> {
+                a.delete(MemoryId("m1"), DeleteMode.SOFT, ctx)
+            }.kind,
+        )
+        assertEquals(2, calls)
     }
 
     @Test

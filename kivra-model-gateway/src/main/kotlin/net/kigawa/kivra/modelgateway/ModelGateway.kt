@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.time.Clock
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.min
 import kotlin.random.Random
 
@@ -53,20 +54,65 @@ class ModelGateway(
 
     fun route(req: ModelRequest, streaming: Boolean = false): RoutingDecision = router.route(req, streaming)
 
-    /** Per-invocation settlement state: whether a provider call may have left the Gateway. */
-    private class Flight { var mayHaveSent = false }
+    /**
+     * Process-local seal for requestIds whose provider response was received but could not be recorded
+     * (see [unrecorded]). It holds even when the [ledger] refuses the terminal write, so this process never re-sends.
+     */
+    private val sealedRequestIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * Per-invocation settlement state. [mayHaveSent] means a provider call may have left the Gateway.
+     * [responseReceived] means a provider response (success) was obtained: the call is billed and the requestId must
+     * never be released, whatever happens while recording it.
+     */
+    private class Flight {
+        var mayHaveSent = false
+        var responseReceived = false
+    }
 
     /** Claims [req].requestId. Returns the stored response for a replayable completed call, or null when claimed. */
-    private fun claim(req: ModelRequest, replayable: Boolean): ModelResponse? =
-        when (val c = ledger.begin(req.requestId, RequestDigest.of(req))) {
+    private fun claim(req: ModelRequest, replayable: Boolean): ModelResponse? {
+        if (req.requestId in sealedRequestIds) throw denied("DUPLICATE_REQUEST", "requestId was already completed or its outcome is unknown")
+        return when (val c = ledger.begin(req.requestId, RequestDigest.of(req))) {
             LedgerClaim.Claimed -> null
             is LedgerClaim.Completed -> c.response?.takeIf { replayable }
                 ?: throw denied("DUPLICATE_REQUEST", "requestId was already completed")
             is LedgerClaim.Rejected -> throw denied(c.code, c.message)
         }
+    }
 
+    /**
+     * Settles a failed invocation. A requestId is released only when no provider request can have been transmitted.
+     * Once a response was received, the terminal record is owned by [unrecorded] / the completion path and is never released.
+     */
     private fun settle(req: ModelRequest, flight: Flight) {
+        if (flight.responseReceived) return
         if (flight.mayHaveSent) ledger.markOutcomeUnknown(req.requestId) else ledger.releaseUnsent(req.requestId)
+    }
+
+    /**
+     * A provider response was received but could not be recorded (budget, ledger or audit write failed). Fail closed:
+     * the requestId is sealed in-process, the ledger is moved to outcome-unknown on a best-effort basis, and the caller
+     * gets OUTCOME_UNKNOWN / RECONCILIATION_REQUIRED instead of the response. The response is deliberately not returned:
+     * its completion is not durable, so a later retry under the same requestId could bill the provider twice. The caller
+     * must reconcile the request result before issuing a new requestId. Budget has already been charged at the estimate
+     * (or the actual cost when that commit succeeded) and is never released.
+     */
+    private fun unrecorded(req: ModelRequest, cause: Throwable): GatewayException {
+        sealedRequestIds.add(req.requestId)
+        try {
+            ledger.markOutcomeUnknown(req.requestId)
+        } catch (e: Throwable) {
+            cause.addSuppressed(e)
+        }
+        return GatewayException(
+            GatewayError(
+                ErrorKind.OUTCOME_UNKNOWN,
+                "provider responded but the call could not be recorded; reconcile before issuing a new requestId",
+                code = "RECONCILIATION_REQUIRED",
+            ),
+            cause,
+        )
     }
 
     private fun denied(code: String, msg: String) = GatewayException(GatewayError(ErrorKind.POLICY_DENIED, msg, code = code))
@@ -83,10 +129,8 @@ class ModelGateway(
         val decision = decide(req, streaming = false)
         claim(req, replayable = true)?.let { return it }
         val flight = Flight()
-        try {
-            val resp = withTimeout(req.timeout) { attemptLoop(req, decision, flight) }
-            ledger.complete(req.requestId, resp)
-            return resp
+        val resp = try {
+            withTimeout(req.timeout) { attemptLoop(req, decision, flight) }
         } catch (e: TimeoutCancellationException) {
             settle(req, flight)
             throw GatewayException(GatewayError(ErrorKind.TIMEOUT, "request deadline exceeded"), e)
@@ -94,6 +138,13 @@ class ModelGateway(
             settle(req, flight)
             throw e
         }
+        // The provider responded and the call is billed. A ledger failure here must not release the requestId.
+        try {
+            ledger.complete(req.requestId, resp)
+        } catch (e: Throwable) {
+            throw unrecorded(req, e)
+        }
+        return resp
     }
 
     /** Streaming call. Failures before the first event may fall back; after that a Failed event ends the stream. */
@@ -147,13 +198,24 @@ class ModelGateway(
                                     is StreamChunk.UsageUpdate -> { usage = chunk.usage; emit(ModelEvent.UsageUpdate(req.requestId, attemptId, seq++, chunk.usage)) }
                                     is StreamChunk.Finished -> {
                                         finished = true
-                                        val cost = CostCalculator.cost(chunk.response.usage, target.model.price!!, CostBasis.ACTUAL)
-                                        val resp = chunk.response.copy(cost = cost)
-                                        budget.commit(key, cost.amount)
-                                        ledger.complete(req.requestId, null)
-                                        health.recordSuccess(ref.providerId)
-                                        auditAttempt(req, attemptId, ref, decision, resp.usage, cost, resp.latencyMs, resp.finishReason, null)
-                                        emit(ModelEvent.Completed(req.requestId, attemptId, seq++, resp))
+                                        flight.responseReceived = true
+                                        val s = seq++
+                                        // Booking failures become a terminal Failed(OUTCOME_UNKNOWN); the requestId is never released.
+                                        val terminal = try {
+                                            val cost = CostCalculator.cost(chunk.response.usage, target.model.price!!, CostBasis.ACTUAL)
+                                            val resp = chunk.response.copy(cost = cost)
+                                            budget.commit(key, cost.amount)
+                                            ledger.complete(req.requestId, null)
+                                            health.recordSuccess(ref.providerId)
+                                            auditAttempt(req, attemptId, ref, decision, resp.usage, cost, resp.latencyMs, resp.finishReason, null)
+                                            ModelEvent.Completed(req.requestId, attemptId, s, resp)
+                                        } catch (e: Throwable) {
+                                            runCatching { budget.commit(key, null) }
+                                            val failure = unrecorded(req, e)
+                                            runCatching { auditAttempt(req, attemptId, ref, decision, chunk.response.usage, null, chunk.response.latencyMs, chunk.response.finishReason, failure.error) }
+                                            ModelEvent.Failed(req.requestId, attemptId, s, failure.error)
+                                        }
+                                        emit(terminal)
                                     }
                                 }
                             }
@@ -240,13 +302,8 @@ class ModelGateway(
                 }
                 val t0 = System.nanoTime()
                 ledger.markSending(req.requestId)
-                try {
-                    val resp = providers.getValue(ref.providerId).invoke(req, target, CallContext(req.requestId, attemptId, decision.decisionId))
-                    val cost = CostCalculator.cost(resp.usage, target.model.price!!, CostBasis.ACTUAL)
-                    budget.commit(key, cost.amount)
-                    health.recordSuccess(ref.providerId)
-                    auditAttempt(req, attemptId, ref, decision, resp.usage, cost, resp.latencyMs, resp.finishReason, null)
-                    return resp.copy(cost = cost)
+                val resp = try {
+                    providers.getValue(ref.providerId).invoke(req, target, CallContext(req.requestId, attemptId, decision.decisionId))
                 } catch (e: CancellationException) {
                     flight.mayHaveSent = true
                     withContext(NonCancellable) {
@@ -277,6 +334,19 @@ class ModelGateway(
                     auditAttempt(req, attemptId, ref, decision, Usage.ZERO, null, elapsed(t0), null, err)
                     throw GatewayException(err, e)
                 }
+                // A response was received: the call is billed. Booking failures are fail-closed (see [unrecorded]).
+                flight.responseReceived = true
+                val cost = try {
+                    val c = CostCalculator.cost(resp.usage, target.model.price!!, CostBasis.ACTUAL)
+                    budget.commit(key, c.amount)
+                    health.recordSuccess(ref.providerId)
+                    auditAttempt(req, attemptId, ref, decision, resp.usage, c, resp.latencyMs, resp.finishReason, null)
+                    c
+                } catch (e: Throwable) {
+                    runCatching { budget.commit(key, null) }
+                    throw unrecorded(req, e)
+                }
+                return resp.copy(cost = cost)
             }
         }
         throw GatewayException(last ?: GatewayError(ErrorKind.TRANSIENT, "all candidates failed"))

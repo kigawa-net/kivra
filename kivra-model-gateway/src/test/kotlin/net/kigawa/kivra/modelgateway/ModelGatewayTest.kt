@@ -415,6 +415,65 @@ class ModelGatewayTest {
         assertEquals(0, BigDecimal.ZERO.compareTo(bud.usage("task").reserved))
     }
 
+    // ---- ledger failure after a received provider response (fail closed, never release) ----
+
+    /** Delegates to an in-memory ledger; can make the terminal write or the outcome-unknown write fail. */
+    private class SpyLedger(private val inner: RequestLedger = InMemoryRequestLedger()) : RequestLedger {
+        var failComplete = false
+        var failMarkUnknown = false
+        var releaseCalls = 0
+        override fun begin(requestId: String, digest: String) = inner.begin(requestId, digest)
+        override fun markSending(requestId: String) = inner.markSending(requestId)
+        override fun complete(requestId: String, response: ModelResponse?) {
+            if (failComplete) throw IllegalStateException("ledger commit result unknown")
+            inner.complete(requestId, response)
+        }
+        override fun markOutcomeUnknown(requestId: String) {
+            if (failMarkUnknown) throw IllegalStateException("ledger unavailable")
+            inner.markOutcomeUnknown(requestId)
+        }
+        override fun releaseUnsent(requestId: String) { releaseCalls++; inner.releaseUnsent(requestId) }
+    }
+
+    @Test fun ledgerCompleteFailureAfterProviderSuccessNeverReleasesAndSealsRequestId() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m)); val b = budget()
+        val ledger = SpyLedger().also { it.failComplete = true }
+        val g = gateway(listOf(m), mapOf("ext" to fake), b, ledger = ledger)
+        val e = assertFailsWith<GatewayException> { g.invoke(request(id = "r1")) }
+        assertEquals(ErrorKind.OUTCOME_UNKNOWN, e.error.kind); assertEquals("RECONCILIATION_REQUIRED", e.error.code)
+        assertEquals(0, ledger.releaseCalls, "releaseUnsent must not run after a provider response")
+        assertEquals(1, fake.calls)
+        assertEquals(0, BigDecimal.ZERO.compareTo(b.usage("task").reserved))
+        assertTrue(b.usage("task").committed > BigDecimal.ZERO, "the billed call stays charged")
+        val again = assertFailsWith<GatewayException> { g.invoke(request(id = "r1")) }
+        assertEquals("DUPLICATE_REQUEST", again.error.code); assertEquals(1, fake.calls)
+    }
+
+    @Test fun ledgerCompleteAndOutcomeUnknownBothFailStillSealsInProcess() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m))
+        val ledger = SpyLedger().also { it.failComplete = true; it.failMarkUnknown = true }
+        val g = gateway(listOf(m), mapOf("ext" to fake), ledger = ledger)
+        assertEquals(ErrorKind.OUTCOME_UNKNOWN, assertFailsWith<GatewayException> { g.invoke(request(id = "r2")) }.error.kind)
+        assertEquals(0, ledger.releaseCalls)
+        val again = assertFailsWith<GatewayException> { g.invoke(request(id = "r2")) }
+        assertEquals("DUPLICATE_REQUEST", again.error.code); assertEquals(1, fake.calls)
+    }
+
+    @Test fun streamCompleteFailureAfterFinishedEmitsOutcomeUnknownAndNeverReleases() = runTest {
+        val m = model("m", "ext"); val b = budget()
+        val ledger = SpyLedger().also { it.failComplete = true }
+        val g = gateway(listOf(m), mapOf("ext" to FakeProvider("ext", ok(m))), b, ledger = ledger)
+        val events = g.stream(request(id = "s1")).toList()
+        val last = assertIs<ModelEvent.Failed>(events.last())
+        assertEquals(ErrorKind.OUTCOME_UNKNOWN, last.error.kind)
+        assertEquals(1, events.count { it is ModelEvent.Completed || it is ModelEvent.Failed }, "exactly one terminal event")
+        assertEquals(0, ledger.releaseCalls)
+        assertEquals(0, BigDecimal.ZERO.compareTo(b.usage("task").reserved))
+        assertTrue(b.usage("task").committed > BigDecimal.ZERO)
+        val again = assertFailsWith<GatewayException> { g.stream(request(id = "s1")).toList() }
+        assertEquals("DUPLICATE_REQUEST", again.error.code)
+    }
+
     @Test fun gatewayWithoutDurableLedgerFailsFastUnlessDevOptIn() {
         val m = model("m", "ext"); val reg = registryOf(listOf(ext), listOf(m))
         val providers = mapOf<String, ModelProvider>("ext" to FakeProvider("ext", ok(m)))

@@ -16,5 +16,19 @@ object KivraNaming {
 
     fun runLabels(runId: String): Map<String, String> = mapOf(RUN_ID_LABEL to runId)
 
+    /**
+     * The runId encoded in a Kivra workspace name, or null when [name] is not exactly `kivra-run-<runId>`.
+     * Used by the Reaper: a name that does not match is never considered Kivra's.
+     */
+    fun runIdOfWorkspaceName(name: String): String? {
+        val runId = name.removePrefix(WORKSPACE_PREFIX).takeIf { name.startsWith(WORKSPACE_PREFIX) } ?: return null
+        return runId.takeIf { it.matches(ULID_PATTERN) }
+    }
+
+    private const val WORKSPACE_PREFIX = "kivra-run-"
+
+    /** Run ids are ULIDs (Crockford base32, 26 chars; CHAR(26) in the schema). */
+    private val ULID_PATTERN = Regex("[0-9A-HJKMNP-TV-Z]{26}")
+
     private val RUN_ID_PATTERN = Regex("[a-zA-Z0-9._-]{1,100}")
 }

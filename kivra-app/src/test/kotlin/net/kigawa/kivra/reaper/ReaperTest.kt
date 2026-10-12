@@ -17,6 +17,7 @@ import net.kigawa.kivra.agent.AgentRunOutcome
 import net.kigawa.kivra.agent.TestPort
 import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.OperationStatus
+import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.AgentRepository
 import net.kigawa.kivra.db.TestDb
@@ -51,10 +52,18 @@ private class ListingDownPort(private val inner: TestPort) : ExecutionPort by in
     override suspend fun listWorkspaces(): PortResult<List<Workspace>> = PortResult.Transient("list down")
 }
 
+/** Refuses every deletion with a transient failure (no proof is possible from the Reaper). */
+private class DeleteTransientPort(private val inner: TestPort) : ExecutionPort by inner {
+    override suspend fun deleteWorkspace(id: WorkspaceId): PortResult<Workspace> {
+        inner.mutatingCalls += "deleteWorkspace"
+        return PortResult.Transient("connection refused")
+    }
+}
+
 class ReaperTest {
     /** A run that AgentManager drove through its workspace / runtime / execution, then ended (COMPLETED). */
     private fun TestDb.completedRun(port: TestPort): RunId {
-        val run = runs.create("task-${System.nanoTime()}", "test")
+        val run = runs.create("task-${System.nanoTime()}", "test", RunCompletionMode.RELEASE)
         forceState(run.runId.value, DevelopmentRunState.PREPARING)
         val out = runBlocking {
             AgentManager("worker-A", port, leases, runs, AgentRepository(database), journal, AGENT_CONFIG).run(run.runId, PROFILE)
@@ -99,6 +108,23 @@ class ReaperTest {
         assertEquals(ReapVerdict.DELETED, findingFor(first, runId).verdict)
         assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
         assertEquals(1, db.reapRows(runId))
+
+        val second = runBlocking { reaper.runOnce() }
+        assertEquals(ReapVerdict.JOURNALED, findingFor(second, runId).verdict)
+        assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+    }
+
+    @Test
+    fun `a transient deletion failure is recorded UNKNOWN (no lease, so no not-sent proof) and never resent`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        val reaper = Reaper(DeleteTransientPort(port), db.database, NO_GRACE)
+
+        val first = runBlocking { reaper.runOnce() }
+        assertEquals(ReapVerdict.DELETE_UNKNOWN, findingFor(first, runId).verdict)
+        assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+        val entry = db.journal.findByKey(runId, "EXKES_REAP_DELETE_WORKSPACE", "reap:${workspaceIdOf(port, db, runId).value}")
+        assertEquals(OperationStatus.UNKNOWN, entry!!.status)
 
         val second = runBlocking { reaper.runOnce() }
         assertEquals(ReapVerdict.JOURNALED, findingFor(second, runId).verdict)
@@ -167,7 +193,7 @@ class ReaperTest {
     @Test
     fun `a Kivra-named workspace without journal proof is quarantined, not deleted`() = TestDb().use { db ->
         val port = TestPort()
-        val run = db.runs.create("task-${System.nanoTime()}", "test")
+        val run = db.runs.create("task-${System.nanoTime()}", "test", RunCompletionMode.RELEASE)
         db.forceState(run.runId.value, DevelopmentRunState.COMPLETED)
         // Created outside AgentManager: the Journal has no EXKES_CREATE_WORKSPACE record for it.
         runBlocking {

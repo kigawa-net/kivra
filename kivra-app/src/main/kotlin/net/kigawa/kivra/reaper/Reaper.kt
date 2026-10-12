@@ -310,9 +310,11 @@ class Reaper(
                 settle(go, "CONFIRMED", null, "already gone (404)")
                 finding(ReapVerdict.DELETED, "already gone (404)")
             }
+            // M0: IN_FLIGHT -> RETRYABLE needs a NotSentProof through the journal API, which needs a Run lease. A terminal
+            // Run is never leased again, so the Reaper cannot prove "not sent": fail closed, record UNKNOWN, never resend.
             is PortResult.Transient -> {
-                settle(go, "RETRYABLE", "TRANSIENT", result.message)
-                finding(ReapVerdict.DELETE_FAILED, "not sent (transient), retryable: ${result.message}")
+                settle(go, "UNKNOWN", "TRANSIENT_NOT_PROVEN", result.message)
+                finding(ReapVerdict.DELETE_UNKNOWN, "transient failure without a not-sent proof, recorded as UNKNOWN and never resent: ${result.message}")
             }
             is PortResult.Unknown -> {
                 settle(go, "UNKNOWN", "UNKNOWN", result.message)
@@ -322,9 +324,10 @@ class Reaper(
                 settle(go, "UNKNOWN", "IDENTITY_MISMATCH", "expected ${result.expected}, got ${result.actual}")
                 finding(ReapVerdict.DELETE_UNKNOWN, "response identity mismatch, recorded as UNKNOWN and never resent")
             }
+            // IN_FLIGHT -> FAILED needs a RejectedProof (same lease constraint as above): recorded UNKNOWN, never resent.
             else -> {
-                settle(go, "FAILED", "REJECTED", result.toString())
-                finding(ReapVerdict.DELETE_FAILED, "refused: $result")
+                settle(go, "UNKNOWN", "REJECTED_NOT_PROVEN", result.toString())
+                finding(ReapVerdict.DELETE_UNKNOWN, "refused without a rejected proof, recorded as UNKNOWN and never resent: $result")
             }
         }
     }

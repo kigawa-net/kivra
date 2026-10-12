@@ -271,7 +271,7 @@ class ReclAdapter(
         404 -> MemoryException(MemoryErrorKind.NOT_FOUND, "recl: not found")
         409, 412 -> MemoryException(MemoryErrorKind.VERSION_CONFLICT, "recl: version conflict")
         405, 501 -> MemoryException(MemoryErrorKind.UNSUPPORTED, "recl: operation not supported ($code)")
-        429 -> MemoryException(MemoryErrorKind.UNAVAILABLE, "recl: rate limited")
+        429 -> MemoryException(MemoryErrorKind.OUTCOME_UNKNOWN, "recl: rate limited; mutation outcome unverified")
         in 400..499 -> MemoryException(MemoryErrorKind.REJECTED, "recl rejected the request ($code)")
         in 500..599 -> MemoryException(MemoryErrorKind.OUTCOME_UNKNOWN, "recl server error ($code)")
         else -> MemoryException(MemoryErrorKind.PROTOCOL, "unexpected status $code")

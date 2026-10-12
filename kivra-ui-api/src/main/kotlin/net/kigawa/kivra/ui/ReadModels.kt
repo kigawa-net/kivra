@@ -37,19 +37,16 @@ enum class ReplayReason {
     EVIDENCE_REQUIRED, CAPABILITY_UNVERIFIED,
 }
 
+/**
+ * Phase-0 read-only UI contract: a reason label is NOT trusted dispatch evidence.
+ * No caller may construct an "allowed" replay response until the authenticated
+ * Evidence Authority/BFF contract (#82/#85) is implemented and independently tested.
+ */
 data class ReplayEligibility(val allowed: Boolean, val reason: ReplayReason) {
     init {
-        require(!allowed || reason in SAFE_REASONS) {
-            "replay may only be allowed with a verified safe reason"
+        require(!allowed) {
+            "Phase-0 UI cannot authorize replay from a caller-supplied reason"
         }
-    }
-
-    private companion object {
-        val SAFE_REASONS = setOf(
-            ReplayReason.VERIFIED_NOT_SENT,
-            ReplayReason.AUTHORITATIVE_ABSENCE,
-            ReplayReason.AUTHORITATIVE_IDEMPOTENCY,
-        )
     }
 }
 

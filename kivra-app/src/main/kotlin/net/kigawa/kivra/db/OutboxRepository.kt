@@ -55,12 +55,13 @@ class OutboxRepository(private val database: Database, private val clock: Clock 
         eventType: String,
         payload: String,
         traceId: String? = null,
+        aggregateKind: String = AGGREGATE_RUN,
     ): String = with(tx) {
         val eventId = Ulid.generate(clock)
         val now = utcNow(clock)
         OutboxEventsTable.insert {
             it[OutboxEventsTable.eventId] = eventId
-            it[aggregateType] = AGGREGATE_RUN
+            it[OutboxEventsTable.aggregateType] = aggregateKind
             it[aggregateId] = runId.value
             it[OutboxEventsTable.aggregateVersion] = aggregateVersion
             it[OutboxEventsTable.eventType] = eventType
@@ -72,6 +73,15 @@ class OutboxRepository(private val database: Database, private val clock: Clock 
         }
         eventId
     }
+
+    /** Reads the event with this unique key `(aggregate_type, aggregate_id, aggregate_version, event_type)`, if any. */
+    fun findEvent(tx: Transaction, aggregateKind: String, aggregateId: String, aggregateVersion: Long, eventType: String): OutboxEvent? =
+        with(tx) {
+            OutboxEventsTable.selectAll().where {
+                (OutboxEventsTable.aggregateType eq aggregateKind) and (OutboxEventsTable.aggregateId eq aggregateId) and
+                    (OutboxEventsTable.aggregateVersion eq aggregateVersion) and (OutboxEventsTable.eventType eq eventType)
+            }.firstOrNull()?.toEvent()
+        }
 
     /** Standalone append that is rejected (and leaves nothing behind) when [lease] is no longer valid. */
     fun appendFenced(lease: Lease, aggregateVersion: Long, eventType: String, payload: String, traceId: String? = null): String =
@@ -86,19 +96,22 @@ class OutboxRepository(private val database: Database, private val clock: Clock 
      * Per run only the lowest-version PENDING event is claimable (a higher version waits until the lower one is
      * PUBLISHED or DEAD), so a run's events are delivered in order. Events of different runs are independent.
      */
-    fun claim(publisherId: String, limit: Int, claimTtl: Duration): List<OutboxEvent> = transaction(database) {
+    fun claim(publisherId: String, limit: Int, claimTtl: Duration, aggregateKind: String? = null): List<OutboxEvent> = transaction(database) {
+        // [aggregateKind] restricts the claim to one aggregate type (e.g. a publisher for AUDIT_ANCHOR events only).
+        val kindFilter = if (aggregateKind == null) "" else "AND o.aggregate_type = ?"
         val candidates = execQuery(
             """
             SELECT o.event_id FROM outbox_events o
              WHERE o.status = 'PENDING' AND o.next_attempt_at <= ${DbTime.NOW}
                AND (o.claim_expires_at IS NULL OR o.claim_expires_at <= ${DbTime.NOW})
+               $kindFilter
                AND NOT EXISTS (SELECT 1 FROM outbox_events p
                                 WHERE p.aggregate_type = o.aggregate_type AND p.aggregate_id = o.aggregate_id
                                   AND p.status = 'PENDING' AND p.aggregate_version < o.aggregate_version)
              ORDER BY o.aggregate_id, o.aggregate_version
              LIMIT ?
             """.trimIndent(),
-            limit,
+            *listOfNotNull(aggregateKind, limit).toTypedArray(),
         ) { it.getString(1) }
         candidates.mapNotNull { id ->
             val token = UUID.randomUUID().toString()

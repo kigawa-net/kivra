@@ -39,7 +39,7 @@ enum class ReplayReason {
 
 data class ReplayEligibility(val allowed: Boolean, val reason: ReplayReason) {
     init {
-        require(allowed == (reason in SAFE_REASONS)) {
+        require(!allowed || reason in SAFE_REASONS) {
             "replay may only be allowed with a verified safe reason"
         }
     }

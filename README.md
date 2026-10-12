@@ -10,6 +10,7 @@
 |---|---|
 | `kivra-core` | ドメイン型、状態機械（DevelopmentRun / Agent / ExecutionSession / OperationStatus）、Port インターフェース（ExecutionPort / TaskProvider / MemoryPort / SchedulePort、定義のみ）、`LeaseStore` |
 | `kivra-model-gateway` | Model Gateway 最小実装(#35): 型・エラー分類、Model Registry(YAML)、制約付きルーティング、予算(予約/確定/解放)、Anthropic Adapter(Ktor)、監査/メトリクスのフック(永続化は別 Issue)。Core / DB には依存しない。Registry 例は `kivra-model-gateway/config/model-registry.example.yaml`(価格等はプレースホルダ)。API キーは信頼管理者が固定する `CredentialBinding`(providerId→許可ホスト/ラベル/環境変数名)経由でのみ解決し、Registry の endpoint/credentialRef は任意の秘密を指せない(HTTPS・ホスト一致必須、リダイレクト不追従)。同一 requestId は `RequestLedger`(予約・結果保存・照合、eviction なし、SHA-256 の正規化 Request Digest で束縛)で冪等化する。永続 Ledger は未対応(M0 の DB 契約に依存)で、`InMemoryRequestLedger` は dev/test 専用として `devAllowInMemoryLedger = true` を明示しない限り Gateway 構築が失敗する。送信済みの可能性がある失敗(5xx・接続断・解析失敗・ストリーム途中失敗・HTTP 応答を伴う 4xx/429 を含む)は予約を見積額で確定し、同一 requestId の Retry / Fallback を行わない(新しい requestId が必要)。送信前に確実に失敗した場合(資格情報未設定・接続拒否・DNS 失敗)のみ予約を解放し Retry / Fallback する。呼出し側 Agent が DataClass を下げられないよう、DataClass は Trusted Orchestrator/Policy Gateway が固定した値を渡すこと(M4 公開 API の前提)。Budget はインメモリで本番の Hard Limit としては使わない(永続化・インスタンス跨ぎは別 Issue) |
+| `kivra-fusha-task` | fusha-task 向け `TaskProvider` 実装（read-only の `FushaTaskAdapter`、`FakeTaskProvider`、Bearer 認証、timeout / retry / backoff）。M1 #27 |
 | `kivra-memory` | `MemoryProvider` ポートと型（MemoryEntry / ScopeRef / SourceRef / ContextBundle / HandoffRecord）、`InMemoryWorkingMemory`、`FakeMemoryPort`、縮退層 `MemoryService`（Write Queue・circuit breaker）、Secret フィルタ、recl 向け `ReclAdapter`（**計画 API に基づく骨格。実 API は存在せず未接続**）。M5 #37 |
 | `kivra-app` | Ktor アプリ、設定読込、`/health`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease のリポジトリ |
 
@@ -63,6 +64,17 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
 | `KIVRA_LEASE_TTL_SECONDS` | 30 | Run Lease の TTL |
 | `KIVRA_LEASE_GRACE_SECONDS` | 5 | 期限切れ後、奪取を許可するまでの猶予 |
 
+fusha-task（`kivra.fusha.*`、**すべて要確認**: 環境ごとの URL・機械向け認証方式は未確定）:
+
+| 環境変数 | 既定 | 内容 |
+|---|---|---|
+| `KIVRA_FUSHA_BASE_URL` | `http://localhost:8787/api/v1` | fusha-task の API ルート（`/api/v1` を含む） |
+| `KIVRA_FUSHA_ENV` | `dev` | TaskId (`fusha:{env}:{id}`) の環境ラベル |
+| `KIVRA_FUSHA_TOKEN` | 空 | Bearer トークン（Keycloak ID token）。client_credentials が fusha-task の aud 検証を通るかは未検証 |
+| `KIVRA_FUSHA_REQUEST_TIMEOUT_MS` / `KIVRA_FUSHA_MAX_RETRIES` | 10000 / 3 | タイムアウトと GET の再試行回数（5xx・429・通信エラーを指数バックオフ + jitter、401 はトークン再取得を 1 回、400/403 は再試行しない） |
+
+M1 の `FushaTaskAdapter` は **read-only**（get / list のみ）。update / comment は `TaskWriteResult.Unsupported` を返す
+（fusha-task に楽観ロック / ETag が無く、機械認証も未検証のため。要確認）。
 ### Memory（`kivra-memory`、M5 #37）
 
 recl（kigawa-net/recl）の現状: **設計書（`docs/design.md`）と内部 Core / InMemory Storage のみ main にマージ済み**

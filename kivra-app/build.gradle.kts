@@ -10,6 +10,7 @@ application {
 
 dependencies {
     implementation(project(":kivra-core"))
+    implementation(project(":kivra-policy"))
     implementation(project(":kivra-fusha-task"))
     implementation(project(":kivra-fusha-poller"))
 

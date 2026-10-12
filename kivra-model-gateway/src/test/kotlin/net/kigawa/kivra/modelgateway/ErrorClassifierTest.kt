@@ -1,6 +1,10 @@
 package net.kigawa.kivra.modelgateway
 
 import java.io.IOException
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.SocketException
+import java.net.UnknownHostException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -44,5 +48,29 @@ class ErrorClassifierTest {
         for (k in listOf(ErrorKind.INVALID_REQUEST, ErrorKind.CONTENT_FILTER, ErrorKind.POLICY_DENIED, ErrorKind.CANCELLED)) assertFalse(k.fallback, "$k")
         assertTrue(ErrorKind.AUTH.fallback && !ErrorKind.AUTH.retrySameModel)
         assertTrue(ErrorKind.CAPABILITY_UNSUPPORTED.fallback)
+    }
+
+    @Test fun connectionPhaseFailuresAreProvenNotSent() {
+        assertEquals(SendState.NOT_SENT, ErrorClassifier.fromThrowable(ConnectException("refused")).sendState)
+        assertEquals(SendState.NOT_SENT, ErrorClassifier.fromThrowable(IOException("dns", UnknownHostException("x"))).sendState)
+        assertEquals(SendState.NOT_SENT, ErrorClassifier.fromThrowable(IOException("route", NoRouteToHostException("x"))).sendState)
+    }
+
+    @Test fun anyFailureAfterConnectIsMaybeSent() {
+        assertEquals(SendState.MAYBE_SENT, ErrorClassifier.fromThrowable(SocketException("reset")).sendState)
+        assertEquals(SendState.MAYBE_SENT, ErrorClassifier.fromThrowable(IOException("reset")).sendState)
+        assertEquals(SendState.MAYBE_SENT, ErrorClassifier.fromThrowable(IllegalStateException("boom")).sendState)
+        assertEquals(SendState.MAYBE_SENT, ErrorClassifier.fromHttp(500, "").sendState)
+        assertEquals(SendState.MAYBE_SENT, ErrorClassifier.fromHttp(429, "").sendState)
+        assertEquals(SendState.MAYBE_SENT, ErrorClassifier.fromHttp(400, "").sendState)
+    }
+
+    @Test fun gatewayErrorsKeepTheirOwnSendState() {
+        val e = GatewayError(ErrorKind.AUTH, "no credential", sendState = SendState.NOT_SENT)
+        assertEquals(SendState.NOT_SENT, ErrorClassifier.fromThrowable(GatewayException(e)).sendState)
+    }
+
+    @Test fun outcomeUnknownNeverRetriesOrFallsBack() {
+        assertFalse(ErrorKind.OUTCOME_UNKNOWN.retrySameModel); assertFalse(ErrorKind.OUTCOME_UNKNOWN.fallback)
     }
 }

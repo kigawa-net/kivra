@@ -23,6 +23,10 @@ data class GatewayConfig(
  * Model Gateway entry point (design 05). Routes under hard constraints, reserves budget, calls the
  * provider with a shared deadline, retries / falls back per the error taxonomy, and emits audit and
  * metrics hooks. Tool calls are returned, never executed.
+ *
+ * requestId idempotency lives in [ledger]. Retry and fallback are only performed for failures proven to occur
+ * before transmission ([SendState.NOT_SENT]); once a provider call may have been made, the reservation is
+ * settled at the estimate, the requestId is sealed as outcome-unknown, and the caller must issue a new requestId.
  */
 class ModelGateway(
     private val registry: ModelRegistry,
@@ -36,60 +40,58 @@ class ModelGateway(
     maxAttempts: Int = 3,
     private val sleep: suspend (Long) -> Unit = { delay(it) },
     private val random: Random = Random.Default,
+    /** Durable requestId ledger. Required in production. */
+    ledger: RequestLedger? = null,
+    /** Explicit opt-in for the process-local [InMemoryRequestLedger] (dev/test only). Without it, no ledger means fail-fast. */
+    devAllowInMemoryLedger: Boolean = false,
 ) {
+    private val ledger: RequestLedger = ledger ?: if (devAllowInMemoryLedger) InMemoryRequestLedger() else throw IllegalStateException(
+        "ModelGateway requires a durable RequestLedger; InMemoryRequestLedger is dev/test only (pass devAllowInMemoryLedger = true to opt in)",
+    )
+
     private val router = RoutingEngine(registry, budget, health, providers.keys, clock, maxAttempts)
 
     fun route(req: ModelRequest, streaming: Boolean = false): RoutingDecision = router.route(req, streaming)
 
-    /** Per-requestId operation record: the gateway, not the caller, decides whether a requestId may reach a provider. */
-    private class Operation(val fingerprint: Int) {
-        var providerCalled = false
-        var response: ModelResponse? = null
-    }
+    /** Per-invocation settlement state: whether a provider call may have left the Gateway. */
+    private class Flight { var mayHaveSent = false }
 
-    private val operations = LinkedHashMap<String, Operation>()
-
-    /**
-     * Claims [req].requestId. A completed non-streaming operation with an identical request returns its
-     * stored response (so the provider is never called and nothing is charged twice); any other repeat
-     * (in flight, failed after a provider call, streaming, or different payload) is rejected authoritatively.
-     */
-    private fun claim(req: ModelRequest, replayable: Boolean): Pair<Operation?, ModelResponse?> = synchronized(operations) {
-        val existing = operations[req.requestId]
-        if (existing == null) {
-            val op = Operation(req.hashCode())
-            operations[req.requestId] = op
-            if (operations.size > MAX_OPERATIONS) {
-                val it = operations.entries.iterator()
-                while (operations.size > MAX_OPERATIONS && it.hasNext()) { if (it.next().value.response != null) it.remove() }
-            }
-            return op to null
+    /** Claims [req].requestId. Returns the stored response for a replayable completed call, or null when claimed. */
+    private fun claim(req: ModelRequest, replayable: Boolean): ModelResponse? =
+        when (val c = ledger.begin(req.requestId, RequestDigest.of(req))) {
+            LedgerClaim.Claimed -> null
+            is LedgerClaim.Completed -> c.response?.takeIf { replayable }
+                ?: throw denied("DUPLICATE_REQUEST", "requestId was already completed")
+            is LedgerClaim.Rejected -> throw denied(c.code, c.message)
         }
-        if (existing.fingerprint != req.hashCode()) throw denied("REQUEST_ID_REUSED", "requestId was already used for a different request")
-        existing.response?.takeIf { replayable }?.let { return null to it }
-        throw denied("DUPLICATE_REQUEST", "requestId is already in flight or was already sent to a provider")
-    }
 
-    private fun unclaimIfNeverSent(req: ModelRequest, op: Operation) = synchronized(operations) {
-        if (!op.providerCalled && operations[req.requestId] === op) operations.remove(req.requestId)
+    private fun settle(req: ModelRequest, flight: Flight) {
+        if (flight.mayHaveSent) ledger.markOutcomeUnknown(req.requestId) else ledger.releaseUnsent(req.requestId)
     }
 
     private fun denied(code: String, msg: String) = GatewayException(GatewayError(ErrorKind.POLICY_DENIED, msg, code = code))
 
+    /** Settles a possibly-billed failure: estimate is charged, the error is no longer retryable or fallback-able. */
+    private fun outcomeUnknown(raw: GatewayError) = GatewayError(
+        ErrorKind.OUTCOME_UNKNOWN,
+        "provider outcome unknown after ${raw.kind}: ${raw.message}",
+        code = raw.code ?: "PROVIDER_OUTCOME_UNKNOWN",
+        providerStatus = raw.providerStatus,
+    )
+
     suspend fun invoke(req: ModelRequest): ModelResponse {
         val decision = decide(req, streaming = false)
-        val (op, replay) = claim(req, replayable = true)
-        if (replay != null) return replay
-        op!!
+        claim(req, replayable = true)?.let { return it }
+        val flight = Flight()
         try {
-            val resp = withTimeout(req.timeout) { attemptLoop(req, decision, op) }
-            synchronized(operations) { op.response = resp }
+            val resp = withTimeout(req.timeout) { attemptLoop(req, decision, flight) }
+            ledger.complete(req.requestId, resp)
             return resp
         } catch (e: TimeoutCancellationException) {
-            unclaimIfNeverSent(req, op)
+            settle(req, flight)
             throw GatewayException(GatewayError(ErrorKind.TIMEOUT, "request deadline exceeded"), e)
         } catch (e: Throwable) {
-            unclaimIfNeverSent(req, op)
+            settle(req, flight)
             throw e
         }
     }
@@ -97,12 +99,13 @@ class ModelGateway(
     /** Streaming call. Failures before the first event may fall back; after that a Failed event ends the stream. */
     fun stream(req: ModelRequest): Flow<ModelEvent> = flow {
         val decision = decide(req, streaming = true)
-        val op = claim(req, replayable = false).first!!
-        try { streamClaimed(req, decision, op) } catch (e: Throwable) { unclaimIfNeverSent(req, op); throw e }
-        if (op.response == null) unclaimIfNeverSent(req, op)
+        claim(req, replayable = false)
+        val flight = Flight()
+        try { streamClaimed(req, decision, flight) } catch (e: Throwable) { settle(req, flight); throw e }
+        settle(req, flight)
     }
 
-    private suspend fun FlowCollector<ModelEvent>.streamClaimed(req: ModelRequest, decision: RoutingDecision, op: Operation) {
+    private suspend fun FlowCollector<ModelEvent>.streamClaimed(req: ModelRequest, decision: RoutingDecision, flight: Flight) {
         var seq = 0L
         var attemptNo = 0
         var lastError: GatewayError? = null
@@ -130,7 +133,7 @@ class ModelGateway(
                         var usage = Usage.ZERO
                         val ctx = CallContext(req.requestId, attemptId, decision.decisionId)
                         try {
-                            op.providerCalled = true
+                            ledger.markSending(req.requestId)
                             providers.getValue(ref.providerId).stream(req, target, ctx).collect { chunk ->
                                 if (finished) return@collect // exactly one terminal event: anything after Finished is dropped
                                 if (!emitted) {
@@ -147,6 +150,7 @@ class ModelGateway(
                                         val cost = CostCalculator.cost(chunk.response.usage, target.model.price!!, CostBasis.ACTUAL)
                                         val resp = chunk.response.copy(cost = cost)
                                         budget.commit(key, cost.amount)
+                                        ledger.complete(req.requestId, null)
                                         health.recordSuccess(ref.providerId)
                                         auditAttempt(req, attemptId, ref, decision, resp.usage, cost, resp.latencyMs, resp.finishReason, null)
                                         emit(ModelEvent.Completed(req.requestId, attemptId, seq++, resp))
@@ -156,14 +160,16 @@ class ModelGateway(
                             if (!finished) {
                                 // Provider ended the stream without a terminal event. It may have been billed, so settle
                                 // conservatively at the reserved estimate and never fall back after an ambiguous send.
-                                val err = GatewayError(ErrorKind.TRANSIENT, "stream ended without a terminal event", code = "TRUNCATED_STREAM")
+                                flight.mayHaveSent = true
+                                val err = GatewayError(ErrorKind.OUTCOME_UNKNOWN, "stream ended without a terminal event", code = "TRUNCATED_STREAM")
                                 budget.commit(key, null)
-                                health.recordFailure(ref.providerId, err.kind)
+                                health.recordFailure(ref.providerId, ErrorKind.TRANSIENT)
                                 auditAttempt(req, attemptId, ref, decision, usage, null, elapsed(t0), null, err)
                                 emit(ModelEvent.Failed(req.requestId, attemptId, seq++, err))
                             }
                             return@withTimeout
                         } catch (e: CancellationException) {
+                            flight.mayHaveSent = true
                             withContext(NonCancellable) {
                                 budget.commit(key, null)
                                 val kind = if (e is TimeoutCancellationException) ErrorKind.TIMEOUT else ErrorKind.CANCELLED
@@ -172,20 +178,26 @@ class ModelGateway(
                             throw e
                         } catch (e: Exception) {
                             if (finished) return@withTimeout // error after the terminal event: already settled, stay silent
-                            val err = ErrorClassifier.fromThrowable(e)
-                            if (err.kind == ErrorKind.TIMEOUT) budget.commit(key, null) else budget.release(key)
-                            health.recordFailure(ref.providerId, err.kind)
+                            val raw = ErrorClassifier.fromThrowable(e)
+                            health.recordFailure(ref.providerId, raw.kind)
+                            if (raw.sendState == SendState.NOT_SENT && !emitted) {
+                                budget.release(key)
+                                auditAttempt(req, attemptId, ref, decision, usage, null, elapsed(t0), null, raw)
+                                lastError = raw
+                                if (raw.kind.retrySameModel && retries < config.maxRetriesPerModel) {
+                                    sleep(backoff(retries++, raw)); continue
+                                }
+                                if (!raw.kind.fallback) { emit(ModelEvent.Failed(req.requestId, attemptId, seq++, raw)); return@withTimeout }
+                                break
+                            }
+                            // The request may have reached the provider: bill the estimate and stop. No retry, no fallback.
+                            flight.mayHaveSent = true
+                            val err = outcomeUnknown(raw)
+                            budget.commit(key, null)
                             auditAttempt(req, attemptId, ref, decision, usage, null, elapsed(t0), null, err)
                             lastError = err
-                            if (emitted) {
-                                emit(ModelEvent.Failed(req.requestId, attemptId, seq++, err))
-                                return@withTimeout
-                            }
-                            if (err.kind.retrySameModel && retries < config.maxRetriesPerModel) {
-                                sleep(backoff(retries++, err)); continue
-                            }
-                            if (!err.kind.fallback) { emit(ModelEvent.Failed(req.requestId, attemptId, seq++, err)); return@withTimeout }
-                            break
+                            emit(ModelEvent.Failed(req.requestId, attemptId, seq++, err))
+                            return@withTimeout
                         }
                     }
                 }
@@ -195,8 +207,6 @@ class ModelGateway(
             emit(ModelEvent.Failed(req.requestId, "${req.requestId}-a$attemptNo", seq++, GatewayError(ErrorKind.TIMEOUT, "request deadline exceeded")))
         }
     }
-
-    private companion object { const val MAX_OPERATIONS = 10_000 }
 
     // ---- internals ----------------------------------------------------------------------------------
 
@@ -210,7 +220,7 @@ class ModelGateway(
         return d
     }
 
-    private suspend fun attemptLoop(req: ModelRequest, decision: RoutingDecision, op: Operation): ModelResponse {
+    private suspend fun attemptLoop(req: ModelRequest, decision: RoutingDecision, flight: Flight): ModelResponse {
         var attemptNo = 0
         var last: GatewayError? = null
         var prev: ModelRef? = null
@@ -229,8 +239,8 @@ class ModelGateway(
                     break
                 }
                 val t0 = System.nanoTime()
+                ledger.markSending(req.requestId)
                 try {
-                    op.providerCalled = true
                     val resp = providers.getValue(ref.providerId).invoke(req, target, CallContext(req.requestId, attemptId, decision.decisionId))
                     val cost = CostCalculator.cost(resp.usage, target.model.price!!, CostBasis.ACTUAL)
                     budget.commit(key, cost.amount)
@@ -238,6 +248,7 @@ class ModelGateway(
                     auditAttempt(req, attemptId, ref, decision, resp.usage, cost, resp.latencyMs, resp.finishReason, null)
                     return resp.copy(cost = cost)
                 } catch (e: CancellationException) {
+                    flight.mayHaveSent = true
                     withContext(NonCancellable) {
                         budget.commit(key, null)
                         val kind = if (e is TimeoutCancellationException) ErrorKind.TIMEOUT else ErrorKind.CANCELLED
@@ -245,16 +256,26 @@ class ModelGateway(
                     }
                     throw e
                 } catch (e: Exception) {
-                    val err = ErrorClassifier.fromThrowable(e)
-                    if (err.kind == ErrorKind.TIMEOUT) budget.commit(key, null) else budget.release(key)
-                    health.recordFailure(ref.providerId, err.kind)
-                    auditAttempt(req, attemptId, ref, decision, Usage.ZERO, null, elapsed(t0), null, err)
-                    last = err
-                    if (err.kind.retrySameModel && retries < config.maxRetriesPerModel) {
-                        sleep(backoff(retries++, err)); continue
+                    val raw = ErrorClassifier.fromThrowable(e)
+                    health.recordFailure(ref.providerId, raw.kind)
+                    if (raw.sendState == SendState.NOT_SENT) {
+                        // Proven not transmitted: release the reservation and allow retry / fallback under this requestId.
+                        budget.release(key)
+                        auditAttempt(req, attemptId, ref, decision, Usage.ZERO, null, elapsed(t0), null, raw)
+                        last = raw
+                        if (raw.kind.retrySameModel && retries < config.maxRetriesPerModel) {
+                            sleep(backoff(retries++, raw)); continue
+                        }
+                        if (!raw.kind.fallback) throw GatewayException(raw)
+                        break
                     }
-                    if (!err.kind.fallback) throw GatewayException(err)
-                    break
+                    // The request may have reached the provider (5xx, transport loss, unparseable body, ...).
+                    // The reservation is kept at the estimate and this requestId is sealed: no retry, no fallback.
+                    flight.mayHaveSent = true
+                    val err = outcomeUnknown(raw)
+                    budget.commit(key, null)
+                    auditAttempt(req, attemptId, ref, decision, Usage.ZERO, null, elapsed(t0), null, err)
+                    throw GatewayException(err, e)
                 }
             }
         }

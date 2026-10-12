@@ -36,8 +36,8 @@ class ModelGatewayTest {
     private fun gateway(
         models: List<ModelEntry>, fakes: Map<String, FakeProvider>, b: BudgetController = budget(),
         providers: List<ProviderEntry> = listOf(ext, ext2, intl, local), health: HealthTracker = AlwaysHealthy,
-        metrics: GatewayMetrics = GatewayMetrics.NOOP,
-    ) = ModelGateway(registryOf(providers, models), fakes, b, health, audit, metrics, GatewayConfig(), sleep = { sleeps.add(it) })
+        metrics: GatewayMetrics = GatewayMetrics.NOOP, ledger: RequestLedger = InMemoryRequestLedger(),
+    ) = ModelGateway(registryOf(providers, models), fakes, b, health, audit, metrics, GatewayConfig(), sleep = { sleeps.add(it) }, ledger = ledger)
 
     @Test fun successReturnsCostedResponseAndAuditsTokensAndCost() = runTest {
         val m = model("m", "ext")
@@ -84,7 +84,7 @@ class ModelGatewayTest {
 
     @Test fun transientErrorFallsBackToNextModel() = runTest {
         val a = model("a", "ext", tier = QualityTier.S); val b = model("b", "ext2", tier = QualityTier.A)
-        val fa = FakeProvider("ext") { fail(ErrorKind.TRANSIENT) }; val fb = FakeProvider("ext2", ok(b))
+        val fa = FakeProvider("ext") { fail(ErrorKind.TRANSIENT, notSent = true) }; val fb = FakeProvider("ext2", ok(b))
         val events = mutableListOf<String>()
         val g = gateway(listOf(a, b), mapOf("ext" to fa, "ext2" to fb), metrics = object : GatewayMetrics {
             override fun fallback(from: ModelRef, to: ModelRef, reason: ErrorKind) { events.add("${from.modelId}->${to.modelId}:$reason") }
@@ -99,14 +99,14 @@ class ModelGatewayTest {
 
     @Test fun rateLimitRetriesSameModelHonouringRetryAfter() = runTest {
         val m = model("m", "ext")
-        val fake = FakeProvider("ext") { n -> if (n == 1) fail(ErrorKind.RATE_LIMITED, retryAfterMs = 7000) else okResponse(m.ref) }
+        val fake = FakeProvider("ext") { n -> if (n == 1) fail(ErrorKind.RATE_LIMITED, retryAfterMs = 7000, notSent = true) else okResponse(m.ref) }
         gateway(listOf(m), mapOf("ext" to fake)).invoke(request())
         assertEquals(2, fake.calls); assertTrue(sleeps.single() >= 7000)
     }
 
     @Test fun invalidRequestIsNeitherRetriedNorFallenBack() = runTest {
         val a = model("a", "ext", tier = QualityTier.S); val b = model("b", "ext2")
-        val fa = FakeProvider("ext") { fail(ErrorKind.INVALID_REQUEST) }; val fb = FakeProvider("ext2", ok(b))
+        val fa = FakeProvider("ext") { fail(ErrorKind.INVALID_REQUEST, notSent = true) }; val fb = FakeProvider("ext2", ok(b))
         val e = assertFailsWith<GatewayException> { gateway(listOf(a, b), mapOf("ext" to fa, "ext2" to fb)).invoke(request()) }
         assertEquals(ErrorKind.INVALID_REQUEST, e.error.kind)
         assertEquals(1, fa.calls); assertEquals(0, fb.calls)
@@ -121,14 +121,14 @@ class ModelGatewayTest {
 
     @Test fun authErrorFallsBackToAnotherProviderWithoutSameModelRetry() = runTest {
         val a = model("a", "ext", tier = QualityTier.S); val b = model("b", "ext2")
-        val fa = FakeProvider("ext") { fail(ErrorKind.AUTH) }
+        val fa = FakeProvider("ext") { fail(ErrorKind.AUTH, notSent = true) }
         val r = gateway(listOf(a, b), mapOf("ext" to fa, "ext2" to FakeProvider("ext2", ok(b)))).invoke(request())
         assertEquals("b", r.selected.modelId); assertEquals(1, fa.calls)
     }
 
     @Test fun failedAttemptsReleaseReservations() = runTest {
         val m = model("m", "ext"); val b = budget()
-        assertFailsWith<GatewayException> { gateway(listOf(m), mapOf("ext" to FakeProvider("ext") { fail(ErrorKind.INVALID_REQUEST) }), b).invoke(request()) }
+        assertFailsWith<GatewayException> { gateway(listOf(m), mapOf("ext" to FakeProvider("ext") { fail(ErrorKind.INVALID_REQUEST, notSent = true) }), b).invoke(request()) }
         assertEquals(0, BigDecimal.ZERO.compareTo(b.usage("task").reserved))
         assertEquals(0, BigDecimal.ZERO.compareTo(b.usage("task").committed))
     }
@@ -138,7 +138,7 @@ class ModelGatewayTest {
     @Test fun localPrimaryFailureNeverEscalatesToExternalProvider() = runTest {
         val loc = model("loc", "local", tier = QualityTier.S); val ex = model("ex", "ext")
         val fx = FakeProvider("ext", ok(ex))
-        val g = gateway(listOf(loc, ex), mapOf("local" to FakeProvider("local") { fail(ErrorKind.TRANSIENT) }, "ext" to fx))
+        val g = gateway(listOf(loc, ex), mapOf("local" to FakeProvider("local") { fail(ErrorKind.TRANSIENT, notSent = true) }, "ext" to fx))
         assertFailsWith<GatewayException> { g.invoke(request()) }
         assertEquals(0, fx.calls, "external provider must not receive data that was routed to a local model")
     }
@@ -146,14 +146,14 @@ class ModelGatewayTest {
     @Test fun restrictedDataNeverReachesExternalEvenWhenLocalFails() = runTest {
         val loc = model("loc", "local"); val ex = model("ex", "ext", tier = QualityTier.S)
         val fx = FakeProvider("ext", ok(ex))
-        val g = gateway(listOf(loc, ex), mapOf("local" to FakeProvider("local") { fail(ErrorKind.TRANSIENT) }, "ext" to fx))
+        val g = gateway(listOf(loc, ex), mapOf("local" to FakeProvider("local") { fail(ErrorKind.TRANSIENT, notSent = true) }, "ext" to fx))
         assertFailsWith<GatewayException> { g.invoke(request(DataClass.RESTRICTED)) }
         assertEquals(0, fx.calls)
     }
 
     @Test fun fallbackMayMoveToMoreInwardZone() = runTest {
         val ex = model("ex", "ext", tier = QualityTier.S); val loc = model("loc", "local")
-        val r = gateway(listOf(ex, loc), mapOf("ext" to FakeProvider("ext") { fail(ErrorKind.TRANSIENT) }, "local" to FakeProvider("local", ok(loc)))).invoke(request())
+        val r = gateway(listOf(ex, loc), mapOf("ext" to FakeProvider("ext") { fail(ErrorKind.TRANSIENT, notSent = true) }, "local" to FakeProvider("local", ok(loc)))).invoke(request())
         assertEquals("loc", r.selected.modelId)
     }
 
@@ -163,7 +163,7 @@ class ModelGatewayTest {
         val fb = FakeProvider("ext2", ok(b))
         val e = assertFailsWith<GatewayException> {
             // Budget fits exactly one reservation; after the first attempt fails and releases, the retry fits again.
-            gateway(listOf(a, b), mapOf("ext" to FakeProvider("ext") { fail(ErrorKind.INVALID_REQUEST) }, "ext2" to fb), budget("0.01")).invoke(request())
+            gateway(listOf(a, b), mapOf("ext" to FakeProvider("ext") { fail(ErrorKind.INVALID_REQUEST, notSent = true) }, "ext2" to fb), budget("0.01")).invoke(request())
         }
         assertEquals(ErrorKind.INVALID_REQUEST, e.error.kind)
     }
@@ -207,7 +207,7 @@ class ModelGatewayTest {
     @Test fun circuitBreakerExcludesProviderAfterRepeatedFailures() = runTest {
         val a = model("a", "ext", tier = QualityTier.S); val b = model("b", "ext2")
         val health = CircuitHealthTracker(threshold = 2)
-        val fa = FakeProvider("ext") { fail(ErrorKind.TRANSIENT) }
+        val fa = FakeProvider("ext") { fail(ErrorKind.TRANSIENT, notSent = true) }
         val g = gateway(listOf(a, b), mapOf("ext" to fa, "ext2" to FakeProvider("ext2", ok(b))), health = health)
         g.invoke(request(id = "r1"))
         val calls = fa.calls
@@ -245,7 +245,7 @@ class ModelGatewayTest {
 
     @Test fun streamFailureBeforeFirstEventFallsBack() = runTest {
         val a = model("a", "ext", tier = QualityTier.S); val b = model("b", "ext2")
-        val g = gateway(listOf(a, b), mapOf("ext" to FakeProvider("ext") { fail(ErrorKind.AUTH) }, "ext2" to FakeProvider("ext2", ok(b))))
+        val g = gateway(listOf(a, b), mapOf("ext" to FakeProvider("ext") { fail(ErrorKind.AUTH, notSent = true) }, "ext2" to FakeProvider("ext2", ok(b))))
         val events = g.stream(request()).toList()
         assertEquals("b", (events.first() as ModelEvent.Started).selected.modelId)
     }
@@ -262,7 +262,7 @@ class ModelGatewayTest {
             }
         }
         val fb = FakeProvider("ext2", ok(b))
-        val events = ModelGateway(registryOf(listOf(ext, ext2), listOf(a, b)), mapOf("ext" to partial, "ext2" to fb), budget(), AlwaysHealthy, audit, sleep = { })
+        val events = ModelGateway(registryOf(listOf(ext, ext2), listOf(a, b)), mapOf("ext" to partial, "ext2" to fb), budget(), AlwaysHealthy, audit, sleep = { }, devAllowInMemoryLedger = true)
             .stream(request()).toList()
         assertIs<ModelEvent.Failed>(events.last()); assertEquals(0, fb.calls)
     }
@@ -327,7 +327,7 @@ class ModelGatewayTest {
 
     @Test fun streamEndingWithoutFinishedFailsTruncatedAndSettlesConservatively() = runTest {
         val m = model("m", "ext"); val b = budget()
-        val g = ModelGateway(registryOf(listOf(ext), listOf(m)), mapOf("ext" to streamOf(m) { }), b, AlwaysHealthy, audit, GatewayMetrics.NOOP, GatewayConfig(), sleep = { })
+        val g = ModelGateway(registryOf(listOf(ext), listOf(m)), mapOf("ext" to streamOf(m) { }), b, AlwaysHealthy, audit, GatewayMetrics.NOOP, GatewayConfig(), sleep = { }, devAllowInMemoryLedger = true)
         val events = g.stream(request()).toList()
         val f = assertIs<ModelEvent.Failed>(events.single())
         assertEquals("TRUNCATED_STREAM", f.error.code)
@@ -341,7 +341,7 @@ class ModelGatewayTest {
             emit(StreamChunk.Text("hi")); emit(StreamChunk.Finished(okResponse(m.ref))); emit(StreamChunk.Finished(okResponse(m.ref)))
             fail(ErrorKind.TRANSIENT)
         }
-        val g = ModelGateway(registryOf(listOf(ext), listOf(m)), mapOf("ext" to p), b, AlwaysHealthy, audit, GatewayMetrics.NOOP, GatewayConfig(), sleep = { })
+        val g = ModelGateway(registryOf(listOf(ext), listOf(m)), mapOf("ext" to p), b, AlwaysHealthy, audit, GatewayMetrics.NOOP, GatewayConfig(), sleep = { }, devAllowInMemoryLedger = true)
         val events = g.stream(request()).toList()
         assertEquals(1, events.count { it is ModelEvent.Completed || it is ModelEvent.Failed })
         assertIs<ModelEvent.Completed>(events.last())
@@ -354,5 +354,71 @@ class ModelGatewayTest {
         g.stream(request()).toList()
         assertFailsWith<GatewayException> { g.stream(request()).toList() }
         assertEquals(1, fake.calls)
+    }
+
+    // ---- requestId ledger, request fingerprint and send-state settlement (review P1s) ----
+
+    @Test fun sameHashCodeDifferentPayloadIsNotReplayed() = runTest {
+        // "Aa" and "BB" share String.hashCode(), so the whole ModelRequest hashCode collides as well.
+        assertEquals(request(text = "Aa").hashCode(), request(text = "BB").hashCode())
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m))
+        val g = gateway(listOf(m), mapOf("ext" to fake))
+        g.invoke(request(text = "Aa"))
+        val e = assertFailsWith<GatewayException> { g.invoke(request(text = "BB")) }
+        assertEquals("REQUEST_ID_REUSED", e.error.code); assertEquals(1, fake.calls)
+    }
+
+    @Test fun completedRequestIdIsNeverEvictedAtCapacity() = runTest {
+        val m = model("m", "ext"); val fake = FakeProvider("ext", ok(m))
+        val g = gateway(listOf(m), mapOf("ext" to fake), ledger = InMemoryRequestLedger(capacity = 2))
+        val first = g.invoke(request(id = "r1"))
+        g.invoke(request(id = "r2"))
+        val e = assertFailsWith<GatewayException> { g.invoke(request(id = "r3")) }
+        assertEquals(ErrorKind.POLICY_DENIED, e.error.kind); assertEquals("LEDGER_FULL", e.error.code)
+        assertEquals(2, fake.calls)
+        assertEquals(first, g.invoke(request(id = "r1")))
+        assertEquals(2, fake.calls, "a completed requestId stays sealed after capacity is reached")
+    }
+
+    @Test fun postSendFailureIsNotRetriedOrFallenBackAndChargesEstimate() = runTest {
+        val a = model("a", "ext", tier = QualityTier.S); val b = model("b", "ext2")
+        val fa = FakeProvider("ext") { fail(ErrorKind.TRANSIENT) }; val fb = FakeProvider("ext2", ok(b))
+        val bud = budget()
+        val g = gateway(listOf(a, b), mapOf("ext" to fa, "ext2" to fb), bud)
+        val e = assertFailsWith<GatewayException> { g.invoke(request()) }
+        assertEquals(ErrorKind.OUTCOME_UNKNOWN, e.error.kind)
+        assertEquals(1, fa.calls); assertEquals(0, fb.calls); assertTrue(sleeps.isEmpty())
+        assertEquals(0, BigDecimal.ZERO.compareTo(bud.usage("task").reserved))
+        assertTrue(bud.usage("task").committed > BigDecimal.ZERO, "a possibly billed call is charged at the estimate")
+        val again = assertFailsWith<GatewayException> { g.invoke(request()) }
+        assertEquals("DUPLICATE_REQUEST", again.error.code); assertEquals(1, fa.calls)
+    }
+
+    @Test fun everyPostSendFailureKindStopsRetryAndFallback() = runTest {
+        val kinds = listOf(ErrorKind.TRANSIENT, ErrorKind.TIMEOUT, ErrorKind.RATE_LIMITED, ErrorKind.AUTH,
+            ErrorKind.OUTPUT_INVALID, ErrorKind.CONTENT_FILTER, ErrorKind.INVALID_REQUEST)
+        for (kind in kinds) {
+            val a = model("a", "ext", tier = QualityTier.S); val b = model("b", "ext2")
+            val fa = FakeProvider("ext") { fail(kind) }; val fb = FakeProvider("ext2", ok(b))
+            val e = assertFailsWith<GatewayException>(kind.name) { gateway(listOf(a, b), mapOf("ext" to fa, "ext2" to fb)).invoke(request()) }
+            assertEquals(ErrorKind.OUTCOME_UNKNOWN, e.error.kind, kind.name)
+            assertEquals(1, fa.calls, kind.name); assertEquals(0, fb.calls, kind.name)
+        }
+    }
+
+    @Test fun preSendFailureReleasesReservationAndFallsBackUnderSameRequestId() = runTest {
+        val a = model("a", "ext", tier = QualityTier.S); val b = model("b", "ext2")
+        val bud = budget(); val fb = FakeProvider("ext2", ok(b))
+        val r = gateway(listOf(a, b), mapOf("ext" to FakeProvider("ext") { fail(ErrorKind.TRANSIENT, notSent = true) }, "ext2" to fb), bud).invoke(request())
+        assertEquals("b", r.selected.modelId); assertEquals(1, fb.calls)
+        assertEquals(0, BigDecimal("0.0105").compareTo(bud.usage("task").committed), "only the billed call is committed")
+        assertEquals(0, BigDecimal.ZERO.compareTo(bud.usage("task").reserved))
+    }
+
+    @Test fun gatewayWithoutDurableLedgerFailsFastUnlessDevOptIn() {
+        val m = model("m", "ext"); val reg = registryOf(listOf(ext), listOf(m))
+        val providers = mapOf<String, ModelProvider>("ext" to FakeProvider("ext", ok(m)))
+        assertFailsWith<IllegalStateException> { ModelGateway(reg, providers, budget()) }
+        assertNotNull(ModelGateway(reg, providers, budget(), devAllowInMemoryLedger = true))
     }
 }

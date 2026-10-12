@@ -60,7 +60,7 @@ class AnthropicProvider(
 
     private fun key(target: ResolvedTarget): String =
         credentials.get(target.provider)
-            ?: throw GatewayException(GatewayError(ErrorKind.AUTH, "credential '${target.provider.credentialRef}' is not configured", code = "NO_CREDENTIAL"))
+            ?: throw GatewayException(GatewayError(ErrorKind.AUTH, "credential '${target.provider.credentialRef}' is not configured", code = "NO_CREDENTIAL", sendState = SendState.NOT_SENT))
 
     /** Local check only (credential configured); makes no network call and incurs no cost. */
     override suspend fun health(target: ResolvedTarget): ProviderHealth =
@@ -148,7 +148,7 @@ class AnthropicProvider(
         val structured = req.responseFormat as? ResponseFormat.JsonSchema
         if (structured != null && req.tools.isNotEmpty()) {
             // Structured output is implemented with a forced tool; combining it with caller tools is ambiguous.
-            throw GatewayException(GatewayError(ErrorKind.CAPABILITY_UNSUPPORTED, "structured output cannot be combined with tools on this adapter"))
+            throw GatewayException(GatewayError(ErrorKind.CAPABILITY_UNSUPPORTED, "structured output cannot be combined with tools on this adapter", sendState = SendState.NOT_SENT))
         }
         val system = req.messages.filter { it.role == Role.SYSTEM }
             .joinToString("\n\n") { m -> m.parts.filterIsInstance<Part.Text>().joinToString("") { it.text } }

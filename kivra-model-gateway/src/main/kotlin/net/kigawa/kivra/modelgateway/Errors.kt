@@ -1,10 +1,15 @@
 package net.kigawa.kivra.modelgateway
 
 import java.io.IOException
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.UnknownHostException
+import java.nio.channels.UnresolvedAddressException
 
 /**
  * Error taxonomy (design 05 section 3.5). [retrySameModel] / [fallback] drive the Gateway's
- * retry and fallback decisions.
+ * retry and fallback decisions. [OUTCOME_UNKNOWN] is what callers see when a provider call may have been
+ * made and failed: it is never retried or fallen back under the same requestId.
  */
 enum class ErrorKind(val retrySameModel: Boolean, val fallback: Boolean) {
     RATE_LIMITED(true, true),
@@ -17,7 +22,14 @@ enum class ErrorKind(val retrySameModel: Boolean, val fallback: Boolean) {
     CAPABILITY_UNSUPPORTED(false, true),
     CANCELLED(false, false),
     OUTPUT_INVALID(false, true),
+    OUTCOME_UNKNOWN(false, false),
 }
+
+/**
+ * Whether the provider request could have left the Gateway. [NOT_SENT] is only for failures proven to occur
+ * before transmission (credential resolution, connection refused, DNS). Everything else is [MAYBE_SENT].
+ */
+enum class SendState { NOT_SENT, MAYBE_SENT }
 
 data class GatewayError(
     val kind: ErrorKind,
@@ -26,6 +38,8 @@ data class GatewayError(
     val code: String? = null,
     val retryAfterMs: Long? = null,
     val providerStatus: Int? = null,
+    /** Conservative default: an error is treated as possibly billed unless proven otherwise. */
+    val sendState: SendState = SendState.MAYBE_SENT,
 )
 
 class GatewayException(val error: GatewayError, cause: Throwable? = null) :
@@ -49,16 +63,29 @@ object ErrorClassifier {
         }
     }
 
+    /**
+     * Classify a thrown failure. Only connection-phase failures (the TCP/DNS step failed, so no request bytes
+     * left) are [SendState.NOT_SENT]; any other transport or unexpected failure is [SendState.MAYBE_SENT].
+     */
     fun fromThrowable(t: Throwable, secrets: Collection<String> = emptyList()): GatewayError {
+        if (t is GatewayException) return t.error
         val name = t::class.simpleName.orEmpty()
-        val msg = redact("${t::class.simpleName}: ${t.message.orEmpty()}", secrets)
+        val msg = redact("$name: ${t.message.orEmpty()}", secrets)
+        val send = if (isConnectionPhaseFailure(t)) SendState.NOT_SENT else SendState.MAYBE_SENT
         return when {
-            t is GatewayException -> t.error
-            name.contains("Timeout", ignoreCase = true) -> GatewayError(ErrorKind.TIMEOUT, msg)
-            t is IOException -> GatewayError(ErrorKind.TRANSIENT, msg)
-            else -> GatewayError(ErrorKind.TRANSIENT, msg, code = "UNEXPECTED")
+            name.contains("Timeout", ignoreCase = true) -> GatewayError(ErrorKind.TIMEOUT, msg, sendState = send)
+            t is IOException -> GatewayError(ErrorKind.TRANSIENT, msg, sendState = send)
+            else -> GatewayError(ErrorKind.TRANSIENT, msg, code = "UNEXPECTED", sendState = send)
         }
     }
+
+    private fun isConnectionPhaseFailure(t: Throwable): Boolean =
+        generateSequence(t) { it.cause }.take(MAX_CAUSE_DEPTH).any {
+            it is ConnectException || it is UnknownHostException || it is NoRouteToHostException ||
+                it is UnresolvedAddressException || it::class.simpleName == "ConnectTimeoutException"
+        }
+
+    private const val MAX_CAUSE_DEPTH = 8
 
     /** Remove credentials from text and bound its size (credentials must never reach logs/errors). */
     fun redact(text: String, secrets: Collection<String>): String {

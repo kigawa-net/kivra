@@ -49,7 +49,9 @@ class FakeProvider(
 fun okResponse(target: ModelRef, usage: Usage = Usage(1000, 500), finish: FinishReason = FinishReason.STOP, message: Message = Message(Role.ASSISTANT, "ok")) =
     ModelResponse("req-1", "a", target, message, null, finish, usage, Cost.zero(), 5, "d")
 
-fun fail(kind: ErrorKind, code: String? = null, retryAfterMs: Long? = null): Nothing =
-    throw GatewayException(GatewayError(kind, "fake $kind", code, retryAfterMs))
+/** Simulated provider failure. Default is MAYBE_SENT (the call may have been billed); pass [notSent] for a pre-send failure. */
+fun fail(kind: ErrorKind, code: String? = null, retryAfterMs: Long? = null, notSent: Boolean = false): Nothing =
+    throw GatewayException(GatewayError(kind, "fake $kind", code, retryAfterMs,
+        sendState = if (notSent) SendState.NOT_SENT else SendState.MAYBE_SENT))
 
 val emptySchema = JsonObject(emptyMap())

@@ -4,6 +4,10 @@ import java.time.Duration
 
 /** Limits of the Agent Manager (all settable; defaults are conservative). */
 data class AgentManagerConfig(
+    /** Tenant every external operation of this manager is bound to (part of the evidence subject). Required. */
+    val tenantId: String,
+    /** Provider Contract version the external operations are bound to (part of the evidence subject). Required. */
+    val providerContractVersion: String,
     val leaseTtl: Duration = Duration.ofSeconds(30),
     val leaseGrace: Duration = Duration.ofSeconds(5),
     /** How many Agent attempts (new Agent + Runtime per attempt) a Run may use before it fails for good. */
@@ -29,5 +33,7 @@ data class AgentManagerConfig(
         require(maxAgentAttempts >= 1) { "maxAgentAttempts must be >= 1" }
         require(maxOperationAttempts >= 1) { "maxOperationAttempts must be >= 1" }
         require(maxConcurrentRuns >= 1) { "maxConcurrentRuns must be >= 1" }
+        require(tenantId.isNotBlank()) { "tenantId must not be blank" }
+        require(providerContractVersion.isNotBlank()) { "providerContractVersion must not be blank" }
     }
 }

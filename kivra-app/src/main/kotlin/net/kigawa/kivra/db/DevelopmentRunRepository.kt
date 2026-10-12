@@ -12,7 +12,6 @@ import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunHaltedException
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.DevelopmentRunState
-import net.kigawa.kivra.core.TrustedEvidenceIssuers
 import net.kigawa.kivra.core.VersionConflictException
 import net.kigawa.kivra.core.canTransitionTo
 import org.jetbrains.exposed.exceptions.ExposedSQLException
@@ -57,8 +56,13 @@ class DevelopmentRunRepository(
     private val outbox: OutboxRepository,
     private val audit: AuditRepository,
     private val clock: Clock = Clock.systemUTC(),
-    private val trustedIssuers: Set<String> = TrustedEvidenceIssuers.DEFAULT,
+    private val trustedIssuers: Set<String> = PR_MERGE_EVIDENCE_ISSUERS,
 ) {
+
+    private companion object {
+        /** Issuers allowed to report a PR merge (PrMergeEvidence). Still a self-declared string allowlist, see #53 / #49 / #50. */
+        val PR_MERGE_EVIDENCE_ISSUERS: Set<String> = setOf("exkes-adapter", "fusha-task-adapter", "github-adapter", "operator-console")
+    }
 
     /** Creates a run in CREATED (version 0) with its audit and outbox events. [completionMode] is fixed for the run's lifetime. */
     fun create(taskId: String, actor: String, completionMode: RunCompletionMode, traceId: String? = null): DevelopmentRun {

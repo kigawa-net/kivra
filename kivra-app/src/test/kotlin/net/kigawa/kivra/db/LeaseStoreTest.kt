@@ -117,7 +117,7 @@ class LeaseStoreTest {
     fun `hold after acquire stops the running worker everywhere and clearing it resumes`() = TestDb().use { db ->
         val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val lease = db.leases.acquire(run.runId, "old-worker", TTL)!!
-        val op = db.journal.prepare(lease, PrepareOperation("EXKES_CREATE_WORKSPACE", "k1", "EXKES", "ref", "a".repeat(64)))
+        val op = db.journal.prepare(lease, PrepareOperation("EXKES_CREATE_WORKSPACE", "k1", "EXKES", "ref", "a".repeat(64), "tenant-1", "2026-01"))
         val v = db.runs.get(run.runId)!!.version
 
         val held = db.runs.hold(run.runId, "ADMIN_HOLD", "admin")
@@ -126,7 +126,7 @@ class LeaseStoreTest {
         assertFalse(db.leases.renew(lease, TTL), "renew must fail while on hold")
         assertFailsWith<RunHaltedException> { db.runs.transition(lease, held.version, DevelopmentRunState.PLANNING, "old-worker") }
         assertFailsWith<RunHaltedException> { db.journal.transition(lease, op.opId, op.version, OperationStatus.IN_FLIGHT) }
-        assertFailsWith<RunHaltedException> { db.journal.prepare(lease, PrepareOperation("EXKES_CREATE_WORKSPACE", "k2", "EXKES", "ref2", "a".repeat(64))) }
+        assertFailsWith<RunHaltedException> { db.journal.prepare(lease, PrepareOperation("EXKES_CREATE_WORKSPACE", "k2", "EXKES", "ref2", "a".repeat(64), "tenant-1", "2026-01")) }
         assertFailsWith<RunHaltedException> { db.outbox.appendFenced(lease, 99, "Custom", "{}") }
         assertEquals(OperationStatus.PREPARED, db.journal.get(op.opId)!!.status, "no side effect started")
         assertEquals(DevelopmentRunState.CREATED, db.runs.get(run.runId)!!.state)
@@ -149,7 +149,7 @@ class LeaseStoreTest {
         assertFalse(db.leases.renew(lease, TTL))
         assertFailsWith<RunHaltedException> { db.runs.transition(lease, requested.version, DevelopmentRunState.PLANNING, "w") }
         assertFailsWith<RunHaltedException> {
-            db.journal.prepare(lease, PrepareOperation("EXKES_CREATE_WORKSPACE", "k", "EXKES", "ref", "a".repeat(64)))
+            db.journal.prepare(lease, PrepareOperation("EXKES_CREATE_WORKSPACE", "k", "EXKES", "ref", "a".repeat(64), "tenant-1", "2026-01"))
         }
         val done = db.runs.transition(lease, requested.version, DevelopmentRunState.CANCELLED, "w", reason = "ACK")
         assertEquals(DevelopmentRunState.CANCELLED, done.state)

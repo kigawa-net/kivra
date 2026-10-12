@@ -81,6 +81,11 @@ private class RecheckHookPort(private val inner: TestPort, private val beforeRec
     }
 }
 
+/** Runtime listing fails: the Reaper cannot observe the runtimes, so it must not delete. */
+private class RuntimeListingDownPort(private val inner: TestPort) : ExecutionPort by inner {
+    override suspend fun listRuntimes(workspace: WorkspaceId): PortResult<List<Runtime>> = PortResult.Transient("list runtimes down")
+}
+
 class ReaperTest {
     /** A run that AgentManager drove through its workspace / runtime / execution, then ended (COMPLETED). */
     private fun TestDb.completedRun(port: TestPort): RunId {
@@ -374,4 +379,42 @@ class ReaperTest {
 
     private fun workspaceIdOf(port: ExecutionPort, db: TestDb, runId: RunId): WorkspaceId =
         workspaceOf(port, db, runId)!!.id
+
+    // ---- CANCELLED is a DB state, not proof that the process stopped (exkes #26 / #27). Runtime observations decide.
+
+    @Test
+    fun `a CANCELLED run with a RUNNING runtime is blocked - the DB state is not proof the process stopped`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        db.forceState(runId.value, DevelopmentRunState.CANCELLED)
+        val rt = (runBlocking { port.listRuntimes(workspaceIdOf(port, db, runId)) } as PortResult.Ok).value.single()
+        port.fake.setRuntimeState(rt.id, RuntimeState.RUNNING)
+
+        val report = runBlocking { Reaper(port, db.database, NO_GRACE).runOnce() }
+        assertEquals(ReapVerdict.BLOCKED, findingFor(report, runId).verdict)
+        assertTrue(port.mutatingCalls.none { it == "deleteWorkspace" }, "a live runtime must never be deleted under a CANCELLED run")
+        assertEquals(0, db.reapRows(runId))
+    }
+
+    @Test
+    fun `a CANCELLED run whose runtimes cannot be listed is blocked, not deleted`() = TestDb().use { db ->
+        val inner = TestPort()
+        val runId = db.completedRun(inner)
+        db.forceState(runId.value, DevelopmentRunState.CANCELLED)
+
+        val report = runBlocking { Reaper(RuntimeListingDownPort(inner), db.database, NO_GRACE).runOnce() }
+        assertEquals(ReapVerdict.BLOCKED, findingFor(report, runId).verdict)
+        assertTrue(inner.mutatingCalls.none { it == "deleteWorkspace" })
+    }
+
+    @Test
+    fun `a CANCELLED run is deleted only once its runtime is observed STOPPED, like any terminal run`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port) // runtime is STOPPED by AgentManager
+        db.forceState(runId.value, DevelopmentRunState.CANCELLED)
+
+        val report = runBlocking { Reaper(port, db.database, NO_GRACE).runOnce() }
+        assertEquals(ReapVerdict.DELETE_REQUESTED, findingFor(report, runId).verdict)
+        assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+    }
 }

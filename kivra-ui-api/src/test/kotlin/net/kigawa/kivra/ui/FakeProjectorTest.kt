@@ -31,13 +31,14 @@ class FakeProjectorTest {
     }
 
     @Test
-    fun `retryable still requires verified replay proof`() {
-        assertFalse(FakeProjector.replay(OperationStatus.RETRYABLE).allowed)
-        assertTrue(
-            FakeProjector.replay(
-                OperationStatus.RETRYABLE,
-                ReplayReason.AUTHORITATIVE_IDEMPOTENCY,
-            ).allowed,
-        )
+    fun `fake projector cannot mint replay authorization even for retryable state`() {
+        val retryable = FakeProjector.replay(OperationStatus.RETRYABLE)
+        assertFalse(retryable.allowed)
+        assertEquals(ReplayReason.EVIDENCE_REQUIRED, retryable.reason)
+
+        val unknown = FakeProjector.replay(OperationStatus.UNKNOWN)
+        assertFalse(unknown.allowed)
+        assertEquals(ReplayReason.NOT_APPLICABLE, unknown.reason)
+        assertFalse(FakeProjector.replay(OperationStatus.RECONCILIATION_REQUIRED).allowed)
     }
 }

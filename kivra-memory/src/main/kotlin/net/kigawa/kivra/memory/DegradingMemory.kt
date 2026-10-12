@@ -6,6 +6,20 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import net.kigawa.kivra.core.IdempotencyKey
+import net.kigawa.kivra.memory.journal.DispatchDecision
+import net.kigawa.kivra.memory.journal.MemoryMutationJournalPort
+import net.kigawa.kivra.memory.journal.MutationCapability
+import net.kigawa.kivra.memory.journal.MutationDigest
+import net.kigawa.kivra.memory.journal.MutationIds
+import net.kigawa.kivra.memory.journal.MutationIntent
+import net.kigawa.kivra.memory.journal.MutationJournalRejectedException
+import net.kigawa.kivra.memory.journal.MutationKind
+import net.kigawa.kivra.memory.journal.MutationRecord
+import net.kigawa.kivra.memory.journal.MutationStatus
+import net.kigawa.kivra.memory.journal.MutationWriter
+import net.kigawa.kivra.memory.journal.NotSentDispatchException
+import net.kigawa.kivra.memory.journal.PrepareResult
+import net.kigawa.kivra.memory.journal.validReasonCode
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -14,6 +28,8 @@ enum class MemoryAuditType {
     READ_DEGRADED, WRITE_QUEUED, WRITE_FLUSHED, WRITE_DROPPED_OVERFLOW, WRITE_DROPPED_EXPIRED, WRITE_DROPPED_PERMANENT,
     /** An outcome-unknown write was held for reconciliation (never re-sent). Detail carries the count only. */
     WRITE_HELD_RECONCILE, WRITE_DROPPED_ATTEMPTS, SECRET_DETECTED,
+    /** Journal path (issue #77): operation id + machine code only. */
+    MUTATION_ESCALATED, MUTATION_SETTLED, MUTATION_CONFLICT,
 }
 
 /** Audit record. [detail] carries only ids, counts and kinds, never memory content or secret values. */
@@ -92,6 +108,12 @@ sealed interface RememberOutcome {
      * persistent Operation Journal (M0 `external_operations`). It is kept for reconciliation, not discarded.
      */
     data object HeldForReconciliation : RememberOutcome
+
+    /**
+     * Journal path only: the same operation is already recorded (CONFIRMED, or IN_FLIGHT under another dispatcher).
+     * No new external call was made by this call.
+     */
+    data object AlreadyRecorded : RememberOutcome
 }
 
 /** [held] = writes whose outcome is unknown and that were kept for reconciliation during this flush (never re-sent). */
@@ -121,7 +143,19 @@ class MemoryService(
     private val maxAttempts: Int = 20,
     private val breakerThreshold: Int = 3,
     private val breakerCooldown: Duration = Duration.ofSeconds(30),
+    /**
+     * Durable Operation Journal (issue #77). When set, [remember] / [flush] use it: the intent is recorded BEFORE any
+     * external call, the in-memory queue and held list are not used, and the outcome is settled in the journal.
+     */
+    private val mutationJournal: MemoryMutationJournalPort? = null,
+    private val writer: MutationWriter? = null,
+    /** Stays DISABLED until recl `recl.memory.v1` is accepted (issue #77 (5)). A DISABLED journal path writes nothing. */
+    private val mutationCapability: MutationCapability = MutationCapability.DISABLED,
 ) {
+    init {
+        require((mutationJournal == null) == (writer == null)) { "mutation journal and writer identity must be given together" }
+    }
+
     private val flushMutex = Mutex()
     private val stateMutex = Mutex()
     private val heldMutex = Mutex()
@@ -129,11 +163,32 @@ class MemoryService(
     private var consecutiveFailures = 0
     private var openUntil: Instant = Instant.MIN
 
+    /** Journal path: payloads of PREPARED writes that this process may still dispatch. In-memory only, never persisted. */
+    private val pendingMutex = Mutex()
+    private val pending = LinkedHashMap<String, PendingWrite>()
+    private val sweepMutex = Mutex()
+    private var swept = false
+
+    private class PendingWrite(
+        val entry: NewMemoryEntry,
+        val key: IdempotencyKey,
+        val ctx: AccessContext,
+        val enqueuedAt: Instant,
+        var version: Long,
+        var attempts: Int = 0,
+    )
+
     /**
      * Writes whose outcome is unknown, held for reconciliation. They are never returned to the [WriteQueue] and never
      * re-sent by this class. Read-only snapshot for the future reconciliation step (persistent Operation Journal).
      */
     suspend fun heldForReconciliation(): List<QueuedWrite> = heldMutex.withLock { held.values.toList() }
+
+    /** Journal path: UNKNOWN_HELD rows of this writer's tenant + principal (ids and codes only). */
+    suspend fun unknownHeldOperations(): List<MutationRecord> {
+        val j = mutationJournal ?: return emptyList()
+        return j.unknownHeld(writer!!.identity)
+    }
 
     private suspend fun holdForReconciliation(w: QueuedWrite) {
         val count = heldMutex.withLock {
@@ -177,6 +232,7 @@ class MemoryService(
     }
 
     suspend fun remember(entry: NewMemoryEntry, ctx: AccessContext, key: IdempotencyKey = IdempotencyKeys.forSave(entry)): RememberOutcome {
+        if (mutationJournal != null) return journaledRemember(entry, ctx, key)
         if (!isOpen()) {
             try {
                 return RememberOutcome.Saved(provider.save(entry, key, ctx))
@@ -214,6 +270,7 @@ class MemoryService(
      * write whose re-send returns OUTCOME_UNKNOWN is held for reconciliation, never re-sent. Never throws on provider errors.
      */
     suspend fun flush(): FlushReport = flushMutex.withLock {
+        if (mutationJournal != null) return@withLock journaledFlush()
         var flushed = 0
         var dropped = 0
         var heldNow = 0
@@ -255,6 +312,207 @@ class MemoryService(
         }
         FlushReport(flushed, queue.size(), dropped, heldNow)
     }
+
+    // ---- Durable Operation Journal path (issue #77) -------------------------------------------------------------
+    // Rules: intent is recorded before any external call; only the CAS winner calls the provider; anything that is not a
+    // proven NotSent or an explicit permanent refusal settles as UNKNOWN_HELD and is never re-sent automatically.
+    // Audit and journal carry ids and machine codes only, never content.
+
+    private suspend fun journaledRemember(entry: NewMemoryEntry, ctx: AccessContext, key: IdempotencyKey): RememberOutcome {
+        val journal = mutationJournal!!
+        val w = writer!!
+        if (mutationCapability == MutationCapability.DISABLED) return RememberOutcome.Rejected(MemoryErrorKind.UNSUPPORTED)
+        // Fail-closed content policy, before any row or external call. RESTRICTED is never stored or sent.
+        if (entry.sensitivity == Sensitivity.RESTRICTED) {
+            journalAudit(MemoryAuditType.WRITE_DROPPED_PERMANENT, ctx, mapOf("kind" to "RESTRICTED"))
+            return RememberOutcome.Rejected(MemoryErrorKind.REJECTED)
+        }
+        val texts = listOfNotNull(entry.title, entry.summary, entry.body) + entry.sources.mapNotNull { it.locator }
+        val kinds = texts.flatMap { SecretFilter.scan(it) }.map { it.kind }.toSet()
+        if (kinds.isNotEmpty()) {
+            journalAudit(MemoryAuditType.SECRET_DETECTED, ctx, mapOf("kinds" to kinds.joinToString(",") { it.name }))
+            return RememberOutcome.Rejected(MemoryErrorKind.REJECTED)
+        }
+        val intent = MutationIntent(
+            operationId = MutationIds.operationId(w.identity, key),
+            identity = w.identity,
+            kind = MutationKind.SAVE,
+            requestId = MutationIds.requestId(w.identity, key),
+            payloadDigest = MutationDigest.of(MutationKind.SAVE, entry),
+            expectedRevision = 0,
+            writerGeneration = w.writerGeneration,
+            executionId = ctx.executionId,
+        )
+        val prepared = try {
+            ensureSwept()
+            journal.prepare(intent)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Journal unavailable before any external call: nothing was sent and nothing is queued (fail-closed).
+            journalAudit(MemoryAuditType.MUTATION_CONFLICT, ctx, mapOf("code" to "JOURNAL_UNAVAILABLE"))
+            return RememberOutcome.Rejected(MemoryErrorKind.UNAVAILABLE)
+        }
+        val rec = when (prepared) {
+            is PrepareResult.Conflict -> {
+                journalAudit(MemoryAuditType.MUTATION_CONFLICT, ctx, mapOf("operationId" to intent.operationId, "code" to prepared.code.name))
+                return RememberOutcome.Rejected(MemoryErrorKind.REJECTED)
+            }
+            is PrepareResult.Prepared -> prepared.record
+            is PrepareResult.Existing -> prepared.record
+        }
+        return when (rec.status) {
+            MutationStatus.PREPARED -> dispatch(rec.operationId, PendingWrite(entry, key, ctx, clock.instant(), rec.version))
+            MutationStatus.IN_FLIGHT, MutationStatus.CONFIRMED -> RememberOutcome.AlreadyRecorded
+            MutationStatus.UNKNOWN_HELD -> RememberOutcome.HeldForReconciliation
+            MutationStatus.FAILED_PERMANENT -> RememberOutcome.Rejected(MemoryErrorKind.REJECTED)
+        }
+    }
+
+    private suspend fun dispatch(opId: String, pw: PendingWrite): RememberOutcome {
+        val journal = mutationJournal!!
+        val gen = writer!!.writerGeneration
+        if (isOpen()) {
+            putPending(opId, pw)
+            journalAudit(MemoryAuditType.WRITE_QUEUED, pw.ctx, mapOf("operationId" to opId))
+            return RememberOutcome.Queued
+        }
+        val won = when (val d = journal.beginDispatch(opId, gen, pw.version)) {
+            is DispatchDecision.Won -> d.record
+            is DispatchDecision.Refused -> return onRefused(opId, pw, d)
+        }
+        val id = try {
+            provider.save(pw.entry, pw.key, pw.ctx)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (ex: Exception) {
+            return settleFailure(opId, won.version, pw, ex)
+        }
+        onSuccess()
+        removePending(opId)
+        try {
+            journal.markConfirmed(opId, gen, won.version)
+            journalAudit(MemoryAuditType.MUTATION_SETTLED, pw.ctx, mapOf("operationId" to opId, "code" to "CONFIRMED"))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // The external write succeeded; a late settle from a superseded generation is discarded, not re-sent.
+            journalAudit(MemoryAuditType.MUTATION_CONFLICT, pw.ctx, mapOf("operationId" to opId, "code" to ((e as? MutationJournalRejectedException)?.code?.name ?: "SETTLE_FAILED")))
+        }
+        return RememberOutcome.Saved(id)
+    }
+
+    private suspend fun onRefused(opId: String, pw: PendingWrite, d: DispatchDecision.Refused): RememberOutcome {
+        val record = d.record
+        return when (record?.status) {
+            MutationStatus.PREPARED -> {
+                // Not dispatchable by this writer yet (for example a PREPARED row of another generation). Keep it pending.
+                pw.version = record.version
+                putPending(opId, pw)
+                RememberOutcome.Queued
+            }
+            MutationStatus.UNKNOWN_HELD -> { removePending(opId); RememberOutcome.HeldForReconciliation }
+            MutationStatus.IN_FLIGHT, MutationStatus.CONFIRMED -> { removePending(opId); RememberOutcome.AlreadyRecorded }
+            MutationStatus.FAILED_PERMANENT, null -> { removePending(opId); RememberOutcome.Rejected(MemoryErrorKind.REJECTED) }
+        }
+    }
+
+    private suspend fun settleFailure(opId: String, version: Long, pw: PendingWrite, ex: Exception): RememberOutcome {
+        val journal = mutationJournal!!
+        val gen = writer!!.writerGeneration
+        if (ex is NotSentDispatchException && ex.evidence.operationId == opId) {
+            return try {
+                journal.markNotSent(opId, gen, version, ex.evidence)
+                pw.version = version + 1
+                putPending(opId, pw)
+                journalAudit(MemoryAuditType.WRITE_QUEUED, pw.ctx, mapOf("operationId" to opId, "code" to "NOT_SENT_PROVEN"))
+                RememberOutcome.Queued
+            } catch (e: MutationJournalRejectedException) {
+                markHeld(opId, version, pw, "NOT_SENT_PROOF_REJECTED")
+            }
+        }
+        val e = asMemoryException(ex)
+        if (e.kind in TRANSPORT_FAILURES) onFailure()
+        if (e.kind == MemoryErrorKind.REJECTED) {
+            removePending(opId)
+            try {
+                journal.markFailedPermanent(opId, gen, version, "PROVIDER_REJECTED")
+            } catch (je: MutationJournalRejectedException) {
+                journalAudit(MemoryAuditType.MUTATION_CONFLICT, pw.ctx, mapOf("operationId" to opId, "code" to je.code.name))
+            }
+            return RememberOutcome.Rejected(MemoryErrorKind.REJECTED)
+        }
+        // 429 / 5xx / timeout / ResponseLost / 404 / 409 / anything unexpected: sent-or-unknown, never a proof of no effect.
+        return markHeld(opId, version, pw, "PROVIDER_${e.kind.name}")
+    }
+
+    private suspend fun markHeld(opId: String, version: Long, pw: PendingWrite, code: String): RememberOutcome {
+        removePending(opId)
+        try {
+            mutationJournal!!.markUnknownHeld(opId, writer!!.writerGeneration, version, validReasonCode(code))
+        } catch (je: MutationJournalRejectedException) {
+            journalAudit(MemoryAuditType.MUTATION_CONFLICT, pw.ctx, mapOf("operationId" to opId, "code" to je.code.name))
+        }
+        journalAudit(MemoryAuditType.WRITE_HELD_RECONCILE, pw.ctx, mapOf("operationId" to opId, "code" to code))
+        return RememberOutcome.HeldForReconciliation
+    }
+
+    private suspend fun journaledFlush(): FlushReport {
+        val journal = mutationJournal!!
+        try {
+            ensureSwept()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return FlushReport(0, pendingCount(), 0, 0)
+        }
+        var flushed = 0
+        var dropped = 0
+        var held = 0
+        val now = clock.instant()
+        for (opId in pendingIds()) {
+            val pw = pendingGet(opId) ?: continue
+            if (pw.enqueuedAt.plus(queueTtl).isBefore(now) || pw.attempts >= maxAttempts) {
+                removePending(opId)
+                dropped++
+                journalAudit(MemoryAuditType.WRITE_DROPPED_ATTEMPTS, pw.ctx, mapOf("operationId" to opId))
+                continue
+            }
+            if (isOpen()) break
+            val rec = journal.get(opId)
+            if (rec == null || rec.status != MutationStatus.PREPARED) {
+                // Settled or owned elsewhere since the last look: this process must not dispatch it.
+                removePending(opId)
+                continue
+            }
+            pw.attempts++
+            pw.version = rec.version
+            when (dispatch(opId, pw)) {
+                is RememberOutcome.Saved -> flushed++
+                is RememberOutcome.HeldForReconciliation -> held++
+                is RememberOutcome.Rejected -> dropped++
+                else -> Unit
+            }
+        }
+        return FlushReport(flushed, pendingCount(), dropped, held)
+    }
+
+    private suspend fun ensureSwept() = sweepMutex.withLock {
+        if (!swept) {
+            // A new writer generation converts older generations' IN_FLIGHT rows to UNKNOWN_HELD (never re-sent).
+            mutationJournal!!.sweepStaleInFlight(writer!!.writerGeneration)
+            swept = true
+        }
+    }
+
+    private suspend fun putPending(opId: String, pw: PendingWrite) = pendingMutex.withLock { pending[opId] = pw }
+    private suspend fun removePending(opId: String) = pendingMutex.withLock { pending.remove(opId) }
+    private suspend fun pendingGet(opId: String): PendingWrite? = pendingMutex.withLock { pending[opId] }
+    private suspend fun pendingIds(): List<String> = pendingMutex.withLock { pending.keys.toList() }
+    private suspend fun pendingCount(): Int = pendingMutex.withLock { pending.size }
+
+    private fun journalAudit(type: MemoryAuditType, ctx: AccessContext, detail: Map<String, String>) =
+        audit.record(MemoryAuditEvent(type, ctx.executionId, ctx.traceId, detail))
 
     private suspend fun isOpen(): Boolean = stateMutex.withLock { clock.instant().isBefore(openUntil) }
     private suspend fun onSuccess() = stateMutex.withLock { consecutiveFailures = 0; openUntil = Instant.MIN }

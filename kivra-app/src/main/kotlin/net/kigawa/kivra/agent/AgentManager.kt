@@ -12,6 +12,7 @@ import net.kigawa.kivra.core.LeaseStore
 import net.kigawa.kivra.core.OperationStatus
 import net.kigawa.kivra.core.RunHaltedException
 import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.core.TrustedEvidenceAuthority
 import net.kigawa.kivra.core.VersionConflictException
 import net.kigawa.kivra.core.canTransitionTo
 import net.kigawa.kivra.db.AgentRecord
@@ -92,11 +93,15 @@ class AgentManager(
     private val runs: DevelopmentRunRepository,
     private val agents: AgentRepository,
     private val journal: OperationJournalRepository,
-    private val config: AgentManagerConfig = AgentManagerConfig(),
+    private val config: AgentManagerConfig,
+    private val authority: TrustedEvidenceAuthority,
     private val clock: Clock = Clock.systemUTC(),
 ) {
     private val slots = Semaphore(config.maxConcurrentRuns)
-    private val ops = OperationExecutor(journal, config.maxOperationAttempts, config.transientBackoff, clock)
+    private val ops = OperationExecutor(
+        journal, authority, config.tenantId, config.providerContractVersion,
+        config.maxOperationAttempts, config.transientBackoff,
+    )
     private val actor = "agent-manager:$workerId"
 
     /** Startup reconciliation (minimal): resumes every run that no live worker owns. Returns the outcomes by run. */

@@ -1,6 +1,8 @@
 package net.kigawa.kivra.agent
 
 import java.time.Duration
+import java.time.LocalDateTime
+import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -10,12 +12,22 @@ import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import net.kigawa.kivra.core.AgentState
 import net.kigawa.kivra.core.DevelopmentRunState
+import net.kigawa.kivra.core.EvidenceObservationRef
+import net.kigawa.kivra.core.EvidencePurpose
+import net.kigawa.kivra.core.EvidenceSubject
+import net.kigawa.kivra.core.EvidenceVerification
+import net.kigawa.kivra.core.ExternalObservation
 import net.kigawa.kivra.core.ExecutionSessionState
 import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.OperationStatus
+import net.kigawa.kivra.core.ProviderCapability
 import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.core.TrustedEvidenceAuthority
+import net.kigawa.kivra.core.VerifiedEvidence
+import net.kigawa.kivra.core.VerifiedEvidenceRef
 import net.kigawa.kivra.db.AgentRepository
+import net.kigawa.kivra.db.FakeTrustedEvidenceAuthority
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.exkes.Execution
 import net.kigawa.kivra.exkes.ExecutionCapabilities
@@ -125,9 +137,48 @@ class TestPort(val fake: FakeExecutionPort = FakeExecutionPort()) : ExecutionPor
     }
 }
 
+/**
+ * The adapter pipeline of these tests: when the executor asks for evidence, the test port has observed exactly that
+ * (a Transient call was never sent; a lookup found the resource). The observation is registered on the shared Fake and
+ * verified by it, so subject, contract, purpose and expiry checks still apply. The executor decides WHEN it asks: only a
+ * Transient result asks for NOT_SENT, only an observed EXISTS asks for RECONCILE_EXISTS.
+ */
+private class PipelineObservedAuthority(private val fake: FakeTrustedEvidenceAuthority) : TrustedEvidenceAuthority {
+    override suspend fun verify(
+        subject: EvidenceSubject,
+        observation: EvidenceObservationRef,
+        requiredPurpose: EvidencePurpose,
+    ): EvidenceVerification {
+        val observed = when (requiredPurpose) {
+            EvidencePurpose.NOT_SENT -> null
+            EvidencePurpose.RECONCILE_EXISTS -> ExternalObservation.EXISTS
+            else -> error("the test pipeline never observes $requiredPurpose")
+        }
+        val now = LocalDateTime.now(ZoneOffset.UTC)
+        fake.register(
+            observation,
+            FakeTrustedEvidenceAuthority.Observation(
+                subject = subject,
+                principal = "exkes-adapter",
+                purpose = requiredPurpose,
+                observation = observed,
+                capability = ProviderCapability.LOOKUP_BY_STABLE_REF,
+                observedAt = now,
+                expiresAt = now.plusHours(1),
+            ),
+        )
+        return fake.verify(subject, observation, requiredPurpose)
+    }
+
+    override suspend fun resolve(ref: VerifiedEvidenceRef, expected: EvidenceSubject, requiredPurpose: EvidencePurpose): VerifiedEvidence =
+        fake.resolve(ref, expected, requiredPurpose)
+}
+
 private val PROFILE = AgentProfile(name = "developer", version = "1", templateId = "tpl-dev")
 
 private val TEST_CONFIG = AgentManagerConfig(
+    tenantId = "tenant-1",
+    providerContractVersion = "2026-01",
     leaseTtl = Duration.ofSeconds(30),
     leaseGrace = Duration.ZERO,
     pollInterval = Duration.ofMillis(1),
@@ -145,7 +196,12 @@ class AgentManagerTest {
     }
 
     private fun TestDb.manager(port: ExecutionPort, worker: String = "worker-A", config: AgentManagerConfig = TEST_CONFIG) =
-        AgentManager(worker, port, leases, runs, AgentRepository(database), journal, config)
+        AgentManager(worker, port, leases, runs, AgentRepository(database), journal, config, pipelineAuthority())
+
+    private fun TestDb.pipelineAuthority(): TrustedEvidenceAuthority {
+        evidence.setProviderContract("EXKES", "2026-01", ProviderCapability.LOOKUP_BY_STABLE_REF)
+        return PipelineObservedAuthority(evidence)
+    }
 
     private fun TestDb.agentsOf(runId: RunId) = AgentRepository(database).agentsOf(runId)
     private fun TestDb.ops(runId: RunId) = journal.listByRun(runId).associateBy { it.opType }

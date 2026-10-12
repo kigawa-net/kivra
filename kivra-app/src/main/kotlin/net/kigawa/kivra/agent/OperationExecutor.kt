@@ -1,17 +1,17 @@
 package net.kigawa.kivra.agent
 
 import java.security.MessageDigest
-import java.time.Clock
-import java.time.LocalDateTime
-import java.time.ZoneOffset
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.delay
-import net.kigawa.kivra.core.ExternalObservation
+import net.kigawa.kivra.core.EvidenceAuthorityUnavailableException
+import net.kigawa.kivra.core.EvidenceObservationRef
+import net.kigawa.kivra.core.EvidencePurpose
+import net.kigawa.kivra.core.EvidenceSubject
+import net.kigawa.kivra.core.EvidenceVerification
 import net.kigawa.kivra.core.Lease
-import net.kigawa.kivra.core.NotSentProof
 import net.kigawa.kivra.core.OperationStatus
-import net.kigawa.kivra.core.ProviderCapability
-import net.kigawa.kivra.core.ReconciliationEvidence
+import net.kigawa.kivra.core.TrustedEvidenceAuthority
+import net.kigawa.kivra.core.VerifiedEvidenceRef
 import net.kigawa.kivra.db.JournalEntry
 import net.kigawa.kivra.db.OperationJournalRepository
 import net.kigawa.kivra.db.PrepareOperation
@@ -67,23 +67,24 @@ fun sha256Hex(text: String): String =
  *
  * Fail-closed rules (M0 contract, docs/adr/0001):
  *  - an UNKNOWN result (or an IN_FLIGHT row left by a dead worker, which is UNKNOWN by definition) is never resent;
- *    it is only looked up. EXISTS adopts (CONFIRMED). Anything else goes to RECONCILIATION_REQUIRED and stops.
- *    exkes lookups are LOOKUP_BY_STABLE_REF only, so an absence never justifies RETRYABLE (create ops are never resent).
- *  - only [PortResult.Transient] (adapter-proven: the request was never sent) is retried, via `markNotSent` with a
- *    [NotSentProof] issued by [ISSUER]. Every other failure stays UNKNOWN and is reconciled: nothing here marks a
+ *    it is only looked up. EXISTS adopts (CONFIRMED) once the Authority verified that observation. Anything else goes
+ *    to RECONCILIATION_REQUIRED and stops. exkes lookups are LOOKUP_BY_STABLE_REF only, so an absence never justifies
+ *    RETRYABLE (create ops are never resent).
+ *  - only [PortResult.Transient] (adapter-proven: the request was never sent) is retried, and only with a
+ *    [VerifiedEvidenceRef] for NOT_SENT that the [TrustedEvidenceAuthority] issued. If no such ref can be obtained the
+ *    row goes to UNKNOWN instead. Every other failure stays UNKNOWN and is reconciled: nothing here marks a
  *    mutating call FAILED, because no trusted REJECTED_NO_EFFECT contract exists yet (M0 #43). A 409 may be our own
  *    earlier POST, and a 4xx or 404 on a POST is not proof that nothing happened.
  *  - the attempt budget is enforced by the journal: RETRYABLE -> IN_FLIGHT may come back as FAILED
  *    (MAX_ATTEMPTS_EXCEEDED), and nothing is sent unless the returned status is IN_FLIGHT.
  */
-/** Issuer of the evidence and proofs this executor records; on the journal's trusted allowlist. */
-internal const val ISSUER = "exkes-adapter"
-
 internal class OperationExecutor(
     private val journal: OperationJournalRepository,
+    private val authority: TrustedEvidenceAuthority,
+    private val tenantId: String,
+    private val providerContractVersion: String,
     private val maxAttempts: Int,
     private val backoff: java.time.Duration,
-    private val clock: Clock,
 ) {
     suspend fun <T> perform(
         lease: Lease,
@@ -94,7 +95,7 @@ internal class OperationExecutor(
     ): OpOutcome {
         var entry = journal.prepare(
             lease,
-            PrepareOperation(op.opType, op.key, "EXKES", op.stableRef, op.requestHash, maxAttempts),
+            PrepareOperation(op.opType, op.key, "EXKES", op.stableRef, op.requestHash, tenantId, providerContractVersion, maxAttempts),
             allowCancel,
         )
         while (true) {
@@ -138,16 +139,41 @@ internal class OperationExecutor(
 
     private class Settled(val entry: JournalEntry?, val stop: OpOutcome?)
 
-    private fun <T> settle(lease: Lease, op: Op<T>, e: JournalEntry, r: PortResult<T>, allowCancel: Boolean): Settled {
-        fun now() = LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)
-        fun proofRef(kind: String) = "$kind:${op.stableRef}".take(250)
+    /**
+     * Asks the Authority for evidence of [purpose] about this operation, observed under [observation]. Returns null when
+     * no evidence is obtained (refused, unavailable, or the row has no subject). Nothing is persisted here.
+     */
+    private suspend fun verified(e: JournalEntry, purpose: EvidencePurpose, observation: String): VerifiedEvidenceRef? {
+        val tenant = e.tenantId ?: return null
+        val contract = e.providerContractVersion ?: return null
+        val subject = EvidenceSubject(
+            tenantId = tenant,
+            runId = e.runId.value,
+            operationId = e.opId,
+            providerId = e.externalSystem,
+            actionId = e.opType,
+            requestDigest = e.requestHash,
+            providerContractVersion = contract,
+        )
+        return try {
+            when (val v = authority.verify(subject, EvidenceObservationRef(observation.take(255)), purpose)) {
+                is EvidenceVerification.Verified -> v.ref
+                is EvidenceVerification.Refused -> null
+            }
+        } catch (unavailable: EvidenceAuthorityUnavailableException) {
+            null
+        }
+    }
+
+    private suspend fun <T> settle(lease: Lease, op: Op<T>, e: JournalEntry, r: PortResult<T>, allowCancel: Boolean): Settled {
         fun move(to: OperationStatus, ref: String? = null, cls: String? = null, msg: String? = null) =
             journal.transition(lease, e.opId, e.version, to, externalRef = ref, errorClass = cls, error = msg, allowCancelRequested = allowCancel)
-        fun notSent(msg: String) = journal.markNotSent(
-            lease, e.opId, e.version,
-            NotSentProof(lease.runId, e.opId, e.requestHash, ISSUER, proofRef("not-sent"), now()),
-            allowCancelRequested = allowCancel,
-        )
+        // Retry only with NOT_SENT evidence from the Authority; without it the call is recorded UNKNOWN (never resent).
+        suspend fun notSent(msg: String): JournalEntry {
+            val ref = verified(e, EvidencePurpose.NOT_SENT, "not-sent:${op.stableRef}")
+                ?: return move(OperationStatus.UNKNOWN, cls = "NOT_SENT_UNVERIFIED", msg = msg)
+            return journal.markNotSent(lease, e.opId, e.version, ref, allowCancelRequested = allowCancel)
+        }
         return when (r) {
             is PortResult.Ok -> Settled(move(OperationStatus.CONFIRMED, op.refOf(r.value)), null)
             PortResult.NotFound ->
@@ -187,21 +213,12 @@ internal class OperationExecutor(
             Observed.Undetermined("lookup threw ${e::class.simpleName}: ${e.message}")
         }
         // exkes list / label lookups are never AUTHORITATIVE_ABSENCE, so an absence cannot justify RETRYABLE (M0 rule).
-        // Only an observed EXISTS is evidence: it adopts the effect and is never re-created.
+        // Only an observed EXISTS that the Authority verifies is evidence: it adopts the effect and is never re-created.
+        val existsRef = (observed as? Observed.Exists)?.let { verified(entry, EvidencePurpose.RECONCILE_EXISTS, "lookup:${op.stableRef}") }
         return when {
-            observed is Observed.Exists -> Reconciled.Settled(
+            observed is Observed.Exists && existsRef != null -> Reconciled.Settled(
                 journal.reconcile(
-                    lease, entry.opId, entry.version, OperationStatus.CONFIRMED,
-                    ReconciliationEvidence(
-                        runId = lease.runId,
-                        opId = entry.opId,
-                        requestHash = entry.requestHash,
-                        issuer = ISSUER,
-                        observation = ExternalObservation.EXISTS,
-                        evidenceRef = "lookup:${op.stableRef}".take(250),
-                        observedAt = LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC),
-                        providerCapability = ProviderCapability.LOOKUP_BY_STABLE_REF,
-                    ),
+                    lease, entry.opId, entry.version, OperationStatus.CONFIRMED, existsRef,
                     externalRef = observed.ref,
                     allowCancelRequested = allowCancel,
                 ),

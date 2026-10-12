@@ -47,7 +47,9 @@ class TestDb : AutoCloseable {
     val audit = AuditRepository()
     val runs = DevelopmentRunRepository(database, outbox, audit)
     val leases = SqlLeaseStore(database)
-    val journal = OperationJournalRepository(database)
+    /** TEST ONLY Authority. Register observations and provider contracts on it before evidence-gated transitions. */
+    val evidence = FakeTrustedEvidenceAuthority()
+    val journal = OperationJournalRepository(database, evidence)
 
     /** Moves the lease expiry [seconds] into the past on the DB clock (simulates a worker that stopped renewing). */
     fun expireLease(runId: String, seconds: Long = 10) = transaction(database) {

@@ -460,10 +460,10 @@ class Reaper(
                 settle(go, "UNKNOWN", "IDENTITY_MISMATCH", describe(result))
                 finding(ReapVerdict.DELETE_UNKNOWN, "response identity mismatch, recorded as UNKNOWN and never resent")
             }
-            // Refused without a RejectedProof: recorded UNKNOWN, never resent.
+            // Refused without verified REJECTED evidence: recorded UNKNOWN, never resent.
             else -> {
                 settle(go, "UNKNOWN", "REJECTED_NOT_PROVEN", describe(result))
-                finding(ReapVerdict.DELETE_UNKNOWN, "refused without a rejected proof, recorded as UNKNOWN and never resent: ${describe(result)}")
+                finding(ReapVerdict.DELETE_UNKNOWN, "refused without verified rejected evidence, recorded as UNKNOWN and never resent: ${describe(result)}")
             }
         }
     }

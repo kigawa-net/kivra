@@ -39,6 +39,8 @@ import org.jetbrains.exposed.sql.transactions.transaction
 private val PROFILE = AgentProfile(name = "developer", version = "1", templateId = "tpl-dev")
 
 private val AGENT_CONFIG = AgentManagerConfig(
+    tenantId = "tenant-1",
+    providerContractVersion = "2026-01",
     leaseTtl = Duration.ofSeconds(30),
     leaseGrace = Duration.ZERO,
     pollInterval = Duration.ofMillis(1),
@@ -92,7 +94,7 @@ class ReaperTest {
         val run = runs.create("task-${System.nanoTime()}", "test", RunCompletionMode.RELEASE)
         forceState(run.runId.value, DevelopmentRunState.PREPARING)
         val out = runBlocking {
-            AgentManager("worker-A", port, leases, runs, AgentRepository(database), journal, AGENT_CONFIG).run(run.runId, PROFILE)
+            AgentManager("worker-A", port, leases, runs, AgentRepository(database), journal, AGENT_CONFIG, evidence).run(run.runId, PROFILE)
         }
         check(out is AgentRunOutcome.Completed) { "setup run did not complete: $out" }
         forceState(run.runId.value, DevelopmentRunState.COMPLETED)

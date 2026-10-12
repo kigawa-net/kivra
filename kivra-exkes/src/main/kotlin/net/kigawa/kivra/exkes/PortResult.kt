@@ -20,7 +20,7 @@ sealed interface PortResult<out T> {
 
     /**
      * The request provably was NOT sent, so the caller MAY repeat it (and the OperationExecutor may record a
-     * NotSentProof). Returned ONLY when nothing was sent: connection refused, connect timeout, DNS resolution
+     * verified NOT_SENT evidence). Returned ONLY when nothing was sent: connection refused, connect timeout, DNS resolution
      * failure, token acquisition failure (classified from the Ktor/JDK engine exceptions in ExkesAdapter).
      * A 429 on a mutating call is [Unknown]: exkes has seen the request, so "no effect" is not proven.
      * Read-only GETs (repeating them has no effect) may also return Transient for a 429/5xx/timeout.
@@ -49,7 +49,7 @@ fun <T> PortResult<T>.getOrNull(): T? = (this as? PortResult.Ok)?.value
 
 /**
  * Operation Journal status that a finished call of a MUTATING operation maps to. UNKNOWN is returned for
- * every ambiguous outcome; leaving UNKNOWN requires ReconciliationEvidence (see [OperationStatus]).
+ * every ambiguous outcome; leaving UNKNOWN requires verified reconciliation evidence (see [OperationStatus]).
  * [PortResult.Conflict] maps to null: the caller must look the resource up before deciding.
  */
 fun PortResult<*>.toOperationStatus(): OperationStatus? = when (this) {

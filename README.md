@@ -126,8 +126,11 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
   - 検知できるもの: 残っているイベントの改変、途中の削除、並べ替え（`verifyChain`）。
   - **検知できないもの**: DB 書込み権限を持つ主体はハッシュを再計算できるため、改竄の隠蔽は防げない。
     **最新イベントの末尾切り詰め、および run の全イベント削除は、チェーン単独では検知できない**（残ったチェーンは有効のまま）。
-  - 外部アンカー用フック: `anchorAuditHead(database, audit, runId, anchor: AuditHeadAnchor)` が現在の head（seq・hash）を取得して
-    `anchor` に渡す。アンカー先（WORM ストア、別アカウントのログ、署名付きノート等）への保存と定期実行は未実装。
+  - 外部アンカー: 監査 Tx 内で `enqueueAuditHeadAnchor(tx, audit, outbox, runId)` が現在の head（seq・hash）を `AUDIT_ANCHOR`
+    種別の Outbox イベントとして書くだけで、外部 I/O は行わない（DB Lock・Tx Rollback と外部障害を切り離す）。
+    配送は Tx コミット後に `AuditAnchorPublisher.publishDue()` が Outbox 経由で行い、冪等キーは event_id。
+    `AuditHeadAnchor` 実装（WORM ストア、別アカウントのログ、署名付きノート等）は event_id で重複排除すること。
+    アンカー先の永続化と publisher の定期実行スケジュールは未実装。
     保存済みの head と現在の head を比べれば末尾切り詰めを検知できる。
   - 運用で必要な前提: 運用 DB ロールに `audit_events` の UPDATE / DELETE を付与しない（マイグレーションでは強制していない）。
     強い監査保証を Admission 条件にするには、外部アンカーの実装と権限分離が前提になる。

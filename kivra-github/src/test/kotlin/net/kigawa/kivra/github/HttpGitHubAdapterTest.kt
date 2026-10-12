@@ -69,6 +69,23 @@ class HttpGitHubAdapterTest {
     }
 
     @Test
+    fun `bearer authenticated GitHub API redirects are never followed`() = runTest {
+        val f = Fake {
+            respond(
+                "",
+                HttpStatusCode.Found,
+                headersOf(HttpHeaders.Location, "https://untrusted.example/steal"),
+            )
+        }
+        val result = f.adapter.getPullRequest(REPO, 7)
+        assertIs<GitHubResult.Failure>(result)
+        assertEquals(1, f.requests.size, "no second request may be sent to the redirect target")
+        assertEquals("api.github.com", f.requests.single().url.host)
+        assertTrue(f.requests.single().headers[HttpHeaders.Authorization]?.startsWith("Bearer ") == true)
+        assertTrue(f.requests.none { it.url.host == "untrusted.example" })
+    }
+
+    @Test
     fun `getBranch returns null for missing ref when repo exists`() = runTest {
         val f = Fake { req ->
             if (req.url.encodedPath.contains("/git/ref/")) respond("""{"message":"Not Found"}""", HttpStatusCode.NotFound, JSON_H)

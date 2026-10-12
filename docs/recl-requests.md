@@ -1,8 +1,11 @@
 # recl への要求事項(設計 #6 §4.3 の整理)
 
-状態: **未提示**。kigawa-net/recl は 2026-10-12 時点でコミットの無い空リポジトリで、Issue #1〜#8 に計画があるだけ。
+状態: **未提示（部分的に前進）**。kigawa-net/recl は 2026-10-12 時点で設計書（`docs/design.md`、PR #17）と内部 Core / InMemory Storage（PR #19）のみ main にマージ済み。
+**実 REST / MCP サーバーと Fortis Adapter は未提供**で、本書の契約は recl 側で確定していない。
+実互換性ゲート: [recl #20](https://github.com/kigawa-net/recl/issues/20)（Trusted Mutation Envelope・Canonical Digest・UUIDv7 境界）、[Kivra #71](https://github.com/kigawa-net/kivra/issues/71)（Provider Compatibility Matrix & Production Capability Gate）。
+Mock の成功は Production Provider 検証ではない。
 本書は Kivra 側 `ReclAdapter`(`kivra-memory`)が期待している契約と、recl に確認・要求すべき事項の一覧である。
-**recl が実装する/存在する前提ではない**。recl#1 の設計書(docs/design.md)が出来たら本書と照合し、不一致は Adapter 側で吸収するか recl に依頼する。
+**recl が実装する/存在する前提ではない**。recl の設計書(docs/design.md、マージ済み)と本書を照合し、不一致は Adapter 側で吸収するか recl に依頼する。
 
 優先度は設計 #6 §4.3 に従う。「Adapter の暫定挙動」は recl が対応しない場合に Kivra 側で採る回避策。
 
@@ -27,3 +30,14 @@
 - 認証: API Token の発行・失効・Scope 束縛、機械向け認証の方式。
 - レート制限(429 を「未適用」と扱う前提)と、5xx 時に処理が適用済みかどうか(Adapter は「結果不明」と扱う)。
 - `health` の有無(Qdrant のみ障害時に pinned / ID 取得が継続できるか、§4.4)。
+
+## recl 設計書との差分(2026-10-12 時点で確認した事実)
+
+- ドメイン Status は recl が `proposed / confirmed / superseded / archived`、Kivra の `MemoryStatus` は `active / superseded / deleted`。一致しないため、応答の status 写像は未確定(現状の Adapter は未知の値を PROTOCOL 扱い)。
+- URL prefix・request/response DTO・MCP identity は未確定。Adapter の `/api/v1` や DTO は仮。
+- Context ID は UUIDv7。再試行で安定させる前提(recl 設計 §Create)だが、recl 側の実装・テストは未提供。
+- Supersede(2 Context 間の原子性)は設計上 approved な Fortis atomic batch が無いと原子的に扱えないとされている。Kivra 側は本番提供を前提にしない。
+- REDACT(物理消去)は recl 設計書に専用 API の記載が無い(ログの redact は言及あり)。`ReclConfig.redactSupported=false` のまま。
+- `GET` の 404 は「以前の write が未適用だった」証拠にならない(設計 §Create の receipt 保持期限の議論を参照)。
+- Mutating operation は Fake / Read-only を原則とし、`ReclConfig.mutationsEnabled` が既定 `false`。サーバー側の冪等性・権限・Receipt・契約テストが合格するまで有効化しない。
+- 未対応: MariaDB 撤廃の経緯(recl 側の判断)は本 PR の範囲では確認していない。Fortis の public conditional KV / Snapshot の可否は recl #14 で未検証。

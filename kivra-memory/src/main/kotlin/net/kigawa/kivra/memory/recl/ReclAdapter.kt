@@ -51,9 +51,12 @@ import java.time.Instant
 import kotlin.random.Random
 
 /**
- * [MemoryProvider] over the PLANNED recl REST API (design #6 section 4.2). SKELETON: recl is an empty repository
- * (only Issues #1 to #8 exist), so the endpoints below are Kivra's expected contract and NOTHING has been verified
- * against a real server. 要確認 items are collected in docs/recl-requests.md and the README.
+ * [MemoryProvider] over the recl REST API that Kivra ASSUMES (design #6 section 4.2). recl has merged only its design
+ * document and the internal Core / InMemory Storage (kigawa-net/recl PR #17 and #19). The REST / MCP server and the
+ * Fortis Adapter are not provided yet, so the endpoints below are Kivra's assumed contract, NOT a published recl API,
+ * and NOTHING has been verified against a real server. This is a mock-backed skeleton: a passing mock test is not
+ * production verification. 要確認 items are collected in docs/recl-requests.md and the README; the compatibility
+ * gates are recl#20 and kivra#71.
  *
  * Planned endpoints (all 要確認, see [ReclConfig.apiPrefix]):
  *  - `POST   /contexts/search`            search (recl#6)
@@ -74,7 +77,10 @@ import kotlin.random.Random
  *  - response identity is verified (requested id == returned id, version advanced, scopes within the caller's
  *    allowed scopes); search hits outside the requested scopes / sensitivity / kinds are dropped (defence in depth);
  *  - request / response bodies, memory text and the token never appear in exception messages;
- *  - secrets are refused before anything is sent.
+ *  - secrets are refused before anything is sent;
+ *  - mutating operations (save / update / supersede / delete) fail with UNSUPPORTED before any request unless
+ *    [ReclConfig.mutationsEnabled] is explicitly set, because server-side idempotency, authorization, Receipt and
+ *    contract tests have not passed yet. Read operations need no flag.
  */
 class ReclAdapter(
     private val config: ReclConfig,
@@ -152,12 +158,14 @@ class ReclAdapter(
     }
 
     override suspend fun save(e: NewMemoryEntry, key: IdempotencyKey, ctx: AccessContext): MemoryId {
+        requireMutationsEnabled()
         guard(e, ctx)
         val res = call(HttpMethod.Post, "/contexts", ctx, body = json.encodeToString(toNew(e, key)), idempotencyKey = key.value)
         return parseId(decode<ReclIdResponse>(res).id)
     }
 
     override suspend fun update(id: MemoryId, expectedVersion: Int, patch: MemoryPatch, ctx: AccessContext): MemoryEntry {
+        requireMutationsEnabled()
         requireNoSecret(listOfNotNull(patch.summary, patch.body))
         val req = ReclUpdateRequest(expectedVersion, ReclPatch(patch.summary, patch.body, patch.importance, patch.pinned, patch.validUntil?.toString()))
         val res = call(HttpMethod.Patch, "/contexts/${id.value.encodeURLPathPart()}", ctx, body = json.encodeToString(req))
@@ -169,6 +177,7 @@ class ReclAdapter(
     }
 
     override suspend fun supersede(oldId: MemoryId, expectedVersion: Int, new: NewMemoryEntry, key: IdempotencyKey, ctx: AccessContext): MemoryId {
+        requireMutationsEnabled()
         guard(new, ctx)
         val req = ReclSupersedeRequest(expectedVersion, toNew(new, key))
         val res = call(HttpMethod.Post, "/contexts/${oldId.value.encodeURLPathPart()}/supersede", ctx, body = json.encodeToString(req), idempotencyKey = key.value)
@@ -178,6 +187,7 @@ class ReclAdapter(
     }
 
     override suspend fun delete(id: MemoryId, mode: DeleteMode, ctx: AccessContext) {
+        requireMutationsEnabled()
         // Fail closed: never silently downgrade a Redact request to a soft delete.
         if (mode == DeleteMode.REDACT && !config.redactSupported) throw MemoryException(MemoryErrorKind.UNSUPPORTED, "recl redact API is unconfirmed (要確認)")
         call(HttpMethod.Delete, "/contexts/${id.value.encodeURLPathPart()}?mode=${mode.name.lowercase()}", ctx)
@@ -268,6 +278,10 @@ class ReclAdapter(
     }
 
     // ---- guards / mapping ----
+
+    private fun requireMutationsEnabled() {
+        if (!config.mutationsEnabled) throw MemoryException(MemoryErrorKind.UNSUPPORTED, "recl mutations are disabled until recl#20 and kivra#71 pass")
+    }
 
     private fun requirePermitted(scopes: List<ScopeRef>, ctx: AccessContext) {
         if (scopes.any { !ctx.permits(it) }) throw MemoryException(MemoryErrorKind.FORBIDDEN, "scope not permitted for this access context")

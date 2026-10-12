@@ -8,8 +8,10 @@ fun interface ReclCredentials {
 }
 
 /**
- * Connection settings for the recl REST API. EVERYTHING here is 要確認: recl's repository is empty, the planned API
- * (recl#3 to #7) is the only source. Not wired into kivra-app yet (no real API to connect to).
+ * Connection settings for the recl REST API. EVERYTHING here is 要確認. recl has merged only the design document
+ * (docs/design.md) and the internal Core / InMemory Storage; the real REST / MCP server and the Fortis Adapter are NOT
+ * provided yet, so the API contract below is Kivra's assumption, not a published recl API. Not wired into kivra-app
+ * (there is no production API to connect to). A mock server passing the contract tests is NOT production verification.
  *
  * [baseUrl] must be https (no http, no userinfo, no query, no fragment): the bearer token must never travel in
  * clear text or to an unexpected host. Redirects are never followed.
@@ -28,6 +30,12 @@ class ReclConfig(
     val idempotentSaveConfirmed: Boolean = false,
     /** Set true only after confirming a Redact / physical delete API exists (section 4.3-3). 要確認. */
     val redactSupported: Boolean = false,
+    /**
+     * Mutating operations (save / update / supersede / delete) are DISABLED by default and fail with UNSUPPORTED before
+     * any request is sent. Set true only after the server-side idempotency, authorization, Receipt and contract tests
+     * pass (recl#20 for the recl side, kivra#71 for the production capability gate). Read-only use does not need it.
+     */
+    val mutationsEnabled: Boolean = false,
 ) {
     val baseUrl: String
 

@@ -36,7 +36,8 @@ import kotlin.test.assertTrue
 class ReclAdapterTest {
     private val ctx: AccessContext = T.ctx(T.tenant)
     private val secretToken = "tok-SUPER-SECRET-123456"
-    private val cfg = ReclConfig("https://recl.example.test")
+    // Mutations are enabled only in this test fixture; the default config must refuse them (see the guard test).
+    private val cfg = ReclConfig("https://recl.example.test", mutationsEnabled = true)
 
     private fun adapter(engine: MockEngine, config: ReclConfig = cfg, sleeps: MutableList<Long>? = null) =
         ReclAdapter(config, engine, { secretToken }, sleep = { sleeps?.add(it) }, jitter = { 0.0 })
@@ -61,6 +62,18 @@ class ReclAdapterTest {
         val a = adapter(MockEngine { respond("{}") })
         assertTrue(a.capabilities.isEmpty())
         assertEquals(setOf(MemoryCapability.IDEMPOTENT_SAVE, MemoryCapability.REDACT), adapter(MockEngine { respond("{}") }, ReclConfig("https://r.test", idempotentSaveConfirmed = true, redactSupported = true)).capabilities)
+    }
+
+    @Test
+    fun `mutations are refused by default before any request is sent`() = runTest {
+        var calls = 0
+        val a = adapter(MockEngine { calls++; respond("{}", HttpStatusCode.Created, jsonHeaders) }, ReclConfig("https://recl.example.test"))
+        val key = T.key("k")
+        assertEquals(MemoryErrorKind.UNSUPPORTED, assertFailsWith<MemoryException> { a.save(T.entry(), key, ctx) }.kind)
+        assertEquals(MemoryErrorKind.UNSUPPORTED, assertFailsWith<MemoryException> { a.update(MemoryId("m1"), 1, MemoryPatch(summary = "x"), ctx) }.kind)
+        assertEquals(MemoryErrorKind.UNSUPPORTED, assertFailsWith<MemoryException> { a.supersede(MemoryId("m1"), 1, T.entry(), key, ctx) }.kind)
+        assertEquals(MemoryErrorKind.UNSUPPORTED, assertFailsWith<MemoryException> { a.delete(MemoryId("m1"), DeleteMode.SOFT, ctx) }.kind)
+        assertEquals(0, calls)
     }
 
     @Test

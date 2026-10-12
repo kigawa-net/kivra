@@ -247,6 +247,20 @@ class OperationJournalRepository(
         return applyTransition(lease, opId, expectedVersion, OperationStatus.RETRYABLE, Gate.Verified(evidence), null, null, null, nextActionAt)
     }
 
+    /**
+     * PREPARED -> IN_FLIGHT by a new writer generation (lease): the row was written by an earlier generation and never
+     * dispatched. Only with a verified NOT_SENT ref for this operation (#91 M5 takeover). The lease fence of [lease] still applies.
+     */
+    suspend fun takeOverPrepared(
+        lease: Lease,
+        opId: String,
+        expectedVersion: Long,
+        ref: VerifiedEvidenceRef,
+    ): JournalEntry {
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref, setOf(OperationStatus.PREPARED))
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.IN_FLIGHT, Gate.Takeover(evidence), null, null, null, null)
+    }
+
     /** IN_FLIGHT -> FAILED, only with a verified REJECTED ref for this operation: the external system explicitly refused. */
     suspend fun markRejected(
         lease: Lease,
@@ -263,7 +277,13 @@ class OperationJournalRepository(
     /** Why a status change is allowed. Only [Plain] comes without evidence, and it never reaches the evidence-only edges. */
     private sealed interface Gate {
         data object Plain : Gate
-        class Verified(val evidence: VerifiedEvidence) : Gate
+        sealed interface Proven : Gate {
+            val evidence: VerifiedEvidence
+        }
+        class Verified(override val evidence: VerifiedEvidence) : Proven
+
+        /** PREPARED -> IN_FLIGHT under a verified NOT_SENT ref (takeover by a newer generation). */
+        class Takeover(override val evidence: VerifiedEvidence) : Proven
     }
 
     /** The journal edge each evidence purpose may justify: allowed source states and the single target state. */
@@ -287,6 +307,7 @@ class OperationJournalRepository(
         expectedVersion: Long,
         purpose: EvidencePurpose,
         ref: VerifiedEvidenceRef,
+        fromStates: Set<OperationStatus> = purpose.edge().first,
     ): VerifiedEvidence {
         val subject = transaction(database) {
             requireLease(lease)
@@ -294,7 +315,6 @@ class OperationJournalRepository(
             if (row[ExternalOperationsTable.version] != expectedVersion) {
                 throw VersionConflictException("operation $opId is at version ${row[ExternalOperationsTable.version]}, expected $expectedVersion")
             }
-            val (fromStates, _) = purpose.edge()
             val from = OperationStatus.valueOf(row[ExternalOperationsTable.status])
             if (from !in fromStates) throw InvalidTransitionException("operation $opId: $purpose cannot justify a transition from $from")
             subjectOf(lease, row)
@@ -344,6 +364,14 @@ class OperationJournalRepository(
                     reason = "MAX_ATTEMPTS_EXCEEDED"
                 }
             }
+            is Gate.Takeover -> {
+                val ev = gate.evidence
+                if (from != OperationStatus.PREPARED || to != OperationStatus.IN_FLIGHT || ev.purpose != EvidencePurpose.NOT_SENT) {
+                    throw InvalidTransitionException("operation $opId: takeover needs a NOT_SENT ref on PREPARED -> IN_FLIGHT")
+                }
+                requireBound(lease, row, ev)
+                reason = "VERIFIED_NOT_SENT_TAKEOVER"
+            }
             is Gate.Verified -> {
                 val ev = gate.evidence
                 val (fromStates, edgeTarget) = ev.purpose.edge()
@@ -379,7 +407,7 @@ class OperationJournalRepository(
             it[ExternalOperationsTable.nextActionAt] = nextActionAt
             if (reason != null) it[transitionReason] = reason
             when (gate) {
-                is Gate.Verified -> {
+                is Gate.Proven -> {
                     val ev = gate.evidence
                     if (ev.purpose in RECONCILIATION_PURPOSES) {
                         it[reconcileAttempts] = row[ExternalOperationsTable.reconcileAttempts] + 1
@@ -426,7 +454,7 @@ class OperationJournalRepository(
      * The subject an evidence must be bound to, read from the row. A row without tenant or contract version (written before
      * V4) has no subject and therefore cannot settle through evidence.
      */
-    private fun subjectOf(lease: Lease, row: ResultRow): EvidenceSubject {
+    internal fun subjectOf(lease: Lease, row: ResultRow): EvidenceSubject {
         val opId = row[ExternalOperationsTable.opId]
         val tenant = row[ExternalOperationsTable.tenantId]
             ?: throw InvalidTransitionException("operation $opId has no tenant binding")

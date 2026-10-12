@@ -20,9 +20,8 @@ import java.time.Instant
  * | CONFIRMED | CONFIRMED | Success response, or a bound read-only lookup that found the request applied. |
  * | FAILED_PERMANENT | FAILED | Explicit refusal (local guard / contract validation). Not a retry candidate. |
  *
- * The M0 adapter (kivra-app) is NOT implemented in this milestone: M0's API (Lease / run-bound / `external_operations`)
- * is expected to change with #82 (raw Proof/Evidence -> VerifiedEvidenceRef). Keep the adapter as the only place that
- * knows M0 types. Until then [InMemoryMemoryMutationJournal] is the only implementation (dev/test only).
+ * The M0 adapter is `M0MemoryMutationJournalAdapter` (kivra-app, Issue #91). It is the only place that knows M0 types.
+ * [InMemoryMemoryMutationJournal] is the dev/test implementation: process-local and not durable.
  *
  * ## Invariants enforced by every implementation (see MutationJournalContract in tests)
  * 1. [prepare] is the atomic record step: one operationId maps to one immutable binding (identity, requestId, digest).

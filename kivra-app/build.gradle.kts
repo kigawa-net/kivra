@@ -10,6 +10,7 @@ application {
 
 dependencies {
     implementation(project(":kivra-core"))
+    implementation(project(":kivra-memory"))
 
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)
@@ -30,4 +31,6 @@ dependencies {
 
     testImplementation(libs.ktor.server.test.host)
     testImplementation(libs.h2)
+    // Shared MemoryMutationJournalPort Contract, run against the M0 adapter (Issue #91).
+    testImplementation(testFixtures(project(":kivra-memory")))
 }

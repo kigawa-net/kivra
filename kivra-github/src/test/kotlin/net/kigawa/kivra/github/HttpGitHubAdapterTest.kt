@@ -140,6 +140,18 @@ class HttpGitHubAdapterTest {
     }
 
     @Test
+    fun `HTTP engine exception details are never exposed as an Unknown result`() = runTest {
+        val secret = "Authorization: Bearer DO-NOT-LOG-THIS-TOKEN"
+        val f = Fake { throw IOException("network error $secret") }
+        val result = assertIs<GitHubResult.Unknown>(
+            f.adapter.createBranch(REPO, "kivra/run-r1", SHA),
+        )
+        assertFalse(result.cause.contains(secret))
+        assertTrue(result.cause.contains("IOException"))
+        assertEquals(1, f.count(HttpMethod.Post))
+    }
+
+    @Test
     fun `ensureRunBranch after unknown create adopts the branch found by name`() = runTest {
         var gets = 0
         val f = Fake { req ->

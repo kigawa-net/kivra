@@ -26,10 +26,14 @@ import net.kigawa.kivra.agent.AgentProfile
 import net.kigawa.kivra.exkes.ExecutionPort
 import net.kigawa.kivra.exkes.KivraNaming
 import net.kigawa.kivra.exkes.PortResult
+import net.kigawa.kivra.exkes.RuntimeSpec
+import net.kigawa.kivra.exkes.RuntimeId
+import net.kigawa.kivra.exkes.Runtime
 import net.kigawa.kivra.exkes.RuntimeState
 import net.kigawa.kivra.exkes.Workspace
 import net.kigawa.kivra.exkes.WorkspaceId
 import net.kigawa.kivra.exkes.WorkspaceSpec
+import net.kigawa.kivra.exkes.WorkspaceState
 import org.jetbrains.exposed.sql.transactions.transaction
 
 private val PROFILE = AgentProfile(name = "developer", version = "1", templateId = "tpl-dev")
@@ -57,6 +61,23 @@ private class DeleteTransientPort(private val inner: TestPort) : ExecutionPort b
     override suspend fun deleteWorkspace(id: WorkspaceId): PortResult<Workspace> {
         inner.mutatingCalls += "deleteWorkspace"
         return PortResult.Transient("connection refused")
+    }
+}
+
+/** Answers every deletion with [answer] and never reaches the fake (the effect, if any, is not modelled). */
+private class DeleteAnswerPort(private val inner: TestPort, private val answer: PortResult<Workspace>) : ExecutionPort by inner {
+    override suspend fun deleteWorkspace(id: WorkspaceId): PortResult<Workspace> {
+        inner.mutatingCalls += "deleteWorkspace"
+        return answer
+    }
+}
+
+/** Runs [beforeRecheck] on the second runtime listing of a deletion (the re-check after the claim), then delegates. */
+private class RecheckHookPort(private val inner: TestPort, private val beforeRecheck: suspend () -> Unit) : ExecutionPort by inner {
+    private var listCalls = 0
+    override suspend fun listRuntimes(workspace: WorkspaceId): PortResult<List<Runtime>> {
+        if (++listCalls == 2) beforeRecheck()
+        return inner.listRuntimes(workspace)
     }
 }
 
@@ -99,19 +120,31 @@ class ReaperTest {
     }
 
     @Test
-    fun `auto-delete deletes a proven orphan once, journals it, and a second pass does not resend`() = TestDb().use { db ->
+    fun `auto-delete requests the deletion once, verifies it gone on a later pass, and never resends`() = TestDb().use { db ->
         val port = TestPort()
         val runId = db.completedRun(port)
         val reaper = Reaper(port, db.database, NO_GRACE)
+        val wsId = workspaceIdOf(port, db, runId)
+        val key = "reap:${wsId.value}"
 
         val first = runBlocking { reaper.runOnce() }
-        assertEquals(ReapVerdict.DELETED, findingFor(first, runId).verdict)
+        assertEquals(ReapVerdict.DELETE_REQUESTED, findingFor(first, runId).verdict)
         assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
         assertEquals(1, db.reapRows(runId))
+        assertEquals(OperationStatus.UNKNOWN, db.journal.findByKey(runId, "EXKES_REAP_DELETE_WORKSPACE", key)!!.status)
 
+        // still listed (DELETING): reported only, not resent, not DELETED
         val second = runBlocking { reaper.runOnce() }
-        assertEquals(ReapVerdict.JOURNALED, findingFor(second, runId).verdict)
+        assertEquals(ReapVerdict.STILL_PRESENT, findingFor(second, runId).verdict)
         assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+
+        // exkes finishes: absent from the listing and not found on GET
+        port.fake.setWorkspaceState(wsId, WorkspaceState.DELETED)
+        val third = runBlocking { reaper.runOnce() }
+        assertEquals(ReapVerdict.DELETED, findingFor(third, runId).verdict)
+        assertEquals(OperationStatus.CONFIRMED, db.journal.findByKey(runId, "EXKES_REAP_DELETE_WORKSPACE", key)!!.status)
+        assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+        assertTrue(runBlocking { reaper.runOnce() }.findings.none { it.runId == runId.value })
     }
 
     @Test
@@ -137,12 +170,80 @@ class ReaperTest {
         val approved = db.completedRun(port)
         val other = db.completedRun(port)
         val approvedId = workspaceIdOf(port, db, approved).value
-        val config = ReaperConfig(dryRun = false, approvedWorkspaceIds = setOf(approvedId), retentionGrace = Duration.ZERO)
+        val config = ReaperConfig(dryRun = false, approvals = ReapApprovalPort { it.workspaceId == approvedId }, retentionGrace = Duration.ZERO)
 
         val report = runBlocking { Reaper(port, db.database, config).runOnce() }
-        assertEquals(ReapVerdict.DELETED, findingFor(report, approved).verdict)
+        assertEquals(ReapVerdict.DELETE_REQUESTED, findingFor(report, approved).verdict)
         assertEquals(ReapVerdict.CANDIDATE, findingFor(report, other).verdict)
         assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+    }
+
+    @Test
+    fun `a failing approval store approves nothing`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        val config = ReaperConfig(dryRun = false, approvals = ReapApprovalPort { error("approval store down") }, retentionGrace = Duration.ZERO)
+        assertEquals(ReapVerdict.CANDIDATE, findingFor(runBlocking { Reaper(port, db.database, config).runOnce() }, runId).verdict)
+        assertTrue(port.mutatingCalls.none { it == "deleteWorkspace" })
+    }
+
+    @Test
+    fun `a runtime that appears after the claim blocks the deletion before anything is sent`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        val wsId = workspaceIdOf(port, db, runId)
+        var appeared: RuntimeId? = null
+        val hooked = RecheckHookPort(port) {
+            appeared = (port.fake.createRuntime(wsId, RuntimeSpec("tpl-dev")) as PortResult.Ok).value.id
+        }
+        val reaper = Reaper(hooked, db.database, NO_GRACE)
+
+        assertEquals(ReapVerdict.BLOCKED, findingFor(runBlocking { reaper.runOnce() }, runId).verdict)
+        assertTrue(port.mutatingCalls.none { it == "deleteWorkspace" }, "nothing may be sent")
+        assertEquals(OperationStatus.PREPARED, db.journal.findByKey(runId, "EXKES_REAP_DELETE_WORKSPACE", "reap:${wsId.value}")!!.status)
+
+        // the runtime stops: a later pass re-claims the PREPARED record and deletes exactly once
+        port.fake.setRuntimeState(appeared!!, RuntimeState.STOPPED)
+        assertEquals(ReapVerdict.DELETE_REQUESTED, findingFor(runBlocking { reaper.runOnce() }, runId).verdict)
+        assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+    }
+
+    @Test
+    fun `a hold placed after the claim stops the deletion at the Run re-check, before anything is sent`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        val hooked = RecheckHookPort(port) {
+            db.setRunColumns(runId, "UPDATE development_runs SET hold_reason = 'ops-investigation' WHERE run_id = ?")
+        }
+        val reaper = Reaper(hooked, db.database, NO_GRACE)
+
+        assertEquals(ReapVerdict.BLOCKED, findingFor(runBlocking { reaper.runOnce() }, runId).verdict)
+        assertTrue(port.mutatingCalls.none { it == "deleteWorkspace" })
+        db.setRunColumns(runId, "UPDATE development_runs SET hold_reason = NULL WHERE run_id = ?")
+        assertEquals(ReapVerdict.DELETE_REQUESTED, findingFor(runBlocking { reaper.runOnce() }, runId).verdict)
+        assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+    }
+
+    @Test
+    fun `a 404 on delete is not proof of deletion - the workspace is verified, not assumed gone`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        val reaper = Reaper(DeleteAnswerPort(port, PortResult.NotFound), db.database, NO_GRACE)
+
+        assertEquals(ReapVerdict.DELETE_REQUESTED, findingFor(runBlocking { reaper.runOnce() }, runId).verdict)
+        // the fake still holds the workspace: a later pass reports it, does not declare it deleted, does not resend
+        assertEquals(ReapVerdict.STILL_PRESENT, findingFor(runBlocking { reaper.runOnce() }, runId).verdict)
+        assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+    }
+
+    @Test
+    fun `provider message text is kept out of findings and the Journal`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        val reaper = Reaper(DeleteAnswerPort(port, PortResult.Transient("Authorization: Bearer SECRET-TOKEN")), db.database, NO_GRACE)
+        val finding = findingFor(runBlocking { reaper.runOnce() }, runId)
+        val entry = db.journal.findByKey(runId, "EXKES_REAP_DELETE_WORKSPACE", "reap:${workspaceIdOf(port, db, runId).value}")!!
+        assertTrue("SECRET-TOKEN" !in finding.reason && "SECRET-TOKEN" !in (entry.lastError ?: ""), "leaked: ${finding.reason} / ${entry.lastError}")
     }
 
     @Test
@@ -187,7 +288,7 @@ class ReaperTest {
         val port = TestPort()
         val runId = db.completedRun(port) // AgentManager leaves its runtime STOPPED
         val report = runBlocking { Reaper(port, db.database, NO_GRACE).runOnce() }
-        assertEquals(ReapVerdict.DELETED, findingFor(report, runId).verdict)
+        assertEquals(ReapVerdict.DELETE_REQUESTED, findingFor(report, runId).verdict)
     }
 
     @Test
@@ -256,7 +357,8 @@ class ReaperTest {
         }
         assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
         val verdicts = reports.map { findingFor(it, runId).verdict }.sorted()
-        assertTrue(ReapVerdict.DELETED in verdicts && ReapVerdict.JOURNALED in verdicts, "verdicts: $verdicts")
+        assertEquals(1, verdicts.count { it == ReapVerdict.DELETE_REQUESTED }, "verdicts: $verdicts")
+        assertTrue(verdicts.all { it == ReapVerdict.DELETE_REQUESTED || it == ReapVerdict.JOURNALED || it == ReapVerdict.STILL_PRESENT }, "verdicts: $verdicts")
     }
 
     @Test

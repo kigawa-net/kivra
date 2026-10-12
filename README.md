@@ -14,7 +14,7 @@
 | `kivra-memory` | `MemoryProvider` ポートと型（MemoryEntry / ScopeRef / SourceRef / ContextBundle / HandoffRecord）、`InMemoryWorkingMemory`、`FakeMemoryPort`、縮退層 `MemoryService`（Write Queue・circuit breaker）、Secret フィルタ、recl 向け `ReclAdapter`（**計画 API に基づく骨格。実 API は存在せず未接続**）。M5 #37 |
 | `kivra-app` | Ktor アプリ、設定読込、`/health`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease / Agent のリポジトリ、`net.kigawa.kivra.agent.AgentManager`（M2: 1 Run に 1 Agent / 1 Workspace、Lease 保持下で ExecutionPort 経由に Workspace→Runtime→Execution を起動し、各副作用を Operation Journal に記録。UNKNOWN は照合のみで再送しない。Hold・Lease 喪失で停止、Cancel は回収後に CANCELLED。#30） |
 
-DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列、V4 Evidence Authority 束縛列。V2 は未マージのため編集中、V4 は #82 で追加。V3 は PR #55 で使用中のため本ブランチでは作らない。マージ後は V5 以降のみ追加）。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。
+DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列、V3 approvals（PR #55 / M0 で取り込み済み）、V4 Evidence Authority 束縛列（#82 で追加）。V2 は未マージのため編集中。マージ後は V5 以降のみ追加。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。
 
 ## ビルド・テスト
 
@@ -148,3 +148,32 @@ Mock の成功は Production Provider 検証ではない。要確認項目は [d
 - **Outbox / Audit**: Run の状態遷移・監査イベント（ハッシュ連鎖）・Outbox イベントを同一トランザクションで書く。
 - 実 Authority（署名検証・Provider Contract・Capability 登録）は #60 / #61 / #71 の範囲で、本リポジトリには interface と test 専用の `FakeTrustedEvidenceAuthority` だけがある。
 - テストは既定で H2（MODE=MySQL）、`KIVRA_TEST_DB=mariadb` で MariaDB 11 実機（上記）。CI は両方を実行する。
+
+## Approval Gate / Audit 永続層（M3, #33）
+
+- `ApprovalRepository`（`ApprovalConsumer` 実装）: 承認の依頼・承認・却下・失効。`consume(approvalId, digest, decisionId)` は
+  `status='APPROVED' AND digest=? AND expires_at>NOW(6)` の条件付き UPDATE 1 本で 1 回限り（同時実行でも勝者 1 件）。
+  状態更新と `audit_events` への追記は **同一 TX（run 行ロック下）** で行い、監査が書けなければ状態更新もロールバックして false（fail-closed）。
+  期限切れ掃除 `expireDue` も EXPIRED ごとに監査を同一 TX で書く。
+- 承認者は `VerifiedHuman` のみ。信頼された認証基盤が検証した人間の資格を表す型で、コンストラクタは private、生成は `internal fun issue` だけ。
+  文字列の subject から直接作る経路は無い。資格の生成は `HumanAssertionVerifier`（port）の実装に任せる。資格の有効期限は承認時に検査する。
+  Agent / Orchestrator の `Principal` からは作れず、申請 Agent と同一なら不可（four-eyes。DB の CHECK 制約でも担保）。
+  **制限**: 境界はプロセス内であり、人間の同一性の真正性は `HumanAssertionVerifier` 実装（OIDC の署名・iss・aud・exp 検証）に依存する。
+  OIDC の verifier アダプタは本 PR に含まれず未実装。
+- `OrphanIntentReaper`: 猶予後の孤立 INTENT（終端記録なし）を閉じる。
+  - `ABANDONED` は「承認が必要かつ未消費」かつ `ExecutionPhaseAuthority`（実行側の権威的な状態照会）が `NOT_STARTED` を返した場合のみ。
+    その後 `consume` は同じ decisionId を拒否するため、閉じた決定の handler は開始できない（承認自体は別の decisionId で再利用可）。
+  - それ以外（承認消費済み、承認不要、`STARTED`、未確認、照会の例外）はすべて `UNKNOWN`（照合必須。推測で再実行しない）。
+  - `ExecutionPhaseAuthority` の本番実装（Gateway / Coordinator 側の実行フェーズ store と、開始との原子的な CAS）と、定期実行の配線は未実装。
+- 監査ログ（ハッシュ連鎖 `audit_events`）の保証範囲:
+  - 検知できるもの: 残っているイベントの改変、途中の削除、並べ替え（`verifyChain`）。
+  - **検知できないもの**: DB 書込み権限を持つ主体はハッシュを再計算できるため、改竄の隠蔽は防げない。
+    **最新イベントの末尾切り詰め、および run の全イベント削除は、チェーン単独では検知できない**（残ったチェーンは有効のまま）。
+  - 外部アンカー: 監査 Tx 内で `enqueueAuditHeadAnchor(tx, audit, outbox, runId)` が現在の head（seq・hash）を `AUDIT_ANCHOR`
+    種別の Outbox イベントとして書くだけで、外部 I/O は行わない（DB Lock・Tx Rollback と外部障害を切り離す）。
+    配送は Tx コミット後に `AuditAnchorPublisher.publishDue()` が Outbox 経由で行い、冪等キーは event_id。
+    `AuditHeadAnchor` 実装（WORM ストア、別アカウントのログ、署名付きノート等）は event_id で重複排除すること。
+    アンカー先の永続化と publisher の定期実行スケジュールは未実装。
+    保存済みの head と現在の head を比べれば末尾切り詰めを検知できる。
+  - 運用で必要な前提: 運用 DB ロールに `audit_events` の UPDATE / DELETE を付与しない（マイグレーションでは強制していない）。
+    強い監査保証を Admission 条件にするには、外部アンカーの実装と権限分離が前提になる。

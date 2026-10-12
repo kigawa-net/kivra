@@ -138,20 +138,6 @@ class TestPort(val fake: FakeExecutionPort = FakeExecutionPort()) : ExecutionPor
     }
 }
 
-private val PROFILE = AgentProfile(name = "developer", version = "1", templateId = "tpl-dev")
-
-private val TEST_CONFIG = AgentManagerConfig(
-    tenantId = "tenant-1",
-    providerContractVersion = "2026-01",
-    leaseTtl = Duration.ofSeconds(30),
-    leaseGrace = Duration.ZERO,
-    pollInterval = Duration.ofMillis(1),
-    transientBackoff = Duration.ZERO,
-    workspaceReadyTimeout = Duration.ofSeconds(2),
-    runtimeReadyTimeout = Duration.ofSeconds(2),
-    executionTimeout = Duration.ofSeconds(2),
-)
-
 /**
  * The adapter pipeline of these tests: when the executor asks for evidence, the test port has observed exactly that
  * (a Transient call was never sent; a lookup found the resource). The observation is registered on the shared Fake and
@@ -188,6 +174,20 @@ private class PipelineObservedAuthority(private val fake: FakeTrustedEvidenceAut
     override suspend fun resolve(ref: VerifiedEvidenceRef, expected: EvidenceSubject, requiredPurpose: EvidencePurpose): VerifiedEvidence =
         fake.resolve(ref, expected, requiredPurpose)
 }
+
+private val PROFILE = AgentProfile(name = "developer", version = "1", templateId = "tpl-dev")
+
+private val TEST_CONFIG = AgentManagerConfig(
+    tenantId = "tenant-1",
+    providerContractVersion = "2026-01",
+    leaseTtl = Duration.ofSeconds(30),
+    leaseGrace = Duration.ZERO,
+    pollInterval = Duration.ofMillis(1),
+    transientBackoff = Duration.ZERO,
+    workspaceReadyTimeout = Duration.ofSeconds(2),
+    runtimeReadyTimeout = Duration.ofSeconds(2),
+    executionTimeout = Duration.ofSeconds(2),
+)
 
 class AgentManagerTest {
     private fun TestDb.preparingRun(): RunId {

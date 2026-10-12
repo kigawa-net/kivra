@@ -330,7 +330,7 @@ class OperationJournalRepository(
         errorClass: String?,
         error: String?,
         nextActionAt: LocalDateTime?,
-        allowCancelRequested: Boolean = false,
+        allowCancelRequested: Boolean,
     ): JournalEntry = transaction(database) {
         requireLease(lease, allowCancelRequested)
         val row = rowOf(lease, opId)

@@ -32,10 +32,11 @@ private val MIGRATION_FILES = mapOf(
     6 to "V6__authority_epoch_fence.sql",
     7 to "V7__pr_merge_binding.sql",
     8 to "V8__authority_epoch_publisher.sql",
+    9 to "V9__dev_task_intake.sql",
 )
 
 /**
- * Migration chain V1 -> V2 -> V3 -> V4 -> V5 -> V6 -> V7 -> V8 (Issue #88, #94, #53, #100). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
+ * Migration chain V1 -> V2 -> V3 -> V4 -> V5 -> V6 -> V7 -> V8 -> V9 (Issue #88, #94, #53, #100, #112). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
  *
  * Partial histories are built from copies of the real migration files in a temporary directory. Nothing here repairs,
  * skips or baselines a history: a mismatch must fail.
@@ -43,15 +44,18 @@ private val MIGRATION_FILES = mapOf(
 class MigrationChainTest {
 
     @Test
-    fun `empty database applies V1 to V8 in order and flyway validate passes`() = TestDb().use { db ->
+    fun `empty database applies V1 to V9 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
-        assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8"), appliedVersions(db.dataSource))
+        assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9"), appliedVersions(db.dataSource))
         assertTrue(flyway.info().all().all { it.state == MigrationState.SUCCESS })
         assertEquals(1, db.tableCount("approvals"))
         assertEquals(1, db.columnCount("external_operations", "tenant_id"))
         assertEquals(1, db.columnCount("external_operations", "provider_contract_version"))
         for (column in listOf("pr_number", "pr_node_id", "pr_repository_id", "pr_base_ref", "pr_policy_revision", "pr_review_manifest_digest")) {
+            assertEquals(1, db.columnCount("development_runs", column))
+        }
+        for (column in listOf("task_title", "principal", "idempotency_key")) {
             assertEquals(1, db.columnCount("development_runs", column))
         }
     }
@@ -66,7 +70,7 @@ class MigrationChainTest {
             // The later migrations are applied on top of the existing history, in order.
             runMigrations(db.dataSource)
             classpathFlyway(db.dataSource).validate()
-            assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8"), appliedVersions(db.dataSource))
+            assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9"), appliedVersions(db.dataSource))
 
             // The row is kept as written: no backfill, no guessed binding.
             assertEquals(before, db.snapshot(opId))

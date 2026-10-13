@@ -1,0 +1,71 @@
+package net.kigawa.kivra.db
+
+import net.kigawa.kivra.core.RunCompletionMode
+import org.flywaydb.core.Flyway
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import org.jetbrains.exposed.sql.transactions.transaction
+
+class MigrationTest {
+    @Test
+    fun `flyway rejects release branches with missing historical migration versions`() = TestDb().use { db ->
+        // A fresh DB can silently accept V1,V2,V4 if V3 is absent; such a branch is unsafe
+        // to roll out before the V3 migration from PR #55 (#88). Also protects future V5.
+        val flyway = Flyway.configure().dataSource(db.dataSource).load()
+        val versions = flyway.info().applied()
+            .mapNotNull { it.version?.toString()?.toIntOrNull() }
+            .sorted()
+        assertEquals((1..(versions.lastOrNull() ?: 0)).toList(), versions,
+            "Flyway version gap: include/validate V3 before V4 and V4 before V5 (#88)")
+    }
+
+
+    @Test
+    fun `flyway applies V1 and V2 and creates every core table`() = TestDb().use { db ->
+        val tables = transaction(db.database) {
+            execQuery("SELECT LOWER(TABLE_NAME) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ${TestDb.schemaSql}") { it.getString(1) }
+        }.toSet()
+        val expected = setOf(
+            "development_runs", "stage_executions", "agents", "execution_sessions", "external_operations",
+            "outbox_events", "inbox_events", "audit_events",
+        )
+        assertEquals(expected, tables.intersect(expected))
+    }
+
+    @Test
+    fun `there is a single run state table and no task_runs`() = TestDb().use { db ->
+        val tables = transaction(db.database) {
+            execQuery("SELECT LOWER(TABLE_NAME) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ${TestDb.schemaSql}") { it.getString(1) }
+        }.toSet()
+        assertEquals(false, "task_runs" in tables)
+        assertEquals(true, "development_runs" in tables)
+    }
+
+    @Test
+    fun `stage attempts are unique per run, stage and attempt number`() = TestDb().use { db ->
+        val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
+        fun insert() = transaction(db.database) {
+            execUpdate(
+                "INSERT INTO stage_executions (stage_exec_id, run_id, stage, attempt_no, lease_generation, status, started_at) VALUES (?, ?, 'DEVELOP', 1, 1, 'RUNNING', NOW(6))",
+                Ulid.generate(), run.runId.value,
+            )
+        }
+        insert()
+        val ex = kotlin.test.assertFailsWith<Exception> { insert() }
+        assertEquals(true, generateSequence(ex as Throwable) { it.cause }.any { (it as? java.sql.SQLException)?.let { s -> s.errorCode == 1062 || s.sqlState == "23505" } == true })
+    }
+
+    @Test
+    fun `exposed table definitions match the migrated columns`() = TestDb().use { db ->
+        // Selecting every mapped column fails if a definition drifts from the DDL.
+        transaction(db.database) {
+            listOf(
+                DevelopmentRunsTable, StageExecutionsTable, AgentsTable, ExecutionSessionsTable, ExternalOperationsTable,
+                OutboxEventsTable, InboxEventsTable, AuditEventsTable,
+            ).forEach { table ->
+                val cols = table.columns.joinToString(", ") { it.name }
+                execQuery("SELECT $cols FROM ${table.tableName}") { 1 }
+            }
+        }
+    }
+}

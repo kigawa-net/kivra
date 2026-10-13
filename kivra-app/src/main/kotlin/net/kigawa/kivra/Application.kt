@@ -12,9 +12,11 @@ import net.kigawa.kivra.db.runMigrations
 import net.kigawa.kivra.observability.MetricsRegistry
 import net.kigawa.kivra.routes.configureDevPreviewRoutes
 import net.kigawa.kivra.routes.configureHealthRoutes
+import net.kigawa.kivra.routes.isDevPreviewEnabled
 import net.kigawa.kivra.routes.configureObservabilityRoutes
 
 fun Application.module() {
+    val devPreviewEnabled = isDevPreviewEnabled(System.getenv())
     val config = KivraConfig.from(environment.config)
     val dataSource = createDataSource(config.database)
     runMigrations(dataSource)
@@ -24,7 +26,7 @@ fun Application.module() {
     val metrics = MetricsRegistry()
     routing {
         configureHealthRoutes()
-        if (System.getenv("KIVRA_DEV_DEMO_ENABLED") == "true") {
+        if (devPreviewEnabled) {
             configureDevPreviewRoutes()
         }
         configureObservabilityRoutes(metrics, config.metrics)

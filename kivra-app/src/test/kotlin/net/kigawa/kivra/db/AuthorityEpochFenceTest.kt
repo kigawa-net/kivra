@@ -276,4 +276,50 @@ class AuthorityEpochFenceTest {
         }
         assertEquals(OperationStatus.RETRYABLE, runBlocking { db.journal.markNotSent(lease, e.opId, e.version, ref) }.status)
     }
+
+    @Test
+    fun `PREPARED takeover refuses a Grant revoked between resolve and Journal commit`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val prepared = db.journal.prepare(lease, prepareOp("takeover-revoked"))
+        val ref = db.issueFor(prepared, EvidencePurpose.NOT_SENT)
+        val before = db.snapshot(lease, prepared.opId)
+        db.evidence.afterResolve = {
+            db.evidence.revokeGrant(PROVIDER)
+            db.syncAuthorityEpoch(TENANT, PROVIDER)
+            db.evidence.afterResolve = null
+        }
+        assertFailsWith<InvalidTransitionException> {
+            runBlocking { db.journal.takeOverPrepared(lease, prepared.opId, prepared.version, ref) }
+        }
+        assertEquals(before, db.snapshot(lease, prepared.opId))
+        assertEquals(OperationStatus.PREPARED, db.journal.get(prepared.opId)!!.status)
+    }
+
+    @Test
+    fun `PREPARED takeover refuses capability change between resolve and Journal commit`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val prepared = db.journal.prepare(lease, prepareOp("takeover-capability"))
+        val ref = db.issueFor(prepared, EvidencePurpose.NOT_SENT)
+        val before = db.snapshot(lease, prepared.opId)
+        db.evidence.afterResolve = {
+            db.evidence.setProviderContract(PROVIDER, CONTRACT, ProviderCapability.LOOKUP_BY_STABLE_REF)
+            db.syncAuthorityEpoch(TENANT, PROVIDER)
+            db.evidence.afterResolve = null
+        }
+        assertFailsWith<InvalidTransitionException> {
+            runBlocking { db.journal.takeOverPrepared(lease, prepared.opId, prepared.version, ref) }
+        }
+        assertEquals(before, db.snapshot(lease, prepared.opId))
+    }
+
+    @Test
+    fun `PREPARED takeover with unchanged Authority Epoch enters IN_FLIGHT`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val prepared = db.journal.prepare(lease, prepareOp("takeover-allowed"))
+        val ref = db.issueFor(prepared, EvidencePurpose.NOT_SENT)
+        val result = runBlocking { db.journal.takeOverPrepared(lease, prepared.opId, prepared.version, ref) }
+        assertEquals(OperationStatus.IN_FLIGHT, result.status)
+        assertEquals(prepared.version + 1, result.version)
+        assertEquals(1L, result.authorityEpoch)
+    }
 }

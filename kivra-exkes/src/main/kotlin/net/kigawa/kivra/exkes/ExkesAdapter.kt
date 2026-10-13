@@ -292,8 +292,8 @@ class ExkesAdapter(
         mutating: Boolean,
         query: Map<String, String> = emptyMap(),
     ): PortResult<T> {
-        val ambiguous: (String, Throwable?) -> PortResult<Nothing> =
-            { msg, t -> if (mutating) PortResult.Unknown(msg, t) else PortResult.Transient(msg) }
+        val ambiguous: (String) -> PortResult<Nothing> =
+            { code -> if (mutating) PortResult.Unknown(code) else PortResult.Transient(code) }
 
         val token = try {
             tokenProvider.token()
@@ -327,33 +327,33 @@ class ExkesAdapter(
         } catch (e: UnknownHostException) {
             return PortResult.Transient(CODE_DNS_FAILED) // no socket was opened
         } catch (e: CancellationException) {
-            if (e.javaClass.simpleName == "HttpRequestTimeoutException") return ambiguous(CODE_REQUEST_TIMEOUT, e)
+            if (e.javaClass.simpleName == "HttpRequestTimeoutException") return ambiguous(CODE_REQUEST_TIMEOUT)
             throw e
         } catch (e: Exception) {
             // includes HttpRequestTimeoutException (an IOException), socket timeouts, resets, EOF.
-            // Only the exception CLASS is kept: its message may contain the request or credential material.
-            return ambiguous("EXCEPTION_${e.javaClass.simpleName}", e)
+            // No exception instance, class name or message crosses this boundary.
+            return ambiguous("TRANSPORT_EXCEPTION")
         }
 
         return when {
             status in 200..299 -> try {
                 PortResult.Ok(json.decodeFromString(ser, text))
             } catch (e: Exception) {
-                ambiguous("UNDECODABLE_RESPONSE_$status", e)
+                ambiguous("UNDECODABLE_RESPONSE_$status")
             }
             status == 404 -> PortResult.NotFound
             // Kind-only: the provider's 409 body is not copied into the result.
             status == 409 -> PortResult.Conflict(CODE_PROVIDER_CONFLICT)
             // 429 is an HTTP response: exkes has seen the request. A mutating call is therefore UNKNOWN, not
             // "not sent"; a GET is idempotent and may be retried by the caller (Transient).
-            status == 429 -> ambiguous(CODE_TOO_MANY_REQUESTS, null)
+            status == 429 -> ambiguous(CODE_TOO_MANY_REQUESTS)
             status in 400..499 -> {
                 // Only the typed error code survives, and only when it is a plain token. The provider's free-text
                 // message is never copied: it may echo request data or credentials.
                 val err = errorOf(text)
                 PortResult.Rejected(status, err?.code?.takeIf { SAFE_CODE.matches(it) }, "HTTP $status")
             }
-            else -> ambiguous("HTTP_${status}_FROM_${method.value}", null)
+            else -> ambiguous("HTTP_${status}_FROM_${method.value}")
         }
     }
 

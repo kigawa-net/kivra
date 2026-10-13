@@ -127,7 +127,7 @@ internal class OperationExecutor(
                     } catch (e: CancellationException) {
                         throw e // the row stays IN_FLIGHT: whoever resumes treats it as UNKNOWN
                     } catch (e: Exception) {
-                        PortResult.Unknown("OPERATION_CALL_EXCEPTION", e)
+                        PortResult.Unknown("OPERATION_CALL_EXCEPTION")
                     }
                     val settled = settle(lease, op, inFlight, result, allowCancel)
                     if (settled.stop != null) return settled.stop

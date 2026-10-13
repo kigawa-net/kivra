@@ -2,14 +2,16 @@ package net.kigawa.kivra.db
 
 import java.time.Clock
 import java.time.LocalDateTime
+import net.kigawa.kivra.core.EvidenceRefusedException
+import net.kigawa.kivra.core.EvidencePurpose
+import net.kigawa.kivra.core.EvidenceSubject
 import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.Lease
-import net.kigawa.kivra.core.NotSentProof
 import net.kigawa.kivra.core.OperationStatus
-import net.kigawa.kivra.core.ReconciliationEvidence
-import net.kigawa.kivra.core.RejectedProof
 import net.kigawa.kivra.core.RunId
-import net.kigawa.kivra.core.TrustedEvidenceIssuers
+import net.kigawa.kivra.core.TrustedEvidenceAuthority
+import net.kigawa.kivra.core.VerifiedEvidence
+import net.kigawa.kivra.core.VerifiedEvidenceRef
 import net.kigawa.kivra.core.VersionConflictException
 import net.kigawa.kivra.core.canTransitionTo
 import org.jetbrains.exposed.exceptions.ExposedSQLException
@@ -68,25 +70,40 @@ data class JournalEntry(
     val lastErrorClass: String?,
     val lastError: String?,
     val version: Long,
+    val tenantId: String? = null,
+    val providerContractVersion: String? = null,
     val evidenceObservation: String? = null,
     val evidenceRef: String? = null,
     val evidenceObservedAt: LocalDateTime? = null,
     val evidenceIssuer: String? = null,
     val providerCapability: String? = null,
+    val evidencePurpose: String? = null,
+    val evidenceDigest: String? = null,
+    val evidenceExpiresAt: LocalDateTime? = null,
     val transitionReason: String? = null,
 )
 
+/**
+ * Operation Journal entry input. [tenantId] and [providerContractVersion] are stored with the row and become part of the
+ * [EvidenceSubject] every later evidence check is bound to. There is no default: an operation without a tenant or a
+ * contract version cannot settle through evidence (fail-closed).
+ */
 data class PrepareOperation(
     val opType: String,
     val idempotencyKey: String,
     val externalSystem: String,
     val stableRef: String,
     val requestHash: String,
+    val tenantId: String,
+    val providerContractVersion: String,
     val maxAttempts: Int = 3,
 )
 
 /** The same idempotency key was reused with different request content: a bug, never retried (design #11 section 4.2). */
 class RequestHashMismatchException(message: String) : RuntimeException(message)
+
+/** Existing idempotency key belongs to a different immutable provider/tenant contract. Never adopt it. */
+class OperationBindingMismatchException(message: String) : RuntimeException(message)
 
 /**
  * Operation Journal (design #11 section 4). Records external side effects before they happen.
@@ -97,14 +114,16 @@ class RequestHashMismatchException(message: String) : RuntimeException(message)
  * - Status changes are CAS on `(status, version)` and must follow [OperationStatus]'s state machine.
  *   `PREPARED/RETRYABLE -> IN_FLIGHT` increments `attempt`.
  * - Fail-closed on unknown results: an UNKNOWN entry is never re-dispatched on a guess. It goes to
- *   RECONCILIATION_REQUIRED, or settles through [reconcile] with persisted evidence of the real external state.
- *   [prepare] on an existing key returns the row as it is (status included), so a duplicate request or a new
- *   Worker adopts an UNKNOWN operation instead of re-sending it.
+ *   RECONCILIATION_REQUIRED, or settles through [reconcile] with a [VerifiedEvidenceRef] that the
+ *   [TrustedEvidenceAuthority] resolves for this exact operation.
+ * - Evidence-gated transitions resolve the ref **before** the CAS and never change the row when the ref is refused,
+ *   the Authority is unavailable, or the subject / purpose / expiry does not match. Such a call throws and leaves the
+ *   entry in IN_FLIGHT / UNKNOWN / RECONCILIATION_REQUIRED.
  */
 class OperationJournalRepository(
     private val database: Database,
+    private val authority: TrustedEvidenceAuthority,
     private val clock: Clock = Clock.systemUTC(),
-    private val trustedIssuers: Set<String> = TrustedEvidenceIssuers.DEFAULT,
 ) {
 
     fun prepare(lease: Lease, op: PrepareOperation): JournalEntry {
@@ -128,6 +147,16 @@ class OperationJournalRepository(
             if (existing[ExternalOperationsTable.requestHash] != op.requestHash) {
                 throw RequestHashMismatchException("idempotency key ${op.idempotencyKey} reused with a different request")
             }
+            // Request digest equality does NOT imply equality of the authenticated subject.
+            // A duplicate key may only adopt the exact same immutable operation binding.
+            if (existing[ExternalOperationsTable.externalSystem] != op.externalSystem ||
+                existing[ExternalOperationsTable.stableRef] != op.stableRef ||
+                existing[ExternalOperationsTable.tenantId] != op.tenantId ||
+                existing[ExternalOperationsTable.providerContractVersion] != op.providerContractVersion ||
+                existing[ExternalOperationsTable.maxAttempts] != op.maxAttempts
+            ) {
+                throw OperationBindingMismatchException("idempotency key reused with a different operation binding")
+            }
             return existing.toEntry()
         }
         val now = utcNow(clock)
@@ -140,6 +169,8 @@ class OperationJournalRepository(
             it[externalSystem] = op.externalSystem
             it[stableRef] = op.stableRef
             it[requestHash] = op.requestHash
+            it[tenantId] = op.tenantId
+            it[providerContractVersion] = op.providerContractVersion
             it[status] = OperationStatus.PREPARED.name
             it[maxAttempts] = op.maxAttempts
             it[leaseGeneration] = lease.generation
@@ -175,51 +206,130 @@ class OperationJournalRepository(
     ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Plain, externalRef, errorClass, error, nextActionAt)
 
     /**
-     * Leaves UNKNOWN / RECONCILIATION_REQUIRED on the strength of an observation of the real external state.
-     * The evidence is bound to this operation (run, op id, request hash), must come from a trusted issuer, must not be
-     * observed in the future, and must not predate the moment the entry entered its current status. Persisted as the reason.
-     * - CONFIRMED needs EXISTS (an already existing resource is adopted, never re-created; [externalRef] should be set),
-     * - RETRYABLE needs ABSENT from an AUTHORITATIVE_ABSENCE or AUTHORITATIVE_IDEMPOTENCY source (never a plain lookup miss),
-     * - FAILED needs FAILED_CONFIRMED.
+     * Leaves UNKNOWN / RECONCILIATION_REQUIRED on the strength of verified evidence of the real external state.
+     * The ref is resolved for this operation's subject and must have the purpose that matches [to]:
+     * - CONFIRMED needs RECONCILE_EXISTS (an existing resource is adopted, never re-created; [externalRef] should be set),
+     * - RETRYABLE needs RECONCILE_ABSENT from an AUTHORITATIVE_ABSENCE / AUTHORITATIVE_IDEMPOTENCY capability
+     *   (only from UNKNOWN, never a plain lookup miss),
+     * - FAILED needs RECONCILE_FAILED.
      */
-    fun reconcile(
+    suspend fun reconcile(
         lease: Lease,
         opId: String,
         expectedVersion: Long,
         to: OperationStatus,
-        evidence: ReconciliationEvidence,
+        ref: VerifiedEvidenceRef,
         externalRef: String? = null,
         nextActionAt: LocalDateTime? = null,
-    ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Evidence(evidence), externalRef, null, null, nextActionAt)
+    ): JournalEntry {
+        val purpose = when (to) {
+            OperationStatus.CONFIRMED -> EvidencePurpose.RECONCILE_EXISTS
+            OperationStatus.RETRYABLE -> EvidencePurpose.RECONCILE_ABSENT
+            OperationStatus.FAILED -> EvidencePurpose.RECONCILE_FAILED
+            else -> throw InvalidTransitionException("operation $opId: reconcile cannot target $to")
+        }
+        val evidence = resolveFor(lease, opId, expectedVersion, purpose, ref)
+        return applyTransition(lease, opId, expectedVersion, to, Gate.Verified(evidence), externalRef, null, null, nextActionAt)
+    }
 
     /**
-     * IN_FLIGHT -> RETRYABLE, only with a [NotSentProof] from a trusted issuer that the call never left the process.
-     * The only evidence-free-looking route back into the retry loop, and it is still gated by the proof.
+     * IN_FLIGHT -> RETRYABLE, only with a verified NOT_SENT ref for this operation: the call never left the process.
+     * The only route back into the retry loop from IN_FLIGHT.
      */
-    fun markNotSent(
+    suspend fun markNotSent(
         lease: Lease,
         opId: String,
         expectedVersion: Long,
-        proof: NotSentProof,
+        ref: VerifiedEvidenceRef,
         nextActionAt: LocalDateTime? = null,
-    ): JournalEntry = applyTransition(lease, opId, expectedVersion, OperationStatus.RETRYABLE, Gate.NotSent(proof), null, null, null, nextActionAt)
+    ): JournalEntry {
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref)
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.RETRYABLE, Gate.Verified(evidence), null, null, null, nextActionAt)
+    }
 
-    /** IN_FLIGHT -> FAILED, only with a [RejectedProof] from a trusted issuer that the external system explicitly refused. */
-    fun markRejected(
+    /**
+     * PREPARED -> IN_FLIGHT by a new writer generation (lease): the row was written by an earlier generation and never
+     * dispatched. Only with a verified NOT_SENT ref for this operation (#91 M5 takeover). The lease fence of [lease] still applies.
+     */
+    suspend fun takeOverPrepared(
         lease: Lease,
         opId: String,
         expectedVersion: Long,
-        proof: RejectedProof,
+        ref: VerifiedEvidenceRef,
+    ): JournalEntry {
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref, setOf(OperationStatus.PREPARED))
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.IN_FLIGHT, Gate.Takeover(evidence), null, null, null, null)
+    }
+
+    /** IN_FLIGHT -> FAILED, only with a verified REJECTED ref for this operation: the external system explicitly refused. */
+    suspend fun markRejected(
+        lease: Lease,
+        opId: String,
+        expectedVersion: Long,
+        ref: VerifiedEvidenceRef,
         errorClass: String? = null,
         error: String? = null,
-    ): JournalEntry = applyTransition(lease, opId, expectedVersion, OperationStatus.FAILED, Gate.Rejected(proof), null, errorClass, error, null)
+    ): JournalEntry {
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.REJECTED, ref)
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.FAILED, Gate.Verified(evidence), null, errorClass, error, null)
+    }
 
-    /** Why a status change is allowed. Only [Plain] comes without a proof, and it never reaches the proof-only edges. */
+    /** Why a status change is allowed. Only [Plain] comes without evidence, and it never reaches the evidence-only edges. */
     private sealed interface Gate {
         data object Plain : Gate
-        class Evidence(val evidence: ReconciliationEvidence) : Gate
-        class NotSent(val proof: NotSentProof) : Gate
-        class Rejected(val proof: RejectedProof) : Gate
+        sealed interface Proven : Gate {
+            val evidence: VerifiedEvidence
+        }
+        class Verified(override val evidence: VerifiedEvidence) : Proven
+
+        /** PREPARED -> IN_FLIGHT under a verified NOT_SENT ref (takeover by a newer generation). */
+        class Takeover(override val evidence: VerifiedEvidence) : Proven
+    }
+
+    /** The journal edge each evidence purpose may justify: allowed source states and the single target state. */
+    private fun EvidencePurpose.edge(): Pair<Set<OperationStatus>, OperationStatus> = when (this) {
+        EvidencePurpose.NOT_SENT -> setOf(OperationStatus.IN_FLIGHT) to OperationStatus.RETRYABLE
+        EvidencePurpose.REJECTED -> setOf(OperationStatus.IN_FLIGHT) to OperationStatus.FAILED
+        EvidencePurpose.RECONCILE_EXISTS -> setOf(OperationStatus.UNKNOWN, OperationStatus.RECONCILIATION_REQUIRED) to OperationStatus.CONFIRMED
+        EvidencePurpose.RECONCILE_ABSENT -> setOf(OperationStatus.UNKNOWN) to OperationStatus.RETRYABLE
+        EvidencePurpose.RECONCILE_FAILED -> setOf(OperationStatus.UNKNOWN, OperationStatus.RECONCILIATION_REQUIRED) to OperationStatus.FAILED
+    }
+
+    /**
+     * Step 1 of every evidence-gated transition, before the Authority is called: lease, row version and edge are checked
+     * against the row, then the row's subject is handed to [TrustedEvidenceAuthority.resolve]. Nothing is written here.
+     * A refusal becomes [InvalidTransitionException]; an unavailable Authority propagates as
+     * [net.kigawa.kivra.core.EvidenceAuthorityUnavailableException]. In both cases the entry is unchanged.
+     */
+    private suspend fun resolveFor(
+        lease: Lease,
+        opId: String,
+        expectedVersion: Long,
+        purpose: EvidencePurpose,
+        ref: VerifiedEvidenceRef,
+        fromStates: Set<OperationStatus> = purpose.edge().first,
+    ): VerifiedEvidence {
+        val subject = transaction(database) {
+            requireLease(lease)
+            val row = rowOf(lease, opId)
+            if (row[ExternalOperationsTable.version] != expectedVersion) {
+                throw VersionConflictException("operation $opId is at version ${row[ExternalOperationsTable.version]}, expected $expectedVersion")
+            }
+            val from = OperationStatus.valueOf(row[ExternalOperationsTable.status])
+            if (from !in fromStates) throw InvalidTransitionException("operation $opId: $purpose cannot justify a transition from $from")
+            subjectOf(lease, row)
+        }
+        val evidence = try {
+            authority.resolve(ref, subject, purpose)
+        } catch (e: EvidenceRefusedException) {
+            // Provider/Authority exception bodies can carry tokens or context content; never surface them via Journal errors.
+            throw InvalidTransitionException("operation $opId: EVIDENCE_REFUSED")
+        }
+        // Defense in depth: the Authority must answer for exactly this subject and purpose.
+        if (evidence.subject != subject || evidence.purpose != purpose || evidence.ref != ref) {
+            throw InvalidTransitionException("operation $opId: authority answered for another subject or purpose")
+        }
+        return evidence
     }
 
     private fun applyTransition(
@@ -234,9 +344,7 @@ class OperationJournalRepository(
         nextActionAt: LocalDateTime?,
     ): JournalEntry = transaction(database) {
         requireLease(lease)
-        val row = ExternalOperationsTable.selectAll().where {
-            (ExternalOperationsTable.opId eq opId) and (ExternalOperationsTable.runId eq lease.runId.value)
-        }.firstOrNull() ?: throw NoSuchElementException("operation $opId not found in run ${lease.runId}")
+        val row = rowOf(lease, opId)
         val from = OperationStatus.valueOf(row[ExternalOperationsTable.status])
         if (row[ExternalOperationsTable.version] != expectedVersion) {
             throw VersionConflictException("operation $opId is at version ${row[ExternalOperationsTable.version]}, expected $expectedVersion")
@@ -246,7 +354,7 @@ class OperationJournalRepository(
         when (gate) {
             is Gate.Plain -> {
                 if (to in from.evidenceGated) {
-                    throw InvalidTransitionException("operation $opId: $from -> $to requires reconciliation evidence (use reconcile)")
+                    throw InvalidTransitionException("operation $opId: $from -> $to requires verified evidence (use reconcile)")
                 }
                 if (!from.canTransitionTo(to)) throw InvalidTransitionException("operation $opId: $from -> $to is not allowed")
                 if (from == OperationStatus.RETRYABLE && to == OperationStatus.IN_FLIGHT &&
@@ -257,30 +365,29 @@ class OperationJournalRepository(
                     reason = "MAX_ATTEMPTS_EXCEEDED"
                 }
             }
-            is Gate.Evidence -> {
+            is Gate.Takeover -> {
                 val ev = gate.evidence
-                if (to !in from.evidenceGated) throw InvalidTransitionException("operation $opId: $from -> $to is not an evidence-based transition")
+                if (from != OperationStatus.PREPARED || to != OperationStatus.IN_FLIGHT || ev.purpose != EvidencePurpose.NOT_SENT) {
+                    throw InvalidTransitionException("operation $opId: takeover needs a NOT_SENT ref on PREPARED -> IN_FLIGHT")
+                }
+                requireBound(lease, row, ev)
+                reason = "VERIFIED_NOT_SENT_TAKEOVER"
+            }
+            is Gate.Verified -> {
+                val ev = gate.evidence
+                val (fromStates, edgeTarget) = ev.purpose.edge()
+                if (from !in fromStates || to != edgeTarget) {
+                    throw InvalidTransitionException("operation $opId: ${ev.purpose} cannot justify $from -> $to")
+                }
                 if (!ev.justifies(to)) {
-                    throw InvalidTransitionException("operation $opId: ${ev.observation}/${ev.providerCapability} does not justify $from -> $to")
+                    throw InvalidTransitionException("operation $opId: ${ev.purpose} (${ev.observation}/${ev.capability}) does not justify $from -> $to")
                 }
-                requireBound(lease, opId, row, ev.runId, ev.opId, ev.requestHash, ev.issuer, ev.observedAt)
-                reason = "RECONCILED_${ev.observation.name}"
-            }
-            is Gate.NotSent -> {
-                val p = gate.proof
-                if (from != OperationStatus.IN_FLIGHT || to != OperationStatus.RETRYABLE) {
-                    throw InvalidTransitionException("operation $opId: a NotSentProof cannot justify $from -> $to")
+                requireBound(lease, row, ev)
+                reason = when (ev.purpose) {
+                    EvidencePurpose.NOT_SENT -> "VERIFIED_NOT_SENT"
+                    EvidencePurpose.REJECTED -> "VERIFIED_REJECTED"
+                    else -> "RECONCILED_${ev.observation!!.name}"
                 }
-                requireBound(lease, opId, row, p.runId, p.opId, p.requestHash, p.issuer, p.observedAt)
-                reason = "PROOF_NOT_SENT"
-            }
-            is Gate.Rejected -> {
-                val p = gate.proof
-                if (from != OperationStatus.IN_FLIGHT || to != OperationStatus.FAILED) {
-                    throw InvalidTransitionException("operation $opId: a RejectedProof cannot justify $from -> $to")
-                }
-                requireBound(lease, opId, row, p.runId, p.opId, p.requestHash, p.issuer, p.observedAt)
-                reason = "PROOF_REJECTED"
             }
         }
 
@@ -301,24 +408,19 @@ class OperationJournalRepository(
             it[ExternalOperationsTable.nextActionAt] = nextActionAt
             if (reason != null) it[transitionReason] = reason
             when (gate) {
-                is Gate.Evidence -> {
+                is Gate.Proven -> {
                     val ev = gate.evidence
-                    it[reconcileAttempts] = row[ExternalOperationsTable.reconcileAttempts] + 1
-                    it[evidenceObservation] = ev.observation.name
-                    it[evidenceRef] = ev.evidenceRef
+                    if (ev.purpose in RECONCILIATION_PURPOSES) {
+                        it[reconcileAttempts] = row[ExternalOperationsTable.reconcileAttempts] + 1
+                    }
+                    it[evidenceObservation] = ev.observation?.name
+                    it[evidenceRef] = ev.ref.value
                     it[evidenceObservedAt] = ev.observedAt
-                    it[evidenceIssuer] = ev.issuer
-                    it[providerCapability] = ev.providerCapability.name
-                }
-                is Gate.NotSent -> {
-                    it[evidenceRef] = gate.proof.evidenceRef
-                    it[evidenceObservedAt] = gate.proof.observedAt
-                    it[evidenceIssuer] = gate.proof.issuer
-                }
-                is Gate.Rejected -> {
-                    it[evidenceRef] = gate.proof.evidenceRef
-                    it[evidenceObservedAt] = gate.proof.observedAt
-                    it[evidenceIssuer] = gate.proof.issuer
+                    it[evidenceIssuer] = ev.principal
+                    it[providerCapability] = ev.capability.name
+                    it[evidencePurpose] = ev.purpose.name
+                    it[evidenceDigest] = ev.requestDigest
+                    it[evidenceExpiresAt] = ev.expiresAt
                 }
                 is Gate.Plain -> Unit
             }
@@ -328,30 +430,46 @@ class OperationJournalRepository(
     }
 
     /**
-     * Binding checks shared by evidence and proofs: same run and operation, same request hash, a trusted issuer,
-     * not in the future, and not older than the moment the row entered its current status.
+     * Checks that shared by all evidence: the evidence was resolved for this row (checked again here), it has not expired,
+     * it is not observed in the future, and it is not older than the moment the row entered its current status.
      */
-    private fun requireBound(
-        lease: Lease,
-        opId: String,
-        row: ResultRow,
-        runId: RunId,
-        evidenceOpId: String,
-        requestHash: String,
-        issuer: String,
-        observedAt: LocalDateTime,
-    ) {
-        if (runId != lease.runId || evidenceOpId != opId) {
+    private fun requireBound(lease: Lease, row: ResultRow, ev: VerifiedEvidence) {
+        val opId = row[ExternalOperationsTable.opId]
+        if (ev.subject != subjectOf(lease, row)) {
             throw InvalidTransitionException("operation $opId: evidence is bound to another operation")
         }
-        if (requestHash != row[ExternalOperationsTable.requestHash]) {
-            throw InvalidTransitionException("operation $opId: evidence request hash does not match the operation")
-        }
-        if (issuer !in trustedIssuers) throw InvalidTransitionException("operation $opId: issuer '$issuer' is not trusted")
-        if (observedAt.isAfter(utcNow(clock))) throw InvalidTransitionException("operation $opId: evidence observedAt is in the future")
-        if (observedAt.isBefore(row[ExternalOperationsTable.updatedAt])) {
+        val now = utcNow(clock)
+        if (!now.isBefore(ev.expiresAt)) throw InvalidTransitionException("operation $opId: evidence has expired")
+        if (ev.observedAt.isAfter(now)) throw InvalidTransitionException("operation $opId: evidence observedAt is in the future")
+        if (ev.observedAt.isBefore(row[ExternalOperationsTable.updatedAt])) {
             throw InvalidTransitionException("operation $opId: evidence was observed before the operation entered its current status")
         }
+    }
+
+    private fun rowOf(lease: Lease, opId: String): ResultRow =
+        ExternalOperationsTable.selectAll().where {
+            (ExternalOperationsTable.opId eq opId) and (ExternalOperationsTable.runId eq lease.runId.value)
+        }.firstOrNull() ?: throw NoSuchElementException("operation $opId not found in run ${lease.runId}")
+
+    /**
+     * The subject an evidence must be bound to, read from the row. A row without tenant or contract version (written before
+     * V4) has no subject and therefore cannot settle through evidence.
+     */
+    internal fun subjectOf(lease: Lease, row: ResultRow): EvidenceSubject {
+        val opId = row[ExternalOperationsTable.opId]
+        val tenant = row[ExternalOperationsTable.tenantId]
+            ?: throw InvalidTransitionException("operation $opId has no tenant binding")
+        val contract = row[ExternalOperationsTable.providerContractVersion]
+            ?: throw InvalidTransitionException("operation $opId has no provider contract binding")
+        return EvidenceSubject(
+            tenantId = tenant,
+            runId = lease.runId.value,
+            operationId = opId,
+            providerId = row[ExternalOperationsTable.externalSystem],
+            actionId = row[ExternalOperationsTable.opType],
+            requestDigest = row[ExternalOperationsTable.requestHash],
+            providerContractVersion = contract,
+        )
     }
 
     fun get(opId: String): JournalEntry? = transaction(database) {
@@ -383,11 +501,22 @@ class OperationJournalRepository(
         lastErrorClass = this[ExternalOperationsTable.lastErrorClass],
         lastError = this[ExternalOperationsTable.lastError],
         version = this[ExternalOperationsTable.version],
+        tenantId = this[ExternalOperationsTable.tenantId],
+        providerContractVersion = this[ExternalOperationsTable.providerContractVersion],
         evidenceObservation = this[ExternalOperationsTable.evidenceObservation],
         evidenceRef = this[ExternalOperationsTable.evidenceRef],
         evidenceObservedAt = this[ExternalOperationsTable.evidenceObservedAt],
         evidenceIssuer = this[ExternalOperationsTable.evidenceIssuer],
         providerCapability = this[ExternalOperationsTable.providerCapability],
+        evidencePurpose = this[ExternalOperationsTable.evidencePurpose],
+        evidenceDigest = this[ExternalOperationsTable.evidenceDigest],
+        evidenceExpiresAt = this[ExternalOperationsTable.evidenceExpiresAt],
         transitionReason = this[ExternalOperationsTable.transitionReason],
     )
+
+    private companion object {
+        val RECONCILIATION_PURPOSES = setOf(
+            EvidencePurpose.RECONCILE_EXISTS, EvidencePurpose.RECONCILE_ABSENT, EvidencePurpose.RECONCILE_FAILED,
+        )
+    }
 }

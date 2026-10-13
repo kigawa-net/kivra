@@ -14,7 +14,10 @@ import org.jetbrains.exposed.sql.transactions.transaction
  * Connection: `KIVRA_TEST_MARIADB_URL` (server URL without a schema, default `jdbc:mariadb://localhost:3306/`),
  * `KIVRA_TEST_MARIADB_USER` (default root; needs CREATE/DROP DATABASE), `KIVRA_TEST_MARIADB_PASSWORD`.
  */
-class TestDb : AutoCloseable {
+class TestDb(
+    /** Applies the schema before the repositories are connected. Default: the full classpath migration chain. */
+    private val migrate: (DataSource) -> Unit = ::runMigrations,
+) : AutoCloseable {
     private val schema: String? = if (isMariaDb) "kivra_t_${System.nanoTime()}" else null
     val dataSource: DataSource
 
@@ -39,7 +42,7 @@ class TestDb : AutoCloseable {
     val database: Database
 
     init {
-        runMigrations(dataSource)
+        migrate(dataSource)
         database = connectDatabase(dataSource)
     }
 
@@ -47,7 +50,9 @@ class TestDb : AutoCloseable {
     val audit = AuditRepository()
     val runs = DevelopmentRunRepository(database, outbox, audit)
     val leases = SqlLeaseStore(database)
-    val journal = OperationJournalRepository(database)
+    /** TEST ONLY Authority. Register observations and provider contracts on it before evidence-gated transitions. */
+    val evidence = FakeTrustedEvidenceAuthority()
+    val journal = OperationJournalRepository(database, evidence)
 
     /** Moves the lease expiry [seconds] into the past on the DB clock (simulates a worker that stopped renewing). */
     fun expireLease(runId: String, seconds: Long = 10) = transaction(database) {

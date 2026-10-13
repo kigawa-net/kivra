@@ -1,8 +1,10 @@
 package net.kigawa.kivra.routes
 
 import io.ktor.http.ContentType
+import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.response.header
+import io.ktor.server.response.respondRedirect
 import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
@@ -30,6 +32,11 @@ internal fun Route.configureUiRoutes() {
     val index = loadUiResource("index.html")
     val appJs = loadUiResource("app.js")
     val appCss = loadUiResource("app.css")
+    // The site root has no page of its own. Send people to the UI (a fixed relative path, so there is no open redirect).
+    get("/") {
+        call.response.header("Cache-Control", "no-store")
+        call.respondRedirect("/ui", permanent = false)
+    }
     get("/ui") { call.respondUi(index, HTML_TYPE) }
     get("/ui/") { call.respondUi(index, HTML_TYPE) }
     get("/ui/app.js") { call.respondUi(appJs, JS_TYPE) }

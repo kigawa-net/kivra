@@ -161,6 +161,18 @@ Run の `task_id` は `api:<runId>`（fusha-task のタスクとは紐づかな�
 
 **#111 のダミー API との関係**: `/api/dev/*` は `KIVRA_DEV_DEMO_ENABLED=true` かつ `KIVRA_RUNTIME_ENV=development` のときだけ有効な、メモリ上の開発用ダミーで、そのまま残す。サーバーでは使わない。
 
+## UI（最小の Web UI）
+
+`GET /ui`（`/ui/`）で、Task の投入、Run の一覧と詳細を見られる最小の画面を配信する。ビルド工程（Node、React、バンドラ）は無く、`kivra-app/src/main/resources/ui/`（`index.html`、`app.js`、`app.css`）をそのまま jar に入れて返す。
+
+- **有効化**: Task API と同じく `KIVRA_AUTH_MODE` が設定されているときだけ登録する。未設定なら `/ui` は 404。
+- **認証**: HTML 自体には秘密が無いので `/ui` には認証を掛けていない。画面が呼ぶ `/api/*` は Task API の認証（本番は oauth2-proxy が付ける Keycloak の JWT を kivra が検証）で保護される。画面の JS は `Authorization` を付けない。
+- **シミュレーション**: この画面の Run はすべてシミュレーション（`mode: SIMULATED`、`executed: false`）。画面にもその旨を常時表示し、「実行中」「成功」のような実行されたと誤認させる表現は使わない。
+- **CSP**: `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`。インラインの script と style は使わない（別ファイル）。あわせて `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`。
+- **XSS 対策**: サーバーからのデータ（title など）は `textContent` だけで DOM に入れる。`innerHTML` などの HTML 文字列を解釈する API、`eval`、`new Function` は使わない（テストで静的に検査している）。
+- **外部依存なし**: CDN やフォント等の外部 URL は使わない（テストで検査している）。
+- **未対応**: Overview、Review・承認 UI、SSE による更新（現状は 30 秒ごとのポーリング）、Memory・Settings 画面、Chat からの投入。Issue #76 / #79 の後続フェーズで扱う。
+
 ## デプロイ
 
 - イメージ: `harbor.kigawa.net/library/kivra:<tag>`（`Dockerfile`、ビルドは `installDist`。ファット JAR は使わない）。`ENTRYPOINT` は `/app/bin/kivra-app`、ポートは 8080。実行ユーザーは非 root の `kivra`。

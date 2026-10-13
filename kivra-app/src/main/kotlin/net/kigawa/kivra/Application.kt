@@ -21,6 +21,7 @@ import net.kigawa.kivra.routes.configureHealthRoutes
 import net.kigawa.kivra.routes.isDevPreviewEnabled
 import net.kigawa.kivra.routes.configureObservabilityRoutes
 import net.kigawa.kivra.routes.configureTaskApiRoutes
+import net.kigawa.kivra.routes.configureUiRoutes
 
 fun Application.module() = appModule(System.getenv())
 
@@ -42,7 +43,11 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureDevPreviewRoutes()
             configureDevTaskSubmitRoutes()
         }
-        if (taskApiIdentity != null) configureTaskApiRoutes(runs, taskApiIdentity)
+        if (taskApiIdentity != null) {
+            configureTaskApiRoutes(runs, taskApiIdentity)
+            // The UI calls the Task API, so it is served only when the Task API is enabled.
+            configureUiRoutes()
+        }
         configureObservabilityRoutes(metrics, config.metrics)
     }
 }

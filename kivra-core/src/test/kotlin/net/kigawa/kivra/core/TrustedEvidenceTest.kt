@@ -27,7 +27,21 @@ class TrustedEvidenceTest {
         requestDigest = subject.requestDigest,
         observedAt = now,
         expiresAt = now.plusHours(1),
+        authorityEpoch = 1,
+        capabilityRevision = 1,
+        grantGeneration = 1,
+        evidenceDigest = "b".repeat(64),
     )
+
+    @Test
+    fun `evidence must carry a SHA-256 digest and non-negative epoch values`() {
+        assertFailsWith<IllegalArgumentException> {
+            ev(EvidencePurpose.NOT_SENT).copy(evidenceDigest = "not-a-digest")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ev(EvidencePurpose.NOT_SENT).copy(authorityEpoch = -1)
+        }
+    }
 
     @Test
     fun `NOT_SENT and REJECTED justify only their own edge`() {

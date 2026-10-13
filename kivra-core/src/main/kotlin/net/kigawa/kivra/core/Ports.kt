@@ -12,33 +12,9 @@ import java.time.Instant
 @JvmInline
 value class IdempotencyKey(val value: String)
 
-// ---- ExecutionPort (exkes) ----
-@JvmInline value class WorkspaceRef(val id: String)
-@JvmInline value class RuntimeRef(val id: String)
-@JvmInline value class ExecutionRef(val id: String)
-@JvmInline value class LogCursor(val value: String)
-
-data class WorkspaceSpec(val name: String, val labels: Map<String, String> = emptyMap())
-data class RuntimeSpec(val labels: Map<String, String> = emptyMap())
-data class ExecutionSpec(val type: String, val payloadJson: String)
-data class WorkspaceStatus(val ref: WorkspaceRef, val status: String)
-data class ExecutionStatus(val ref: ExecutionRef, val status: String)
-data class LogPage(val lines: List<String>, val next: LogCursor?)
-data class ResourceRef(val kind: String, val id: String)
-
-interface ExecutionPort {
-    suspend fun createWorkspace(spec: WorkspaceSpec, key: IdempotencyKey): WorkspaceRef
-    suspend fun getWorkspace(ref: WorkspaceRef): WorkspaceStatus
-    suspend fun createRuntime(ws: WorkspaceRef, spec: RuntimeSpec, key: IdempotencyKey): RuntimeRef
-    suspend fun startExecution(rt: RuntimeRef, spec: ExecutionSpec, key: IdempotencyKey): ExecutionRef
-    suspend fun getExecution(ref: ExecutionRef): ExecutionStatus
-    suspend fun cancelExecution(ref: ExecutionRef)
-    suspend fun readLogs(ref: ExecutionRef, cursor: LogCursor?): LogPage
-    suspend fun deleteWorkspace(ref: WorkspaceRef)
-
-    /** For reconciliation after an unknown result. */
-    suspend fun findByLabel(labels: Map<String, String>): List<ResourceRef>
-}
+// ---- ExecutionPort ----
+// Lives in kivra-exkes (net.kigawa.kivra.exkes.ExecutionPort, issue #29): its results carry UNKNOWN / Unsupported
+// and exkes cannot honour IdempotencyKeys, so the earlier placeholder here was removed in #30.
 
 // ---- TaskProvider (fusha-task) ----
 // M1 (#27): read-only first. Write operations exist on the Port so callers can branch on
@@ -146,8 +122,27 @@ interface MemoryPort {
 data class JobSpec(val name: String, val cron: String?, val runAt: Instant?)
 data class ScheduleExecutionStatus(val ref: ScheduleExecutionRef, val status: String)
 
+/**
+ * Proof that the caller is the single schedule writer (the Orchestrator's leader lease, #36), required by
+ * [SchedulePort.upsertJob]. Job creation is lookup-then-POST and ai-scheduler job names are not unique server-side, so
+ * two concurrent writers can both create a job; the server-side check only detects that afterwards. Only the holder of
+ * the writer lease may call upsertJob.
+ *
+ * NOT YET IMPLEMENTED (未対応): no leader-lease implementation produces this value yet. Callers must not fabricate it
+ * outside tests.
+ */
+data class ScheduleWriterLease(val owner: String, val generation: Long) {
+    init {
+        require(owner.isNotBlank() && generation >= 0) { "invalid schedule writer lease" }
+    }
+}
+
 interface SchedulePort {
-    suspend fun upsertJob(spec: JobSpec, key: IdempotencyKey): JobRef
+    /**
+     * Requires [writer] (single-writer guarantee, see [ScheduleWriterLease]). Duplicates created by a race are detected
+     * after the POST and reported as a conflict; they are not removed automatically.
+     */
+    suspend fun upsertJob(spec: JobSpec, key: IdempotencyKey, writer: ScheduleWriterLease): JobRef
     suspend fun pauseJob(ref: JobRef)
     suspend fun triggerNow(ref: JobRef, key: IdempotencyKey): ScheduleExecutionRef
     suspend fun getExecution(ref: ScheduleExecutionRef): ScheduleExecutionStatus

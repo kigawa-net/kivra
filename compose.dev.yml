@@ -1,0 +1,41 @@
+# Development-only startup: no provider writes, replay or self-deployment.
+# Run: docker compose -f compose.dev.yml up --build -d
+# Check: curl -fsS http://localhost:8080/health
+services:
+  db:
+    image: mariadb:11
+    environment:
+      MARIADB_DATABASE: kivra
+      MARIADB_USER: kivra
+      MARIADB_PASSWORD: kivra_dev_only
+      MARIADB_ROOT_PASSWORD: kivra_root_dev_only
+    volumes:
+      - kivra-dev-db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [internal]
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PORT: "8080"
+      KIVRA_DB_JDBC_URL: "jdbc:mariadb://db:3306/kivra?sessionVariables=time_zone='+00:00'"
+      KIVRA_DB_USER: kivra
+      KIVRA_DB_PASSWORD: kivra_dev_only
+      KIVRA_METRICS_ENABLED: "false"
+      KIVRA_FUSHA_STATUS_WRITE_ENABLED: "false"
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal]
+    restart: "no"
+volumes:
+  kivra-dev-db:
+networks:
+  internal:

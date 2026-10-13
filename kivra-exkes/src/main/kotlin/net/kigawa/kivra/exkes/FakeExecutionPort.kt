@@ -75,6 +75,10 @@ class FakeExecutionPort(
         PortResult.Ok(workspaces.values.firstOrNull { it.name == name })
     }
 
+    override suspend fun listWorkspaces(): PortResult<List<Workspace>> = mutex.withLock {
+        PortResult.Ok(workspaces.values.filter { it.state != WorkspaceState.DELETED }.toList())
+    }
+
     override suspend fun deleteWorkspace(id: WorkspaceId): PortResult<Workspace> = mutex.withLock {
         val w = workspaces[id.value] ?: return PortResult.NotFound
         mutate("deleteWorkspace") {
@@ -110,6 +114,10 @@ class FakeExecutionPort(
 
     override suspend fun getRuntime(id: RuntimeId): PortResult<Runtime> = mutex.withLock {
         runtime(id)?.let { PortResult.Ok(it) } ?: PortResult.NotFound
+    }
+
+    override suspend fun listRuntimes(workspace: WorkspaceId): PortResult<List<Runtime>> = mutex.withLock {
+        if (workspace.value !in workspaces) PortResult.NotFound else PortResult.Ok(matching(workspace, emptyMap()))
     }
 
     override suspend fun findRuntimesByLabel(workspace: WorkspaceId, labels: Map<String, String>): PortResult<List<Runtime>> =

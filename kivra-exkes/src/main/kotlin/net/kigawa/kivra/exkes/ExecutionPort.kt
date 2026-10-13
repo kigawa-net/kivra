@@ -33,6 +33,9 @@ interface ExecutionPort {
 
     /** Reconciliation lookup. Ok(null) = no live workspace with this name (DELETED tombstones are not listed by exkes). */
     suspend fun findWorkspaceByName(name: String): PortResult<Workspace?>
+
+    /** Reaper listing of every live workspace (DELETED tombstones are not listed by exkes). Read-only. */
+    suspend fun listWorkspaces(): PortResult<List<Workspace>>
     suspend fun deleteWorkspace(id: WorkspaceId): PortResult<Workspace>
 
     // ---- Runtime ----
@@ -41,6 +44,9 @@ interface ExecutionPort {
 
     /** Reconciliation lookup; every given label must match. exkes has no filter, so this is client-side. */
     suspend fun findRuntimesByLabel(workspace: WorkspaceId, labels: Map<String, String>): PortResult<List<Runtime>>
+
+    /** Every live runtime of [workspace] (DELETED tombstones are not listed). Read-only; used by the Reaper to find blockers. */
+    suspend fun listRuntimes(workspace: WorkspaceId): PortResult<List<Runtime>>
     suspend fun stopRuntime(id: RuntimeId): PortResult<Runtime>
     suspend fun deleteRuntime(id: RuntimeId): PortResult<Runtime>
 

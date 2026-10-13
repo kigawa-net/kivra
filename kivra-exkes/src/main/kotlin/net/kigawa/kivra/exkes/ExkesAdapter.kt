@@ -99,6 +99,12 @@ class ExkesAdapter(
             else -> r.asFailure()
         }
 
+    override suspend fun listWorkspaces(): PortResult<List<Workspace>> =
+        when (val r = listAll("/v1/workspaces", WorkspaceDto.serializer())) {
+            is PortResult.Ok -> PortResult.Ok(r.value.filter { it.status != "DELETED" }.map { it.toDomain() })
+            else -> r.asFailure()
+        }
+
     override suspend fun deleteWorkspace(id: WorkspaceId): PortResult<Workspace> =
         when (val r = delete("/v1/workspaces/${id.value}", WorkspaceDto.serializer())) {
             is PortResult.Ok -> checkIdentity(id.value, r.value.id) { r.value.toDomain() }
@@ -144,17 +150,19 @@ class ExkesAdapter(
             else -> r.asFailure()
         }
 
-    override suspend fun findRuntimesByLabel(workspace: WorkspaceId, labels: Map<String, String>): PortResult<List<Runtime>> {
+    override suspend fun findRuntimesByLabel(workspace: WorkspaceId, labels: Map<String, String>): PortResult<List<Runtime>> =
+        when (val r = listRuntimes(workspace)) {
+            is PortResult.Ok -> PortResult.Ok(r.value.filter { rt -> labels.all { (k, v) -> rt.labels[k] == v } })
+            else -> r.asFailure()
+        }
+
+    override suspend fun listRuntimes(workspace: WorkspaceId): PortResult<List<Runtime>> {
         val r = listAll("/v1/workspaces/${workspace.value}/runtimes", RuntimeDto.serializer())
         if (r !is PortResult.Ok) return r.asFailure()
         r.value.firstOrNull { it.workspaceId != workspace.value }?.let {
             return PortResult.IdentityMismatch(workspace.value, it.workspaceId)
         }
-        return PortResult.Ok(
-            r.value
-                .filter { it.status != "DELETED" && labels.all { (k, v) -> it.labels[k] == v } }
-                .map { it.toDomain() },
-        )
+        return PortResult.Ok(r.value.filter { it.status != "DELETED" }.map { it.toDomain() })
     }
 
     override suspend fun stopRuntime(id: RuntimeId): PortResult<Runtime> =

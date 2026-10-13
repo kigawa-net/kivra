@@ -118,6 +118,27 @@ class UiRoutesTest {
     }
 
     @Test
+    fun `the site root redirects to the ui with a fixed relative location`() = testApplication {
+        application { routing { configureUiRoutes() } }
+        val noFollow = createClient { followRedirects = false }
+
+        val response = noFollow.get("/")
+        assertEquals(HttpStatusCode.Found, response.status)
+        assertEquals("/ui", response.headers["Location"])
+        assertEquals("no-store", response.headers["Cache-Control"])
+        // A query string must not change where it goes.
+        assertEquals("/ui", noFollow.get("/?next=https://evil.example/").headers["Location"])
+    }
+
+    @Test
+    fun `the site root is not registered without KIVRA_AUTH_MODE`() = testApplication {
+        environment { config = h2Config() }
+        application { appModule(emptyMap()) }
+
+        assertEquals(HttpStatusCode.NotFound, client.get("/").status)
+    }
+
+    @Test
     fun `title input is limited to 200 characters`() {
         assertContains(indexHtml, "maxlength=\"200\"")
     }

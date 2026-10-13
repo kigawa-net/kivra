@@ -81,6 +81,10 @@ data class JournalEntry(
     val evidenceDigest: String? = null,
     val evidenceExpiresAt: LocalDateTime? = null,
     val transitionReason: String? = null,
+    val authorityEpoch: Long? = null,
+    val capabilityRevision: Long? = null,
+    val grantGeneration: Long? = null,
+    val evidenceContentDigest: String? = null,
 )
 
 /**
@@ -119,11 +123,21 @@ class OperationBindingMismatchException(message: String) : RuntimeException(mess
  * - Evidence-gated transitions resolve the ref **before** the CAS and never change the row when the ref is refused,
  *   the Authority is unavailable, or the subject / purpose / expiry does not match. Such a call throws and leaves the
  *   entry in IN_FLIGHT / UNKNOWN / RECONCILIATION_REQUIRED.
+ * - Evidence-gated transitions also compare the evidence's Authority Epoch values (authority epoch, capability revision,
+ *   grant generation, contract version, capability) with the Kivra MariaDB copy in [AuthorityEpochRepository]. The copy
+ *   is read under a row lock in the same transaction as the CAS, so a Grant revoke or epoch bump that committed before
+ *   that transaction refuses the transition with no write (Issue #94). The copy is the epoch of record; see the
+ *   [TrustedEvidenceAuthority] KDoc for what this does not cover.
+ *
+ * Every applied transition appends an audit event in the same transaction. The outbox is not written here: its
+ * uniqueness key is (aggregate, aggregate_version, event_type), and an operation has no per-run monotonic version to use.
  */
 class OperationJournalRepository(
     private val database: Database,
     private val authority: TrustedEvidenceAuthority,
     private val clock: Clock = Clock.systemUTC(),
+    private val epochs: AuthorityEpochRepository = AuthorityEpochRepository(database),
+    private val audit: AuditRepository = AuditRepository(clock),
 ) {
 
     fun prepare(lease: Lease, op: PrepareOperation): JournalEntry {
@@ -383,6 +397,7 @@ class OperationJournalRepository(
                     throw InvalidTransitionException("operation $opId: ${ev.purpose} (${ev.observation}/${ev.capability}) does not justify $from -> $to")
                 }
                 requireBound(lease, row, ev)
+                requireCurrentAuthorityEpoch(opId, subjectOf(lease, row).tenantId, ev)
                 reason = when (ev.purpose) {
                     EvidencePurpose.NOT_SENT -> "VERIFIED_NOT_SENT"
                     EvidencePurpose.REJECTED -> "VERIFIED_REJECTED"
@@ -421,12 +436,44 @@ class OperationJournalRepository(
                     it[evidencePurpose] = ev.purpose.name
                     it[evidenceDigest] = ev.requestDigest
                     it[evidenceExpiresAt] = ev.expiresAt
+                    it[authorityEpoch] = ev.authorityEpoch
+                    it[capabilityRevision] = ev.capabilityRevision
+                    it[grantGeneration] = ev.grantGeneration
+                    it[evidenceContentDigest] = ev.evidenceDigest
                 }
                 is Gate.Plain -> Unit
             }
         }
         if (updated != 1) throw VersionConflictException("operation $opId changed concurrently")
+        audit.append(
+            this,
+            lease.runId,
+            AuditEntry(
+                actor = lease.owner,
+                action = "OP_STATUS_CHANGED",
+                result = "OK",
+                resource = "op:$opId",
+                payload = "from=$from;to=$target;reason=${reason ?: "PLAIN"};version=${expectedVersion + 1}",
+            ),
+        )
         ExternalOperationsTable.selectAll().where { ExternalOperationsTable.opId eq opId }.single().toEntry()
+    }
+
+    /**
+     * Compares the evidence's Authority Epoch values with the Kivra MariaDB copy, inside the transition transaction and
+     * under the copy's row lock. Any difference, a missing copy, or a revoked/changed grant refuses the call before any
+     * write (Issue #94). Runs after [requireBound], so the subject (tenant, operation, digest, issuer binding) is already
+     * checked.
+     */
+    private fun Transaction.requireCurrentAuthorityEpoch(opId: String, tenantId: String, ev: VerifiedEvidence) {
+        val current = with(epochs) { lockForTransition(tenantId, ev.subject.providerId) }
+            ?: throw InvalidTransitionException("operation $opId: no authority epoch copy for this provider")
+        val stale = current.providerContractVersion != ev.providerContractVersion ||
+            current.capability != ev.capability ||
+            current.capabilityRevision != ev.capabilityRevision ||
+            current.authorityEpoch != ev.authorityEpoch ||
+            current.grantGeneration != ev.grantGeneration
+        if (stale) throw InvalidTransitionException("operation $opId: authority epoch changed after the evidence was resolved")
     }
 
     /**
@@ -512,6 +559,10 @@ class OperationJournalRepository(
         evidenceDigest = this[ExternalOperationsTable.evidenceDigest],
         evidenceExpiresAt = this[ExternalOperationsTable.evidenceExpiresAt],
         transitionReason = this[ExternalOperationsTable.transitionReason],
+        authorityEpoch = this[ExternalOperationsTable.authorityEpoch],
+        capabilityRevision = this[ExternalOperationsTable.capabilityRevision],
+        grantGeneration = this[ExternalOperationsTable.grantGeneration],
+        evidenceContentDigest = this[ExternalOperationsTable.evidenceContentDigest],
     )
 
     private companion object {

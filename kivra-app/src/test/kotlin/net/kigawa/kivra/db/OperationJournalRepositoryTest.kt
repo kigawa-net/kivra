@@ -69,6 +69,7 @@ private fun TestDb.verifyWith(
     expiresAt: LocalDateTime = now().plusHours(1),
 ): EvidenceVerification {
     evidence.setProviderContract(PROVIDER, CONTRACT, capability)
+    syncAuthorityEpoch(asked.tenantId, PROVIDER)
     val obsRef = EvidenceObservationRef("obs-${UUID.randomUUID()}")
     evidence.register(obsRef, FakeTrustedEvidenceAuthority.Observation(observed, principal, purpose, observation, capability, observedAt, expiresAt))
     return runBlocking { evidence.verify(asked, obsRef, purpose) }

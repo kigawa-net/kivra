@@ -3,7 +3,7 @@ package net.kigawa.kivra.db
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.datetime
 
-/** Exposed definitions mirroring db/migration/V1__core_schema.sql and V2__reconciliation_evidence_and_outbox_claim.sql. The migration is the source of truth for DDL. */
+/** Exposed definitions mirroring db/migration/V1__core_schema.sql, V2__reconciliation_evidence_and_outbox_claim.sql, V4__evidence_authority_binding.sql and V5__memory_mutation_binding.sql. The migration is the source of truth for DDL. */
 
 object DevelopmentRunsTable : Table("development_runs") {
     val runId = char("run_id", 26)
@@ -85,6 +85,8 @@ object ExternalOperationsTable : Table("external_operations") {
     val stableRef = varchar("stable_ref", 255)
     val externalRef = varchar("external_ref", 255).nullable()
     val requestHash = char("request_hash", 64)
+    val tenantId = varchar("tenant_id", 64).nullable()
+    val providerContractVersion = varchar("provider_contract_version", 64).nullable()
     val status = varchar("status", 32)
     val attempt = integer("attempt").default(0)
     val maxAttempts = integer("max_attempts").default(3)
@@ -98,7 +100,20 @@ object ExternalOperationsTable : Table("external_operations") {
     val evidenceObservedAt = datetime("evidence_observed_at").nullable()
     val evidenceIssuer = varchar("evidence_issuer", 64).nullable()
     val providerCapability = varchar("provider_capability", 32).nullable()
+    val evidencePurpose = varchar("evidence_purpose", 32).nullable()
+    val evidenceDigest = char("evidence_digest", 64).nullable()
+    val evidenceExpiresAt = datetime("evidence_expires_at").nullable()
     val transitionReason = varchar("transition_reason", 64).nullable()
+    val authorityEpoch = long("authority_epoch").nullable()
+    val capabilityRevision = long("capability_revision").nullable()
+    val grantGeneration = long("grant_generation").nullable()
+    val evidenceContentDigest = char("evidence_content_digest", 64).nullable()
+    val principalId = varchar("principal_id", 128).nullable()
+    val requestId = varchar("request_id", 64).nullable()
+    val expectedRevision = long("expected_revision").nullable()
+    val executionId = varchar("execution_id", 128).nullable()
+    val memoryKind = varchar("memory_kind", 16).nullable()
+    val memoryReason = varchar("memory_reason", 64).nullable()
     val version = long("version").default(0)
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at")

@@ -74,6 +74,8 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
 | `KIVRA_LEASE_GRACE_SECONDS` | 5 | 期限切れ後、奪取を許可するまでの猶予 |
 | `KIVRA_METRICS_ENABLED` | false | `/metrics` の有効化（true のとき `KIVRA_METRICS_BEARER_TOKEN` が必須） |
 | `KIVRA_METRICS_BEARER_TOKEN` | （空） | `/metrics` の Bearer トークン |
+| `KIVRA_AUTH_MODE` | （未設定） | Task API の認証。`oauth2-proxy` / `none` / 未設定（ルートを登録しない）。下記「Task API」 |
+| `KIVRA_RUNTIME_ENV` | （未設定） | `none` を使うには `development` が必須 |
 
 fusha-task（`kivra.fusha.*`、**すべて要確認**: 環境ごとの URL・機械向け認証方式は未確定）:
 
@@ -115,10 +117,39 @@ Mock の成功は Production Provider 検証ではない。要確認項目は [d
 
 時刻は UTC。MariaDB のセッションを UTC にする（既定の URL は設定済み）。
 
+## Task API（Issue #112）
+
+認証付きで Task を投入し、MariaDB の `development_runs` に永続化する API。**実行は SIMULATED**: Run は CREATED で作られるだけで、
+Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込みは一切行わない（`executed` は常に `false`）。
+
+| メソッド・パス | 内容 |
+|---|---|
+| `POST /api/tasks` | body `{"title": "...", "idempotencyKey": "..."}`。新規は 202、同じ (呼び出し元, idempotencyKey) の再送は 200 で同じ `runId` を返す。同じキーで title が違えば 409 |
+| `GET /api/runs/{id}` | 自分の Run。他人の Run、存在しない Run は 404 |
+| `GET /api/runs` | 自分の Run を新しい順に最大 50 件 |
+
+応答（Run のスナップショット）: `{runId, taskId, title, state, mode, executed, createdAt}`。`state` は `CREATED`、`mode` は `SIMULATED`、`executed` は `false`。
+入力: `title` は 1〜200 文字（前後の空白は除去）、`idempotencyKey` は 1〜128 文字、どちらも制御文字を含まないこと。違反は 400。
+
+**認証（`KIVRA_AUTH_MODE`）**
+
+- `oauth2-proxy`: `X-Auth-Request-Email`（無ければ `X-Auth-Request-User`）から呼び出し元を得る。どちらも無い、空、256 文字超、制御文字を含む場合は 401。本番はこのモード。
+- `none`: 認証なし。全員が同じ開発用の principal になる。**`KIVRA_RUNTIME_ENV=development` のときだけ許可**し、それ以外で指定すると起動に失敗する。本番では使わない。
+- 未設定（既定）: Task API のルートを登録しない（`/api/tasks` は 404）。fail-closed。
+
+**前提（重要）**: `oauth2-proxy` モードは、ヘッダーを oauth2-proxy が付与することを信頼している。kivra は oauth2-proxy 経由でのみ到達可能であること
+（k8s の NetworkPolicy で他の経路を塞ぐ。これは別 PR）が前提。直接到達できれば、ヘッダーは誰でも偽装できる。
+
+**永続化**: 既存の `DevelopmentRunRepository` が正本。V9（`task_title`, `principal`, `idempotency_key` 列と、`(principal, idempotency_key)` の UNIQUE）で追加する。
+Run の `task_id` は `api:<runId>`（fusha-task のタスクとは紐づかない）、`completion_mode` は `PR_ONLY`（RELEASE には進めない）。
+再起動後も同じ Run を取得できる。同じキーの並行 POST は 1 行に収束する。
+
+**#111 のダミー API との関係**: `/api/dev/*` は `KIVRA_DEV_DEMO_ENABLED=true` かつ `KIVRA_RUNTIME_ENV=development` のときだけ有効な、メモリ上の開発用ダミーで、そのまま残す。サーバーでは使わない。
+
 ## デプロイ
 
 - イメージ: `harbor.kigawa.net/library/kivra:<tag>`（`Dockerfile`、ビルドは `installDist`。ファット JAR は使わない）。`ENTRYPOINT` は `/app/bin/kivra-app`、ポートは 8080。実行ユーザーは非 root の `kivra`。
-- 起動時に Flyway が `db/migration`（V1〜V7 など）を自動で migrate する。DB 接続先に既存スキーマがあれば未適用分だけが流れる。
+- 起動時に Flyway が `db/migration`（V1〜V9 など）を自動で migrate する。DB 接続先に既存スキーマがあれば未適用分だけが流れる。
 - 必須で上書きする環境変数（既定値のままでは本番で使えない）: `KIVRA_DB_JDBC_URL`（既定は localhost）、`KIVRA_DB_USER`、`KIVRA_DB_PASSWORD`（既定はプレースホルダ）。JDBC URL の `time_zone='+00:00'` は UTC 固定のため残すこと。
 - 任意: `PORT`（既定 8080）、`KIVRA_METRICS_ENABLED`（既定 `false`）。`true` にする場合は `KIVRA_METRICS_BEARER_TOKEN` も必須。
 - ヘルスチェック: `GET /health`（イメージの `HEALTHCHECK` も同じ）。

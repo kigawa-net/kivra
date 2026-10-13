@@ -23,6 +23,8 @@ import net.kigawa.kivra.core.canTransitionTo
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
+import org.jetbrains.exposed.sql.SortOrder
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -47,7 +49,26 @@ data class DevelopmentRun(
     val prHeadSha: String?,
     val createdAt: LocalDateTime,
     val updatedAt: LocalDateTime,
+    /** Set only for Tasks submitted through the Task API (Issue #112, V9). */
+    val taskTitle: String? = null,
+    /** Authenticated owner of an API-submitted Task (V9). Null for runs created by the workflow path. */
+    val principal: String? = null,
+    val idempotencyKey: String? = null,
 )
+
+/** Result of [DevelopmentRunRepository.submitTask]. */
+sealed interface TaskSubmitResult {
+    val run: DevelopmentRun
+
+    /** A new run was persisted in CREATED. */
+    data class Created(override val run: DevelopmentRun) : TaskSubmitResult
+
+    /** The same (principal, idempotency key) was submitted before with the same title: the existing run is returned. */
+    data class Replayed(override val run: DevelopmentRun) : TaskSubmitResult
+
+    /** The same (principal, idempotency key) exists with a different title. Nothing is written. */
+    data class ConflictingTitle(override val run: DevelopmentRun) : TaskSubmitResult
+}
 
 /** Another non-terminal run already exists for the task (`uk_dev_runs_active_task`). */
 class DuplicateActiveRunException(val taskId: String) : RuntimeException("an active run already exists for task $taskId")
@@ -92,6 +113,68 @@ class DevelopmentRunRepository(
 
     fun get(runId: RunId): DevelopmentRun? = transaction(database) {
         DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.firstOrNull()?.toDevelopmentRun()
+    }
+
+    /**
+     * Persists a Task submitted through the Task API (Issue #112). The run is created in CREATED with the same audit and
+     * outbox events as [create], and it is never executed here: the mode is SIMULATED and no external system is called.
+     * Idempotent per (principal, idempotencyKey). Concurrent identical submissions converge on one row: the loser of the
+     * unique-index race re-reads the winner's row.
+     */
+    fun submitTask(principal: String, idempotencyKey: String, title: String): TaskSubmitResult {
+        findTask(principal, idempotencyKey)?.let { return replayOrConflict(it, title) }
+        val runId = RunId(Ulid.generate(clock))
+        try {
+            transaction(database) {
+                val now = utcNow(clock)
+                val taskId = "api:${runId.value}"
+                DevelopmentRunsTable.insert {
+                    it[DevelopmentRunsTable.runId] = runId.value
+                    it[DevelopmentRunsTable.taskId] = taskId
+                    it[state] = DevelopmentRunState.CREATED.name
+                    // PR_ONLY is the least-privileged completion mode: an API Task can never reach RELEASE.
+                    it[completionMode] = RunCompletionMode.PR_ONLY.name
+                    it[taskTitle] = title
+                    it[DevelopmentRunsTable.principal] = principal
+                    it[DevelopmentRunsTable.idempotencyKey] = idempotencyKey
+                    it[createdAt] = now
+                    it[updatedAt] = now
+                }
+                audit.append(this, runId, AuditEntry(actor = principal, action = "RUN_CREATED", result = "OK", resource = "task:$taskId"))
+                outbox.append(this, runId, 0, "RunCreated", transitionPayload(taskId, null, DevelopmentRunState.CREATED), null)
+            }
+        } catch (e: ExposedSQLException) {
+            if (!e.isUniqueViolation()) throw e
+            // Lost the race (or a replay): the winner's row is committed, so a fresh transaction sees it.
+            val existing = findTask(principal, idempotencyKey) ?: throw e
+            return replayOrConflict(existing, title)
+        }
+        return TaskSubmitResult.Created(get(runId)!!)
+    }
+
+    private fun replayOrConflict(existing: DevelopmentRun, title: String): TaskSubmitResult =
+        if (existing.taskTitle == title) TaskSubmitResult.Replayed(existing) else TaskSubmitResult.ConflictingTitle(existing)
+
+    private fun findTask(principal: String, idempotencyKey: String): DevelopmentRun? = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { (DevelopmentRunsTable.principal eq principal) and (DevelopmentRunsTable.idempotencyKey eq idempotencyKey) }
+            .firstOrNull()?.toDevelopmentRun()
+    }
+
+    /** A run owned by [principal]. Another principal's run is indistinguishable from a missing one (null). */
+    fun getTask(runId: RunId, principal: String): DevelopmentRun? = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { (DevelopmentRunsTable.runId eq runId.value) and (DevelopmentRunsTable.principal eq principal) }
+            .firstOrNull()?.toDevelopmentRun()
+    }
+
+    /** Runs submitted by [principal], newest first. */
+    fun listTasks(principal: String, limit: Int = 50): List<DevelopmentRun> = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { DevelopmentRunsTable.principal eq principal }
+            .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
+            .limit(limit)
+            .map { it.toDevelopmentRun() }
     }
 
     /**
@@ -418,5 +501,8 @@ class DevelopmentRunRepository(
         traceId = this[DevelopmentRunsTable.traceId],
         createdAt = this[DevelopmentRunsTable.createdAt],
         updatedAt = this[DevelopmentRunsTable.updatedAt],
+        taskTitle = this[DevelopmentRunsTable.taskTitle],
+        principal = this[DevelopmentRunsTable.principal],
+        idempotencyKey = this[DevelopmentRunsTable.idempotencyKey],
     )
 }

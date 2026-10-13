@@ -32,6 +32,10 @@ object DevelopmentRunsTable : Table("development_runs") {
     val prPolicyRevision = varchar("pr_policy_revision", 255).nullable()
     val prReviewManifestDigest = varchar("pr_review_manifest_digest", 255).nullable()
     val completionMergeSha = varchar("completion_merge_sha", 64).nullable()
+    // V9: API-submitted Tasks (Issue #112). Null for runs created by the workflow path.
+    val taskTitle = varchar("task_title", 200).nullable()
+    val principal = varchar("principal", 256).nullable()
+    val idempotencyKey = varchar("idempotency_key", 128).nullable()
     val completionEvidenceRef = varchar("completion_evidence_ref", 255).nullable()
     val completionObservedAt = datetime("completion_observed_at").nullable()
     val version = long("version").default(0)

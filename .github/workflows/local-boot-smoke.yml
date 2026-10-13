@@ -1,0 +1,37 @@
+name: Local boot smoke
+on:
+  pull_request:
+    paths:
+      - 'compose.dev.yml'
+      - 'Dockerfile'
+      - 'docs/local-first-boot.md'
+      - '.github/workflows/local-boot-smoke.yml'
+  workflow_dispatch:
+jobs:
+  boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose
+        run: docker compose -f compose.dev.yml config --quiet
+      - name: Build and start app
+        run: docker compose -f compose.dev.yml up --build -d --wait --wait-timeout 240
+      - name: Verify Kivra HTTP health
+        run: |
+          set -eu
+          for i in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:8080/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Diagnostics
+        if: always()
+        run: |
+          docker compose -f compose.dev.yml ps || true
+          docker compose -f compose.dev.yml logs --tail=160 || true
+      - name: Stop
+        if: always()
+        run: docker compose -f compose.dev.yml down

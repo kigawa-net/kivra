@@ -12,33 +12,9 @@ import java.time.Instant
 @JvmInline
 value class IdempotencyKey(val value: String)
 
-// ---- ExecutionPort (exkes) ----
-@JvmInline value class WorkspaceRef(val id: String)
-@JvmInline value class RuntimeRef(val id: String)
-@JvmInline value class ExecutionRef(val id: String)
-@JvmInline value class LogCursor(val value: String)
-
-data class WorkspaceSpec(val name: String, val labels: Map<String, String> = emptyMap())
-data class RuntimeSpec(val labels: Map<String, String> = emptyMap())
-data class ExecutionSpec(val type: String, val payloadJson: String)
-data class WorkspaceStatus(val ref: WorkspaceRef, val status: String)
-data class ExecutionStatus(val ref: ExecutionRef, val status: String)
-data class LogPage(val lines: List<String>, val next: LogCursor?)
-data class ResourceRef(val kind: String, val id: String)
-
-interface ExecutionPort {
-    suspend fun createWorkspace(spec: WorkspaceSpec, key: IdempotencyKey): WorkspaceRef
-    suspend fun getWorkspace(ref: WorkspaceRef): WorkspaceStatus
-    suspend fun createRuntime(ws: WorkspaceRef, spec: RuntimeSpec, key: IdempotencyKey): RuntimeRef
-    suspend fun startExecution(rt: RuntimeRef, spec: ExecutionSpec, key: IdempotencyKey): ExecutionRef
-    suspend fun getExecution(ref: ExecutionRef): ExecutionStatus
-    suspend fun cancelExecution(ref: ExecutionRef)
-    suspend fun readLogs(ref: ExecutionRef, cursor: LogCursor?): LogPage
-    suspend fun deleteWorkspace(ref: WorkspaceRef)
-
-    /** For reconciliation after an unknown result. */
-    suspend fun findByLabel(labels: Map<String, String>): List<ResourceRef>
-}
+// ---- ExecutionPort ----
+// Lives in kivra-exkes (net.kigawa.kivra.exkes.ExecutionPort, issue #29): its results carry UNKNOWN / Unsupported
+// and exkes cannot honour IdempotencyKeys, so the earlier placeholder here was removed in #30.
 
 // ---- TaskProvider (fusha-task) ----
 // M1 (#27): read-only first. Write operations exist on the Port so callers can branch on

@@ -14,7 +14,10 @@ import org.jetbrains.exposed.sql.transactions.transaction
  * Connection: `KIVRA_TEST_MARIADB_URL` (server URL without a schema, default `jdbc:mariadb://localhost:3306/`),
  * `KIVRA_TEST_MARIADB_USER` (default root; needs CREATE/DROP DATABASE), `KIVRA_TEST_MARIADB_PASSWORD`.
  */
-class TestDb : AutoCloseable {
+class TestDb(
+    /** Applies the schema before the repositories are connected. Default: the full classpath migration chain. */
+    private val migrate: (DataSource) -> Unit = ::runMigrations,
+) : AutoCloseable {
     private val schema: String? = if (isMariaDb) "kivra_t_${System.nanoTime()}" else null
     val dataSource: DataSource
 
@@ -39,7 +42,7 @@ class TestDb : AutoCloseable {
     val database: Database
 
     init {
-        runMigrations(dataSource)
+        migrate(dataSource)
         database = connectDatabase(dataSource)
     }
 
@@ -49,11 +52,21 @@ class TestDb : AutoCloseable {
     val leases = SqlLeaseStore(database)
     /** TEST ONLY Authority. Register observations and provider contracts on it before evidence-gated transitions. */
     val evidence = FakeTrustedEvidenceAuthority()
-    val journal = OperationJournalRepository(database, evidence)
+    val epochs = AuthorityEpochRepository(database)
+    val journal = OperationJournalRepository(database, evidence, epochs = epochs)
 
     /** Moves the lease expiry [seconds] into the past on the DB clock (simulates a worker that stopped renewing). */
     fun expireLease(runId: String, seconds: Long = 10) = transaction(database) {
         execUpdate("UPDATE development_runs SET lease_expires_at = TIMESTAMPADD(SECOND, -?, NOW(6)) WHERE run_id = ?", seconds, runId)
+    }
+
+    /** The Authority sync: copies the fake Authority's current epoch values for [providerId] into the Kivra DB copy. */
+    fun syncAuthorityEpoch(tenantId: String, providerId: String) {
+        val s = evidence.state(providerId) ?: error("no provider contract registered for $providerId")
+        epochs.publish(
+            tenantId, providerId,
+            AuthorityEpochSnapshot(s.contractVersion, s.capability, s.capabilityRevision, s.authorityEpoch, s.grantGeneration),
+        )
     }
 
     /** Moves an outbox claim into the past on the DB clock (simulates a publisher that crashed or stalled). */
@@ -73,6 +86,19 @@ class TestDb : AutoCloseable {
 
     fun count(table: String, where: String = "1=1"): Int = transaction(database) {
         execQuery("SELECT COUNT(*) FROM $table WHERE $where") { it.getInt(1) }.single()
+    }
+
+    /**
+     * Every column of every row of every persisted table, flattened to text. Redaction regression tests assert that a
+     * secret injected through a provider answer appears nowhere in it (journal, audit, outbox, run / agent state).
+     */
+    fun allPersistedText(): String = transaction(database) {
+        listOf(
+            "development_runs", "stage_executions", "agents", "execution_sessions", "external_operations",
+            "outbox_events", "inbox_events", "audit_events",
+        ).flatMap { table ->
+            execQuery("SELECT * FROM $table") { rs -> (1..rs.metaData.columnCount).joinToString("|") { rs.getString(it).orEmpty() } }
+        }.joinToString("\n")
     }
 
     override fun close() {

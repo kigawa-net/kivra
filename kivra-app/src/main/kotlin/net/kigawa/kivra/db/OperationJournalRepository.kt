@@ -81,6 +81,10 @@ data class JournalEntry(
     val evidenceDigest: String? = null,
     val evidenceExpiresAt: LocalDateTime? = null,
     val transitionReason: String? = null,
+    val authorityEpoch: Long? = null,
+    val capabilityRevision: Long? = null,
+    val grantGeneration: Long? = null,
+    val evidenceContentDigest: String? = null,
 )
 
 /**
@@ -119,25 +123,39 @@ class OperationBindingMismatchException(message: String) : RuntimeException(mess
  * - Evidence-gated transitions resolve the ref **before** the CAS and never change the row when the ref is refused,
  *   the Authority is unavailable, or the subject / purpose / expiry does not match. Such a call throws and leaves the
  *   entry in IN_FLIGHT / UNKNOWN / RECONCILIATION_REQUIRED.
+ * - Evidence-gated transitions also compare the evidence's Authority Epoch values (authority epoch, capability revision,
+ *   grant generation, contract version, capability) with the Kivra MariaDB copy in [AuthorityEpochRepository]. The copy
+ *   is read under a row lock in the same transaction as the CAS, so a Grant revoke or epoch bump that committed before
+ *   that transaction refuses the transition with no write (Issue #94). The copy is the epoch of record; see the
+ *   [TrustedEvidenceAuthority] KDoc for what this does not cover.
+ *
+ * Every applied transition appends an audit event in the same transaction. The outbox is not written here: its
+ * uniqueness key is (aggregate, aggregate_version, event_type), and an operation has no per-run monotonic version to use.
  */
 class OperationJournalRepository(
     private val database: Database,
     private val authority: TrustedEvidenceAuthority,
     private val clock: Clock = Clock.systemUTC(),
+    private val epochs: AuthorityEpochRepository = AuthorityEpochRepository(database),
+    private val audit: AuditRepository = AuditRepository(clock),
 ) {
 
-    fun prepare(lease: Lease, op: PrepareOperation): JournalEntry {
+    /**
+     * [allowCancelRequested] is for the wind-down of a cancelled run only (stop / delete of what the run created):
+     * a pending Cancel then no longer rejects journal writes, while Hold and lease loss still do.
+     */
+    fun prepare(lease: Lease, op: PrepareOperation, allowCancelRequested: Boolean = false): JournalEntry {
         try {
-            return transaction(database) { prepareInTx(lease, op) }
+            return transaction(database) { prepareInTx(lease, op, allowCancelRequested) }
         } catch (e: ExposedSQLException) {
             if (!e.isUniqueViolation()) throw e
             // Lost an insert race for the same key (cannot happen under one valid lease, but stay safe): adopt the winner.
-            return transaction(database) { prepareInTx(lease, op) }
+            return transaction(database) { prepareInTx(lease, op, allowCancelRequested) }
         }
     }
 
-    private fun Transaction.prepareInTx(lease: Lease, op: PrepareOperation): JournalEntry {
-        requireLease(lease)
+    private fun Transaction.prepareInTx(lease: Lease, op: PrepareOperation, allowCancelRequested: Boolean): JournalEntry {
+        requireLease(lease, allowCancelRequested)
         val existing = ExternalOperationsTable.selectAll().where {
             (ExternalOperationsTable.runId eq lease.runId.value) and
                 (ExternalOperationsTable.opType eq op.opType) and
@@ -203,7 +221,8 @@ class OperationJournalRepository(
         errorClass: String? = null,
         error: String? = null,
         nextActionAt: LocalDateTime? = null,
-    ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Plain, externalRef, errorClass, error, nextActionAt)
+        allowCancelRequested: Boolean = false,
+    ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Plain, externalRef, errorClass, error, nextActionAt, allowCancelRequested)
 
     /**
      * Leaves UNKNOWN / RECONCILIATION_REQUIRED on the strength of verified evidence of the real external state.
@@ -221,6 +240,7 @@ class OperationJournalRepository(
         ref: VerifiedEvidenceRef,
         externalRef: String? = null,
         nextActionAt: LocalDateTime? = null,
+        allowCancelRequested: Boolean = false,
     ): JournalEntry {
         val purpose = when (to) {
             OperationStatus.CONFIRMED -> EvidencePurpose.RECONCILE_EXISTS
@@ -228,8 +248,8 @@ class OperationJournalRepository(
             OperationStatus.FAILED -> EvidencePurpose.RECONCILE_FAILED
             else -> throw InvalidTransitionException("operation $opId: reconcile cannot target $to")
         }
-        val evidence = resolveFor(lease, opId, expectedVersion, purpose, ref)
-        return applyTransition(lease, opId, expectedVersion, to, Gate.Verified(evidence), externalRef, null, null, nextActionAt)
+        val evidence = resolveFor(lease, opId, expectedVersion, purpose, ref, allowCancelRequested)
+        return applyTransition(lease, opId, expectedVersion, to, Gate.Verified(evidence), externalRef, null, null, nextActionAt, allowCancelRequested)
     }
 
     /**
@@ -242,9 +262,25 @@ class OperationJournalRepository(
         expectedVersion: Long,
         ref: VerifiedEvidenceRef,
         nextActionAt: LocalDateTime? = null,
+        allowCancelRequested: Boolean = false,
     ): JournalEntry {
-        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref)
-        return applyTransition(lease, opId, expectedVersion, OperationStatus.RETRYABLE, Gate.Verified(evidence), null, null, null, nextActionAt)
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref, allowCancelRequested)
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.RETRYABLE, Gate.Verified(evidence), null, null, null, nextActionAt, allowCancelRequested)
+    }
+
+    /**
+     * PREPARED -> IN_FLIGHT by a new writer generation (lease): the row was written by an earlier generation and never
+     * dispatched. Only with a verified NOT_SENT ref for this operation (#91 M5 takeover). The lease fence of [lease] still applies.
+     */
+    suspend fun takeOverPrepared(
+        lease: Lease,
+        opId: String,
+        expectedVersion: Long,
+        ref: VerifiedEvidenceRef,
+        allowCancelRequested: Boolean = false,
+    ): JournalEntry {
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref, allowCancelRequested, setOf(OperationStatus.PREPARED))
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.IN_FLIGHT, Gate.Takeover(evidence), null, null, null, null, allowCancelRequested)
     }
 
     /** IN_FLIGHT -> FAILED, only with a verified REJECTED ref for this operation: the external system explicitly refused. */
@@ -255,15 +291,22 @@ class OperationJournalRepository(
         ref: VerifiedEvidenceRef,
         errorClass: String? = null,
         error: String? = null,
+        allowCancelRequested: Boolean = false,
     ): JournalEntry {
-        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.REJECTED, ref)
-        return applyTransition(lease, opId, expectedVersion, OperationStatus.FAILED, Gate.Verified(evidence), null, errorClass, error, null)
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.REJECTED, ref, allowCancelRequested)
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.FAILED, Gate.Verified(evidence), null, errorClass, error, null, allowCancelRequested)
     }
 
     /** Why a status change is allowed. Only [Plain] comes without evidence, and it never reaches the evidence-only edges. */
     private sealed interface Gate {
         data object Plain : Gate
-        class Verified(val evidence: VerifiedEvidence) : Gate
+        sealed interface Proven : Gate {
+            val evidence: VerifiedEvidence
+        }
+        class Verified(override val evidence: VerifiedEvidence) : Proven
+
+        /** PREPARED -> IN_FLIGHT under a verified NOT_SENT ref (takeover by a newer generation). */
+        class Takeover(override val evidence: VerifiedEvidence) : Proven
     }
 
     /** The journal edge each evidence purpose may justify: allowed source states and the single target state. */
@@ -287,14 +330,15 @@ class OperationJournalRepository(
         expectedVersion: Long,
         purpose: EvidencePurpose,
         ref: VerifiedEvidenceRef,
+        allowCancelRequested: Boolean,
+        fromStates: Set<OperationStatus> = purpose.edge().first,
     ): VerifiedEvidence {
         val subject = transaction(database) {
-            requireLease(lease)
+            requireLease(lease, allowCancelRequested)
             val row = rowOf(lease, opId)
             if (row[ExternalOperationsTable.version] != expectedVersion) {
                 throw VersionConflictException("operation $opId is at version ${row[ExternalOperationsTable.version]}, expected $expectedVersion")
             }
-            val (fromStates, _) = purpose.edge()
             val from = OperationStatus.valueOf(row[ExternalOperationsTable.status])
             if (from !in fromStates) throw InvalidTransitionException("operation $opId: $purpose cannot justify a transition from $from")
             subjectOf(lease, row)
@@ -302,7 +346,8 @@ class OperationJournalRepository(
         val evidence = try {
             authority.resolve(ref, subject, purpose)
         } catch (e: EvidenceRefusedException) {
-            throw InvalidTransitionException("operation $opId: evidence refused: ${e.message}")
+            // Provider/Authority exception bodies can carry tokens or context content; never surface them via Journal errors.
+            throw InvalidTransitionException("operation $opId: EVIDENCE_REFUSED")
         }
         // Defense in depth: the Authority must answer for exactly this subject and purpose.
         if (evidence.subject != subject || evidence.purpose != purpose || evidence.ref != ref) {
@@ -321,8 +366,9 @@ class OperationJournalRepository(
         errorClass: String?,
         error: String?,
         nextActionAt: LocalDateTime?,
+        allowCancelRequested: Boolean,
     ): JournalEntry = transaction(database) {
-        requireLease(lease)
+        requireLease(lease, allowCancelRequested)
         val row = rowOf(lease, opId)
         val from = OperationStatus.valueOf(row[ExternalOperationsTable.status])
         if (row[ExternalOperationsTable.version] != expectedVersion) {
@@ -344,6 +390,14 @@ class OperationJournalRepository(
                     reason = "MAX_ATTEMPTS_EXCEEDED"
                 }
             }
+            is Gate.Takeover -> {
+                val ev = gate.evidence
+                if (from != OperationStatus.PREPARED || to != OperationStatus.IN_FLIGHT || ev.purpose != EvidencePurpose.NOT_SENT) {
+                    throw InvalidTransitionException("operation $opId: takeover needs a NOT_SENT ref on PREPARED -> IN_FLIGHT")
+                }
+                requireBound(lease, row, ev)
+                reason = "VERIFIED_NOT_SENT_TAKEOVER"
+            }
             is Gate.Verified -> {
                 val ev = gate.evidence
                 val (fromStates, edgeTarget) = ev.purpose.edge()
@@ -354,6 +408,7 @@ class OperationJournalRepository(
                     throw InvalidTransitionException("operation $opId: ${ev.purpose} (${ev.observation}/${ev.capability}) does not justify $from -> $to")
                 }
                 requireBound(lease, row, ev)
+                requireCurrentAuthorityEpoch(opId, subjectOf(lease, row).tenantId, ev)
                 reason = when (ev.purpose) {
                     EvidencePurpose.NOT_SENT -> "VERIFIED_NOT_SENT"
                     EvidencePurpose.REJECTED -> "VERIFIED_REJECTED"
@@ -379,7 +434,7 @@ class OperationJournalRepository(
             it[ExternalOperationsTable.nextActionAt] = nextActionAt
             if (reason != null) it[transitionReason] = reason
             when (gate) {
-                is Gate.Verified -> {
+                is Gate.Proven -> {
                     val ev = gate.evidence
                     if (ev.purpose in RECONCILIATION_PURPOSES) {
                         it[reconcileAttempts] = row[ExternalOperationsTable.reconcileAttempts] + 1
@@ -392,12 +447,44 @@ class OperationJournalRepository(
                     it[evidencePurpose] = ev.purpose.name
                     it[evidenceDigest] = ev.requestDigest
                     it[evidenceExpiresAt] = ev.expiresAt
+                    it[authorityEpoch] = ev.authorityEpoch
+                    it[capabilityRevision] = ev.capabilityRevision
+                    it[grantGeneration] = ev.grantGeneration
+                    it[evidenceContentDigest] = ev.evidenceDigest
                 }
                 is Gate.Plain -> Unit
             }
         }
         if (updated != 1) throw VersionConflictException("operation $opId changed concurrently")
+        audit.append(
+            this,
+            lease.runId,
+            AuditEntry(
+                actor = lease.owner,
+                action = "OP_STATUS_CHANGED",
+                result = "OK",
+                resource = "op:$opId",
+                payload = "from=$from;to=$target;reason=${reason ?: "PLAIN"};version=${expectedVersion + 1}",
+            ),
+        )
         ExternalOperationsTable.selectAll().where { ExternalOperationsTable.opId eq opId }.single().toEntry()
+    }
+
+    /**
+     * Compares the evidence's Authority Epoch values with the Kivra MariaDB copy, inside the transition transaction and
+     * under the copy's row lock. Any difference, a missing copy, or a revoked/changed grant refuses the call before any
+     * write (Issue #94). Runs after [requireBound], so the subject (tenant, operation, digest, issuer binding) is already
+     * checked.
+     */
+    private fun Transaction.requireCurrentAuthorityEpoch(opId: String, tenantId: String, ev: VerifiedEvidence) {
+        val current = with(epochs) { lockForTransition(tenantId, ev.subject.providerId) }
+            ?: throw InvalidTransitionException("operation $opId: no authority epoch copy for this provider")
+        val stale = current.providerContractVersion != ev.providerContractVersion ||
+            current.capability != ev.capability ||
+            current.capabilityRevision != ev.capabilityRevision ||
+            current.authorityEpoch != ev.authorityEpoch ||
+            current.grantGeneration != ev.grantGeneration
+        if (stale) throw InvalidTransitionException("operation $opId: authority epoch changed after the evidence was resolved")
     }
 
     /**
@@ -426,7 +513,7 @@ class OperationJournalRepository(
      * The subject an evidence must be bound to, read from the row. A row without tenant or contract version (written before
      * V4) has no subject and therefore cannot settle through evidence.
      */
-    private fun subjectOf(lease: Lease, row: ResultRow): EvidenceSubject {
+    internal fun subjectOf(lease: Lease, row: ResultRow): EvidenceSubject {
         val opId = row[ExternalOperationsTable.opId]
         val tenant = row[ExternalOperationsTable.tenantId]
             ?: throw InvalidTransitionException("operation $opId has no tenant binding")
@@ -445,6 +532,12 @@ class OperationJournalRepository(
 
     fun get(opId: String): JournalEntry? = transaction(database) {
         ExternalOperationsTable.selectAll().where { ExternalOperationsTable.opId eq opId }.firstOrNull()?.toEntry()
+    }
+
+    /** All operations of a run, in ULID order. Read-only, needs no lease. */
+    fun listByRun(runId: RunId): List<JournalEntry> = transaction(database) {
+        ExternalOperationsTable.selectAll().where { ExternalOperationsTable.runId eq runId.value }
+            .orderBy(ExternalOperationsTable.opId).map { it.toEntry() }
     }
 
     fun findByKey(runId: RunId, opType: String, idempotencyKey: String): JournalEntry? = transaction(database) {
@@ -483,6 +576,10 @@ class OperationJournalRepository(
         evidenceDigest = this[ExternalOperationsTable.evidenceDigest],
         evidenceExpiresAt = this[ExternalOperationsTable.evidenceExpiresAt],
         transitionReason = this[ExternalOperationsTable.transitionReason],
+        authorityEpoch = this[ExternalOperationsTable.authorityEpoch],
+        capabilityRevision = this[ExternalOperationsTable.capabilityRevision],
+        grantGeneration = this[ExternalOperationsTable.grantGeneration],
+        evidenceContentDigest = this[ExternalOperationsTable.evidenceContentDigest],
     )
 
     private companion object {

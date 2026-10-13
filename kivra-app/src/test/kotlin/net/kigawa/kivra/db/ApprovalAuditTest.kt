@@ -74,7 +74,7 @@ class ApprovalAuditTest {
     fun `V3 creates approvals and leaves V1 V2 tables intact`() = fixture {
         assertEquals(0, db.count("approvals"))
         val versions = transaction(db.database) { execQuery("SELECT version FROM flyway_schema_history WHERE success = TRUE AND version IS NOT NULL ORDER BY installed_rank") { it.getString(1) } }
-        assertEquals(listOf("1", "2", "3", "4"), versions)
+        assertEquals(listOf("1", "2", "3", "4", "5", "6"), versions)
     }
 
     @Test

@@ -45,6 +45,7 @@ class M0MemoryMutationJournalAdapterTest {
 
         init {
             db.evidence.setProviderContract("recl", "recl.memory.v1", ProviderCapability.LOOKUP_BY_STABLE_REF)
+            db.syncAuthorityEpoch("t1", "recl")
         }
 
         fun adapter(owner: String) = M0MemoryMutationJournalAdapter(db.database, db.evidence, runId, owner)

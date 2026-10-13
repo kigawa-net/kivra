@@ -1,0 +1,140 @@
+name: cd
+
+# テストは ci.yml が担当する(ここでは再実行しない)。
+# PR: イメージのビルドと push のみ(デプロイしない)。
+# main への push / workflow_dispatch(main): イメージを push し、dev のマニフェストを更新する。
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  dockerRepository: harbor.kigawa.net/library
+  name: kivra
+  manifestRepository: kigawa-net/kigawa-net-k8s
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # fork からの PR には BWS_ACCESS_TOKEN / Harbor の認証情報が渡らないため、ビルドしない
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "tag=pr-${{ github.event.pull_request.number }}-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install bws CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q jq unzip curl
+          BWS_VERSION=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/bitwarden/sdk-sm/releases?per_page=30" \
+            | jq -r '[.[] | select(.tag_name | startswith("bws-v"))][0].tag_name')
+          BWS_TAG=${BWS_VERSION#bws-v}
+          curl -Lo bws.zip "https://github.com/bitwarden/sdk-sm/releases/download/${BWS_VERSION}/bws-x86_64-unknown-linux-gnu-${BWS_TAG}.zip"
+          unzip bws.zip bws
+          sudo mv bws /usr/local/bin/
+          bws --version
+
+      - name: Harbor認証情報をBWSから取得
+        env:
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
+        run: |
+          HARBOR_USER=$(bws -c no secret get 929d361e-e599-4b58-b173-b3e201004d0a | jq -r '.value')
+          HARBOR_PASS=$(bws -c no secret get 13c66d3b-7eb6-4c37-b466-b3e2010057b1 | jq -r '.value')
+          echo "::add-mask::$HARBOR_USER"
+          echo "::add-mask::$HARBOR_PASS"
+          echo "HARBOR_USER=$HARBOR_USER" >> "$GITHUB_ENV"
+          echo "HARBOR_PASS=$HARBOR_PASS" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: harbor.kigawa.net
+          username: ${{ env.HARBOR_USER }}
+          password: ${{ env.HARBOR_PASS }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./
+          file: Dockerfile
+          push: true
+          tags: ${{ env.dockerRepository }}/${{ env.name }}:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # main への push(または main での手動実行)で dev 環境へデプロイ。
+  # 直接 push ではなく、manifest repo に更新 PR を作成・更新する(main は保護されているため。ai-scheduler の PR #12 と同じ形)。
+  deploy-dev:
+    name: deploy to dev
+    needs: build
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      # 静的 PAT ではなく、組織の GitHub Actions OIDC ブローカーから短命トークンを取得する。
+      - name: Mint kigawa-net-k8s repo token
+        id: k8s-token
+        uses: kigawa-net/kinfra/.github/actions/kigawa-net-app-token@dev
+        with:
+          owner: kigawa-net
+          repositories: kigawa-net-k8s
+          permissions: '{"contents":"write","pull_requests":"write"}'
+
+      - name: checkout manifest repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.manifestRepository }}
+          ref: main
+          token: ${{ steps.k8s-token.outputs.token }}
+          path: manifests
+
+      - name: Update YAML File
+        run: |
+          MANIFEST=./manifests/${{ env.name }}/dev/${{ env.name }}.yaml
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::$MANIFEST が manifest repo にありません。k8s 側の PR を先にマージしてください。"
+            exit 1
+          fi
+          yq -i '.spec.template.spec.containers[0].image = "${{ env.dockerRepository }}/${{ env.name }}:${{ needs.build.outputs.tag }}"' \
+            "$MANIFEST"
+
+      - name: Create or update manifest pull request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.k8s-token.outputs.token }}
+          path: manifests
+          base: main
+          branch: deploy/${{ env.name }}/dev
+          add-paths: ${{ env.name }}/dev/${{ env.name }}.yaml
+          commit-message: "deploy ${{ env.name }} ${{ needs.build.outputs.tag }} to dev"
+          title: "deploy(${{ env.name }}): dev ${{ needs.build.outputs.tag }}"
+          body: |
+            Automated manifest update for ${{ env.name }} dev.
+            Source commit: ${{ github.sha }}
+            Image: ${{ env.dockerRepository }}/${{ env.name }}:${{ needs.build.outputs.tag }}
+
+            Review and merge this PR in kigawa-net-k8s to trigger ArgoCD.
+          delete-branch: true

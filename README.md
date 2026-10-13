@@ -115,6 +115,16 @@ Mock の成功は Production Provider 検証ではない。要確認項目は [d
 
 時刻は UTC。MariaDB のセッションを UTC にする（既定の URL は設定済み）。
 
+## デプロイ
+
+- イメージ: `harbor.kigawa.net/library/kivra:<tag>`（`Dockerfile`、ビルドは `installDist`。ファット JAR は使わない）。`ENTRYPOINT` は `/app/bin/kivra-app`、ポートは 8080。実行ユーザーは非 root の `kivra`。
+- 起動時に Flyway が `db/migration`（V1〜V7 など）を自動で migrate する。DB 接続先に既存スキーマがあれば未適用分だけが流れる。
+- 必須で上書きする環境変数（既定値のままでは本番で使えない）: `KIVRA_DB_JDBC_URL`（既定は localhost）、`KIVRA_DB_USER`、`KIVRA_DB_PASSWORD`（既定はプレースホルダ）。JDBC URL の `time_zone='+00:00'` は UTC 固定のため残すこと。
+- 任意: `PORT`（既定 8080）、`KIVRA_METRICS_ENABLED`（既定 `false`）。`true` にする場合は `KIVRA_METRICS_BEARER_TOKEN` も必須。
+- ヘルスチェック: `GET /health`（イメージの `HEALTHCHECK` も同じ）。
+- 本番の既定値: Recl への mutation は無効（`MutationCapability.DISABLED` / `ReclConfig.mutationsEnabled=false`）、Reaper の自動削除は無効（`autoDeleteEnabled=false`）。Replay について切り替え用の環境変数は無い。
+- CI/CD（`.github/workflows/cd.yml`）: PR はイメージのビルドと push のみ（`pr-<番号>-<sha>`）。main への push と main での手動実行は `main-<sha>` を push したうえで、dev のマニフェスト（`kigawa-net/kigawa-net-k8s` の `kivra/dev/kivra.yaml`）を更新する PR を作成する。テストは `ci.yml` が担当する。
+
 ## 実装上の要点
 
 - **単一の Run 正本**: `development_runs` / `DevelopmentRunState`（CREATED / PLANNING / PREPARING / DEVELOPING / TESTING / REVIEWING /

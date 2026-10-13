@@ -10,6 +10,7 @@ application {
 
 dependencies {
     implementation(project(":kivra-core"))
+    implementation(project(":kivra-observability"))
     implementation(project(":kivra-exkes"))
     implementation(project(":kivra-memory"))
     implementation(project(":kivra-policy"))

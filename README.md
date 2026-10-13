@@ -9,13 +9,14 @@
 | モジュール | 内容 |
 |---|---|
 | `kivra-core` | ドメイン型、状態機械（DevelopmentRun / Agent / ExecutionSession / OperationStatus）、Port インターフェース（TaskProvider / MemoryPort / SchedulePort、定義のみ）、`LeaseStore` |
+| `kivra-observability` | Trace 土台（`Tracer` / `SpanExporter` Port）、メトリクス（`MetricsRegistry`、Prometheus 形式）、指標カタログ、コスト Port（観測専用。`BudgetCheck.verdict` の `WITHIN_KNOWN_LIMIT` も承認ではない。Issue #73）、秘密を出さない属性フィルタ。外部依存なし（[docs/observability.md](docs/observability.md)） |
 | `kivra-scheduler` | SchedulePort の具体型（#38）。`ScheduleClient`（Job の作成・取得・一時停止/再開/削除、Execution の取得・cancel・retry）、`FakeScheduleClient`、`AiSchedulerAdapter`（Ktor。Bearer は `ScheduleTokenProvider` 差し込み）、起動契約（`ScheduleTriggerHandler` で `(jobId, scheduledAt)` を冪等化、`SchedulePoller`）。**Orchestrator は ai-scheduler が止まっても動く**（ai-scheduler は起動役に限定）。Orchestrator（#36）とは未結線。実 API の確認結果と要確認事項は [docs/ai-scheduler-requests.md](docs/ai-scheduler-requests.md)（結果通知は Callback 不可で Polling、認証は Phase 1 無し=ネットワーク限定、`feat/timeout` 未マージ） |
 | `kivra-exkes` | `ExecutionPort`（唯一の定義。core のプレースホルダは #30 で削除）、`ExkesAdapter`（Ktor クライアント、Bearer は `TokenProvider`）、`FakeExecutionPort`、共通契約テスト。DB・Run 状態機械には依存しない（#29）。exkes 側の不足機能は [docs/exkes-requests.md](docs/exkes-requests.md) |
 | `kivra-github` | GitHub Adapter（#34）。`GitHubPort` + Ktor HTTP 実装。ブランチ・PR・Checks・レビュー取得まで。Merge / force push / main への push は Port に存在しない（人間のみ）。Tool Gateway（#32）とは未結線 |
 | `kivra-model-gateway` | Model Gateway 最小実装(#35): 型・エラー分類、Model Registry(YAML)、制約付きルーティング、予算(予約/確定/解放)、Anthropic Adapter(Ktor)、監査/メトリクスのフック(永続化は別 Issue)。Core / DB には依存しない。Registry 例は `kivra-model-gateway/config/model-registry.example.yaml`(価格等はプレースホルダ)。API キーは信頼管理者が固定する `CredentialBinding`(providerId→許可ホスト/ラベル/環境変数名)経由でのみ解決し、Registry の endpoint/credentialRef は任意の秘密を指せない(HTTPS・ホスト一致必須、リダイレクト不追従)。同一 requestId は `RequestLedger`(予約・結果保存・照合、eviction なし、SHA-256 の正規化 Request Digest で束縛)で冪等化する。永続 Ledger は未対応(M0 の DB 契約に依存)で、`InMemoryRequestLedger` は dev/test 専用として `devAllowInMemoryLedger = true` を明示しない限り Gateway 構築が失敗する。送信済みの可能性がある失敗(5xx・接続断・解析失敗・ストリーム途中失敗・HTTP 応答を伴う 4xx/429 を含む)は予約を見積額で確定し、同一 requestId の Retry / Fallback を行わない(新しい requestId が必要)。送信前に確実に失敗した場合(資格情報未設定・接続拒否・DNS 失敗)のみ予約を解放し Retry / Fallback する。呼出し側 Agent が DataClass を下げられないよう、DataClass は Trusted Orchestrator/Policy Gateway が固定した値を渡すこと(M4 公開 API の前提)。Budget はインメモリで本番の Hard Limit としては使わない(永続化・インスタンス跨ぎは別 Issue) |
 | `kivra-fusha-task` | fusha-task 向け `TaskProvider` 実装（read-only の `FushaTaskAdapter`、`FakeTaskProvider`、Bearer 認証、timeout / retry / backoff）。M1 #27 |
 | `kivra-memory` | `MemoryProvider` ポートと型（MemoryEntry / ScopeRef / SourceRef / ContextBundle / HandoffRecord）、`InMemoryWorkingMemory`、`FakeMemoryPort`、縮退層 `MemoryService`（Write Queue・circuit breaker）、Secret フィルタ、recl 向け `ReclAdapter`（**計画 API に基づく骨格。実 API は存在せず未接続**）。M5 #37 |
-| `kivra-app` | Ktor アプリ、設定読込、`/health`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease / Agent のリポジトリ、`net.kigawa.kivra.agent.AgentManager`（M2: 1 Run に 1 Agent / 1 Workspace、Lease 保持下で ExecutionPort 経由に Workspace→Runtime→Execution を起動し、各副作用を Operation Journal に記録。UNKNOWN は照合のみで再送しない。Hold・Lease 喪失で停止、Cancel は回収後に CANCELLED。#30） |
+| `kivra-app` | Ktor アプリ、設定読込、`/health`、`/metrics`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease / Agent のリポジトリ、`net.kigawa.kivra.agent.AgentManager`（M2: 1 Run に 1 Agent / 1 Workspace、Lease 保持下で ExecutionPort 経由に Workspace→Runtime→Execution を起動し、各副作用を Operation Journal に記録。UNKNOWN は照合のみで再送しない。Hold・Lease 喪失で停止、Cancel は回収後に CANCELLED。#30） |
 
 DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列、V3 approvals（PR #55 / #33。M0 で取り込み済み）、V4 Evidence Authority 束縛列（#82。M0 でも追加済み））。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。このブランチに V5 は含めない（PR #92 の V5 は別途）。マージ順は #43 → #55 → #86 で固定し、V4 適用済み DB への V3 後付けは行わない（Issue #88、fail-closed）。V2 は未マージのため編集中。マージ後は V5 以降のみ追加。
 
@@ -55,6 +56,11 @@ Testcontainers は使っていない（docker ソケット権限・CI の servic
 CI（`.github/workflows/ci.yml`、JDK 21）は `./gradlew test`（H2）→ MariaDB 11 service container に対する `:kivra-app:test` → `./gradlew build` の順に実行する。
 マージ前に、このワークフローを必須チェックに設定すること（リポジトリ設定側の作業）。
 
+## 観測
+
+`GET /metrics`（Prometheus text format）は既定で無効。`KIVRA_METRICS_ENABLED=true` と `KIVRA_METRICS_BEARER_TOKEN`（必須、未設定なら起動失敗）の両方で有効化し、`Authorization: Bearer <token>` で呼ぶ。別ポート化は未実装。
+要確認: 別ポート（loopback）化の要否、収集基盤（Prometheus / OpenTelemetry）の採用、Metrics の実計測への結線（未対応）。指標の一覧と秘密の扱いは [docs/observability.md](docs/observability.md)。
+
 ## 設定
 
 HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上書きできる。
@@ -66,6 +72,8 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
 | `KIVRA_DB_USER` / `KIVRA_DB_PASSWORD` | `kivra` / `change-this-in-production` | DB 認証情報（本番では必ず上書き） |
 | `KIVRA_LEASE_TTL_SECONDS` | 30 | Run Lease の TTL |
 | `KIVRA_LEASE_GRACE_SECONDS` | 5 | 期限切れ後、奪取を許可するまでの猶予 |
+| `KIVRA_METRICS_ENABLED` | false | `/metrics` の有効化（true のとき `KIVRA_METRICS_BEARER_TOKEN` が必須） |
+| `KIVRA_METRICS_BEARER_TOKEN` | （空） | `/metrics` の Bearer トークン |
 
 fusha-task（`kivra.fusha.*`、**すべて要確認**: 環境ごとの URL・機械向け認証方式は未確定）:
 

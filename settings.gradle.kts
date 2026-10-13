@@ -24,5 +24,6 @@ include(
     "kivra-model-gateway",
     "kivra-policy",
     "kivra-app",
+    "kivra-observability",
     "kivra-ui-api",
 )

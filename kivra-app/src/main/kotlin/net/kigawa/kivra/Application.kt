@@ -9,7 +9,9 @@ import net.kigawa.kivra.config.KivraConfig
 import net.kigawa.kivra.db.connectDatabase
 import net.kigawa.kivra.db.createDataSource
 import net.kigawa.kivra.db.runMigrations
+import net.kigawa.kivra.observability.MetricsRegistry
 import net.kigawa.kivra.routes.configureHealthRoutes
+import net.kigawa.kivra.routes.configureObservabilityRoutes
 
 fun Application.module() {
     val config = KivraConfig.from(environment.config)
@@ -18,5 +20,9 @@ fun Application.module() {
     connectDatabase(dataSource)
 
     install(ContentNegotiation) { json() }
-    routing { configureHealthRoutes() }
+    val metrics = MetricsRegistry()
+    routing {
+        configureHealthRoutes()
+        configureObservabilityRoutes(metrics, config.metrics)
+    }
 }

@@ -2,12 +2,16 @@ package net.kigawa.kivra.db
 
 import java.time.Clock
 import java.time.LocalDateTime
+import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.Lease
 import net.kigawa.kivra.core.LeaseLostException
-import net.kigawa.kivra.core.PrMergeEvidence
+import net.kigawa.kivra.core.PrMergeObservationPolicy
+import net.kigawa.kivra.core.PullRequestBinding
+import net.kigawa.kivra.core.VerifiedPrMerge
 import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunHaltedException
 import net.kigawa.kivra.core.RunId
@@ -56,13 +60,7 @@ class DevelopmentRunRepository(
     private val outbox: OutboxRepository,
     private val audit: AuditRepository,
     private val clock: Clock = Clock.systemUTC(),
-    private val trustedIssuers: Set<String> = PR_MERGE_EVIDENCE_ISSUERS,
 ) {
-
-    private companion object {
-        /** Issuers allowed to report a PR merge (PrMergeEvidence). Still a self-declared string allowlist, see #53 / #49 / #50. */
-        val PR_MERGE_EVIDENCE_ISSUERS: Set<String> = setOf("exkes-adapter", "fusha-task-adapter", "github-adapter", "operator-console")
-    }
 
     /** Creates a run in CREATED (version 0) with its audit and outbox events. [completionMode] is fixed for the run's lifetime. */
     fun create(taskId: String, actor: String, completionMode: RunCompletionMode, traceId: String? = null): DevelopmentRun {
@@ -148,11 +146,12 @@ class DevelopmentRunRepository(
     }
 
     /**
-     * Records the PR repository and head SHA the run is working on. Allowed only in PULL_REQUEST with the lease and version;
-     * a new head (a push) overwrites the previous binding, so the merge check always compares against the latest head.
+     * Records the pull request identity the run works on (Issue #53). Allowed only in PULL_REQUEST with the lease and version.
+     * A new bind (a push, or a changed policy / manifest) overwrites every binding column, so a merge verified against an older
+     * binding is refused at completion and the policy / manifest must be supplied again.
      */
-    fun bindPullRequest(lease: Lease, expectedVersion: Long, repository: String, headSha: String, actor: String): DevelopmentRun {
-        require(repository.isNotBlank() && headSha.isNotBlank()) { "repository and headSha must not be blank" }
+    fun bindPullRequest(lease: Lease, expectedVersion: Long, binding: PullRequestBinding, actor: String): DevelopmentRun {
+        require(binding.runId == lease.runId) { "binding belongs to another run" }
         transaction(database) {
             requireLease(lease)
             val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
@@ -164,11 +163,14 @@ class DevelopmentRunRepository(
             val updated = execUpdate(
                 """
                 UPDATE development_runs
-                   SET pr_repository = ?, pr_head_sha = ?, version = version + 1, updated_at = ?
+                   SET pr_repository = ?, pr_head_sha = ?, pr_number = ?, pr_node_id = ?, pr_repository_id = ?, pr_base_ref = ?,
+                       pr_policy_revision = ?, pr_review_manifest_digest = ?, version = version + 1, updated_at = ?
                  WHERE run_id = ? AND lease_generation = ? AND lease_owner = ? AND lease_expires_at > ${DbTime.NOW}
                    AND hold_reason IS NULL AND version = ? AND state = ?
                 """.trimIndent(),
-                repository, headSha, utcNow(clock), lease.runId.value, lease.generation, lease.owner, expectedVersion, from.name,
+                binding.repository, binding.headSha, binding.prNumber, binding.prNodeId, binding.repositoryId, binding.baseRef,
+                binding.policyRevision, binding.reviewManifestDigest, utcNow(clock),
+                lease.runId.value, lease.generation, lease.owner, expectedVersion, from.name,
             )
             if (updated != 1) throw LeaseLostException("fenced update rejected for run ${lease.runId}")
             val taskId = row[DevelopmentRunsTable.taskId]
@@ -176,22 +178,36 @@ class DevelopmentRunRepository(
             audit.append(this, lease.runId, AuditEntry(actor = actor, action = "RUN_PR_BOUND", result = "OK", resource = "task:$taskId", traceId = traceId))
             outbox.append(
                 this, lease.runId, expectedVersion + 1, "RunPullRequestBound",
-                buildJsonObject { put("taskId", taskId); put("repository", repository); put("headSha", headSha) }.toString(), traceId,
+                buildJsonObject {
+                    put("taskId", taskId)
+                    put("repository", binding.repository)
+                    put("headSha", binding.headSha)
+                    put("prNumber", binding.prNumber)
+                }.toString(),
+                traceId,
             )
         }
         return get(lease.runId)!!
     }
 
+    /** The binding the run currently records, or null when any binding column is missing (for example a row written before V7). */
+    fun loadPullRequestBinding(runId: RunId): PullRequestBinding? = transaction(database) {
+        val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.firstOrNull() ?: return@transaction null
+        row.toPullRequestBindingOrNull()
+    }
+
     /**
-     * PR_ONLY completion: PULL_REQUEST or WAITING_APPROVAL -> COMPLETED, compare-and-set on the lease and version, and only with
-     * a verified merge of the head this run is bound to. Every other outcome is refused and nothing is written:
+     * PR_ONLY completion: PULL_REQUEST or WAITING_APPROVAL -> COMPLETED, compare-and-set on the lease and version, and only with a
+     * [VerifiedPrMerge] (from [PrMergeVerifier] via [TrustedPrMergeAuthority]) that matches the run's current binding. Every other
+     * outcome is refused and nothing is written:
      * - run is not PR_ONLY, or not in a PR state,
-     * - evidence is not `merged == true`, has no merge SHA, names another repository or head, is from an untrusted issuer,
-     *   belongs to another run, or is observed in the future,
+     * - the run has no complete binding (legacy row), or the merge belongs to another run,
+     * - repository id / name, PR number, node id, base ref, head SHA, policy revision or review manifest digest differ from the binding,
+     * - the observation is in the future or older than [PrMergeObservationPolicy.MAX_OBSERVATION_AGE],
      * - the lease is lost or the run is on hold / cancel-requested ([LeaseLostException] / [RunHaltedException]).
      * A second call fails (the run is already COMPLETED and terminal), so `RunCompleted` is appended exactly once.
      */
-    fun completePrOnlyRun(lease: Lease, expectedVersion: Long, evidence: PrMergeEvidence, actor: String): DevelopmentRun {
+    fun completePrOnlyRun(lease: Lease, expectedVersion: Long, merge: VerifiedPrMerge, actor: String): DevelopmentRun {
         transaction(database) {
             requireLease(lease)
             val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
@@ -205,8 +221,9 @@ class DevelopmentRunRepository(
             if (from !in DevelopmentRunState.prOnlyCompletionSources) {
                 throw InvalidTransitionException("run ${lease.runId}: $from cannot complete as PR_ONLY")
             }
-            verifyMergeEvidence(lease, row, evidence)
+            verifyMerge(lease, row, merge)
 
+            val observedAt = LocalDateTime.ofInstant(merge.observedAt, ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS)
             val updated = execUpdate(
                 """
                 UPDATE development_runs
@@ -215,7 +232,7 @@ class DevelopmentRunRepository(
                  WHERE run_id = ? AND lease_generation = ? AND lease_owner = ? AND lease_expires_at > ${DbTime.NOW}
                    AND hold_reason IS NULL AND version = ? AND state = ?
                 """.trimIndent(),
-                DevelopmentRunState.COMPLETED.name, "PR_MERGED", evidence.mergeSha, evidence.evidenceRef, evidence.observedAt,
+                DevelopmentRunState.COMPLETED.name, "PR_MERGED", merge.mergeCommitSha, "github-pr:${merge.prNodeId}", observedAt,
                 utcNow(clock), lease.runId.value, lease.generation, lease.owner, expectedVersion, from.name,
             )
             if (updated != 1) throw LeaseLostException("fenced update rejected for run ${lease.runId}")
@@ -226,7 +243,7 @@ class DevelopmentRunRepository(
                 put("taskId", taskId)
                 put("from", from.name)
                 put("to", DevelopmentRunState.COMPLETED.name)
-                put("mergeSha", evidence.mergeSha!!)
+                put("mergeSha", merge.mergeCommitSha)
             }.toString()
             audit.append(this, lease.runId, AuditEntry(actor = actor, action = "RUN_TRANSITION", result = "OK", resource = "task:$taskId", traceId = traceId, payload = payload))
             outbox.append(this, lease.runId, expectedVersion + 1, "RunCompleted", payload, traceId)
@@ -234,19 +251,47 @@ class DevelopmentRunRepository(
         return get(lease.runId)!!
     }
 
-    /** Checks the GitHub merge evidence against the run's own PR binding. Throws [InvalidTransitionException] on any mismatch. */
-    private fun verifyMergeEvidence(lease: Lease, row: ResultRow, e: PrMergeEvidence) {
+    /** Checks the verified merge against the run's current binding. Throws [InvalidTransitionException] on any mismatch. */
+    private fun verifyMerge(lease: Lease, row: ResultRow, m: VerifiedPrMerge) {
         fun refuse(why: String): Nothing = throw InvalidTransitionException("run ${lease.runId}: PR_ONLY completion refused: $why")
-        if (e.runId != lease.runId) refuse("evidence belongs to another run")
-        if (e.issuer !in trustedIssuers) refuse("issuer '${e.issuer}' is not trusted")
-        if (!e.merged) refuse("the pull request is not merged (closed without merge, or still open)")
-        if (e.mergeSha.isNullOrBlank()) refuse("merge SHA is missing")
-        if (e.observedAt.isAfter(utcNow(clock))) refuse("observedAt is in the future")
-        val boundRepo = row[DevelopmentRunsTable.prRepository]
-        val boundHead = row[DevelopmentRunsTable.prHeadSha]
-        if (boundRepo == null || boundHead == null) refuse("the run is not bound to a pull request")
-        if (e.repository != boundRepo) refuse("merged repository ${e.repository} is not $boundRepo")
-        if (e.headSha != boundHead) refuse("merged head ${e.headSha} is not the bound head $boundHead")
+        if (m.runId != lease.runId) refuse("the verified merge belongs to another run")
+        if (!m.merged) refuse("the pull request is not merged")
+        val now = utcNow(clock)
+        val observedAt = LocalDateTime.ofInstant(m.observedAt, ZoneOffset.UTC)
+        if (observedAt.isAfter(now)) refuse("observedAt is in the future")
+        if (observedAt.isBefore(now.minus(PrMergeObservationPolicy.MAX_OBSERVATION_AGE))) refuse("the observation is too old")
+        val bound = row.toPullRequestBindingOrNull()
+            ?: refuse("the run has no complete pull request binding (legacy or unbound row is not completable)")
+        if (!m.repository.equals(bound.repository, ignoreCase = true)) refuse("the merged repository is not the bound repository")
+        if (m.repositoryId != bound.repositoryId) refuse("the merged repository id is not the bound repository id")
+        if (m.prNumber != bound.prNumber) refuse("the merged pull request number is not the bound number")
+        if (m.prNodeId != bound.prNodeId) refuse("the merged pull request node id is not the bound node id")
+        if (m.baseRef != bound.baseRef) refuse("the merged base is not the bound base")
+        if (m.headSha != bound.headSha) refuse("the merged head is not the bound head")
+        if (m.policyRevision != bound.policyRevision) refuse("the policy revision is not the bound revision")
+        if (m.reviewManifestDigest != bound.reviewManifestDigest) refuse("the review manifest digest is not the bound digest")
+    }
+
+    private fun ResultRow.toPullRequestBindingOrNull(): PullRequestBinding? {
+        val repository = this[DevelopmentRunsTable.prRepository] ?: return null
+        val headSha = this[DevelopmentRunsTable.prHeadSha] ?: return null
+        val prNumber = this[DevelopmentRunsTable.prNumber] ?: return null
+        val prNodeId = this[DevelopmentRunsTable.prNodeId] ?: return null
+        val repositoryId = this[DevelopmentRunsTable.prRepositoryId] ?: return null
+        val baseRef = this[DevelopmentRunsTable.prBaseRef] ?: return null
+        val policyRevision = this[DevelopmentRunsTable.prPolicyRevision] ?: return null
+        val manifestDigest = this[DevelopmentRunsTable.prReviewManifestDigest] ?: return null
+        return PullRequestBinding(
+            runId = RunId(this[DevelopmentRunsTable.runId]),
+            repository = repository,
+            repositoryId = repositoryId,
+            prNumber = prNumber,
+            prNodeId = prNodeId,
+            baseRef = baseRef,
+            headSha = headSha,
+            policyRevision = policyRevision,
+            reviewManifestDigest = manifestDigest,
+        )
     }
 
     /**

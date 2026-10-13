@@ -151,8 +151,17 @@ Mock の成功は Production Provider 検証ではない。要確認項目は [d
   上限で DEAD。Publisher / Consumer worker 自体は未実装。
 - **Run completion mode（M8）**: `development_runs.completion_mode`（PR_ONLY / RELEASE）は Run Admission で一度だけ決め、以後変更する経路はない（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。
   - RELEASE: RELEASING → VERIFYING → COMPLETED（従来どおり）。PR_ONLY: 汎用 `transition()` から COMPLETED / RELEASING / VERIFYING へは行けない。
-  - PR_ONLY は `completePrOnlyRun()` だけで PULL_REQUEST / WAITING_APPROVAL → COMPLETED になる。GitHub の検証済み証拠（`merged == true`、Merge SHA、
-    repository と head SHA が run の `bindPullRequest` で記録した値と一致、信頼 issuer）が必要。close のみ・別 head の merge・未確定の結果は未完了のまま。
+  - PR_ONLY は `completePrOnlyRun()` だけで PULL_REQUEST / WAITING_APPROVAL → COMPLETED になる。引数は呼び出し側が組み立てられない
+    `VerifiedPrMerge` のみ（コンストラクタは private で、生成は `PrMergeVerifier.verify` だけ）。その元になる GitHub 観測は
+    `TrustedPrMergeAuthority`（実装: kivra-github `GitHubPrMergeAuthority`、`GET /pulls/{n}` を照会）が取得する（Issue #53）。
+    - Run は `bindPullRequest()` で repository / repository id（不変 ID）/ PR 番号 / node id / base ref / head SHA / policy revision / review manifest digest を
+      記録する（V7 で追加した列を含む）。再 bind（push 等）で全列を上書きし、古い head の merge は拒否される。
+    - 完了は、束縛と全項目が一致し、`merged == true`、Merge commit SHA が 40 桁の hex、観測時刻が未来でなく 10 分以内（`PrMergeObservationPolicy`）の場合だけ。
+      Squash / Rebase の merge commit SHA は head SHA と異なってよい。
+    - Authority の拒否・利用不可（5xx / 401 / 403 / rate limit / I/O）・例外では Run、audit、outbox のいずれも変わらない。
+      GitHub の 404・3xx（追跡しない）・不正応答は拒否扱い。close のみ・別 PR・別 head の merge は未完了のまま。
+    - V7 以前の行（束縛列が NULL）は完了できない（fail-closed）。
+    - 未対応: Authority の本番結線（app からの組み立て）、Webhook の HMAC 検証、`policy_revision` / `review_manifest_digest` の生成と検証（#49 / #50。現状は bind 時の値をそのまま照合する）、Merge Queue の `merge_group` SHA。
     COMPLETED は終端なので、重複完了は lease 喪失で拒否され、`RunCompleted` Outbox は 1 回だけ。
 - **将来の作り直し（#64）**: 最終ストレージが Fortis になれば、この SQL 実装（`FOR UPDATE` / `NOW(6)` / 生成列 / claim のロック）は作り直しになり得る。
   今回の契約（Run / Operation の状態機械、証拠規則、Evidence Authority の束縛規則、PR_ONLY 完了規則、Outbox の claim token 規則）は Storage に依存しない要件として維持する。

@@ -58,7 +58,7 @@ enum class DevelopmentRunState : StateMachine<DevelopmentRunState> {
 
 /**
  * How a run ends on success, fixed at Run Admission and never changed afterwards (M8 PR-only vertical slice, ADR 0001).
- * - PR_ONLY: the run ends when a human merges the pull request on GitHub (verified by PrMergeEvidence). No release.
+ * - PR_ONLY: the run ends when a human merges the pull request on GitHub (verified by TrustedPrMergeAuthority). No release.
  * - RELEASE: RELEASING -> VERIFYING -> COMPLETED through DEC (design #9 section 3.3).
  */
 enum class RunCompletionMode { PR_ONLY, RELEASE }
@@ -180,31 +180,6 @@ enum class ProviderCapability {
      * may justify a re-dispatch. A plain list / get that finds nothing does not qualify (eventual consistency).
      */
     AUTHORITATIVE_ABSENCE,
-}
-
-/**
- * Verified GitHub merge result for a PR_ONLY run (`completePrOnlyRun`). Must show `merged == true` for the PR head
- * that the run recorded; a close without merge, a merge of another head, or an unknown result never completes the run.
- */
-data class PrMergeEvidence(
-    val runId: RunId,
-    val issuer: String,
-    val repository: String,
-    val headSha: String,
-    val mergeSha: String?,
-    val merged: Boolean,
-    val evidenceRef: String,
-    val observedAt: java.time.LocalDateTime,
-) {
-    init {
-        requireProofFields(issuer, evidenceRef)
-    }
-}
-
-private fun requireProofFields(issuer: String, evidenceRef: String) {
-    require(issuer.isNotBlank()) { "issuer must not be blank" }
-    require(evidenceRef.isNotBlank()) { "evidenceRef must not be blank" }
-    require(evidenceRef.length <= 255) { "evidenceRef is too long" }
 }
 
 /** Transactional Outbox entry status (design #10 section 4 / #11 section 5.2). */

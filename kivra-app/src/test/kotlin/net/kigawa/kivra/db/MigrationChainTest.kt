@@ -30,10 +30,11 @@ private val MIGRATION_FILES = mapOf(
     4 to "V4__evidence_authority_binding.sql",
     5 to "V5__memory_mutation_binding.sql",
     6 to "V6__authority_epoch_fence.sql",
+    7 to "V7__pr_merge_binding.sql",
 )
 
 /**
- * Migration chain V1 -> V2 -> V3 -> V4 -> V5 -> V6 (Issue #88, #94). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
+ * Migration chain V1 -> V2 -> V3 -> V4 -> V5 -> V6 -> V7 (Issue #88, #94, #53). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
  *
  * Partial histories are built from copies of the real migration files in a temporary directory. Nothing here repairs,
  * skips or baselines a history: a mismatch must fail.
@@ -41,27 +42,30 @@ private val MIGRATION_FILES = mapOf(
 class MigrationChainTest {
 
     @Test
-    fun `empty database applies V1 to V6 in order and flyway validate passes`() = TestDb().use { db ->
+    fun `empty database applies V1 to V7 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
-        assertEquals(listOf("1", "2", "3", "4", "5", "6"), appliedVersions(db.dataSource))
+        assertEquals(listOf("1", "2", "3", "4", "5", "6", "7"), appliedVersions(db.dataSource))
         assertTrue(flyway.info().all().all { it.state == MigrationState.SUCCESS })
         assertEquals(1, db.tableCount("approvals"))
         assertEquals(1, db.columnCount("external_operations", "tenant_id"))
         assertEquals(1, db.columnCount("external_operations", "provider_contract_version"))
+        for (column in listOf("pr_number", "pr_node_id", "pr_repository_id", "pr_base_ref", "pr_policy_revision", "pr_review_manifest_digest")) {
+            assertEquals(1, db.columnCount("development_runs", column))
+        }
     }
 
     @Test
     fun `existing external_operations rows survive V3 and V4 with NULL tenant and contract binding`() {
         TestDb { ds -> migrateOnly(ds, 1, 2) }.use { db ->
-            val run = db.runs.create("task-legacy", "test", RunCompletionMode.RELEASE)
-            val opId = db.insertPreV4Row(run.runId.value, key = "legacy-key", status = "IN_FLIGHT", version = 3)
+            val runId = db.insertLegacyRun("task-legacy")
+            val opId = db.insertPreV4Row(runId, key = "legacy-key", status = "IN_FLIGHT", version = 3)
             val before = db.snapshot(opId)
 
             // The later migrations are applied on top of the existing history, in order.
             runMigrations(db.dataSource)
             classpathFlyway(db.dataSource).validate()
-            assertEquals(listOf("1", "2", "3", "4", "5", "6"), appliedVersions(db.dataSource))
+            assertEquals(listOf("1", "2", "3", "4", "5", "6", "7"), appliedVersions(db.dataSource))
 
             // The row is kept as written: no backfill, no guessed binding.
             assertEquals(before, db.snapshot(opId))
@@ -150,6 +154,25 @@ class MigrationChainTest {
             "SELECT tenant_id, provider_contract_version FROM external_operations WHERE op_id = ?",
             opId,
         ) { rs -> rs.getString(1) to rs.getString(2) }.single()
+    }
+
+    /**
+     * Inserts a development run with the V1 / V2 columns only. The Exposed table maps later columns (V7), so the repository
+     * cannot be used on a partial history.
+     */
+    private fun TestDb.insertLegacyRun(taskId: String): String {
+        val runId = Ulid.generate()
+        transaction(database) {
+            execUpdate(
+                """
+                INSERT INTO development_runs
+                    (run_id, task_id, state, completion_mode, attempt, plan_revision, lease_generation, cancel_requested, version, created_at, updated_at)
+                VALUES (?, ?, 'CREATED', 'RELEASE', 0, 0, 0, FALSE, 0, NOW(6), NOW(6))
+                """.trimIndent(),
+                runId, taskId,
+            )
+        }
+        return runId
     }
 
     /** Inserts a row shaped like the V2 schema: the columns V4 adds are not named, so they stay NULL. */

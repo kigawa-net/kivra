@@ -218,6 +218,12 @@ class HttpGitHubAdapter(
 
     private fun JsonObject.bool(key: String): Boolean? = (this[key] as? JsonPrimitive)?.booleanOrNull
 
+    private fun JsonObject.nestedLong(vararg path: String): Long? {
+        var cur: JsonElement = this
+        for (p in path) cur = (cur as? JsonObject)?.get(p) ?: return null
+        return (cur as? JsonPrimitive)?.longOrNull
+    }
+
     private fun sameRepo(fullName: String?, repo: RepoRef) = fullName != null && fullName.equals(repo.toString(), ignoreCase = true)
 
     private val sha40 = Regex("[0-9a-f]{40}")
@@ -260,6 +266,9 @@ class HttpGitHubAdapter(
                 baseRef = baseRef,
                 body = o.str("body") ?: "",
                 htmlUrl = o.str("html_url") ?: "",
+                nodeId = o.str("node_id"),
+                baseRepositoryId = o.nestedLong("base", "repo", "id"),
+                mergeCommitSha = o.str("merge_commit_sha")?.takeIf { sha40.matches(it) },
             ),
         )
     }

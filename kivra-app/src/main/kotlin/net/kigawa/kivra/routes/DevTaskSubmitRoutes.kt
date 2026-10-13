@@ -6,13 +6,21 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
 @Serializable
 private data class DevTaskRequest(val title: String, val idempotencyKey: String)
 @Serializable
-internal data class DevTaskRun(val runId: String, val title: String, val state: String = "NOT_EXECUTED", val mode: String = "SIMULATED")
+@OptIn(ExperimentalSerializationApi::class)
+internal data class DevTaskRun(
+    val runId: String,
+    val title: String,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val state: String = "NOT_EXECUTED",
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val mode: String = "SIMULATED",
+)
 @Serializable
 private data class DevTaskError(val error: String)
 

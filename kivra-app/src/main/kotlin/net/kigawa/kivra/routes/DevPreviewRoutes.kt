@@ -4,21 +4,47 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
+import kotlinx.serialization.Serializable
 
 /**
- * Deliberately simulated and read-only. These endpoints never invoke the LLM,
- * exkes, GitHub or any production operation journal transition.
- *
- * Only wire this route behind an explicit development flag.
+ * The demo API is never registered in normal deployments. Production startup
+ * must fail rather than accidentally publishing unauthenticated development routes.
+ */
+internal fun isDevPreviewEnabled(environment: Map<String, String>): Boolean {
+    if (environment["KIVRA_DEV_DEMO_ENABLED"] != "true") return false
+    require(environment["KIVRA_RUNTIME_ENV"] == "development") {
+        "KIVRA_DEV_DEMO_ENABLED requires KIVRA_RUNTIME_ENV=development"
+    }
+    return true
+}
+
+@Serializable
+private data class DemoTask(val id: String, val title: String, val state: String)
+
+@Serializable
+private data class DemoTasksResponse(val mode: String, val tasks: List<DemoTask>)
+
+@Serializable
+private data class DemoRunPreviewResponse(
+    val mode: String,
+    val runId: String,
+    val status: String,
+    val stages: List<String>,
+    val message: String,
+)
+
+/**
+ * Read-only and simulated: no LLM, exkes, GitHub, memory or operation-journal writes.
+ * The GET preview is not an actual task dispatch or completed development run.
  */
 fun Route.configureDevPreviewRoutes() {
     get("/api/dev/tasks") {
         call.respond(
-            mapOf(
-                "mode" to "SIMULATED",
-                "tasks" to listOf(
-                    mapOf("id" to "demo-1", "title" to "Inspect a repository issue", "state" to "READY"),
-                    mapOf("id" to "demo-2", "title" to "Draft a review plan", "state" to "READY"),
+            DemoTasksResponse(
+                mode = "SIMULATED",
+                tasks = listOf(
+                    DemoTask("demo-1", "Inspect a repository issue", "READY"),
+                    DemoTask("demo-2", "Draft a review plan", "READY"),
                 ),
             ),
         )
@@ -26,12 +52,12 @@ fun Route.configureDevPreviewRoutes() {
     get("/api/dev/runs/preview") {
         call.respond(
             HttpStatusCode.OK,
-            mapOf(
-                "mode" to "SIMULATED",
-                "runId" to "preview-only",
-                "status" to "NOT_EXECUTED",
-                "stages" to listOf("READ_ISSUE", "PLAN", "HUMAN_REVIEW"),
-                "message" to "Preview only: no code executed, no tokens spent, no external writes",
+            DemoRunPreviewResponse(
+                mode = "SIMULATED",
+                runId = "preview-only",
+                status = "NOT_EXECUTED",
+                stages = listOf("READ_ISSUE", "PLAN", "HUMAN_REVIEW"),
+                message = "Preview only: no code executed, no tokens spent, no external writes",
             ),
         )
     }

@@ -85,13 +85,17 @@ class OidcJwtVerifier(
      * audience, JWKS unreachable, missing role).
      */
     private fun logRejection(reason: String) {
-        val now = System.currentTimeMillis()
-        val last = lastRejectionLog.put(reason, now)
-        if (last == null || now - last >= REJECTION_LOG_INTERVAL_MILLIS) {
-            logger.warn("OIDC access token rejected: reason={}", reason)
-        } else {
-            lastRejectionLog[reason] = last
+        val now = System.nanoTime()
+        var shouldLog = false
+        lastRejectionLog.compute(reason) { _, previous ->
+            if (previous == null || now - previous >= REJECTION_LOG_INTERVAL_MILLIS * 1_000_000L) {
+                shouldLog = true
+                now
+            } else {
+                previous
+            }
         }
+        if (shouldLog) logger.warn("OIDC access token rejected: reason={}", reason)
     }
 
     private val lastRejectionLog = java.util.concurrent.ConcurrentHashMap<String, Long>()

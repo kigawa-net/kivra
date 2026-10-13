@@ -31,6 +31,10 @@ dependencies {
     implementation(libs.flyway.mysql)
     implementation(libs.mariadb.driver)
 
+    // Task API の JWT 検証（KIVRA_AUTH_MODE=oidc-jwt）。kivra-app だけに閉じる。
+    implementation(libs.java.jwt)
+    implementation(libs.jwks.rsa)
+
     implementation(libs.logback.classic)
     implementation(libs.logstash.logback.encoder)
 

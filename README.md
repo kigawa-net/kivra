@@ -151,8 +151,19 @@ Mock の成功は Production Provider 検証ではない。要確認項目は [d
   上限で DEAD。Publisher / Consumer worker 自体は未実装。
 - **Run completion mode（M8）**: `development_runs.completion_mode`（PR_ONLY / RELEASE）は Run Admission で一度だけ決め、以後変更する経路はない（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。
   - RELEASE: RELEASING → VERIFYING → COMPLETED（従来どおり）。PR_ONLY: 汎用 `transition()` から COMPLETED / RELEASING / VERIFYING へは行けない。
-  - PR_ONLY は `completePrOnlyRun()` だけで PULL_REQUEST / WAITING_APPROVAL → COMPLETED になる。GitHub の検証済み証拠（`merged == true`、Merge SHA、
-    repository と head SHA が run の `bindPullRequest` で記録した値と一致、信頼 issuer）が必要。close のみ・別 head の merge・未確定の結果は未完了のまま。
+  - PR_ONLY は `completePrOnlyRun(lease, version, actor)` だけで PULL_REQUEST / WAITING_APPROVAL → COMPLETED になる（Issue #53）。
+    呼び出し側は証拠を渡せない。Repository は注入された `TrustedPrMergeAuthority` を呼び、その検証結果だけで完了する。
+    - Repository はコンストラクタで Authority を必須で受け取る（デフォルトなし）。実装は `PrMergeAuthorityBase` を継承し、
+      `observe()` で GitHub の応答を報告する。`verifyMerge()` は final で、core の内部 verifier が束縛と照合する。
+      `VerifiedPrMerge` のコンストラクタは private で、生成は core の内部だけ。kivra-core の外から verifier は呼べない。
+    - Run は `bindPullRequest()` で repository / repository id（不変 ID）/ PR 番号 / node id / base ref / head SHA / policy revision / review manifest digest を記録する（V7 で追加した列を含む）。
+    - 完了は、束縛と全項目が一致し、`merged == true`、Merge commit SHA が 40 桁の hex、観測時刻が未来でなく 10 分以内（`PrMergeObservationPolicy`）の場合だけ。
+      Squash / Rebase の merge commit SHA は head SHA と異なってよい。
+    - 検証の前に読んだ束縛と、トランザクション内で読み直した束縛を再照合する。検証中に再 bind（push 等）されていれば拒否される。
+    - Authority の拒否・利用不可（5xx / 401 / 403 / rate limit / I/O）・例外では Run、audit、outbox のいずれも変わらない。
+      GitHub の 404・3xx（追跡しない）・不正応答は拒否扱い。close のみ・別 PR・別 head の merge は未完了のまま。
+    - V7 以前の行（束縛列が NULL）は Authority を呼ばずに完了を拒否する（fail-closed）。
+    - 未対応: Authority の本番結線（app からの組み立て。現状は組み立てコードなし）、Webhook の HMAC 検証、`policy_revision` / `review_manifest_digest` の生成と検証（#49 / #50。現状は bind 時の値をそのまま照合する）、Merge Queue の `merge_group` SHA。
     COMPLETED は終端なので、重複完了は lease 喪失で拒否され、`RunCompleted` Outbox は 1 回だけ。
 - **将来の作り直し（#64）**: 最終ストレージが Fortis になれば、この SQL 実装（`FOR UPDATE` / `NOW(6)` / 生成列 / claim のロック）は作り直しになり得る。
   今回の契約（Run / Operation の状態機械、証拠規則、Evidence Authority の束縛規則、PR_ONLY 完了規則、Outbox の claim token 規則）は Storage に依存しない要件として維持する。

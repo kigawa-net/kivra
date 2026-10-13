@@ -48,7 +48,9 @@ class TestDb(
 
     val outbox = OutboxRepository(database)
     val audit = AuditRepository()
-    val runs = DevelopmentRunRepository(database, outbox, audit)
+    /** TEST ONLY merge Authority, injected into the run repository like the production GitHub Authority. */
+    val prAuthority = FakeTrustedPrMergeAuthority()
+    val runs = DevelopmentRunRepository(database, outbox, audit, prAuthority)
     val leases = SqlLeaseStore(database)
     /** TEST ONLY Authority. Register observations and provider contracts on it before evidence-gated transitions. */
     val evidence = FakeTrustedEvidenceAuthority()

@@ -105,6 +105,12 @@ data class PullRequest(
     val baseRef: String,
     val body: String,
     val htmlUrl: String,
+    /** GraphQL node id (`node_id`). Null when the response did not carry it; merge verification then fails closed. */
+    val nodeId: String? = null,
+    /** Immutable id of the base repository (`base.repo.id`). Null when absent; merge verification then fails closed. */
+    val baseRepositoryId: Long? = null,
+    /** Merge commit SHA (`merge_commit_sha`). Set by GitHub for merged PRs; never equated with [headSha]. */
+    val mergeCommitSha: String? = null,
 ) {
     fun hasMarker(runId: String): Boolean = body.lines().any { it.trim() == RunBranch.marker(runId) }
 }

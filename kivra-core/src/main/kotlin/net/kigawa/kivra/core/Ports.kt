@@ -122,8 +122,27 @@ interface MemoryPort {
 data class JobSpec(val name: String, val cron: String?, val runAt: Instant?)
 data class ScheduleExecutionStatus(val ref: ScheduleExecutionRef, val status: String)
 
+/**
+ * Proof that the caller is the single schedule writer (the Orchestrator's leader lease, #36), required by
+ * [SchedulePort.upsertJob]. Job creation is lookup-then-POST and ai-scheduler job names are not unique server-side, so
+ * two concurrent writers can both create a job; the server-side check only detects that afterwards. Only the holder of
+ * the writer lease may call upsertJob.
+ *
+ * NOT YET IMPLEMENTED (未対応): no leader-lease implementation produces this value yet. Callers must not fabricate it
+ * outside tests.
+ */
+data class ScheduleWriterLease(val owner: String, val generation: Long) {
+    init {
+        require(owner.isNotBlank() && generation >= 0) { "invalid schedule writer lease" }
+    }
+}
+
 interface SchedulePort {
-    suspend fun upsertJob(spec: JobSpec, key: IdempotencyKey): JobRef
+    /**
+     * Requires [writer] (single-writer guarantee, see [ScheduleWriterLease]). Duplicates created by a race are detected
+     * after the POST and reported as a conflict; they are not removed automatically.
+     */
+    suspend fun upsertJob(spec: JobSpec, key: IdempotencyKey, writer: ScheduleWriterLease): JobRef
     suspend fun pauseJob(ref: JobRef)
     suspend fun triggerNow(ref: JobRef, key: IdempotencyKey): ScheduleExecutionRef
     suspend fun getExecution(ref: ScheduleExecutionRef): ScheduleExecutionStatus

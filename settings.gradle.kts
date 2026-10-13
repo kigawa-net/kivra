@@ -18,6 +18,7 @@ include(
     "kivra-fusha-task",
     "kivra-fusha-poller",
     "kivra-core",
+    "kivra-scheduler",
     "kivra-exkes",
     "kivra-github",
     "kivra-model-gateway",

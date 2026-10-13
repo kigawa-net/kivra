@@ -14,7 +14,10 @@ import org.jetbrains.exposed.sql.transactions.transaction
  * Connection: `KIVRA_TEST_MARIADB_URL` (server URL without a schema, default `jdbc:mariadb://localhost:3306/`),
  * `KIVRA_TEST_MARIADB_USER` (default root; needs CREATE/DROP DATABASE), `KIVRA_TEST_MARIADB_PASSWORD`.
  */
-class TestDb : AutoCloseable {
+class TestDb(
+    /** Applies the schema before the repositories are connected. Default: the full classpath migration chain. */
+    private val migrate: (DataSource) -> Unit = ::runMigrations,
+) : AutoCloseable {
     private val schema: String? = if (isMariaDb) "kivra_t_${System.nanoTime()}" else null
     val dataSource: DataSource
 
@@ -39,7 +42,7 @@ class TestDb : AutoCloseable {
     val database: Database
 
     init {
-        runMigrations(dataSource)
+        migrate(dataSource)
         database = connectDatabase(dataSource)
     }
 

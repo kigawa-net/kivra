@@ -8,8 +8,7 @@ import java.time.Instant
 /**
  * DEV / TEST ONLY. Process-local, NON-DURABLE journal: it does not survive a JVM exit and it does not coordinate
  * across processes. Its CAS is a process-wide mutex, so it can only model several replicas inside one JVM (for example
- * in tests). Production must use the M0 `external_operations` adapter (not yet implemented, see the status mapping in
- * MutationJournal.kt).
+ * in tests). Production must use the M0 `external_operations` adapter (`M0MemoryMutationJournalAdapter`, kivra-app).
  *
  * An EXPLICIT `KIVRA_ENVIRONMENT` of `dev` / `test` / `local` is required. Missing environment is
  * NOT assumed to be local: production deployments without the flag must fail closed.

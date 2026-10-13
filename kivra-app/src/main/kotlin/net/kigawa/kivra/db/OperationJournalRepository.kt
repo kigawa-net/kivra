@@ -395,8 +395,7 @@ class OperationJournalRepository(
                 if (from != OperationStatus.PREPARED || to != OperationStatus.IN_FLIGHT || ev.purpose != EvidencePurpose.NOT_SENT) {
                     throw InvalidTransitionException("operation $opId: takeover needs a NOT_SENT ref on PREPARED -> IN_FLIGHT")
                 }
-                requireBound(lease, row, ev)
-                requireCurrentAuthorityEpoch(opId, subjectOf(lease, row).tenantId, ev)
+                requireEvidenceGate(lease, row, ev)
                 reason = "VERIFIED_NOT_SENT_TAKEOVER"
             }
             is Gate.Verified -> {
@@ -408,8 +407,7 @@ class OperationJournalRepository(
                 if (!ev.justifies(to)) {
                     throw InvalidTransitionException("operation $opId: ${ev.purpose} (${ev.observation}/${ev.capability}) does not justify $from -> $to")
                 }
-                requireBound(lease, row, ev)
-                requireCurrentAuthorityEpoch(opId, subjectOf(lease, row).tenantId, ev)
+                requireEvidenceGate(lease, row, ev)
                 reason = when (ev.purpose) {
                     EvidencePurpose.NOT_SENT -> "VERIFIED_NOT_SENT"
                     EvidencePurpose.REJECTED -> "VERIFIED_REJECTED"
@@ -472,14 +470,34 @@ class OperationJournalRepository(
     }
 
     /**
+     * The one evidence gate of every transition that a [VerifiedEvidence] justifies ([Gate.Verified] and [Gate.Takeover]).
+     * Both paths call this and nothing else, so they cannot diverge. It runs inside the transition transaction, after the
+     * row lock of the lease and before the Journal CAS, in this order:
+     * 1. binding: the evidence was resolved for this row's subject ([requireBound]);
+     * 2. expiry: not expired, not observed in the future, not observed before the row entered its current status ([requireBound]);
+     * 3. issuer: the principal that produced the observation is named;
+     * 4. epoch copy: the Kivra copy is locked, exists, has a publish time and is fresh ([requireCurrentAuthorityEpoch]);
+     * 5. epoch values: authority epoch, grant generation, capability revision, contract version and capability equal the copy.
+     * A failure throws [InvalidTransitionException] before any write (no Journal, Audit or Outbox change).
+     */
+    private fun Transaction.requireEvidenceGate(lease: Lease, row: ResultRow, ev: VerifiedEvidence) {
+        val opId = row[ExternalOperationsTable.opId]
+        requireBound(lease, row, ev)
+        if (ev.principal.isBlank()) throw InvalidTransitionException("operation $opId: evidence has no issuer")
+        requireCurrentAuthorityEpoch(opId, subjectOf(lease, row).tenantId, ev)
+    }
+
+    /**
      * Compares the evidence's Authority Epoch values with the Kivra MariaDB copy, inside the transition transaction and
-     * under the copy's row lock. Any difference, a missing copy, or a revoked/changed grant refuses the call before any
-     * write (Issue #94). Runs after [requireBound], so the subject (tenant, operation, digest, issuer binding) is already
-     * checked.
+     * under the copy's row lock. A missing, unpublished or stale copy, and any difference (including a revoked or changed
+     * grant), refuses the call before any write (Issue #94, Issue #100).
      */
     private fun Transaction.requireCurrentAuthorityEpoch(opId: String, tenantId: String, ev: VerifiedEvidence) {
-        val current = with(epochs) { lockForTransition(tenantId, ev.subject.providerId) }
-            ?: throw InvalidTransitionException("operation $opId: no authority epoch copy for this provider")
+        val current = try {
+            with(epochs) { lockFreshForTransition(tenantId, ev.subject.providerId, clock.instant()) }
+        } catch (e: AuthorityEpochNotFreshException) {
+            throw InvalidTransitionException("operation $opId: ${e.message}")
+        }
         val stale = current.providerContractVersion != ev.providerContractVersion ||
             current.capability != ev.capability ||
             current.capabilityRevision != ev.capabilityRevision ||

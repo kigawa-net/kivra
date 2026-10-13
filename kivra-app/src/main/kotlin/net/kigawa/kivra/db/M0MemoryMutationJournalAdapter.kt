@@ -64,7 +64,7 @@ class M0MemoryMutationJournalAdapter(
     private val clock: Clock = Clock.systemUTC(),
 ) : MemoryMutationJournalPort {
 
-    private val journal = OperationJournalRepository(database, authority, clock)
+    private val journal = OperationJournalRepository(database, authority, clock, epochs = AuthorityEpochRepository(database, clock))
 
     /** A row as the port sees it, plus the M0 identifiers the repository needs and the subject evidence must bind to. */
     private class Snapshot(

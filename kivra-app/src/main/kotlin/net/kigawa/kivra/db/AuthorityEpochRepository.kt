@@ -3,6 +3,7 @@ package net.kigawa.kivra.db
 import java.sql.SQLException
 import java.time.Clock
 import java.time.Duration
+import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import net.kigawa.kivra.core.ProviderCapability
@@ -59,11 +60,10 @@ private const val MAX_PUBLISH_ATTEMPTS = 3
  *   secret. Trust in the issuer is NOT verified here: the caller must be the authenticated Authority sync. That verification
  *   belongs to the future real Authority integration and is out of scope for this class.
  * - [requireFresh] fails closed when the copy is missing, has no `published_at`, or is older than the freshness bound.
- *   The Journal does not call it yet (see the follow-up note in the Issue #100 PR); it is ready for that integration.
- *
- * - [lockForTransition] is used by [OperationJournalRepository] inside the transition transaction. It takes a row lock
- *   (`SELECT ... FOR UPDATE`) so that a concurrent [publish] and a transition are serialized on this row. The commit
- *   therefore sees either the old epoch or the new one, never a mix.
+ * - [lockFreshForTransition] is used by [OperationJournalRepository] inside the transition transaction. It takes a row lock
+ *   (`SELECT ... FOR UPDATE`) and applies the same freshness check, so that a concurrent [publish] and a transition are
+ *   serialized on this row and a stale copy refuses the transition before the Journal CAS. The commit sees either the old
+ *   epoch or the new one, never a mix.
  *
  * Not a cross-store guarantee. The value compared is the copy in Kivra MariaDB, not the Authority's own state. An
  * Authority change that has not been synced here is invisible to the commit. A Permit / Revocation ACK protocol with a
@@ -145,18 +145,36 @@ class AuthorityEpochRepository(
     ): AuthorityEpochSnapshot {
         val stored = transaction(database) { readStored(tenantId, providerId, lock = false) }
             ?: throw AuthorityEpochNotFreshException("no authority epoch copy for this provider")
-        val publishedAt = stored.publishedAt
-            ?: throw AuthorityEpochNotFreshException("authority epoch copy has no publish time (fail-closed)")
-        val age = Duration.between(publishedAt.toInstant(ZoneOffset.UTC), clock.instant())
-        if (age.isNegative || age > maxAge) {
-            throw AuthorityEpochNotFreshException("authority epoch copy is not fresh (age $age, bound $maxAge)")
-        }
+        checkFresh(stored, clock.instant(), maxAge)
         return stored.snapshot
     }
 
-    /** Row-locked read for use inside a transition transaction. Returns null when no copy exists (fail-closed). */
-    internal fun Transaction.lockForTransition(tenantId: String, providerId: String): AuthorityEpochSnapshot? =
-        readStored(tenantId, providerId, lock = true)?.snapshot
+    /**
+     * Row-locked, freshness-checked read for a transition transaction (the same transaction as the Journal CAS, Issue #100).
+     * Fails with [AuthorityEpochNotFreshException] when the copy is missing, has no publish time, or is older than [maxAge]
+     * at [now]. [now] is the transition's own clock reading, so freshness and the rest of the evidence gate use one instant.
+     */
+    internal fun Transaction.lockFreshForTransition(
+        tenantId: String,
+        providerId: String,
+        now: Instant,
+        maxAge: Duration = AUTHORITY_EPOCH_FRESHNESS_BOUND,
+    ): AuthorityEpochSnapshot {
+        val stored = readStored(tenantId, providerId, lock = true)
+            ?: throw AuthorityEpochNotFreshException("no authority epoch copy for this provider")
+        checkFresh(stored, now, maxAge)
+        return stored.snapshot
+    }
+
+    /** Fail-closed freshness: a copy without publish time, a negative age (published in the future), or an age over [maxAge]. */
+    private fun checkFresh(stored: StoredEpoch, now: Instant, maxAge: Duration) {
+        val publishedAt = stored.publishedAt
+            ?: throw AuthorityEpochNotFreshException("authority epoch copy has no publish time (fail-closed)")
+        val age = Duration.between(publishedAt.toInstant(ZoneOffset.UTC), now)
+        if (age.isNegative || age > maxAge) {
+            throw AuthorityEpochNotFreshException("authority epoch copy is not fresh (age $age, bound $maxAge)")
+        }
+    }
 
     private data class StoredEpoch(val snapshot: AuthorityEpochSnapshot, val publishedAt: LocalDateTime?)
 

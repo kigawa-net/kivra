@@ -12,7 +12,7 @@ import java.util.UUID
 @Serializable
 private data class DevTaskRequest(val title: String, val idempotencyKey: String)
 @Serializable
-private data class DevTaskRun(val runId: String, val title: String, val state: String = "NOT_EXECUTED", val mode: String = "SIMULATED")
+internal data class DevTaskRun(val runId: String, val title: String, val state: String = "NOT_EXECUTED", val mode: String = "SIMULATED")
 @Serializable
 private data class DevTaskError(val error: String)
 

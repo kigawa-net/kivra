@@ -11,14 +11,36 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import net.kigawa.kivra.core.EvidencePurpose
+import net.kigawa.kivra.core.ExternalObservation
 
 /**
- * Contract for every [MemoryMutationJournalPort] implementation (the in-memory dev/test journal today; the M0
- * `external_operations` adapter later). Subclasses provide a fresh journal that trusts [TRUSTED_ISSUER].
+ * Contract for every [MemoryMutationJournalPort] implementation: the in-memory dev/test journal (kivra-memory) and the M0
+ * `external_operations` adapter (kivra-app, Issue #91). Subclasses provide a fresh journal that trusts [TRUSTED_ISSUER].
+ *
+ * Two seams keep the contract honest for implementations that are bound to a run lease (M0):
+ * - [advanceTo] makes a newer writer generation current. The in-memory journal takes the generation as a plain argument.
+ * - [proof] builds evidence the implementation accepts. The in-memory journal accepts any observation from a trusted issuer;
+ *   M0 only accepts a ref that the TrustedEvidenceAuthority verified for the operation's own subject.
  */
 abstract class MutationJournalContract {
     /** Fresh journal instance that trusts exactly [TRUSTED_ISSUER]. */
     protected abstract fun newJournal(): MemoryMutationJournalPort
+
+    /** Makes [gen] the current writer generation (the previous one is superseded). */
+    protected open suspend fun advanceTo(gen: Long) {}
+
+    /** False when the implementation has no evidence-free route to FAILED_PERMANENT (M0: FAILED needs a REJECTED ref). */
+    protected open val supportsFailedPermanent: Boolean get() = true
+
+    /** Evidence the implementation accepts for [opId]. In-memory: a bare observation from [TRUSTED_ISSUER]. */
+    protected open suspend fun proof(
+        opId: String = "op-1",
+        identity: MutationIdentity = alice,
+        digest: String = digestA,
+        purpose: EvidencePurpose = EvidencePurpose.NOT_SENT,
+        observation: ExternalObservation? = null,
+    ): MutationEvidence = MutationEvidence(identity, opId, digest, TRUSTED_ISSUER, "ref-$opId", Instant.now())
 
     protected val alice = MutationIdentity("t1", "alice", "recl", "recl.memory.v1")
     protected val bob = MutationIdentity("t1", "bob", "recl", "recl.memory.v1")
@@ -34,14 +56,6 @@ abstract class MutationJournalContract {
         gen: Long = 1,
     ) = MutationIntent(opId, identity, MutationKind.SAVE, requestId, digest, 0, gen, "exec-1")
 
-    /** Evidence is created at call time, i.e. after the row transition it must follow (observedAt >= updatedAt). */
-    protected fun evidence(
-        opId: String = "op-1",
-        identity: MutationIdentity = alice,
-        digest: String = digestA,
-        issuer: String = TRUSTED_ISSUER,
-    ) = MutationEvidence(identity, opId, digest, issuer, "ref-${opId}", Instant.now())
-
     protected suspend fun prepared(j: MemoryMutationJournalPort, opId: String = "op-1", gen: Long = 1): MutationRecord =
         (j.prepare(intent(opId = opId, gen = gen)) as PrepareResult.Prepared).record
 
@@ -49,6 +63,8 @@ abstract class MutationJournalContract {
         val rec = prepared(j, opId, gen)
         return j.beginDispatch(opId, gen, rec.version) as DispatchDecision.Won
     }
+
+    private fun refusal(d: DispatchDecision): RefusalCode = assertIs<DispatchDecision.Refused>(d).code
 
     @Test
     fun `prepare is re-entrant for the same binding and adopts the existing row`() = runBlocking {
@@ -79,6 +95,7 @@ abstract class MutationJournalContract {
             PrepareResult.Conflict(ConflictCode.IDENTITY_MISMATCH),
             j.prepare(original.copy(expectedRevision = 1L)),
         )
+        advanceTo(2)
         assertIs<PrepareResult.Existing>(j.prepare(original.copy(writerGeneration = 2L)))
         assertEquals(original.writerGeneration, j.get(original.operationId)!!.ownerGeneration)
     }
@@ -100,11 +117,11 @@ abstract class MutationJournalContract {
     }
 
     @Test
-    fun `exactly one dispatch winner among concurrent replicas`() = runBlocking {
+    fun `exactly one dispatch winner among concurrent replicas of the same generation`() = runBlocking {
         val j = newJournal()
         val rec = prepared(j)
-        val decisions = (1..10).map { gen ->
-            async(Dispatchers.Default) { j.beginDispatch("op-1", gen.toLong(), rec.version) }
+        val decisions = (1..10).map {
+            async(Dispatchers.Default) { j.beginDispatch("op-1", 1L, rec.version) }
         }.awaitAll()
         assertEquals(1, decisions.count { it is DispatchDecision.Won })
         assertEquals(9, decisions.count { it is DispatchDecision.Refused })
@@ -127,7 +144,7 @@ abstract class MutationJournalContract {
         val j = newJournal()
         val won = inFlight(j).record
         j.markConfirmed("op-1", 1, won.version)
-        assertEquals(RefusalCode.NOT_PREPARED, assertIs<DispatchDecision.Refused>(j.beginDispatch("op-1", 1, won.version + 1)).code)
+        assertEquals(RefusalCode.NOT_PREPARED, refusal(j.beginDispatch("op-1", 1, won.version + 1)))
     }
 
     @Test
@@ -136,32 +153,21 @@ abstract class MutationJournalContract {
         val won = inFlight(j).record
         val held = j.markUnknownHeld("op-1", 1, won.version, "PROVIDER_OUTCOME_UNKNOWN")
         assertEquals(MutationStatus.UNKNOWN_HELD, held.status)
-        assertEquals(RefusalCode.NOT_PREPARED, assertIs<DispatchDecision.Refused>(j.beginDispatch("op-1", 1, held.version)).code)
-        assertEquals(
-            RefusalCode.NOT_PREPARED,
-            assertIs<DispatchDecision.Refused>(j.beginDispatch("op-1", 2, held.version, evidence())).code,
-        )
+        assertEquals(RefusalCode.NOT_PREPARED, refusal(j.beginDispatch("op-1", 1, held.version)))
+        assertEquals(RefusalCode.NOT_PREPARED, refusal(j.beginDispatch("op-1", 2, held.version, proof())))
     }
 
     @Test
     fun `a prepared row of another generation is not dispatched without a trusted not-sent proof`() = runBlocking {
         val j = newJournal()
         val rec = prepared(j, gen = 1) // writer 1 crashed after prepare and before dispatch
-        assertEquals(
-            RefusalCode.NEEDS_NOT_SENT_PROOF,
-            assertIs<DispatchDecision.Refused>(j.beginDispatch("op-1", 2, rec.version)).code,
-        )
-        val untrusted = evidence().copy(issuer = "unknown-issuer")
-        assertEquals(
-            RefusalCode.PROOF_REJECTED,
-            assertIs<DispatchDecision.Refused>(j.beginDispatch("op-1", 2, rec.version, untrusted)).code,
-        )
-        val wrongDigest = evidence(digest = digestB)
-        assertEquals(
-            RefusalCode.PROOF_REJECTED,
-            assertIs<DispatchDecision.Refused>(j.beginDispatch("op-1", 2, rec.version, wrongDigest)).code,
-        )
-        val won = assertIs<DispatchDecision.Won>(j.beginDispatch("op-1", 2, rec.version, evidence()))
+        advanceTo(2)
+        assertEquals(RefusalCode.NEEDS_NOT_SENT_PROOF, refusal(j.beginDispatch("op-1", 2, rec.version)))
+        val untrusted = proof().copy(issuer = "unknown-issuer")
+        assertEquals(RefusalCode.PROOF_REJECTED, refusal(j.beginDispatch("op-1", 2, rec.version, untrusted)))
+        val wrongDigest = proof(digest = digestB)
+        assertEquals(RefusalCode.PROOF_REJECTED, refusal(j.beginDispatch("op-1", 2, rec.version, wrongDigest)))
+        val won = assertIs<DispatchDecision.Won>(j.beginDispatch("op-1", 2, rec.version, proof()))
         assertEquals(2L, won.record.ownerGeneration)
         assertEquals(MutationStatus.IN_FLIGHT, won.record.status)
     }
@@ -170,7 +176,7 @@ abstract class MutationJournalContract {
     fun `a proven not-sent returns the row to PREPARED and it can be dispatched once more`() = runBlocking {
         val j = newJournal()
         val won = inFlight(j).record
-        val back = j.markNotSent("op-1", 1, won.version, evidence())
+        val back = j.markNotSent("op-1", 1, won.version, proof())
         assertEquals(MutationStatus.PREPARED, back.status)
         val again = assertIs<DispatchDecision.Won>(j.beginDispatch("op-1", 1, back.version))
         assertEquals(2, again.record.attempts)
@@ -183,7 +189,7 @@ abstract class MutationJournalContract {
         assertEquals(
             RefusalCode.PROOF_REJECTED,
             assertFailsWith<MutationJournalRejectedException> {
-                j.markNotSent("op-1", 1, won.version, evidence(identity = bob))
+                j.markNotSent("op-1", 1, won.version, proof(identity = bob))
             }.code,
         )
         assertEquals(MutationStatus.IN_FLIGHT, j.get("op-1")!!.status)
@@ -193,10 +199,13 @@ abstract class MutationJournalContract {
     fun `restart sweep moves older generations in-flight rows to unknown held exactly once`() = runBlocking {
         val j = newJournal()
         inFlight(j, gen = 1)
+        advanceTo(2)
         assertEquals(1, j.sweepStaleInFlight(2))
         val row = j.get("op-1")!!
         assertEquals(MutationStatus.UNKNOWN_HELD, row.status)
         assertEquals("SWEPT_WORKER_LOST", row.reasonCode)
+        assertEquals(0, j.sweepStaleInFlight(2))
+        advanceTo(3)
         assertEquals(0, j.sweepStaleInFlight(3))
     }
 
@@ -217,20 +226,27 @@ abstract class MutationJournalContract {
         val held = j.markUnknownHeld("op-1", 1, won.version, "PROVIDER_OUTCOME_UNKNOWN")
         assertEquals(
             RefusalCode.PROOF_REJECTED,
-            assertFailsWith<MutationJournalRejectedException> { j.settleFromLookup("op-1", held.version, evidence(identity = otherTenant)) }.code,
+            assertFailsWith<MutationJournalRejectedException> {
+                j.settleFromLookup("op-1", held.version, proof(identity = otherTenant, purpose = EvidencePurpose.RECONCILE_EXISTS, observation = ExternalObservation.EXISTS))
+            }.code,
         )
         assertEquals(MutationStatus.UNKNOWN_HELD, j.get("op-1")!!.status)
-        val settled = j.settleFromLookup("op-1", held.version, evidence())
+        val settled = j.settleFromLookup(
+            "op-1",
+            held.version,
+            proof(purpose = EvidencePurpose.RECONCILE_EXISTS, observation = ExternalObservation.EXISTS),
+        )
         assertEquals(MutationStatus.CONFIRMED, settled.status)
         assertNull(j.unknownHeld(alice).firstOrNull())
     }
 
     @Test
     fun `failed permanent is terminal`() = runBlocking {
+        if (!supportsFailedPermanent) return@runBlocking
         val j = newJournal()
         val won = inFlight(j).record
         assertEquals(MutationStatus.FAILED_PERMANENT, j.markFailedPermanent("op-1", 1, won.version, "PROVIDER_REJECTED").status)
-        assertEquals(RefusalCode.NOT_PREPARED, assertIs<DispatchDecision.Refused>(j.beginDispatch("op-1", 1, won.version + 1)).code)
+        assertEquals(RefusalCode.NOT_PREPARED, refusal(j.beginDispatch("op-1", 1, won.version + 1)))
     }
 
     @Test
@@ -242,6 +258,7 @@ abstract class MutationJournalContract {
     }
 
     companion object {
-        const val TRUSTED_ISSUER = "test-precheck"
+        /** The issuer the fixtures treat as trusted. The M0 harness registers its observations under this principal. */
+        const val TRUSTED_ISSUER = "exkes-adapter"
     }
 }

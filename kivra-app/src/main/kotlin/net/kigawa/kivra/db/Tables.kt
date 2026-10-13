@@ -3,7 +3,7 @@ package net.kigawa.kivra.db
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.datetime
 
-/** Exposed definitions mirroring db/migration/V1__core_schema.sql, V2__reconciliation_evidence_and_outbox_claim.sql and V4__evidence_authority_binding.sql. The migration is the source of truth for DDL. */
+/** Exposed definitions mirroring db/migration/V1__core_schema.sql, V2__reconciliation_evidence_and_outbox_claim.sql, V4__evidence_authority_binding.sql and V5__memory_mutation_binding.sql. The migration is the source of truth for DDL. */
 
 object DevelopmentRunsTable : Table("development_runs") {
     val runId = char("run_id", 26)
@@ -104,6 +104,12 @@ object ExternalOperationsTable : Table("external_operations") {
     val evidenceDigest = char("evidence_digest", 64).nullable()
     val evidenceExpiresAt = datetime("evidence_expires_at").nullable()
     val transitionReason = varchar("transition_reason", 64).nullable()
+    val principalId = varchar("principal_id", 128).nullable()
+    val requestId = varchar("request_id", 64).nullable()
+    val expectedRevision = long("expected_revision").nullable()
+    val executionId = varchar("execution_id", 128).nullable()
+    val memoryKind = varchar("memory_kind", 16).nullable()
+    val memoryReason = varchar("memory_reason", 64).nullable()
     val version = long("version").default(0)
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at")

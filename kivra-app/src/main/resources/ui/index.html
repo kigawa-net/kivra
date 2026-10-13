@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kivra</title>
+<link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+<header class="app-header">
+  <div class="brand">
+    <h1>Kivra</h1>
+    <span class="env-badge">環境: dev</span>
+  </div>
+  <div class="conn" id="health-status" role="status">接続: 未確認</div>
+</header>
+
+<p class="sim-banner" role="note">このサーバーの Run は、すべてシミュレーションです（AI は実行されていません。<code>executed: false</code>）</p>
+
+<main>
+  <div id="view-list">
+    <section class="card" aria-labelledby="h-submit">
+      <h2 id="h-submit">Task を投入</h2>
+      <form id="submit-form">
+        <label for="title">タイトル（1〜200 文字）</label>
+        <input id="title" name="title" type="text" maxlength="200" required autocomplete="off">
+        <div class="counter" id="title-count">0 / 200</div>
+        <div>
+          <button type="submit" id="submit-btn">投入</button>
+        </div>
+      </form>
+      <p id="submit-result" class="result" role="status"></p>
+    </section>
+
+    <section class="card" aria-labelledby="h-runs">
+      <div class="card-head">
+        <h2 id="h-runs">Run の一覧</h2>
+        <button type="button" id="refresh-btn" class="secondary">今すぐ更新</button>
+      </div>
+      <p id="runs-status" class="meta" role="status">未取得</p>
+      <ul id="runs-list" class="run-list"></ul>
+    </section>
+  </div>
+
+  <section id="view-detail" class="card" hidden aria-labelledby="h-detail">
+    <p><a href="#/">← 一覧に戻る</a></p>
+    <h2 id="h-detail">Run の詳細</h2>
+    <div id="detail-body" aria-live="polite"></div>
+  </section>
+</main>
+
+<footer class="legend">
+  <p><span class="badge">SIMULATED</span> シミュレーションの Run です。Agent や外部システムは起動されません。</p>
+  <p><span class="badge">executed: false</span> 実行されていないことを示します。状態（作成済みなど）とは別に表示しています。</p>
+</footer>
+
+<script src="/ui/app.js" defer></script>
+</body>
+</html>

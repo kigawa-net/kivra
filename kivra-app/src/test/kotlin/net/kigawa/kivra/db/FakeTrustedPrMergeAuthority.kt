@@ -2,29 +2,36 @@ package net.kigawa.kivra.db
 
 import java.time.Clock
 import java.time.Duration
+import java.time.Instant
+import java.time.ZoneId
+import java.time.ZoneOffset
 import net.kigawa.kivra.core.ObservedPullRequest
-import net.kigawa.kivra.core.PrMergeVerification
-import net.kigawa.kivra.core.PrMergeVerifier
+import net.kigawa.kivra.core.PrMergeAuthorityBase
+import net.kigawa.kivra.core.PrMergeObservation
 import net.kigawa.kivra.core.PullRequestBinding
-import net.kigawa.kivra.core.TrustedPrMergeAuthority
 
 /**
- * Test double for the GitHub merge Authority. [observe] plays the part of GitHub's answer for a binding (null = not found).
- * The real verification path is [PrMergeVerifier]; this class only chooses what GitHub reported.
+ * TEST ONLY merge Authority. It extends [PrMergeAuthorityBase] like the production GitHub Authority, so every Verified result
+ * goes through the same core verification. [answer] plays GitHub's reply for a binding (null = not found).
  */
-class FakeTrustedPrMergeAuthority(private val clock: Clock = Clock.systemUTC()) : TrustedPrMergeAuthority {
-    var observe: (PullRequestBinding) -> ObservedPullRequest? = { merged(it) }
+class FakeTrustedPrMergeAuthority(val clock: AdjustableClock = AdjustableClock()) : PrMergeAuthorityBase(clock) {
+    var answer: (PullRequestBinding) -> ObservedPullRequest? = { merged(it) }
 
-    /** Added to the observation time, to simulate an observation in the future or an old one. */
-    var observedAtOffset: Duration = Duration.ZERO
-
-    /** When set, [verifyMerge] throws this instead of answering. */
+    /** When set, [observe] throws this instead of answering. */
     var failure: Throwable? = null
 
-    override suspend fun verifyMerge(binding: PullRequestBinding): PrMergeVerification {
+    /** Runs after the binding was read and before the answer. Used to simulate a push or re-bind during verification. */
+    var beforeAnswer: (PullRequestBinding) -> Unit = {}
+
+    /** Number of observations requested, to show when the Authority was (not) asked. */
+    var calls: Int = 0
+
+    override suspend fun observe(binding: PullRequestBinding): PrMergeObservation {
+        calls++
         failure?.let { throw it }
-        val observed = observe(binding) ?: return PrMergeVerification.Refused("GITHUB_NOT_FOUND")
-        return PrMergeVerifier.verify(binding, observed, clock.instant().plus(observedAtOffset))
+        beforeAnswer(binding)
+        val observed = answer(binding) ?: return PrMergeObservation.Refused("GITHUB_NOT_FOUND")
+        return PrMergeObservation.Found(observed)
     }
 
     companion object {
@@ -42,4 +49,11 @@ class FakeTrustedPrMergeAuthority(private val clock: Clock = Clock.systemUTC()) 
 
         const val MERGE_SHA = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
     }
+}
+
+/** A clock whose reading can be moved, to produce future or old observation times. */
+class AdjustableClock(var offset: Duration = Duration.ZERO) : Clock() {
+    override fun getZone(): ZoneId = ZoneOffset.UTC
+    override fun withZone(zone: ZoneId?): Clock = this
+    override fun instant(): Instant = Instant.now().plus(offset)
 }

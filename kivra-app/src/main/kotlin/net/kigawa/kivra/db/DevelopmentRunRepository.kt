@@ -10,7 +10,9 @@ import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.Lease
 import net.kigawa.kivra.core.LeaseLostException
 import net.kigawa.kivra.core.PrMergeObservationPolicy
+import net.kigawa.kivra.core.PrMergeVerification
 import net.kigawa.kivra.core.PullRequestBinding
+import net.kigawa.kivra.core.TrustedPrMergeAuthority
 import net.kigawa.kivra.core.VerifiedPrMerge
 import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunHaltedException
@@ -59,6 +61,8 @@ class DevelopmentRunRepository(
     private val database: Database,
     private val outbox: OutboxRepository,
     private val audit: AuditRepository,
+    /** The merge Authority. Required (no default): a repository cannot be built without one, and it never receives evidence from callers. */
+    private val prMergeAuthority: TrustedPrMergeAuthority,
     private val clock: Clock = Clock.systemUTC(),
 ) {
 
@@ -197,17 +201,37 @@ class DevelopmentRunRepository(
     }
 
     /**
-     * PR_ONLY completion: PULL_REQUEST or WAITING_APPROVAL -> COMPLETED, compare-and-set on the lease and version, and only with a
-     * [VerifiedPrMerge] (from [PrMergeVerifier] via [TrustedPrMergeAuthority]) that matches the run's current binding. Every other
-     * outcome is refused and nothing is written:
+     * PR_ONLY completion: PULL_REQUEST or WAITING_APPROVAL -> COMPLETED (Issue #53). The caller supplies no merge evidence.
+     *
+     * 1. The run's current [PullRequestBinding] is read (no transaction lock is held while the Authority is asked).
+     * 2. The injected [TrustedPrMergeAuthority] verifies the merge. A refusal throws [InvalidTransitionException] and an
+     *    unavailable Authority or any other exception propagates. In both cases nothing has been written.
+     * 3. [commitPrOnlyCompletion] re-checks the verified merge against the binding in the database inside the transaction
+     *    and performs the compare-and-set. A re-bind (for example a push) in between makes the merge refused.
+     */
+    suspend fun completePrOnlyRun(lease: Lease, expectedVersion: Long, actor: String): DevelopmentRun {
+        val binding = loadPullRequestBinding(lease.runId)
+            ?: throw InvalidTransitionException("run ${lease.runId}: PR_ONLY completion refused: the run has no complete pull request binding")
+        val merge = when (val verification = prMergeAuthority.verifyMerge(binding)) {
+            is PrMergeVerification.Verified -> verification.merge
+            is PrMergeVerification.Refused -> throw InvalidTransitionException(
+                "run ${lease.runId}: PR_ONLY completion refused by the merge authority: ${verification.reason}",
+            )
+        }
+        return commitPrOnlyCompletion(lease, expectedVersion, merge, actor)
+    }
+
+    /**
+     * The compare-and-set half of [completePrOnlyRun]. Private: a [VerifiedPrMerge] can only come from the Authority.
+     * Completion is refused unless the merge matches the run's binding in the database at this point. Other outcomes write nothing:
      * - run is not PR_ONLY, or not in a PR state,
-     * - the run has no complete binding (legacy row), or the merge belongs to another run,
+     * - the run has no complete binding (legacy or unbound row), or the merge belongs to another run,
      * - repository id / name, PR number, node id, base ref, head SHA, policy revision or review manifest digest differ from the binding,
      * - the observation is in the future or older than [PrMergeObservationPolicy.MAX_OBSERVATION_AGE],
      * - the lease is lost or the run is on hold / cancel-requested ([LeaseLostException] / [RunHaltedException]).
      * A second call fails (the run is already COMPLETED and terminal), so `RunCompleted` is appended exactly once.
      */
-    fun completePrOnlyRun(lease: Lease, expectedVersion: Long, merge: VerifiedPrMerge, actor: String): DevelopmentRun {
+    private fun commitPrOnlyCompletion(lease: Lease, expectedVersion: Long, merge: VerifiedPrMerge, actor: String): DevelopmentRun {
         transaction(database) {
             requireLease(lease)
             val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()

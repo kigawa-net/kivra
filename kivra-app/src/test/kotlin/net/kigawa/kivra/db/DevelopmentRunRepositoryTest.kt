@@ -7,16 +7,13 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.Lease
 import net.kigawa.kivra.core.LeaseLostException
-import net.kigawa.kivra.core.DevelopmentRunState
-import net.kigawa.kivra.core.ObservedPullRequest
-import net.kigawa.kivra.core.PrMergeVerification
-import net.kigawa.kivra.core.PullRequestBinding
-import net.kigawa.kivra.core.VerifiedPrMerge
 import net.kigawa.kivra.core.PrMergeAuthorityUnavailableException
 import net.kigawa.kivra.core.PrMergeObservationPolicy
+import net.kigawa.kivra.core.PullRequestBinding
 import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunHaltedException
 import net.kigawa.kivra.core.RunId
@@ -129,20 +126,9 @@ class DevelopmentRunRepositoryTest {
         manifest: String = MANIFEST,
     ) = PullRequestBinding(runId, REPO, repositoryId, prNumber, nodeId, baseRef, headSha, policy, manifest)
 
-    /** The caller's path: load the run's binding, ask the Authority, and return the verified merge or null on refusal. */
-    private fun TestDb.verified(authority: FakeTrustedPrMergeAuthority, runId: RunId): VerifiedPrMerge? {
-        val b = runs.loadPullRequestBinding(runId) ?: error("run $runId has no binding")
-        return when (val v = runBlocking { authority.verifyMerge(b) }) {
-            is PrMergeVerification.Verified -> v.merge
-            is PrMergeVerification.Refused -> null
-        }
-    }
-
-    /** Verifies with [authority] and completes; a refusal by the Authority is returned as null and nothing is written. */
-    private fun TestDb.complete(lease: Lease, version: Long, authority: FakeTrustedPrMergeAuthority, runId: RunId): DevelopmentRun? {
-        val merge = verified(authority, runId) ?: return null
-        return runs.completePrOnlyRun(lease, version, merge, "w")
-    }
+    /** The production call: the repository asks its injected Authority. The test supplies no evidence. */
+    private fun TestDb.complete(lease: Lease, version: Long): DevelopmentRun =
+        runBlocking { runs.completePrOnlyRun(lease, version, "w") }
 
     private fun TestDb.completedEvents(runId: RunId) = count("outbox_events", "aggregate_id = '$runId' AND event_type = 'RunCompleted'")
 
@@ -152,10 +138,9 @@ class DevelopmentRunRepositoryTest {
     )
 
     @Test
-    fun `a PR_ONLY run completes on a verified merge, with one RunCompleted event and the mode unchanged`() = TestDb().use { db ->
+    fun `a PR_ONLY run completes on a merge the Authority verified, with one RunCompleted event and the mode unchanged`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val authority = FakeTrustedPrMergeAuthority()
-        val done = db.complete(lease, run.version, authority, run.runId)!!
+        val done = db.complete(lease, run.version)
         assertEquals(DevelopmentRunState.COMPLETED, done.state)
         assertEquals(RunCompletionMode.PR_ONLY, done.completionMode)
         assertEquals(1, db.completedEvents(run.runId))
@@ -165,18 +150,17 @@ class DevelopmentRunRepositoryTest {
     @Test
     fun `a squash merge whose merge commit differs from the PR head completes`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val authority = FakeTrustedPrMergeAuthority()
         assertFalse(FakeTrustedPrMergeAuthority.MERGE_SHA == HEAD)
-        assertEquals(DevelopmentRunState.COMPLETED, db.complete(lease, run.version, authority, run.runId)!!.state)
+        assertEquals(DevelopmentRunState.COMPLETED, db.complete(lease, run.version).state)
     }
 
     @Test
-    fun `a closed PR, or a GitHub answer that does not match the binding, never completes the run`() = TestDb().use { db ->
+    fun `a closed PR, or a provider answer that does not match the binding, never completes the run`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
         val before = db.sideEffects(run.runId)
-        fun refusedBy(observe: (PullRequestBinding) -> ObservedPullRequest?) {
-            val authority = FakeTrustedPrMergeAuthority().apply { this.observe = observe }
-            assertEquals(null, db.complete(lease, run.version, authority, run.runId))
+        fun refusedBy(answer: (PullRequestBinding) -> net.kigawa.kivra.core.ObservedPullRequest?) {
+            db.prAuthority.answer = answer
+            assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
         }
         refusedBy { FakeTrustedPrMergeAuthority.merged(it).copy(merged = false, mergeCommitSha = null) }
         refusedBy { FakeTrustedPrMergeAuthority.merged(it).copy(headSha = "d4".repeat(20)) }
@@ -184,82 +168,90 @@ class DevelopmentRunRepositoryTest {
         refusedBy { FakeTrustedPrMergeAuthority.merged(it).copy(mergeCommitSha = null) }
         refusedBy { FakeTrustedPrMergeAuthority.merged(it).copy(mergeCommitSha = "") }
         refusedBy { null }
+        db.prAuthority.answer = { FakeTrustedPrMergeAuthority.merged(it) }
         assertEquals(DevelopmentRunState.PULL_REQUEST, db.runs.get(run.runId)!!.state)
         assertEquals(0, db.completedEvents(run.runId))
         assertEquals(before, db.sideEffects(run.runId))
-        assertFailsWith<VersionConflictException> {
-            db.runs.completePrOnlyRun(lease, run.version - 1, FakeTrustedPrMergeAuthority().let { db.verified(it, run.runId)!! }, "w")
-        }
+        assertFailsWith<VersionConflictException> { db.complete(lease, run.version - 1) }
     }
 
     @Test
     fun `the same head SHA on another PR number is refused`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
         val before = db.sideEffects(run.runId)
-        val authority = FakeTrustedPrMergeAuthority().apply { observe = { FakeTrustedPrMergeAuthority.merged(it).copy(number = PR + 1) } }
-        assertEquals(null, db.complete(lease, run.version, authority, run.runId))
+        db.prAuthority.answer = { FakeTrustedPrMergeAuthority.merged(it).copy(number = PR + 1) }
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
         assertEquals(before, db.sideEffects(run.runId))
     }
 
     @Test
     fun `the same PR number with another node id is refused`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val authority = FakeTrustedPrMergeAuthority().apply { observe = { FakeTrustedPrMergeAuthority.merged(it).copy(nodeId = "PR_other") } }
-        assertEquals(null, db.complete(lease, run.version, authority, run.runId))
+        db.prAuthority.answer = { FakeTrustedPrMergeAuthority.merged(it).copy(nodeId = "PR_other") }
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
         assertEquals(0, db.completedEvents(run.runId))
     }
 
     @Test
     fun `a repository with the same name but another repository id is refused`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val authority = FakeTrustedPrMergeAuthority().apply { observe = { FakeTrustedPrMergeAuthority.merged(it).copy(repositoryId = REPO_ID + 1) } }
-        assertEquals(null, db.complete(lease, run.version, authority, run.runId))
+        db.prAuthority.answer = { FakeTrustedPrMergeAuthority.merged(it).copy(repositoryId = REPO_ID + 1) }
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
         assertEquals(0, db.completedEvents(run.runId))
     }
 
     @Test
     fun `a merge into another base branch is refused`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val authority = FakeTrustedPrMergeAuthority().apply { observe = { FakeTrustedPrMergeAuthority.merged(it).copy(baseRef = "release") } }
-        assertEquals(null, db.complete(lease, run.version, authority, run.runId))
+        db.prAuthority.answer = { FakeTrustedPrMergeAuthority.merged(it).copy(baseRef = "release") }
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
         assertEquals(0, db.completedEvents(run.runId))
     }
 
     @Test
-    fun `a new head pushed after binding makes the merge of the old head insufficient`() = TestDb().use { db ->
+    fun `a new head pushed after binding makes a merge of the old head insufficient`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val authority = FakeTrustedPrMergeAuthority()
-        val oldMerge = db.verified(authority, run.runId)!!
         val rebound = db.runs.bindPullRequest(lease, run.version, binding(run.runId, headSha = HEAD2), "w")
-        assertFailsWith<InvalidTransitionException> { db.runs.completePrOnlyRun(lease, rebound.version, oldMerge, "w") }
+        // The provider still reports the old head: refused against the new binding.
+        db.prAuthority.answer = { FakeTrustedPrMergeAuthority.merged(it).copy(headSha = HEAD) }
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, rebound.version) }
         assertEquals(0, db.completedEvents(run.runId))
-        // A merge verified against the new binding completes it.
-        assertEquals(DevelopmentRunState.COMPLETED, db.complete(lease, rebound.version, FakeTrustedPrMergeAuthority().apply {
-            observe = { FakeTrustedPrMergeAuthority.merged(it).copy(headSha = HEAD2) }
-        }, run.runId)!!.state)
+        // The merge of the new head completes it.
+        db.prAuthority.answer = { FakeTrustedPrMergeAuthority.merged(it) }
+        assertEquals(DevelopmentRunState.COMPLETED, db.complete(lease, rebound.version).state)
     }
 
     @Test
-    fun `a merge verified against an older policy revision or manifest digest is refused after rebinding`() = TestDb().use { db ->
+    fun `a re-bind of the head, policy or manifest during verification makes the completion refused`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val oldMerge = db.verified(FakeTrustedPrMergeAuthority(), run.runId)!!
-        val repoBound = db.runs.bindPullRequest(lease, run.version, binding(run.runId, policy = "policy-2"), "w")
-        assertFailsWith<InvalidTransitionException> { db.runs.completePrOnlyRun(lease, repoBound.version, oldMerge, "w") }
-        val manifestBound = db.runs.bindPullRequest(lease, repoBound.version, binding(run.runId, policy = "policy-2", manifest = "manifest-2"), "w")
-        assertFailsWith<InvalidTransitionException> { db.runs.completePrOnlyRun(lease, manifestBound.version, oldMerge, "w") }
+        // A push lands while the Authority is answering: the verification used the old binding.
+        db.prAuthority.beforeAnswer = { _ ->
+            db.runs.bindPullRequest(lease, db.runs.get(run.runId)!!.version, binding(run.runId, headSha = HEAD2), "w")
+        }
+        assertFailsWith<VersionConflictException> { db.complete(lease, run.version) }
+        db.prAuthority.beforeAnswer = { _ ->
+            db.runs.bindPullRequest(lease, db.runs.get(run.runId)!!.version, binding(run.runId, policy = "policy-2"), "w")
+        }
+        assertFailsWith<VersionConflictException> { db.complete(lease, run.version) }
+        db.prAuthority.beforeAnswer = { _ -> }
         assertEquals(0, db.completedEvents(run.runId))
+        // With the current binding and version, the merge completes.
+        val current = db.runs.get(run.runId)!!
+        assertEquals(DevelopmentRunState.COMPLETED, db.complete(lease, current.version).state)
     }
 
     @Test
     fun `an Authority that refuses, is unavailable, or throws leaves the run and its audit and outbox untouched`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
         val before = db.sideEffects(run.runId)
-        val refusing = FakeTrustedPrMergeAuthority().apply { observe = { null } }
-        assertEquals(null, db.complete(lease, run.version, refusing, run.runId))
-        val unavailable = FakeTrustedPrMergeAuthority().apply { failure = PrMergeAuthorityUnavailableException("GitHub merge observation unavailable") }
-        assertFailsWith<PrMergeAuthorityUnavailableException> { db.complete(lease, run.version, unavailable, run.runId) }
-        val crashing = FakeTrustedPrMergeAuthority().apply { failure = IllegalStateException("boom") }
-        assertFailsWith<IllegalStateException> { db.complete(lease, run.version, crashing, run.runId) }
+        db.prAuthority.answer = { null }
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
+        db.prAuthority.answer = { FakeTrustedPrMergeAuthority.merged(it) }
+        db.prAuthority.failure = PrMergeAuthorityUnavailableException("GitHub merge observation unavailable")
+        assertFailsWith<PrMergeAuthorityUnavailableException> { db.complete(lease, run.version) }
+        db.prAuthority.failure = IllegalStateException("boom")
+        assertFailsWith<IllegalStateException> { db.complete(lease, run.version) }
+        db.prAuthority.failure = null
         assertEquals(DevelopmentRunState.PULL_REQUEST, db.runs.get(run.runId)!!.state)
         assertEquals(before, db.sideEffects(run.runId))
         assertEquals(0, db.completedEvents(run.runId))
@@ -268,24 +260,23 @@ class DevelopmentRunRepositoryTest {
     @Test
     fun `an observation from the future or older than the allowed age is refused, a recent one is accepted`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val future = FakeTrustedPrMergeAuthority().apply { observedAtOffset = Duration.ofHours(1) }
-        val merge = db.verified(future, run.runId)!!
-        assertFailsWith<InvalidTransitionException> { db.runs.completePrOnlyRun(lease, run.version, merge, "w") }
-        val stale = FakeTrustedPrMergeAuthority().apply { observedAtOffset = PrMergeObservationPolicy.MAX_OBSERVATION_AGE.negated().minusMinutes(1) }
-        val staleMerge = db.verified(stale, run.runId)!!
-        assertFailsWith<InvalidTransitionException> { db.runs.completePrOnlyRun(lease, run.version, staleMerge, "w") }
+        db.prAuthority.clock.offset = Duration.ofHours(1)
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
+        db.prAuthority.clock.offset = PrMergeObservationPolicy.MAX_OBSERVATION_AGE.negated().minusMinutes(1)
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
         assertEquals(0, db.completedEvents(run.runId))
-        val recent = FakeTrustedPrMergeAuthority().apply { observedAtOffset = PrMergeObservationPolicy.MAX_OBSERVATION_AGE.negated().plusMinutes(1) }
-        assertEquals(DevelopmentRunState.COMPLETED, db.runs.completePrOnlyRun(lease, run.version, db.verified(recent, run.runId)!!, "w").state)
+        db.prAuthority.clock.offset = PrMergeObservationPolicy.MAX_OBSERVATION_AGE.negated().plusMinutes(1)
+        assertEquals(DevelopmentRunState.COMPLETED, db.complete(lease, run.version).state)
     }
 
     @Test
-    fun `a run whose binding columns are missing, as in a row written before V7, is never completable`() = TestDb().use { db ->
+    fun `a run whose binding columns are missing, as in a row written before V7, is never completable and the Authority is not asked`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val merge = db.verified(FakeTrustedPrMergeAuthority(), run.runId)!!
         transaction(db.database) { execUpdate("UPDATE development_runs SET pr_number = NULL, pr_node_id = NULL WHERE run_id = ?", run.runId.value) }
         assertEquals(null, db.runs.loadPullRequestBinding(run.runId))
-        assertFailsWith<InvalidTransitionException> { db.runs.completePrOnlyRun(lease, run.version, merge, "w") }
+        val asked = db.prAuthority.calls
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
+        assertEquals(asked, db.prAuthority.calls)
         assertEquals(0, db.completedEvents(run.runId))
     }
 
@@ -300,30 +291,28 @@ class DevelopmentRunRepositoryTest {
     fun `WAITING_APPROVAL is also a PR_ONLY completion source`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
         val waiting = db.runs.transition(lease, run.version, DevelopmentRunState.WAITING_APPROVAL, "w")
-        assertEquals(DevelopmentRunState.COMPLETED, db.complete(lease, waiting.version, FakeTrustedPrMergeAuthority(), run.runId)!!.state)
+        assertEquals(DevelopmentRunState.COMPLETED, db.complete(lease, waiting.version).state)
     }
 
     @Test
     fun `a duplicate completion fails and RunCompleted is appended exactly once`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val merge = db.verified(FakeTrustedPrMergeAuthority(), run.runId)!!
-        val done = db.runs.completePrOnlyRun(lease, run.version, merge, "w")
+        val done = db.complete(lease, run.version)
         // Replayed webhook / polling: the same lease and the stale version, or the same lease after the terminal state.
         // COMPLETED is terminal, so the lease is no longer valid for the run: fenced out before any write.
-        assertFailsWith<LeaseLostException> { db.runs.completePrOnlyRun(lease, run.version, merge, "w") }
-        assertFailsWith<LeaseLostException> { db.runs.completePrOnlyRun(lease, done.version, merge, "w") }
+        assertFailsWith<LeaseLostException> { db.complete(lease, run.version) }
+        assertFailsWith<LeaseLostException> { db.complete(lease, done.version) }
         assertEquals(1, db.completedEvents(run.runId))
     }
 
     @Test
     fun `a stale worker cannot complete a run, and a held run cannot either`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
-        val merge = db.verified(FakeTrustedPrMergeAuthority(), run.runId)!!
         db.runs.hold(run.runId, "admin", "admin")
-        assertFailsWith<RunHaltedException> { db.runs.completePrOnlyRun(lease, run.version, merge, "w") }
+        assertFailsWith<RunHaltedException> { db.complete(lease, run.version) }
         db.runs.clearHold(run.runId, "admin")
         db.expireLease(run.runId.value)
-        assertFailsWith<LeaseLostException> { db.runs.completePrOnlyRun(lease, run.version, merge, "w") }
+        assertFailsWith<LeaseLostException> { db.complete(lease, run.version) }
         assertEquals(DevelopmentRunState.PULL_REQUEST, db.runs.get(run.runId)!!.state)
         assertEquals(0, db.completedEvents(run.runId))
     }
@@ -339,8 +328,7 @@ class DevelopmentRunRepositoryTest {
     @Test
     fun `completePrOnlyRun is refused for RELEASE runs, which keep the RELEASING VERIFYING COMPLETED path`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.RELEASE)
-        val merge = db.verified(FakeTrustedPrMergeAuthority(), run.runId)!!
-        assertFailsWith<InvalidTransitionException> { db.runs.completePrOnlyRun(lease, run.version, merge, "w") }
+        assertFailsWith<InvalidTransitionException> { db.complete(lease, run.version) }
         var v = db.runs.transition(lease, run.version, DevelopmentRunState.RELEASING, "w").version
         v = db.runs.transition(lease, v, DevelopmentRunState.VERIFYING, "w").version
         assertEquals(DevelopmentRunState.COMPLETED, db.runs.transition(lease, v, DevelopmentRunState.COMPLETED, "w").state)
@@ -350,8 +338,7 @@ class DevelopmentRunRepositoryTest {
     fun `the completion mode is recorded at admission and is never changed`() = TestDb().use { db ->
         val (run, lease) = db.toPullRequest(RunCompletionMode.PR_ONLY)
         assertEquals(RunCompletionMode.PR_ONLY, db.runs.get(run.runId)!!.completionMode)
-        val merge = db.verified(FakeTrustedPrMergeAuthority(), run.runId)!!
-        assertEquals(RunCompletionMode.PR_ONLY, db.runs.completePrOnlyRun(lease, run.version, merge, "w").completionMode)
+        assertEquals(RunCompletionMode.PR_ONLY, db.complete(lease, run.version).completionMode)
     }
 
     companion object {

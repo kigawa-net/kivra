@@ -99,4 +99,14 @@ class TrustedPrMergeTest {
     fun `the observation age policy is ten minutes`() {
         assertEquals(java.time.Duration.ofMinutes(10), PrMergeObservationPolicy.MAX_OBSERVATION_AGE)
     }
+
+    @Test
+    fun `an Authority built on the base class cannot return a merge that the verifier did not confirm`() = kotlinx.coroutines.runBlocking {
+        // The provider answer names another PR. The base class verifies it, so the result is a refusal, never Verified.
+        val authority = object : PrMergeAuthorityBase() {
+            override suspend fun observe(binding: PullRequestBinding): PrMergeObservation =
+                PrMergeObservation.Found(observed().copy(number = 8L))
+        }
+        assertEquals("PR_NUMBER_MISMATCH", assertIs<PrMergeVerification.Refused>(authority.verifyMerge(binding)).reason)
+    }
 }

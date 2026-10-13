@@ -19,10 +19,11 @@ sealed interface PortResult<out T> {
     data class Rejected(val httpStatus: Int, val code: String?, val message: String) : PortResult<Nothing>
 
     /**
-     * The request provably did not take effect, so the caller MAY repeat it. Returned ONLY when nothing was
-     * sent: connection refused, connect timeout, DNS resolution failure, token acquisition failure.
-     * Also returned for a 429 on a read-only GET (idempotent, safe to repeat). A 429 on a mutating call is
-     * [Unknown]: exkes has seen the request, so its effect is not known to be absent.
+     * The request provably was NOT sent, so the caller MAY repeat it (and the OperationExecutor may record a
+     * NotSentProof). Returned ONLY when nothing was sent: connection refused, connect timeout, DNS resolution
+     * failure, token acquisition failure (classified from the Ktor/JDK engine exceptions in ExkesAdapter).
+     * A 429 on a mutating call is [Unknown]: exkes has seen the request, so "no effect" is not proven.
+     * Read-only GETs (repeating them has no effect) may also return Transient for a 429/5xx/timeout.
      */
     data class Transient(val message: String) : PortResult<Nothing>
 

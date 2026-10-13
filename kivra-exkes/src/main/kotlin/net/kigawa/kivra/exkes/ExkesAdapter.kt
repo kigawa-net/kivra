@@ -312,9 +312,9 @@ class ExkesAdapter(
             status = response.status.value
             text = response.bodyAsText()
         } catch (e: ConnectTimeoutException) {
-            return PortResult.Transient("connect timeout: ${e.message}") // request never reached the server
+            return PortResult.Transient("connect timeout: ${e.message}") // connect never completed, nothing was written
         } catch (e: ConnectException) {
-            return PortResult.Transient("connection refused: ${e.message}")
+            return PortResult.Transient("connection refused: ${e.message}") // nothing was sent
         } catch (e: UnresolvedAddressException) {
             return PortResult.Transient("DNS resolution failed: ${e.message}") // no socket was opened
         } catch (e: UnknownHostException) {

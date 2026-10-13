@@ -140,18 +140,22 @@ class OperationJournalRepository(
     private val audit: AuditRepository = AuditRepository(clock),
 ) {
 
-    fun prepare(lease: Lease, op: PrepareOperation): JournalEntry {
+    /**
+     * [allowCancelRequested] is for the wind-down of a cancelled run only (stop / delete of what the run created):
+     * a pending Cancel then no longer rejects journal writes, while Hold and lease loss still do.
+     */
+    fun prepare(lease: Lease, op: PrepareOperation, allowCancelRequested: Boolean = false): JournalEntry {
         try {
-            return transaction(database) { prepareInTx(lease, op) }
+            return transaction(database) { prepareInTx(lease, op, allowCancelRequested) }
         } catch (e: ExposedSQLException) {
             if (!e.isUniqueViolation()) throw e
             // Lost an insert race for the same key (cannot happen under one valid lease, but stay safe): adopt the winner.
-            return transaction(database) { prepareInTx(lease, op) }
+            return transaction(database) { prepareInTx(lease, op, allowCancelRequested) }
         }
     }
 
-    private fun Transaction.prepareInTx(lease: Lease, op: PrepareOperation): JournalEntry {
-        requireLease(lease)
+    private fun Transaction.prepareInTx(lease: Lease, op: PrepareOperation, allowCancelRequested: Boolean): JournalEntry {
+        requireLease(lease, allowCancelRequested)
         val existing = ExternalOperationsTable.selectAll().where {
             (ExternalOperationsTable.runId eq lease.runId.value) and
                 (ExternalOperationsTable.opType eq op.opType) and
@@ -217,7 +221,8 @@ class OperationJournalRepository(
         errorClass: String? = null,
         error: String? = null,
         nextActionAt: LocalDateTime? = null,
-    ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Plain, externalRef, errorClass, error, nextActionAt)
+        allowCancelRequested: Boolean = false,
+    ): JournalEntry = applyTransition(lease, opId, expectedVersion, to, Gate.Plain, externalRef, errorClass, error, nextActionAt, allowCancelRequested)
 
     /**
      * Leaves UNKNOWN / RECONCILIATION_REQUIRED on the strength of verified evidence of the real external state.
@@ -235,6 +240,7 @@ class OperationJournalRepository(
         ref: VerifiedEvidenceRef,
         externalRef: String? = null,
         nextActionAt: LocalDateTime? = null,
+        allowCancelRequested: Boolean = false,
     ): JournalEntry {
         val purpose = when (to) {
             OperationStatus.CONFIRMED -> EvidencePurpose.RECONCILE_EXISTS
@@ -242,8 +248,8 @@ class OperationJournalRepository(
             OperationStatus.FAILED -> EvidencePurpose.RECONCILE_FAILED
             else -> throw InvalidTransitionException("operation $opId: reconcile cannot target $to")
         }
-        val evidence = resolveFor(lease, opId, expectedVersion, purpose, ref)
-        return applyTransition(lease, opId, expectedVersion, to, Gate.Verified(evidence), externalRef, null, null, nextActionAt)
+        val evidence = resolveFor(lease, opId, expectedVersion, purpose, ref, allowCancelRequested)
+        return applyTransition(lease, opId, expectedVersion, to, Gate.Verified(evidence), externalRef, null, null, nextActionAt, allowCancelRequested)
     }
 
     /**
@@ -256,9 +262,10 @@ class OperationJournalRepository(
         expectedVersion: Long,
         ref: VerifiedEvidenceRef,
         nextActionAt: LocalDateTime? = null,
+        allowCancelRequested: Boolean = false,
     ): JournalEntry {
-        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref)
-        return applyTransition(lease, opId, expectedVersion, OperationStatus.RETRYABLE, Gate.Verified(evidence), null, null, null, nextActionAt)
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref, allowCancelRequested)
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.RETRYABLE, Gate.Verified(evidence), null, null, null, nextActionAt, allowCancelRequested)
     }
 
     /**
@@ -270,9 +277,10 @@ class OperationJournalRepository(
         opId: String,
         expectedVersion: Long,
         ref: VerifiedEvidenceRef,
+        allowCancelRequested: Boolean = false,
     ): JournalEntry {
-        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref, setOf(OperationStatus.PREPARED))
-        return applyTransition(lease, opId, expectedVersion, OperationStatus.IN_FLIGHT, Gate.Takeover(evidence), null, null, null, null)
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.NOT_SENT, ref, allowCancelRequested, setOf(OperationStatus.PREPARED))
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.IN_FLIGHT, Gate.Takeover(evidence), null, null, null, null, allowCancelRequested)
     }
 
     /** IN_FLIGHT -> FAILED, only with a verified REJECTED ref for this operation: the external system explicitly refused. */
@@ -283,9 +291,10 @@ class OperationJournalRepository(
         ref: VerifiedEvidenceRef,
         errorClass: String? = null,
         error: String? = null,
+        allowCancelRequested: Boolean = false,
     ): JournalEntry {
-        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.REJECTED, ref)
-        return applyTransition(lease, opId, expectedVersion, OperationStatus.FAILED, Gate.Verified(evidence), null, errorClass, error, null)
+        val evidence = resolveFor(lease, opId, expectedVersion, EvidencePurpose.REJECTED, ref, allowCancelRequested)
+        return applyTransition(lease, opId, expectedVersion, OperationStatus.FAILED, Gate.Verified(evidence), null, errorClass, error, null, allowCancelRequested)
     }
 
     /** Why a status change is allowed. Only [Plain] comes without evidence, and it never reaches the evidence-only edges. */
@@ -321,10 +330,11 @@ class OperationJournalRepository(
         expectedVersion: Long,
         purpose: EvidencePurpose,
         ref: VerifiedEvidenceRef,
+        allowCancelRequested: Boolean,
         fromStates: Set<OperationStatus> = purpose.edge().first,
     ): VerifiedEvidence {
         val subject = transaction(database) {
-            requireLease(lease)
+            requireLease(lease, allowCancelRequested)
             val row = rowOf(lease, opId)
             if (row[ExternalOperationsTable.version] != expectedVersion) {
                 throw VersionConflictException("operation $opId is at version ${row[ExternalOperationsTable.version]}, expected $expectedVersion")
@@ -356,8 +366,9 @@ class OperationJournalRepository(
         errorClass: String?,
         error: String?,
         nextActionAt: LocalDateTime?,
+        allowCancelRequested: Boolean,
     ): JournalEntry = transaction(database) {
-        requireLease(lease)
+        requireLease(lease, allowCancelRequested)
         val row = rowOf(lease, opId)
         val from = OperationStatus.valueOf(row[ExternalOperationsTable.status])
         if (row[ExternalOperationsTable.version] != expectedVersion) {
@@ -521,6 +532,12 @@ class OperationJournalRepository(
 
     fun get(opId: String): JournalEntry? = transaction(database) {
         ExternalOperationsTable.selectAll().where { ExternalOperationsTable.opId eq opId }.firstOrNull()?.toEntry()
+    }
+
+    /** All operations of a run, in ULID order. Read-only, needs no lease. */
+    fun listByRun(runId: RunId): List<JournalEntry> = transaction(database) {
+        ExternalOperationsTable.selectAll().where { ExternalOperationsTable.runId eq runId.value }
+            .orderBy(ExternalOperationsTable.opId).map { it.toEntry() }
     }
 
     fun findByKey(runId: RunId, opType: String, idempotencyKey: String): JournalEntry? = transaction(database) {

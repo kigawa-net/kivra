@@ -200,6 +200,8 @@ class AgentManagerTest {
 
     private fun TestDb.pipelineAuthority(): TrustedEvidenceAuthority {
         evidence.setProviderContract("EXKES", "2026-01", ProviderCapability.LOOKUP_BY_STABLE_REF)
+        // M0 (#94) fence: the Kivra DB must hold an authority epoch copy for the provider before any evidence-gated transition.
+        syncAuthorityEpoch(TEST_CONFIG.tenantId, "EXKES")
         return PipelineObservedAuthority(evidence)
     }
 

@@ -7,6 +7,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -15,6 +16,7 @@ import kotlinx.coroutines.runBlocking
 import net.kigawa.kivra.core.EvidenceAuthorityUnavailableException
 import net.kigawa.kivra.core.EvidenceObservationRef
 import net.kigawa.kivra.core.EvidencePurpose
+import net.kigawa.kivra.core.EvidenceRefusedException
 import net.kigawa.kivra.core.EvidenceSubject
 import net.kigawa.kivra.core.EvidenceVerification
 import net.kigawa.kivra.core.ExternalObservation
@@ -25,6 +27,8 @@ import net.kigawa.kivra.core.OperationStatus
 import net.kigawa.kivra.core.ProviderCapability
 import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.VerifiedEvidenceRef
+import net.kigawa.kivra.core.VerifiedEvidence
+import net.kigawa.kivra.core.TrustedEvidenceAuthority
 import net.kigawa.kivra.core.VersionConflictException
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.insert
@@ -400,6 +404,29 @@ class OperationJournalRepositoryTest {
         assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(c.opId)!!.status)
         // The ref still works for its own operation.
         assertEquals(OperationStatus.RETRYABLE, (blocking { db.journal.markNotSent(lease, a.opId, a.version, refForA) } as JournalEntry).status)
+    }
+
+    @Test
+    fun `authority refusal detail cannot leak into Journal exceptions`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val op = db.inFlight(lease)
+        val credential = "Authorization: Bearer DO-NOT-LOG-SECRET"
+        val hostileAuthority = object : TrustedEvidenceAuthority by db.evidence {
+            override suspend fun resolve(
+                ref: VerifiedEvidenceRef,
+                expected: EvidenceSubject,
+                requiredPurpose: EvidencePurpose,
+            ): VerifiedEvidence {
+                throw EvidenceRefusedException(credential)
+            }
+        }
+        val guardedJournal = OperationJournalRepository(db.database, hostileAuthority)
+        val error = assertFailsWith<InvalidTransitionException> {
+            blocking { guardedJournal.markNotSent(lease, op.opId, op.version, VerifiedEvidenceRef("evd-refused")) }
+        }
+        assertFalse(error.message.orEmpty().contains("DO-NOT-LOG-SECRET"))
+        assertTrue(error.message.orEmpty().contains("EVIDENCE_REFUSED"))
+        assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(op.opId)!!.status)
     }
 
     @Test

@@ -31,10 +31,11 @@ private val MIGRATION_FILES = mapOf(
     5 to "V5__memory_mutation_binding.sql",
     6 to "V6__authority_epoch_fence.sql",
     7 to "V7__pr_merge_binding.sql",
+    8 to "V8__authority_epoch_publisher.sql",
 )
 
 /**
- * Migration chain V1 -> V2 -> V3 -> V4 -> V5 -> V6 -> V7 (Issue #88, #94, #53). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
+ * Migration chain V1 -> V2 -> V3 -> V4 -> V5 -> V6 -> V7 -> V8 (Issue #88, #94, #53, #100). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
  *
  * Partial histories are built from copies of the real migration files in a temporary directory. Nothing here repairs,
  * skips or baselines a history: a mismatch must fail.
@@ -42,10 +43,10 @@ private val MIGRATION_FILES = mapOf(
 class MigrationChainTest {
 
     @Test
-    fun `empty database applies V1 to V7 in order and flyway validate passes`() = TestDb().use { db ->
+    fun `empty database applies V1 to V8 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
-        assertEquals(listOf("1", "2", "3", "4", "5", "6", "7"), appliedVersions(db.dataSource))
+        assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8"), appliedVersions(db.dataSource))
         assertTrue(flyway.info().all().all { it.state == MigrationState.SUCCESS })
         assertEquals(1, db.tableCount("approvals"))
         assertEquals(1, db.columnCount("external_operations", "tenant_id"))
@@ -65,7 +66,7 @@ class MigrationChainTest {
             // The later migrations are applied on top of the existing history, in order.
             runMigrations(db.dataSource)
             classpathFlyway(db.dataSource).validate()
-            assertEquals(listOf("1", "2", "3", "4", "5", "6", "7"), appliedVersions(db.dataSource))
+            assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8"), appliedVersions(db.dataSource))
 
             // The row is kept as written: no backfill, no guessed binding.
             assertEquals(before, db.snapshot(opId))

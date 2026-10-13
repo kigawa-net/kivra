@@ -142,14 +142,17 @@ class AuthorityEpochFenceTest {
     }
 
     @Test
-    fun `a stale Kivra copy of the capability refuses the commit even when the fake Authority still agrees`() = TestDb().use { db ->
+    fun `a Kivra copy that disagrees with the evidence refuses the commit even when the fake Authority still agrees`() = TestDb().use { db ->
         val lease = db.leasedRun()
         val e = db.inFlight(lease)
         val ref = db.issueFor(e, EvidencePurpose.NOT_SENT)
-        // Downgrade only the DB copy: the commit-time check is what must refuse, not the Authority resolve.
+        // Change only the DB copy (a newer epoch with a downgraded capability): the commit-time check is what must refuse,
+        // not the Authority resolve. An older same-epoch or rolled-back copy is refused by publish itself (see
+        // AuthorityEpochPublishTest), so the copy can only disagree by being ahead here.
         db.epochs.publish(
             TENANT, PROVIDER,
-            AuthorityEpochSnapshot(CONTRACT, ProviderCapability.LOOKUP_BY_STABLE_REF, 2, 1, 1),
+            AuthorityEpochSnapshot(CONTRACT, ProviderCapability.LOOKUP_BY_STABLE_REF, 2, 2, 1),
+            TestDb.TEST_ISSUER,
         )
         val before = db.snapshot(lease, e.opId)
         assertFailsWith<InvalidTransitionException> {
@@ -259,6 +262,47 @@ class AuthorityEpochFenceTest {
         assertNotNull(settled.evidenceContentDigest)
         assertTrue(settled.evidenceContentDigest!!.matches(Regex("[0-9a-f]{64}")))
         assertEquals(auditBefore + 1, db.auditCount(lease))
+    }
+
+    /**
+     * Issue #100: a revoke published concurrently with the transition. Both start at the TOCTOU point (after resolve). The
+     * Journal commit and the revoke publish serialize on the epoch row, so either the transition commits first (it recorded
+     * the pre-revoke grant generation) or the revoke commits first and the transition is refused. Old evidence never commits
+     * after the revoke has been published.
+     */
+    @Test
+    fun `a revoke published concurrently with a transition is serialized on the epoch row`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val e = db.inFlight(lease)
+        val ref = db.issueFor(e, EvidencePurpose.NOT_SENT)
+        val barrier = CyclicBarrier(2)
+        db.evidence.afterResolve = { barrier.await(20, TimeUnit.SECONDS) }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val transition = pool.submit<Result<OperationStatus>> {
+                runCatching { runBlocking { db.journal.markNotSent(lease, e.opId, e.version, ref, nextActionAt = now()) }.status }
+            }
+            val revoke = pool.submit<Unit> {
+                barrier.await(20, TimeUnit.SECONDS)
+                db.evidence.revokeGrant(PROVIDER)
+                db.syncAuthorityEpoch(TENANT, PROVIDER)
+            }
+            revoke.get(60, TimeUnit.SECONDS)
+            val outcome = transition.get(60, TimeUnit.SECONDS)
+            assertEquals(2L, db.epochs.current(TENANT, PROVIDER)!!.grantGeneration)
+            val exception = outcome.exceptionOrNull()
+            if (exception == null) {
+                // The transition committed before the revoke: it recorded the pre-revoke grant generation.
+                assertEquals(OperationStatus.RETRYABLE, outcome.getOrNull())
+                assertEquals(1L, db.journal.get(e.opId)!!.grantGeneration)
+            } else {
+                assertTrue(exception is InvalidTransitionException, "unexpected failure: $exception")
+                assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(e.opId)!!.status)
+            }
+        } finally {
+            db.evidence.afterResolve = null
+            pool.shutdownNow()
+        }
     }
 
     /**

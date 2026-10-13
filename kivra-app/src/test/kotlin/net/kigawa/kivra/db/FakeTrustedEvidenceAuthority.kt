@@ -76,14 +76,18 @@ class FakeTrustedEvidenceAuthority : TrustedEvidenceAuthority {
 
     /**
      * The Provider Contract and capability the registry currently declares for [providerId]. A change of contract version
-     * or capability bumps the capability revision. The authority epoch and grant generation are left alone.
+     * or capability bumps the capability revision and the authority epoch (one ordered Authority revision, Issue #100).
+     * The grant generation is left alone.
      */
     fun setProviderContract(providerId: String, contractVersion: String, capability: ProviderCapability) {
         providers.compute(providerId) { _, cur ->
             when {
                 cur == null -> ProviderState(contractVersion, capability, 1, 1, 1)
                 cur.contractVersion == contractVersion && cur.capability == capability -> cur
-                else -> cur.copy(contractVersion = contractVersion, capability = capability, capabilityRevision = cur.capabilityRevision + 1)
+                else -> cur.copy(
+                    contractVersion = contractVersion, capability = capability,
+                    capabilityRevision = cur.capabilityRevision + 1, authorityEpoch = cur.authorityEpoch + 1,
+                )
             }
         }
     }
@@ -93,9 +97,14 @@ class FakeTrustedEvidenceAuthority : TrustedEvidenceAuthority {
         providers.computeIfPresent(providerId) { _, s -> s.copy(authorityEpoch = s.authorityEpoch + 1) }
     }
 
-    /** Provider Grant revoked: every ref verified before this call is refused by [resolve]. */
+    /**
+     * Provider Grant revoked: every ref verified before this call is refused by [resolve]. The revocation is an Authority
+     * change, so it also advances the authority epoch (Issue #100: every Authority-stream change is ordered by the epoch).
+     */
     fun revokeGrant(providerId: String) {
-        providers.computeIfPresent(providerId) { _, s -> s.copy(grantGeneration = s.grantGeneration + 1) }
+        providers.computeIfPresent(providerId) { _, s ->
+            s.copy(grantGeneration = s.grantGeneration + 1, authorityEpoch = s.authorityEpoch + 1)
+        }
     }
 
     fun state(providerId: String): ProviderState? = providers[providerId]

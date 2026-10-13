@@ -10,6 +10,7 @@ import net.kigawa.kivra.db.connectDatabase
 import net.kigawa.kivra.db.createDataSource
 import net.kigawa.kivra.db.runMigrations
 import net.kigawa.kivra.observability.MetricsRegistry
+import net.kigawa.kivra.routes.configureDevPreviewRoutes
 import net.kigawa.kivra.routes.configureHealthRoutes
 import net.kigawa.kivra.routes.configureObservabilityRoutes
 
@@ -23,6 +24,9 @@ fun Application.module() {
     val metrics = MetricsRegistry()
     routing {
         configureHealthRoutes()
+        if (System.getenv("KIVRA_DEV_DEMO_ENABLED") == "true") {
+            configureDevPreviewRoutes()
+        }
         configureObservabilityRoutes(metrics, config.metrics)
     }
 }

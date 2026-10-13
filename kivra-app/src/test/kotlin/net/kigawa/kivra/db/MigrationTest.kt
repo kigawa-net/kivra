@@ -1,11 +1,25 @@
 package net.kigawa.kivra.db
 
 import net.kigawa.kivra.core.RunCompletionMode
+import org.flywaydb.core.Flyway
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import org.jetbrains.exposed.sql.transactions.transaction
 
 class MigrationTest {
+    @Test
+    fun `flyway rejects release branches with missing historical migration versions`() = TestDb().use { db ->
+        // A fresh DB can silently accept V1,V2,V4 if V3 is absent; such a branch is unsafe
+        // to roll out before the V3 migration from PR #55 (#88). Also protects future V5.
+        val flyway = Flyway.configure().dataSource(db.dataSource).load()
+        val versions = flyway.info().applied()
+            .mapNotNull { it.version?.toString()?.toIntOrNull() }
+            .sorted()
+        assertEquals((1..(versions.lastOrNull() ?: 0)).toList(), versions,
+            "Flyway version gap: include/validate V3 before V4 and V4 before V5 (#88)")
+    }
+
+
     @Test
     fun `flyway applies V1 and V2 and creates every core table`() = TestDb().use { db ->
         val tables = transaction(db.database) {

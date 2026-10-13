@@ -20,9 +20,8 @@ import java.time.Instant
  * | CONFIRMED | CONFIRMED | Success response, or a bound read-only lookup that found the request applied. |
  * | FAILED_PERMANENT | FAILED | Explicit refusal (local guard / contract validation). Not a retry candidate. |
  *
- * The M0 adapter (kivra-app) is NOT implemented in this milestone: M0's API (Lease / run-bound / `external_operations`)
- * is expected to change with #82 (raw Proof/Evidence -> VerifiedEvidenceRef). Keep the adapter as the only place that
- * knows M0 types. Until then [InMemoryMemoryMutationJournal] is the only implementation (dev/test only).
+ * The M0 adapter is `M0MemoryMutationJournalAdapter` (kivra-app, Issue #91). It is the only place that knows M0 types.
+ * [InMemoryMemoryMutationJournal] is the dev/test implementation: process-local and not durable.
  *
  * ## Invariants enforced by every implementation (see MutationJournalContract in tests)
  * 1. [prepare] is the atomic record step: one operationId maps to one immutable binding (identity, requestId, digest).
@@ -43,6 +42,9 @@ enum class MutationCapability { DISABLED, ENABLED }
 
 private val SAFE_ID = Regex("[A-Za-z0-9._:-]{1,128}")
 private val SAFE_REF = Regex("[A-Za-z0-9._:/-]{1,256}")
+
+/** Opaque `prefix-<uuid>` pointers carry no content; the entropy heuristic misfires on them at random (flaky rejections). */
+private val OPAQUE_UUID_REF = Regex("[a-z]{2,8}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 private val REQUEST_ID = Regex("[A-Za-z0-9-]{1,64}")
 private val DIGEST = Regex("sha256:[0-9a-f]{64}")
 private val REASON_CODE = Regex("[A-Z_]{1,64}")
@@ -118,7 +120,9 @@ data class MutationEvidence(
     init {
         require(SAFE_ID.matches(operationId) && SAFE_ID.matches(issuer)) { "invalid evidence binding" }
         require(DIGEST.matches(payloadDigest)) { "invalid evidence digest" }
-        require(SAFE_REF.matches(evidenceRef) && !SecretFilter.containsSecret(evidenceRef)) { "invalid evidence ref" }
+        require(SAFE_REF.matches(evidenceRef) && (OPAQUE_UUID_REF.matches(evidenceRef) || !SecretFilter.containsSecret(evidenceRef))) {
+            "invalid evidence ref"
+        }
     }
 }
 

@@ -20,7 +20,6 @@ import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 class DevTaskSubmitRoutesTest {
     private fun runId(body: String): String =
@@ -40,8 +39,8 @@ class DevTaskSubmitRoutesTest {
         val id = runId(result.bodyAsText())
         val lookup = client.get("/api/dev/runs/$id")
         assertEquals(HttpStatusCode.OK, lookup.status)
-        assertTrue(lookup.bodyAsText().contains("\\"state\\":\\"NOT_EXECUTED\\""))
-        assertTrue(lookup.bodyAsText().contains("\\"mode\\":\\"SIMULATED\\""))
+        assertEquals("NOT_EXECUTED", Json.parseToJsonElement(lookup.bodyAsText()).jsonObject.getValue("state").jsonPrimitive.content)
+        assertEquals("SIMULATED", Json.parseToJsonElement(lookup.bodyAsText()).jsonObject.getValue("mode").jsonPrimitive.content)
     }
 
     @Test

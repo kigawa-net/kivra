@@ -74,7 +74,8 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
 | `KIVRA_LEASE_GRACE_SECONDS` | 5 | 期限切れ後、奪取を許可するまでの猶予 |
 | `KIVRA_METRICS_ENABLED` | false | `/metrics` の有効化（true のとき `KIVRA_METRICS_BEARER_TOKEN` が必須） |
 | `KIVRA_METRICS_BEARER_TOKEN` | （空） | `/metrics` の Bearer トークン |
-| `KIVRA_AUTH_MODE` | （未設定） | Task API の認証。`oauth2-proxy` / `none` / 未設定（ルートを登録しない）。下記「Task API」 |
+| `KIVRA_AUTH_MODE` | （未設定） | Task API の認証。`oidc-jwt`（本番）/ `oauth2-proxy`・`none`（development のみ）/ 未設定（ルートを登録しない）。下記「Task API」 |
+| `KIVRA_OIDC_ISSUER` / `KIVRA_OIDC_AUDIENCE` / `KIVRA_OIDC_REQUIRED_ROLE` | （`oidc-jwt` で必須） | JWT の検証条件。`KIVRA_OIDC_JWKS_URL`（任意）。下記「認証」 |
 | `KIVRA_RUNTIME_ENV` | （未設定） | `none` を使うには `development` が必須 |
 
 fusha-task（`kivra.fusha.*`、**すべて要確認**: 環境ごとの URL・機械向け認証方式は未確定）:
@@ -133,12 +134,26 @@ Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込み
 
 **認証（`KIVRA_AUTH_MODE`）**
 
-- `oauth2-proxy`: `X-Auth-Request-Email`（無ければ `X-Auth-Request-User`）から呼び出し元を得る。どちらも無い、空、256 文字超、制御文字を含む場合は 401。本番はこのモード。
-- `none`: 認証なし。全員が同じ開発用の principal になる。**`KIVRA_RUNTIME_ENV=development` のときだけ許可**し、それ以外で指定すると起動に失敗する。本番では使わない。
+- `oidc-jwt`（本番）: Keycloak のアクセストークン（JWT）を kivra 自身が検証する。トークンは `Authorization: Bearer <JWT>`、無ければ `X-Forwarded-Access-Token` から取る。
+  検証は、署名（JWKS、RS256 のみ）、`iss`、`aud`、`exp`、`nbf`（時計のずれは 30 秒まで許容）、必須ロール（`resource_access.<クライアント>.roles`）。
+  principal は `email`（`email_verified` が true のときだけ）、無ければ `preferred_username`、無ければ `sub`。検証に失敗したら全て 401（理由は本文に出さない）。
+  JWKS はキャッシュし、未知の kid のときだけ、最小 30 秒の間隔で再取得する（ローテーション対応。読み取りのみ）。
+  - `KIVRA_OIDC_ISSUER`（必須。例 `https://user.kigawa.net/realms/kigawa-net`）
+  - `KIVRA_OIDC_AUDIENCE`（必須。例 `kivra-dev`）
+  - `KIVRA_OIDC_REQUIRED_ROLE`（必須。`<クライアント>:<ロール>` 形式。例 `admin-panel:admin`）
+  - `KIVRA_OIDC_JWKS_URL`（任意。既定は `<issuer>/protocol/openid-connect/certs`）
+  - 必須設定が無い、またはロール形式が不正なら起動に失敗する。
+  - oauth2-proxy を使う場合は `--pass-access-token=true`（`--pass-authorization-header=true` でも可）を付ける。
+- `oauth2-proxy`（development のみ）: `X-Auth-Request-Email`（無ければ `X-Auth-Request-User`）を**信頼する**。どちらも無い、空、256 文字超、制御文字を含む場合は 401。`KIVRA_RUNTIME_ENV=development` 以外で指定すると起動に失敗する。
+- `none`: 認証なし。全員が同じ開発用の principal になる。`KIVRA_RUNTIME_ENV=development` のときだけ許可し、それ以外で指定すると起動に失敗する。本番では使わない。
 - 未設定（既定）: Task API のルートを登録しない（`/api/tasks` は 404）。fail-closed。
 
-**前提（重要）**: `oauth2-proxy` モードは、ヘッダーを oauth2-proxy が付与することを信頼している。kivra は oauth2-proxy 経由でのみ到達可能であること
-（k8s の NetworkPolicy で他の経路を塞ぐ。これは別 PR）が前提。直接到達できれば、ヘッダーは誰でも偽装できる。
+**なぜヘッダー信頼（`oauth2-proxy`）をサーバーで使わないか**: ヘッダーを信頼するモードは、kivra に oauth2-proxy を経由せずに到達できれば、誰でもヘッダーを偽装して他人になりすませる。
+対策として NetworkPolicy で他の経路を塞ぐ案があったが、**クラスタの CNI は Flannel で、NetworkPolicy は実行されない**（実測: 同じ namespace の oauth2-proxy 以外の Pod から、偽装ヘッダー付きの `/api/runs` が 200 になった）。
+ネットワークの分離を保証できないため、サーバーではトークンの署名検証（`oidc-jwt`）で認証し、ヘッダーは信頼しない。
+偽装されたトークンは署名検証で拒否されるので、ネットワーク構成に依存しない。
+
+**未対応**: トークンの失効確認（introspection）はしない。失効させたトークンは `exp` まで有効。
 
 **永続化**: 既存の `DevelopmentRunRepository` が正本。V9（`task_title`, `principal`, `idempotency_key` 列と、`(principal, idempotency_key)` の UNIQUE）で追加する。
 Run の `task_id` は `api:<runId>`（fusha-task のタスクとは紐づかない）、`completion_mode` は `PR_ONLY`（RELEASE には進めない）。

@@ -9,8 +9,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import java.time.ZoneOffset
 import kotlinx.serialization.Serializable
-import net.kigawa.kivra.auth.TaskApiAuthMode
-import net.kigawa.kivra.auth.principalFromHeaders
+import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
@@ -18,10 +17,10 @@ import net.kigawa.kivra.db.TaskSubmitResult
 
 /**
  * Task API (Issue #112): authenticated, persisted Task submission. Every Run here is SIMULATED and CREATED only. No
- * external system is called and no Agent is started. The principal comes from [principalFromHeaders]; a caller sees only
+ * external system is called and no Agent is started. The principal comes from [TaskApiIdentity]; a caller sees only
  * the Runs it submitted (another caller's run id is 404).
  *
- * Registered only when `KIVRA_AUTH_MODE` is set (see [net.kigawa.kivra.auth.resolveTaskApiAuthMode]).
+ * Registered only when `KIVRA_AUTH_MODE` is set (see [net.kigawa.kivra.auth.resolveTaskApiIdentity]).
  */
 @Serializable
 data class SubmitTaskRequest(val title: String, val idempotencyKey: String)
@@ -63,15 +62,9 @@ internal fun DevelopmentRun.toTaskRunResponse(): TaskRunResponse = TaskRunRespon
     createdAt = createdAt.toInstant(ZoneOffset.UTC).toString(),
 )
 
-private fun ApplicationCall.principal(mode: TaskApiAuthMode): String? = principalFromHeaders(
-    mode,
-    email = request.headers["X-Auth-Request-Email"],
-    user = request.headers["X-Auth-Request-User"],
-)
-
-internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, mode: TaskApiAuthMode) {
+internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity) {
     post("/api/tasks") {
-        val principal = call.principal(mode)
+        val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, TaskApiError("unauthorized"))
             return@post
@@ -94,7 +87,7 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, mode: 
     }
 
     get("/api/runs/{id}") {
-        val principal = call.principal(mode)
+        val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, TaskApiError("unauthorized"))
             return@get
@@ -105,7 +98,7 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, mode: 
     }
 
     get("/api/runs") {
-        val principal = call.principal(mode)
+        val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, TaskApiError("unauthorized"))
             return@get

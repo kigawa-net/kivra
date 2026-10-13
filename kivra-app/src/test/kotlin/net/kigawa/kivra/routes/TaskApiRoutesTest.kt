@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -18,6 +19,7 @@ import io.ktor.server.routing.routing
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
 import kotlin.test.Test
+import kotlin.test.assertFailsWith
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
@@ -26,28 +28,44 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.appModule
-import net.kigawa.kivra.auth.TaskApiAuthMode
+import net.kigawa.kivra.auth.OidcJwtVerifier
+import net.kigawa.kivra.auth.OidcTestTokens
+import net.kigawa.kivra.auth.TaskApiIdentity
+import net.kigawa.kivra.auth.resolveTaskApiIdentity
 import net.kigawa.kivra.db.TestDb
 
 private const val ALICE = "alice@example.com"
 private const val BOB = "bob@example.com"
 
-class TaskApiRoutesTest {
-    private fun ApplicationTestBuilder.setUpRoutes(db: TestDb, mode: TaskApiAuthMode) {
+/**
+ * The Task API contract, run once per authentication scheme (see the subclasses). [credentialFor] returns the request
+ * headers that identify [email] under that scheme, or none when [email] is null.
+ */
+abstract class TaskApiRoutesContractTest {
+    protected abstract val identity: TaskApiIdentity
+
+    /** Headers that identify [email] (null = no identity at all). */
+    protected abstract fun credentialFor(email: String?): Map<String, String>
+
+    private fun ApplicationTestBuilder.setUpRoutes(db: TestDb) {
         application {
             install(ContentNegotiation) { json() }
-            routing { configureTaskApiRoutes(db.runs, mode) }
+            routing { configureTaskApiRoutes(db.runs, identity) }
         }
+    }
+
+    private fun HttpRequestBuilder.identify(email: String?) {
+        credentialFor(email).forEach { (name, value) -> header(name, value) }
     }
 
     private suspend fun HttpClient.submit(body: String, email: String? = ALICE): HttpResponse = post("/api/tasks") {
         header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
-        email?.let { header("X-Auth-Request-Email", it) }
+        identify(email)
         setBody(body)
     }
 
     private suspend fun HttpClient.read(path: String, email: String? = ALICE): HttpResponse = get(path) {
-        email?.let { header("X-Auth-Request-Email", it) }
+        identify(email)
     }
 
     private suspend fun HttpResponse.json(): JsonObject = Json.parseToJsonElement(bodyAsText()).jsonObject
@@ -57,7 +75,7 @@ class TaskApiRoutesTest {
     @Test
     fun `request without an identity is 401 for every route`() = TestDb().use { db ->
         testApplication {
-            setUpRoutes(db, TaskApiAuthMode.OAUTH2_PROXY)
+            setUpRoutes(db)
             assertEquals(HttpStatusCode.Unauthorized, client.submit("""{"title":"t","idempotencyKey":"k"}""", email = null).status)
             assertEquals(HttpStatusCode.Unauthorized, client.read("/api/runs", email = null).status)
             assertEquals(HttpStatusCode.Unauthorized, client.read("/api/runs/01AAAAAAAAAAAAAAAAAAAAAAAA", email = null).status)
@@ -68,7 +86,7 @@ class TaskApiRoutesTest {
     @Test
     fun `over-long identity header is 401 (control characters are covered in TaskApiAuthTest)`() = TestDb().use { db ->
         testApplication {
-            setUpRoutes(db, TaskApiAuthMode.OAUTH2_PROXY)
+            setUpRoutes(db)
             assertEquals(HttpStatusCode.Unauthorized, client.submit("""{"title":"t","idempotencyKey":"k"}""", email = "x".repeat(257)).status)
             assertEquals(0, db.count("development_runs"))
         }
@@ -77,7 +95,7 @@ class TaskApiRoutesTest {
     @Test
     fun `valid submit is 202 with the simulated run snapshot`() = TestDb().use { db ->
         testApplication {
-            setUpRoutes(db, TaskApiAuthMode.OAUTH2_PROXY)
+            setUpRoutes(db)
             val response = client.submit("""{"title":"Write the release notes","idempotencyKey":"rn-1"}""")
             assertEquals(HttpStatusCode.Accepted, response.status)
             val body = response.json()
@@ -93,7 +111,7 @@ class TaskApiRoutesTest {
     @Test
     fun `replay returns the same run and a different title is 409`() = TestDb().use { db ->
         testApplication {
-            setUpRoutes(db, TaskApiAuthMode.OAUTH2_PROXY)
+            setUpRoutes(db)
             val first = client.submit("""{"title":"Same","idempotencyKey":"k"}""")
             val replay = client.submit("""{"title":"Same","idempotencyKey":"k"}""")
             val conflict = client.submit("""{"title":"Different","idempotencyKey":"k"}""")
@@ -108,7 +126,7 @@ class TaskApiRoutesTest {
     @Test
     fun `another user's run is 404 and listing is scoped to the caller`() = TestDb().use { db ->
         testApplication {
-            setUpRoutes(db, TaskApiAuthMode.OAUTH2_PROXY)
+            setUpRoutes(db)
             val aliceRun = client.submit("""{"title":"Alice task","idempotencyKey":"a"}""", email = ALICE).runId()
             client.submit("""{"title":"Bob task","idempotencyKey":"b"}""", email = BOB)
 
@@ -125,7 +143,7 @@ class TaskApiRoutesTest {
     @Test
     fun `invalid title, key or body is 400 and nothing is written`() = TestDb().use { db ->
         testApplication {
-            setUpRoutes(db, TaskApiAuthMode.OAUTH2_PROXY)
+            setUpRoutes(db)
             val bad = listOf(
                 """{"title":"   ","idempotencyKey":"k"}""",
                 """{"title":"${"a".repeat(201)}","idempotencyKey":"k"}""",
@@ -144,40 +162,156 @@ class TaskApiRoutesTest {
     @Test
     fun `title of 200 characters is accepted`() = TestDb().use { db ->
         testApplication {
-            setUpRoutes(db, TaskApiAuthMode.OAUTH2_PROXY)
+            setUpRoutes(db)
             assertEquals(HttpStatusCode.Accepted, client.submit("""{"title":"${"a".repeat(200)}","idempotencyKey":"max"}""").status)
         }
     }
 
+}
+
+/** Header-trust scheme (oauth2-proxy), development only. */
+class OAuth2ProxyTaskApiRoutesTest : TaskApiRoutesContractTest() {
+    override val identity: TaskApiIdentity = resolveTaskApiIdentity(
+        mapOf("KIVRA_AUTH_MODE" to "oauth2-proxy", "KIVRA_RUNTIME_ENV" to "development"),
+    )!!
+
+    override fun credentialFor(email: String?): Map<String, String> = email?.let { mapOf("X-Auth-Request-Email" to it) } ?: emptyMap()
+}
+
+/**
+ * oidc-jwt scheme: the caller presents a Keycloak access token that kivra verifies (no network, see [OidcTestTokens]).
+ * Every contract test below must pass under this scheme too.
+ */
+class OidcJwtTaskApiRoutesTest : TaskApiRoutesContractTest() {
+    override val identity: TaskApiIdentity = OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks()).asIdentity()
+
+    override fun credentialFor(email: String?): Map<String, String> =
+        email?.let { mapOf("Authorization" to OidcTestTokens.bearer(it)) } ?: emptyMap()
+
+    @Test
+    fun `a forged X-Auth-Request-Email header without a token is 401`() = TestDb().use { db ->
+        testApplication {
+            application {
+                install(ContentNegotiation) { json() }
+                routing { configureTaskApiRoutes(db.runs, identity) }
+            }
+            val forged = client.post("/api/tasks") {
+                header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                header("X-Auth-Request-Email", "admin@example.com")
+                header("X-Auth-Request-User", "admin")
+                setBody("""{"title":"forged","idempotencyKey":"forged-1"}""")
+            }
+            assertEquals(HttpStatusCode.Unauthorized, forged.status)
+            assertEquals(HttpStatusCode.Unauthorized, client.get("/api/runs") {
+                header("X-Auth-Request-Email", "admin@example.com")
+            }.status)
+            assertEquals(0, db.count("development_runs"))
+        }
+    }
+
+    @Test
+    fun `a token whose email is not verified is attributed to the username, not the email`() = TestDb().use { db ->
+        testApplication {
+            application {
+                install(ContentNegotiation) { json() }
+                routing { configureTaskApiRoutes(db.runs, identity) }
+            }
+            val token = OidcTestTokens.token(emailVerified = false, preferredUsername = "alice")
+            assertEquals(HttpStatusCode.Accepted, client.post("/api/tasks") {
+                header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                header("Authorization", "Bearer $token")
+                setBody("""{"title":"unverified","idempotencyKey":"u-1"}""")
+            }.status)
+            val listed = Json.parseToJsonElement(client.get("/api/runs") {
+                header("Authorization", "Bearer ${OidcTestTokens.token(emailVerified = false, preferredUsername = "alice")}")
+            }.bodyAsText()).jsonArray
+            assertEquals(listOf("unverified"), listed.map { it.jsonObject.getValue("title").jsonPrimitive.content })
+            val asEmail = client.get("/api/runs") { header("Authorization", OidcTestTokens.bearer(ALICE)) }
+            assertEquals("[]", asEmail.bodyAsText())
+        }
+    }
+}
+
+class TaskApiModuleTest {
     @Test
     fun `module without KIVRA_AUTH_MODE exposes no Task API`() = testApplication {
         environment { config = h2Config("kivra_route_absent") }
         application { appModule(emptyMap()) }
-        assertEquals(HttpStatusCode.NotFound, client.submit("""{"title":"t","idempotencyKey":"k"}""").status)
-        assertEquals(HttpStatusCode.NotFound, client.read("/api/runs").status)
+        assertEquals(HttpStatusCode.NotFound, client.submitWith("""{"title":"t","idempotencyKey":"k"}""").status)
+        assertEquals(HttpStatusCode.NotFound, client.readWith("/api/runs").status)
         assertEquals(HttpStatusCode.OK, client.get("/health").status)
     }
 
     @Test
     fun `module with oauth2-proxy requires an identity`() = testApplication {
         environment { config = h2Config("kivra_route_oauth") }
-        application { appModule(mapOf("KIVRA_AUTH_MODE" to "oauth2-proxy")) }
-        assertEquals(HttpStatusCode.Unauthorized, client.read("/api/runs", email = null).status)
-        assertEquals(HttpStatusCode.OK, client.read("/api/runs").status)
+        application { appModule(mapOf("KIVRA_AUTH_MODE" to "oauth2-proxy", "KIVRA_RUNTIME_ENV" to "development")) }
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/runs") { header("X-Auth-Request-Email", "") }.status)
+        assertEquals(HttpStatusCode.OK, client.get("/api/runs") { header("X-Auth-Request-Email", ALICE) }.status)
     }
 
     @Test
     fun `module with none in development accepts unauthenticated submits`() = testApplication {
         environment { config = h2Config("kivra_route_none") }
         application { appModule(mapOf("KIVRA_AUTH_MODE" to "none", "KIVRA_RUNTIME_ENV" to "development")) }
-        assertEquals(HttpStatusCode.Accepted, client.submit("""{"title":"dev task","idempotencyKey":"dev-1"}""", email = null).status)
+        assertEquals(HttpStatusCode.Accepted, client.submitWith("""{"title":"dev task","idempotencyKey":"dev-1"}""", email = null).status)
     }
 
-    private fun h2Config(name: String) = MapApplicationConfig(
-        "kivra.database.jdbcUrl" to "jdbc:h2:mem:${name}_${System.nanoTime()};MODE=MySQL;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1",
-        "kivra.database.user" to "sa",
-        "kivra.database.password" to "",
-        "kivra.lease.ttlSeconds" to "30",
-        "kivra.lease.graceSeconds" to "5",
-    )
+    @Test
+    fun `module with oauth2-proxy outside development does not start`() {
+        assertFailsWith<IllegalArgumentException> {
+            testApplication {
+                environment { config = h2Config("kivra_route_prod") }
+                application { appModule(mapOf("KIVRA_AUTH_MODE" to "oauth2-proxy")) }
+                startApplication()
+            }
+        }
+    }
+
+    @Test
+    fun `module with oidc-jwt without required settings does not start`() {
+        assertFailsWith<IllegalArgumentException> {
+            testApplication {
+                environment { config = h2Config("kivra_route_oidc_missing") }
+                application { appModule(mapOf("KIVRA_AUTH_MODE" to "oidc-jwt")) }
+                startApplication()
+            }
+        }
+    }
+
+    @Test
+    fun `module with oidc-jwt requires a bearer token`() = testApplication {
+        environment { config = h2Config("kivra_route_oidc") }
+        application {
+            appModule(
+                mapOf(
+                    "KIVRA_AUTH_MODE" to "oidc-jwt",
+                    "KIVRA_OIDC_ISSUER" to OidcTestTokens.ISSUER,
+                    "KIVRA_OIDC_AUDIENCE" to OidcTestTokens.AUDIENCE,
+                    "KIVRA_OIDC_REQUIRED_ROLE" to OidcTestTokens.REQUIRED_ROLE,
+                ),
+            )
+        }
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/runs") { header("X-Auth-Request-Email", ALICE) }.status)
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/runs").status)
+        assertEquals(HttpStatusCode.OK, client.get("/health").status)
+    }
 }
+
+private suspend fun HttpClient.submitWith(body: String, email: String? = ALICE): HttpResponse = post("/api/tasks") {
+    header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+    email?.let { header("X-Auth-Request-Email", it) }
+    setBody(body)
+}
+
+private suspend fun HttpClient.readWith(path: String, email: String? = ALICE): HttpResponse = get(path) {
+    email?.let { header("X-Auth-Request-Email", it) }
+}
+
+private fun h2Config(name: String) = MapApplicationConfig(
+    "kivra.database.jdbcUrl" to "jdbc:h2:mem:${name}_${System.nanoTime()};MODE=MySQL;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1",
+    "kivra.database.user" to "sa",
+    "kivra.database.password" to "",
+    "kivra.lease.ttlSeconds" to "30",
+    "kivra.lease.graceSeconds" to "5",
+)

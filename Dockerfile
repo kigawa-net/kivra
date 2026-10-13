@@ -47,7 +47,8 @@ FROM eclipse-temurin:21-jre-jammy
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -r kivra && useradd -r -g kivra kivra
+# UID/GID 1000 は固定する: kigawa-net-k8s の Deployment が runAsUser: 1000 を指定している
+RUN groupadd -g 1000 kivra && useradd -u 1000 -g kivra -r kivra
 
 WORKDIR /app
 

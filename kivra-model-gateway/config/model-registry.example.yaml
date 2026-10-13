@@ -1,0 +1,32 @@
+# Model Registry (Git-managed source of truth, design 05 section 5). Changes go through PR.
+# NOTE: prices, context sizes and dataHandling below are PLACEHOLDERS. Confirm them against the
+# provider's primary sources before use (design 05 section 16-6). While dataHandling.status is UNKNOWN
+# the provider is not used for INTERNAL or more sensitive data. No secrets belong here: credentialRef
+# is only a logical label: the secret's env var and the allowed endpoint host are fixed by the trusted
+# administrator's CredentialBinding (not in this file), and endpoint must be https.
+registryVersion: "2026-10-12-example"
+
+providers:
+  - id: anthropic
+    adapter: anthropic
+    trustZone: EXTERNAL
+    dataHandling:
+      status: UNKNOWN          # set to CONFIRMED with confirmedBy / confirmedAt / sourceUrl once verified
+    enabled: true
+    endpoint: https://api.anthropic.com
+    credentialRef: ANTHROPIC_API_KEY
+
+models:
+  - id: claude-sonnet
+    providerId: anthropic
+    providerModelName: claude-sonnet-5-5   # configuration value; not hard-coded in code
+    lifecycle: ACTIVE
+    capabilities: [TEXT, VISION_INPUT, TOOL_CALLING, STRUCTURED_OUTPUT_NATIVE, STREAMING, SYSTEM_PROMPT, LONG_CONTEXT, PROMPT_CACHING]
+    contextWindowTokens: 200000   # placeholder: verify
+    maxOutputTokens: 64000        # placeholder: verify
+    qualityTier: A
+    price:                        # placeholder: verify (USD per million tokens)
+      inputPerMtok: "3.00"
+      outputPerMtok: "15.00"
+      currency: USD
+      sourceRef: "TODO: provider pricing page"

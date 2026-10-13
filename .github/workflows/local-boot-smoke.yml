@@ -3,6 +3,10 @@ on:
   pull_request:
     paths:
       - 'compose.dev.yml'
+      - 'kivra-app/**'
+      - 'kivra-core/**'
+      - '**/*.gradle.kts'
+      - 'gradle/**'
       - 'Dockerfile'
       - 'docs/local-first-boot.md'
       - '.github/workflows/local-boot-smoke.yml'
@@ -31,6 +35,17 @@ jobs:
         run: |
           curl --fail --silent --show-error http://127.0.0.1:8080/api/dev/tasks | grep 'SIMULATED'
           curl --fail --silent --show-error http://127.0.0.1:8080/api/dev/runs/preview | grep 'NOT_EXECUTED'
+      - name: Verify simulated submit, replay and run lookup
+        run: |
+          set -eu
+          endpoint=http://127.0.0.1:8080/api/dev
+          request='{"title":"Smoke preview only","idempotencyKey":"local-boot-smoke"}'
+          first=$(curl --fail --silent --show-error -X POST -H 'Content-Type: application/json' -d "$request" "$endpoint/tasks")
+          printf '%s\n' "$first" | jq -e '.state == "NOT_EXECUTED" and .mode == "SIMULATED" and (.runId | type == "string")'
+          run_id=$(printf '%s\n' "$first" | jq -er '.runId')
+          again=$(curl --fail --silent --show-error -X POST -H 'Content-Type: application/json' -d "$request" "$endpoint/tasks")
+          test "$(printf '%s\n' "$again" | jq -er '.runId')" = "$run_id"
+          curl --fail --silent --show-error "$endpoint/runs/$run_id" | jq -e '.state == "NOT_EXECUTED" and .mode == "SIMULATED"'
       - name: Diagnostics
         if: always()
         run: |

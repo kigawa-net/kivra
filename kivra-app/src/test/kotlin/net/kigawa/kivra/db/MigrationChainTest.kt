@@ -28,6 +28,7 @@ private val MIGRATION_FILES = mapOf(
     2 to "V2__reconciliation_evidence_and_outbox_claim.sql",
     3 to "V3__approvals.sql",
     4 to "V4__evidence_authority_binding.sql",
+    5 to "V5__memory_mutation_binding.sql",
 )
 
 /**
@@ -42,7 +43,7 @@ class MigrationChainTest {
     fun `empty database applies V1 to V4 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
-        assertEquals(listOf("1", "2", "3", "4"), appliedVersions(db.dataSource))
+        assertEquals(listOf("1", "2", "3", "4", "5"), appliedVersions(db.dataSource))
         assertTrue(flyway.info().all().all { it.state == MigrationState.SUCCESS })
         assertEquals(1, db.tableCount("approvals"))
         assertEquals(1, db.columnCount("external_operations", "tenant_id"))
@@ -59,7 +60,7 @@ class MigrationChainTest {
             // The later migrations are applied on top of the existing history, in order.
             runMigrations(db.dataSource)
             classpathFlyway(db.dataSource).validate()
-            assertEquals(listOf("1", "2", "3", "4"), appliedVersions(db.dataSource))
+            assertEquals(listOf("1", "2", "3", "4", "5"), appliedVersions(db.dataSource))
 
             // The row is kept as written: no backfill, no guessed binding.
             assertEquals(before, db.snapshot(opId))

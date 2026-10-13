@@ -10,11 +10,13 @@
 |---|---|
 | `kivra-core` | ドメイン型、状態機械（DevelopmentRun / Agent / ExecutionSession / OperationStatus）、Port インターフェース（ExecutionPort / TaskProvider / MemoryPort / SchedulePort、定義のみ）、`LeaseStore` |
 | `kivra-exkes` | `ExecutionPort`（具体型）、`ExkesAdapter`（Ktor クライアント、Bearer は `TokenProvider`）、`FakeExecutionPort`、共通契約テスト。DB・Run 状態機械には依存しない（#29）。exkes 側の不足機能は [docs/exkes-requests.md](docs/exkes-requests.md) |
+| `kivra-github` | GitHub Adapter（#34）。`GitHubPort` + Ktor HTTP 実装。ブランチ・PR・Checks・レビュー取得まで。Merge / force push / main への push は Port に存在しない（人間のみ）。Tool Gateway（#32）とは未結線 |
+| `kivra-model-gateway` | Model Gateway 最小実装(#35): 型・エラー分類、Model Registry(YAML)、制約付きルーティング、予算(予約/確定/解放)、Anthropic Adapter(Ktor)、監査/メトリクスのフック(永続化は別 Issue)。Core / DB には依存しない。Registry 例は `kivra-model-gateway/config/model-registry.example.yaml`(価格等はプレースホルダ)。API キーは信頼管理者が固定する `CredentialBinding`(providerId→許可ホスト/ラベル/環境変数名)経由でのみ解決し、Registry の endpoint/credentialRef は任意の秘密を指せない(HTTPS・ホスト一致必須、リダイレクト不追従)。同一 requestId は `RequestLedger`(予約・結果保存・照合、eviction なし、SHA-256 の正規化 Request Digest で束縛)で冪等化する。永続 Ledger は未対応(M0 の DB 契約に依存)で、`InMemoryRequestLedger` は dev/test 専用として `devAllowInMemoryLedger = true` を明示しない限り Gateway 構築が失敗する。送信済みの可能性がある失敗(5xx・接続断・解析失敗・ストリーム途中失敗・HTTP 応答を伴う 4xx/429 を含む)は予約を見積額で確定し、同一 requestId の Retry / Fallback を行わない(新しい requestId が必要)。送信前に確実に失敗した場合(資格情報未設定・接続拒否・DNS 失敗)のみ予約を解放し Retry / Fallback する。呼出し側 Agent が DataClass を下げられないよう、DataClass は Trusted Orchestrator/Policy Gateway が固定した値を渡すこと(M4 公開 API の前提)。Budget はインメモリで本番の Hard Limit としては使わない(永続化・インスタンス跨ぎは別 Issue) |
 | `kivra-fusha-task` | fusha-task 向け `TaskProvider` 実装（read-only の `FushaTaskAdapter`、`FakeTaskProvider`、Bearer 認証、timeout / retry / backoff）。M1 #27 |
 | `kivra-memory` | `MemoryProvider` ポートと型（MemoryEntry / ScopeRef / SourceRef / ContextBundle / HandoffRecord）、`InMemoryWorkingMemory`、`FakeMemoryPort`、縮退層 `MemoryService`（Write Queue・circuit breaker）、Secret フィルタ、recl 向け `ReclAdapter`（**計画 API に基づく骨格。実 API は存在せず未接続**）。M5 #37 |
 | `kivra-app` | Ktor アプリ、設定読込、`/health`、Flyway マイグレーション、Exposed テーブル定義、Journal / Outbox / Inbox / Audit / Lease のリポジトリ |
 
-DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列、V3 approvals。V2 は未マージのため編集中、マージ後は V4 以降のみ追加）。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。
+DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列、V3 approvals（PR #55 / #33。M0 で取り込み済み）、V4 Evidence Authority 束縛列（#82。M0 でも追加済み））。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。このブランチに V5 は含めない（PR #92 の V5 は別途）。マージ順は #43 → #55 → #86 で固定し、V4 適用済み DB への V3 後付けは行わない（Issue #88、fail-closed）。V2 は未マージのため編集中。マージ後は V5 以降のみ追加。
 
 ## ビルド・テスト
 
@@ -119,11 +121,12 @@ Mock の成功は Production Provider 検証ではない。要確認項目は [d
 - **Operation Journal（`external_operations`）**: `(run_id, op_type, idempotency_key)` の一意制約、`PREPARED → IN_FLIGHT → …` の状態機械 + `(status, version)` の CAS。
   書き込みは全て Lease の検証（行ロック）から始まり、旧 Worker は Journal も更新できない。
   - **IN_FLIGHT の出口は証拠なしで `CONFIRMED` と `UNKNOWN` だけ**。timeout / 503 は「送信されなかった」の証明にならない。
-    `IN_FLIGHT → RETRYABLE` は `markNotSent(NotSentProof)`、`IN_FLIGHT → FAILED` は `markRejected(RejectedProof)` のみ。
-    汎用 `transition()` からは到達できない（拒否される）。Proof は run / op id / request hash に束縛され、発行元は信頼 issuer の許可リストで検証する。
+    `IN_FLIGHT → RETRYABLE` は `markNotSent(ref)`、`IN_FLIGHT → FAILED` は `markRejected(ref)` のみ（`ref` は `VerifiedEvidenceRef`）。
+    汎用 `transition()` からは到達できない（拒否される）。呼出し側は証拠を自分で作れず、`TrustedEvidenceAuthority`（#82）が検証・永続化した不透明な ref だけを渡せる。
+    Journal は ref を行の subject（tenant / run / op / provider / action / request digest / contract version）と purpose に照らして解決し、期限切れ・失効・別 subject・Capability 降格・Authority 利用不可は拒否する（行は変更されない）。
   - **UNKNOWN は fail-closed**: 証拠なしに出られるのは `RECONCILIATION_REQUIRED` のみ。`UNKNOWN → RETRYABLE/CONFIRMED/FAILED`（と
-    `RECONCILIATION_REQUIRED → CONFIRMED/FAILED`）は `reconcile()` に `ReconciliationEvidence` を渡したときだけ可能で、証拠は行に永続化される。
-    証拠は run / op id / request hash に束縛し、許可リスト外の issuer、未来の observedAt、行の現状態より前の observedAt は拒否する。
+    `RECONCILIATION_REQUIRED → CONFIRMED/FAILED`）は `reconcile()` に検証済み ref を渡したときだけ可能で、Evidence ID / digest / authority principal / capability / 期限は行に永続化される（secret は保存しない）。
+    未来の observedAt、行の現状態より前の observedAt、purpose と遷移の不一致は拒否する。
   - **RETRYABLE に戻れるのは `AUTHORITATIVE_ABSENCE` / `AUTHORITATIVE_IDEMPOTENCY` の ABSENT だけ**。`LOOKUP_BY_STABLE_REF` の list/get 未検出や
     `MANUAL_OPERATOR` では戻れない（exkes の Runtime / Execution POST は Idempotency-Key を持たないため、未検出だけでは外部作成済みを否定できない）。
     外部に既に存在していた（EXISTS）なら CONFIRMED で取り込み、再送しない。
@@ -143,10 +146,29 @@ Mock の成功は Production Provider 検証ではない。要確認項目は [d
     repository と head SHA が run の `bindPullRequest` で記録した値と一致、信頼 issuer）が必要。close のみ・別 head の merge・未確定の結果は未完了のまま。
     COMPLETED は終端なので、重複完了は lease 喪失で拒否され、`RunCompleted` Outbox は 1 回だけ。
 - **将来の作り直し（#64）**: 最終ストレージが Fortis になれば、この SQL 実装（`FOR UPDATE` / `NOW(6)` / 生成列 / claim のロック）は作り直しになり得る。
-  今回の契約（Run / Operation の状態機械、証拠規則、Proof 規則、PR_ONLY 完了規則、Outbox の claim token 規則）は Storage に依存しない要件として維持する。
+  今回の契約（Run / Operation の状態機械、証拠規則、Evidence Authority の束縛規則、PR_ONLY 完了規則、Outbox の claim token 規則）は Storage に依存しない要件として維持する。
 - **Outbox / Audit**: Run の状態遷移・監査イベント（ハッシュ連鎖）・Outbox イベントを同一トランザクションで書く。
+- 実 Authority（署名検証・Provider Contract・Capability 登録）は #60 / #61 / #71 の範囲で、本リポジトリには interface と test 専用の `FakeTrustedEvidenceAuthority` だけがある。
 - テストは既定で H2（MODE=MySQL）、`KIVRA_TEST_DB=mariadb` で MariaDB 11 実機（上記）。CI は両方を実行する。
 
+## GitHub Adapter（`kivra-github`、Issue #34）
+
+- **決定的ブランチ名** `kivra/run-<runId>`。PR 本文に `kivra-run:<runId>` と `kivra-head-sha:<sha>` を埋め込み、head ブランチで open/closed PR を検索して照合する（`ensurePullRequest`）。マーカーの無い PR が同じ head にあれば `FOREIGN_OBJECT` で隔離（採用しない）。
+- **POST は自動再送しない**: タイムアウト・I/O エラー・5xx は `GitHubResult.Unknown`。`ensure*` は直後に名前で照合し、見つかれば採用、見つからなければ `Unknown` のまま返す。GET のみ 5xx / I/O で最大 3 回リトライ、401 はトークンを破棄して 1 回だけ再試行。
+- **失敗分類**: AUTH / PERMISSION / RATE_LIMITED（`retryAfterSeconds`）/ NOT_FOUND / CONFLICT / VALIDATION / SERVER_ERROR / NETWORK / IDENTITY_MISMATCH / FOREIGN_OBJECT / PROTOCOL。
+- **対象同一性検証**: レスポンスの owner/repo・PR 番号・head ブランチ・SHA（Check Run の `head_sha`、Status の `sha`）が要求と一致しなければ `IDENTITY_MISMATCH`（PR #47 レビューの教訓）。
+- **認証**: `TokenProvider` 差し込み口。`InstallationTokenProvider`（キャッシュ + 期限前更新）、`JwtSigner`（`RsaJwtSigner` は PKCS#8 PEM。鍵は設定の参照先から読み、リポジトリにコミットしない）。
+- Merge は M3 では人間。Port のテストが merge/force/push/delete/update 系メソッドの不在を固定する。
+
+### 要確認（外部仕様・未検証。実 GitHub には接続していない）
+
+- 対象リポジトリの Ruleset / Required Checks の実態。`CheckRunsSummary.allPassed` は「全 Run 完了かつ失敗なし、かつ空でない」だけで、Required Checks 名との突合は呼び出し側（Policy）の責務。
+- Reviewer Agent（App / Bot）の承認が必須レビューに数えられるか。`getReviews` は生の state と `commitId` を返すだけで、承認の有効性判定はしない（古い SHA の APPROVED を流用しないこと、#49）。
+- Kivra 用 GitHub App の発行方法と最終的なトークン方式（#1 §10 M3）。GitHub の秘密鍵は PKCS#1 で配布されるため PKCS#8 への変換が必要。
+- 同一 head/base の open PR 重複が GitHub 側で拒否される（422 "already exists"）前提。メッセージ文言に依存した CONFLICT 判定は実機確認が必要。
+- `GET /git/ref/heads/...` の 404 はリポジトリ欠如と区別できないため、404 時に `GET /repos/{o}/{r}` で確認している。
+- Check Run / Status の件数上限・ページング挙動（最大 10 ページで打ち切り、超過時は `complete=false`）。
+- Tool Gateway / Operation Journal への結線は #32・#25 側（本モジュールは DB・状態機械に依存しない）。
 ## Approval Gate / Audit 永続層（M3, #33）
 
 - `ApprovalRepository`（`ApprovalConsumer` 実装）: 承認の依頼・承認・却下・失効。`consume(approvalId, digest, decisionId)` は

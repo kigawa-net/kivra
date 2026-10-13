@@ -3,22 +3,32 @@ package net.kigawa.kivra.db
 import java.time.Clock
 import java.time.Duration
 import java.time.LocalDateTime
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
+import net.kigawa.kivra.core.EvidenceAuthorityUnavailableException
+import net.kigawa.kivra.core.EvidenceObservationRef
+import net.kigawa.kivra.core.EvidencePurpose
+import net.kigawa.kivra.core.EvidenceRefusedException
+import net.kigawa.kivra.core.EvidenceSubject
+import net.kigawa.kivra.core.EvidenceVerification
 import net.kigawa.kivra.core.ExternalObservation
 import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.Lease
 import net.kigawa.kivra.core.LeaseLostException
-import net.kigawa.kivra.core.NotSentProof
 import net.kigawa.kivra.core.OperationStatus
 import net.kigawa.kivra.core.ProviderCapability
-import net.kigawa.kivra.core.ReconciliationEvidence
-import net.kigawa.kivra.core.RejectedProof
 import net.kigawa.kivra.core.RunCompletionMode
-import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.core.VerifiedEvidenceRef
+import net.kigawa.kivra.core.VerifiedEvidence
+import net.kigawa.kivra.core.TrustedEvidenceAuthority
 import net.kigawa.kivra.core.VersionConflictException
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.insert
@@ -26,37 +36,60 @@ import org.jetbrains.exposed.sql.transactions.transaction
 
 private val TTL = Duration.ofSeconds(30)
 private val HASH = "a".repeat(64)
+private const val TENANT = "tenant-1"
+private const val PROVIDER = "EXKES"
+private const val CONTRACT = "2026-01"
 
 private fun op(key: String = "run:x:workspace", hash: String = HASH, maxAttempts: Int = 3) = PrepareOperation(
-    opType = "EXKES_CREATE_WORKSPACE", idempotencyKey = key, externalSystem = "EXKES", stableRef = "kivra-run-x",
-    requestHash = hash, maxAttempts = maxAttempts,
+    opType = "EXKES_CREATE_WORKSPACE", idempotencyKey = key, externalSystem = PROVIDER, stableRef = "kivra-run-x",
+    requestHash = hash, tenantId = TENANT, providerContractVersion = CONTRACT, maxAttempts = maxAttempts,
 )
 
 private fun now() = utcNow(Clock.systemUTC())
 
-/** Evidence bound to [entry] by default; override any field to test the refusals. */
-private fun evidenceFor(
-    entry: JournalEntry,
-    observation: ExternalObservation,
+private fun blocking(block: suspend () -> Any?) = runBlocking { block() }
+
+/** The subject the Journal derives from [entry]. */
+private fun subjectOf(entry: JournalEntry, tenant: String = TENANT, digest: String = entry.requestHash, contract: String = CONTRACT) =
+    EvidenceSubject(tenant, entry.runId.value, entry.opId, entry.externalSystem, entry.opType, digest, contract)
+
+/**
+ * Registers an observation the adapter pipeline reported and asks the (fake) Authority to verify it. [observed] is the
+ * subject the observation was made for, [asked] the subject the verification is requested for: they differ in the
+ * negative tests.
+ */
+private fun TestDb.verifyWith(
+    observed: EvidenceSubject,
+    asked: EvidenceSubject,
+    purpose: EvidencePurpose,
+    observation: ExternalObservation? = null,
     capability: ProviderCapability = ProviderCapability.AUTHORITATIVE_ABSENCE,
+    principal: String = "exkes-adapter",
     observedAt: LocalDateTime = now(),
-    issuer: String = "exkes-adapter",
-    opId: String = entry.opId,
-    runId: RunId = entry.runId,
-    requestHash: String = entry.requestHash,
-) = ReconciliationEvidence(runId, opId, requestHash, issuer, observation, "exkes:get-workspace/kivra-run-x", observedAt, capability)
+    expiresAt: LocalDateTime = now().plusHours(1),
+): EvidenceVerification {
+    evidence.setProviderContract(PROVIDER, CONTRACT, capability)
+    syncAuthorityEpoch(asked.tenantId, PROVIDER)
+    val obsRef = EvidenceObservationRef("obs-${UUID.randomUUID()}")
+    evidence.register(obsRef, FakeTrustedEvidenceAuthority.Observation(observed, principal, purpose, observation, capability, observedAt, expiresAt))
+    return runBlocking { evidence.verify(asked, obsRef, purpose) }
+}
 
-private fun proofFor(
+/** A verified ref for [entry]'s own subject. */
+private fun TestDb.issue(
     entry: JournalEntry,
+    purpose: EvidencePurpose,
+    observation: ExternalObservation? = null,
+    capability: ProviderCapability = ProviderCapability.AUTHORITATIVE_ABSENCE,
+    principal: String = "exkes-adapter",
     observedAt: LocalDateTime = now(),
-    issuer: String = "exkes-adapter",
-    opId: String = entry.opId,
-    runId: RunId = entry.runId,
-    requestHash: String = entry.requestHash,
-) = NotSentProof(runId, opId, requestHash, issuer, "exkes:connect-refused/kivra-run-x", observedAt)
-
-private fun rejectedFor(entry: JournalEntry, observedAt: LocalDateTime = now(), issuer: String = "exkes-adapter") =
-    RejectedProof(entry.runId, entry.opId, entry.requestHash, issuer, "exkes:400/kivra-run-x", observedAt)
+): VerifiedEvidenceRef {
+    val s = subjectOf(entry)
+    return when (val v = verifyWith(s, s, purpose, observation, capability, principal, observedAt)) {
+        is EvidenceVerification.Verified -> v.ref
+        is EvidenceVerification.Refused -> error("verify refused: ${v.reason}")
+    }
+}
 
 class OperationJournalRepositoryTest {
     private fun TestDb.leasedRun(): Lease {
@@ -80,6 +113,8 @@ class OperationJournalRepositoryTest {
         val lease = db.leasedRun()
         val first = db.journal.prepare(lease, op())
         assertEquals(OperationStatus.PREPARED, first.status)
+        assertEquals(TENANT, first.tenantId)
+        assertEquals(CONTRACT, first.providerContractVersion)
         val again = db.journal.prepare(lease, op())
         assertEquals(first.opId, again.opId)
         assertEquals(1, db.count("external_operations"))
@@ -90,6 +125,27 @@ class OperationJournalRepositoryTest {
         val lease = db.leasedRun()
         db.journal.prepare(lease, op())
         assertFailsWith<RequestHashMismatchException> { db.journal.prepare(lease, op(hash = "b".repeat(64))) }
+        assertEquals(1, db.count("external_operations"))
+    }
+
+    @Test
+    fun `idempotent prepare refuses cross-tenant or provider-contract rebind even with matching digest`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val original = db.journal.prepare(lease, op())
+        val mismatches = listOf(
+            op().copy(tenantId = "tenant-2"),
+            op().copy(providerContractVersion = "2026-02"),
+            op().copy(externalSystem = "OTHER_PROVIDER"),
+            op().copy(stableRef = "other-workspace"),
+            op().copy(maxAttempts = 99),
+        )
+        for (changed in mismatches) {
+            assertFailsWith<OperationBindingMismatchException> { db.journal.prepare(lease, changed) }
+        }
+        val adopted = db.journal.prepare(lease, op())
+        assertEquals(original.opId, adopted.opId)
+        assertEquals(original.tenantId, adopted.tenantId)
+        assertEquals(original.providerContractVersion, adopted.providerContractVersion)
         assertEquals(1, db.count("external_operations"))
     }
 
@@ -169,62 +225,115 @@ class OperationJournalRepositoryTest {
     }
 
     @Test
-    fun `IN_FLIGHT to RETRYABLE needs a NotSentProof from a trusted issuer bound to this operation`() = TestDb().use { db ->
+    fun `IN_FLIGHT to RETRYABLE needs a verified NOT_SENT ref bound to this operation`() = TestDb().use { db ->
         val lease = db.leasedRun()
         val e = db.inFlight(lease)
-        // Untrusted issuer, wrong operation, wrong request hash, future and too-old proofs are all refused.
-        assertFailsWith<InvalidTransitionException> { db.journal.markNotSent(lease, e.opId, e.version, proofFor(e, issuer = "random-agent")) }
-        assertFailsWith<InvalidTransitionException> { db.journal.markNotSent(lease, e.opId, e.version, proofFor(e, opId = Ulid.generate())) }
-        assertFailsWith<InvalidTransitionException> { db.journal.markNotSent(lease, e.opId, e.version, proofFor(e, requestHash = "c".repeat(64))) }
-        assertFailsWith<InvalidTransitionException> { db.journal.markNotSent(lease, e.opId, e.version, proofFor(e, observedAt = now().plusHours(1))) }
-        assertFailsWith<InvalidTransitionException> { db.journal.markNotSent(lease, e.opId, e.version, proofFor(e, observedAt = now().minusHours(1))) }
+        // A string that the Authority never issued is not evidence.
+        assertFailsWith<InvalidTransitionException> {
+            blocking { db.journal.markNotSent(lease, e.opId, e.version, VerifiedEvidenceRef("exkes-adapter-forged")) }
+        }
+        // Evidence verified for another purpose (a reconciliation result) cannot justify a not-sent retry.
+        val absent = db.issue(e, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT)
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.markNotSent(lease, e.opId, e.version, absent) } }
+        // An observation reported under an untrusted principal is never verified, so it cannot become a ref.
+        assertIs<EvidenceVerification.Refused>(db.verifyWith(subjectOf(e), subjectOf(e), EvidencePurpose.NOT_SENT, principal = "llm-agent"))
         assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(e.opId)!!.status)
+        assertEquals(e.version, db.journal.get(e.opId)!!.version)
 
-        val retry = db.journal.markNotSent(lease, e.opId, e.version, proofFor(e), nextActionAt = now())
+        val retry = blocking { db.journal.markNotSent(lease, e.opId, e.version, db.issue(e, EvidencePurpose.NOT_SENT), nextActionAt = now()) } as JournalEntry
         assertEquals(OperationStatus.RETRYABLE, retry.status)
-        assertEquals("PROOF_NOT_SENT", retry.transitionReason)
+        assertEquals("VERIFIED_NOT_SENT", retry.transitionReason)
         assertEquals("exkes-adapter", retry.evidenceIssuer)
+        assertEquals("NOT_SENT", retry.evidencePurpose)
+        assertEquals(HASH, retry.evidenceDigest)
+        assertNotNull(retry.evidenceExpiresAt)
+        assertTrue(retry.evidenceRef!!.startsWith("evd-"))
     }
 
     @Test
-    fun `IN_FLIGHT to FAILED needs a RejectedProof from a trusted issuer`() = TestDb().use { db ->
+    fun `IN_FLIGHT to FAILED needs a verified REJECTED ref`() = TestDb().use { db ->
         val lease = db.leasedRun()
         val e = db.inFlight(lease)
-        assertFailsWith<InvalidTransitionException> { db.journal.markRejected(lease, e.opId, e.version, rejectedFor(e, issuer = "unknown-issuer")) }
+        assertFailsWith<InvalidTransitionException> {
+            blocking { db.journal.markRejected(lease, e.opId, e.version, VerifiedEvidenceRef("forged")) }
+        }
+        // A not-sent ref does not prove an explicit rejection.
+        assertFailsWith<InvalidTransitionException> {
+            blocking { db.journal.markRejected(lease, e.opId, e.version, db.issue(e, EvidencePurpose.NOT_SENT)) }
+        }
         assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(e.opId)!!.status)
-        val failed = db.journal.markRejected(lease, e.opId, e.version, rejectedFor(e), errorClass = "HTTP_400", error = "validation failed")
+        val failed = blocking {
+            db.journal.markRejected(lease, e.opId, e.version, db.issue(e, EvidencePurpose.REJECTED), errorClass = "HTTP_400", error = "validation failed")
+        } as JournalEntry
         assertEquals(OperationStatus.FAILED, failed.status)
-        assertEquals("PROOF_REJECTED", failed.transitionReason)
+        assertEquals("VERIFIED_REJECTED", failed.transitionReason)
     }
 
     @Test
-    fun `proof APIs refuse entries that are not IN_FLIGHT`() = TestDb().use { db ->
+    fun `evidence APIs refuse entries that are not IN_FLIGHT`() = TestDb().use { db ->
         val lease = db.leasedRun()
         val prepared = db.journal.prepare(lease, op())
-        assertFailsWith<InvalidTransitionException> { db.journal.markNotSent(lease, prepared.opId, prepared.version, proofFor(prepared)) }
-        assertFailsWith<InvalidTransitionException> { db.journal.markRejected(lease, prepared.opId, prepared.version, rejectedFor(prepared)) }
+        assertFailsWith<InvalidTransitionException> {
+            blocking { db.journal.markNotSent(lease, prepared.opId, prepared.version, db.issue(prepared, EvidencePurpose.NOT_SENT)) }
+        }
+        assertFailsWith<InvalidTransitionException> {
+            blocking { db.journal.markRejected(lease, prepared.opId, prepared.version, db.issue(prepared, EvidencePurpose.REJECTED)) }
+        }
         val unknown = db.unknownOp(lease, key = "other")
-        assertFailsWith<InvalidTransitionException> { db.journal.markNotSent(lease, unknown.opId, unknown.version, proofFor(unknown)) }
+        assertFailsWith<InvalidTransitionException> {
+            blocking { db.journal.markNotSent(lease, unknown.opId, unknown.version, db.issue(unknown, EvidencePurpose.NOT_SENT)) }
+        }
+        assertEquals(OperationStatus.PREPARED, db.journal.get(prepared.opId)!!.status)
+    }
+
+    @Test
+    fun `a row without a tenant binding cannot settle through evidence`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val opId = Ulid.generate()
+        transaction(db.database) {
+            // A row written without tenant / contract binding (as before V4).
+            ExternalOperationsTable.insert {
+                it[ExternalOperationsTable.opId] = opId
+                it[runId] = lease.runId.value
+                it[opType] = "EXKES_CREATE_WORKSPACE"
+                it[idempotencyKey] = "legacy"
+                it[externalSystem] = PROVIDER
+                it[stableRef] = "legacy"
+                it[requestHash] = HASH
+                it[status] = "IN_FLIGHT"
+                it[leaseGeneration] = lease.generation
+                it[createdAt] = utcNow(Clock.systemUTC())
+                it[updatedAt] = utcNow(Clock.systemUTC())
+            }
+        }
+        val subject = EvidenceSubject(TENANT, lease.runId.value, opId, PROVIDER, "EXKES_CREATE_WORKSPACE", HASH, CONTRACT)
+        val ref = assertIs<EvidenceVerification.Verified>(db.verifyWith(subject, subject, EvidencePurpose.NOT_SENT)).ref
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.markNotSent(lease, opId, 0, ref) } }
+        assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(opId)!!.status)
     }
 
     @Test
     fun `timeout after the workspace already exists adopts it and never re-sends`() = TestDb().use { db ->
         val lease = db.leasedRun()
         val unknown = db.unknownOp(lease)
-        val found = evidenceFor(unknown, ExternalObservation.EXISTS, ProviderCapability.LOOKUP_BY_STABLE_REF)
-        // "It exists" can neither authorise a resend nor be recorded as ABSENT-style retry.
-        assertFailsWith<InvalidTransitionException> { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, found) }
+        val found = db.issue(unknown, EvidencePurpose.RECONCILE_EXISTS, ExternalObservation.EXISTS, ProviderCapability.LOOKUP_BY_STABLE_REF)
+        // "It exists" can neither authorise a resend nor be used as an absence proof.
+        assertFailsWith<InvalidTransitionException> {
+            blocking { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, found) }
+        }
         assertEquals(OperationStatus.UNKNOWN, db.journal.get(unknown.opId)!!.status)
 
-        val done = db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.CONFIRMED, found, externalRef = "ws-existing")
+        val done = blocking {
+            db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.CONFIRMED, found, externalRef = "ws-existing")
+        } as JournalEntry
         assertEquals(OperationStatus.CONFIRMED, done.status)
         assertEquals("ws-existing", done.externalRef)
         assertEquals(1, done.attempt, "the external call was never repeated")
         assertEquals("EXISTS", done.evidenceObservation)
-        assertEquals("exkes:get-workspace/kivra-run-x", done.evidenceRef)
-        assertEquals(found.observedAt, done.evidenceObservedAt)
+        assertEquals(found.value, done.evidenceRef)
         assertEquals("LOOKUP_BY_STABLE_REF", done.providerCapability)
         assertEquals("exkes-adapter", done.evidenceIssuer)
+        assertEquals("RECONCILE_EXISTS", done.evidencePurpose)
         assertEquals("RECONCILED_EXISTS", done.transitionReason)
         assertFailsWith<InvalidTransitionException> { db.journal.transition(lease, done.opId, done.version, OperationStatus.IN_FLIGHT) }
     }
@@ -233,19 +342,19 @@ class OperationJournalRepositoryTest {
     fun `retry after UNKNOWN needs authoritative ABSENT evidence and then increments attempt`() = TestDb().use { db ->
         val lease = db.leasedRun()
         val unknown = db.unknownOp(lease)
-        // Wrong observation, a human guess, and stale evidence are all refused.
+        // Wrong purpose, a human guess, and a plain lookup are all refused.
         assertFailsWith<InvalidTransitionException> {
-            db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, evidenceFor(unknown, ExternalObservation.FAILED_CONFIRMED))
+            blocking { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, db.issue(unknown, EvidencePurpose.RECONCILE_FAILED, ExternalObservation.FAILED_CONFIRMED)) }
         }
-        assertFailsWith<InvalidTransitionException> {
-            db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, evidenceFor(unknown, ExternalObservation.ABSENT, ProviderCapability.MANUAL_OPERATOR))
-        }
-        assertFailsWith<InvalidTransitionException> {
-            db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, evidenceFor(unknown, ExternalObservation.ABSENT, observedAt = now().minusSeconds(3600)))
-        }
+        val manual = db.issue(unknown, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT, ProviderCapability.MANUAL_OPERATOR)
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, manual) } }
+        // Stale: observed before the operation entered UNKNOWN.
+        val stale = db.issue(unknown, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT, observedAt = now().minusSeconds(3600))
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, stale) } }
         assertEquals(OperationStatus.UNKNOWN, db.journal.get(unknown.opId)!!.status)
 
-        var e = db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, evidenceFor(unknown, ExternalObservation.ABSENT, ProviderCapability.AUTHORITATIVE_ABSENCE))
+        val ref = db.issue(unknown, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT, ProviderCapability.AUTHORITATIVE_ABSENCE)
+        var e = blocking { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, ref) } as JournalEntry
         assertEquals("RECONCILED_ABSENT", e.transitionReason)
         e = db.journal.transition(lease, e.opId, e.version, OperationStatus.IN_FLIGHT)
         assertEquals(2, e.attempt)
@@ -256,7 +365,8 @@ class OperationJournalRepositoryTest {
     fun `AUTHORITATIVE_IDEMPOTENCY ABSENT also reopens the retry path`() = TestDb().use { db ->
         val lease = db.leasedRun()
         val unknown = db.unknownOp(lease)
-        val e = db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, evidenceFor(unknown, ExternalObservation.ABSENT, ProviderCapability.AUTHORITATIVE_IDEMPOTENCY))
+        val ref = db.issue(unknown, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT, ProviderCapability.AUTHORITATIVE_IDEMPOTENCY)
+        val e = blocking { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, ref) } as JournalEntry
         assertEquals(OperationStatus.RETRYABLE, e.status)
     }
 
@@ -265,24 +375,110 @@ class OperationJournalRepositoryTest {
         // Exkes Runtime / Execution POST has no Idempotency-Key: a list/get that does not find the resource proves nothing.
         val lease = db.leasedRun()
         val unknown = db.unknownOp(lease)
-        val notFound = evidenceFor(unknown, ExternalObservation.ABSENT, ProviderCapability.LOOKUP_BY_STABLE_REF)
-        assertFailsWith<InvalidTransitionException> { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, notFound) }
+        val notFound = db.issue(unknown, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT, ProviderCapability.LOOKUP_BY_STABLE_REF)
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, notFound) } }
         assertEquals(OperationStatus.UNKNOWN, db.journal.get(unknown.opId)!!.status)
         // The miss can still be recorded as "stop waiting" through reconciliation, never as a resend.
         assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.journal.transition(lease, unknown.opId, unknown.version, OperationStatus.RECONCILIATION_REQUIRED).status)
     }
 
     @Test
-    fun `evidence bound to another run, operation or request, or from an untrusted issuer is refused`() = TestDb().use { db ->
+    fun `verified evidence bound to another run, operation or request is refused on reuse`() = TestDb().use { db ->
         val lease = db.leasedRun()
-        val unknown = db.unknownOp(lease)
-        fun attempt(ev: ReconciliationEvidence) = db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, ev)
-        assertFailsWith<InvalidTransitionException> { attempt(evidenceFor(unknown, ExternalObservation.ABSENT, opId = Ulid.generate())) }
-        assertFailsWith<InvalidTransitionException> { attempt(evidenceFor(unknown, ExternalObservation.ABSENT, runId = RunId(Ulid.generate()))) }
-        assertFailsWith<InvalidTransitionException> { attempt(evidenceFor(unknown, ExternalObservation.ABSENT, requestHash = "d".repeat(64))) }
-        assertFailsWith<InvalidTransitionException> { attempt(evidenceFor(unknown, ExternalObservation.ABSENT, issuer = "llm-agent")) }
+        val a = db.inFlight(lease, key = "a")
+        val b = db.inFlight(lease, key = "b")
+        val refForA = db.issue(a, EvidencePurpose.NOT_SENT)
+        // Another operation of the same run.
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.markNotSent(lease, b.opId, b.version, refForA) } }
+
+        // Another run.
+        val otherLease = db.leasedRun()
+        val c = db.inFlight(otherLease, key = "c")
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.markNotSent(otherLease, c.opId, c.version, refForA) } }
+
+        // The same operation with a different request digest / tenant: the Authority refuses to verify the observation.
+        assertIs<EvidenceVerification.Refused>(db.verifyWith(subjectOf(a, digest = "c".repeat(64)), subjectOf(a), EvidencePurpose.NOT_SENT))
+        assertIs<EvidenceVerification.Refused>(db.verifyWith(subjectOf(a, tenant = "tenant-2"), subjectOf(a), EvidencePurpose.NOT_SENT))
+
+        assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(b.opId)!!.status)
+        assertEquals(b.version, db.journal.get(b.opId)!!.version)
+        assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(c.opId)!!.status)
+        // The ref still works for its own operation.
+        assertEquals(OperationStatus.RETRYABLE, (blocking { db.journal.markNotSent(lease, a.opId, a.version, refForA) } as JournalEntry).status)
+    }
+
+    @Test
+    fun `authority refusal detail cannot leak into Journal exceptions`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val op = db.inFlight(lease)
+        val credential = "Authorization: Bearer DO-NOT-LOG-SECRET"
+        val hostileAuthority = object : TrustedEvidenceAuthority by db.evidence {
+            override suspend fun resolve(
+                ref: VerifiedEvidenceRef,
+                expected: EvidenceSubject,
+                requiredPurpose: EvidencePurpose,
+            ): VerifiedEvidence {
+                throw EvidenceRefusedException(credential)
+            }
+        }
+        val guardedJournal = OperationJournalRepository(db.database, hostileAuthority)
+        val error = assertFailsWith<InvalidTransitionException> {
+            blocking { guardedJournal.markNotSent(lease, op.opId, op.version, VerifiedEvidenceRef("evd-refused")) }
+        }
+        assertFalse(error.message.orEmpty().contains("DO-NOT-LOG-SECRET"))
+        assertTrue(error.message.orEmpty().contains("EVIDENCE_REFUSED"))
+        assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(op.opId)!!.status)
+    }
+
+    @Test
+    fun `expired, revoked and unknown evidence refs are refused and leave the entry unchanged`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val e = db.inFlight(lease)
+        val expired = db.issue(e, EvidencePurpose.NOT_SENT)
+        db.evidence.expire(expired)
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.markNotSent(lease, e.opId, e.version, expired) } }
+        val revoked = db.issue(e, EvidencePurpose.NOT_SENT)
+        db.evidence.revoke(revoked)
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.markNotSent(lease, e.opId, e.version, revoked) } }
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.markNotSent(lease, e.opId, e.version, VerifiedEvidenceRef("evd-unknown")) } }
+        assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(e.opId)!!.status)
+    }
+
+    @Test
+    fun `a provider contract change or a capability downgrade makes an old ref unusable`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val u1 = db.unknownOp(lease, key = "u1")
+        val byContract = db.issue(u1, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT, ProviderCapability.AUTHORITATIVE_ABSENCE)
+        db.evidence.setProviderContract(PROVIDER, "2027-01", ProviderCapability.AUTHORITATIVE_ABSENCE)
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.reconcile(lease, u1.opId, u1.version, OperationStatus.RETRYABLE, byContract) } }
+        assertEquals(OperationStatus.UNKNOWN, db.journal.get(u1.opId)!!.status)
+
+        val u2 = db.unknownOp(lease, key = "u2")
+        val byCapability = db.issue(u2, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT, ProviderCapability.AUTHORITATIVE_ABSENCE)
+        db.evidence.setProviderContract(PROVIDER, CONTRACT, ProviderCapability.LOOKUP_BY_STABLE_REF)
+        assertFailsWith<InvalidTransitionException> { blocking { db.journal.reconcile(lease, u2.opId, u2.version, OperationStatus.RETRYABLE, byCapability) } }
+        assertEquals(OperationStatus.UNKNOWN, db.journal.get(u2.opId)!!.status)
+        assertEquals(1, db.journal.get(u2.opId)!!.attempt)
+    }
+
+    @Test
+    fun `when the authority is unavailable every evidence-gated transition fails closed`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val e = db.inFlight(lease)
+        val ref = db.issue(e, EvidencePurpose.NOT_SENT)
+        val unknown = db.unknownOp(lease, key = "unk")
+        val absent = db.issue(unknown, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT)
+
+        db.evidence.available = false
+        assertFailsWith<EvidenceAuthorityUnavailableException> { blocking { db.journal.markNotSent(lease, e.opId, e.version, ref) } }
+        assertFailsWith<EvidenceAuthorityUnavailableException> { blocking { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.RETRYABLE, absent) } }
+        assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(e.opId)!!.status)
+        assertEquals(e.version, db.journal.get(e.opId)!!.version)
         assertEquals(OperationStatus.UNKNOWN, db.journal.get(unknown.opId)!!.status)
-        assertEquals(1, db.journal.get(unknown.opId)!!.attempt)
+
+        // Once the authority is back, the same ref works and nothing was half-written.
+        db.evidence.available = true
+        assertEquals(OperationStatus.RETRYABLE, (blocking { db.journal.markNotSent(lease, e.opId, e.version, ref) } as JournalEntry).status)
     }
 
     @Test
@@ -291,13 +487,15 @@ class OperationJournalRepositoryTest {
         val unknown = db.unknownOp(lease)
         val rr = db.journal.transition(lease, unknown.opId, unknown.version, OperationStatus.RECONCILIATION_REQUIRED)
         assertFailsWith<InvalidTransitionException> {
-            db.journal.reconcile(lease, rr.opId, rr.version, OperationStatus.RETRYABLE, evidenceFor(rr, ExternalObservation.ABSENT, ProviderCapability.AUTHORITATIVE_ABSENCE))
+            blocking { db.journal.reconcile(lease, rr.opId, rr.version, OperationStatus.RETRYABLE, db.issue(rr, EvidencePurpose.RECONCILE_ABSENT, ExternalObservation.ABSENT, ProviderCapability.AUTHORITATIVE_ABSENCE)) }
         }
         // Evidence observed before the entry moved to RECONCILIATION_REQUIRED is stale.
         assertFailsWith<InvalidTransitionException> {
-            db.journal.reconcile(lease, rr.opId, rr.version, OperationStatus.FAILED, evidenceFor(rr, ExternalObservation.FAILED_CONFIRMED, observedAt = now().minusSeconds(3600)))
+            blocking { db.journal.reconcile(lease, rr.opId, rr.version, OperationStatus.FAILED, db.issue(rr, EvidencePurpose.RECONCILE_FAILED, ExternalObservation.FAILED_CONFIRMED, observedAt = now().minusSeconds(3600))) }
         }
-        val failed = db.journal.reconcile(lease, rr.opId, rr.version, OperationStatus.FAILED, evidenceFor(rr, ExternalObservation.FAILED_CONFIRMED, ProviderCapability.MANUAL_OPERATOR))
+        val failed = blocking {
+            db.journal.reconcile(lease, rr.opId, rr.version, OperationStatus.FAILED, db.issue(rr, EvidencePurpose.RECONCILE_FAILED, ExternalObservation.FAILED_CONFIRMED, ProviderCapability.MANUAL_OPERATOR))
+        } as JournalEntry
         assertEquals(OperationStatus.FAILED, failed.status)
     }
 
@@ -305,7 +503,9 @@ class OperationJournalRepositoryTest {
     fun `reconcile is refused for entries that are not UNKNOWN or awaiting reconciliation`() = TestDb().use { db ->
         val lease = db.leasedRun()
         val e = db.journal.prepare(lease, op())
-        assertFailsWith<InvalidTransitionException> { db.journal.reconcile(lease, e.opId, e.version, OperationStatus.CONFIRMED, evidenceFor(e, ExternalObservation.EXISTS)) }
+        assertFailsWith<InvalidTransitionException> {
+            blocking { db.journal.reconcile(lease, e.opId, e.version, OperationStatus.CONFIRMED, db.issue(e, EvidencePurpose.RECONCILE_EXISTS, ExternalObservation.EXISTS)) }
+        }
     }
 
     @Test
@@ -330,11 +530,13 @@ class OperationJournalRepositoryTest {
         val adopted = db.journal.prepare(newLease, op())
         assertEquals(OperationStatus.UNKNOWN, adopted.status)
         assertFailsWith<InvalidTransitionException> { db.journal.transition(newLease, adopted.opId, adopted.version, OperationStatus.RETRYABLE) }
-        // The old worker holds stale evidence but no lease: fenced out entirely.
+        // The old worker holds evidence but no lease: fenced out before the Authority is even asked.
         assertFailsWith<LeaseLostException> {
-            db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.CONFIRMED, evidenceFor(unknown, ExternalObservation.EXISTS))
+            blocking { db.journal.reconcile(lease, unknown.opId, unknown.version, OperationStatus.CONFIRMED, db.issue(unknown, EvidencePurpose.RECONCILE_EXISTS, ExternalObservation.EXISTS)) }
         }
-        val done = db.journal.reconcile(newLease, adopted.opId, adopted.version, OperationStatus.CONFIRMED, evidenceFor(adopted, ExternalObservation.EXISTS), externalRef = "ws-1")
+        val done = blocking {
+            db.journal.reconcile(newLease, adopted.opId, adopted.version, OperationStatus.CONFIRMED, db.issue(adopted, EvidencePurpose.RECONCILE_EXISTS, ExternalObservation.EXISTS), externalRef = "ws-1")
+        } as JournalEntry
         assertEquals(newLease.generation, done.leaseGeneration)
         assertEquals(1, done.attempt)
     }
@@ -390,10 +592,10 @@ class OperationJournalRepositoryTest {
         val lease = db.leasedRun()
         var e = db.journal.prepare(lease, op(maxAttempts = 2))
         e = db.journal.transition(lease, e.opId, e.version, OperationStatus.IN_FLIGHT) // attempt 1
-        e = db.journal.markNotSent(lease, e.opId, e.version, proofFor(e))
+        e = blocking { db.journal.markNotSent(lease, e.opId, e.version, db.issue(e, EvidencePurpose.NOT_SENT)) } as JournalEntry
         e = db.journal.transition(lease, e.opId, e.version, OperationStatus.IN_FLIGHT) // attempt 2
         assertEquals(2, e.attempt)
-        e = db.journal.markNotSent(lease, e.opId, e.version, proofFor(e))
+        e = blocking { db.journal.markNotSent(lease, e.opId, e.version, db.issue(e, EvidencePurpose.NOT_SENT)) } as JournalEntry
         val capped = db.journal.transition(lease, e.opId, e.version, OperationStatus.IN_FLIGHT)
         assertEquals(OperationStatus.FAILED, capped.status, "no third send")
         assertEquals("MAX_ATTEMPTS_EXCEEDED", capped.transitionReason)
@@ -410,6 +612,16 @@ class OperationJournalRepositoryTest {
         val done = db.journal.transition(lease, e.opId, inFlight.version, OperationStatus.CONFIRMED)
         assertFailsWith<InvalidTransitionException> { db.journal.transition(lease, e.opId, done.version, OperationStatus.IN_FLIGHT) }
         assertEquals(OperationStatus.CONFIRMED, db.journal.get(e.opId)!!.status)
+    }
+
+    @Test
+    fun `a stale version is refused before any evidence is resolved`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val e = db.inFlight(lease)
+        val ref = db.issue(e, EvidencePurpose.NOT_SENT)
+        assertFailsWith<VersionConflictException> { blocking { db.journal.markNotSent(lease, e.opId, e.version + 1, ref) } }
+        assertEquals(OperationStatus.IN_FLIGHT, db.journal.get(e.opId)!!.status)
+        assertNull(db.journal.get(e.opId)!!.transitionReason)
     }
 
     @Test

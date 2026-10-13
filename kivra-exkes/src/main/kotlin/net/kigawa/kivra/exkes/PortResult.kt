@@ -33,13 +33,13 @@ sealed interface PortResult<out T> {
      * (findWorkspaceByName / findRuntimesByLabel); when reconciliation is impossible it goes to
      * RECONCILIATION_REQUIRED (M0 Operation Journal contract).
      */
-    data class Unknown(val message: String, val cause: Throwable? = null) : PortResult<Nothing> {
+    data class Unknown(val message: String) : PortResult<Nothing> {
         /**
-         * [cause] is the raw Throwable and may carry tokens, URLs or provider bodies in its message. It is for in-process
-         * diagnosis only: this toString never renders it (nor its message), and nothing persisted / audited / logged may
-         * read it. Use [kindCode] for anything that leaves the process.
+         * Raw Throwable instances must never cross this adapter boundary: they can retain provider response bodies,
+         * bearer tokens, request URLs and credentials even if toString() is redacted. Callers get a machine code only.
+         * Do not render message here either: other Port implementations may not sanitize it.
          */
-        override fun toString(): String = "PortResult.Unknown(message=$message, cause=${cause?.javaClass?.name})"
+        override fun toString(): String = "PortResult.Unknown(kind=UNKNOWN)"
     }
 
     /**

@@ -435,7 +435,7 @@ class Reaper(
         } catch (e: CancellationException) {
             throw e // the row stays IN_FLIGHT: it is never resent, a later pass only records it as JOURNALED
         } catch (e: Exception) {
-            PortResult.Unknown("deleteWorkspace threw ${e::class.simpleName}", e)
+            PortResult.Unknown("EXKES_DELETE_EXCEPTION")
         }
         return when (result) {
             is PortResult.Ok -> {

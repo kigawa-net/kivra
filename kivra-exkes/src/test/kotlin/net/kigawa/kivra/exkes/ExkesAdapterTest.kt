@@ -62,15 +62,15 @@ class ExkesAdapterTest {
     }
 
     @Test
-    fun `transport and token exception messages are dropped, only the class and cause are kept`() = runTest {
+    fun `transport and token exceptions never cross the PortResult boundary`() = runTest {
         val (sim, a) = setup()
         sim.override = { req -> if (req.method == HttpMethod.Post) throw java.io.IOException("socket reset $secret") else null }
         val unknown = a.createWorkspace(WorkspaceSpec("kivra-run-4"))
         assertIs<PortResult.Unknown>(unknown)
-        assertEquals("EXCEPTION_IOException", unknown.message)
+        assertEquals("TRANSPORT_EXCEPTION", unknown.message)
         assertNoSecret(unknown)
-        // the raw cause is still available for in-process diagnosis, but it is never rendered
-        assertTrue(unknown.cause?.message?.contains("DO-NOT-KEEP") == true)
+        // No Throwable or provider text is carried by an adapter error.
+        assertFalse(PortResult.Unknown(secret).toString().contains("DO-NOT-KEEP"))
 
         val (_, tokenFailing) = setup(TokenProvider { throw IllegalStateException("token endpoint said $secret") })
         val transient = tokenFailing.createWorkspace(WorkspaceSpec("kivra-run-5"))

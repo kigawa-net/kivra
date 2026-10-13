@@ -245,15 +245,15 @@ class AgentManagerTest {
     }
 
     @Test
-    fun `provider unknown outcome with a secret-bearing cause never reaches persisted state`() = TestDb().use { db ->
+    fun `provider unknown outcome with secret text never reaches persisted state`() = TestDb().use { db ->
         val secret = "Authorization: Bearer DO-NOT-STORE-CAUSE"
         val port = TestPort().also {
-            it.injectFailure("createWorkspace", afterEffect = false, PortResult.Unknown("transport failed", IllegalStateException(secret)))
+            it.injectFailure("createWorkspace", afterEffect = false, PortResult.Unknown(secret))
         }
         val runId = db.preparingRun()
         runBlocking { db.manager(port).run(runId, PROFILE) }
-        assertFalse(db.allPersistedText().contains("DO-NOT-STORE-CAUSE"), "a Throwable message leaked into persisted state")
-        assertFalse(PortResult.Unknown("transport failed", IllegalStateException(secret)).toString().contains("DO-NOT-STORE-CAUSE"))
+        assertFalse(db.allPersistedText().contains("DO-NOT-STORE-CAUSE"), "a provider error message leaked into persisted state")
+        assertFalse(PortResult.Unknown(secret).toString().contains("DO-NOT-STORE-CAUSE"))
     }
 
     private fun TestDb.agentsOf(runId: RunId) = AgentRepository(database).agentsOf(runId)

@@ -54,20 +54,26 @@ class TestDb(
     val leases = SqlLeaseStore(database)
     /** TEST ONLY Authority. Register observations and provider contracts on it before evidence-gated transitions. */
     val evidence = FakeTrustedEvidenceAuthority()
-    val epochs = AuthorityEpochRepository(database)
-    val journal = OperationJournalRepository(database, evidence, epochs = epochs)
+    /** Shared by the Journal and the Authority Epoch copy, so a test can age the copy past the freshness bound. */
+    val clock = AdjustableClock()
+    val epochs = AuthorityEpochRepository(database, clock)
+    val journal = OperationJournalRepository(database, evidence, clock, epochs = epochs)
 
     /** Moves the lease expiry [seconds] into the past on the DB clock (simulates a worker that stopped renewing). */
     fun expireLease(runId: String, seconds: Long = 10) = transaction(database) {
         execUpdate("UPDATE development_runs SET lease_expires_at = TIMESTAMPADD(SECOND, -?, NOW(6)) WHERE run_id = ?", seconds, runId)
     }
 
-    /** The Authority sync: copies the fake Authority's current epoch values for [providerId] into the Kivra DB copy. */
-    fun syncAuthorityEpoch(tenantId: String, providerId: String) {
+    /**
+     * The Authority sync: copies the fake Authority's current epoch values for [providerId] into the Kivra DB copy, as the
+     * authenticated issuer [issuer].
+     */
+    fun syncAuthorityEpoch(tenantId: String, providerId: String, issuer: String = TEST_ISSUER) {
         val s = evidence.state(providerId) ?: error("no provider contract registered for $providerId")
         epochs.publish(
             tenantId, providerId,
             AuthorityEpochSnapshot(s.contractVersion, s.capability, s.capabilityRevision, s.authorityEpoch, s.grantGeneration),
+            issuer,
         )
     }
 
@@ -114,6 +120,9 @@ class TestDb(
     }
 
     companion object {
+        /** Issuer identifier the test Authority sync publishes under. */
+        const val TEST_ISSUER = "test-authority-sync"
+
         /** SQL expression for the current schema in INFORMATION_SCHEMA queries. */
         val schemaSql: String get() = if (isMariaDb) "DATABASE()" else "'PUBLIC'"
         val isMariaDb: Boolean = System.getenv("KIVRA_TEST_DB").equals("mariadb", ignoreCase = true)

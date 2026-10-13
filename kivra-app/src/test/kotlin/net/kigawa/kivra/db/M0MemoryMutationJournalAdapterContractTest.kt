@@ -33,6 +33,7 @@ class M0MemoryMutationJournalAdapterContractTest : MutationJournalContract() {
     override fun newJournal(): MemoryMutationJournalPort {
         db = TestDb().also { dbs += it }
         db.evidence.setProviderContract("recl", "recl.memory.v1", ProviderCapability.LOOKUP_BY_STABLE_REF)
+        db.syncAuthorityEpoch("t1", "recl")
         val run = db.runs.create("task-91-contract", "test", RunCompletionMode.RELEASE)
         runId = run.runId
         checkNotNull(db.leases.acquire(runId, owner, Duration.ofHours(1))) { "could not acquire the run lease" }

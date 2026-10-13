@@ -80,6 +80,10 @@ sealed interface EvidenceVerification {
  * - [principal]: the verified service principal that produced the observation (not a self-declared string).
  * - [capability]: the Provider Capability the Authority verified for this contract version at verification time.
  * - [observation]: the observed external state, for RECONCILE_* purposes only (null for NOT_SENT / REJECTED).
+ * - [authorityEpoch], [capabilityRevision], [grantGeneration]: the Authority Epoch values the evidence was verified under.
+ *   The Journal compares them with the current values inside the transition's own transaction (Issue #94). Only the
+ *   Authority implementation constructs this value; the Journal never trusts these numbers without that comparison.
+ * - [evidenceDigest]: the Authority-bound SHA-256 hex digest of the evidence content. Stored for audit only.
  */
 data class VerifiedEvidence(
     val ref: VerifiedEvidenceRef,
@@ -92,12 +96,18 @@ data class VerifiedEvidence(
     val requestDigest: String,
     val observedAt: LocalDateTime,
     val expiresAt: LocalDateTime,
+    val authorityEpoch: Long,
+    val capabilityRevision: Long,
+    val grantGeneration: Long,
+    val evidenceDigest: String,
 ) {
     init {
         require(principal.isNotBlank()) { "principal must not be blank" }
         require((purpose in RECONCILIATION) == (observation != null)) {
             "observation is required exactly for RECONCILE_* purposes"
         }
+        require(authorityEpoch >= 0 && capabilityRevision >= 0 && grantGeneration >= 0) { "epoch values must not be negative" }
+        require(SHA256_HEX.matches(evidenceDigest)) { "evidence digest must be a SHA-256 hex digest" }
     }
 
     /**
@@ -118,6 +128,7 @@ data class VerifiedEvidence(
         private val RECONCILIATION = setOf(
             EvidencePurpose.RECONCILE_EXISTS, EvidencePurpose.RECONCILE_ABSENT, EvidencePurpose.RECONCILE_FAILED,
         )
+        private val SHA256_HEX = Regex("[0-9a-f]{64}")
     }
 }
 
@@ -125,6 +136,13 @@ data class VerifiedEvidence(
  * Verifies observations and resolves evidence refs. Adapters and operator tooling call [verify] to obtain a ref; the
  * Operation Journal calls [resolve] before every evidence-gated transition. A real implementation (signature checks,
  * Provider Contract and Capability registry, persistence) is out of scope for #82 and tracked by #60 / #61 / #71.
+ *
+ * Epoch fencing (Issue #94): [resolve] is not the linearization point. [VerifiedEvidence] carries the Authority Epoch
+ * values it was verified under, and the Journal re-compares them with its own copy of the current epoch in the same
+ * database transaction as the status CAS. A Grant revoke or epoch bump that lands after [resolve] returned, but before
+ * that commit, refuses the transition with no write. The epoch of record is the copy written to Kivra MariaDB; a
+ * change made only on the external side and not yet synced is not seen by the commit. Closing that gap needs a separate
+ * short-lived Permit / Revocation ACK protocol, which is not part of this slice.
  */
 interface TrustedEvidenceAuthority {
     /** Verifies the observation for [subject] and [requiredPurpose] and persists it. Refusals are returned, not thrown. */

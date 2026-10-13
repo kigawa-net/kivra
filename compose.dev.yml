@@ -28,6 +28,7 @@ services:
       KIVRA_DB_PASSWORD: kivra_dev_only
       KIVRA_METRICS_ENABLED: "false"
       KIVRA_FUSHA_STATUS_WRITE_ENABLED: "false"
+      KIVRA_DEV_DEMO_ENABLED: "true"
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:

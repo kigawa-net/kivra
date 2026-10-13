@@ -1,0 +1,97 @@
+package net.kigawa.kivra.auth
+
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
+import io.ktor.http.HttpHeaders
+import io.ktor.http.headersOf
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
+import net.kigawa.kivra.auth.OidcTestTokens.token
+import org.slf4j.LoggerFactory
+
+/**
+ * A rejected token must leave a trace that says why (expired, wrong audience, missing role, ...), at the default production
+ * level, because otherwise a 401 cannot be diagnosed. The trace holds a fixed reason or an exception class name only: never
+ * the token, a claim value or an exception message. The same reason is logged at most once per minute.
+ */
+class OidcJwtRejectionLogTest {
+    private val logger = LoggerFactory.getLogger(OidcJwtVerifier::class.java) as Logger
+    private val appender = ListAppender<ILoggingEvent>()
+    private lateinit var previousLevel: Level
+
+    @BeforeTest
+    fun attach() {
+        previousLevel = logger.level ?: Level.INFO
+        logger.level = Level.INFO
+        appender.start()
+        logger.addAppender(appender)
+    }
+
+    @AfterTest
+    fun detach() {
+        logger.detachAppender(appender)
+        appender.stop()
+        logger.level = previousLevel
+    }
+
+    private fun verify(token: String): String? = runBlocking {
+        OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks())
+            .principal(headersOf(HttpHeaders.Authorization, "Bearer $token"))
+    }
+
+    private fun warnings(): List<String> = appender.list.filter { it.level == Level.WARN }.map { it.formattedMessage }
+
+    @Test
+    fun `an expired token is logged at WARN with the exception class only`() {
+        val expired = token(expiresInSeconds = -3600)
+        assertNull(verify(expired))
+        val lines = warnings()
+        assertEquals(1, lines.size)
+        assertTrue(lines.single().contains("reason=TokenExpiredException"), lines.single())
+    }
+
+    @Test
+    fun `a missing required role is logged with a fixed reason`() {
+        assertNull(verify(token(roles = listOf("viewer"))))
+        assertTrue(warnings().single().contains("reason=RequiredRoleMissing"))
+    }
+
+    @Test
+    fun `the log never contains the token, a claim value or the exception message`() {
+        val expired = token(expiresInSeconds = -3600, email = "alice-secret@example.test")
+        assertNull(verify(expired))
+        val all = appender.list.joinToString("\n") { it.formattedMessage + " " + (it.throwableProxy?.message ?: "") }
+        assertFalse(all.contains(expired), "token must not be logged")
+        assertFalse(all.contains(expired.substringBefore('.')), "token header must not be logged")
+        assertFalse(all.contains("alice-secret"), "claim value must not be logged")
+        assertFalse(all.contains("expired at"), "exception message must not be logged")
+        assertTrue(appender.list.all { it.throwableProxy == null }, "no stack trace")
+    }
+
+    @Test
+    fun `the same reason is logged once per minute, a different reason is logged separately`() {
+        val verifier = OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks())
+        fun run(token: String) = runBlocking {
+            verifier.principal(headersOf(HttpHeaders.Authorization, "Bearer $token"))
+        }
+        repeat(20) { assertNull(run(token(expiresInSeconds = -3600))) }
+        assertEquals(1, warnings().size, "flood of the same reason is collapsed")
+
+        assertNull(run(token(roles = listOf("viewer"))))
+        assertEquals(2, warnings().size, "another reason is logged")
+    }
+
+    @Test
+    fun `a request without a token is not logged`() {
+        runBlocking { OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks()).principal(headersOf()) }
+        assertTrue(warnings().isEmpty(), "unauthenticated scanning must not fill the log")
+    }
+}

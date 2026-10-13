@@ -72,29 +72,52 @@ class OidcJwtVerifier(
             try {
                 verify(token)
             } catch (e: Exception) {
-                logger.debug("OIDC access token rejected: {}", e.javaClass.simpleName)
+                logRejection(e.javaClass.simpleName)
                 null
             }
         }
     }
 
+    /**
+     * Logs why a token was rejected: a fixed reason or the exception class name only, never the token, a claim value or
+     * the exception message. At WARN so that it shows at the default production level, rate limited per reason so that
+     * unauthenticated traffic cannot flood the log. Without this a 401 cannot be told apart (expired token, wrong
+     * audience, JWKS unreachable, missing role).
+     */
+    private fun logRejection(reason: String) {
+        val now = System.currentTimeMillis()
+        val last = lastRejectionLog.put(reason, now)
+        if (last == null || now - last >= REJECTION_LOG_INTERVAL_MILLIS) {
+            logger.warn("OIDC access token rejected: reason={}", reason)
+        } else {
+            lastRejectionLog[reason] = last
+        }
+    }
+
+    private val lastRejectionLog = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun reject(reason: String): String? {
+        logRejection(reason)
+        return null
+    }
+
     private fun verify(token: String): String? {
         val decoded = JWT.decode(token)
-        if (decoded.algorithm != "RS256") return null
-        val key = jwks.get(decoded.keyId).publicKey as? RSAPublicKey ?: return null
+        if (decoded.algorithm != "RS256") return reject("AlgorithmNotRs256")
+        val key = jwks.get(decoded.keyId).publicKey as? RSAPublicKey ?: return reject("SigningKeyNotRsa")
         val verified = JWT.require(Algorithm.RSA256(key, null))
             .withIssuer(config.issuer)
             .withAudience(config.audience)
             .acceptLeeway(LEEWAY_SECONDS)
             .build()
             .verify(token)
-        if (verified.expiresAt == null) return null
-        if (!hasRole(verified.getClaim("resource_access").asMap())) return null
+        if (verified.expiresAt == null) return reject("MissingExp")
+        if (!hasRole(verified.getClaim("resource_access").asMap())) return reject("RequiredRoleMissing")
 
         val emailVerified = verified.getClaim("email_verified").asBoolean() == true
         val email = verified.getClaim("email").asString()?.takeIf { emailVerified && it.isNotBlank() }
         val username = verified.getClaim("preferred_username").asString()?.takeIf { it.isNotBlank() }
-        return validPrincipal(email ?: username ?: verified.subject)
+        return validPrincipal(email ?: username ?: verified.subject) ?: reject("InvalidPrincipal")
     }
 
     private fun hasRole(resourceAccess: Map<String, Any?>?): Boolean {
@@ -106,6 +129,9 @@ class OidcJwtVerifier(
     companion object {
         /** Clock-skew tolerance for exp / nbf. Must stay within 30 seconds. */
         const val LEEWAY_SECONDS = 30L
+
+        /** The same rejection reason is logged at most once per minute. */
+        const val REJECTION_LOG_INTERVAL_MILLIS = 60_000L
 
         /** Upper bound on the token length, checked before parsing. */
         const val MAX_TOKEN_LENGTH = 16 * 1024

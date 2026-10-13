@@ -20,7 +20,7 @@ sealed interface PortResult<out T> {
 
     /**
      * The request provably was NOT sent, so the caller MAY repeat it (and the OperationExecutor may record a
-     * NotSentProof). Returned ONLY when nothing was sent: connection refused, connect timeout, DNS resolution
+     * verified NOT_SENT evidence). Returned ONLY when nothing was sent: connection refused, connect timeout, DNS resolution
      * failure, token acquisition failure (classified from the Ktor/JDK engine exceptions in ExkesAdapter).
      * A 429 on a mutating call is [Unknown]: exkes has seen the request, so "no effect" is not proven.
      * Read-only GETs (repeating them has no effect) may also return Transient for a 429/5xx/timeout.
@@ -33,7 +33,14 @@ sealed interface PortResult<out T> {
      * (findWorkspaceByName / findRuntimesByLabel); when reconciliation is impossible it goes to
      * RECONCILIATION_REQUIRED (M0 Operation Journal contract).
      */
-    data class Unknown(val message: String, val cause: Throwable? = null) : PortResult<Nothing>
+    data class Unknown(val message: String, val cause: Throwable? = null) : PortResult<Nothing> {
+        /**
+         * [cause] is the raw Throwable and may carry tokens, URLs or provider bodies in its message. It is for in-process
+         * diagnosis only: this toString never renders it (nor its message), and nothing persisted / audited / logged may
+         * read it. Use [kindCode] for anything that leaves the process.
+         */
+        override fun toString(): String = "PortResult.Unknown(message=$message, cause=${cause?.javaClass?.name})"
+    }
 
     /**
      * The response contradicts what was asked (response id / name / parent differs from the request).
@@ -48,8 +55,23 @@ sealed interface PortResult<out T> {
 fun <T> PortResult<T>.getOrNull(): T? = (this as? PortResult.Ok)?.value
 
 /**
+ * Kind-only, machine-readable description of a result, safe for journal / audit / logs / UI. It never includes the
+ * message, cause or provider body of any variant; use it instead of `toString()` or string templates on a PortResult.
+ */
+fun PortResult<*>.kindCode(): String = when (this) {
+    is PortResult.Ok -> "OK"
+    PortResult.NotFound -> "NOT_FOUND"
+    is PortResult.Conflict -> "CONFLICT"
+    is PortResult.Rejected -> "REJECTED_HTTP_$httpStatus"
+    is PortResult.Transient -> "TRANSIENT"
+    is PortResult.Unknown -> "UNKNOWN"
+    is PortResult.IdentityMismatch -> "IDENTITY_MISMATCH"
+    is PortResult.Unsupported -> "UNSUPPORTED"
+}
+
+/**
  * Operation Journal status that a finished call of a MUTATING operation maps to. UNKNOWN is returned for
- * every ambiguous outcome; leaving UNKNOWN requires ReconciliationEvidence (see [OperationStatus]).
+ * every ambiguous outcome; leaving UNKNOWN requires verified reconciliation evidence (see [OperationStatus]).
  * [PortResult.Conflict] maps to null: the caller must look the resource up before deciding.
  */
 fun PortResult<*>.toOperationStatus(): OperationStatus? = when (this) {

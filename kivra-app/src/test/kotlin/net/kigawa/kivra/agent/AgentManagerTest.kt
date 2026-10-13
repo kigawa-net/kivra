@@ -5,6 +5,7 @@ import java.time.LocalDateTime
 import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -203,6 +204,56 @@ class AgentManagerTest {
         // M0 (#94) fence: the Kivra DB must hold an authority epoch copy for the provider before any evidence-gated transition.
         syncAuthorityEpoch(TEST_CONFIG.tenantId, "EXKES")
         return PipelineObservedAuthority(evidence)
+    }
+
+    @Test
+    fun `untrusted provider and lookup exceptions never enter the durable operation journal`() {
+        TestDb().use { db ->
+        val runId = db.preparingRun()
+        val lease = db.leases.acquire(runId, "error-redaction-test", Duration.ofSeconds(30))!!
+        val secret = "Authorization: Bearer DO-NOT-STORE-THIS"
+        val call = Op<Unit>(
+            opType = "EXKES_CREATE_WORKSPACE",
+            key = "redaction-guard",
+            stableRef = "workspace-redaction",
+            requestHash = "a".repeat(64),
+            call = { PortResult.Unknown("provider error $secret") },
+            refOf = { null },
+            observe = { throw IllegalStateException("lookup failure $secret") },
+        )
+        val executor = OperationExecutor(db.journal, db.pipelineAuthority(), "tenant-1", "2026-01", 3, Duration.ZERO)
+        val result = runBlocking {
+            executor.perform(lease, call, allowCancel = false, allowDispatch = true, guard = {})
+        }
+        assertIs<OpOutcome.ReconciliationRequired>(result)
+        val journalRow = db.journal.listByRun(runId).single()
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, journalRow.status)
+        assertEquals("PROVIDER_LOOKUP_UNDETERMINED", journalRow.lastError)
+        assertFalse(journalRow.lastError?.contains("DO-NOT-STORE-THIS") == true)
+        }
+    }
+
+    @Test
+    fun `provider rejection text and exception text never reach journal, audit, outbox or run state`() = TestDb().use { db ->
+        val secret = "Authorization: Bearer DO-NOT-STORE-REJECT"
+        val port = TestPort().also {
+            it.injectFailure("createWorkspace", afterEffect = false, PortResult.Rejected(400, "VALIDATION_ERROR", secret))
+        }
+        val runId = db.preparingRun()
+        runBlocking { db.manager(port).run(runId, PROFILE) }
+        assertFalse(db.allPersistedText().contains("DO-NOT-STORE-REJECT"), "a provider rejection leaked into persisted state")
+    }
+
+    @Test
+    fun `provider unknown outcome with a secret-bearing cause never reaches persisted state`() = TestDb().use { db ->
+        val secret = "Authorization: Bearer DO-NOT-STORE-CAUSE"
+        val port = TestPort().also {
+            it.injectFailure("createWorkspace", afterEffect = false, PortResult.Unknown("transport failed", IllegalStateException(secret)))
+        }
+        val runId = db.preparingRun()
+        runBlocking { db.manager(port).run(runId, PROFILE) }
+        assertFalse(db.allPersistedText().contains("DO-NOT-STORE-CAUSE"), "a Throwable message leaked into persisted state")
+        assertFalse(PortResult.Unknown("transport failed", IllegalStateException(secret)).toString().contains("DO-NOT-STORE-CAUSE"))
     }
 
     private fun TestDb.agentsOf(runId: RunId) = AgentRepository(database).agentsOf(runId)
@@ -564,6 +615,17 @@ class AgentManagerTest {
         assertIs<AgentRunOutcome.Failed>(out)
         assertEquals(3, bad.mutatingCalls.count { it == "createWorkspace" })
         assertEquals(DevelopmentRunState.FAILED, db.runState(run2)) // PREPARING has no retry path
+    }
+
+    @Test
+    fun `transient failure with the Authority unavailable is UNKNOWN - no NOT_SENT evidence, never resent`() = TestDb().use { db ->
+        val port = TestPort().also { it.transientCreateWorkspace = 1 }
+        db.evidence.available = false
+        val runId = db.preparingRun()
+        val rr = assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(1, port.mutatingCalls.count { it == "createWorkspace" })
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.journal.get(rr.opId)!!.status)
+        assertEquals(DevelopmentRunState.PREPARING, db.runState(runId))
     }
 
     @Test

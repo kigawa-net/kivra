@@ -13,8 +13,10 @@ import java.net.ConnectException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /** Adapter-specific behaviour beyond the shared contract: failure classification, identity checks, auth. */
 class ExkesAdapterTest {
@@ -25,6 +27,56 @@ class ExkesAdapterTest {
     private fun setup(tokens: TokenProvider = TokenProvider.None): Pair<ExkesSimulator, ExkesAdapter> {
         val sim = ExkesSimulator()
         return sim to ExkesAdapter(ExkesAdapter.newClient(sim.engine, cfg), cfg, tokens)
+    }
+
+    private val secret = "Bearer DO-NOT-KEEP-ADAPTER"
+
+    private fun assertNoSecret(r: PortResult<*>) {
+        assertFalse(r.toString().contains("DO-NOT-KEEP"), "toString leaked: ${r::class.simpleName}")
+        assertFalse(r.kindCode().contains("DO-NOT-KEEP"), "kindCode leaked")
+        val text = when (r) {
+            is PortResult.Rejected -> listOf(r.code, r.message)
+            is PortResult.Conflict -> listOf(r.message)
+            is PortResult.Transient -> listOf(r.message)
+            is PortResult.Unknown -> listOf(r.message)
+            else -> emptyList()
+        }
+        text.forEach { assertFalse(it?.contains("DO-NOT-KEEP") == true, "message field leaked") }
+    }
+
+    @Test
+    fun `provider error bodies and exception text never become PortResult fields`() = runTest {
+        val (sim, a) = setup()
+        sim.override = { req -> if (req.method == HttpMethod.Post) reply(400, """{"code":"VALIDATION_ERROR","message":"echo $secret"}""") else null }
+        val rejected = a.createWorkspace(WorkspaceSpec("kivra-run-1"))
+        assertIs<PortResult.Rejected>(rejected)
+        assertEquals("VALIDATION_ERROR", rejected.code)
+        assertNoSecret(rejected)
+
+        sim.override = { req -> if (req.method == HttpMethod.Post) reply(409, """{"code":"CONFLICT","message":"dup $secret"}""") else null }
+        assertNoSecret(a.createWorkspace(WorkspaceSpec("kivra-run-2")).also { assertIs<PortResult.Conflict>(it) })
+
+        // A code that is not a plain token is dropped instead of copied.
+        sim.override = { req -> if (req.method == HttpMethod.Post) reply(400, """{"code":"$secret","message":"x"}""") else null }
+        assertNull((a.createWorkspace(WorkspaceSpec("kivra-run-3")) as PortResult.Rejected).code)
+    }
+
+    @Test
+    fun `transport and token exception messages are dropped, only the class and cause are kept`() = runTest {
+        val (sim, a) = setup()
+        sim.override = { req -> if (req.method == HttpMethod.Post) throw java.io.IOException("socket reset $secret") else null }
+        val unknown = a.createWorkspace(WorkspaceSpec("kivra-run-4"))
+        assertIs<PortResult.Unknown>(unknown)
+        assertEquals("EXCEPTION_IOException", unknown.message)
+        assertNoSecret(unknown)
+        // the raw cause is still available for in-process diagnosis, but it is never rendered
+        assertTrue(unknown.cause?.message?.contains("DO-NOT-KEEP") == true)
+
+        val (_, tokenFailing) = setup(TokenProvider { throw IllegalStateException("token endpoint said $secret") })
+        val transient = tokenFailing.createWorkspace(WorkspaceSpec("kivra-run-5"))
+        assertIs<PortResult.Transient>(transient)
+        assertEquals("TOKEN_PROVIDER_FAILED", transient.message)
+        assertNoSecret(transient)
     }
 
     @Test

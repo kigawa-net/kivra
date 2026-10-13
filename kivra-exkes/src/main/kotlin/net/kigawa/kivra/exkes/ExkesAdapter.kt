@@ -120,7 +120,7 @@ class ExkesAdapter(
                 is PortResult.Ok -> when (found.value.size) {
                     0 -> Unit
                     1 -> return PortResult.Ok(found.value.single())
-                    else -> return PortResult.Conflict("ambiguous: ${found.value.size} runtimes already carry labels ${spec.labels}")
+                    else -> return PortResult.Conflict(CODE_AMBIGUOUS_LABELS)
                 }
                 else -> return found.asFailure()
             }
@@ -183,10 +183,8 @@ class ExkesAdapter(
         if (spec.singleExecutionGuard) {
             when (val existing = listExecutions(runtime)) {
                 is PortResult.Ok -> if (existing.value.isNotEmpty()) {
-                    return PortResult.Conflict(
-                        "runtime ${runtime.value} already has executions ${existing.value.map { it.id.value }}; " +
-                            "exkes has no idempotency key or label for executions, reconcile instead of POSTing again",
-                    )
+                    // Kind-only: ids and provider text are not carried in the result (see PortResult.Conflict).
+                    return PortResult.Conflict(CODE_EXECUTION_ALREADY_EXISTS)
                 }
                 else -> return existing.asFailure()
             }
@@ -282,7 +280,7 @@ class ExkesAdapter(
             offset += page.items.size
             if (page.items.isEmpty() || offset >= page.total) return PortResult.Ok(out)
         }
-        return PortResult.Transient("list $path exceeded $MAX_PAGES pages")
+        return PortResult.Transient(CODE_LIST_PAGE_LIMIT)
     }
 
     /** Single attempt. Failure classification is the heart of the UNKNOWN contract. */
@@ -302,7 +300,8 @@ class ExkesAdapter(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            return PortResult.Transient("token provider failed: ${e.message}") // nothing was sent
+            // nothing was sent. The exception message is dropped: it may carry credential material.
+            return PortResult.Transient(CODE_TOKEN_PROVIDER_FAILED)
         }
 
         val status: Int
@@ -320,37 +319,41 @@ class ExkesAdapter(
             status = response.status.value
             text = response.bodyAsText()
         } catch (e: ConnectTimeoutException) {
-            return PortResult.Transient("connect timeout: ${e.message}") // connect never completed, nothing was written
+            return PortResult.Transient(CODE_CONNECT_TIMEOUT) // connect never completed, nothing was written
         } catch (e: ConnectException) {
-            return PortResult.Transient("connection refused: ${e.message}") // nothing was sent
+            return PortResult.Transient(CODE_CONNECTION_REFUSED) // nothing was sent
         } catch (e: UnresolvedAddressException) {
-            return PortResult.Transient("DNS resolution failed: ${e.message}") // no socket was opened
+            return PortResult.Transient(CODE_DNS_FAILED) // no socket was opened
         } catch (e: UnknownHostException) {
-            return PortResult.Transient("DNS resolution failed: ${e.message}") // no socket was opened
+            return PortResult.Transient(CODE_DNS_FAILED) // no socket was opened
         } catch (e: CancellationException) {
-            if (e.javaClass.simpleName == "HttpRequestTimeoutException") return ambiguous("request timeout", e)
+            if (e.javaClass.simpleName == "HttpRequestTimeoutException") return ambiguous(CODE_REQUEST_TIMEOUT, e)
             throw e
         } catch (e: Exception) {
-            // includes HttpRequestTimeoutException (an IOException), socket timeouts, resets, EOF
-            return ambiguous("${e.javaClass.simpleName}: ${e.message}", e)
+            // includes HttpRequestTimeoutException (an IOException), socket timeouts, resets, EOF.
+            // Only the exception CLASS is kept: its message may contain the request or credential material.
+            return ambiguous("EXCEPTION_${e.javaClass.simpleName}", e)
         }
 
         return when {
             status in 200..299 -> try {
                 PortResult.Ok(json.decodeFromString(ser, text))
             } catch (e: Exception) {
-                ambiguous("undecodable $status response from $method $path: ${e.message}", e)
+                ambiguous("UNDECODABLE_RESPONSE_$status", e)
             }
             status == 404 -> PortResult.NotFound
-            status == 409 -> PortResult.Conflict(errorOf(text)?.message ?: "conflict")
+            // Kind-only: the provider's 409 body is not copied into the result.
+            status == 409 -> PortResult.Conflict(CODE_PROVIDER_CONFLICT)
             // 429 is an HTTP response: exkes has seen the request. A mutating call is therefore UNKNOWN, not
             // "not sent"; a GET is idempotent and may be retried by the caller (Transient).
-            status == 429 -> ambiguous("429 too many requests", null)
+            status == 429 -> ambiguous(CODE_TOO_MANY_REQUESTS, null)
             status in 400..499 -> {
+                // Only the typed error code survives, and only when it is a plain token. The provider's free-text
+                // message is never copied: it may echo request data or credentials.
                 val err = errorOf(text)
-                PortResult.Rejected(status, err?.code, err?.message ?: "HTTP $status")
+                PortResult.Rejected(status, err?.code?.takeIf { SAFE_CODE.matches(it) }, "HTTP $status")
             }
-            else -> ambiguous("HTTP $status from $method $path", null)
+            else -> ambiguous("HTTP_${status}_FROM_${method.value}", null)
         }
     }
 
@@ -377,6 +380,19 @@ class ExkesAdapter(
 
     companion object {
         private const val MAX_PAGES = 200
+
+        // Fixed machine-readable codes. Provider or exception text never becomes a PortResult message (see PortResult).
+        private const val CODE_AMBIGUOUS_LABELS = "AMBIGUOUS_RUNTIME_LABELS"
+        private const val CODE_EXECUTION_ALREADY_EXISTS = "RUNTIME_ALREADY_HAS_EXECUTION"
+        private const val CODE_LIST_PAGE_LIMIT = "LIST_PAGE_LIMIT_EXCEEDED"
+        private const val CODE_TOKEN_PROVIDER_FAILED = "TOKEN_PROVIDER_FAILED"
+        private const val CODE_CONNECT_TIMEOUT = "CONNECT_TIMEOUT"
+        private const val CODE_CONNECTION_REFUSED = "CONNECTION_REFUSED"
+        private const val CODE_DNS_FAILED = "DNS_RESOLUTION_FAILED"
+        private const val CODE_REQUEST_TIMEOUT = "REQUEST_TIMEOUT"
+        private const val CODE_PROVIDER_CONFLICT = "PROVIDER_CONFLICT"
+        private const val CODE_TOO_MANY_REQUESTS = "HTTP_429_TOO_MANY_REQUESTS"
+        private val SAFE_CODE = Regex("[A-Z][A-Z0-9_]{0,63}")
         private val json = Json { ignoreUnknownKeys = true; encodeDefaults = false; explicitNulls = false }
 
         /**

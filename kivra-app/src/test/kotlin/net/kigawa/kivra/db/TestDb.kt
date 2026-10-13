@@ -88,6 +88,19 @@ class TestDb(
         execQuery("SELECT COUNT(*) FROM $table WHERE $where") { it.getInt(1) }.single()
     }
 
+    /**
+     * Every column of every row of every persisted table, flattened to text. Redaction regression tests assert that a
+     * secret injected through a provider answer appears nowhere in it (journal, audit, outbox, run / agent state).
+     */
+    fun allPersistedText(): String = transaction(database) {
+        listOf(
+            "development_runs", "stage_executions", "agents", "execution_sessions", "external_operations",
+            "outbox_events", "inbox_events", "audit_events",
+        ).flatMap { table ->
+            execQuery("SELECT * FROM $table") { rs -> (1..rs.metaData.columnCount).joinToString("|") { rs.getString(it).orEmpty() } }
+        }.joinToString("\n")
+    }
+
     override fun close() {
         closeDataSource(dataSource)
         if (schema != null) {

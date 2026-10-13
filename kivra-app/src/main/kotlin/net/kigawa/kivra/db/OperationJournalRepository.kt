@@ -396,6 +396,7 @@ class OperationJournalRepository(
                     throw InvalidTransitionException("operation $opId: takeover needs a NOT_SENT ref on PREPARED -> IN_FLIGHT")
                 }
                 requireBound(lease, row, ev)
+                requireCurrentAuthorityEpoch(opId, subjectOf(lease, row).tenantId, ev)
                 reason = "VERIFIED_NOT_SENT_TAKEOVER"
             }
             is Gate.Verified -> {

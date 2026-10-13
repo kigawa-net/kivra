@@ -38,7 +38,7 @@ internal class DevTaskStore {
  * This endpoint creates only an ephemeral simulated preview, never a real
  * DevelopmentRun, external write, model request or Agent execution.
  */
-fun Route.configureDevTaskSubmitRoutes(store: DevTaskStore = DevTaskStore()) {
+internal fun Route.configureDevTaskSubmitRoutes(store: DevTaskStore = DevTaskStore()) {
     post("/api/dev/tasks") {
         val request = try { call.receive<DevTaskRequest>() } catch (_: Exception) {
             call.respond(HttpStatusCode.BadRequest, DevTaskError("invalid request"))

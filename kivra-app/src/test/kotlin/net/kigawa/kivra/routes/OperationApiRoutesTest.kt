@@ -7,6 +7,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.delete
 import io.ktor.client.request.patch
+import io.ktor.client.request.parameter
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -61,6 +62,13 @@ private fun pathOf(runId: String) = "/api/runs/$runId/operations"
 private suspend fun HttpClient.list(runId: String, email: String? = ALICE): HttpResponse = get(pathOf(runId)) {
     email?.let { header("X-Auth-Request-Email", it) }
 }
+
+/** Like [list], with the `after` cursor. A null [after] sends no query parameter at all. */
+private suspend fun HttpClient.listPage(runId: String, after: String?, email: String? = ALICE): HttpResponse =
+    get(pathOf(runId)) {
+        email?.let { header("X-Auth-Request-Email", it) }
+        after?.let { parameter("after", it) }
+    }
 
 private fun TestDb.submitRun(email: String, key: String): RunId =
     when (val r = runs.submitTask(email, key, "task $key")) {
@@ -243,6 +251,127 @@ class OperationApiRoutesTest {
             val json = Json.parseToJsonElement(client.list(run.value).bodyAsText()).jsonObject
             assertEquals("false", json.getValue("truncated").toString())
             assertEquals(1, json.getValue("operations").jsonArray.size)
+        }
+    }
+
+    @Test
+    fun `exactly 100 operations is not truncated and has no nextAfter, 101 is truncated with nextAfter`() = TestDb().use { db ->
+        testApplication {
+            setUpRoutes(db)
+            val run = db.submitRun(ALICE, "c1")
+            val lease = db.leaseFor(run)
+            repeat(100) { db.prepareOp(lease, it) }
+            val exact = client.list(run.value).bodyAsText()
+            assertEquals("false", Json.parseToJsonElement(exact).jsonObject.getValue("truncated").toString())
+            assertFalse(exact.contains("nextAfter"))
+
+            db.prepareOp(lease, 100)
+            val over = Json.parseToJsonElement(client.list(run.value).bodyAsText()).jsonObject
+            assertEquals("true", over.getValue("truncated").toString())
+            val ids = over.getValue("operations").jsonArray.map { it.jsonObject.getValue("operationId").jsonPrimitive.content }
+            assertEquals(ids.last(), over.getValue("nextAfter").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `cursor pages cover 150 operations once each, in order, and the last page has no nextAfter`() = TestDb().use { db ->
+        testApplication {
+            setUpRoutes(db)
+            val run = db.submitRun(ALICE, "c2")
+            val lease = db.leaseFor(run)
+            val created = (1..150).map { db.prepareOp(lease, it) }
+
+            val seen = mutableListOf<String>()
+            var after: String? = null
+            var pages = 0
+            do {
+                val json = Json.parseToJsonElement(client.listPage(run.value, after).bodyAsText()).jsonObject
+                seen += json.getValue("operations").jsonArray.map { it.jsonObject.getValue("operationId").jsonPrimitive.content }
+                after = json["nextAfter"]?.jsonPrimitive?.content
+                pages++
+            } while (after != null)
+            assertEquals(2, pages)
+            assertEquals(created.sorted(), seen)
+        }
+    }
+
+    @Test
+    fun `a page never contains another run's operations`() = TestDb().use { db ->
+        testApplication {
+            setUpRoutes(db)
+            val mine = db.submitRun(ALICE, "c3")
+            val mineLease = db.leaseFor(mine)
+            val myOps = (1..3).map { db.prepareOp(mineLease, it) }
+            val theirs = db.submitRun(ALICE, "c4")
+            val theirLease = db.leaseFor(theirs)
+            (10..14).forEach { db.prepareOp(theirLease, it) }
+
+            val ids = Json.parseToJsonElement(client.list(mine.value).bodyAsText()).jsonObject
+                .getValue("operations").jsonArray.map { it.jsonObject.getValue("operationId").jsonPrimitive.content }
+            assertEquals(myOps.sorted(), ids)
+        }
+    }
+
+    @Test
+    fun `a page of 500 operations returns 100 and the cursor is the 100th`() = TestDb().use { db ->
+        testApplication {
+            setUpRoutes(db)
+            val run = db.submitRun(ALICE, "c5")
+            val lease = db.leaseFor(run)
+            val created = (1..500).map { db.prepareOp(lease, it) }
+
+            val json = Json.parseToJsonElement(client.list(run.value).bodyAsText()).jsonObject
+            val ids = json.getValue("operations").jsonArray.map { it.jsonObject.getValue("operationId").jsonPrimitive.content }
+            assertEquals(100, ids.size)
+            assertEquals(created.sorted().take(100), ids)
+            assertEquals(ids.last(), json.getValue("nextAfter").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `an invalid after is 400 with a fixed message that does not echo the input`() = TestDb().use { db ->
+        testApplication {
+            setUpRoutes(db)
+            val run = db.submitRun(ALICE, "c6")
+            val lease = db.leaseFor(run)
+            db.prepareOp(lease, 1)
+            val bad = listOf(
+                "SECRET-CURSOR-INPUT",
+                "",
+                "A".repeat(27),
+                "01ARZ3NDEKTSV4RRFFQ69G5FA!",
+                "01ARZ3NDEKTSV4RRFFQ69G5F\n",
+            )
+            for (value in bad) {
+                val response = client.listPage(run.value, after = value)
+                assertEquals(HttpStatusCode.BadRequest, response.status, "after=$value")
+                val body = response.bodyAsText()
+                assertEquals("{\"error\":\"invalid after\"}", body)
+                assertFalse(body.contains("SECRET-CURSOR-INPUT"))
+            }
+        }
+    }
+
+    @Test
+    fun `another user's run and a missing run get the same 404 with after, valid or not`() = TestDb().use { db ->
+        testApplication {
+            setUpRoutes(db)
+            val bobRun = db.submitRun(BOB, "c7")
+            db.prepareOp(db.leaseFor(bobRun), 1)
+            val missing = "01ZZZZZZZZZZZZZZZZZZZZZZZZ"
+            val cursor = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+            val otherValid = client.listPage(bobRun.value, after = cursor, email = ALICE)
+            val absentValid = client.listPage(missing, after = cursor, email = ALICE)
+            val otherBad = client.listPage(bobRun.value, after = "NOT-A-CURSOR", email = ALICE)
+            val absentBad = client.listPage(missing, after = "NOT-A-CURSOR", email = ALICE)
+            assertEquals(HttpStatusCode.NotFound, otherValid.status)
+            assertEquals(HttpStatusCode.NotFound, absentValid.status)
+            assertEquals(HttpStatusCode.NotFound, otherBad.status)
+            assertEquals(HttpStatusCode.NotFound, absentBad.status)
+            assertEquals(absentValid.bodyAsText(), otherValid.bodyAsText())
+            assertEquals(absentBad.bodyAsText(), otherBad.bodyAsText())
+            assertEquals(otherValid.bodyAsText(), otherBad.bodyAsText())
         }
     }
 

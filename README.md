@@ -173,7 +173,7 @@ Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込み
 | `POST /api/tasks` | body `{"title": "...", "idempotencyKey": "..."}`。新規は 202、同じ (呼び出し元, idempotencyKey) の再送は 200 で同じ `runId` を返す。同じキーで title が違えば 409 |
 | `GET /api/runs/{id}` | 自分の Run。他人の Run、存在しない Run は 404 |
 | `GET /api/runs` | 自分の Run を新しい順に最大 50 件 |
-| `GET /api/runs/{id}/operations` | 自分の Run の Operation を作成順に最大 100 件（読み取り専用）。他人の Run・存在しない Run は同じ 404。`{schemaVersion, runId, operations, limit, truncated}`。`state` は Journal の状態名をそのまま返す（UNKNOWN / RECONCILIATION_REQUIRED を成功・完了とは表示しない）。トークン、request hash、外部参照、生のエラー、Evidence は含まない |
+| `GET /api/runs/{id}/operations` | 自分の Run の Operation を作成順に最大 100 件（読み取り専用）。他人の Run・存在しない Run は同じ 404。`{schemaVersion, runId, operations, limit, truncated}`。`?after=<operationId>` で次ページを取得でき、`truncated=true` のとき応答の `nextAfter` がその値（不正な `after` は 400）。`state` は Journal の状態名をそのまま返す（UNKNOWN / RECONCILIATION_REQUIRED を成功・完了とは表示しない）。トークン、request hash、外部参照、生のエラー、Evidence は含まない |
 
 応答（Run のスナップショット）: `{runId, taskId, title, state, mode, executed, createdAt}`。`state` は `CREATED`、`mode` は `SIMULATED`、`executed` は `false`。
 入力: `title` は 1〜200 文字（前後の空白は除去）、`idempotencyKey` は 1〜128 文字、どちらも制御文字を含まないこと。違反は 400。

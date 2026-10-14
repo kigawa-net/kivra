@@ -12,7 +12,7 @@
   var CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
 
   var MESSAGES = {
-    unauthorized: 'ログインが必要です、または権限がありません。ログインし直してから、もう一度お試しください。',
+    session: 'セッションが切れました（ログインが必要です）。「再読み込みしてログインし直す」からログインし直してください。',
     notFound: '見つかりません（他のユーザーの Run は見えません）',
     badRequest: '入力内容を確認してください（1〜200 文字、制御文字は使えません）',
     conflict: 'この投入は受け付けられませんでした（同じ投入キーで別のタイトルが使われていました）。もう一度投入してください。',
@@ -30,6 +30,7 @@
     runsErrorKind: null,
     runsLoading: false,
     runsLastAttemptAt: 0,
+    sessionExpired: false,
     healthOk: null,
     healthCheckedAt: 0,
     healthOkAt: 0,
@@ -113,18 +114,43 @@
   /** Maps a non-2xx status to a fixed message key. The response body is never shown. */
   function kindOf(status) {
     if (status === 400) return 'badRequest';
-    if (status === 401) return 'unauthorized';
+    if (status === 401) return 'session';
     if (status === 404) return 'notFound';
     if (status === 409) return 'conflict';
     return 'server';
   }
 
-  /** Same-origin only. This page sets no credential header: the reverse proxy (oauth2-proxy) adds the token. */
+  function isApi(path) {
+    return path.indexOf('/api/') === 0;
+  }
+
+  /**
+   * Once the session is gone, /api/* can no longer succeed until the page is reloaded (oauth2-proxy then
+   * redirects to the Keycloak login). Only the automatic refresh of the run list stops; /health keeps running.
+   */
+  function markSessionExpired() {
+    state.sessionExpired = true;
+    $('session-banner').hidden = false;
+    $('refresh-btn').disabled = true;
+    renderRunsStatus(Date.now());
+  }
+
+  function fail(path, kind, status) {
+    if (kind === 'session' && isApi(path)) markSessionExpired();
+    return { ok: false, kind: kind, status: status };
+  }
+
+  /**
+   * Same-origin only. This page sets no credential header: the reverse proxy (oauth2-proxy) adds the token.
+   * redirect: 'manual' keeps a redirect to the sign-in page from being followed silently. It shows up as an
+   * opaqueredirect response, which is treated as an expired session. The page never builds a redirect URL itself.
+   */
   async function apiFetch(path, method, body) {
     var init = {
       method: method,
       credentials: 'same-origin',
       cache: 'no-store',
+      redirect: 'manual',
       headers: { Accept: 'application/json' }
     };
     if (body !== undefined) {
@@ -137,8 +163,13 @@
     } catch (e) {
       return { ok: false, kind: 'network' };
     }
-    if (res.redirected) return { ok: false, kind: 'unauthorized' };
-    if (!res.ok) return { ok: false, kind: kindOf(res.status), status: res.status };
+    if (res.type === 'opaqueredirect' || res.redirected) return fail(path, 'session');
+    if (!res.ok) return fail(path, kindOf(res.status), res.status);
+    // A 2xx that is not JSON (e.g. an HTML sign-in page served after a followed redirect) is an expired session for /api/*.
+    var contentType = res.headers.get('content-type') || '';
+    if (!/^application\/json(\s*;|\s*$)/i.test(contentType)) {
+      return fail(path, isApi(path) ? 'session' : 'invalid');
+    }
     try {
       return { ok: true, status: res.status, data: await res.json() };
     } catch (e) {
@@ -240,6 +271,17 @@
   function renderRunsStatus(now) {
     var el = $('runs-status');
     var list = $('runs-list');
+    if (state.sessionExpired) {
+      list.classList.add('stale');
+      el.className = 'meta error';
+      if (state.runsOkAt === 0) {
+        el.textContent = '一覧を取得できていません（セッション切れ）';
+      } else {
+        var secAgo = Math.max(0, Math.round((now - state.runsOkAt) / 1000));
+        el.textContent = secAgo + ' 秒前のデータ（セッション切れ）';
+      }
+      return;
+    }
     if (state.runsFailed) {
       list.classList.add('stale');
       var reason = MESSAGES[state.runsErrorKind] || MESSAGES.server;
@@ -262,7 +304,8 @@
   }
 
   async function refreshRuns() {
-    if (state.runsLoading) return;
+    // After an expired session the automatic refresh stops (every /api/runs call would only get 401 again).
+    if (state.runsLoading || state.sessionExpired) return;
     state.runsLoading = true;
     state.runsLastAttemptAt = Date.now();
     try {
@@ -416,6 +459,10 @@
     $('refresh-btn').addEventListener('click', function () {
       refreshRuns();
       checkHealth();
+    });
+    // Re-entering the sign-in flow is done by the browser reload; the sign-in URL is never built here.
+    $('reload-btn').addEventListener('click', function () {
+      window.location.reload();
     });
     window.addEventListener('hashchange', route);
     document.addEventListener('visibilitychange', function () {

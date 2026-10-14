@@ -15,6 +15,11 @@
   <div class="conn" id="health-status" role="status">接続: 未確認</div>
 </header>
 
+<div id="session-banner" class="session-banner" role="alert" hidden>
+  <p>セッションが切れました（ログインが必要です）。入力中のタイトルは残っています。</p>
+  <button type="button" id="reload-btn">再読み込みしてログインし直す</button>
+</div>
+
 <p class="sim-banner" role="note">このサーバーの Run は、すべてシミュレーションです（AI は実行されていません。<code>executed: false</code>）</p>
 
 <main>

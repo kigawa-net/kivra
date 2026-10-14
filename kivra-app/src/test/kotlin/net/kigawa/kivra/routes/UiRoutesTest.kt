@@ -139,6 +139,38 @@ class UiRoutesTest {
     }
 
     @Test
+    fun `expired session is detected from 401, opaque redirects and non-json responses`() {
+        // oauth2-proxy answers an expired session with 401 or a redirect to the sign-in page.
+        assertContains(appJs, "401")
+        assertContains(appJs, "redirect: 'manual'")
+        assertContains(appJs, "'opaqueredirect'")
+        assertContains(appJs, "application\\/json")
+        assertContains(appJs, "markSessionExpired")
+        // The automatic run-list refresh stops after an expired session.
+        assertContains(appJs, "state.sessionExpired) return")
+    }
+
+    @Test
+    fun `reload button is the only way back to the sign-in flow`() {
+        // The sign-in redirect is done by oauth2-proxy on reload; the page never builds a redirect target.
+        assertContains(appJs, "window.location.reload()")
+        for (token in listOf("location.href =", "location.href=", "location.assign", "location.replace", "window.open")) {
+            assertFalse(appJs.contains(token), "app.js must not use $token")
+        }
+        assertContains(indexHtml, "id=\"reload-btn\"")
+    }
+
+    @Test
+    fun `session expired banner exists in the page and is hidden until needed`() {
+        assertContains(indexHtml, "id=\"session-banner\"")
+        assertContains(indexHtml, "role=\"alert\"")
+        assertContains(indexHtml, "セッションが切れました（ログインが必要です）")
+        assertTrue(Regex("id=\"session-banner\"[^>]*\\shidden").containsMatchIn(indexHtml))
+        assertContains(appJs, "\$('session-banner').hidden = false")
+        assertContains(appCss, ".session-banner")
+    }
+
+    @Test
     fun `title input is limited to 200 characters`() {
         assertContains(indexHtml, "maxlength=\"200\"")
     }

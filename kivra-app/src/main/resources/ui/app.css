@@ -113,6 +113,18 @@ code {
   font-weight: 600;
 }
 
+.session-banner {
+  padding: 0.6rem 1rem;
+  background: var(--banner-bg);
+  color: var(--banner-fg);
+  border-bottom: 2px solid var(--err);
+  font-weight: 600;
+}
+
+.session-banner p {
+  margin: 0 0 0.5rem;
+}
+
 main {
   max-width: 760px;
   margin: 0 auto;

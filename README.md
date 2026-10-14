@@ -225,7 +225,8 @@ Run の `task_id` は `api:<runId>`（fusha-task のタスクとは紐づかな�
 - 必須で上書きする環境変数（既定値のままでは本番で使えない）: `KIVRA_DB_JDBC_URL`（既定は localhost）、`KIVRA_DB_USER`、`KIVRA_DB_PASSWORD`（既定はプレースホルダ）。JDBC URL の `time_zone='+00:00'` は UTC 固定のため残すこと。
 - 本番では、アプリ用（`KIVRA_DB_USER` / `KIVRA_DB_PASSWORD`、DML のみ）と migration 用（`KIVRA_DB_MIGRATION_USER` / `KIVRA_DB_MIGRATION_PASSWORD`、DDL 権限あり）を分けること。両方を設定すると、起動時の Flyway だけが migration 用で接続し、完了後に閉じる。JDBC URL は同じものを使う。
 - 任意: `PORT`（既定 8080）、`KIVRA_METRICS_ENABLED`（既定 `false`）。`true` にする場合は `KIVRA_METRICS_BEARER_TOKEN` も必須。
-- ヘルスチェック: `GET /health`（イメージの `HEALTHCHECK` も同じ）。
+- ヘルスチェック: `GET /health`（イメージの `HEALTHCHECK` も同じ）。DB に触れず常に 200 を返す（liveness 用）。
+- Readiness: `GET /ready` は DB に `SELECT 1`（既定 2 秒でタイムアウト、結果は 3 秒キャッシュ）を発行し、成功なら 200 `{"status":"ready"}`、失敗・タイムアウトなら 503 `{"status":"not_ready"}`。k8s の readinessProbe は `/ready`、livenessProbe は `/health` を使う（DB 障害で liveness が落ちてアプリが再起動を繰り返すのを避けるため）。
 - 本番の既定値: Recl への mutation は無効（`MutationCapability.DISABLED` / `ReclConfig.mutationsEnabled=false`）、Reaper の自動削除は無効（`autoDeleteEnabled=false`）。Replay について切り替え用の環境変数は無い。
 - CI/CD（`.github/workflows/cd.yml`）: PR はイメージのビルドと push のみ（`pr-<番号>-<sha>`）。main への push と main での手動実行は `main-<sha>` を push したうえで、dev のマニフェスト（`kigawa-net/kigawa-net-k8s` の `kivra/dev/kivra.yaml`）を更新する PR を作成する。テストは `ci.yml` が担当する。
 

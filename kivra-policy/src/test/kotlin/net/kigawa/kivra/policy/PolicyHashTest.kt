@@ -1,7 +1,5 @@
 package net.kigawa.kivra.policy
 
-import org.slf4j.Logger
-import java.lang.reflect.Proxy
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -126,24 +124,13 @@ class PolicyHashTest {
         }
     }
 
-    @Test fun logLoadedLogsOnlyTwelveHashCharsAndCount() {
-        val engine = PolicyEngine.parse(base)
-        val logged = mutableListOf<Pair<String, Array<Any?>>>()
-        val logger = Proxy.newProxyInstance(Logger::class.java.classLoader, arrayOf(Logger::class.java)) { _, method, args ->
-            if (method.name == "info") {
-                @Suppress("UNCHECKED_CAST")
-                logged += (args[0] as String) to (args.drop(1).toTypedArray() as Array<Any?>)
-            }
-            null
-        } as Logger
-
-        engine.logLoaded(logger)
-
-        assertEquals(1, logged.size)
-        val (format, params) = logged.single()
-        assertEquals("policy loaded: hash={} rules={}", format)
-        val rendered = format.replaceFirst("{}", params[0].toString()).replaceFirst("{}", params[1].toString())
-        assertEquals("policy loaded: hash=${engine.policyHash.take(12)} rules=3", rendered)
-        assertFalse(rendered.contains("kigawa-net") || rendered.contains("github") || rendered.contains("ns:prod"))
+    @Test fun logLineHasOnlyTwelveHashCharsAndCount() {
+        val engine = PolicyEngine.parse(base, fixedClock)
+        val line = engine.describe().logLine()
+        assertEquals("policy loaded: hash=${engine.policyHash.take(12)} rules=3", line)
+        assertEquals(12, line.substringAfter("hash=").substringBefore(" ").length)
+        listOf("fusha.comment", "github.pr.create", "k8s.apply", "kigawa-net", "ns:prod", "DEVELOPER").forEach {
+            assertFalse(line.contains(it), "log line must not expose rule contents: $line")
+        }
     }
 }

@@ -2,7 +2,6 @@ package net.kigawa.kivra.policy
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import org.slf4j.Logger
 import java.time.Clock
 import java.time.Instant
 
@@ -34,7 +33,13 @@ data class PolicyDescriptor(
     val policyHash: String,
     val ruleCount: Int,
     val loadedAt: Instant,
-)
+) {
+    /**
+     * 起動時のログ 1 行: ハッシュ先頭 12 桁と件数のみ(ルールの内容は含めない)。
+     * 配線時に起動時 1 回、呼び出し側のロガーで出す。`kivra-policy` はログ基盤に依存しない。
+     */
+    fun logLine(): String = "policy loaded: hash=${policyHash.take(12)} rules=$ruleCount"
+}
 
 /**
  * Static policy engine. Deny by default and fail-closed: anything not explicitly allowed, or that cannot
@@ -53,15 +58,6 @@ class PolicyEngine private constructor(rules: List<PolicyRule>, private val load
     fun verifyIntegrity(expectedHash: String): Boolean = PolicyHash.of(rules) == expectedHash
 
     fun describe(): PolicyDescriptor = PolicyDescriptor(POLICY_HASH_VERSION, policyHash, rules.size, loadedAt)
-
-    /**
-     * Logs one INFO line with the first 12 hex digits of the hash and the rule count (never the rule contents).
-     * Intended to be called once at startup, right after loading. Not wired into the application yet, because the
-     * Policy Gateway is not in production.
-     */
-    fun logLoaded(logger: Logger) {
-        logger.info("policy loaded: hash={} rules={}", policyHash.take(12), rules.size)
-    }
 
     fun evaluate(principal: Principal, action: String, resource: String): Decision {
         if (loadError != null) return Decision.Deny("policy unavailable (fail-closed): $loadError")

@@ -177,3 +177,18 @@ object AuditEventsTable : Table("audit_events") {
     val hash = char("hash", 64)
     override val primaryKey = PrimaryKey(eventId)
 }
+
+/** TaskBinding (V11, Issue #26). Written only by [DbRunAdmission]. */
+object TaskBindingsTable : Table("task_bindings") {
+    val provider = varchar("provider", 32)
+    val environment = varchar("environment", 64)
+    val taskId = varchar("task_id", 128)
+    val activeRunId = char("active_run_id", 26).nullable()
+    val generation = integer("generation").default(1)
+    val observedHash = varchar("observed_hash", 128).nullable()
+    val observedUpdatedAt = datetime("observed_updated_at").nullable()
+    val version = long("version").default(0)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(provider, environment, taskId)
+}

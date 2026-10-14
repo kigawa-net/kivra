@@ -24,6 +24,7 @@ import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
+import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -91,24 +92,37 @@ class DevelopmentRunRepository(
     fun create(taskId: String, actor: String, completionMode: RunCompletionMode, traceId: String? = null): DevelopmentRun {
         val runId = RunId(Ulid.generate(clock))
         try {
-            transaction(database) {
-                val now = utcNow(clock)
-                DevelopmentRunsTable.insert {
-                    it[DevelopmentRunsTable.runId] = runId.value
-                    it[DevelopmentRunsTable.taskId] = taskId
-                    it[state] = DevelopmentRunState.CREATED.name
-                    it[DevelopmentRunsTable.completionMode] = completionMode.name
-                    it[DevelopmentRunsTable.traceId] = traceId
-                    it[createdAt] = now
-                    it[updatedAt] = now
-                }
-                audit.append(this, runId, AuditEntry(actor = actor, action = "RUN_CREATED", result = "OK", resource = "task:$taskId", traceId = traceId))
-                outbox.append(this, runId, 0, "RunCreated", transitionPayload(taskId, null, DevelopmentRunState.CREATED), traceId)
-            }
+            transaction(database) { insertCreatedRun(this, runId, taskId, actor, completionMode, traceId) }
         } catch (e: ExposedSQLException) {
             if (e.isUniqueViolation()) throw DuplicateActiveRunException(taskId) else throw e
         }
         return get(runId)!!
+    }
+
+    /**
+     * The CREATED row with its RUN_CREATED audit and outbox event, inside the caller's transaction [tx]. Used by [create] and by
+     * [DbRunAdmission], so that a binding and its run are written together (Issue #26). Does not read back the row.
+     */
+    internal fun insertCreatedRun(
+        tx: Transaction,
+        runId: RunId,
+        taskId: String,
+        actor: String,
+        completionMode: RunCompletionMode,
+        traceId: String?,
+    ) = with(tx) {
+        val now = utcNow(clock)
+        DevelopmentRunsTable.insert {
+            it[DevelopmentRunsTable.runId] = runId.value
+            it[DevelopmentRunsTable.taskId] = taskId
+            it[state] = DevelopmentRunState.CREATED.name
+            it[DevelopmentRunsTable.completionMode] = completionMode.name
+            it[DevelopmentRunsTable.traceId] = traceId
+            it[createdAt] = now
+            it[updatedAt] = now
+        }
+        audit.append(this, runId, AuditEntry(actor = actor, action = "RUN_CREATED", result = "OK", resource = "task:$taskId", traceId = traceId))
+        outbox.append(this, runId, 0, "RunCreated", transitionPayload(taskId, null, DevelopmentRunState.CREATED), traceId)
     }
 
     fun get(runId: RunId): DevelopmentRun? = transaction(database) {

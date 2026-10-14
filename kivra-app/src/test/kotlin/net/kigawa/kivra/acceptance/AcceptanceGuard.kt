@@ -7,9 +7,12 @@ package net.kigawa.kivra.acceptance
  * Scope: what the code under test can read, not everything in the developer's shell. A variable is reported when its name
  * matches one of the following:
  * - prefix `KIVRA_` (except `KIVRA_TEST_`, the test database settings);
- * - prefixes of adapters that are not wired in yet, so they cannot slip in later: `ANTHROPIC_`, `EXKES_`, `OPENAI_`, `RECL_`,
- *   `FUSHA_`, `AI_SCHEDULER_`, `GITHUB_APP_`;
- * - the GitHub and Git credential names: `GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_PAT`, `GITHUB_PAT_TOKEN`, `GIT_TOKEN`.
+ * - prefixes of adapters that are not wired in yet, so they cannot slip in later: `ANTHROPIC_`, `OPENAI_`, `EXKES_`,
+ *   `RECL_`, `AI_SCHEDULER_`. (`FUSHA_` is not listed: Kivra reads `KIVRA_FUSHA_*`, and `FUSHA_*` belongs to developer tools.)
+ *
+ * GitHub credentials are not reported yet. The current `src/main` does not read any GitHub credential from the environment
+ * (checked with `git grep` on 2026-10-15). When a GitHub adapter is wired from environment variables, add its names
+ * (for example `GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_PAT_TOKEN`, `GITHUB_APP_*`) to the detection list in the same change.
  *
  * Basis (`git grep` over the src/main trees on 2026-10-15). The environment variables that production code reads are:
  * - `kivra-app/src/main/resources/application.conf` (`${?...}`): KIVRA_DB_JDBC_URL, KIVRA_DB_USER, KIVRA_DB_PASSWORD,
@@ -31,15 +34,14 @@ package net.kigawa.kivra.acceptance
 object AcceptanceGuard {
     private const val ALLOWED_PREFIX = "KIVRA_TEST_"
     private val forbiddenPrefixes = listOf(
-        "KIVRA_", "ANTHROPIC_", "EXKES_", "OPENAI_", "RECL_", "FUSHA_", "AI_SCHEDULER_", "GITHUB_APP_",
+        "KIVRA_", "ANTHROPIC_", "OPENAI_", "EXKES_", "RECL_", "AI_SCHEDULER_",
     )
-    private val forbiddenNames = setOf("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT", "GITHUB_PAT_TOKEN", "GIT_TOKEN")
 
     /** Names of variables in [env] that the acceptance tests must not see, sorted. Values are never included. */
     fun leakedNames(env: Map<String, String> = System.getenv()): List<String> =
         env.keys.filter { name ->
             !name.startsWith(ALLOWED_PREFIX) &&
-                (name in forbiddenNames || forbiddenPrefixes.any { name.startsWith(it) })
+                forbiddenPrefixes.any { name.startsWith(it) }
         }.sorted()
 
     /** Throws before any scenario runs when a production-scoped variable name is visible to the test JVM. */

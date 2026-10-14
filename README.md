@@ -20,6 +20,50 @@
 
 DB スキーマは `kivra-app/src/main/resources/db/migration/`（V1 コア、V2 照合証拠列・Outbox claim token・RunCompletionMode / PR 証拠列、V3 approvals（PR #55 / #33。M0 で取り込み済み）、V4 Evidence Authority 束縛列（#82。M0 でも追加済み））。Run の正本は `development_runs` の DevelopmentRun のみ（[ADR 0001](docs/adr/0001-run-source-of-truth.md)）。構文は MariaDB と H2 MODE=MySQL の両方で動くものに限定している。このブランチに V5 は含めない（PR #92 の V5 は別途）。マージ順は #43 → #55 → #86 で固定し、V4 適用済み DB への V3 後付けは行わない（Issue #88、fail-closed）。V2 は未マージのため編集中。マージ後は V5 以降のみ追加。
 
+## ローカルで試す（クイックスタート）
+
+`compose.dev.yml` で、HTTP API と MariaDB 11 を Docker だけで起動し、ダミーの投入 API を試す。JDK 21 も Gradle も不要（アプリのビルドは `Dockerfile` 内で行う）。
+
+**前提**: Docker と Docker Compose V2（`docker compose` サブコマンド）。`127.0.0.1:8080` が空いていること。初回はイメージのビルドと依存解決に数分かかる。以下はリポジトリのルートで実行する。
+
+```bash
+# 1. 起動（MariaDB と app の healthcheck が通るまで待つ。Flyway migration は app の起動時に実行される）
+docker compose -f compose.dev.yml up --build -d --wait
+
+# 2. ヘルスチェック
+curl -fsS http://localhost:8080/health
+# 想定応答: {"status":"ok"}
+
+# 3. ダミーのタスク一覧（SIMULATED。固定のデモ値）
+curl -fsS http://localhost:8080/api/dev/tasks
+# 想定応答: {"mode":"SIMULATED","tasks":[{"id":"demo-1","title":"Inspect a repository issue","state":"READY"},{"id":"demo-2","title":"Draft a review plan","state":"READY"}]}
+
+# 3'. ダミーのタスク投入（title は 1〜256 文字、idempotencyKey は 1〜128 文字）
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"title":"ローカル確認","idempotencyKey":"quickstart-1"}' \
+  http://localhost:8080/api/dev/tasks
+# 想定応答（HTTP 202）: {"runId":"<UUID>","title":"ローカル確認","state":"NOT_EXECUTED","mode":"SIMULATED"}
+# 同じ idempotencyKey と同じ title で再送すると同じ runId が返る（202）。同じキーで title が違えば 409。
+
+# 3''. 投入した Run の参照（上の runId を入れる）
+curl -fsS http://localhost:8080/api/dev/runs/<runId>
+# 想定応答（HTTP 200）: 投入時と同じ JSON。存在しない id は 404 {"error":"run not found"}
+
+# 4. 後片付け（DB のボリュームも削除する）
+docker compose -f compose.dev.yml down -v
+```
+
+### 何が動き、何が偽で、何が未接続か
+
+| 区分 | 内容 |
+|---|---|
+| 動く | HTTP API（`/health`、`/api/dev/*`）。MariaDB 11 の起動と Flyway migration（起動時に適用され、`development_runs` などのテーブルが作られる）。ダミー投入の冪等性（同じ idempotencyKey は同じ runId。ただし**プロセス内メモリ**のみで、再起動で消え、DB には書かない） |
+| 偽（SIMULATED） | `/api/dev/*` の一覧は固定のデモ値。投入された Run は `state: NOT_EXECUTED`、`mode: SIMULATED`。Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込みは一切行わない |
+| 未接続 | 実 Provider（fusha-task への接続、GitHub への書き込み、exkes での実行）、外部 LLM API、ローカル LLM（`kivra-model-gateway`）、予算管理、Memory（recl）。`kivra-app` はこれらのモジュールに依存していない、または dev 起動経路から呼ばれない（`KIVRA_FUSHA_*` も渡していない） |
+
+- **本番用の認証付き Task API（`/api/tasks`、OIDC）とは別物**。上記「Task API」節のとおり、そちらは MariaDB の `development_runs` に永続化する。この compose では `KIVRA_AUTH_MODE` が未設定なので Task API は登録されず、`/api/tasks` は 404 になる。
+- **`KIVRA_DEV_DEMO_ENABLED=true` を、サーバーやクラスタなどリモートの環境で有効にしないこと**。`/api/dev/*` には認証がなく、誰でも呼べる。`KIVRA_RUNTIME_ENV=development` 以外では起動に失敗する（「設定」節）。この compose はポートを `127.0.0.1` にだけ公開している。外部に公開するように変更しない。
+
 ## ビルド・テスト
 
 JDK 21 を使う（Gradle wrapper は 8.14。JDK 25 では動かない）。既定の `java` が 21 でなければ `JAVA_HOME` を明示する。

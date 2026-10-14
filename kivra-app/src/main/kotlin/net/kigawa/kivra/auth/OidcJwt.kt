@@ -66,7 +66,13 @@ class OidcJwtVerifier(
     fun asIdentity(): TaskApiIdentity = TaskApiIdentity { headers -> principal(headers) }
 
     suspend fun principal(headers: Headers): String? {
-        val token = bearerToken(headers) ?: return null
+        val token = bearerToken(headers)
+        if (token == null) {
+            // Why there is no usable token. Fixed names only, rate limited like every other rejection. This is the case
+            // where a logged-in browser's request reaches kivra without the access token (a proxy that does not forward it).
+            logRejection(missingTokenReason(headers))
+            return null
+        }
         // JWKS may be fetched over the network, so keep the blocking work off the Netty event loop.
         return withContext(Dispatchers.IO) {
             try {
@@ -145,6 +151,24 @@ class OidcJwtVerifier(
          * `X-Forwarded-Access-Token`. Null when the value is missing, is not a Bearer credential, or is not shaped like a
          * JWT (three dot-separated parts).
          */
+        /** A fixed name for why [bearerToken] found nothing. Never the header value. */
+        internal fun missingTokenReason(headers: Headers): String {
+            val authorization = headers[HttpHeaders.Authorization]
+            val token = if (authorization != null) {
+                val trimmed = authorization.trim()
+                if (!trimmed.startsWith("Bearer ", ignoreCase = true)) return "AuthorizationNotBearer"
+                trimmed.substring("Bearer ".length).trim()
+            } else {
+                headers["X-Forwarded-Access-Token"]?.trim()
+                    ?: return "NoAuthorizationAndNoForwardedToken"
+            }
+            return when {
+                token.isEmpty() -> "EmptyToken"
+                token.length > MAX_TOKEN_LENGTH -> "TokenTooLong"
+                else -> "TokenNotJwtShaped"
+            }
+        }
+
         internal fun bearerToken(headers: Headers): String? {
             val authorization = headers[HttpHeaders.Authorization]
             val token = if (authorization != null) {

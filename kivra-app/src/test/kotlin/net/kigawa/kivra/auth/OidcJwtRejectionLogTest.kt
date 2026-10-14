@@ -106,9 +106,31 @@ class OidcJwtRejectionLogTest {
         assertEquals(1, warnings().size, "throttle must be atomic under concurrent JWT failures")
     }
 
+    // One verifier for the whole test, like production (one instance is created at startup and shared by every request).
+    private val shared = OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks())
+
+    private fun principalOf(vararg headers: Pair<String, String>): String? = runBlocking {
+        shared.principal(headersOf(*headers.map { it.first to listOf(it.second) }.toTypedArray()))
+    }
+
     @Test
-    fun `a request without a token is not logged`() {
-        runBlocking { OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks()).principal(headersOf()) }
-        assertTrue(warnings().isEmpty(), "unauthenticated scanning must not fill the log")
+    fun `a request without any credential is logged once with a fixed reason, never the header value`() {
+        assertNull(principalOf())
+        assertEquals(1, warnings().size)
+        assertTrue(warnings().single().contains("reason=NoAuthorizationAndNoForwardedToken"), warnings().single())
+        // a flood of unauthenticated requests collapses into that one line
+        repeat(50) { principalOf() }
+        assertEquals(1, warnings().size, "scanning must not fill the log")
+    }
+
+    @Test
+    fun `missing-token reasons are named without leaking the header value`() {
+        assertNull(principalOf("Authorization" to "Basic dXNlcjpzZWNyZXQtcGFzc3dvcmQ="))
+        assertNull(principalOf("X-Forwarded-Access-Token" to "not-a-jwt-secret-value"))
+        val all = warnings().joinToString("\n")
+        assertTrue(all.contains("reason=AuthorizationNotBearer"), all)
+        assertTrue(all.contains("reason=TokenNotJwtShaped"), all)
+        assertFalse(all.contains("dXNlcjpzZWNyZXQ"), "Authorization value must not be logged")
+        assertFalse(all.contains("not-a-jwt-secret-value"), "forwarded token value must not be logged")
     }
 }

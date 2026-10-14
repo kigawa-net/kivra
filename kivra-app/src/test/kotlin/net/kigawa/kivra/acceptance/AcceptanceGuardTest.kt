@@ -6,6 +6,10 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+/**
+ * The guard reports only names that Kivra's code can read (see [AcceptanceGuard]). The unrelated developer secrets below pass
+ * on purpose: they are not read by Kivra, so failing on them would only make local runs fail.
+ */
 class AcceptanceGuardTest {
     private val githubActions = mapOf(
         "GITHUB_ACTIONS" to "true", "GITHUB_REPOSITORY" to "kigawa-net/kivra", "GITHUB_SHA" to "0".repeat(40),
@@ -20,30 +24,41 @@ class AcceptanceGuardTest {
     }
 
     @Test
-    fun `unknown GITHUB_ variables and test database settings are allowed`() {
-        assertEquals(emptyList(), AcceptanceGuard.leakedNames(mapOf("GITHUB_NEW_THING" to "x", "KIVRA_TEST_DB" to "mariadb", "KIVRA_TEST_MARIADB_PASSWORD" to "y")))
+    fun `unrelated developer secrets pass because Kivra does not read them`() {
+        val shell = mapOf(
+            "BWS_ACCESS_TOKEN" to "v1", "CLOUDFLARE_API_TOKEN" to "v2", "OP_SERVICE_ACCOUNT_TOKEN" to "v3",
+            "KUTIL_SSH_KEY" to "v4", "AWS_SECRET_ACCESS_KEY" to "v5", "CLAUDE_CODE_MESSAGING_TOKEN" to "v6",
+        )
+        assertEquals(emptyList(), AcceptanceGuard.leakedNames(shell + githubActions))
+        AcceptanceGuard.require(shell)
     }
 
     @Test
-    fun `secret-looking names are reported whatever their prefix`() {
-        val env = mapOf("GITHUB_PAT_TOKEN" to "v1", "GITHUB_TOKEN" to "v2", "ANTHROPIC_API_KEY" to "v3", "EXKES_TOKEN" to "v4",
-            "KIVRA_DB_PASSWORD" to "v5", "OPENAI_API_KEY" to "v6", "GITHUB_ACTIONS" to "true")
+    fun `test database settings are allowed`() {
+        assertEquals(emptyList(), AcceptanceGuard.leakedNames(mapOf("KIVRA_TEST_DB" to "mariadb", "KIVRA_TEST_MARIADB_PASSWORD" to "y")))
+    }
+
+    @Test
+    fun `production-scoped names are reported`() {
+        val env = mapOf(
+            "KIVRA_DB_PASSWORD" to "v1", "KIVRA_FOO" to "v2", "ANTHROPIC_API_KEY" to "v3", "OPENAI_API_KEY" to "v4",
+            "EXKES_URL" to "v5", "GITHUB_TOKEN" to "v6", "GH_TOKEN" to "v7", "GITHUB_PAT_TOKEN" to "v8",
+            "GITHUB_APP_PRIVATE_KEY" to "v9", "RECL_ENDPOINT" to "v10", "FUSHA_TOKEN" to "v11", "AI_SCHEDULER_URL" to "v12",
+        )
         assertEquals(
-            listOf("ANTHROPIC_API_KEY", "EXKES_TOKEN", "GITHUB_PAT_TOKEN", "GITHUB_TOKEN", "KIVRA_DB_PASSWORD", "OPENAI_API_KEY"),
+            listOf(
+                "AI_SCHEDULER_URL", "ANTHROPIC_API_KEY", "EXKES_URL", "FUSHA_TOKEN", "GH_TOKEN", "GITHUB_APP_PRIVATE_KEY",
+                "GITHUB_PAT_TOKEN", "GITHUB_TOKEN", "KIVRA_DB_PASSWORD", "KIVRA_FOO", "OPENAI_API_KEY", "RECL_ENDPOINT",
+            ),
             AcceptanceGuard.leakedNames(env),
         )
     }
 
     @Test
-    fun `service-prefixed production settings are reported even when not secret-looking`() {
-        assertEquals(listOf("EXKES_URL", "KIVRA_FOO"), AcceptanceGuard.leakedNames(mapOf("KIVRA_FOO" to "a", "EXKES_URL" to "b", "PATH" to "/bin")))
-    }
-
-    @Test
-    fun `the guard fails for a secret and does not print its value`() {
+    fun `the guard fails for a production name and does not print its value`() {
         val secret = "super-secret-value-123"
-        val e = assertFailsWith<IllegalStateException> { AcceptanceGuard.require(githubActions + mapOf("GITHUB_PAT_TOKEN" to secret)) }
-        assertTrue(e.message.orEmpty().contains("GITHUB_PAT_TOKEN"))
+        val e = assertFailsWith<IllegalStateException> { AcceptanceGuard.require(githubActions + mapOf("KIVRA_DB_PASSWORD" to secret)) }
+        assertTrue(e.message.orEmpty().contains("KIVRA_DB_PASSWORD"))
         assertFalse(e.message.orEmpty().contains(secret))
     }
 

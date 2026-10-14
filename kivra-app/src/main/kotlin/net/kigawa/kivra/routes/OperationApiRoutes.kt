@@ -4,6 +4,8 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.EvidenceAuthorityUnavailableException
@@ -29,6 +31,7 @@ import org.jetbrains.exposed.sql.Database
  * The state is passed through as the journal's own name. UNKNOWN and RECONCILIATION_REQUIRED are not mapped to a success
  * or completed value. Tokens, request hashes, external refs, raw provider errors and Evidence data are not included.
  */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class OperationListResponse(
     val schemaVersion: String = "ui.v1",
@@ -38,6 +41,12 @@ data class OperationListResponse(
     val limit: Int,
     /** True when the Run has more operations than [limit]; the rest are not returned. */
     val truncated: Boolean,
+    /**
+     * Cursor for the next page, present only when [truncated] is true. Pass it back as `?after=`. Omitted otherwise
+     * (EncodeDefault.NEVER keeps the key out of the JSON when it is null).
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val nextAfter: String? = null,
 )
 
 @Serializable
@@ -58,6 +67,9 @@ private data class OperationApiError(val error: String)
 
 /** Maximum operations returned per Run. Operations are ordered by operationId (ULID, so creation order). */
 internal const val MAX_OPERATIONS_PER_RUN = 100
+
+/** A cursor is an operationId: a 26-char ULID. Anything else is rejected before it reaches the database. */
+private val CURSOR_PATTERN = Regex("[0-9A-Za-z]{26}")
 
 internal fun JournalEntry.toOperationSummary(): OperationSummaryResponse = OperationSummaryResponse(
     operationId = opId,
@@ -110,13 +122,20 @@ internal fun Route.configureOperationApiRoutes(
             call.respond(HttpStatusCode.NotFound, OperationApiError("run not found"))
             return@get
         }
-        val all = operations.listByRun(runId)
+        // Checked after the owner check, so a bad cursor never tells a non-owner anything beyond the same 404.
+        val after = call.request.queryParameters["after"]
+        if (after != null && !CURSOR_PATTERN.matches(after)) {
+            call.respond(HttpStatusCode.BadRequest, OperationApiError("invalid after"))
+            return@get
+        }
+        val page = operations.listByRun(runId, limit = MAX_OPERATIONS_PER_RUN, afterOpId = after)
         call.respond(
             OperationListResponse(
                 runId = runId.value,
-                operations = all.take(MAX_OPERATIONS_PER_RUN).map { it.toOperationSummary() },
+                operations = page.items.map { it.toOperationSummary() },
                 limit = MAX_OPERATIONS_PER_RUN,
-                truncated = all.size > MAX_OPERATIONS_PER_RUN,
+                truncated = page.hasMore,
+                nextAfter = if (page.hasMore) page.items.last().opId else null,
             ),
         )
     }

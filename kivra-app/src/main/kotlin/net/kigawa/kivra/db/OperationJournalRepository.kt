@@ -17,6 +17,8 @@ import net.kigawa.kivra.core.canTransitionTo
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
@@ -52,6 +54,12 @@ internal fun Transaction.sweepStaleInFlight(lease: Lease, clock: Clock): Int {
     }
     return swept
 }
+
+/** Upper bound for [OperationJournalRepository.listByRun]'s `limit`. */
+const val MAX_LIST_LIMIT = 1000
+
+/** One page from [OperationJournalRepository.listByRun]. [hasMore] is true when operations follow [items]. */
+data class OperationPage(val items: List<JournalEntry>, val hasMore: Boolean)
 
 data class JournalEntry(
     val opId: String,
@@ -553,10 +561,33 @@ class OperationJournalRepository(
         ExternalOperationsTable.selectAll().where { ExternalOperationsTable.opId eq opId }.firstOrNull()?.toEntry()
     }
 
-    /** All operations of a run, in ULID order. Read-only, needs no lease. */
+    /** All operations of a run, in ULID order. Read-only, needs no lease. Unbounded: use the paged overload for API reads. */
     fun listByRun(runId: RunId): List<JournalEntry> = transaction(database) {
         ExternalOperationsTable.selectAll().where { ExternalOperationsTable.runId eq runId.value }
             .orderBy(ExternalOperationsTable.opId).map { it.toEntry() }
+    }
+
+    /**
+     * One page of a run's operations in ULID order (`opId` ascending), read-only, needs no lease.
+     *
+     * At most [limit] entries are returned. [afterOpId] is the cursor: only operations with `opId > afterOpId` are
+     * returned, so the next page starts with the operation after the last entry of the previous page. [OperationPage.hasMore]
+     * is true when at least one more operation follows the page. The SQL fetches `limit + 1` rows so that check needs no
+     * second query.
+     *
+     * @throws IllegalArgumentException if [limit] is outside 1..[MAX_LIST_LIMIT].
+     */
+    fun listByRun(runId: RunId, limit: Int, afterOpId: String? = null): OperationPage {
+        require(limit in 1..MAX_LIST_LIMIT) { "limit must be in 1..$MAX_LIST_LIMIT" }
+        return transaction(database) {
+            val byRun = ExternalOperationsTable.runId eq runId.value
+            val condition = if (afterOpId == null) byRun else byRun and (ExternalOperationsTable.opId greater afterOpId)
+            val rows = ExternalOperationsTable.selectAll().where { condition }
+                .orderBy(ExternalOperationsTable.opId)
+                .limit(limit + 1)
+                .map { it.toEntry() }
+            OperationPage(items = rows.take(limit), hasMore = rows.size > limit)
+        }
     }
 
     fun findByKey(runId: RunId, opType: String, idempotencyKey: String): JournalEntry? = transaction(database) {

@@ -639,4 +639,43 @@ class OperationJournalRepositoryTest {
         db.journal.transition(newLease, adopted.opId, adopted.version, OperationStatus.IN_FLIGHT)
         assertEquals(1, db.count("external_operations"))
     }
+
+    @Test
+    fun `paged listByRun reports hasMore at the page boundary and the full listByRun is unchanged`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val ids = (1..25).map { db.journal.prepare(lease, op(key = "page-$it")).opId }
+        val first = db.journal.listByRun(lease.runId, limit = 10)
+        assertEquals(10, first.items.size)
+        assertTrue(first.hasMore)
+        val exact = db.journal.listByRun(lease.runId, limit = 25)
+        assertEquals(25, exact.items.size)
+        assertFalse(exact.hasMore)
+        assertEquals(25, db.journal.listByRun(lease.runId, limit = 1000).items.size)
+        assertEquals(ids.sorted(), db.journal.listByRun(lease.runId).map { it.opId })
+    }
+
+    @Test
+    fun `paged listByRun walks every operation once, in order, inside its own run`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        val other = db.leasedRun()
+        val ids = (1..150).map { db.journal.prepare(lease, op(key = "walk-$it")).opId }
+        repeat(5) { db.journal.prepare(other, op(key = "other-$it")) }
+
+        val seen = mutableListOf<JournalEntry>()
+        var after: String? = null
+        do {
+            val page = db.journal.listByRun(lease.runId, limit = 40, afterOpId = after)
+            seen += page.items
+            after = page.items.lastOrNull()?.opId
+        } while (page.hasMore)
+        assertEquals(ids.sorted(), seen.map { it.opId })
+        assertTrue(seen.all { it.runId == lease.runId })
+    }
+
+    @Test
+    fun `paged listByRun refuses a limit outside 1 to MAX_LIST_LIMIT`() = TestDb().use { db ->
+        val lease = db.leasedRun()
+        assertFailsWith<IllegalArgumentException> { db.journal.listByRun(lease.runId, limit = 0) }
+        assertFailsWith<IllegalArgumentException> { db.journal.listByRun(lease.runId, limit = MAX_LIST_LIMIT + 1) }
+    }
 }

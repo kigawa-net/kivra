@@ -248,4 +248,117 @@ class PolicyGatewayTest {
         assertTrue(globMatches("a.*", "a.b.c")); assertTrue(globMatches("*", "")); assertFalse(globMatches("a.*", "b.a"))
         assertTrue(globMatches("a*c*e", "abcde")); assertFalse(globMatches("ab*bc", "abc"))
     }
+
+    // --- acceptance review (#32): Forbidden, self-approval, digest, traversal, HIGH, audit, determinism ---
+
+    @Test fun forbiddenActionsDeniedEvenWithValidApproval() {
+        val g = gateway()
+        for (a in listOf("approval.grant", "approval.issue", "approval.approve", "policy.update", "audit.delete", "safety.disable")) {
+            approvalDigests["ap-$a"] = OperationDigest.of(dev, CanonicalCommand.of(a, "x"))
+            assertIs<ToolResult.Denied>(g.call(req(a, approval = "ap-$a")), a)
+        }
+        assertTrue(executed.isEmpty())
+        assertTrue(consumed.isEmpty(), "an approval must never be consumed for a Forbidden action")
+    }
+
+    @Test fun agentSelfIssuedApprovalIsRejected() {
+        val g = gateway()
+        val need = assertIs<ToolResult.ApprovalRequired>(g.call(apply("prod")))
+        // An approval whose approver is the requesting agent itself must not validate (four-eyes).
+        val selfApproved = ApprovalBinding("ap-self", need.digest, requesterAgentId = "agentA", approverId = "agentA", expiresAtEpochSec = 100)
+        val g2 = ToolGateway({ dev }, { _, _ -> true }, PolicyEngine.parse(policy), { id, d, _ -> selfApproved.approvalId == id && selfApproved.isValidFor(d, 1) }, { audits += it; true }, bindings())
+        assertIs<ToolResult.Denied>(g2.call(apply("prod", approval = "ap-self")))
+        // An approval id the agent invents (not known to the approval service) is rejected.
+        assertIs<ToolResult.Denied>(g.call(apply("prod", approval = "invented-by-agent")))
+        assertTrue(executed.isEmpty())
+    }
+
+    @Test fun approvalDigestDependsOnRunAgentAndEveryArgButNotArgOrder() {
+        val cmd = { extra: Map<String, String> -> CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a") + extra) }
+        val base = OperationDigest.of(dev, cmd(emptyMap()))
+        assertEquals(base, OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", linkedMapOf("manifest" to "a", "namespace" to "prod"))), "argument order must not matter")
+        assertNotEquals(base, OperationDigest.of(dev.copy(runId = "run2"), cmd(emptyMap())), "approval must not transfer across runs")
+        assertNotEquals(base, OperationDigest.of(dev.copy(agentId = "agentB"), cmd(emptyMap())), "approval must not transfer across agents")
+        assertNotEquals(base, OperationDigest.of(dev, cmd(mapOf("role" to "ORCHESTRATOR"))), "optional params are part of the digest")
+    }
+
+    @Test fun traversalSegmentsCannotEscapeAllowedResourceGlob() {
+        val g = gateway()
+        // "repo:kigawa-net/*" must not be satisfied by a path that climbs out of kigawa-net.
+        for (repo in listOf("kigawa-net/../other-org/private", "kigawa-net/./../other-org", "../other-org/x")) {
+            assertIs<ToolResult.Denied>(g.call(pr(repo, hint = "repo:kigawa-net/a")), repo)
+        }
+        assertTrue(executed.isEmpty())
+        assertFailsWith<IllegalArgumentException> { CanonicalCommand.of("github.pr.create", "repo:kigawa-net/../x") }
+    }
+
+    @Test fun highRiskOperationsNeverRunWithoutValidApproval() {
+        val p = PolicyEngine.parse("""{"rules":[
+          {"action":"github.pr.merge","resource":"repo:kigawa-net/*","roles":["DEVELOPER"],"risk":"HIGH"},
+          {"action":"github.secret.read","resource":"*","roles":["DEVELOPER"],"risk":"HIGH"},
+          {"action":"github.external.write","resource":"*","roles":["DEVELOPER"],"risk":"HIGH"}]}""")
+        val binds = listOf("github.pr.merge", "github.secret.read", "github.external.write").associateWith { a ->
+            ToolBinding(CommandDecoder { r -> CanonicalCommand.of(a, r.resource) }, ToolHandler { _, cmd -> executed += cmd.action; "ok" })
+        }
+        val g = gateway(p, binds)
+        val target = "repo:kigawa-net/x"
+        for (a in binds.keys) {
+            val need = assertIs<ToolResult.ApprovalRequired>(g.call(req(a, target)), a)
+            assertEquals(RiskClass.HIGH, need.risk)
+            assertIs<ToolResult.Denied>(g.call(req(a, target, approval = "nope")), a)
+        }
+        assertTrue(executed.isEmpty())
+        assertTrue(consumed.isEmpty())
+        val merge = assertIs<ToolResult.ApprovalRequired>(g.call(req("github.pr.merge", target)))
+        approvalDigests["m"] = merge.digest
+        assertIs<ToolResult.Success>(g.call(req("github.pr.merge", target, approval = "m")))
+        assertEquals(listOf("github.pr.merge"), executed)
+    }
+
+    @Test fun roleNotInRuleIsDeniedWhileGrantedRoleIsAllowed() {
+        val reviewer = dev.copy(role = Role.REVIEWER, scopes = setOf("github.*", "fusha.*"))
+        val g = ToolGateway({ reviewer }, { _, _ -> true }, PolicyEngine.parse(policy), { _, _, _ -> false }, { audits += it; true }, bindings())
+        assertIs<ToolResult.Success>(g.call(req("fusha.comment")))
+        assertIs<ToolResult.Denied>(g.call(pr("kigawa-net/a")))
+    }
+
+    @Test fun everyDecisionIsAuditedAndNoSecretLeaks() {
+        val token = "tok-SECRET-9f3a"
+        val secretArg = "SECRET-ARG-77"
+        val g = ToolGateway({ if (it == token) dev else null }, { _, _ -> active }, PolicyEngine.parse(policy),
+            { id, d, _ -> approvalDigests[id] == d && consumed.add(id) }, { audits += it; true }, bindings())
+        val results = mutableListOf<ToolResult>()
+        results += g.call(ToolRequest("tok-WRONG", "fusha.comment", "x"))                                              // invalid token
+        results += g.call(ToolRequest(token, "github.issue.close", "x", mapOf("body" to secretArg)))                    // unknown action
+        results += g.call(ToolRequest(token, "github.pr.create", "repo:kigawa-net/a",                                    // undecodable params
+            mapOf("repository" to "kigawa-net/a", "extra" to secretArg)))
+        results += g.call(ToolRequest(token, "fusha.comment", "x", mapOf("body" to secretArg)))                         // allowed
+        active = false
+        results += g.call(ToolRequest(token, "fusha.comment", "x"))                                                     // run not active
+        active = true
+        assertIs<ToolResult.Success>(results[3])
+        for (i in listOf(0, 1, 2, 4)) assertIs<ToolResult.Denied>(results[i], "case $i")
+        assertEquals(4, audits.count { it.outcome == AuditOutcome.DENIED }, "every denial must be audited")
+        assertEquals(listOf(AuditOutcome.INTENT_ALLOWED, AuditOutcome.EXECUTED), audits.filter { it.action == "fusha.comment" && it.outcome != AuditOutcome.DENIED }.map { it.outcome })
+        val visible = results.map { it.toString() } + audits.map { it.toString() }
+        for (s in visible) {
+            assertFalse(s.contains(token), "token leaked")
+            assertFalse(s.contains(secretArg), "argument secret leaked")
+        }
+    }
+
+    @Test fun decisionIsDeterministicAndIndependentOfRuleOrder() {
+        val forward = """{"rules":[
+          {"action":"github.pr.create","resource":"repo:kigawa-net/*","roles":["DEVELOPER"],"risk":"HIGH"},
+          {"action":"github.pr.create","resource":"*","roles":["DEVELOPER"],"risk":"LOW"}]}"""
+        val reversed = """{"rules":[
+          {"action":"github.pr.create","resource":"*","roles":["DEVELOPER"],"risk":"LOW"},
+          {"action":"github.pr.create","resource":"repo:kigawa-net/*","roles":["DEVELOPER"],"risk":"HIGH"}]}"""
+        val a = PolicyEngine.parse(forward).evaluate(dev, "github.pr.create", "repo:kigawa-net/x")
+        val b = PolicyEngine.parse(reversed).evaluate(dev, "github.pr.create", "repo:kigawa-net/x")
+        assertEquals(a, b)
+        assertIs<Decision.RequireApproval>(a, "the most restrictive matching rule must win")
+        val engine = PolicyEngine.parse(forward)
+        repeat(20) { assertEquals(a, engine.evaluate(dev, "github.pr.create", "repo:kigawa-net/x")) }
+    }
 }

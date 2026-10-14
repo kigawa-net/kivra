@@ -65,6 +65,8 @@ class CanonicalCommand private constructor(
         fun of(action: String, resource: String, args: Map<String, String> = emptyMap()): CanonicalCommand {
             require(action.isNotBlank()) { "blank action" }
             require(resource.isNotBlank() && resource.none { it.isWhitespace() || it.isISOControl() }) { "invalid canonical resource" }
+            // Dot segments would let a path climb out of an allowed glob (e.g. "repo:org/../other" matching "repo:org/*").
+            require(resource.substringAfter(':', resource).split('/').none { it == "." || it == ".." }) { "dot segment in canonical resource" }
             return CanonicalCommand(action, resource, java.util.Collections.unmodifiableMap(java.util.TreeMap(args)))
         }
     }

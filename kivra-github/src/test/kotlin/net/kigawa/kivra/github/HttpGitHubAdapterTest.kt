@@ -447,6 +447,66 @@ class HttpGitHubAdapterTest {
     }
 
     @Test
+    fun `GET redirects of every 3xx status are REDIRECT failures and no request follows the Location`() = runTest {
+        val statuses = listOf(
+            HttpStatusCode.MovedPermanently,
+            HttpStatusCode.Found,
+            HttpStatusCode.SeeOther,
+            HttpStatusCode.TemporaryRedirect,
+            HttpStatusCode.PermanentRedirect,
+        )
+        for (status in statuses) {
+            val f = Fake { respond("", status, headersOf(HttpHeaders.Location, "https://evil.example/steal")) }
+            val r = assertIs<GitHubResult.Failure>(f.adapter.getPullRequest(REPO, 7))
+            assertEquals(GitHubFailureKind.REDIRECT, r.kind, "status $status")
+            assertEquals(1, f.requests.size, "status $status")
+            assertTrue(f.requests.all { it.url.host == "api.github.com" }, "status $status")
+        }
+    }
+
+    @Test
+    fun `non-2xx responses are sent once and never retried, and POST 401 only invalidates the token`() = runTest {
+        val g = Fake { respond("{}", HttpStatusCode.TooManyRequests, headersOf(HttpHeaders.RetryAfter, "5")) }
+        val rl = assertIs<GitHubResult.Failure>(g.adapter.getPullRequest(REPO, 7))
+        assertEquals(GitHubFailureKind.RATE_LIMITED, rl.kind)
+        assertEquals(5L, rl.retryAfterSeconds)
+        assertEquals(1, g.requests.size, "a GET 429 must not be retried by the adapter")
+
+        for (status in listOf(HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden, HttpStatusCode.TooManyRequests, HttpStatusCode.UnprocessableEntity)) {
+            val f = Fake { respond("""{"message":"Validation Failed"}""", status, JSON_H) }
+            assertIs<GitHubResult.Failure>(f.adapter.createPullRequest(REPO, CREATE), "status $status")
+            assertEquals(1, f.count(HttpMethod.Post), "status $status")
+            assertEquals(1, f.requests.size, "status $status")
+        }
+        val unauthorized = Fake { respond("{}", HttpStatusCode.Unauthorized, JSON_H) }
+        unauthorized.adapter.createBranch(REPO, "kivra/run-r1", SHA)
+        assertEquals(1, unauthorized.tokens.invalidations)
+        assertEquals(1, unauthorized.requests.size)
+    }
+
+    @Test
+    fun `a bearer token carried by a token provider or engine failure never reaches a result`() = runTest {
+        val token = "ghs_SECRET-TOKEN-VALUE"
+        val engineLeak = HttpGitHubAdapter(
+            githubHttpClient(MockEngine { throw IOException("Authorization: Bearer $token") }),
+            object : TokenProvider { override suspend fun token() = token },
+            backoff = {},
+        )
+        val unknown = assertIs<GitHubResult.Unknown>(engineLeak.createBranch(REPO, "kivra/run-r1", SHA))
+        assertFalse(unknown.toString().contains(token))
+        assertFalse(unknown.cause.contains(token))
+
+        val minterLeak = HttpGitHubAdapter(
+            githubHttpClient(MockEngine { respond("", HttpStatusCode.OK, JSON_H) }),
+            object : TokenProvider { override suspend fun token(): String = throw IllegalStateException("mint failed: $token") },
+            backoff = {},
+        )
+        val failure = assertIs<GitHubResult.Failure>(minterLeak.getPullRequest(REPO, 7))
+        assertFalse(failure.toString().contains(token))
+        assertFalse(failure.message.contains(token))
+    }
+
+    @Test
     fun `rsa signer produces a three part jwt`() {
         val kp = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
         val pem = "-----BEGIN PRIVATE KEY-----\n" + java.util.Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(kp.private.encoded) + "\n-----END PRIVATE KEY-----"

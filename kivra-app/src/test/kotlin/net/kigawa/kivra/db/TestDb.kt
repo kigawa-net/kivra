@@ -18,7 +18,7 @@ class TestDb(
     /** Applies the schema before the repositories are connected. Default: the full classpath migration chain. */
     private val migrate: (DataSource) -> Unit = ::runMigrations,
 ) : AutoCloseable {
-    private val schema: String? = if (isMariaDb) "kivra_t_${System.nanoTime()}" else null
+    internal val schema: String? = if (isMariaDb) "kivra_t_${System.nanoTime()}" else null
     val dataSource: DataSource
 
     init {

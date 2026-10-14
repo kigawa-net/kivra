@@ -1,0 +1,120 @@
+package net.kigawa.kivra.db
+
+import java.nio.file.Files
+import java.nio.file.Paths
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+/**
+ * Static Expand-only check (Issue #88, acceptance: old Writers keep working while the new schema is applied).
+ *
+ * The migrations are read from the classpath and scanned for statements that break a Writer built against the previous
+ * schema: dropping, renaming, or retyping an existing column or table, deleting rows, and adding a NOT NULL column without
+ * a DEFAULT (an old INSERT that does not name the column then fails). Such a change needs a Contract step after every
+ * Writer is gone, so it is refused here unless it is listed in [KNOWN_CONTRACT_REQUIRED] with a reason.
+ *
+ * The scan is a conservative text check, not a SQL parser: comments are stripped, statements are split on `;`.
+ */
+class MigrationExpandOnlyTest {
+
+    @Test
+    fun `every migration is expand-only, except the listed changes that already need a Contract step`() {
+        val files = migrationFiles()
+        assertEquals((1..files.size).toList(), files.keys.toList(), "migration versions must be contiguous from V1")
+
+        val found = files.flatMap { (version, sql) -> expandViolations(version, sql) }.toSet()
+
+        val unexpected = found - KNOWN_CONTRACT_REQUIRED.keys
+        assertTrue(unexpected.isEmpty(), "non-expand changes (refused unless listed with a reason): $unexpected")
+        // A listed exception that no longer matches is stale: remove it from the list so it cannot hide a later change.
+        val stale = KNOWN_CONTRACT_REQUIRED.keys - found
+        assertTrue(stale.isEmpty(), "allowlist entries that no migration contains any more: $stale")
+    }
+
+    @Test
+    fun `the detector flags every forbidden form and accepts additive ones`() {
+        val forbidden = listOf(
+            "ALTER TABLE external_operations DROP COLUMN request_hash;",
+            "DROP TABLE audit_events;",
+            "ALTER TABLE outbox_events RENAME COLUMN claimed_by TO claimer;",
+            "RENAME TABLE agents TO agents_old;",
+            "ALTER TABLE development_runs MODIFY COLUMN task_id VARCHAR(255) NOT NULL;",
+            "ALTER TABLE development_runs CHANGE COLUMN task_id task_ref VARCHAR(128) NULL;",
+            "ALTER TABLE development_runs ALTER COLUMN task_id SET DATA TYPE VARCHAR(255);",
+            "TRUNCATE TABLE outbox_events;",
+            "DELETE FROM outbox_events WHERE state = 'DONE';",
+            "ALTER TABLE development_runs ADD COLUMN flag BOOLEAN NOT NULL;",
+        )
+        for (sql in forbidden) {
+            assertTrue(expandViolations(99, sql).isNotEmpty(), "should be flagged: $sql")
+        }
+
+        val additive = listOf(
+            "ALTER TABLE development_runs ADD COLUMN flag BOOLEAN NULL;",
+            "ALTER TABLE development_runs ADD COLUMN flag BOOLEAN NOT NULL DEFAULT FALSE;",
+            "CREATE TABLE t (id INT NOT NULL, PRIMARY KEY (id));",
+            "CREATE UNIQUE INDEX uk_x ON development_runs (task_id, principal);",
+            "-- DROP COLUMN in a comment is not a statement\nALTER TABLE development_runs ADD COLUMN flag INT NULL;",
+        )
+        for (sql in additive) {
+            assertEquals(emptyList(), expandViolations(99, sql), "should be accepted: $sql")
+        }
+    }
+
+    private fun migrationFiles(): Map<Int, String> {
+        val dir = Paths.get(requireNotNull(TestDb::class.java.classLoader.getResource("db/migration")) { "db/migration is missing" }.toURI())
+        return Files.list(dir).use { stream ->
+            stream.toList()
+                .mapNotNull { path ->
+                    val m = Regex("""V(\d+)__.*\.sql""").matchEntire(path.fileName.toString()) ?: return@mapNotNull null
+                    m.groupValues[1].toInt() to Files.readString(path)
+                }
+                .sortedBy { it.first }
+                .toMap()
+        }
+    }
+
+    companion object {
+        /**
+         * Changes that are not Expand-only, with the reason. Each key is `V<n>:<what>` as produced by [expandViolations].
+         * Adding an entry here is a decision: the old Writer must be drained first, or the change reworked to be additive.
+         */
+        val KNOWN_CONTRACT_REQUIRED: Map<String, String> = mapOf(
+            "V2:ADD NOT NULL development_runs.completion_mode" to
+                "NOT NULL without DEFAULT. A pre-V2 Writer INSERT into development_runs does not name this column, so on MariaDB " +
+                "(strict mode) it fails with ERROR 1364 once V2 is applied. The old Writer must be drained before V2, or the column " +
+                "needs a DEFAULT (V2 is the one unmerged migration that is edited in place, so this is still open).",
+        )
+    }
+}
+
+/**
+ * Returns the forbidden or non-additive statements of [sql] as `V<version>:<what>` keys. Comments (`--`) are removed first.
+ */
+internal fun expandViolations(version: Int, sql: String): List<String> {
+    val withoutComments = sql.lines().joinToString("\n") { it.substringBefore("--") }
+    return withoutComments.split(';')
+        .map { it.trim().replace(Regex("\\s+"), " ").uppercase() }
+        .filter { it.isNotEmpty() }
+        .mapNotNull { statement -> violationOf(statement)?.let { "V$version:$it" } }
+}
+
+private val ADD_COLUMN = Regex("""ALTER TABLE (\w+) ADD (?:COLUMN )?(\w+) (.*)""")
+
+private fun violationOf(s: String): String? {
+    if (Regex("""\bDROP\b""").containsMatchIn(s)) return "DROP ($s)"
+    if (Regex("""\bRENAME\b""").containsMatchIn(s)) return "RENAME ($s)"
+    if (Regex("""\bMODIFY\b""").containsMatchIn(s)) return "MODIFY ($s)"
+    if (Regex("""\bCHANGE (COLUMN )?\w+ \w+""").containsMatchIn(s)) return "CHANGE ($s)"
+    if (Regex("""\bALTER COLUMN\b""").containsMatchIn(s) || s.contains("SET DATA TYPE")) return "ALTER COLUMN type ($s)"
+    if (Regex("""\bTRUNCATE\b""").containsMatchIn(s) || s.startsWith("DELETE FROM")) return "DELETE rows ($s)"
+    val add = ADD_COLUMN.matchEntire(s)
+    if (add != null) {
+        val (table, column, definition) = add.destructured
+        val notNull = Regex("""\bNOT NULL\b""").containsMatchIn(definition)
+        val hasDefault = Regex("""\bDEFAULT\b""").containsMatchIn(definition)
+        if (notNull && !hasDefault) return "ADD NOT NULL ${table.lowercase()}.${column.lowercase()}"
+    }
+    return null
+}

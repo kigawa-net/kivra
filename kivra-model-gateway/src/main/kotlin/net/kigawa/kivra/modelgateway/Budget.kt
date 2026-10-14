@@ -41,11 +41,37 @@ object BudgetDenial {
     const val BUDGET_POLICY_MISSING = "BUDGET_POLICY_MISSING"
     /** Price unknown, currency/unit not comparable, or unpriced usage already recorded. Never admitted. */
     const val UNKNOWN_COST = "UNKNOWN_COST"
+    /** The budget store could not decide (I/O or database error). Fail closed: the call is not admitted. */
+    const val STORE_UNAVAILABLE = "BUDGET_STORE_UNAVAILABLE"
 }
 
 sealed interface ReserveResult {
     data object Reserved : ReserveResult
     data class Denied(val scopeId: String, val reason: String, val code: String = BudgetDenial.BUDGET) : ReserveResult
+}
+
+/**
+ * The budget operations the Model Gateway needs (design 05 section 7). Implementations: [BudgetController] (in-memory,
+ * dev/test only) and the durable store in kivra-app (`DbBudgetStore`). Both must satisfy the same contract.
+ */
+interface BudgetPort {
+    /** Committed spend, open reservations and unpriced call count of [scopeId]. */
+    fun usage(scopeId: String): BudgetUsage
+
+    /** The admission decision without reserving. Null means admitted. */
+    fun admission(scopes: List<String>, amount: BudgetAmount?): ReserveResult.Denied?
+
+    /** True when any scope in the path is at or beyond its soft limit. */
+    fun softExceeded(scopes: List<String>): Boolean
+
+    /** Atomically reserve [amount] in every scope under [key]. A null [amount] (unknown price) is denied. */
+    fun reserve(key: String, scopes: List<String>, amount: BudgetAmount?): ReserveResult
+
+    /** Settle the reservation under [key]. Null [actual] means the actual cost is not established. Idempotent. */
+    fun commit(key: String, actual: BudgetAmount?)
+
+    /** Return the reservation under [key] to the budget. Idempotent. */
+    fun release(key: String)
 }
 
 /**
@@ -60,7 +86,7 @@ class BudgetController(
     private val limits: Map<String, BudgetLimit>,
     private val clock: Clock = Clock.systemUTC(),
     private val reservationTtl: Duration = Duration.ofMinutes(5),
-) {
+) : BudgetPort {
     private class Reservation(val scopes: List<String>, val amount: BudgetAmount, val expiresAt: Instant)
 
     private val committed = HashMap<String, BigDecimal>()
@@ -76,7 +102,7 @@ class BudgetController(
     private val lapsed = HashMap<String, Reservation>()
 
     @Synchronized
-    fun usage(scopeId: String): BudgetUsage {
+    override fun usage(scopeId: String): BudgetUsage {
         purgeExpired()
         return BudgetUsage(committed[scopeId] ?: BigDecimal.ZERO, reservedFor(scopeId), unpriced[scopeId] ?: 0L)
     }
@@ -86,14 +112,14 @@ class BudgetController(
 
     /** The admission decision without reserving. Null means admitted. */
     @Synchronized
-    fun admission(scopes: List<String>, amount: BudgetAmount?): ReserveResult.Denied? {
+    override fun admission(scopes: List<String>, amount: BudgetAmount?): ReserveResult.Denied? {
         purgeExpired()
         return denial(scopes, amount)
     }
 
     /** True when any scope in the path is at or beyond its soft limit. */
     @Synchronized
-    fun softExceeded(scopes: List<String>): Boolean {
+    override fun softExceeded(scopes: List<String>): Boolean {
         purgeExpired()
         return scopes.any { id ->
             val soft = limits[id]?.soft ?: return@any false
@@ -103,7 +129,7 @@ class BudgetController(
 
     /** Atomically reserve [amount] in every scope. [key] identifies requestId/attemptId. A null [amount] (unknown price) is denied. */
     @Synchronized
-    fun reserve(key: String, scopes: List<String>, amount: BudgetAmount?): ReserveResult {
+    override fun reserve(key: String, scopes: List<String>, amount: BudgetAmount?): ReserveResult {
         purgeExpired()
         // A key that is already reserved, lapsed or settled has been (or is being) spent: never hand out a second
         // reservation for it, otherwise a repeated key could reach the provider with no budget accounting.
@@ -120,7 +146,7 @@ class BudgetController(
      * Idempotent: a second commit for the same key is ignored.
      */
     @Synchronized
-    fun commit(key: String, actual: BudgetAmount?) {
+    override fun commit(key: String, actual: BudgetAmount?) {
         lapsed.remove(key)?.let { r ->
             settledKeys.add(key)
             // The estimate was already charged and counted as unpriced at lapse; only a known actual trues it up.
@@ -138,7 +164,7 @@ class BudgetController(
     }
 
     @Synchronized
-    fun release(key: String) {
+    override fun release(key: String) {
         lapsed.remove(key)?.let { r ->
             settledKeys.add(key)
             for (s in r.scopes) {

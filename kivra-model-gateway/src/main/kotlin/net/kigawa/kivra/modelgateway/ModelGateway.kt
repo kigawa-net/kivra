@@ -32,7 +32,7 @@ data class GatewayConfig(
 class ModelGateway(
     private val registry: ModelRegistry,
     private val providers: Map<String, ModelProvider>,
-    private val budget: BudgetController,
+    private val budget: BudgetPort,
     private val health: HealthTracker = AlwaysHealthy,
     private val audit: AuditSink = AuditSink { },
     private val metrics: GatewayMetrics = GatewayMetrics.NOOP,

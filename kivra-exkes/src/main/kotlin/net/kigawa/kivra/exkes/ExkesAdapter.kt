@@ -280,7 +280,8 @@ class ExkesAdapter(
             offset += page.items.size
             if (page.items.isEmpty() || offset >= page.total) return PortResult.Ok(out)
         }
-        return PortResult.Transient(CODE_LIST_PAGE_LIMIT)
+        // Every page was a GET that was sent: this is a read failure, not a proof that nothing was sent (ADR 0005).
+        return PortResult.Retryable(CODE_LIST_PAGE_LIMIT)
     }
 
     /** Single attempt. Failure classification is the heart of the UNKNOWN contract. */
@@ -292,8 +293,10 @@ class ExkesAdapter(
         mutating: Boolean,
         query: Map<String, String> = emptyMap(),
     ): PortResult<T> {
+        // Failure after the request may have been written. A mutating call is UNKNOWN (never resent, reconciled).
+        // A GET is a read with no side effect: Retryable (retry allowed, but NOT a NotSentProof). See ADR 0005.
         val ambiguous: (String) -> PortResult<Nothing> =
-            { code -> if (mutating) PortResult.Unknown(code) else PortResult.Transient(code) }
+            { code -> if (mutating) PortResult.Unknown(code) else PortResult.Retryable(code) }
 
         val token = try {
             tokenProvider.token()
@@ -345,7 +348,7 @@ class ExkesAdapter(
             // Kind-only: the provider's 409 body is not copied into the result.
             status == 409 -> PortResult.Conflict(CODE_PROVIDER_CONFLICT)
             // 429 is an HTTP response: exkes has seen the request. A mutating call is therefore UNKNOWN, not
-            // "not sent"; a GET is idempotent and may be retried by the caller (Transient).
+            // "not sent"; a GET is idempotent and may be retried by the caller (Retryable).
             status == 429 -> ambiguous(CODE_TOO_MANY_REQUESTS)
             status in 400..499 -> {
                 // Only the typed error code survives, and only when it is a plain token. The provider's free-text

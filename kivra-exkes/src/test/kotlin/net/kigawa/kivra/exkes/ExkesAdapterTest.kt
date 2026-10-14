@@ -38,6 +38,7 @@ class ExkesAdapterTest {
             is PortResult.Rejected -> listOf(r.code, r.message)
             is PortResult.Conflict -> listOf(r.message)
             is PortResult.Transient -> listOf(r.message)
+            is PortResult.Retryable -> listOf(r.message)
             is PortResult.Unknown -> listOf(r.message)
             else -> emptyList()
         }
@@ -90,12 +91,40 @@ class ExkesAdapterTest {
     }
 
     @Test
-    fun `5xx on POST is UNKNOWN and on GET is Transient`() = runTest {
+    fun `5xx on POST is UNKNOWN and on GET is Retryable`() = runTest {
         val (sim, a) = setup()
         sim.override = { req -> if (req.method == HttpMethod.Post) reply(500, "boom") else null }
         assertIs<PortResult.Unknown>(a.createWorkspace(WorkspaceSpec("kivra-run-1")))
         assertEquals(1, sim.requestsOf(HttpMethod.Post).size)
         sim.override = { reply(503, "") }
+        val read = a.getWorkspace(WorkspaceId("x"))
+        assertIs<PortResult.Retryable>(read)
+        assertFalse(read is PortResult.Transient, "a sent GET is not a not-sent proof")
+    }
+
+    @Test
+    fun `5xx on a mutating DELETE is UNKNOWN and sent exactly once`() = runTest {
+        val (sim, a) = setup()
+        sim.override = { req -> if (req.method == HttpMethod.Delete) reply(503, "") else null }
+        assertIs<PortResult.Unknown>(a.deleteWorkspace(WorkspaceId("x")))
+        assertEquals(1, sim.requestsOf(HttpMethod.Delete).size)
+    }
+
+    @Test
+    fun `transport loss after the GET was sent is Retryable and never Transient`() = runTest {
+        val (sim, a) = setup()
+        sim.override = { throw java.io.IOException("socket reset $secret") }
+        val r = a.getWorkspace(WorkspaceId("x"))
+        assertIs<PortResult.Retryable>(r)
+        assertEquals("TRANSPORT_EXCEPTION", r.message)
+        assertNoSecret(r)
+        assertEquals(OperationStatus.UNKNOWN, r.toOperationStatus(), "Retryable never maps to RETRYABLE (no NotSentProof)")
+    }
+
+    @Test
+    fun `refused GET before send is Transient`() = runTest {
+        val (sim, a) = setup()
+        sim.override = { throw ConnectException("refused") }
         assertIs<PortResult.Transient>(a.getWorkspace(WorkspaceId("x")))
     }
 
@@ -118,10 +147,10 @@ class ExkesAdapterTest {
     }
 
     @Test
-    fun `429 on a GET is Transient`() = runTest {
+    fun `429 on a GET is Retryable`() = runTest {
         val (sim, a) = setup()
         sim.override = { reply(429, "") }
-        assertIs<PortResult.Transient>(a.getWorkspace(WorkspaceId("x")))
+        assertIs<PortResult.Retryable>(a.getWorkspace(WorkspaceId("x")))
         assertEquals(1, sim.requestsOf(HttpMethod.Get).size)
     }
 
@@ -264,7 +293,7 @@ class ExkesAdapterTest {
         assertIs<PortResult.Unknown>(a.createWorkspace(WorkspaceSpec("kivra-run-r1")))
         assertEquals(1, sim.requestsOf(HttpMethod.Post).size, "redirect must not cause a second POST")
         // A GET redirect is not followed either; it is an ordinary non-success for a read.
-        assertIs<PortResult.Transient>(a.getWorkspace(WorkspaceId("x")))
+        assertIs<PortResult.Retryable>(a.getWorkspace(WorkspaceId("x")))
         assertEquals(1, sim.requests.count { it.url.encodedPath == "/v1/workspaces/x" }, "GET redirect must not be followed")
         assertTrue(sim.requests.all { it.url.host == "exkes.test" }, "every request stays on the configured origin")
     }

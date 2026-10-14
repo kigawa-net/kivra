@@ -19,13 +19,22 @@ sealed interface PortResult<out T> {
     data class Rejected(val httpStatus: Int, val code: String?, val message: String) : PortResult<Nothing>
 
     /**
-     * The request provably was NOT sent, so the caller MAY repeat it (and the OperationExecutor may record a
-     * verified NOT_SENT evidence). Returned ONLY when nothing was sent: connection refused, connect timeout, DNS resolution
-     * failure, token acquisition failure (classified from the Ktor/JDK engine exceptions in ExkesAdapter).
-     * A 429 on a mutating call is [Unknown]: exkes has seen the request, so "no effect" is not proven.
-     * Read-only GETs (repeating them has no effect) may also return Transient for a 429/5xx/timeout.
+     * The request provably was NOT sent, so the caller MAY repeat it and the OperationExecutor may record a verified
+     * NOT_SENT evidence. This is the ONLY variant that can justify NotSentProof (ADR 0005).
+     * Returned ONLY when nothing was sent: connection refused, connect timeout, DNS resolution failure, token acquisition
+     * failure (classified from the Ktor/JDK engine exceptions in ExkesAdapter). A 429 on a mutating call is [Unknown]:
+     * exkes has seen the request, so "no effect" is not proven. Reads (GET) that failed after sending are [Retryable],
+     * never Transient.
      */
     data class Transient(val message: String) : PortResult<Nothing>
+
+    /**
+     * The request may have been sent, but repeating it is safe because it is a read (GET) with no side effect: a 5xx,
+     * a 429, a timeout, a transport loss or an undecodable 2xx after the request was written. The caller may retry it
+     * under its existing bounded retry rules. It is NOT evidence that nothing was sent, so it NEVER justifies a
+     * NotSentProof and must not be converted into one (ADR 0005). A mutating call never returns this: it is [Unknown].
+     */
+    data class Retryable(val message: String) : PortResult<Nothing>
 
     /**
      * A mutating call whose effect on exkes is unknown (timeout, connection loss, 5xx, undecodable 2xx).
@@ -64,6 +73,7 @@ fun PortResult<*>.kindCode(): String = when (this) {
     is PortResult.Conflict -> "CONFLICT"
     is PortResult.Rejected -> "REJECTED_HTTP_$httpStatus"
     is PortResult.Transient -> "TRANSIENT"
+    is PortResult.Retryable -> "RETRYABLE"
     is PortResult.Unknown -> "UNKNOWN"
     is PortResult.IdentityMismatch -> "IDENTITY_MISMATCH"
     is PortResult.Unsupported -> "UNSUPPORTED"
@@ -78,6 +88,7 @@ fun PortResult<*>.toOperationStatus(): OperationStatus? = when (this) {
     is PortResult.Ok -> OperationStatus.CONFIRMED
     is PortResult.Rejected, PortResult.NotFound, is PortResult.Unsupported -> OperationStatus.FAILED
     is PortResult.Transient -> OperationStatus.RETRYABLE
-    is PortResult.Unknown, is PortResult.IdentityMismatch -> OperationStatus.UNKNOWN
+    // Not a proof that nothing was sent, so it cannot become RETRYABLE (no NotSentProof). Mutating calls never get here.
+    is PortResult.Retryable, is PortResult.Unknown, is PortResult.IdentityMismatch -> OperationStatus.UNKNOWN
     is PortResult.Conflict -> null
 }

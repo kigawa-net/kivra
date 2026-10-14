@@ -40,7 +40,7 @@ data class RoutingDecision(
  */
 class RoutingEngine(
     private val registry: ModelRegistry,
-    private val budget: BudgetController,
+    private val budget: BudgetPort,
     private val health: HealthTracker,
     /** Provider ids that have a usable adapter wired in. Others are excluded as disabled. */
     private val availableProviders: Set<String>,

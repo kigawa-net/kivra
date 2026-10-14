@@ -16,6 +16,8 @@ dependencies {
     implementation(project(":kivra-policy"))
     implementation(project(":kivra-fusha-task"))
     implementation(project(":kivra-fusha-poller"))
+    // Model Gateway budget port. The durable store (db/DbBudgetStore) implements it; the gateway itself never imports kivra-app.
+    implementation(project(":kivra-model-gateway"))
 
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)

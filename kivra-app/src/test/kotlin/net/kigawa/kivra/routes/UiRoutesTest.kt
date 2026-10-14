@@ -151,6 +151,27 @@ class UiRoutesTest {
     }
 
     @Test
+    fun `expired session guards task submission, run detail and apiFetch without network access`() {
+        // Submit: the button is disabled through the single updateSubmitEnabled() and the handler returns early.
+        assertContains(appJs, "function updateSubmitEnabled()")
+        assertContains(appJs, "state.submitting || state.sessionExpired")
+        assertContains(appJs, "if (state.submitting || state.sessionExpired) {")
+        // The send's finally re-evaluates the button, so it cannot re-enable it after the session expired.
+        assertContains(appJs, "} finally {\n      state.submitting = false;\n      updateSubmitEnabled();")
+        assertContains(appJs, "\$('submit-note').hidden = !state.sessionExpired;")
+        assertContains(indexHtml, "id=\"submit-note\"")
+        // Run detail: no /api/runs/{id} request after expiry.
+        assertContains(appJs, "if (state.sessionExpired) {\n      body.appendChild(h('p', { className: 'error', text: MESSAGES.session }));")
+        // apiFetch: /api/* is answered locally with kind 'session'; /health is not guarded.
+        assertContains(appJs, "if (isApi(path) && state.sessionExpired) return { ok: false, kind: 'session' };")
+        // The guard is a request-reduction only and says so in the code.
+        assertContains(appJs, "Client-side guard only")
+        // The page never clears sessionExpired itself; only a reload (new page state) does.
+        assertEquals(1, Regex("state\\.sessionExpired\\s*=").findAll(appJs).count(), "only markSessionExpired sets it")
+        assertFalse(Regex("\\.href\\s*=[^=]").containsMatchIn(appJs), "app.js must not assign .href")
+    }
+
+    @Test
     fun `reload button is the only way back to the sign-in flow`() {
         // The sign-in redirect is done by oauth2-proxy on reload; the page never builds a redirect target.
         assertContains(appJs, "window.location.reload()")

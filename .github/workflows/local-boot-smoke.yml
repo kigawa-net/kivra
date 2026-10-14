@@ -46,6 +46,125 @@ jobs:
           again=$(curl --fail --silent --show-error -X POST -H 'Content-Type: application/json' -d "$request" "$endpoint/tasks")
           test "$(printf '%s\n' "$again" | jq -er '.runId')" = "$run_id"
           curl --fail --silent --show-error "$endpoint/runs/$run_id" | jq -e '.state == "NOT_EXECUTED" and .mode == "SIMULATED"'
+      - name: Restart app keeps health and DB state
+        run: |
+          set -eu
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then docker compose -f compose.dev.yml ps || true; docker compose -f compose.dev.yml logs --tail=80 app || true; fi' EXIT
+          db_count() {
+            docker compose -f compose.dev.yml exec -T db mariadb -ukivra -pkivra_dev_only kivra -N -e 'select count(*) from flyway_schema_history'
+          }
+          app_started_at() {
+            docker inspect -f '{{.State.StartedAt}}' "$(docker compose -f compose.dev.yml ps -q app)"
+          }
+          wait_for_health() {
+            for i in $(seq 1 30); do
+              if curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/health; then
+                echo
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+          before_count=$(db_count)
+          test "$before_count" -ge 1
+          before_started=$(app_started_at)
+          docker compose -f compose.dev.yml restart app
+          wait_for_health
+          test "$(app_started_at)" != "$before_started"
+          test "$(db_count)" = "$before_count"
+      - name: Recreate app keeps health and DB state
+        run: |
+          set -eu
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then docker compose -f compose.dev.yml ps || true; docker compose -f compose.dev.yml logs --tail=80 app || true; fi' EXIT
+          db_count() {
+            docker compose -f compose.dev.yml exec -T db mariadb -ukivra -pkivra_dev_only kivra -N -e 'select count(*) from flyway_schema_history'
+          }
+          wait_for_health() {
+            for i in $(seq 1 30); do
+              if curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/health; then
+                echo
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+          before_count=$(db_count)
+          docker compose -f compose.dev.yml up -d --force-recreate --wait --wait-timeout 240 app
+          wait_for_health
+          test "$(db_count)" = "$before_count"
+      - name: Diagnostics
+        if: always()
+        run: |
+          docker compose -f compose.dev.yml ps || true
+          docker compose -f compose.dev.yml logs --tail=160 || true
+      - name: Stop
+        if: always()
+        run: docker compose -f compose.dev.yml down
+
+  bad-credentials:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare invalid DB password override
+        run: |
+          set -eu
+          bad_password=$(openssl rand -hex 16)
+          echo "::add-mask::$bad_password"
+          echo "KIVRA_SMOKE_BAD_DB_PASSWORD=$bad_password" >> "$GITHUB_ENV"
+          export KIVRA_SMOKE_BAD_DB_PASSWORD="$bad_password"
+          cat > "$RUNNER_TEMP/bad-creds.yml" <<'EOF'
+          services:
+            app:
+              environment:
+                KIVRA_DB_PASSWORD: ${KIVRA_SMOKE_BAD_DB_PASSWORD:?}
+          EOF
+          docker compose -f compose.dev.yml -f "$RUNNER_TEMP/bad-creds.yml" config --quiet
+      - name: Start app with invalid DB password (expect failure)
+        run: |
+          set -eu
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then docker compose -f compose.dev.yml -f "$RUNNER_TEMP/bad-creds.yml" ps -a || true; docker compose -f compose.dev.yml -f "$RUNNER_TEMP/bad-creds.yml" logs --tail=80 app || true; fi' EXIT
+          up_rc=0
+          docker compose -f compose.dev.yml -f "$RUNNER_TEMP/bad-creds.yml" up --build -d --wait --wait-timeout 240 || up_rc=$?
+          echo "compose up exit code (non-zero is expected): $up_rc"
+          cid=$(docker compose -f compose.dev.yml -f "$RUNNER_TEMP/bad-creds.yml" ps -aq app)
+          test -n "$cid"
+          test "$(docker inspect -f '{{.State.Status}}' "$cid")" = exited
+          test "$(docker inspect -f '{{.State.ExitCode}}' "$cid")" != 0
+      - name: Verify /health is unreachable with invalid DB password
+        run: |
+          set -eu
+          rc=0
+          curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8080/health || rc=$?
+          echo "curl exit code (7 = connection refused): $rc"
+          test "$rc" = 7
+      - name: Verify app log has a DB failure and no password value
+        run: |
+          set -eu
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then docker compose -f compose.dev.yml -f "$RUNNER_TEMP/bad-creds.yml" logs --tail=80 app || true; fi' EXIT
+          test -n "$KIVRA_SMOKE_BAD_DB_PASSWORD"
+          docker compose -f compose.dev.yml -f "$RUNNER_TEMP/bad-creds.yml" logs --no-color app > "$RUNNER_TEMP/bad-app.log" 2>&1 || true
+          test -s "$RUNNER_TEMP/bad-app.log"
+          if grep -qF -- "$KIVRA_SMOKE_BAD_DB_PASSWORD" "$RUNNER_TEMP/bad-app.log"; then
+            echo "::error::app log contains the invalid DB password value"
+            exit 1
+          fi
+          grep -qiE 'flyway|access denied|sqlexception|migration' "$RUNNER_TEMP/bad-app.log"
+      - name: Recover with valid credentials
+        run: |
+          set -eu
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then docker compose -f compose.dev.yml ps || true; docker compose -f compose.dev.yml logs --tail=80 app || true; fi' EXIT
+          docker compose -f compose.dev.yml up -d --force-recreate --wait --wait-timeout 240 app
+          for i in $(seq 1 30); do
+            if curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/health; then
+              echo
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
       - name: Diagnostics
         if: always()
         run: |

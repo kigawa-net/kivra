@@ -1,5 +1,7 @@
 package net.kigawa.kivra.scheduler
 
+import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import net.kigawa.kivra.core.JobRef
@@ -107,6 +109,12 @@ enum class TriggerOutcome {
 
     /** An earlier start may have happened and is UNKNOWN. Not started again; needs reconciliation. */
     HELD_UNKNOWN,
+
+    /**
+     * `scheduledAt` is too far in the future (clock skew, or a bogus value) or too long ago (a stale wake-up after a
+     * long ai-scheduler outage). Rejected before any claim, so nothing is started and nothing is recorded.
+     */
+    REJECTED_SCHEDULE_TIME,
 }
 
 /**
@@ -116,13 +124,23 @@ enum class TriggerOutcome {
 class ScheduleTriggerHandler(
     private val dedup: TriggerDedupStore,
     allowInMemoryForDev: Boolean = false,
+    private val clock: Clock = Clock.systemUTC(),
+    /** A trigger scheduled further than this after now is rejected (clock skew between ai-scheduler and Kivra). */
+    private val maxFutureSkew: Duration = Duration.ofMinutes(5),
+    /** A trigger scheduled further than this before now is rejected (a stale wake-up is not started late). */
+    private val maxLateness: Duration = Duration.ofHours(24),
     private val sink: ScheduleTriggerSink,
 ) {
     init {
         requireDurableTriggerDedup(dedup, allowInMemoryForDev)
+        require(!maxFutureSkew.isNegative && !maxLateness.isNegative) { "invalid time window" }
     }
 
     suspend fun handle(trigger: ScheduleTrigger): TriggerOutcome {
+        val now = clock.instant()
+        if (trigger.scheduledAt.isAfter(now.plus(maxFutureSkew)) || trigger.scheduledAt.isBefore(now.minus(maxLateness))) {
+            return TriggerOutcome.REJECTED_SCHEDULE_TIME
+        }
         val key = trigger.dedupKey
         dedup.tryClaim(key)?.let { existing ->
             return if (existing.state == ClaimState.UNKNOWN) TriggerOutcome.HELD_UNKNOWN else TriggerOutcome.DUPLICATE
@@ -153,12 +171,14 @@ class SchedulePoller(private val client: ScheduleClient, private val handler: Sc
         val duplicates: Int,
         val failures: Map<JobRef, String>,
         val heldUnknown: Int = 0,
+        val rejected: Int = 0,
     )
 
     suspend fun poll(jobs: Collection<JobRef>, kind: ScheduleTriggerKind = ScheduleTriggerKind.TICK): Result {
         var accepted = 0
         var duplicates = 0
         var held = 0
+        var rejected = 0
         val failures = linkedMapOf<JobRef, String>()
         for (ref in jobs) {
             try {
@@ -167,6 +187,7 @@ class SchedulePoller(private val client: ScheduleClient, private val handler: Sc
                     TriggerOutcome.ACCEPTED -> accepted++
                     TriggerOutcome.DUPLICATE -> duplicates++
                     TriggerOutcome.HELD_UNKNOWN -> held++
+                    TriggerOutcome.REJECTED_SCHEDULE_TIME -> rejected++
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -174,6 +195,6 @@ class SchedulePoller(private val client: ScheduleClient, private val handler: Sc
                 failures[ref] = e::class.simpleName ?: "error"
             }
         }
-        return Result(accepted, duplicates, failures, held)
+        return Result(accepted, duplicates, failures, held, rejected)
     }
 }

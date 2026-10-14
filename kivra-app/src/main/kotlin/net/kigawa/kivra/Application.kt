@@ -13,7 +13,7 @@ import net.kigawa.kivra.db.NoPrMergeAuthority
 import net.kigawa.kivra.db.OutboxRepository
 import net.kigawa.kivra.db.connectDatabase
 import net.kigawa.kivra.db.createDataSource
-import net.kigawa.kivra.db.runMigrations
+import net.kigawa.kivra.db.migrateDatabase
 import net.kigawa.kivra.observability.MetricsRegistry
 import net.kigawa.kivra.routes.configureDevPreviewRoutes
 import net.kigawa.kivra.routes.configureDevTaskSubmitRoutes
@@ -31,7 +31,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     val taskApiIdentity = resolveTaskApiIdentity(env)
     val config = KivraConfig.from(environment.config)
     val dataSource = createDataSource(config.database)
-    runMigrations(dataSource)
+    migrateDatabase(config.database, dataSource)
     val database = connectDatabase(dataSource)
     val runs = DevelopmentRunRepository(database, OutboxRepository(database), AuditRepository(), NoPrMergeAuthority)
 

@@ -25,11 +25,30 @@ data class MetricsConfig(
     }
 }
 
+/**
+ * [user] / [password] are the application credentials (DML only in production). [migrationUser] / [migrationPassword]
+ * are optional: when both are set, Flyway runs with them (DDL) and the application pool keeps [user]. Blank values count
+ * as unset. Setting only one of the pair fails at startup, so a typo cannot silently run the migration with the wrong
+ * credentials or leave both roles identical. Messages never contain a password.
+ */
 data class DatabaseConfig(
     val jdbcUrl: String,
     val user: String,
     val password: String,
-)
+    val migrationUser: String? = null,
+    val migrationPassword: String? = null,
+) {
+    init {
+        require((migrationUser == null) == (migrationPassword == null)) {
+            "kivra.database.migrationUser (KIVRA_DB_MIGRATION_USER) and kivra.database.migrationPassword " +
+                "(KIVRA_DB_MIGRATION_PASSWORD) must be set together or both left unset"
+        }
+    }
+
+    /** Keeps passwords out of logs and exception messages that print the config. */
+    override fun toString(): String =
+        "DatabaseConfig(jdbcUrl=$jdbcUrl, user=***, password=***, migrationUser=${migrationUser?.let { "***" }}, migrationPassword=${migrationPassword?.let { "***" }})"
+}
 
 data class LeaseConfig(
     val ttl: Duration,
@@ -52,6 +71,8 @@ data class KivraConfig(
                 jdbcUrl = config.property("kivra.database.jdbcUrl").getString(),
                 user = config.property("kivra.database.user").getString(),
                 password = config.property("kivra.database.password").getString(),
+                migrationUser = config.propertyOrNull("kivra.database.migrationUser")?.getString()?.takeIf { it.isNotBlank() },
+                migrationPassword = config.propertyOrNull("kivra.database.migrationPassword")?.getString()?.takeIf { it.isNotBlank() },
             ),
             lease = LeaseConfig(
                 ttl = Duration.ofSeconds(config.property("kivra.lease.ttlSeconds").getString().toLong()),

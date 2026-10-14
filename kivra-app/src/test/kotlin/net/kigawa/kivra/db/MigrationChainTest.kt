@@ -23,7 +23,7 @@ private val TTL = Duration.ofSeconds(30)
 private val HASH = "a".repeat(64)
 
 /** Migration files on the classpath, by version. They are copied, never edited, when a partial history is built. */
-private val MIGRATION_FILES = mapOf(
+internal val MIGRATION_FILES = mapOf(
     1 to "V1__core_schema.sql",
     2 to "V2__reconciliation_evidence_and_outbox_claim.sql",
     3 to "V3__approvals.sql",
@@ -217,14 +217,14 @@ class MigrationChainTest {
     }
 }
 
-private fun classpathFlyway(dataSource: DataSource): Flyway =
+internal fun classpathFlyway(dataSource: DataSource): Flyway =
     Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").validateMigrationNaming(true).load()
 
-private fun appliedVersions(dataSource: DataSource): List<String> =
+internal fun appliedVersions(dataSource: DataSource): List<String> =
     classpathFlyway(dataSource).info().applied().map { it.version.version }
 
 /** Applies only the given versions, in order, from copies of the real migration files. */
-private fun migrateOnly(dataSource: DataSource, vararg versions: Int) {
+internal fun migrateOnly(dataSource: DataSource, vararg versions: Int) {
     val dir = Files.createTempDirectory("kivra-migration-chain")
     try {
         for (v in versions) {

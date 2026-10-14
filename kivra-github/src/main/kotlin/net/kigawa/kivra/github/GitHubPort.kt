@@ -47,16 +47,26 @@ interface GitHubPort {
     suspend fun getReviews(repo: RepoRef, number: Int): GitHubResult<List<Review>>
 }
 
+/**
+ * A GitHub owner/repo pair. Values are interpolated into API paths, so dot segments must never get through:
+ * `.`, `..`, any value containing `..`, and a `.git` suffix are rejected (issue #138).
+ */
 data class RepoRef(val owner: String, val repo: String) {
     init {
-        require(NAME.matches(owner)) { "invalid owner: $owner" }
-        require(NAME.matches(repo)) { "invalid repo: $repo" }
+        require(OWNER.matches(owner)) { "invalid owner: $owner" }
+        require(REPO.matches(repo) && !repo.isUnsafeRepoName()) { "invalid repo: $repo" }
     }
 
     override fun toString() = "$owner/$repo"
 
     private companion object {
-        val NAME = Regex("[A-Za-z0-9_.-]{1,100}")
+        /** GitHub user and organization names: alphanumerics and hyphens only. */
+        val OWNER = Regex("[A-Za-z0-9-]{1,39}")
+        /** GitHub repository names: alphanumerics, `.`, `_` and `-`. */
+        val REPO = Regex("[A-Za-z0-9_.-]{1,100}")
+
+        fun String.isUnsafeRepoName(): Boolean =
+            this == "." || contains("..") || endsWith(".git", ignoreCase = true)
     }
 }
 

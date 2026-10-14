@@ -232,7 +232,17 @@ class HttpGitHubAdapter(
 
     private fun repoPath(repo: RepoRef) = "/repos/${repo.owner}/${repo.repo}"
 
-    private fun refPath(branch: String) = branch.split('/').joinToString("/") { java.net.URLEncoder.encode(it, "UTF-8") }
+    /**
+     * `URLEncoder` leaves `.` and `..` unchanged, so a dot segment would traverse the API path. Such a branch is
+     * rejected before any request is built (issue #138); the message never echoes the branch name.
+     */
+    private fun requireSafeBranch(branch: String) =
+        require(branch.split('/').none { it == "." || it == ".." }) { "branch name contains a dot segment" }
+
+    private fun refPath(branch: String): String {
+        requireSafeBranch(branch)
+        return branch.split('/').joinToString("/") { java.net.URLEncoder.encode(it, "UTF-8") }
+    }
 
     private fun parseBranchRef(repo: RepoRef, branch: String, raw: Raw): GitHubResult<BranchInfo> {
         val o = parse(raw) as? JsonObject ?: return protocol("ref")
@@ -290,6 +300,7 @@ class HttpGitHubAdapter(
         }
 
     override suspend fun createBranch(repo: RepoRef, branch: String, baseSha: String): GitHubResult<BranchInfo> {
+        requireSafeBranch(branch)
         requireSha(baseSha)
         val body = buildJsonObject {
             put("ref", "refs/heads/$branch")

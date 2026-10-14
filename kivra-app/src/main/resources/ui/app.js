@@ -132,6 +132,7 @@
     state.sessionExpired = true;
     $('session-banner').hidden = false;
     $('refresh-btn').disabled = true;
+    updateSubmitEnabled();
     renderRunsStatus(Date.now());
   }
 
@@ -146,6 +147,9 @@
    * opaqueredirect response, which is treated as an expired session. The page never builds a redirect URL itself.
    */
   async function apiFetch(path, method, body) {
+    // Client-side guard only: it saves unneeded requests and is not an authorization check. The server still
+    // enforces auth on every request. Only a page reload clears sessionExpired (the sign-in happens on reload).
+    if (isApi(path) && state.sessionExpired) return { ok: false, kind: 'session' };
     var init = {
       method: method,
       credentials: 'same-origin',
@@ -189,6 +193,16 @@
     el.className = 'result' + (cls ? ' ' + cls : '');
   }
 
+  /**
+   * The only place that decides whether the submit button is enabled. Use it after every change to
+   * submitting or sessionExpired, so a finished send never re-enables the button after the session expired.
+   */
+  function updateSubmitEnabled() {
+    var blocked = state.submitting || state.sessionExpired;
+    $('submit-btn').disabled = blocked;
+    $('submit-note').hidden = !state.sessionExpired;
+  }
+
   function updateCounter() {
     var n = Array.from($('title').value).length;
     $('title-count').textContent = n + ' / ' + MAX_TITLE;
@@ -196,7 +210,11 @@
 
   async function onSubmit(ev) {
     ev.preventDefault();
-    if (state.submitting) return;
+    // Enter in the title field also reaches here (no POST while the session is expired).
+    if (state.submitting || state.sessionExpired) {
+      updateSubmitEnabled();
+      return;
+    }
     var title = $('title').value.trim();
     var n = Array.from(title).length;
     if (n === 0 || n > MAX_TITLE || CONTROL_CHARS.test(title)) {
@@ -204,13 +222,16 @@
       return;
     }
     state.submitting = true;
-    $('submit-btn').disabled = true;
+    updateSubmitEnabled();
     showResult('送信中です…', '');
 
-    var r = await apiFetch('/api/tasks', 'POST', { title: title, idempotencyKey: state.idempotencyKey });
-
-    state.submitting = false;
-    $('submit-btn').disabled = false;
+    var r;
+    try {
+      r = await apiFetch('/api/tasks', 'POST', { title: title, idempotencyKey: state.idempotencyKey });
+    } finally {
+      state.submitting = false;
+      updateSubmitEnabled();
+    }
 
     var accepted = r.ok && (r.status === 202 || r.status === 200) && r.data && typeof r.data.runId === 'string';
     if (accepted) {
@@ -397,6 +418,11 @@
     clear(body);
     if (id === '') {
       body.appendChild(h('p', { className: 'error', text: 'リンクが正しくありません' }));
+      return;
+    }
+    // After an expired session no detail request is sent; the same guidance as the banner is shown instead.
+    if (state.sessionExpired) {
+      body.appendChild(h('p', { className: 'error', text: MESSAGES.session }));
       return;
     }
     body.appendChild(h('p', { className: 'empty', text: '読み込み中…' }));

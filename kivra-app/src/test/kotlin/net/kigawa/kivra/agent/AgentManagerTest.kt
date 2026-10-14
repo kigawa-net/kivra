@@ -356,6 +356,18 @@ class AgentManagerTest {
     }
 
     @Test
+    fun `createWorkspace Retryable is never a NOT_SENT proof - never resent, never RETRYABLE`() = TestDb().use { db ->
+        // A read-only failure (GET) can only be Retryable; a mutating call must not turn it into a not-sent proof.
+        val port = TestPort().also {
+            it.injectFailure("createWorkspace", afterEffect = false, PortResult.Retryable("HTTP_503_FROM_POST"))
+        }
+        val runId = db.preparingRun()
+        assertIs<AgentRunOutcome.ReconciliationRequired>(runBlocking { db.manager(port).run(runId, PROFILE) })
+        assertEquals(1, port.mutatingCalls.count { it == "createWorkspace" }, "never resent")
+        assertEquals(OperationStatus.RECONCILIATION_REQUIRED, db.ops(runId).getValue("EXKES_CREATE_WORKSPACE").status)
+    }
+
+    @Test
     fun `createWorkspace 404 on a create is reconciled by lookup, never FAILED`() = TestDb().use { db ->
         val port = TestPort().also { it.injectFailure("createWorkspace", afterEffect = false, PortResult.NotFound) }
         val runId = db.preparingRun()

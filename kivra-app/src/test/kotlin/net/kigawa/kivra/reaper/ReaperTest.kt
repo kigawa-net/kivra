@@ -67,6 +67,14 @@ private class DeleteTransientPort(private val inner: TestPort) : ExecutionPort b
     }
 }
 
+/** Refuses every deletion with a read-style Retryable failure: still no proof that nothing was sent. */
+private class DeleteRetryablePort(private val inner: TestPort) : ExecutionPort by inner {
+    override suspend fun deleteWorkspace(id: WorkspaceId): PortResult<Workspace> {
+        inner.mutatingCalls += "deleteWorkspace"
+        return PortResult.Retryable("HTTP_503_FROM_DELETE")
+    }
+}
+
 /** Answers every deletion with [answer] and never reaches the fake (the effect, if any, is not modelled). */
 private class DeleteAnswerPort(private val inner: TestPort, private val answer: PortResult<Workspace>) : ExecutionPort by inner {
     override suspend fun deleteWorkspace(id: WorkspaceId): PortResult<Workspace> {
@@ -179,6 +187,19 @@ class ReaperTest {
         val second = runBlocking { reaper.runOnce() }
         assertEquals(ReapVerdict.JOURNALED, findingFor(second, runId).verdict)
         assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+    }
+
+    @Test
+    fun `a retryable deletion failure is never a not-sent proof - recorded UNKNOWN and never resent`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        val reaper = Reaper(DeleteRetryablePort(port), db.database, NO_GRACE)
+
+        val first = runBlocking { reaper.runOnce() }
+        assertEquals(ReapVerdict.DELETE_UNKNOWN, findingFor(first, runId).verdict)
+        assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+        val entry = db.journal.findByKey(runId, "EXKES_REAP_DELETE_WORKSPACE", "reap:${workspaceIdOf(port, db, runId).value}")
+        assertEquals(OperationStatus.UNKNOWN, entry!!.status)
     }
 
     @Test

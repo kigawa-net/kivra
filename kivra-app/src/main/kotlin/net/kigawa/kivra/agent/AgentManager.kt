@@ -397,7 +397,7 @@ class AgentManager(
         data class Failed(val message: String) : Polled<Nothing>
     }
 
-    /** Polls with a lease renewal per round. GET failures that may be transient (Unknown / Transient) are ridden out until the timeout. */
+    /** Polls with a lease renewal per round. GET failures that may be transient (Unknown / Transient / Retryable) are ridden out until the timeout. */
     private suspend fun <T> poll(
         ctx: Ctx,
         timeout: Duration,
@@ -413,7 +413,7 @@ class AgentManager(
                     bad(r.value)?.let { return Polled.Failed(it) }
                     if (done(r.value)) return Polled.Reached(r.value)
                 }
-                is PortResult.Transient, is PortResult.Unknown -> Unit
+                is PortResult.Transient, is PortResult.Retryable, is PortResult.Unknown -> Unit
                 else -> return Polled.Failed("POLL_${r::class.simpleName}")
             }
             if (mark.elapsedNow().inWholeMilliseconds >= timeout.toMillis()) return Polled.TimedOut
@@ -489,7 +489,7 @@ class AgentManager(
     }
 
     /**
-     * Re-reads until [gone] holds or the target is NotFound (= gone). Transient / Unknown reads are ridden out until
+     * Re-reads until [gone] holds or the target is NotFound (= gone). Transient / Retryable / Unknown reads are ridden out until
      * [AgentManagerConfig.teardownTimeout]; any other answer is not a confirmation and stops the wait at once.
      */
     private suspend fun <T> awaitGone(ctx: Ctx, get: suspend () -> PortResult<T>, gone: (T) -> Boolean): Boolean {
@@ -499,7 +499,7 @@ class AgentManager(
             when (val r = get()) {
                 PortResult.NotFound -> return true
                 is PortResult.Ok -> if (gone(r.value)) return true
-                is PortResult.Transient, is PortResult.Unknown -> Unit
+                is PortResult.Transient, is PortResult.Retryable, is PortResult.Unknown -> Unit
                 else -> return false
             }
             if (mark.elapsedNow().inWholeMilliseconds >= config.teardownTimeout.toMillis()) return false

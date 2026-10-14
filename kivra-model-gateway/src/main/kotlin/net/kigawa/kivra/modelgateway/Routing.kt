@@ -2,6 +2,7 @@ package net.kigawa.kivra.modelgateway
 
 import java.math.BigDecimal
 import java.time.Clock
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.UUID
@@ -46,6 +47,8 @@ class RoutingEngine(
     private val availableProviders: Set<String>,
     private val clock: Clock = Clock.systemUTC(),
     private val maxAttempts: Int = 3,
+    /** Converts native-currency prices into the (JPY) budget. Null keeps the native currency (USD budgets). */
+    private val converter: CostConverter? = null,
 ) {
     fun route(req: ModelRequest, streaming: Boolean = false): RoutingDecision {
         val today = LocalDate.now(clock.withZone(ZoneOffset.UTC))
@@ -53,12 +56,17 @@ class RoutingEngine(
         val inTokens = Estimator.inputTokens(req)
         val softExceeded = budget.softExceeded(req.budgetScopes)
 
+        val now = clock.instant()
         val traces = ArrayList<CandidateTrace>()
         val survivors = ArrayList<Pair<ModelEntry, BigDecimal>>()
         for (m in registry.models) {
             val provider = registry.providers.getValue(m.providerId)
-            val reason = exclusion(req, m, provider, required, inTokens, today)
-            if (reason == null) survivors.add(m to (Estimator.maxCost(req, m) ?: BigDecimal.ZERO)) else traces.add(CandidateTrace(m.ref, reason))
+            val reason = exclusion(req, m, provider, required, inTokens, today, now)
+            if (reason == null) {
+                // Survivors have a known budget amount; it is the score's cost so models are compared in the budget currency.
+                val amount = Estimator.maxBudgetAmount(req, m, provider, registry.registryVersion, now, converter)?.amount ?: BigDecimal.ZERO
+                survivors.add(m to amount)
+            } else traces.add(CandidateTrace(m.ref, reason))
         }
 
         val maxCost = survivors.maxOfOrNull { it.second } ?: BigDecimal.ZERO
@@ -100,7 +108,7 @@ class RoutingEngine(
     }
 
     private fun exclusion(
-        req: ModelRequest, m: ModelEntry, p: ProviderEntry, required: Set<Capability>, inTokens: Long, today: LocalDate,
+        req: ModelRequest, m: ModelEntry, p: ProviderEntry, required: Set<Capability>, inTokens: Long, today: LocalDate, now: Instant,
     ): ExclusionReason? {
         // 1. Sensitivity x trust zone / locality.
         when (req.dataClass) {
@@ -122,7 +130,7 @@ class RoutingEngine(
         if (!p.enabled || p.id !in availableProviders || m.lifecycle != Lifecycle.ACTIVE || (m.retireAt != null && !m.retireAt.isAfter(today)))
             return ExclusionReason.LIFECYCLE
         // 5. Budget. The cost must be known in the budget's currency and unit: an unknown cost is never treated as zero.
-        val amount = Estimator.maxBudgetAmount(req, m, registry.registryVersion) ?: return ExclusionReason.UNKNOWN_COST
+        val amount = Estimator.maxBudgetAmount(req, m, p, registry.registryVersion, now, converter) ?: return ExclusionReason.UNKNOWN_COST
         budget.admission(req.budgetScopes, amount)?.let { denied ->
             return when (denied.code) {
                 BudgetDenial.UNKNOWN_COST -> ExclusionReason.UNKNOWN_COST

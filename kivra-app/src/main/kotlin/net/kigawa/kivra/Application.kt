@@ -17,7 +17,9 @@ import net.kigawa.kivra.db.migrateDatabase
 import net.kigawa.kivra.observability.MetricsRegistry
 import net.kigawa.kivra.routes.configureDevPreviewRoutes
 import net.kigawa.kivra.routes.configureDevTaskSubmitRoutes
+import net.kigawa.kivra.routes.ReadinessChecker
 import net.kigawa.kivra.routes.configureHealthRoutes
+import net.kigawa.kivra.routes.configureReadyRoutes
 import net.kigawa.kivra.routes.isDevPreviewEnabled
 import net.kigawa.kivra.routes.configureObservabilityRoutes
 import net.kigawa.kivra.routes.configureTaskApiRoutes
@@ -39,6 +41,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     val metrics = MetricsRegistry()
     routing {
         configureHealthRoutes()
+        configureReadyRoutes(ReadinessChecker(dataSource))
         if (devPreviewEnabled) {
             configureDevPreviewRoutes()
             configureDevTaskSubmitRoutes()

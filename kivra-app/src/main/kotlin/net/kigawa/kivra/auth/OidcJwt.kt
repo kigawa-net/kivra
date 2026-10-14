@@ -47,6 +47,20 @@ data class OidcJwtConfig(
 }
 
 /**
+ * The owner key of a verified JWT caller: `<n>:<iss>:<sub>`, where `n` is the UTF-8 byte length of `iss`. The explicit
+ * length makes the encoding unambiguous: `iss` is read back by its length, so a `:` inside `iss` or `sub` can never make
+ * two different (iss, sub) pairs produce the same key. (`iss="a:b", sub="c"` gives `3:a:b:c`; `iss="a", sub="b:c"` gives
+ * `1:a:b:c`.) Only the verified issuer is used, and `sub` is kept as is (not trimmed). Null (fail closed) when [subject]
+ * is null, blank or has control characters, or when the key would exceed [MAX_PRINCIPAL_LENGTH] (the DB column length).
+ */
+internal fun oidcOwnerKey(issuer: String, subject: String?): String? {
+    if (subject == null || subject.isBlank() || subject.any { it.isISOControl() }) return null
+    if (issuer.isBlank() || issuer.any { it.isISOControl() }) return null
+    val issuerBytes = issuer.toByteArray(Charsets.UTF_8).size
+    return "$issuerBytes:$issuer:$subject".takeIf { it.length <= MAX_PRINCIPAL_LENGTH }
+}
+
+/**
  * Verifies a Keycloak access token and returns its principal, or null (-> 401) for any failure. The failure reason is
  * logged by exception class only, and is never sent to the client.
  *
@@ -55,7 +69,13 @@ data class OidcJwtConfig(
  * present and not passed; `nbf` is not in the future. Clock skew is tolerated for [LEEWAY_SECONDS] seconds. The token
  * must contain the required client role.
  *
- * Principal: `email` when `email_verified` is true, else `preferred_username`, else `sub`.
+ * Owner (principal): the canonical key from the verified `iss` (the configured [OidcJwtConfig.issuer]) and `sub`, see
+ * [oidcOwnerKey]. `email` and `preferred_username` are never used for ownership: they can change or be reassigned.
+ * A token without a non-blank `sub` is rejected.
+ *
+ * Migration: runs created before this change are owned by an email (or username) and are not mapped to any `sub`. Their
+ * owner key does not match, so they are unreachable (404) for every caller. An audited explicit mapping is a separate
+ * issue; there is no automatic backfill.
  */
 class OidcJwtVerifier(
     private val config: OidcJwtConfig,
@@ -124,10 +144,9 @@ class OidcJwtVerifier(
         if (verified.expiresAt == null) return reject("MissingExp")
         if (!hasRole(verified.getClaim("resource_access").asMap())) return reject("RequiredRoleMissing")
 
-        val emailVerified = verified.getClaim("email_verified").asBoolean() == true
-        val email = verified.getClaim("email").asString()?.takeIf { emailVerified && it.isNotBlank() }
-        val username = verified.getClaim("preferred_username").asString()?.takeIf { it.isNotBlank() }
-        return validPrincipal(email ?: username ?: verified.subject) ?: reject("InvalidPrincipal")
+        val subject = verified.subject
+        if (subject == null) return reject("MissingSubject")
+        return oidcOwnerKey(config.issuer, subject) ?: reject("InvalidSubject")
     }
 
     private fun hasRole(resourceAccess: Map<String, Any?>?): Boolean {

@@ -32,6 +32,7 @@ import net.kigawa.kivra.auth.OidcJwtVerifier
 import net.kigawa.kivra.auth.OidcTestTokens
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.auth.resolveTaskApiIdentity
+import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.db.TestDb
 
 private const val ALICE = "alice@example.com"
@@ -180,21 +181,31 @@ class OAuth2ProxyTaskApiRoutesTest : TaskApiRoutesContractTest() {
 
 /**
  * oidc-jwt scheme: the caller presents a Keycloak access token that kivra verifies (no network, see [OidcTestTokens]).
- * Every contract test below must pass under this scheme too.
+ * Every contract test below must pass under this scheme too. The owner is the token's `iss` + `sub`, so each test
+ * email gets its own `sub` ("sub-<local part>"); the email itself is only a claim that can change.
  */
 class OidcJwtTaskApiRoutesTest : TaskApiRoutesContractTest() {
     override val identity: TaskApiIdentity = OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks()).asIdentity()
 
     override fun credentialFor(email: String?): Map<String, String> =
-        email?.let { mapOf("Authorization" to OidcTestTokens.bearer(it)) } ?: emptyMap()
+        email?.let { mapOf("Authorization" to "Bearer ${tokenFor(it)}") } ?: emptyMap()
+
+    private fun tokenFor(email: String, emailVerified: Boolean? = true): String =
+        OidcTestTokens.token(email = email, emailVerified = emailVerified, subject = "sub-${email.substringBefore("@")}")
+
+    private suspend fun HttpResponse.oidcRunId(): String = Json.parseToJsonElement(bodyAsText()).jsonObject.getValue("runId").jsonPrimitive.content
+
+    private fun ApplicationTestBuilder.setUpOidcRoutes(db: TestDb) {
+        application {
+            install(ContentNegotiation) { json() }
+            routing { configureTaskApiRoutes(db.runs, identity) }
+        }
+    }
 
     @Test
     fun `a forged X-Auth-Request-Email header without a token is 401`() = TestDb().use { db ->
         testApplication {
-            application {
-                install(ContentNegotiation) { json() }
-                routing { configureTaskApiRoutes(db.runs, identity) }
-            }
+            setUpOidcRoutes(db)
             val forged = client.post("/api/tasks") {
                 header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
                 header("X-Auth-Request-Email", "admin@example.com")
@@ -210,24 +221,66 @@ class OidcJwtTaskApiRoutesTest : TaskApiRoutesContractTest() {
     }
 
     @Test
-    fun `a token whose email is not verified is attributed to the username, not the email`() = TestDb().use { db ->
+    fun `changing the email or username keeps access to the same runs`() = TestDb().use { db ->
         testApplication {
-            application {
-                install(ContentNegotiation) { json() }
-                routing { configureTaskApiRoutes(db.runs, identity) }
-            }
-            val token = OidcTestTokens.token(emailVerified = false, preferredUsername = "alice")
+            setUpOidcRoutes(db)
+            val runId = client.post("/api/tasks") {
+                header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                header("Authorization", "Bearer ${OidcTestTokens.token(email = "alice@example.com", preferredUsername = "alice")}")
+                setBody("""{"title":"before rename","idempotencyKey":"rename-1"}""")
+            }.oidcRunId()
+            // Same sub, new email and username: still the owner.
+            val renamed = "Bearer ${OidcTestTokens.token(email = "alice.new@example.com", preferredUsername = "alice2")}"
+            assertEquals(HttpStatusCode.OK, client.get("/api/runs/$runId") { header("Authorization", renamed) }.status)
+        }
+    }
+
+    @Test
+    fun `an email reused by another sub cannot read the old owner's runs`() = TestDb().use { db ->
+        testApplication {
+            setUpOidcRoutes(db)
+            val runId = client.post("/api/tasks") {
+                header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+                header("Authorization", "Bearer ${OidcTestTokens.token(subject = "sub-old", email = "reused@example.com")}")
+                setBody("""{"title":"old owner","idempotencyKey":"reuse-1"}""")
+            }.oidcRunId()
+            val newOwner = "Bearer ${OidcTestTokens.token(subject = "sub-new", email = "reused@example.com")}"
+            assertEquals(HttpStatusCode.NotFound, client.get("/api/runs/$runId") { header("Authorization", newOwner) }.status)
+            assertEquals("[]", client.get("/api/runs") { header("Authorization", newOwner) }.bodyAsText())
+        }
+    }
+
+    @Test
+    fun `a run owned by a legacy email principal is unreachable for every sub (404)`() = TestDb().use { db ->
+        testApplication {
+            setUpOidcRoutes(db)
+            // Pre-#120 owner: the email itself, not an iss+sub key. It is not mapped to any sub (no automatic backfill).
+            val legacy = db.runs.submitTask("alice@example.com", "legacy-1", "legacy task")
+            val legacyRunId = (legacy as TaskSubmitResult.Created).run.runId.value
+            val alice = "Bearer ${tokenFor("alice")}"
+            assertEquals(HttpStatusCode.NotFound, client.get("/api/runs/$legacyRunId") { header("Authorization", alice) }.status)
+            assertEquals("[]", client.get("/api/runs") { header("Authorization", alice) }.bodyAsText())
+        }
+    }
+
+    @Test
+    fun `the owner is the sub - the same sub sees the run whatever its email, another sub does not`() = TestDb().use { db ->
+        testApplication {
+            setUpOidcRoutes(db)
+            // Default test subject is "sub-alice", email unverified.
             assertEquals(HttpStatusCode.Accepted, client.post("/api/tasks") {
                 header(HttpHeaders.ContentType, ContentType.Application.Json.toString())
-                header("Authorization", "Bearer $token")
+                header("Authorization", "Bearer ${OidcTestTokens.token(emailVerified = false, preferredUsername = "alice")}")
                 setBody("""{"title":"unverified","idempotencyKey":"u-1"}""")
             }.status)
-            val listed = Json.parseToJsonElement(client.get("/api/runs") {
-                header("Authorization", "Bearer ${OidcTestTokens.token(emailVerified = false, preferredUsername = "alice")}")
+            val sameSub = Json.parseToJsonElement(client.get("/api/runs") {
+                header("Authorization", "Bearer ${OidcTestTokens.token(email = "other@example.com", preferredUsername = "other")}")
             }.bodyAsText()).jsonArray
-            assertEquals(listOf("unverified"), listed.map { it.jsonObject.getValue("title").jsonPrimitive.content })
-            val asEmail = client.get("/api/runs") { header("Authorization", OidcTestTokens.bearer(ALICE)) }
-            assertEquals("[]", asEmail.bodyAsText())
+            assertEquals(listOf("unverified"), sameSub.map { it.jsonObject.getValue("title").jsonPrimitive.content })
+            val otherSub = client.get("/api/runs") {
+                header("Authorization", "Bearer ${OidcTestTokens.token(subject = "sub-bob", emailVerified = false, preferredUsername = "alice")}")
+            }
+            assertEquals("[]", otherSub.bodyAsText())
         }
     }
 }

@@ -237,6 +237,39 @@ class ExkesAdapterTest {
     }
 
     @Test
+    fun `ambiguous runtime labels are a Conflict and no third runtime is created`() = runTest {
+        val (sim, a) = setup()
+        val labels = KivraNaming.runLabels("01HRUN")
+        sim.workspaces["ws-1"] = WorkspaceDto("ws-1", "w", "READY")
+        sim.runtimes["rt-1"] = RuntimeDto("rt-1", "ws-1", "t", "RUNNING", labels = labels)
+        sim.runtimes["rt-2"] = RuntimeDto("rt-2", "ws-1", "t", "RUNNING", labels = labels)
+        val r = a.createRuntime(WorkspaceId("ws-1"), RuntimeSpec("t", labels))
+        assertIs<PortResult.Conflict>(r)
+        assertEquals(0, sim.requestsOf(HttpMethod.Post).size, "lookup found two: the adapter must not POST")
+    }
+
+    @Test
+    fun `redirects are not followed - a POST is never resent to another origin`() = runTest {
+        val (sim, a) = setup(TokenProvider.static("tok-redirect"))
+        val elsewhere = headersOf(HttpHeaders.Location, "http://evil.test/v1/workspaces")
+        sim.override = { req ->
+            when {
+                req.method == HttpMethod.Post -> respond("", HttpStatusCode.TemporaryRedirect, elsewhere)
+                req.method == HttpMethod.Get && req.url.encodedPath == "/v1/workspaces" ->
+                    reply(200, """{"items":[],"total":0,"limit":100,"offset":0}""")
+                else -> respond("", HttpStatusCode.Found, elsewhere)
+            }
+        }
+        // 307 keeps the method and body: following it would re-send the mutation (and the bearer token) elsewhere.
+        assertIs<PortResult.Unknown>(a.createWorkspace(WorkspaceSpec("kivra-run-r1")))
+        assertEquals(1, sim.requestsOf(HttpMethod.Post).size, "redirect must not cause a second POST")
+        // A GET redirect is not followed either; it is an ordinary non-success for a read.
+        assertIs<PortResult.Transient>(a.getWorkspace(WorkspaceId("x")))
+        assertEquals(1, sim.requests.count { it.url.encodedPath == "/v1/workspaces/x" }, "GET redirect must not be followed")
+        assertTrue(sim.requests.all { it.url.host == "exkes.test" }, "every request stays on the configured origin")
+    }
+
+    @Test
     fun `a client with HttpRequestRetry is refused`() {
         val sim = ExkesSimulator()
         val client = ExkesAdapter.newClient(sim.engine, cfg) { install(HttpRequestRetry) }

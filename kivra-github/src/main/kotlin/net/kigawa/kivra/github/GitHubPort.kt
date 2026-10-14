@@ -34,7 +34,9 @@ interface GitHubPort {
     /**
      * Idempotent PR creation: search by deterministic head branch first, create only if none exists, and on an
      * unknown create outcome search again once. A PR on that head not carrying this run's marker is
-     * `Failure(FOREIGN_OBJECT)` (isolate, never adopt).
+     * `Failure(FOREIGN_OBJECT)` (isolate, never adopt). An open PR carrying the marker is adopted only when its head
+     * sha equals `request.headSha` and its base ref equals `request.base`; otherwise `Failure(IDENTITY_MISMATCH)`,
+     * and no PR is created. Several open PRs that match are a `Failure(CONFLICT)`.
      */
     suspend fun ensurePullRequest(repo: RepoRef, request: CreatePullRequest): GitHubResult<EnsuredPullRequest>
 
@@ -139,7 +141,13 @@ data class CheckRun(
 
 /** [complete] is false when pagination hit the safety cap, so callers must not treat the list as authoritative. */
 data class CheckRunsSummary(val sha: String, val runs: List<CheckRun>, val totalCount: Int, val complete: Boolean) {
-    /** All runs finished and none failed. Empty is NOT success: Required Checks must be matched by the caller. */
+    /**
+     * All runs finished and none failed. Empty is NOT success: Required Checks must be matched by the caller.
+     *
+     * `neutral` and `skipped` count as passed, which matches GitHub's branch protection: GitHub treats them as success.
+     * This is a deliberate choice, not an oversight. For a merge decision, evaluate the Required Checks by name instead
+     * of relying on this aggregate. Pinned by `CheckRunsConclusionTest`.
+     */
     val allPassed: Boolean
         get() = complete && runs.isNotEmpty() && runs.all {
             it.status == "completed" &&

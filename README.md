@@ -70,6 +70,7 @@ HOCON（`kivra-app/src/main/resources/application.conf`）。環境変数で上�
 | `PORT` | 8080 | HTTP ポート |
 | `KIVRA_DB_JDBC_URL` | `jdbc:mariadb://localhost:3306/kivra?sessionVariables=time_zone='+00:00'` | JDBC URL |
 | `KIVRA_DB_USER` / `KIVRA_DB_PASSWORD` | `kivra` / `change-this-in-production` | DB 認証情報（本番では必ず上書き） |
+| `KIVRA_DB_MIGRATION_USER` / `KIVRA_DB_MIGRATION_PASSWORD` | （未設定） | 任意。Flyway（スキーマの作成・変更、DDL）専用の認証情報。両方設定したときだけ有効で、アプリの接続プールは `KIVRA_DB_USER` / `KIVRA_DB_PASSWORD` を使う（DML のみを想定）。両方未設定なら従来どおり 1 組の認証情報で migration とアプリを動かす。片方だけの設定は起動失敗 |
 | `KIVRA_LEASE_TTL_SECONDS` | 30 | Run Lease の TTL |
 | `KIVRA_LEASE_GRACE_SECONDS` | 5 | 期限切れ後、奪取を許可するまでの猶予 |
 | `KIVRA_METRICS_ENABLED` | false | `/metrics` の有効化（true のとき `KIVRA_METRICS_BEARER_TOKEN` が必須） |
@@ -178,6 +179,7 @@ Run の `task_id` は `api:<runId>`（fusha-task のタスクとは紐づかな�
 - イメージ: `harbor.kigawa.net/library/kivra:<tag>`（`Dockerfile`、ビルドは `installDist`。ファット JAR は使わない）。`ENTRYPOINT` は `/app/bin/kivra-app`、ポートは 8080。実行ユーザーは非 root の `kivra`。
 - 起動時に Flyway が `db/migration`（V1〜V9 など）を自動で migrate する。DB 接続先に既存スキーマがあれば未適用分だけが流れる。
 - 必須で上書きする環境変数（既定値のままでは本番で使えない）: `KIVRA_DB_JDBC_URL`（既定は localhost）、`KIVRA_DB_USER`、`KIVRA_DB_PASSWORD`（既定はプレースホルダ）。JDBC URL の `time_zone='+00:00'` は UTC 固定のため残すこと。
+- 本番では、アプリ用（`KIVRA_DB_USER` / `KIVRA_DB_PASSWORD`、DML のみ）と migration 用（`KIVRA_DB_MIGRATION_USER` / `KIVRA_DB_MIGRATION_PASSWORD`、DDL 権限あり）を分けること。両方を設定すると、起動時の Flyway だけが migration 用で接続し、完了後に閉じる。JDBC URL は同じものを使う。
 - 任意: `PORT`（既定 8080）、`KIVRA_METRICS_ENABLED`（既定 `false`）。`true` にする場合は `KIVRA_METRICS_BEARER_TOKEN` も必須。
 - ヘルスチェック: `GET /health`（イメージの `HEALTHCHECK` も同じ）。
 - 本番の既定値: Recl への mutation は無効（`MutationCapability.DISABLED` / `ReclConfig.mutationsEnabled=false`）、Reaper の自動削除は無効（`autoDeleteEnabled=false`）。Replay について切り替え用の環境変数は無い。

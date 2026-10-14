@@ -90,6 +90,13 @@ enum class ReapVerdict {
     /** The Run is not terminal: the workspace belongs to live work. Not an orphan. */
     IN_USE,
 
+    /**
+     * The Run is not terminal, its lease owner stopped renewing (lease expired, heartbeat lapsed), and no live lease holds it.
+     * This is the LOST candidate of design #3 §4.1 / §6.3. Reported only: nothing is deleted and the Run state is not changed
+     * (there is no LOST state in [DevelopmentRunState]). Reconciliation against exkes decides what happens next.
+     */
+    LEASE_LAPSED,
+
     /** The Run is terminal but inside the retention grace. */
     RETENTION,
 
@@ -194,12 +201,20 @@ class Reaper(
 ) {
     /** One detection pass, plus deletions the config allows. Idempotent: a repeated pass finds the same state or less. */
     suspend fun runOnce(): ReapReport {
-        // Any failing page counts as a failed listing: a partial listing is never treated as complete.
-        val listed = when (val r = port.listWorkspaces()) {
-            is PortResult.Ok -> r.value
-            else -> return ReapReport(emptyList(), listingFailed = describe(r))
+        // Any failing page counts as a failed listing: a partial listing is never treated as complete. A thrown listing
+        // is the same as a failed one: nothing is evaluated, nothing is touched.
+        val listed = try {
+            when (val r = port.listWorkspaces()) {
+                is PortResult.Ok -> r.value
+                else -> return ReapReport(emptyList(), listingFailed = describe(r))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return ReapReport(emptyList(), listingFailed = "listing threw: ${e::class.simpleName}")
         }
         val listedIds = listed.mapTo(HashSet()) { it.id.value }
+        val listedNames = listed.mapTo(HashSet()) { it.name }
         val findings = ArrayList<ReapFinding>()
         // Requested deletions no longer in a complete listing: verify them gone before reporting DELETED.
         for (req in requestedDeletions().filter { it.workspaceId !in listedIds }) {
@@ -215,6 +230,13 @@ class Reaper(
                 ReapFinding(ws.name, ws.id.value, runId, ReapVerdict.QUARANTINE, "review failed: ${e::class.simpleName}")
             }
             findings += finding
+        }
+        // Runs whose heartbeat lapsed and that have no listed workspace (exkes side missing): LOST candidates, report only.
+        // Runs with a listed workspace were already reported by review().
+        for (runId in lapsedRunIds()) {
+            val wsName = runCatching { KivraNaming.workspaceName(runId) }.getOrDefault("")
+            if (wsName in listedNames) continue
+            findings += ReapFinding(wsName, "", runId, ReapVerdict.LEASE_LAPSED, "lease expired and no workspace is listed for the run")
         }
         return ReapReport(findings)
     }
@@ -249,7 +271,10 @@ class Reaper(
             }
         }
         val run = loadRun(runId) ?: return finding(ReapVerdict.QUARANTINE, "no DevelopmentRun record for $runId")
-        if (!run.terminal) return finding(ReapVerdict.IN_USE, "run is ${run.state}")
+        if (!run.terminal) {
+            return if (run.leaseLapsed) finding(ReapVerdict.LEASE_LAPSED, "run is ${run.state}; lease expired, heartbeat lapsed. Not deleted")
+            else finding(ReapVerdict.IN_USE, "run is ${run.state}")
+        }
 
         proofProblem(runId, ws)?.let { return finding(ReapVerdict.QUARANTINE, it) }
         if (!run.retentionElapsed) return finding(ReapVerdict.RETENTION, "run ${run.state} is inside the retention grace")
@@ -291,6 +316,8 @@ class Reaper(
         val liveLease: Boolean,
         val retentionElapsed: Boolean,
         val leaseGeneration: Long,
+        /** A lease owner is recorded but its expiry has passed: the heartbeat lapsed. */
+        val leaseLapsed: Boolean,
     ) {
         val terminal: Boolean get() = state in DevelopmentRunState.terminalNames
     }
@@ -302,7 +329,8 @@ class Reaper(
         SELECT state, hold_reason,
                CASE WHEN lease_owner IS NOT NULL AND lease_expires_at > ${DbTime.NOW} THEN 1 ELSE 0 END,
                CASE WHEN updated_at <= ${DbTime.nowMinusSeconds()} THEN 1 ELSE 0 END,
-               lease_generation
+               lease_generation,
+               CASE WHEN lease_owner IS NOT NULL AND lease_expires_at <= ${DbTime.NOW} THEN 1 ELSE 0 END
           FROM development_runs
          WHERE run_id = ?
         """.trimIndent() + if (locked) " FOR UPDATE" else "",
@@ -314,8 +342,19 @@ class Reaper(
             liveLease = rs.getInt(3) == 1,
             retentionElapsed = rs.getInt(4) == 1,
             leaseGeneration = rs.getLong(5),
+            leaseLapsed = rs.getInt(6) == 1,
         )
     }.singleOrNull()
+
+    /**
+     * Ids of non-terminal runs that once had a lease owner and whose lease has expired (heartbeat lapsed, no renewal).
+     * A run that never acquired a lease is not listed: it has no heartbeat to lapse.
+     */
+    private fun lapsedRunIds(): List<String> = transaction(database) {
+        execQuery(
+            "SELECT run_id, state FROM development_runs WHERE lease_owner IS NOT NULL AND lease_expires_at <= ${DbTime.NOW}",
+        ) { it.getString(1) to it.getString(2) }
+    }.filter { (_, state) -> state !in DevelopmentRunState.terminalNames }.map { it.first }
 
     /** Null when the Journal proves that this Kivra run created exactly this workspace id; otherwise the reason it does not. */
     private fun proofProblem(runId: String, ws: Workspace): String? {
@@ -348,7 +387,8 @@ class Reaper(
     ) { Existing(it.getString(1), it.getString(2), it.getInt(3), it.getInt(4), it.getLong(5), it.getString(6)) }.singleOrNull()
 
     private sealed interface Claim {
-        data class Go(val opId: String, val version: Long) : Claim
+        /** [leaseGeneration] is the Run's lease generation read at the claim; arm refuses if it has changed since. */
+        data class Go(val opId: String, val version: Long, val leaseGeneration: Long) : Claim
         data class Refused(val verdict: ReapVerdict, val reason: String) : Claim
     }
 
@@ -366,6 +406,7 @@ class Reaper(
     private fun claim(runId: String, ws: Workspace): Claim = transaction(database) {
         val gate = readRunGate(runId, locked = true)
         gateRefusal(gate)?.let { return@transaction it }
+        val generation = gate!!.leaseGeneration
         val existing = deleteRecord(runId, ws.id.value)
         val now = utcNow(clock)
         when {
@@ -381,10 +422,10 @@ class Reaper(
                     opId, runId, OP_REAP_DELETE_WORKSPACE, "reap:${ws.id.value}", ws.name, ws.id.value,
                     sha256Hex("reap-delete-workspace|${ws.id.value}"), config.maxDeleteAttempts, gate!!.leaseGeneration, now, now,
                 )
-                Claim.Go(opId, 0)
+                Claim.Go(opId, 0, generation)
             }
             existing.status == "PREPARED" || (existing.status == "RETRYABLE" && existing.attempt < existing.maxAttempts) ->
-                Claim.Go(existing.opId, existing.version)
+                Claim.Go(existing.opId, existing.version, generation)
             existing.status == "CONFIRMED" -> Claim.Refused(ReapVerdict.JOURNALED, "already deleted: Journal record is CONFIRMED")
             else -> Claim.Refused(
                 ReapVerdict.JOURNALED,
@@ -395,7 +436,16 @@ class Reaper(
 
     /** Step 3 (Run row lock): gates again, then CAS PREPARED/RETRYABLE -> IN_FLIGHT on the record version. Only the CAS winner sends. */
     private fun arm(runId: String, go: Claim.Go): Claim = transaction(database) {
-        gateRefusal(readRunGate(runId, locked = true))?.let { return@transaction it }
+        val current = readRunGate(runId, locked = true)
+        gateRefusal(current)?.let { return@transaction it }
+        // Fencing: the lease generation read at the claim must still be the current one. A lease change in between means the
+        // judgment is stale, so nothing is sent.
+        if (current!!.leaseGeneration != go.leaseGeneration) {
+            return@transaction Claim.Refused(
+                ReapVerdict.BLOCKED,
+                "run lease generation changed since the claim (${go.leaseGeneration} -> ${current.leaseGeneration}); nothing sent",
+            )
+        }
         val moved = execUpdate(
             """
             UPDATE external_operations
@@ -404,7 +454,7 @@ class Reaper(
             """.trimIndent(),
             utcNow(clock), go.opId, go.version,
         )
-        if (moved == 1) Claim.Go(go.opId, go.version + 1)
+        if (moved == 1) Claim.Go(go.opId, go.version + 1, go.leaseGeneration)
         else Claim.Refused(ReapVerdict.JOURNALED, "journal record changed concurrently; another Reaper owns this deletion")
     }
 

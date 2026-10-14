@@ -1,7 +1,9 @@
 package net.kigawa.kivra.fusha.poller
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -111,6 +113,15 @@ class TaskPoller(
             return failure(now, PollFailureCause.PROVIDER, e.kind, "task provider call failed (${e.kind})")
         } catch (e: TaskValidationException) {
             return failure(now, PollFailureCause.VALIDATION, null, e.message ?: "task validation failed")
+        } catch (e: CancellationException) {
+            // Only this coroutine's own cancellation may stop the loop. A CancellationException from an inner
+            // timeout is a provider failure; otherwise run() would die and admission would silently go stale.
+            currentCoroutineContext().ensureActive()
+            return failure(now, PollFailureCause.PROVIDER, null, "task provider call was cancelled (${e.javaClass.simpleName})")
+        } catch (e: Exception) {
+            // Any other provider error (e.g. a token refresh failure) is a degraded poll. Only the class name is
+            // reported: the message may carry credentials or response detail.
+            return failure(now, PollFailureCause.PROVIDER, null, "task provider call failed (${e.javaClass.simpleName})")
         }
 
         try {

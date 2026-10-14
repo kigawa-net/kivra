@@ -134,6 +134,14 @@ fusha-task（`kivra.fusha.*`、**すべて要確認**: 環境ごとの URL・機
 
 M1 の `FushaTaskAdapter` は **read-only**（get / list のみ）。update / comment は `TaskWriteResult.Unsupported` を返す
 （fusha-task に楽観ロック / ETag が無く、機械認証も未検証のため。要確認）。
+
+### Task → Run admission（Issue #26、本番未配線）
+
+- `RunAdmission.admit(task, requestId)`（`DbRunAdmission`）は、Task を 1 件の DevelopmentRun に対応づける。`task_bindings`（V11、`provider / environment / task_id` の複合主キー）と Run の作成を **1 トランザクション**で書く。同じ Task の active な Run は常に 1 つ。
+- 判定は純粋関数 `AdmissionEvaluator` が行い、条件が不明なものは fail closed で `Blocked`（DB に何も書かない）。`AdmissionPolicy` が無い（既定）場合は全件 `Blocked`。
+- 同じ Task の Run が未終端なら `AlreadyActive`、終端済みなら `AlreadyTerminal`（新しい Run は作らない）。古い `updatedAt` では Binding を後退させない。
+- 再実行は `requestRerun`（運用者の明示操作のみ）。旧 Run が終端のときだけ `generation` を進め、次の admit で新しい Run を作る。監査に operator と理由を残す。HTTP の露出は無い。
+- **本番（`Application.kt`）には配線していない。** poller → admission の接続、状態の書き戻し、運用者向けの HTTP は未対応（#26 の後続、#28）。
 ### Memory（`kivra-memory`、M5 #37）
 
 recl（kigawa-net/recl）の現状: **設計書（`docs/design.md`）と内部 Core / InMemory Storage のみ main にマージ済み**

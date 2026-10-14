@@ -98,7 +98,7 @@ class OidcJwtVerifier(
             try {
                 verify(token)
             } catch (e: Exception) {
-                logRejection(e.javaClass.simpleName)
+                logRejection((e as? JwksLookupException)?.reasonCode ?: e.javaClass.simpleName)
                 null
             }
         }

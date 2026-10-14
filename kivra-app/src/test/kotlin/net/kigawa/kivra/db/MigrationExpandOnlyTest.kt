@@ -62,6 +62,26 @@ class MigrationExpandOnlyTest {
         }
     }
 
+    @Test
+    fun multipleAddColumnsIndependentlyChecked() {
+        assertEquals(
+            listOf("V99:ADD NOT NULL t.unsafe"),
+            expandViolations(99, "ALTER TABLE t ADD COLUMN unsafe INT NOT NULL, ADD COLUMN safe INT DEFAULT 0;"),
+        )
+        assertEquals(
+            listOf("V99:ADD NOT NULL t.a", "V99:ADD NOT NULL t.b"),
+            expandViolations(99, "ALTER TABLE t ADD COLUMN a INT NOT NULL, ADD COLUMN b VARCHAR(20) NOT NULL;"),
+        )
+        assertEquals(
+            emptyList(),
+            expandViolations(
+                99,
+                "ALTER TABLE t ADD COLUMN amount DECIMAL(12,2) NOT NULL DEFAULT 0, " +
+                    "ADD COLUMN note VARCHAR(80) NOT NULL DEFAULT 'a,b';",
+            ),
+        )
+    }
+
     private fun migrationFiles(): Map<Int, String> {
         val dir = Paths.get(requireNotNull(TestDb::class.java.classLoader.getResource("db/migration")) { "db/migration is missing" }.toURI())
         return Files.list(dir).use { stream ->
@@ -97,24 +117,31 @@ internal fun expandViolations(version: Int, sql: String): List<String> {
     return withoutComments.split(';')
         .map { it.trim().replace(Regex("\\s+"), " ").uppercase() }
         .filter { it.isNotEmpty() }
-        .mapNotNull { statement -> violationOf(statement)?.let { "V$version:$it" } }
+        .flatMap { statement -> violationsOf(statement).map { "V$version:$it" } }
 }
 
-private val ADD_COLUMN = Regex("""ALTER TABLE (\w+) ADD (?:COLUMN )?(\w+) (.*)""")
+private val ALTER_TABLE = Regex("""^ALTER TABLE (\w+) """)
+private val ADD_START = Regex("""(?:^ALTER TABLE \w+ |,\s*)ADD (?:COLUMN )?(\w+) """)
 
-private fun violationOf(s: String): String? {
-    if (Regex("""\bDROP\b""").containsMatchIn(s)) return "DROP ($s)"
-    if (Regex("""\bRENAME\b""").containsMatchIn(s)) return "RENAME ($s)"
-    if (Regex("""\bMODIFY\b""").containsMatchIn(s)) return "MODIFY ($s)"
-    if (Regex("""\bCHANGE (COLUMN )?\w+ \w+""").containsMatchIn(s)) return "CHANGE ($s)"
-    if (Regex("""\bALTER COLUMN\b""").containsMatchIn(s) || s.contains("SET DATA TYPE")) return "ALTER COLUMN type ($s)"
-    if (Regex("""\bTRUNCATE\b""").containsMatchIn(s) || s.startsWith("DELETE FROM")) return "DELETE rows ($s)"
-    val add = ADD_COLUMN.matchEntire(s)
-    if (add != null) {
-        val (table, column, definition) = add.destructured
+private fun violationsOf(s: String): List<String> {
+    if (Regex("""\bDROP\b""").containsMatchIn(s)) return listOf("DROP ($s)")
+    if (Regex("""\bRENAME\b""").containsMatchIn(s)) return listOf("RENAME ($s)")
+    if (Regex("""\bMODIFY\b""").containsMatchIn(s)) return listOf("MODIFY ($s)")
+    if (Regex("""\bCHANGE (COLUMN )?\w+ \w+""").containsMatchIn(s)) return listOf("CHANGE ($s)")
+    if (Regex("""\bALTER COLUMN\b""").containsMatchIn(s) || s.contains("SET DATA TYPE")) return listOf("ALTER COLUMN type ($s)")
+    if (Regex("""\bTRUNCATE\b""").containsMatchIn(s) || s.startsWith("DELETE FROM")) return listOf("DELETE rows ($s)")
+
+    val table = ALTER_TABLE.find(s)?.groupValues?.get(1) ?: return emptyList()
+    val additions = ADD_START.findAll(s).toList()
+    return additions.mapIndexedNotNull { index, match ->
+        val column = match.groupValues[1]
+        if (column in setOf("INDEX", "KEY", "PRIMARY", "CONSTRAINT", "FOREIGN", "UNIQUE")) {
+            return@mapIndexedNotNull null
+        }
+        val until = additions.getOrNull(index + 1)?.range?.first ?: s.length
+        val definition = s.substring(match.range.last + 1, until)
         val notNull = Regex("""\bNOT NULL\b""").containsMatchIn(definition)
         val hasDefault = Regex("""\bDEFAULT\b""").containsMatchIn(definition)
-        if (notNull && !hasDefault) return "ADD NOT NULL ${table.lowercase()}.${column.lowercase()}"
+        if (notNull && !hasDefault) "ADD NOT NULL " + table.lowercase() + "." + column.lowercase() else null
     }
-    return null
 }

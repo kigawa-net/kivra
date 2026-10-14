@@ -63,16 +63,42 @@ enum class BudgetVerdict {
     UNKNOWN_COST,
 }
 
+/**
+ * 既知コストの観測結果。[complete] が false のとき、[knownMicros] は実際のコストより過小である。
+ * [unpricedCalls] は価格不明の呼び出し数で、0 円として扱ってはならない。
+ */
+data class KnownCostObservation(
+    val knownMicros: Long,
+    val unpricedCalls: Long,
+    val complete: Boolean,
+)
+
 object BudgetCheck {
     /**
-     * 観測専用: 既知コストのみの比較で、未価格呼出し・部分ストリーム・応答喪失・会計 commit 失敗は考慮しない。
-     * 支出の承認(admission)に使ってはならない。承認判定は [verdict] を使い、承認ゲートは #35 / #69 / #73 で扱う。
+     * 観測専用。`unpricedCalls > 0` や価格不明の呼び出しを 0 円として扱う。支出の可否の判断に使ってはならない。
+     * 可否は `kivra-model-gateway` の `BudgetPort`（ALLOW / DENY / UNKNOWN_COST、fail-closed）が決める。
+     *
+     * 既知コストのみの比較で、未価格呼出し・部分ストリーム・応答喪失・会計 commit 失敗は考慮しない。
+     * 未価格呼出しの有無は [observeKnownCost] の `complete` で確認できる。
      *
      * True when the known cost of [scope] exceeds its limit. Returns false when no limit is configured.
      */
     fun knownCostExceeded(ledger: CostLedger, policy: BudgetPolicy, scope: CostScope): Boolean {
         val limit = policy.limitMicros(scope) ?: return false
         return ledger.total(scope).knownCostMicros > limit
+    }
+
+    /**
+     * 観測専用。既知コストと未価格呼出し数を返す。[KnownCostObservation.complete] が false の場合、
+     * 観測結果は完全ではない（価格不明の呼び出しを含む）。支出の可否の判断に使ってはならない（上記 [knownCostExceeded] と同じ）。
+     */
+    fun observeKnownCost(ledger: CostLedger, scope: CostScope): KnownCostObservation {
+        val total = ledger.total(scope)
+        return KnownCostObservation(
+            knownMicros = total.knownCostMicros,
+            unpricedCalls = total.unpricedCalls,
+            complete = total.unpricedCalls == 0L,
+        )
     }
 
     /**
@@ -94,7 +120,7 @@ object BudgetCheck {
 }
 
 /**
- * テスト・開発専用の非永続 ledger。本番の admission / 集計には使わない (#35 / #69 / #70 の durable reserve/commit/release の範囲)。
+ * 開発・テスト専用。本番の台帳ではない（非永続）。本番の admission / 集計には使わない (#35 / #69 / #70 の durable reserve/commit/release の範囲)。
  * モジュール外から参照できないよう internal にしている。
  */
 internal class TestOnlyInMemoryCostLedger : CostLedger {

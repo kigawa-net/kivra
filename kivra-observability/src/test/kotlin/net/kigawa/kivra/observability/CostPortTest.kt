@@ -68,6 +68,35 @@ class CostPortTest {
     }
 
     @Test
+    fun `unpriced calls below the known limit are not over the limit and observation is incomplete`() {
+        val ledger = TestOnlyInMemoryCostLedger()
+        val policy = BudgetPolicy { 1000 }
+        ledger.add(run, UsageAmount(10, 10, 500))
+        ledger.add(run, UsageAmount(10, 10, null))
+        assertFalse(BudgetCheck.knownCostExceeded(ledger, policy, run))
+        assertEquals(KnownCostObservation(500, 1, false), BudgetCheck.observeKnownCost(ledger, run))
+    }
+
+    @Test
+    fun `known cost equal to the limit is not over, above it is over`() {
+        val ledger = TestOnlyInMemoryCostLedger()
+        val policy = BudgetPolicy { 1000 }
+        ledger.add(run, UsageAmount(0, 0, 1000))
+        assertFalse(BudgetCheck.knownCostExceeded(ledger, policy, run))
+        ledger.add(run, UsageAmount(0, 0, 0))
+        assertFalse(BudgetCheck.knownCostExceeded(ledger, policy, run))
+        ledger.add(run, UsageAmount(0, 0, 1))
+        assertTrue(BudgetCheck.knownCostExceeded(ledger, policy, run))
+    }
+
+    @Test
+    fun `observation without unpriced calls is complete`() {
+        val ledger = TestOnlyInMemoryCostLedger()
+        ledger.add(run, UsageAmount(1, 1, 300))
+        assertEquals(KnownCostObservation(300, 0, true), BudgetCheck.observeKnownCost(ledger, run))
+    }
+
+    @Test
     fun `negative token counts and costs are rejected`() {
         val failures = listOf(
             runCatching { UsageAmount(-1, 0, null) },

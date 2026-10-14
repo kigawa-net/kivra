@@ -13,6 +13,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import net.kigawa.kivra.auth.OidcTestTokens.token
 import org.slf4j.LoggerFactory
@@ -87,6 +91,19 @@ class OidcJwtRejectionLogTest {
 
         assertNull(run(token(roles = listOf("viewer"))))
         assertEquals(2, warnings().size, "another reason is logged")
+    }
+
+    @Test
+    fun `concurrent requests with the same rejection reason yield only one warning`() = runBlocking {
+        val verifier = OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks())
+        val expired = token(expiresInSeconds = -3600)
+        val headers = headersOf(HttpHeaders.Authorization, "Bearer $expired")
+        coroutineScope {
+            (1..64).map {
+                async(Dispatchers.Default) { assertNull(verifier.principal(headers)) }
+            }.awaitAll()
+        }
+        assertEquals(1, warnings().size, "throttle must be atomic under concurrent JWT failures")
     }
 
     @Test

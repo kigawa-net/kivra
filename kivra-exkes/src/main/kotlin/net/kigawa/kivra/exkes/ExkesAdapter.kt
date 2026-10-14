@@ -402,6 +402,9 @@ class ExkesAdapter(
         fun newClient(engine: HttpClientEngine, config: ExkesConfig, extra: HttpClientConfig<*>.() -> Unit = {}) =
             HttpClient(engine) {
                 expectSuccess = false
+                // Ktor follows redirects by default: a 307/308 would re-send the POST and the bearer token to another
+                // origin. A 3xx is returned to execute() as a plain non-success instead (UNKNOWN for mutations).
+                followRedirects = false
                 install(HttpTimeout) {
                     requestTimeoutMillis = config.requestTimeout.inWholeMilliseconds
                     connectTimeoutMillis = config.connectTimeout.inWholeMilliseconds

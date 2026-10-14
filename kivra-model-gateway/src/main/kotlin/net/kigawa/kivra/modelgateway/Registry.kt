@@ -4,7 +4,9 @@ import org.yaml.snakeyaml.LoaderOptions
 import org.yaml.snakeyaml.Yaml
 import org.yaml.snakeyaml.constructor.SafeConstructor
 import java.math.BigDecimal
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.ZoneOffset
 
 enum class DataHandlingStatus { CONFIRMED, UNKNOWN }
@@ -30,13 +32,71 @@ data class ProviderEntry(
 
 enum class Lifecycle { PREVIEW, ACTIVE, DEPRECATED, RETIRED }
 
+/**
+ * A token-tier boundary. The rate applies while the request's total input tokens (input + cached) are at most
+ * [inputTokensUpTo]. Tiers are ordered by bound; the top-level rates of [Price] apply above the largest bound.
+ */
+data class PriceTier(
+    val inputTokensUpTo: Long,
+    val inputPerMtok: BigDecimal,
+    val outputPerMtok: BigDecimal,
+    val cachedInputPerMtok: BigDecimal? = null,
+)
+
+/** Per-million-token rates with the cached rate resolved (defaults to the input rate). */
+data class Rate(val inputPerMtok: BigDecimal, val outputPerMtok: BigDecimal, val cachedInputPerMtok: BigDecimal)
+
+/**
+ * One price version of a model (design 13 B2). [effectiveFrom] is the first JST date on which this version applies;
+ * null means it has always applied. A version with a later [effectiveFrom] is not used before that date.
+ */
 data class Price(
     val inputPerMtok: BigDecimal,
     val outputPerMtok: BigDecimal,
     val cachedInputPerMtok: BigDecimal? = null,
     val currency: String = "USD",
     val sourceRef: String? = null,
-)
+    val effectiveFrom: LocalDate? = null,
+    val tiers: List<PriceTier> = emptyList(),
+) {
+    init {
+        if (currency.isBlank()) throw RegistryException("price currency is required")
+        val rates = listOf(inputPerMtok, outputPerMtok, cachedInputPerMtok) + tiers.flatMap {
+            listOf(it.inputPerMtok, it.outputPerMtok, it.cachedInputPerMtok)
+        }
+        if (rates.any { it != null && it.signum() < 0 }) throw RegistryException("price rates must not be negative")
+        for (i in 1 until tiers.size) {
+            if (tiers[i].inputTokensUpTo <= tiers[i - 1].inputTokensUpTo) throw RegistryException("price tiers must be strictly ascending by inputTokensUpTo")
+        }
+        if (tiers.any { it.inputTokensUpTo <= 0 }) throw RegistryException("inputTokensUpTo must be positive")
+    }
+
+    /** Rate for a request whose total input tokens are known. Null [totalInputTokens] means the tier is unknown: the highest rate per component is used. */
+    fun rateFor(totalInputTokens: Long?): Rate {
+        if (totalInputTokens == null) {
+            val all = listOf(topRate()) + tiers.map { tierRate(it) }
+            // The input-side rate also covers cached reads, which may be priced above the input rate in theory.
+            return Rate(
+                inputPerMtok = all.maxOf { maxOf(it.inputPerMtok, it.cachedInputPerMtok) },
+                outputPerMtok = all.maxOf { it.outputPerMtok },
+                cachedInputPerMtok = all.maxOf { it.cachedInputPerMtok },
+            )
+        }
+        val tier = tiers.firstOrNull { totalInputTokens <= it.inputTokensUpTo }
+        return if (tier != null) tierRate(tier) else topRate()
+    }
+
+    /** True when every rate is explicitly zero (a free model). */
+    fun isExplicitlyZero(): Boolean =
+        (listOf(inputPerMtok, outputPerMtok, cachedInputPerMtok) + tiers.flatMap { listOf(it.inputPerMtok, it.outputPerMtok, it.cachedInputPerMtok) })
+            .all { it == null || it.signum() == 0 }
+
+    private fun topRate() = Rate(inputPerMtok, outputPerMtok, cachedInputPerMtok ?: inputPerMtok)
+    private fun tierRate(t: PriceTier) = Rate(t.inputPerMtok, t.outputPerMtok, t.cachedInputPerMtok ?: t.inputPerMtok)
+}
+
+/** Token-count and price-version timing use the JST calendar, matching the monthly budget period (design 13 section 2). */
+val PRICE_ZONE: ZoneId = ZoneId.of("Asia/Tokyo")
 
 data class ModelEntry(
     val id: String,
@@ -48,10 +108,26 @@ data class ModelEntry(
     val capabilities: Set<Capability>,
     val contextWindowTokens: Int,
     val maxOutputTokens: Int,
-    val price: Price?,
+    /** Price versions. Empty means unpriced (fail closed). */
+    val prices: List<Price>,
     val qualityTier: QualityTier?,
 ) {
+    init {
+        if (prices.count { it.effectiveFrom == null } > 1 || prices.mapNotNull { it.effectiveFrom }.let { it.size != it.toSet().size })
+            throw RegistryException("model $id: two price versions share an effective date")
+    }
+
     val ref: ModelRef get() = ModelRef(providerId, id, providerModelName)
+
+    /**
+     * The price version in force at [now]: the one with the latest [Price.effectiveFrom] not after today (JST). Null when
+     * no version is in force, which the caller treats as an unknown cost.
+     */
+    fun priceAt(now: Instant): Price? {
+        val today = now.atZone(PRICE_ZONE).toLocalDate()
+        return prices.filter { it.effectiveFrom == null || !it.effectiveFrom.isAfter(today) }
+            .maxByOrNull { it.effectiveFrom ?: LocalDate.MIN }
+    }
 }
 
 data class ResolvedTarget(val provider: ProviderEntry, val model: ModelEntry)
@@ -138,24 +214,58 @@ object RegistryLoader {
         )
     }
 
-    private fun isUnknownPlaceholder(p: Map<*, *>): Boolean =
-        listOf("inputPerMtok", "outputPerMtok").any { p[it]?.toString()?.trim().equals("UNKNOWN", ignoreCase = true) }
+    private fun isUnknownPlaceholder(v: Any?): Boolean = v?.toString()?.trim().equals("UNKNOWN", ignoreCase = true)
+
+    private fun dec(v: Any?, ctx: String): BigDecimal =
+        runCatching { BigDecimal(v.toString()) }.getOrNull() ?: throw RegistryException("$ctx: invalid decimal value")
+
+    /**
+     * `price` is absent, the UNKNOWN placeholder (unpriced), a single version mapping, or a list of versions. A placeholder
+     * inside a list is rejected because it would make the price history ambiguous.
+     */
+    private fun prices(m: Map<*, *>, ctx: String): List<Price> = when (val raw = m["price"]) {
+        null -> emptyList()
+        is String -> if (isUnknownPlaceholder(raw)) emptyList() else throw RegistryException("$ctx: price must be a mapping, a list, or UNKNOWN")
+        is Map<*, *> -> listOfNotNull(price(raw, ctx))
+        is List<*> -> raw.map {
+            val p = it as? Map<*, *> ?: throw RegistryException("$ctx: price versions must be mappings")
+            if (isUnknownPlaceholder(p["inputPerMtok"]) || isUnknownPlaceholder(p["outputPerMtok"])) {
+                throw RegistryException("$ctx: UNKNOWN is not allowed in a price version list")
+            }
+            price(p, ctx)!!
+        }
+        else -> throw RegistryException("$ctx: price must be a mapping, a list, or UNKNOWN")
+    }
+
+    /** Null for an UNKNOWN placeholder (the version is unpriced). */
+    private fun price(p: Map<*, *>, ctx: String): Price? {
+        if (isUnknownPlaceholder(p["inputPerMtok"]) || isUnknownPlaceholder(p["outputPerMtok"])) return null
+        val tiers = (p["tiers"] as? List<*>)?.map {
+            val t = it as? Map<*, *> ?: throw RegistryException("$ctx: price tiers must be mappings")
+            PriceTier(
+                inputTokensUpTo = req(t, "inputTokensUpTo", ctx).toLongOrNull() ?: throw RegistryException("$ctx: inputTokensUpTo must be an integer"),
+                inputPerMtok = dec(req(t, "inputPerMtok", ctx), ctx),
+                outputPerMtok = dec(req(t, "outputPerMtok", ctx), ctx),
+                cachedInputPerMtok = t["cachedInputPerMtok"]?.let { dec(it, ctx) },
+            )
+        } ?: emptyList()
+        if (p["tiers"] != null && p["tiers"] !is List<*>) throw RegistryException("$ctx: tiers must be a list")
+        return Price(
+            inputPerMtok = dec(req(p, "inputPerMtok", ctx), ctx),
+            outputPerMtok = dec(req(p, "outputPerMtok", ctx), ctx),
+            cachedInputPerMtok = p["cachedInputPerMtok"]?.let { dec(it, ctx) },
+            currency = p["currency"]?.toString() ?: "USD",
+            sourceRef = p["sourceRef"]?.toString(),
+            effectiveFrom = p["effectiveFrom"]?.let { date(it, ctx) },
+            tiers = tiers,
+        )
+    }
 
     private fun model(m: Map<*, *>): ModelEntry {
         val id = req(m, "id", "model")
         val ctx = "model $id"
         val caps = (m["capabilities"] as? List<*> ?: throw RegistryException("$ctx: capabilities is required"))
             .map { enumOf(Capability::class.java, it.toString(), ctx) }.toSet()
-        // A placeholder price ("UNKNOWN") means the model is unpriced: it is loaded without a price and excluded from routing.
-        val price = (m["price"] as? Map<*, *>)?.takeUnless(::isUnknownPlaceholder)?.let {
-            Price(
-                inputPerMtok = BigDecimal(req(it, "inputPerMtok", ctx)),
-                outputPerMtok = BigDecimal(req(it, "outputPerMtok", ctx)),
-                cachedInputPerMtok = it["cachedInputPerMtok"]?.toString()?.let(::BigDecimal),
-                currency = it["currency"]?.toString() ?: "USD",
-                sourceRef = it["sourceRef"]?.toString(),
-            )
-        }
         return ModelEntry(
             id = id,
             providerId = req(m, "providerId", ctx),
@@ -165,7 +275,7 @@ object RegistryLoader {
             capabilities = caps,
             contextWindowTokens = req(m, "contextWindowTokens", ctx).toInt(),
             maxOutputTokens = req(m, "maxOutputTokens", ctx).toInt(),
-            price = price,
+            prices = prices(m, ctx),
             qualityTier = m["qualityTier"]?.toString()?.let { enumOf(QualityTier::class.java, it, ctx) },
         )
     }

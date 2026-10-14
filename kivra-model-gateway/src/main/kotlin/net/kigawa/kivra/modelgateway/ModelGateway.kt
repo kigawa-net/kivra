@@ -45,12 +45,14 @@ class ModelGateway(
     ledger: RequestLedger? = null,
     /** Explicit opt-in for the process-local [InMemoryRequestLedger] (dev/test only). Without it, no ledger means fail-fast. */
     devAllowInMemoryLedger: Boolean = false,
+    /** Converts USD prices into the JPY budget (design 13 B2). Null keeps the native currency. */
+    private val costConverter: CostConverter? = null,
 ) {
     private val ledger: RequestLedger = ledger ?: if (devAllowInMemoryLedger) InMemoryRequestLedger() else throw IllegalStateException(
         "ModelGateway requires a durable RequestLedger; InMemoryRequestLedger is dev/test only (pass devAllowInMemoryLedger = true to opt in)",
     )
 
-    private val router = RoutingEngine(registry, budget, health, providers.keys, clock, maxAttempts)
+    private val router = RoutingEngine(registry, budget, health, providers.keys, clock, maxAttempts, costConverter)
 
     fun route(req: ModelRequest, streaming: Boolean = false): RoutingDecision = router.route(req, streaming)
 
@@ -354,8 +356,8 @@ class ModelGateway(
      * provider is not called. Routing already excludes unpriced models; this keeps the invariant local to the reservation.
      */
     private fun reservation(req: ModelRequest, target: ResolvedTarget): BudgetAmount =
-        Estimator.maxBudgetAmount(req, target.model, registry.registryVersion)
-            ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price; provider not called")
+        Estimator.maxBudgetAmount(req, target.model, target.provider, registry.registryVersion, clock.instant(), costConverter)
+            ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price in force or cost cannot be converted; provider not called")
 
     /**
      * Books a completed provider call. With complete usage, the actual cost is committed and bound to its price revision,
@@ -369,11 +371,15 @@ class ModelGateway(
             budget.commit(key, null)
             return Cost(est.amount, est.currency, CostBasis.ESTIMATED, est.unit, rev, target.model.ref, req.requestId)
         }
-        val price = target.model.price ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price")
-        val cost = CostCalculator.cost(usage, price, CostBasis.ACTUAL)
-            .copy(priceRevision = rev, model = target.model.ref, requestId = req.requestId)
-        budget.commit(key, BudgetAmount(cost.amount, cost.currency, cost.unit, rev, target.model.ref))
-        return cost
+        val now = clock.instant()
+        val price = target.model.priceAt(now) ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price in force")
+        // Tier is chosen from the actual input size (input + cached), so the actual cost is exact for the tier that applied.
+        val rate = price.rateFor(usage.inputTokens + usage.cachedInputTokens)
+        val native = CostCalculator.cost(usage, rate, price.currency, CostBasis.ACTUAL)
+        val amount = Estimator.toBudget(native.amount, price, target.model.ref, target.provider, rev, now, costConverter)
+            ?: throw denied("UNKNOWN_COST", "model ${target.model.id} cost cannot be converted to the budget currency")
+        budget.commit(key, amount)
+        return native.copy(priceRevision = rev, model = target.model.ref, requestId = req.requestId)
     }
 
     /** Exponential backoff with full jitter, never shorter than a provider-supplied Retry-After. */

@@ -17,7 +17,7 @@ fun model(
     id: String, providerId: String, caps: Set<Capability> = setOf(Capability.TEXT, Capability.STREAMING, Capability.SYSTEM_PROMPT, Capability.TOOL_CALLING),
     tier: QualityTier? = QualityTier.A, context: Int = 100_000, maxOut: Int = 4096, price: Price? = Price(BigDecimal("3"), BigDecimal("15")),
     lifecycle: Lifecycle = Lifecycle.ACTIVE, retireAt: java.time.LocalDate? = null,
-) = ModelEntry(id, providerId, "$id-name", lifecycle, retireAt, caps, context, maxOut, price, tier)
+) = ModelEntry(id, providerId, "$id-name", lifecycle, retireAt, caps, context, maxOut, listOfNotNull(price), tier)
 
 fun request(
     dataClass: DataClass = DataClass.PUBLIC, id: String = "req-1", scopes: List<String> = listOf("task"),

@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.JsonElement
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.Instant
 
 data class CallContext(val requestId: String, val attemptId: String, val routingDecisionId: String)
 
@@ -54,31 +55,49 @@ object Estimator {
 
     fun outputTokens(req: ModelRequest, model: ModelEntry): Int = minOf(req.generation.maxOutputTokens, model.maxOutputTokens)
 
-    /** Upper-bound cost used for reservation; null when the model has no price (fail closed). */
-    fun maxCost(req: ModelRequest, model: ModelEntry): BigDecimal? {
-        val price = model.price ?: return null
-        return CostCalculator.cost(Usage(inputTokens(req), outputTokens(req, model).toLong()), price, CostBasis.ESTIMATED).amount
+    /**
+     * Upper-bound amount for budget admission in the budget currency. Null when no price version is in force at [now], or
+     * when the cost cannot be expressed in the budget currency (fail closed). Upper bound: the highest-tier rate is used.
+     */
+    fun maxBudgetAmount(
+        req: ModelRequest, model: ModelEntry, provider: ProviderEntry, registryVersion: String, now: Instant, converter: CostConverter?,
+    ): BudgetAmount? {
+        val price = model.priceAt(now) ?: return null
+        val usage = Usage(inputTokens(req), outputTokens(req, model).toLong())
+        val native = CostCalculator.cost(usage, price.rateFor(null), price.currency, CostBasis.ESTIMATED).amount
+        return toBudget(native, price, model.ref, provider, registryVersion, now, converter)
     }
 
     /**
-     * Upper-bound amount for budget admission, bound to the price revision and model. Null when the model has no price:
-     * an unknown cost is never admitted as zero.
+     * Converts a native-currency amount into a budget amount. A local model with an explicitly zero price is free: it is
+     * booked as zero without a conversion, so it needs no exchange rate. Otherwise the amount is converted through
+     * [converter] when one is injected; without one the amount stays in the price currency (the USD budget path).
      */
-    fun maxBudgetAmount(req: ModelRequest, model: ModelEntry, priceRevision: String): BudgetAmount? {
-        val price = model.price ?: return null
-        val c = CostCalculator.cost(Usage(inputTokens(req), outputTokens(req, model).toLong()), price, CostBasis.ESTIMATED)
-        return BudgetAmount(c.amount, c.currency, c.unit, priceRevision, model.ref)
+    fun toBudget(
+        native: BigDecimal, price: Price, ref: ModelRef, provider: ProviderEntry, registryVersion: String, now: Instant,
+        converter: CostConverter?,
+    ): BudgetAmount? {
+        if (provider.trustZone == TrustZone.LOCAL && price.isExplicitlyZero()) {
+            val currency = if (converter == null) price.currency else CostConverter.YEN
+            return BudgetAmount(BigDecimal.ZERO, currency, Cost.UNIT_CURRENCY_UNITS, "$registryVersion;free-local", ref)
+        }
+        if (converter == null) return BudgetAmount(native, price.currency, Cost.UNIT_CURRENCY_UNITS, registryVersion, ref)
+        val yen = converter.toYen(native, price.currency, now) ?: return null
+        return BudgetAmount(
+            yen.amount, CostConverter.YEN, Cost.UNIT_CURRENCY_UNITS,
+            "$registryVersion;${yen.evidence};priceFrom=${price.effectiveFrom ?: "always"}", ref,
+        )
     }
 }
 
 object CostCalculator {
     private val MILLION = BigDecimal(1_000_000)
 
-    fun cost(usage: Usage, price: Price, basis: CostBasis): Cost {
+    fun cost(usage: Usage, rate: Rate, currency: String, basis: CostBasis): Cost {
         fun part(tokens: Long, perMtok: BigDecimal) = BigDecimal(tokens).multiply(perMtok).divide(MILLION, 10, RoundingMode.UP)
-        val total = part(usage.inputTokens, price.inputPerMtok) +
-            part(usage.outputTokens, price.outputPerMtok) +
-            part(usage.cachedInputTokens, price.cachedInputPerMtok ?: price.inputPerMtok)
-        return Cost(total, price.currency, basis)
+        val total = part(usage.inputTokens, rate.inputPerMtok) +
+            part(usage.outputTokens, rate.outputPerMtok) +
+            part(usage.cachedInputTokens, rate.cachedInputPerMtok)
+        return Cost(total, currency, basis)
     }
 }

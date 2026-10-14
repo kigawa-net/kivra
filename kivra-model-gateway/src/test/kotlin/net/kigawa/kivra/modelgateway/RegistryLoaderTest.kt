@@ -41,7 +41,7 @@ class RegistryLoaderTest {
     """.trimIndent()
 
     @Test fun minimalRegistryLoadsWithoutPrice() {
-        assertEquals(null, RegistryLoader.fromYaml(base).models.single().price)
+        assertEquals(emptyList(), RegistryLoader.fromYaml(base).models.single().prices)
     }
 
     @Test fun confirmedDataHandlingNeedsConfirmerDateAndSource() {
@@ -62,9 +62,9 @@ class RegistryLoaderTest {
 
     @Test fun unknownPlaceholderPriceLoadsAsUnpricedModel() {
         val placeholder = base + "\n    price: { inputPerMtok: UNKNOWN, outputPerMtok: UNKNOWN }"
-        assertEquals(null, RegistryLoader.fromYaml(placeholder).models.single().price)
+        assertEquals(emptyList(), RegistryLoader.fromYaml(placeholder).models.single().prices)
         val scalar = base + "\n    price: UNKNOWN"
-        assertEquals(null, RegistryLoader.fromYaml(scalar).models.single().price)
+        assertEquals(emptyList(), RegistryLoader.fromYaml(scalar).models.single().prices)
     }
 
     @Test fun disabledByDefaultWhenFlagMissing() {

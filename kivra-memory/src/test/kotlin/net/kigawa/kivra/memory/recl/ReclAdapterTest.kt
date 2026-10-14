@@ -147,6 +147,56 @@ class ReclAdapterTest {
     }
 
     @Test
+    fun `Retry-After never causes a mutation to be re-sent`() = runTest {
+        val retryAfter = headersOf(HttpHeaders.ContentType to listOf("application/json"), "Retry-After" to listOf("1"))
+        for (status in listOf(HttpStatusCode.TooManyRequests, HttpStatusCode.ServiceUnavailable)) {
+            var calls = 0
+            val sleeps = mutableListOf<Long>()
+            val a = adapter(MockEngine { calls++; respond("{}", status, retryAfter) }, sleeps = sleeps)
+            assertFailsWith<MemoryException> { a.save(T.entry(), T.key("ra"), ctx) }
+            assertFailsWith<MemoryException> { a.update(MemoryId("m1"), 1, MemoryPatch(summary = "x"), ctx) }
+            assertFailsWith<MemoryException> { a.delete(MemoryId("m1"), DeleteMode.SOFT, ctx) }
+            assertEquals(3, calls, "status $status: one request per mutation, no re-send")
+            assertTrue(sleeps.isEmpty(), "mutations must not back off or retry on Retry-After")
+        }
+    }
+
+    @Test
+    fun `read timeouts on PATCH and DELETE after sending are unknown outcomes and are not re-sent`() = runTest {
+        var calls = 0
+        val sleeps = mutableListOf<Long>()
+        val a = adapter(MockEngine { calls++; throw java.net.SocketTimeoutException("read timed out") }, sleeps = sleeps)
+        assertEquals(MemoryErrorKind.OUTCOME_UNKNOWN, assertFailsWith<MemoryException> { a.update(MemoryId("m1"), 1, MemoryPatch(summary = "x"), ctx) }.kind)
+        assertEquals(MemoryErrorKind.OUTCOME_UNKNOWN, assertFailsWith<MemoryException> { a.delete(MemoryId("m1"), DeleteMode.SOFT, ctx) }.kind)
+        assertEquals(2, calls)
+        assertTrue(sleeps.isEmpty())
+    }
+
+    @Test
+    fun `rate limit body echoing the token is not surfaced in the exception`() = runTest {
+        val a = adapter(MockEngine { respond("""{"error":"limited for $secretToken"}""", HttpStatusCode.TooManyRequests, jsonHeaders) })
+        val ex = assertFailsWith<MemoryException> { a.save(T.entry(), T.key("k"), ctx) }
+        assertEquals(MemoryErrorKind.OUTCOME_UNKNOWN, ex.kind)
+        assertFalse(ex.message!!.contains(secretToken))
+        assertFalse(ex.toString().contains(secretToken))
+    }
+
+    @Test
+    fun `GET 429 is retried within the attempt budget with backoff, not by Retry-After`() = runTest {
+        var calls = 0
+        val sleeps = mutableListOf<Long>()
+        val limited = headersOf(HttpHeaders.ContentType to listOf("application/json"), "Retry-After" to listOf("60"))
+        val engine = MockEngine {
+            calls++
+            if (calls < 3) respond("{}", HttpStatusCode.TooManyRequests, limited)
+            else respond(testJson.encodeToString(reclContext(stored())), HttpStatusCode.OK, jsonHeaders)
+        }
+        assertEquals("m1", adapter(engine, sleeps = sleeps).get(MemoryId("m1"), ctx)?.id?.value)
+        assertEquals(3, calls)
+        assertEquals(listOf(100L, 200L), sleeps)
+    }
+
+    @Test
     fun `GET is retried with backoff and then succeeds`() = runTest {
         var calls = 0
         val sleeps = mutableListOf<Long>()

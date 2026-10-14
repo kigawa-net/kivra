@@ -28,6 +28,7 @@ import net.kigawa.kivra.memory.Sensitivity
 import net.kigawa.kivra.memory.SourceRef
 import net.kigawa.kivra.memory.SourceType
 import net.kigawa.kivra.memory.WriteProvenance
+import java.io.IOException
 import java.time.Instant
 
 val jsonHeaders = headersOf(HttpHeaders.ContentType, "application/json")
@@ -54,6 +55,13 @@ private fun newEntry(n: ReclNewContext) = NewMemoryEntry(
 /** A stand-in for recl implementing the PLANNED contract on top of [FakeMemoryPort]. Test-only. */
 class MockRecl(val fake: FakeMemoryPort, private val ctx: AccessContext) {
     val requests = mutableListOf<HttpRequestData>()
+
+    /** Fault switch: the next N `POST /contexts` are APPLIED and then the connection drops (response lost). */
+    var responsesLostAfterApply = 0
+
+    /** Fault switch: the next N `POST /contexts` are APPLIED and then answered 429 with `Retry-After`. */
+    var rateLimitedAfterApply = 0
+
     val engine = MockEngine { request ->
         requests += request
         try {
@@ -91,6 +99,14 @@ class MockRecl(val fake: FakeMemoryPort, private val ctx: AccessContext) {
             m == HttpMethod.Post && path == "/contexts" -> {
                 val n = testJson.decodeFromString<ReclNewContext>(body(r))
                 val id = fake.save(newEntry(n), IdempotencyKey(r.headers["Idempotency-Key"]!!), ctx)
+                if (responsesLostAfterApply > 0) {
+                    responsesLostAfterApply--
+                    throw IOException("connection reset after the server applied the POST")
+                }
+                if (rateLimitedAfterApply > 0) {
+                    rateLimitedAfterApply--
+                    return respond("{}", HttpStatusCode.TooManyRequests, headersOf(HttpHeaders.ContentType to listOf("application/json"), "Retry-After" to listOf("1")))
+                }
                 respond(testJson.encodeToString(ReclIdResponse(id.value)), HttpStatusCode.Created, jsonHeaders)
             }
             m == HttpMethod.Post && path.endsWith("/supersede") -> {

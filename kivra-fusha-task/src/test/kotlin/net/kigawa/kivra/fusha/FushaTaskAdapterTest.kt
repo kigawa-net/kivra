@@ -14,10 +14,16 @@ import net.kigawa.kivra.core.TaskFilter
 import net.kigawa.kivra.core.TaskProvider
 import net.kigawa.kivra.core.TaskProviderException
 import java.io.IOException
+import java.net.SocketTimeoutException
+import java.time.Clock
 import java.time.Duration
+import java.time.Instant
+import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -241,6 +247,94 @@ class FushaTaskAdapterTest {
         val cfg = config()
         assertTrue("tok" !in cfg.toString().replace("staticToken", ""))
         assertTrue("secret-token" !in StaticTokenProvider("secret-token").toString())
+    }
+
+    @Test fun `401 asks the token provider for a forced refresh exactly once and never without one first`() = runTest {
+        val flags = mutableListOf<Boolean>()
+        val tokens = object : TokenProvider {
+            override suspend fun token(forceRefresh: Boolean): String {
+                flags += forceRefresh
+                return if (forceRefresh) "fresh" else "stale"
+            }
+        }
+        var n = 0
+        val h = Harness(MockEngine { n++; respond("", HttpStatusCode.Unauthorized) }, tokens)
+        assertEquals(TaskErrorKind.UNAUTHORIZED, assertFailsWith<TaskProviderException> { h.adapter.list() }.kind)
+        assertEquals(listOf(false, true), flags)
+        assertEquals(2, n)
+        assertTrue(h.sleeps.isEmpty())
+    }
+
+    @Test fun `401 on list also refreshes once and succeeds`() = runTest {
+        val used = mutableListOf<String>()
+        val tokens = object : TokenProvider {
+            override suspend fun token(forceRefresh: Boolean) = if (forceRefresh) "fresh" else "stale"
+        }
+        val h = Harness(MockEngine {
+            val auth = it.headers[HttpHeaders.Authorization]!!.removePrefix("Bearer ")
+            used += auth
+            if (auth == "stale") respond("", HttpStatusCode.Unauthorized) else fakeServer(it)
+        }, tokens)
+        assertEquals(3, h.adapter.list().size)
+        assertEquals(listOf("stale", "fresh"), used)
+    }
+
+    @Test fun `persistent 401 leaks no token into exception message, cause or stack trace`() = runTest {
+        val secret = "secret-xyz-123"
+        val h = Harness(MockEngine { respond("", HttpStatusCode.Unauthorized) }, StaticTokenProvider(secret))
+        val e = assertFailsWith<TaskProviderException> { h.adapter.get(ContractFixture.id(1)) }
+        assertFalse(secret in e.toString())
+        assertFalse(secret in (e.message ?: ""))
+        assertFalse(secret in e.stackTraceToString())
+    }
+
+    @Test fun `persistent 429 is TRANSIENT after maxRetries and sends no more requests`() = runTest {
+        var n = 0
+        val h = Harness(MockEngine { n++; respond("", HttpStatusCode.TooManyRequests) }, cfg = config(retries = 2))
+        val e = assertFailsWith<TaskProviderException> { h.adapter.get(ContractFixture.id(1)) }
+        assertEquals(TaskErrorKind.TRANSIENT, e.kind)
+        assertEquals(429, e.httpStatus)
+        assertEquals(3, n)
+        assertEquals(listOf(100L, 200L), h.sleeps)
+    }
+
+    @Test fun `socket timeout is retried and then TRANSIENT`() = runTest {
+        var n = 0
+        val h = Harness(MockEngine { n++; throw SocketTimeoutException("read timed out") }, cfg = config(retries = 2))
+        assertEquals(TaskErrorKind.TRANSIENT, assertFailsWith<TaskProviderException> { h.adapter.get(ContractFixture.id(1)) }.kind)
+        assertEquals(3, n)
+    }
+
+    @Test fun `token provider failure sends no request (fail closed)`() = runTest {
+        var n = 0
+        val tokens = object : TokenProvider {
+            override suspend fun token(forceRefresh: Boolean): String = throw IllegalStateException("no credential")
+        }
+        val h = Harness(MockEngine { n++; fakeServer(it) }, tokens)
+        assertFails { h.adapter.get(ContractFixture.id(1)) }
+        assertEquals(0, n)
+    }
+
+    @Test fun `token fetch IO failure is retried and no request is sent without a token`() = runTest {
+        var n = 0
+        val tokens = object : TokenProvider {
+            override suspend fun token(forceRefresh: Boolean): String = throw IOException("token endpoint down")
+        }
+        val h = Harness(MockEngine { n++; fakeServer(it) }, tokens, config(retries = 2))
+        assertEquals(TaskErrorKind.TRANSIENT, assertFailsWith<TaskProviderException> { h.adapter.get(ContractFixture.id(1)) }.kind)
+        assertEquals(0, n)
+    }
+
+    @Test fun `fetchedAt comes from the injected clock`() = runTest {
+        val fixed = Instant.parse("2026-10-15T01:02:03Z")
+        val cfg = config()
+        val adapter = FushaTaskAdapter(
+            cfg,
+            FushaTaskAdapter.createClient(cfg, MockEngine { fakeServer(it) }),
+            StaticTokenProvider("tok"),
+            clock = Clock.fixed(fixed, ZoneOffset.UTC),
+        )
+        assertEquals(fixed, adapter.get(ContractFixture.id(1))!!.fetchedAt)
     }
 
     @Test fun `config toString hides token`() {

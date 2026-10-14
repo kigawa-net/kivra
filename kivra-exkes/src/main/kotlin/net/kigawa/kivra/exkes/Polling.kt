@@ -28,7 +28,7 @@ private suspend fun <T> poll(config: PollConfig, get: suspend () -> PortResult<T
                 last = r.value
                 if (done(r.value)) return PollOutcome.Reached(r.value)
             }
-            is PortResult.Transient, is PortResult.Unknown -> Unit // GET only: safe to keep polling
+            is PortResult.Transient, is PortResult.Retryable, is PortResult.Unknown -> Unit // GET only: safe to keep polling
             else -> return PollOutcome.Failed(r)
         }
         if (mark.elapsedNow() >= config.timeout) return PollOutcome.TimedOut(last)

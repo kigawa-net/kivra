@@ -72,7 +72,8 @@ fun sha256Hex(text: String): String =
  *    RETRYABLE (create ops are never resent).
  *  - only [PortResult.Transient] (adapter-proven: the request was never sent) is retried, and only with a
  *    [VerifiedEvidenceRef] for NOT_SENT that the [TrustedEvidenceAuthority] issued. If no such ref can be obtained the
- *    row goes to UNKNOWN instead. Every other failure stays UNKNOWN and is reconciled: nothing here marks a
+ *    row goes to UNKNOWN instead. [PortResult.Retryable] (a read failure that may have been sent) is never a NOT_SENT
+ *    proof and is never mapped to RETRYABLE here (ADR 0005). Every other failure stays UNKNOWN and is reconciled: nothing here marks a
  *    mutating call FAILED, because no trusted REJECTED_NO_EFFECT contract exists yet (M0 #43). A 409 may be our own
  *    earlier POST, and a 4xx or 404 on a POST is not proof that nothing happened.
  *  - the attempt budget is enforced by the journal: RETRYABLE -> IN_FLIGHT may come back as FAILED
@@ -188,6 +189,9 @@ internal class OperationExecutor(
             )
             // Adapter-proven: the request never left the process (connect refused / connect timeout / DNS / token failure).
             is PortResult.Transient -> Settled(notSent("PROVIDER_PRE_DISPATCH_FAILURE"), null)
+            // A read-only failure (GET) after the request may have been sent. It is NOT a NotSentProof, so no markNotSent
+            // and no RETRYABLE: a mutating Op never produces it (the adapter answers Unknown), so it fails closed here.
+            is PortResult.Retryable -> Settled(move(OperationStatus.UNKNOWN, cls = "RETRYABLE_NOT_PROVEN", msg = "PROVIDER_RETRYABLE_NOT_PROVEN"), null)
             is PortResult.Unknown -> Settled(move(OperationStatus.UNKNOWN, cls = "UNKNOWN", msg = "PROVIDER_OUTCOME_UNKNOWN"), null)
             is PortResult.IdentityMismatch ->
                 Settled(move(OperationStatus.UNKNOWN, cls = "IDENTITY_MISMATCH", msg = "PROVIDER_IDENTITY_MISMATCH"), null)

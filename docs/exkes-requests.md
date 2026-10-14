@@ -48,7 +48,8 @@ M0 の `OperationStatus`/`ReconciliationEvidence` に従う。`PortResult.toOper
 |---|---|---|
 | Ok | CONFIRMED | 202 受理 = 作成要求の確定。実体の状態は GET で追跡(Polling) |
 | Unknown / IdentityMismatch | UNKNOWN | 自動再送禁止。照合後に `ReconciliationEvidence` で遷移 |
-| Transient | RETRYABLE | 接続拒否・429・GET 失敗など、効果が無かったと言えるもの |
+| Transient | RETRYABLE | 送信前に確実に失敗したもの(接続拒否・接続タイムアウト・DNS 失敗・トークン取得失敗)。NotSentProof の根拠になる唯一の型(ADR 0005) |
+| Retryable | UNKNOWN | 読み取り(GET)の 5xx・429・timeout など。再試行はしてよいが未送信の証拠ではないため RETRYABLE にしない(ADR 0005) |
 | Rejected / NotFound / Unsupported | FAILED | |
 | Conflict | (null) | 呼び出し側で照合してから判断 |
 

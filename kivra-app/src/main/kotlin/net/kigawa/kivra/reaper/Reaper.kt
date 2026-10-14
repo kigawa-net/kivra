@@ -155,6 +155,7 @@ internal fun describe(r: PortResult<*>): String = when (r) {
     is PortResult.Conflict -> "conflict"
     is PortResult.Rejected -> "rejected (HTTP ${r.httpStatus})"
     is PortResult.Transient -> "transient failure"
+    is PortResult.Retryable -> "retryable failure"
     is PortResult.Unknown -> "outcome unknown"
     is PortResult.IdentityMismatch -> "identity mismatch"
     is PortResult.Unsupported -> "unsupported: ${r.capability}"
@@ -501,6 +502,12 @@ class Reaper(
             is PortResult.Transient -> {
                 settle(go, "UNKNOWN", "TRANSIENT_NOT_PROVEN", describe(result))
                 finding(ReapVerdict.DELETE_UNKNOWN, "transient failure without a not-sent proof, recorded as UNKNOWN and never resent")
+            }
+            // A DELETE never returns Retryable (it is a mutation, so the adapter answers Unknown). Treated like Transient
+            // should it ever appear: no proof of no effect, so recorded UNKNOWN and never resent.
+            is PortResult.Retryable -> {
+                settle(go, "UNKNOWN", "RETRYABLE_NOT_PROVEN", describe(result))
+                finding(ReapVerdict.DELETE_UNKNOWN, "retryable failure without a not-sent proof, recorded as UNKNOWN and never resent")
             }
             is PortResult.Unknown -> {
                 settle(go, "UNKNOWN", "UNKNOWN", describe(result))

@@ -21,6 +21,7 @@ import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.AgentRepository
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.execUpdate
 import net.kigawa.kivra.agent.AgentProfile
 import net.kigawa.kivra.exkes.ExecutionPort
@@ -83,6 +84,11 @@ private class RecheckHookPort(private val inner: TestPort, private val beforeRec
     }
 }
 
+/** The workspace listing throws (not a failed PortResult): the Reaper must treat it as a failed listing. */
+private class ListingThrowsPort(private val inner: TestPort) : ExecutionPort by inner {
+    override suspend fun listWorkspaces(): PortResult<List<Workspace>> = throw IllegalStateException("socket reset")
+}
+
 /** Runtime listing fails: the Reaper cannot observe the runtimes, so it must not delete. */
 private class RuntimeListingDownPort(private val inner: TestPort) : ExecutionPort by inner {
     override suspend fun listRuntimes(workspace: WorkspaceId): PortResult<List<Runtime>> = PortResult.Transient("list runtimes down")
@@ -111,6 +117,10 @@ class ReaperTest {
         "external_operations",
         "run_id = '${runId.value}' AND op_type = 'EXKES_REAP_DELETE_WORKSPACE'",
     )
+
+    private fun TestDb.runState(runId: RunId): String = transaction(database) {
+        execQuery("SELECT state FROM development_runs WHERE run_id = ?", runId.value) { it.getString(1) }.single()
+    }
 
     private fun findingFor(report: ReapReport, runId: RunId) =
         report.findings.single { it.runId == runId.value }
@@ -418,5 +428,76 @@ class ReaperTest {
         val report = runBlocking { Reaper(port, db.database, NO_GRACE).runOnce() }
         assertEquals(ReapVerdict.DELETE_REQUESTED, findingFor(report, runId).verdict)
         assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+    }
+
+    // ---- Heartbeat lapse (design #3 §4.1 / §6.3): LEASE_LAPSED is reported, never deleted, and the Run state is not changed.
+
+    @Test
+    fun `a non-terminal run whose lease lapsed is LEASE_LAPSED - reported, not deleted, state unchanged`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        db.forceState(runId.value, DevelopmentRunState.TESTING)
+        db.setRunColumns(runId, "UPDATE development_runs SET lease_owner = 'worker-dead', lease_expires_at = TIMESTAMPADD(SECOND, -60, NOW(6)) WHERE run_id = ?")
+
+        val report = runBlocking { Reaper(port, db.database, NO_GRACE).runOnce() }
+        assertEquals(ReapVerdict.LEASE_LAPSED, findingFor(report, runId).verdict)
+        assertTrue(port.mutatingCalls.none { it == "deleteWorkspace" })
+        assertEquals(0, db.reapRows(runId))
+        assertEquals(DevelopmentRunState.TESTING.name, db.runState(runId))
+    }
+
+    @Test
+    fun `a lapsed run with no listed workspace is LEASE_LAPSED and nothing is deleted`() = TestDb().use { db ->
+        val port = TestPort()
+        val run = db.runs.create("task-${System.nanoTime()}", "test", RunCompletionMode.RELEASE)
+        db.forceState(run.runId.value, DevelopmentRunState.DEVELOPING)
+        db.setRunColumns(run.runId, "UPDATE development_runs SET lease_owner = 'worker-dead', lease_expires_at = TIMESTAMPADD(SECOND, -60, NOW(6)) WHERE run_id = ?")
+
+        val report = runBlocking { Reaper(port, db.database, NO_GRACE).runOnce() }
+        assertEquals(ReapVerdict.LEASE_LAPSED, findingFor(report, run.runId).verdict)
+        assertTrue(port.mutatingCalls.none { it == "deleteWorkspace" })
+    }
+
+    @Test
+    fun `a run with a live lease is not reported as lapsed`() = TestDb().use { db ->
+        val port = TestPort()
+        val run = db.runs.create("task-${System.nanoTime()}", "test", RunCompletionMode.RELEASE)
+        db.forceState(run.runId.value, DevelopmentRunState.DEVELOPING)
+        db.setRunColumns(run.runId, "UPDATE development_runs SET lease_owner = 'worker-live', lease_expires_at = TIMESTAMPADD(SECOND, 60, NOW(6)) WHERE run_id = ?")
+
+        val report = runBlocking { Reaper(port, db.database, NO_GRACE).runOnce() }
+        assertTrue(report.findings.none { it.runId == run.runId.value }, "a live lease is not a lapse and has no workspace to review")
+    }
+
+    // ---- Lease generation fencing: a judgment made under one lease generation is not acted on under another.
+
+    @Test
+    fun `a lease generation change between the claim and the arm blocks the deletion before anything is sent`() = TestDb().use { db ->
+        val port = TestPort()
+        val runId = db.completedRun(port)
+        val wsId = workspaceIdOf(port, db, runId)
+        val hooked = RecheckHookPort(port) {
+            db.setRunColumns(runId, "UPDATE development_runs SET lease_generation = lease_generation + 1 WHERE run_id = ?")
+        }
+        val reaper = Reaper(hooked, db.database, NO_GRACE)
+
+        assertEquals(ReapVerdict.BLOCKED, findingFor(runBlocking { reaper.runOnce() }, runId).verdict)
+        assertTrue(port.mutatingCalls.none { it == "deleteWorkspace" }, "nothing may be sent under a stale generation")
+        assertEquals(OperationStatus.PREPARED, db.journal.findByKey(runId, "EXKES_REAP_DELETE_WORKSPACE", "reap:${wsId.value}")!!.status)
+
+        // a later pass re-claims under the current generation and deletes exactly once
+        assertEquals(ReapVerdict.DELETE_REQUESTED, findingFor(runBlocking { reaper.runOnce() }, runId).verdict)
+        assertEquals(1, port.mutatingCalls.count { it == "deleteWorkspace" })
+    }
+
+    // ---- A thrown listing is a failed listing.
+
+    @Test
+    fun `a listing that throws is a failed listing and touches nothing`() = TestDb().use { db ->
+        val inner = TestPort()
+        val report = runBlocking { Reaper(ListingThrowsPort(inner), db.database, NO_GRACE).runOnce() }
+        assertNotNull(report.listingFailed)
+        assertTrue(report.findings.isEmpty())
+        assertTrue(inner.mutatingCalls.none { it == "deleteWorkspace" })
     }
 }

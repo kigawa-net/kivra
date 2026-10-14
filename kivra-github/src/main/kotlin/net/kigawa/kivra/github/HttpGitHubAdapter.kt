@@ -228,6 +228,13 @@ class HttpGitHubAdapter(
 
     private val sha40 = Regex("[0-9a-f]{40}")
 
+    /** Lookup failures that decide which PR is ours; reported even when the create outcome was unknown. */
+    private val IDENTITY_DECISIONS = setOf(
+        GitHubFailureKind.FOREIGN_OBJECT,
+        GitHubFailureKind.IDENTITY_MISMATCH,
+        GitHubFailureKind.CONFLICT,
+    )
+
     private fun requireSha(sha: String) = require(sha40.matches(sha)) { "sha must be 40 lowercase hex chars: $sha" }
 
     private fun repoPath(repo: RepoRef) = "/repos/${repo.owner}/${repo.repo}"
@@ -412,26 +419,11 @@ class HttpGitHubAdapter(
     }
 
     override suspend fun ensurePullRequest(repo: RepoRef, request: CreatePullRequest): GitHubResult<EnsuredPullRequest> {
-        val runId = request.runId
         suspend fun lookup(): GitHubResult<EnsuredPullRequest?> =
             when (val f = findPullRequestsByHead(repo, request.head)) {
                 is GitHubResult.Failure -> f
                 is GitHubResult.Unknown -> f
-                is GitHubResult.Success -> {
-                    val prs = f.value
-                    val foreign = prs.firstOrNull { !it.hasMarker(runId) }
-                    when {
-                        foreign != null -> GitHubResult.Failure(
-                            GitHubFailureKind.FOREIGN_OBJECT,
-                            "PR #${foreign.number} on ${request.head} lacks marker ${RunBranch.marker(runId)}; isolating",
-                        )
-                        // Prefer an open PR; otherwise the most recent closed one is reported (caller decides).
-                        else -> GitHubResult.Success(
-                            (prs.firstOrNull { it.state == PullRequestState.OPEN } ?: prs.maxByOrNull { it.number })
-                                ?.let { EnsuredPullRequest(it, created = false) },
-                        )
-                    }
-                }
+                is GitHubResult.Success -> adoptOwnPullRequest(request, f.value)
             }
         when (val l = lookup()) {
             is GitHubResult.Failure -> return l
@@ -451,9 +443,37 @@ class HttpGitHubAdapter(
             is GitHubResult.Unknown ->
                 when (val l = lookup()) {
                     is GitHubResult.Success -> l.value?.let { GitHubResult.Success(it) } ?: c
-                    is GitHubResult.Failure -> if (l.kind == GitHubFailureKind.FOREIGN_OBJECT) l else c
+                    // Identity decisions are definitive: keep them instead of reporting a bare Unknown.
+                    is GitHubResult.Failure ->
+                        if (l.kind in IDENTITY_DECISIONS) l else c
                     is GitHubResult.Unknown -> c
                 }
+        }
+    }
+
+    /**
+     * Chooses this run's PR among the PRs on its head branch (issue #34, P1). Fail closed: an open PR is adopted only
+     * when the marker, head repo and head ref (checked by [findPullRequestsByHead]) and also the head sha and base ref
+     * all match the request. A stale or foreign-base PR is never adopted, and the caller must not create a new PR
+     * while one of them is open. With no open PR, the most recent closed one is reported (`created=false`), as before.
+     */
+    private fun adoptOwnPullRequest(request: CreatePullRequest, prs: List<PullRequest>): GitHubResult<EnsuredPullRequest?> {
+        val foreign = prs.firstOrNull { !it.hasMarker(request.runId) }
+        if (foreign != null) {
+            return GitHubResult.Failure(
+                GitHubFailureKind.FOREIGN_OBJECT,
+                "PR #${foreign.number} on ${request.head} lacks marker ${RunBranch.marker(request.runId)}; isolating",
+            )
+        }
+        val open = prs.filter { it.state == PullRequestState.OPEN }
+        if (open.isEmpty()) {
+            return GitHubResult.Success(prs.maxByOrNull { it.number }?.let { EnsuredPullRequest(it, created = false) })
+        }
+        val matching = open.filter { it.headSha == request.headSha && it.baseRef == request.base }
+        return when (matching.size) {
+            0 -> mismatch()
+            1 -> GitHubResult.Success(EnsuredPullRequest(matching.single(), created = false))
+            else -> GitHubResult.Failure(GitHubFailureKind.CONFLICT, "multiple open PRs match this run; refusing to choose")
         }
     }
 

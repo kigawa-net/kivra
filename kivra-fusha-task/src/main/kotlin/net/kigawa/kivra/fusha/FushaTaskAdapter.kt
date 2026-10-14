@@ -192,7 +192,7 @@ class FushaTaskAdapter(
         var forceRefresh = false
         while (true) {
             val outcome: Result<HttpResponse> = try {
-                val token = tokens.token(forceRefresh)
+                val token = currentToken(forceRefresh)
                 forceRefresh = false
                 Result.success(
                     client.get(url) {
@@ -203,6 +203,8 @@ class FushaTaskAdapter(
                 )
             } catch (e: CancellationException) {
                 // Timeouts (HttpRequestTimeoutException etc.) are IOExceptions in Ktor 3; real cancellation propagates.
+                throw e
+            } catch (e: TaskProviderException) {
                 throw e
             } catch (e: IOException) {
                 Result.failure(e)
@@ -225,6 +227,31 @@ class FushaTaskAdapter(
             sleep(backoffMillis(attempt))
             attempt++
         }
+    }
+
+    /**
+     * Obtains the bearer token, failing closed before any request is sent.
+     * - [IOException] is passed through so the caller retries it like a transient network error.
+     * - Any other failure of the [TokenProvider] becomes [TaskProviderException] (UNAUTHORIZED). The original
+     *   exception is deliberately not attached as cause: its message may contain secrets and would appear in the stack trace.
+     * - A blank token is treated the same way, so `Authorization: Bearer ` is never sent.
+     */
+    private suspend fun currentToken(forceRefresh: Boolean): String {
+        val token = try {
+            tokens.token(forceRefresh)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: TaskProviderException) {
+            throw e
+        } catch (e: IOException) {
+            throw e
+        } catch (e: Exception) {
+            throw TaskProviderException(TaskErrorKind.UNAUTHORIZED, "fusha-task token provider failed (${e.javaClass.simpleName})")
+        }
+        if (token.isBlank()) {
+            throw TaskProviderException(TaskErrorKind.UNAUTHORIZED, "fusha-task token provider returned an empty token")
+        }
+        return token
     }
 
     private fun backoffMillis(attempt: Int): Long {

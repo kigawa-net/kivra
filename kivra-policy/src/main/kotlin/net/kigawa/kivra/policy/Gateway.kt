@@ -76,6 +76,9 @@ class ToolGateway(
     // Exact action names only: an unregistered action cannot execute even if a rule allows it.
     private val bindings = bindings.toMap()
 
+    /** Policy hash captured when this gateway was built (ADR 0007). Every call re-checks the rules against it. */
+    private val expectedPolicyHash = engine.policyHash
+
     fun call(request: ToolRequest): ToolResult {
         val decisionId = UUID.randomUUID().toString()
         var principal: Principal? = null
@@ -86,6 +89,10 @@ class ToolGateway(
             catch (e: Exception) { false }
         // A denial stays a denial even if its audit record cannot be written (nothing executes).
         fun deny(reason: String): ToolResult { rec(AuditOutcome.DENIED, reason); return ToolResult.Denied(reason, decisionId) }
+
+        // Fail-closed: if the rules no longer match the hash fixed at load time, nothing is evaluated or executed.
+        val intact = try { engine.verifyIntegrity(expectedPolicyHash) } catch (e: Exception) { false }
+        if (!intact) return deny("POLICY_TAMPERED: policy rules changed after load (fail-closed)")
 
         principal = try { verifier.verify(request.token) } catch (e: Exception) { null }
             ?: return deny("invalid or expired token")

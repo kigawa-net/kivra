@@ -72,6 +72,9 @@ sealed interface TaskSubmitResult {
 }
 
 /** Another non-terminal run already exists for the task (`uk_dev_runs_active_task`). */
+/** Fixed reason code for a pull request closed without merge (ADR 0008 item 6). */
+const val PR_ABANDONED_REASON = "PR_ABANDONED"
+
 class DuplicateActiveRunException(val taskId: String) : RuntimeException("an active run already exists for task $taskId")
 
 /**
@@ -126,7 +129,7 @@ class DevelopmentRunRepository(
     }
 
     fun get(runId: RunId): DevelopmentRun? = transaction(database) {
-        DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.firstOrNull()?.toDevelopmentRun()
+        DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.firstOrNull()?.toDevelopmentRunOrNull()
     }
 
     /**
@@ -172,14 +175,14 @@ class DevelopmentRunRepository(
     private fun findTask(principal: String, idempotencyKey: String): DevelopmentRun? = transaction(database) {
         DevelopmentRunsTable.selectAll()
             .where { (DevelopmentRunsTable.principal eq principal) and (DevelopmentRunsTable.idempotencyKey eq idempotencyKey) }
-            .firstOrNull()?.toDevelopmentRun()
+            .firstOrNull()?.toDevelopmentRunOrNull()
     }
 
     /** A run owned by [principal]. Another principal's run is indistinguishable from a missing one (null). */
     fun getTask(runId: RunId, principal: String): DevelopmentRun? = transaction(database) {
         DevelopmentRunsTable.selectAll()
             .where { (DevelopmentRunsTable.runId eq runId.value) and (DevelopmentRunsTable.principal eq principal) }
-            .firstOrNull()?.toDevelopmentRun()
+            .firstOrNull()?.toDevelopmentRunOrNull()
     }
 
     /** Runs submitted by [principal], newest first. */
@@ -188,7 +191,7 @@ class DevelopmentRunRepository(
             .where { DevelopmentRunsTable.principal eq principal }
             .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
             .limit(limit)
-            .map { it.toDevelopmentRun() }
+            .mapNotNull { it.toDevelopmentRunOrNull() }
     }
 
     /**
@@ -202,14 +205,24 @@ class DevelopmentRunRepository(
         to: DevelopmentRunState,
         actor: String,
         reason: String? = null,
+        /** When set, the stored state must be exactly this one (checked under the row lock). */
+        expectedFrom: DevelopmentRunState? = null,
+        /** A fixed machine reason code, written to the audit payload. Never free text. */
+        auditReasonCode: String? = null,
     ): DevelopmentRun {
         transaction(database) {
             // Locks the row; throws LeaseLostException / RunHaltedException (hold, or cancel request except the CANCELLED ack).
             requireLease(lease, allowCancelRequested = to == DevelopmentRunState.CANCELLED)
             val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
-            val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+            val from = storedStateOrRefuse(lease.runId.value, row[DevelopmentRunsTable.state])
             if (row[DevelopmentRunsTable.version] != expectedVersion) {
                 throw VersionConflictException("run ${lease.runId} is at version ${row[DevelopmentRunsTable.version]}, expected $expectedVersion")
+            }
+            if (expectedFrom != null && from != expectedFrom) {
+                throw InvalidTransitionException("run ${lease.runId}: expected $expectedFrom, the run is in $from")
+            }
+            if (to in from.evidenceGated) {
+                throw InvalidTransitionException("run ${lease.runId}: $from -> $to requires verified evidence; no reconciliation path exists yet")
             }
             if (!from.canTransitionTo(to)) throw InvalidTransitionException("run ${lease.runId}: $from -> $to is not allowed")
             val mode = RunCompletionMode.valueOf(row[DevelopmentRunsTable.completionMode])
@@ -220,6 +233,9 @@ class DevelopmentRunRepository(
             }
             if (mode == RunCompletionMode.PR_ONLY && to in setOf(DevelopmentRunState.RELEASING, DevelopmentRunState.VERIFYING)) {
                 throw InvalidTransitionException("run ${lease.runId}: PR_ONLY runs never release ($from -> $to refused)")
+            }
+            if (to == DevelopmentRunState.PATCH_READY && mode != RunCompletionMode.PR_ONLY) {
+                throw InvalidTransitionException("run ${lease.runId}: PATCH_READY is only for PR_ONLY runs ($from -> $to, $mode refused)")
             }
 
             val updated = execUpdate(
@@ -239,12 +255,25 @@ class DevelopmentRunRepository(
             val traceId = row[DevelopmentRunsTable.traceId]
             audit.append(
                 this, lease.runId,
-                AuditEntry(actor = actor, action = "RUN_TRANSITION", result = "OK", resource = "task:$taskId", traceId = traceId, payload = transitionPayload(taskId, from, to)),
+                AuditEntry(actor = actor, action = "RUN_TRANSITION", result = "OK", resource = "task:$taskId", traceId = traceId, payload = transitionPayload(taskId, from, to, auditReasonCode)),
             )
             outbox.append(this, lease.runId, expectedVersion + 1, "RunStateChanged", transitionPayload(taskId, from, to), traceId)
         }
         return get(lease.runId)!!
     }
+
+    /**
+     * Closes a PULL_REQUEST run whose pull request was closed without merge, or timed out (ADR 0008 item 6). This is a plain
+     * PULL_REQUEST -> CANCELLED transition: it frees the one-active-run key, and the audit row carries the fixed reason code
+     * [PR_ABANDONED_REASON]. No pull request or task text is written.
+     */
+    fun closeAbandonedPullRequest(lease: Lease, expectedVersion: Long, actor: String): DevelopmentRun =
+        transition(
+            lease, expectedVersion, DevelopmentRunState.CANCELLED, actor,
+            reason = PR_ABANDONED_REASON,
+            expectedFrom = DevelopmentRunState.PULL_REQUEST,
+            auditReasonCode = PR_ABANDONED_REASON,
+        )
 
     /**
      * Records the pull request identity the run works on (Issue #53). Allowed only in PULL_REQUEST with the lease and version.
@@ -256,7 +285,7 @@ class DevelopmentRunRepository(
         transaction(database) {
             requireLease(lease)
             val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
-            val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+            val from = storedStateOrRefuse(lease.runId.value, row[DevelopmentRunsTable.state])
             if (row[DevelopmentRunsTable.version] != expectedVersion) {
                 throw VersionConflictException("run ${lease.runId} is at version ${row[DevelopmentRunsTable.version]}, expected $expectedVersion")
             }
@@ -332,7 +361,7 @@ class DevelopmentRunRepository(
         transaction(database) {
             requireLease(lease)
             val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
-            val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+            val from = storedStateOrRefuse(lease.runId.value, row[DevelopmentRunsTable.state])
             if (row[DevelopmentRunsTable.version] != expectedVersion) {
                 throw VersionConflictException("run ${lease.runId} is at version ${row[DevelopmentRunsTable.version]}, expected $expectedVersion")
             }
@@ -444,7 +473,7 @@ class DevelopmentRunRepository(
     /** Completes a requested cancel when no worker owns the run any more (no lease, or it expired). Returns false if not applicable. */
     fun cancelUnowned(runId: RunId, actor: String): Boolean = transaction(database) {
         val row = lockRun(runId) ?: return@transaction false
-        val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+        val from = storedStateOrRefuse(runId.value, row[DevelopmentRunsTable.state])
         if (!row[DevelopmentRunsTable.cancelRequested] || !from.canTransitionTo(DevelopmentRunState.CANCELLED)) return@transaction false
         val updated = execUpdate(
             """
@@ -474,7 +503,7 @@ class DevelopmentRunRepository(
     ) {
         transaction(database) {
             val row = lockRun(runId) ?: throw NoSuchElementException("run $runId not found")
-            val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+            val from = storedStateOrRefuse(runId.value, row[DevelopmentRunsTable.state])
             if (from.isTerminal) throw InvalidTransitionException("run $runId is already $from")
             check(from)
             val version = row[DevelopmentRunsTable.version]
@@ -490,20 +519,32 @@ class DevelopmentRunRepository(
         }
     }
 
-    private fun transitionPayload(taskId: String, from: DevelopmentRunState?, to: DevelopmentRunState): String =
+    private fun transitionPayload(taskId: String, from: DevelopmentRunState?, to: DevelopmentRunState, reasonCode: String? = null): String =
         buildJsonObject {
             put("taskId", taskId)
             if (from != null) put("from", from.name)
             put("to", to.name)
+            if (reasonCode != null) put("reasonCode", reasonCode)
         }.toString()
 
-    private fun ResultRow.toDevelopmentRun() = DevelopmentRun(
+    /** The stored state, or a refusal for a name this binary does not know. Writers never act on such a run (fail-closed). */
+    private fun storedStateOrRefuse(runId: String, raw: String): DevelopmentRunState =
+        DevelopmentRunState.fromStorage(raw)
+            ?: throw InvalidTransitionException("run $runId is in a state this version does not know; refused")
+
+    /** Null for a state name this binary does not know: such a run is not shown and never acted on (fail-closed). */
+    private fun ResultRow.toDevelopmentRunOrNull(): DevelopmentRun? {
+        val state = DevelopmentRunState.fromStorage(this[DevelopmentRunsTable.state]) ?: return null
+        return toDevelopmentRun(state)
+    }
+
+    private fun ResultRow.toDevelopmentRun(state: DevelopmentRunState) = DevelopmentRun(
         completionMode = RunCompletionMode.valueOf(this[DevelopmentRunsTable.completionMode]),
         prRepository = this[DevelopmentRunsTable.prRepository],
         prHeadSha = this[DevelopmentRunsTable.prHeadSha],
         runId = RunId(this[DevelopmentRunsTable.runId]),
         taskId = this[DevelopmentRunsTable.taskId],
-        state = DevelopmentRunState.valueOf(this[DevelopmentRunsTable.state]),
+        state = state,
         stateReason = this[DevelopmentRunsTable.stateReason],
         attempt = this[DevelopmentRunsTable.attempt],
         leaseOwner = this[DevelopmentRunsTable.leaseOwner],

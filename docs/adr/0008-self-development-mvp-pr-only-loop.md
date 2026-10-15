@@ -54,12 +54,13 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
    | PATCH_READY | **追加** | PatchSet が PatchPolicy を通過し、コミット待ち | 検証の結果を保持する状態 |
    | PULL_REQUEST | 既存 | PR 作成済み。人間のレビュー待ち | 要求文の「PR_OPEN」に相当。名称変更は既存の `prOnlyCompletionSources` と遷移表の変更を伴うため、**既存の `PULL_REQUEST` を再利用する** |
    | COMPLETED | 既存 | マージを検証済み | `completePrOnlyRun` のみで到達 |
-   | ABANDONED | **追加** | PR が閉じられた(マージされずに)、またはタイムアウト | 終端状態。`FAILED` と区別する |
+   | CANCELLED | 既存 | PR が閉じられた(マージされずに)、またはタイムアウト(`PULL_REQUEST -> CANCELLED`) | 既存の終端。理由コード `PR_ABANDONED` を監査(audit)の payload に残す。`ABANDONED` は追加しない(下記) |
    | FAILED | 既存 | `PatchPolicy` で拒否、予算超過など | 理由コードのみを記録する(本文や秘密は残さない) |
    | UNKNOWN | **追加** | 外部の結果が不明。照合(#62)へ | 非終端。自動の再送はしない |
 
    - 既存の `PULL_REQUEST` を再利用するため、`WAITING_APPROVAL` は自己開発の経路では使わない。
-   - `ABANDONED` と `UNKNOWN` の遷移元・遷移先は、実装 PR で `next` に追加し、`terminalNames` と V1 の `active_flag` の扱いを確認する。
+   - `ABANDONED` は追加しない。PR が閉じられた/タイムアウトは `CANCELLED` + 監査の理由コード `PR_ABANDONED`。理由: `ABANDONED` を終端にするには、V1 の生成列 `active_flag` の終端一覧を変え、一意キー `uk_dev_runs_active_task` を作り直す必要があり、適用中に一意性の保証が外れる窓ができるため(2026-10-15 の決定)。
+   - `UNKNOWN` は active(照合まで保持)。出る経路は、運用者の監査つきの明示操作と、照合(#61)で設計する。`PATCH_READY` への遷移は `PR_ONLY` の Run だけ。
    - **既存の SIMULATED の Run(`/api/tasks`)の挙動は変えない**。自己開発は、フラグ(`KIVRA_SELFDEV_ENABLED`)が有効で、対象(`target`)の指定がある場合のみ動く。
 
 7. **MVP でやらないこと**: exkes での実行、ローカルでのテスト実行、複数ステップのエージェント、複数リポジトリ、自動マージ、Flyway のマイグレーションの生成、ワークフロー(`.github/`)の変更、依存関係の追加(`*.gradle.kts`)、ADR・設計判断の変更。
@@ -73,7 +74,7 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 - MVP の完了は「GitHub の PR が作られ、人間が GitHub でマージし、kivra がそのマージを照合して `PR_ONLY` で COMPLETED にする」ことである。
 - 自己開発の経路は既定で無効。有効化は能力ゲート経由に限る。
 - 安全性の根拠は、プロンプトではなく `PatchPolicy`、`commitFiles` の制約、GitHub 側の権限と、ブランチ保護(infra#296 の適用後)にある。
-- 状態表(6 節)の追加は Flyway V12 と合わせて行う(`development_runs.state` の取り得る値を広げる)。
+- ⑤ に Flyway V12 は無い。`ABANDONED` を追加しないため、`development_runs.state` の制約と V1 の `active_flag` は変えない(`PATCH_READY` / `UNKNOWN` は非終端なので active 扱い)。
 
 ## 実装の分割
 
@@ -83,7 +84,7 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 | ② | `GitHubPort.commitFiles`(`kivra/run-<runId>` に限定、`force=false`)。Git Data API を使う(blob → tree → commit → ref の順。複数ファイルを 1 コミットで原子的に書く) | なし | `kivra-github` | 別の Haiku が実装中。`GitHubPort` の既存の API は変えない |
 | ③ | 新モジュール `kivra-developer`: `DeveloperPort`、LLM を使う実装(プロンプト、構造化出力、予算の予約・確定)、Fake 実装。`kivra-core` と `kivra-model-gateway` に依存し、DB を使わないので DB なしでテストできる | ①(`PatchSet`)、②(マージ後に着手)、`kivra-model-gateway` | `kivra-developer`(新規)、`settings.gradle.kts`(この PR で追加) | `settings.gradle.kts` を触るため、① と ② のマージ後に着手する |
 | ④ | `SelfDevRunner`(状態機械。Run、Journal、GitHub、Developer をつなぐ)。DB を使うので `kivra-app` に置く。Fake で Acceptance Harness の Happy path(#70 のシナリオ 1)を通す | ①②③⑤ | `kivra-app`(`agent/` か新パッケージ)、`kivra-app/src/test/.../acceptance/` | ③ の Fake を使うため、③ の後。Harness の追加は ④ のみ |
-| ⑤ | Run の状態の追加(`ABANDONED`、`UNKNOWN`、`PATCH_READY`、遷移表、Flyway V12 の `development_runs.state` の制約) | ①(`kivra-core` を共有するため、① の後) | `kivra-core`(`States.kt`)、`kivra-app/src/main/resources/db/migration/V12__*.sql` | ① の後に着手する(`kivra-core` の変更の順序は ① → ⑤) |
+| ⑤ | Run の状態の追加(`UNKNOWN`、`PATCH_READY`、遷移表。`ABANDONED` は追加せず `CANCELLED` + `PR_ABANDONED`。Flyway V12 は無し) | ①(`kivra-core` を共有するため、① の後) | `kivra-core`(`States.kt`)、`kivra-app/src/main/kotlin/net/kigawa/kivra/db/`、それらのテスト | ① の後に着手する(`kivra-core` の変更の順序は ① → ⑤) |
 | ⑥ | 配線(`Application.kt`: `KIVRA_SELFDEV_ENABLED`、設定、Anthropic の API キーと GitHub トークンの Secret の読み込み、能力ゲートの手順) | ②③④ | `kivra-app`(`Application.kt`、`config/KivraConfig.kt`) | `KivraConfig` を触るため、他の設定 PR と順序を合わせる |
 | ⑦ | 起動の経路: 別のエンドポイント `POST /api/selfdev/tasks`。既存の `/api/tasks` の挙動は変えない(能力ゲートを明示できる)。認証は既存と同じ(`admin-panel:admin`)。`KIVRA_SELFDEV_ENABLED` が必須 | ④⑥ | `kivra-app`(新しいルート、`routes/` 配下) | `/api/tasks`(`TaskApiRoutes.kt`)は変えない |
 | ⑧ | k8s の Secret と設定、dev での最初の実行の手順(runbook) | ⑥⑦ | `kigawa-net-k8s` 系の manifest、`docs/`(runbook) | 別リポジトリ(k8s)の変更を含む。`docs/` の runbook は `docs/adr/` 以外の新規ファイル |
@@ -103,7 +104,7 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 ## 確認できなかった事実
 
 - Happy path(#70 シナリオ 1)の Harness は、このリポジトリに無い(④ で作る)。
-- `ABANDONED` と `UNKNOWN` を `DevelopmentRunState` に足したときの、V1 の `active_flag` と既存の遷移テストへの影響は未確認。
+- ⑤ で `UNKNOWN` と `PATCH_READY` を足したときの、既存の遷移テストへの影響は、⑤ の PR で確認した(`active_flag` は両方を active として扱うので変更不要)。
 - 月 1 万円の予算を、`BudgetController`(インメモリ)と V10 の永続的な台帳のどちらで強制するかは未決定。本番では永続的な台帳を使うべき(ADR 0004)。
 - `kigawa-net/kivra` の `main` にはブランチ保護が無い(2026-10-15 に API で確認: Ruleset 0 件、`branches/main/protection` は 404)。infra#296 で追加予定。
 - `commitFiles` は Git Data API を使う(決定済み)。

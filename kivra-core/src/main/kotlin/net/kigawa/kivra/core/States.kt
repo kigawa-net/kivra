@@ -26,26 +26,55 @@ fun <S> S.canTransitionTo(to: S): Boolean where S : Enum<S>, S : StateMachine<S>
  */
 enum class DevelopmentRunState : StateMachine<DevelopmentRunState> {
     CREATED, PLANNING, PREPARING, DEVELOPING, TESTING, REVIEWING, PULL_REQUEST, WAITING_APPROVAL,
-    RELEASING, VERIFYING, RETRY_WAITING, COMPLETED, FAILED, CANCELLED;
+    RELEASING, VERIFYING, RETRY_WAITING, COMPLETED, FAILED, CANCELLED,
+    /** Self-development (ADR 0008 item 6): the PatchSet passed PatchPolicy and waits for commit. */
+    PATCH_READY,
+    /** Self-development: an external result is unknown (ADR 0005). Active, never re-dispatched. See [evidenceGated]. */
+    UNKNOWN;
 
+    /**
+     * Transitions allowed without evidence. UNKNOWN has none: every way out of it is in [evidenceGated].
+     */
     override val next: Set<DevelopmentRunState>
         get() = when (this) {
-            CREATED -> setOf(PLANNING, CANCELLED, FAILED)
+            CREATED -> setOf(PLANNING, DEVELOPING, CANCELLED, FAILED)
             PLANNING -> setOf(PREPARING, RETRY_WAITING, CANCELLED, FAILED)
             PREPARING -> setOf(DEVELOPING, CANCELLED, FAILED)
-            DEVELOPING -> setOf(TESTING, RETRY_WAITING, CANCELLED, FAILED)
+            DEVELOPING -> setOf(TESTING, RETRY_WAITING, PATCH_READY, UNKNOWN, CANCELLED, FAILED)
             TESTING -> setOf(REVIEWING, DEVELOPING, RETRY_WAITING, CANCELLED, FAILED)
             REVIEWING -> setOf(DEVELOPING, PULL_REQUEST, CANCELLED, FAILED)
-            PULL_REQUEST -> setOf(WAITING_APPROVAL, RELEASING, TESTING, RETRY_WAITING, CANCELLED, FAILED)
+            PATCH_READY -> setOf(PULL_REQUEST, UNKNOWN, CANCELLED, FAILED)
+            PULL_REQUEST -> setOf(WAITING_APPROVAL, RELEASING, TESTING, RETRY_WAITING, UNKNOWN, CANCELLED, FAILED)
             WAITING_APPROVAL -> setOf(RELEASING, CANCELLED, FAILED)
             RELEASING -> setOf(VERIFYING, FAILED)
             VERIFYING -> setOf(COMPLETED, FAILED)
             RETRY_WAITING -> setOf(PLANNING, DEVELOPING, CANCELLED, FAILED)
+            UNKNOWN -> emptySet()
             COMPLETED, FAILED, CANCELLED -> emptySet()
         }
 
+    /**
+     * Transitions that need a verified reconciliation (Evidence) for this run, in the style of [OperationStatus.evidenceGated].
+     * The generic transition() refuses them. No Evidence path exists yet, so UNKNOWN stays until one is added (see ADR 0008).
+     */
+    val evidenceGated: Set<DevelopmentRunState>
+        get() = when (this) {
+            UNKNOWN -> setOf(PULL_REQUEST, FAILED)
+            else -> emptySet()
+        }
+
+    /** UNKNOWN is active, not terminal, although it has no evidence-free exit (so [next] is empty). */
+    override val isTerminal: Boolean
+        get() = this == COMPLETED || this == FAILED || this == CANCELLED
+
     companion object {
-        /** Names of terminal states, shared with the `active_flag` generated column in V1. */
+        /**
+         * Maps a stored state name to the state. Null for a name this binary does not know (for example written by a
+         * newer image during a rolling update). Callers treat null as fail-closed: never act on the run.
+         */
+        fun fromStorage(name: String): DevelopmentRunState? = entries.firstOrNull { it.name == name }
+
+        /** Names of terminal states, shared with the `active_flag` generated column (V1). */
         val terminalNames: Set<String> = entries.filter { it.isTerminal }.map { it.name }.toSet()
 
         /**

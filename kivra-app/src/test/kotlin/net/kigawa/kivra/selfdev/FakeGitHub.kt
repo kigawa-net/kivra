@@ -13,7 +13,9 @@ import net.kigawa.kivra.github.GitHubPort
 import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.PullRequest
 import net.kigawa.kivra.github.PullRequestState
+import net.kigawa.kivra.github.RepoFileContent
 import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.github.RepoTree
 import net.kigawa.kivra.github.Review
 import net.kigawa.kivra.github.RunBranch
 
@@ -181,6 +183,10 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
     override suspend fun getCombinedStatus(repo: RepoRef, sha: String): GitHubResult<CombinedStatus> = unused()
 
     override suspend fun getReviews(repo: RepoRef, number: Int): GitHubResult<List<Review>> = unused()
+
+    override suspend fun listTree(repo: RepoRef, ref: String): GitHubResult<RepoTree> = unused()
+
+    override suspend fun readFile(repo: RepoRef, ref: String, path: String, maxBytes: Int): GitHubResult<RepoFileContent?> = unused()
 
     override suspend fun commitFiles(repo: RepoRef, request: CommitFilesRequest): GitHubResult<CommittedFiles> {
         touch("commitFiles")

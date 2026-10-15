@@ -126,7 +126,7 @@ class DevelopmentRunRepository(
     }
 
     fun get(runId: RunId): DevelopmentRun? = transaction(database) {
-        DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.firstOrNull()?.toDevelopmentRun()
+        DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.firstOrNull()?.toDevelopmentRunOrNull()
     }
 
     /**
@@ -172,14 +172,14 @@ class DevelopmentRunRepository(
     private fun findTask(principal: String, idempotencyKey: String): DevelopmentRun? = transaction(database) {
         DevelopmentRunsTable.selectAll()
             .where { (DevelopmentRunsTable.principal eq principal) and (DevelopmentRunsTable.idempotencyKey eq idempotencyKey) }
-            .firstOrNull()?.toDevelopmentRun()
+            .firstOrNull()?.toDevelopmentRunOrNull()
     }
 
     /** A run owned by [principal]. Another principal's run is indistinguishable from a missing one (null). */
     fun getTask(runId: RunId, principal: String): DevelopmentRun? = transaction(database) {
         DevelopmentRunsTable.selectAll()
             .where { (DevelopmentRunsTable.runId eq runId.value) and (DevelopmentRunsTable.principal eq principal) }
-            .firstOrNull()?.toDevelopmentRun()
+            .firstOrNull()?.toDevelopmentRunOrNull()
     }
 
     /** Runs submitted by [principal], newest first. */
@@ -188,7 +188,7 @@ class DevelopmentRunRepository(
             .where { DevelopmentRunsTable.principal eq principal }
             .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
             .limit(limit)
-            .map { it.toDevelopmentRun() }
+            .mapNotNull { it.toDevelopmentRunOrNull() }
     }
 
     /**
@@ -207,9 +207,12 @@ class DevelopmentRunRepository(
             // Locks the row; throws LeaseLostException / RunHaltedException (hold, or cancel request except the CANCELLED ack).
             requireLease(lease, allowCancelRequested = to == DevelopmentRunState.CANCELLED)
             val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
-            val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+            val from = storedStateOrRefuse(lease.runId.value, row[DevelopmentRunsTable.state])
             if (row[DevelopmentRunsTable.version] != expectedVersion) {
                 throw VersionConflictException("run ${lease.runId} is at version ${row[DevelopmentRunsTable.version]}, expected $expectedVersion")
+            }
+            if (to in from.evidenceGated) {
+                throw InvalidTransitionException("run ${lease.runId}: $from -> $to requires verified evidence; no reconciliation path exists yet")
             }
             if (!from.canTransitionTo(to)) throw InvalidTransitionException("run ${lease.runId}: $from -> $to is not allowed")
             val mode = RunCompletionMode.valueOf(row[DevelopmentRunsTable.completionMode])
@@ -256,7 +259,7 @@ class DevelopmentRunRepository(
         transaction(database) {
             requireLease(lease)
             val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
-            val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+            val from = storedStateOrRefuse(lease.runId.value, row[DevelopmentRunsTable.state])
             if (row[DevelopmentRunsTable.version] != expectedVersion) {
                 throw VersionConflictException("run ${lease.runId} is at version ${row[DevelopmentRunsTable.version]}, expected $expectedVersion")
             }
@@ -332,7 +335,7 @@ class DevelopmentRunRepository(
         transaction(database) {
             requireLease(lease)
             val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
-            val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+            val from = storedStateOrRefuse(lease.runId.value, row[DevelopmentRunsTable.state])
             if (row[DevelopmentRunsTable.version] != expectedVersion) {
                 throw VersionConflictException("run ${lease.runId} is at version ${row[DevelopmentRunsTable.version]}, expected $expectedVersion")
             }
@@ -444,7 +447,7 @@ class DevelopmentRunRepository(
     /** Completes a requested cancel when no worker owns the run any more (no lease, or it expired). Returns false if not applicable. */
     fun cancelUnowned(runId: RunId, actor: String): Boolean = transaction(database) {
         val row = lockRun(runId) ?: return@transaction false
-        val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+        val from = storedStateOrRefuse(runId.value, row[DevelopmentRunsTable.state])
         if (!row[DevelopmentRunsTable.cancelRequested] || !from.canTransitionTo(DevelopmentRunState.CANCELLED)) return@transaction false
         val updated = execUpdate(
             """
@@ -474,7 +477,7 @@ class DevelopmentRunRepository(
     ) {
         transaction(database) {
             val row = lockRun(runId) ?: throw NoSuchElementException("run $runId not found")
-            val from = DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+            val from = storedStateOrRefuse(runId.value, row[DevelopmentRunsTable.state])
             if (from.isTerminal) throw InvalidTransitionException("run $runId is already $from")
             check(from)
             val version = row[DevelopmentRunsTable.version]
@@ -497,13 +500,24 @@ class DevelopmentRunRepository(
             put("to", to.name)
         }.toString()
 
-    private fun ResultRow.toDevelopmentRun() = DevelopmentRun(
+    /** The stored state, or a refusal for a name this binary does not know. Writers never act on such a run (fail-closed). */
+    private fun storedStateOrRefuse(runId: String, raw: String): DevelopmentRunState =
+        DevelopmentRunState.fromStorage(raw)
+            ?: throw InvalidTransitionException("run $runId is in a state this version does not know; refused")
+
+    /** Null for a state name this binary does not know: such a run is not shown and never acted on (fail-closed). */
+    private fun ResultRow.toDevelopmentRunOrNull(): DevelopmentRun? {
+        val state = DevelopmentRunState.fromStorage(this[DevelopmentRunsTable.state]) ?: return null
+        return toDevelopmentRun(state)
+    }
+
+    private fun ResultRow.toDevelopmentRun(state: DevelopmentRunState) = DevelopmentRun(
         completionMode = RunCompletionMode.valueOf(this[DevelopmentRunsTable.completionMode]),
         prRepository = this[DevelopmentRunsTable.prRepository],
         prHeadSha = this[DevelopmentRunsTable.prHeadSha],
         runId = RunId(this[DevelopmentRunsTable.runId]),
         taskId = this[DevelopmentRunsTable.taskId],
-        state = DevelopmentRunState.valueOf(this[DevelopmentRunsTable.state]),
+        state = state,
         stateReason = this[DevelopmentRunsTable.stateReason],
         attempt = this[DevelopmentRunsTable.attempt],
         leaseOwner = this[DevelopmentRunsTable.leaseOwner],

@@ -62,7 +62,7 @@ class DevelopmentRunRepositoryTest {
         val run = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
         val lease = db.leases.acquire(run.runId, "w", TTL)!!
         val v = db.runs.get(run.runId)!!.version
-        assertFailsWith<InvalidTransitionException> { db.runs.transition(lease, v, DevelopmentRunState.DEVELOPING, "w") }
+        assertFailsWith<InvalidTransitionException> { db.runs.transition(lease, v, DevelopmentRunState.TESTING, "w") } // CREATED -> DEVELOPING is allowed (ADR 0008)
         assertFailsWith<VersionConflictException> { db.runs.transition(lease, v - 1, DevelopmentRunState.PLANNING, "w") }
         assertEquals(DevelopmentRunState.CREATED, db.runs.get(run.runId)!!.state)
         assertEquals(1, db.count("outbox_events"))

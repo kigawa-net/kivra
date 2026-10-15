@@ -104,7 +104,8 @@ class DbRunAdmission(
             if (activeRunId != null) {
                 val state = runStateOrFail(activeRunId)
                 if (!stale) recordObservation(key, binding, digest, observedLocal)
-                return@transaction if (state.isTerminal) AdmissionResult.AlreadyTerminal(RunId(activeRunId)) else AdmissionResult.AlreadyActive(RunId(activeRunId))
+                // An unknown state counts as active (fail-closed): no new run is created over it.
+                return@transaction if (state?.isTerminal == true) AdmissionResult.AlreadyTerminal(RunId(activeRunId)) else AdmissionResult.AlreadyActive(RunId(activeRunId))
             }
             if (stale) return@transaction AdmissionResult.Blocked(AdmissionBlockReason.STALE_SNAPSHOT)
 
@@ -146,7 +147,7 @@ class DbRunAdmission(
         return transaction(database) {
             val binding = lockBinding(key) ?: return@transaction RerunResult.Rejected(RerunRejectReason.NOT_BOUND)
             val activeRunId = binding.activeRunId ?: return@transaction RerunResult.Rejected(RerunRejectReason.NOTHING_TO_RERUN)
-            if (!runStateOrFail(activeRunId).isTerminal) return@transaction RerunResult.Rejected(RerunRejectReason.RUN_NOT_TERMINAL)
+            if (runStateOrFail(activeRunId)?.isTerminal != true) return@transaction RerunResult.Rejected(RerunRejectReason.RUN_NOT_TERMINAL)
 
             val newGeneration = binding.generation + 1
             execUpdate(
@@ -206,10 +207,11 @@ class DbRunAdmission(
             .firstOrNull()
             ?.toBindingRow()
 
-    private fun Transaction.runStateOrFail(runId: String): DevelopmentRunState {
+    /** Null for a state name this binary does not know. Callers treat that as active (fail-closed). */
+    private fun Transaction.runStateOrFail(runId: String): DevelopmentRunState? {
         val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId }.firstOrNull()
             ?: error("task binding points at a missing run")
-        return DevelopmentRunState.valueOf(row[DevelopmentRunsTable.state])
+        return DevelopmentRunState.fromStorage(row[DevelopmentRunsTable.state])
     }
 
     /** Records the newest observation. Never moves [BindingRow.observedUpdatedAt] backwards (the caller checks staleness). */

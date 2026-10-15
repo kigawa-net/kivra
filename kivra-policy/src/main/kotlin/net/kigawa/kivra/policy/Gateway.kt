@@ -13,7 +13,18 @@ fun interface RunAgentStatus { fun isActive(runId: String, agentId: String): Boo
  * [decisionId] is the decision whose INTENT_ALLOWED record was written; an implementation must refuse (false) when that
  * decision has already been closed as ABANDONED by the orphan reaper, so the handler can never start for it.
  */
-fun interface ApprovalConsumer { fun consume(approvalId: String, digest: OperationDigest, decisionId: String): Boolean }
+fun interface ApprovalConsumer {
+    fun consume(approvalId: String, digest: OperationDigest, decisionId: String): Boolean
+
+    /**
+     * Policy hash the approval was issued under, when the approval service records it (ADR 0007). Null when unknown.
+     * Used only to report [POLICY_CHANGED_REASON]; a digest mismatch is refused by [consume] regardless (fail-closed).
+     */
+    fun issuedUnderPolicyHash(approvalId: String): String? = null
+}
+
+/** Denial reason when an approval was issued under a Policy other than the current one. Carries no rule content. */
+const val POLICY_CHANGED_REASON = "POLICY_CHANGED: the approval was issued under a different policy and is not valid for the current policy (fail-closed)"
 
 /**
  * Port to #33's Audit log / decision journal. Returns true only when the record is DURABLY stored.
@@ -110,7 +121,7 @@ class ToolGateway(
         val decision = try { engine.evaluate(principal, command.action, command.resource) }
         catch (e: Exception) { Decision.Deny("policy evaluation failed (fail-closed)") }
 
-        val opDigest = OperationDigest.of(principal, command)
+        val opDigest = OperationDigest.of(principal, command, expectedPolicyHash)
         val needsApproval = when (decision) {
             is Decision.Deny -> return deny(decision.reason)
             is Decision.RequireApproval -> {
@@ -124,6 +135,13 @@ class ToolGateway(
             is Decision.Allow -> false
         }
         digest = opDigest.hex
+
+        if (needsApproval) {
+            val id = request.approvalId!!
+            // Checked before the intent record and before consumption: a stale approval is never consumed.
+            val issued = try { approvals.issuedUnderPolicyHash(id) } catch (e: Exception) { return deny("approval '$id' could not be verified (fail-closed)") }
+            if (issued != null && issued != expectedPolicyHash) return deny(POLICY_CHANGED_REASON)
+        }
 
         // Durable decision intent BEFORE any side effect or approval consumption; fail-closed when it cannot be stored.
         if (!rec(AuditOutcome.INTENT_ALLOWED, decision.reason)) {

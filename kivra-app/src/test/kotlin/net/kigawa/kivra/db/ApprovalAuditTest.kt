@@ -55,7 +55,7 @@ private class Fixture(val db: TestDb) {
     fun apply(approval: String? = null, ns: String = "prod") =
         ToolRequest("tok", "k8s.apply", "ns:$ns", mapOf("namespace" to ns), approval)
     fun digest(ns: String = "prod") =
-        OperationDigest.of(principal, CanonicalCommand.of("k8s.apply", "ns:$ns", mapOf("namespace" to ns)))
+        OperationDigest.of(principal, CanonicalCommand.of("k8s.apply", "ns:$ns", mapOf("namespace" to ns)), policy.policyHash)
     fun requestApproval(ns: String = "prod", ttl: Long = 600) =
         approvals.request(principal, digest(ns), "k8s.apply", "ns:$ns", ttl)
     fun results(result: String) = db.count("audit_events", "result = '$result'")

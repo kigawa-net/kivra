@@ -6,12 +6,18 @@ import java.security.MessageDigest
  * Binds an approval to one exact operation (design #1 section 6.3): run, agent, action and the canonical target + args
  * (a [CanonicalCommand], never the raw self-declared request).
  * Any change to the operation changes the digest, so an approval cannot be reused for a different call.
+ * The digest also binds the [policyHash] the operation was evaluated under (ADR 0007, TOCTOU): an approval granted
+ * under one Policy does not match the same operation under another Policy.
  */
 @JvmInline
 value class OperationDigest(val hex: String) {
     companion object {
-        fun of(principal: Principal, command: CanonicalCommand): OperationDigest {
-            val w = FieldWriter()
+        /** Domain prefix and version of the operation digest encoding (v2 adds the policy hash; v1 is not accepted). */
+        const val VERSION = "kivra-op-digest-v2"
+
+        fun of(principal: Principal, command: CanonicalCommand, policyHash: String): OperationDigest {
+            require(POLICY_HASH_PATTERN.matches(policyHash)) { "policy hash must be 64 lowercase hex characters" }
+            val w = FieldWriter("$VERSION\n").field(policyHash)
             w.field(principal.runId).field(principal.agentId)
             w.field(command.action).field(command.resource)
             command.args.toSortedMap().forEach { (k, v) -> w.field(k).field(v) }
@@ -50,6 +56,9 @@ data class ApprovalBinding(
 
 /** Domain prefix and version of the policy hash encoding. Also reported as [PolicyDescriptor.version]. */
 const val POLICY_HASH_VERSION = "kivra-policy-v1"
+
+/** Shape of a SHA-256 hex digest (the policy hash and the operation digest). */
+internal val POLICY_HASH_PATTERN = Regex("[0-9a-f]{64}")
 
 /**
  * Canonical SHA-256 of a rule set (ADR 0007: the policy hash fixed at load time).

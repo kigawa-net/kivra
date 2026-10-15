@@ -13,6 +13,7 @@ class PolicyGatewayTest {
     """.trimIndent()
 
     private val dev = Principal("run1", "agentA", Role.DEVELOPER, setOf("fusha.*", "github.*", "k8s.*", "policy.*", "privilege.*", "approval.*", "audit.*"))
+    private val POLICY_HASH = PolicyEngine.parse(policy).policyHash
     private val audits = mutableListOf<AuditRecord>()
     private val executed = mutableListOf<String>()
     private var active = true
@@ -95,7 +96,7 @@ class PolicyGatewayTest {
     }
 
     @Test fun forbiddenRuleDeniedEvenWithApproval() {
-        val d = OperationDigest.of(dev, CanonicalCommand.of("github.force-push", "x"))
+        val d = OperationDigest.of(dev, CanonicalCommand.of("github.force-push", "x"), POLICY_HASH)
         approvalDigests["ap"] = d
         assertIs<ToolResult.Denied>(gateway().call(req("github.force-push", approval = "ap")))
         assertTrue(executed.isEmpty())
@@ -117,7 +118,7 @@ class PolicyGatewayTest {
     }
 
     @Test fun approvalBindingChecks() {
-        val d = OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod"))
+        val d = OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod"), POLICY_HASH)
         val b = ApprovalBinding("a", d, "agentA", "human", 100)
         assertTrue(b.isValidFor(d, 99))
         assertFalse(b.isValidFor(d, 100))
@@ -125,7 +126,7 @@ class PolicyGatewayTest {
         assertFalse(b.copy(used = true).isValidFor(d, 50))
         assertFalse(b.copy(approverId = "agentA").isValidFor(d, 50)) // self-approval
         // field boundaries cannot be shifted to collide
-        assertNotEquals(OperationDigest.of(dev, CanonicalCommand.of("a", "bc")), OperationDigest.of(dev, CanonicalCommand.of("ab", "c")))
+        assertNotEquals(OperationDigest.of(dev, CanonicalCommand.of("a", "bc"), POLICY_HASH), OperationDigest.of(dev, CanonicalCommand.of("ab", "c"), POLICY_HASH))
     }
 
     @Test fun instructionsInParamsDoNotChangeDecision() {
@@ -198,7 +199,7 @@ class PolicyGatewayTest {
         // Same approval cannot be replayed with a spoofed hint pointing elsewhere.
         assertIs<ToolResult.Denied>(g.call(apply("prod", approval = "ap", hint = "ns:dev")))
         assertTrue(consumed.isEmpty())
-        assertEquals(need.digest, OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a"))))
+        assertEquals(need.digest, OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a")), POLICY_HASH))
     }
 
     // --- review P1: audit fail-closed ---
@@ -207,7 +208,7 @@ class PolicyGatewayTest {
         val g = gateway()
         assertIs<ToolResult.Denied>(g.call(req("fusha.comment")))
         assertIs<ToolResult.Denied>(g.call(pr("kigawa-net/a")))
-        approvalDigests["ap"] = OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a")))
+        approvalDigests["ap"] = OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a")), POLICY_HASH)
         assertIs<ToolResult.Denied>(g.call(apply("prod", approval = "ap")))
         assertTrue(executed.isEmpty())
         assertTrue(consumed.isEmpty(), "approval must not be consumed when audit is down")
@@ -229,7 +230,7 @@ class PolicyGatewayTest {
     // --- review P2: approval consumed only when executable ---
     @Test fun approvalNotConsumedForUnregisteredAction() {
         val g = gateway(b = bindings() - "k8s.apply")
-        approvalDigests["ap"] = OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a")))
+        approvalDigests["ap"] = OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a")), POLICY_HASH)
         assertIs<ToolResult.Denied>(g.call(apply("prod", approval = "ap")))
         assertTrue(consumed.isEmpty())
         // after the handler is registered the same approval still works
@@ -238,7 +239,7 @@ class PolicyGatewayTest {
 
     @Test fun handlerCrashAfterApprovalConsumedIsUnknown() {
         val g = gateway(b = bindings(ToolHandler { _, _ -> error("x") }))
-        approvalDigests["ap"] = OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a")))
+        approvalDigests["ap"] = OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a")), POLICY_HASH)
         assertIs<ToolResult.Unknown>(g.call(apply("prod", approval = "ap")))
         assertEquals(setOf("ap"), consumed)
         assertEquals(AuditOutcome.UNKNOWN, audits.last().outcome)
@@ -254,7 +255,7 @@ class PolicyGatewayTest {
     @Test fun forbiddenActionsDeniedEvenWithValidApproval() {
         val g = gateway()
         for (a in listOf("approval.grant", "approval.issue", "approval.approve", "policy.update", "audit.delete", "safety.disable")) {
-            approvalDigests["ap-$a"] = OperationDigest.of(dev, CanonicalCommand.of(a, "x"))
+            approvalDigests["ap-$a"] = OperationDigest.of(dev, CanonicalCommand.of(a, "x"), POLICY_HASH)
             assertIs<ToolResult.Denied>(g.call(req(a, approval = "ap-$a")), a)
         }
         assertTrue(executed.isEmpty())
@@ -275,11 +276,11 @@ class PolicyGatewayTest {
 
     @Test fun approvalDigestDependsOnRunAgentAndEveryArgButNotArgOrder() {
         val cmd = { extra: Map<String, String> -> CanonicalCommand.of("k8s.apply", "ns:prod", mapOf("namespace" to "prod", "manifest" to "a") + extra) }
-        val base = OperationDigest.of(dev, cmd(emptyMap()))
-        assertEquals(base, OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", linkedMapOf("manifest" to "a", "namespace" to "prod"))), "argument order must not matter")
-        assertNotEquals(base, OperationDigest.of(dev.copy(runId = "run2"), cmd(emptyMap())), "approval must not transfer across runs")
-        assertNotEquals(base, OperationDigest.of(dev.copy(agentId = "agentB"), cmd(emptyMap())), "approval must not transfer across agents")
-        assertNotEquals(base, OperationDigest.of(dev, cmd(mapOf("role" to "ORCHESTRATOR"))), "optional params are part of the digest")
+        val base = OperationDigest.of(dev, cmd(emptyMap()), POLICY_HASH)
+        assertEquals(base, OperationDigest.of(dev, CanonicalCommand.of("k8s.apply", "ns:prod", linkedMapOf("manifest" to "a", "namespace" to "prod")), POLICY_HASH), "argument order must not matter")
+        assertNotEquals(base, OperationDigest.of(dev.copy(runId = "run2"), cmd(emptyMap()), POLICY_HASH), "approval must not transfer across runs")
+        assertNotEquals(base, OperationDigest.of(dev.copy(agentId = "agentB"), cmd(emptyMap()), POLICY_HASH), "approval must not transfer across agents")
+        assertNotEquals(base, OperationDigest.of(dev, cmd(mapOf("role" to "ORCHESTRATOR")), POLICY_HASH), "optional params are part of the digest")
     }
 
     @Test fun traversalSegmentsCannotEscapeAllowedResourceGlob() {

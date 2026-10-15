@@ -4,6 +4,7 @@ import java.time.Clock
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import net.kigawa.kivra.core.AdmissionBlockReason
@@ -26,6 +27,7 @@ import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.slf4j.LoggerFactory
 
 /**
  * MariaDB (and H2 in tests) implementation of [RunAdmission] (Issue #26).
@@ -45,12 +47,44 @@ class DbRunAdmission(
     private val audit: AuditRepository,
     private val policy: AdmissionPolicy?,
     private val clock: Clock = Clock.systemUTC(),
+    /** Monotonic clock for the blocked-log throttle. Tests replace it to move time forward. */
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : RunAdmission {
 
     /** TEST ONLY fault injection: runs after the run row is inserted and before the binding is updated. Throwing rolls back all of it. */
     internal var afterRunInsert: (() -> Unit)? = null
 
-    override suspend fun admit(task: TaskSnapshot, requestId: String): AdmissionResult {
+    override suspend fun admit(task: TaskSnapshot, requestId: String): AdmissionResult =
+        decide(task, requestId).also { if (it is AdmissionResult.Blocked) logBlocked(it.reason) }
+
+    /**
+     * Logs a blocked admission with its fixed reason code only: never the task id, title, body, requestId or any exception
+     * message. Called after the transaction has committed, so the log never sits inside a rolled-back unit of work. At most
+     * once per reason per [BLOCKED_LOG_INTERVAL_NANOS], like the rejection log in OidcJwtVerifier. A logging failure is
+     * swallowed: it must never change the admission result.
+     */
+    private fun logBlocked(reason: AdmissionBlockReason) {
+        try {
+            val now = nanoTime()
+            var shouldLog = false
+            lastBlockedLog.compute(reason) { _, previous ->
+                if (previous == null || now - previous >= BLOCKED_LOG_INTERVAL_NANOS) {
+                    shouldLog = true
+                    now
+                } else {
+                    previous
+                }
+            }
+            if (shouldLog) logger.warn("task admission blocked: reason={}", reason.name)
+        } catch (_: RuntimeException) {
+            // Logging is best effort. The admission result is already decided.
+        }
+    }
+
+    private val logger = LoggerFactory.getLogger(DbRunAdmission::class.java)
+    private val lastBlockedLog = ConcurrentHashMap<AdmissionBlockReason, Long>()
+
+    private suspend fun decide(task: TaskSnapshot, requestId: String): AdmissionResult {
         val key = TaskKey.parse(task.id) ?: return AdmissionResult.Blocked(AdmissionBlockReason.INVALID_TASK_ID)
         if (requestId.isBlank() || requestId.length > MAX_REQUEST_ID) return AdmissionResult.Blocked(AdmissionBlockReason.INVALID_REQUEST_ID)
         AdmissionEvaluator.evaluate(task, policy)?.let { return AdmissionResult.Blocked(it) }
@@ -205,5 +239,6 @@ class DbRunAdmission(
         private const val MAX_REQUEST_ID = 128
         private const val MAX_OPERATOR = 256
         private const val MAX_RERUN_REASON = 200
+        private const val BLOCKED_LOG_INTERVAL_NANOS = 60_000_000_000L
     }
 }

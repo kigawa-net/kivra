@@ -39,18 +39,24 @@ import org.slf4j.LoggerFactory
 
 /**
  * The budget release must not leak its free text to any log. Every outcome is driven through the HTTP route over the durable
- * store, with secret markers in `evidence` and `reason`. All log events (every logger, TRACE level) and all response bodies are
+ * store, with secret markers in `evidence` and `reason`. All log events (every application logger at TRACE, third-party loggers at production level) and all response bodies are
  * checked: the markers never appear, and the only operator-facing value logged is the operator id with the key prefix.
  */
 class BudgetAdminLogTest {
     private val root = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
+    private val appLogger = LoggerFactory.getLogger("net.kigawa") as Logger
     private val appender = ListAppender<ILoggingEvent>()
-    private lateinit var previousLevel: Level
+    private lateinit var previousAppLevel: Level
 
+    /**
+     * Captures every event the application logs at TRACE. Third-party loggers keep their production level (root INFO in
+     * logback.xml): at TRACE the MariaDB driver dumps the bytes of each packet, bound parameters included, which is driver
+     * diagnostics and not an application log line. The application's own loggers are not exempted.
+     */
     @BeforeTest
     fun attach() {
-        previousLevel = root.level
-        root.level = Level.TRACE
+        previousAppLevel = appLogger.level ?: Level.INFO
+        appLogger.level = Level.TRACE
         appender.start()
         root.addAppender(appender)
     }
@@ -59,16 +65,16 @@ class BudgetAdminLogTest {
     fun detach() {
         root.detachAppender(appender)
         appender.stop()
-        root.level = previousLevel
+        appLogger.level = previousAppLevel
     }
 
-    private fun loggedText(): String = appender.list.joinToString("\n") { e ->
-        buildString {
-            append(e.loggerName).append(' ').append(e.level).append(' ').append(e.formattedMessage)
-            e.argumentArray?.forEach { append(' ').append(it) }
-            e.throwableProxy?.let { append(' ').append(it.className).append(' ').append(it.message.orEmpty()) }
-        }
+    private fun loggedText(e: ILoggingEvent): String = buildString {
+        append(e.loggerName).append(' ').append(e.level).append(' ').append(e.formattedMessage)
+        e.argumentArray?.forEach { append(' ').append(it) }
+        e.throwableProxy?.let { append(' ').append(it.className).append(' ').append(it.message.orEmpty()) }
     }
+
+    private fun loggedText(): String = appender.list.joinToString("\n") { loggedText(it) }
 
     private val operator = "op-visible-1"
     private val key = "reservation-key-0001"
@@ -161,7 +167,8 @@ class BudgetAdminLogTest {
             assertTrue(errorBodies.all { !it.contains("reservation-key-0001") }, "an error response echoed the key")
 
             val logs = loggedText()
-            assertFalse(logs.contains("SECRET"), "a log line carried a secret marker:\n$logs")
+            val leaked = appender.list.filter { e -> loggedText(e).contains("SECRET") }
+            assertTrue(leaked.isEmpty(), "log events carried a secret marker: " + leaked.joinToString(" || ") { loggedText(it).take(400) })
             assertFalse(logs.contains("injected failure"), "the injected exception reached the log")
             // What is logged: the operator, the first 8 characters of the key, and the result kind. Never the full key.
             assertTrue(logs.contains("operator=$operator"), "the operator id is missing from the audit log line:\n$logs")

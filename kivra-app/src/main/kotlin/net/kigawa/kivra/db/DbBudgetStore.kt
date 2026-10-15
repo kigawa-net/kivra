@@ -9,6 +9,11 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.YearMonth
+import net.kigawa.kivra.modelgateway.ACKNOWLEDGE_MAX_MULTIPLE
+import net.kigawa.kivra.modelgateway.ACKNOWLEDGE_NOT_COMPARABLE
+import net.kigawa.kivra.modelgateway.ACKNOWLEDGE_TOO_LARGE
+import net.kigawa.kivra.modelgateway.AcknowledgeResult
+import net.kigawa.kivra.modelgateway.AcknowledgeUnpriced
 import net.kigawa.kivra.modelgateway.BudgetAmount
 import net.kigawa.kivra.modelgateway.BudgetDenial
 import net.kigawa.kivra.modelgateway.BudgetLimit
@@ -16,9 +21,11 @@ import net.kigawa.kivra.modelgateway.BudgetPort
 import net.kigawa.kivra.modelgateway.BudgetUsage
 import net.kigawa.kivra.modelgateway.Cost
 import net.kigawa.kivra.modelgateway.ReserveResult
+import net.kigawa.kivra.modelgateway.validateAcknowledgement
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.slf4j.LoggerFactory
 
 /**
  * Durable budget ledger in Kivra MariaDB (Issue #109, B1). Same semantics as the in-memory [net.kigawa.kivra.modelgateway.BudgetController],
@@ -41,6 +48,10 @@ import org.jetbrains.exposed.sql.transactions.transaction
  * LAPSED charges the estimate to the scope and counts it as unpriced. A later commit trues up the amount; a release
  * returns it. Usage always reads the current JST month for the tenant scope; a reservation keeps the period it was made in.
  *
+ * UNPRICED: a reservation whose cost was never established (committed without an actual, or lapsed). Its unpriced count stays
+ * on every scope of its path until an operator releases it with [acknowledgeUnpriced] (ADR 0003). The charged amount is kept
+ * in `budget_reservations.amount_micro_yen`, so a release computes the correction from what is actually charged.
+ *
  * Limits are fixed at construction. The database user only needs DML: nothing here issues DDL.
  */
 class DbBudgetStore(
@@ -58,8 +69,13 @@ class DbBudgetStore(
         require(reservationTtl.isPositive) { "reservationTtl must be positive" }
     }
 
+    private val logger = LoggerFactory.getLogger(DbBudgetStore::class.java)
+
     /** Test seam: runs inside the reserve transaction after the reservation rows are written. A throw must roll all of it back. */
     internal var afterReservationWrite: (() -> Unit)? = null
+
+    /** Test seam: runs inside the acknowledgement transaction after the rows are written. A throw must roll all of it back. */
+    internal var afterAcknowledgeWrite: (() -> Unit)? = null
 
     override fun usage(scopeId: String): BudgetUsage = transaction(database) {
         val now = clock.instant()
@@ -148,13 +164,17 @@ class DbBudgetStore(
                     for ((id, period) in r.scopes) {
                         addToPeriod(id, period, known ?: r.amount, unpriced = if (known == null) 1L else 0L)
                     }
-                    settle(key, COMMITTED)
+                    settle(key, if (known == null) UNPRICED else COMMITTED)
                 }
-                // The estimate was charged and counted as unpriced at lapse. A known actual trues up the amount only.
+                // The estimate was charged and counted as unpriced at lapse. A known actual trues up the amount only; the
+                // unpriced count stays (a late actual does not clear it), so the reservation remains UNPRICED until released.
                 LAPSED -> {
                     lockRunRows(r.scopes)
-                    if (known != null) for ((id, period) in r.scopes) addToPeriod(id, period, known - r.amount, unpriced = 0L)
-                    settle(key, COMMITTED)
+                    if (known != null) {
+                        for ((id, period) in r.scopes) addToPeriod(id, period, known - r.amount, unpriced = 0L)
+                        execUpdate("UPDATE budget_reservations SET amount_micro_yen = ? WHERE reservation_key = ?", known, key)
+                    }
+                    settle(key, UNPRICED)
                 }
                 else -> Unit // COMMITTED / RELEASED: idempotent
             }
@@ -177,6 +197,61 @@ class DbBudgetStore(
                 else -> Unit
             }
         }
+    }
+
+    /**
+     * Releases one UNPRICED (or LAPSED) reservation after an operator's audited decision (ADR 0003). In one transaction, under the
+     * tenant lock: the charge moves to the verified actual (or stays at the charged amount when no actual is known), the unpriced
+     * count of each scope in the path drops by one, and the audit row is inserted. Any failure rolls all of it back and returns
+     * [AcknowledgeResult.Failure]. The audit row's evidence is never logged; the log has only the operator, a key prefix, and the result kind.
+     */
+    override fun acknowledgeUnpriced(request: AcknowledgeUnpriced): AcknowledgeResult {
+        validateAcknowledgement(request)?.let { return AcknowledgeResult.Rejected(it) }
+        val result = try {
+            transaction<AcknowledgeResult>(database) {
+                lockTenant()
+                expireDue(clock.instant())
+                val r = loadReservation(request.reservationKey) ?: return@transaction AcknowledgeResult.NotFound
+                if (r.scopes.none { it.first == request.scopeId && it.second == request.period }) return@transaction AcknowledgeResult.NotFound
+                if (r.state == ACKNOWLEDGED) return@transaction AcknowledgeResult.AlreadyAcknowledged
+                if (r.state != LAPSED && r.state != UNPRICED) return@transaction AcknowledgeResult.NotUnpriced
+                val actualMicro: Long? = request.actualAmount?.let { a ->
+                    val m = knownMicro(a) ?: return@transaction AcknowledgeResult.Rejected(ACKNOWLEDGE_NOT_COMPARABLE)
+                    if (m > Math.multiplyExact(r.amount, ACKNOWLEDGE_MAX_MULTIPLE)) return@transaction AcknowledgeResult.Rejected(ACKNOWLEDGE_TOO_LARGE)
+                    m
+                }
+                val settled = actualMicro ?: r.amount
+                lockRunRows(r.scopes)
+                for ((id, period) in r.scopes) {
+                    // An unpriced count must exist for every scope of an UNPRICED or LAPSED reservation. Otherwise the data is
+                    // inconsistent: refuse (rolls back) rather than drive a counter negative.
+                    check((periodRow(id, period)?.unpriced ?: 0L) >= 1L) { "unpriced count is inconsistent" }
+                    addToPeriod(id, period, settled - r.amount, unpriced = -1L)
+                }
+                execUpdate(
+                    "UPDATE budget_reservations SET state = ?, amount_micro_yen = ?, settled_at = ? WHERE reservation_key = ?",
+                    ACKNOWLEDGED, settled, utcNow(clock), request.reservationKey,
+                )
+                execUpdate(
+                    """
+                    INSERT INTO budget_acknowledgements
+                        (reservation_key, scope_id, period, operator_id, reason, evidence, charged_before_micro_yen, actual_micro_yen, actual_known, acknowledged_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """.trimIndent(),
+                    request.reservationKey, request.scopeId, request.period, request.operatorId, request.reason, request.evidence,
+                    r.amount, settled, actualMicro != null, utcNow(clock),
+                )
+                afterAcknowledgeWrite?.invoke()
+                AcknowledgeResult.Acknowledged(request.reservationKey, actualKnown = actualMicro != null)
+            }
+        } catch (e: Exception) {
+            if (e.isDuplicateKey()) AcknowledgeResult.AlreadyAcknowledged else AcknowledgeResult.Failure
+        }
+        logger.info(
+            "budget acknowledgement: operator={} reservation={} result={}",
+            request.operatorId, request.reservationKey.take(8), result::class.simpleName,
+        )
+        return result
     }
 
     // ---- admission --------------------------------------------------------------------------------------------------
@@ -352,6 +427,10 @@ class DbBudgetStore(
         const val RESERVED = "RESERVED"
         const val LAPSED = "LAPSED"
         const val COMMITTED = "COMMITTED"
+        /** Settled without an established actual cost. Still counted as unpriced until acknowledged. */
+        const val UNPRICED = "UNPRICED"
+        /** Released by an operator through [acknowledgeUnpriced]. Terminal. */
+        const val ACKNOWLEDGED = "ACKNOWLEDGED"
         const val RELEASED = "RELEASED"
         private const val MICRO_SCALE = 6
         private val JST: ZoneId = ZoneId.of("Asia/Tokyo")

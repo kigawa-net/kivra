@@ -12,6 +12,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import net.kigawa.kivra.modelgateway.AcknowledgeResult
+import net.kigawa.kivra.modelgateway.AcknowledgeUnpriced
 import net.kigawa.kivra.modelgateway.BudgetAmount
 import net.kigawa.kivra.modelgateway.BudgetDenial
 import net.kigawa.kivra.modelgateway.BudgetPort
@@ -209,6 +211,204 @@ abstract class BudgetPortContract {
             assertTrue(!p.softExceeded(listOf(BUDGET_TENANT)))
             p.reserve("s2", listOf(BUDGET_TENANT), jpy("0.000001"))
             assertTrue(p.softExceeded(listOf(BUDGET_TENANT)))
+        }
+    }
+
+    // ---- acknowledgeUnpriced (ADR 0003): the operator releases one unpriced reservation -----------------------------
+
+    /** A release request for [key]. The test clock starts in JST month 2026-10, so [period] defaults to that month. */
+    private fun ack(
+        key: String,
+        actual: BudgetAmount? = null,
+        period: String = "2026-10",
+        scope: String = BUDGET_TENANT,
+        operator: String = "op-1",
+    ) = AcknowledgeUnpriced(scope, period, key, actual, evidence = "invoice checked", operatorId = operator, reason = "lost response")
+
+    @Test
+    fun `a known actual trues the charge up to the actual and clears the unpriced count (a)`() {
+        withBudget { f ->
+            val p = f.port
+            p.reserve("ack-a", listOf(BUDGET_TENANT), jpy("1000"))
+            p.commit("ack-a", null)
+            assertBd("1000", p.usage(BUDGET_TENANT).committed)
+            assertEquals(1L, p.usage(BUDGET_TENANT).unpricedCalls)
+
+            assertEquals(AcknowledgeResult.Acknowledged("ack-a", actualKnown = true), p.acknowledgeUnpriced(ack("ack-a", jpy("600"))))
+            val u = p.usage(BUDGET_TENANT)
+            assertBd("600", u.committed)
+            assertEquals(0L, u.unpricedCalls)
+            assertNull(p.admission(listOf(BUDGET_TENANT), jpy("1")))
+        }
+    }
+
+    @Test
+    fun `without a known actual the charged estimate stays as the settled cost (b)`() {
+        withBudget { f ->
+            val p = f.port
+            p.reserve("ack-b", listOf(BUDGET_TENANT), jpy("1000"))
+            p.commit("ack-b", null)
+            assertEquals(AcknowledgeResult.Acknowledged("ack-b", actualKnown = false), p.acknowledgeUnpriced(ack("ack-b")))
+            val u = p.usage(BUDGET_TENANT)
+            assertBd("1000", u.committed)
+            assertEquals(0L, u.unpricedCalls)
+        }
+    }
+
+    @Test
+    fun `an actual of zero, verified as not billed, releases the whole charge (c)`() {
+        withBudget { f ->
+            val p = f.port
+            p.reserve("ack-c", listOf(BUDGET_TENANT), jpy("1000"))
+            p.commit("ack-c", null)
+            p.acknowledgeUnpriced(ack("ack-c", jpy("0")))
+            val u = p.usage(BUDGET_TENANT)
+            assertBd("0", u.committed)
+            assertEquals(0L, u.unpricedCalls)
+        }
+    }
+
+    @Test
+    fun `a negative actual or one above 100 times the charged cost is refused and changes nothing (d)`() {
+        withBudget { f ->
+            val p = f.port
+            p.reserve("ack-d", listOf(BUDGET_TENANT), jpy("1000"))
+            p.commit("ack-d", null)
+            assertTrue(p.acknowledgeUnpriced(ack("ack-d", jpy("-1"))) is AcknowledgeResult.Rejected)
+            assertTrue(p.acknowledgeUnpriced(ack("ack-d", jpy("100001"))) is AcknowledgeResult.Rejected)
+            assertTrue(p.acknowledgeUnpriced(ack("ack-d", BudgetAmount(BigDecimal("1"), "USD"))) is AcknowledgeResult.Rejected)
+            assertTrue(p.acknowledgeUnpriced(ack("ack-d", jpy("1")).copy(evidence = " ")) is AcknowledgeResult.Rejected)
+            assertTrue(p.acknowledgeUnpriced(ack("ack-d", jpy("1")).copy(operatorId = "x\u0007")) is AcknowledgeResult.Rejected)
+            val u = p.usage(BUDGET_TENANT)
+            assertBd("1000", u.committed)
+            assertEquals(1L, u.unpricedCalls)
+            // The refused attempts did not consume the release: a valid one still works.
+            assertEquals(AcknowledgeResult.Acknowledged("ack-d", actualKnown = true), p.acknowledgeUnpriced(ack("ack-d", jpy("100000"))))
+        }
+    }
+
+    @Test
+    fun `a second release of the same key is idempotent and changes nothing (e)`() {
+        withBudget { f ->
+            val p = f.port
+            p.reserve("ack-e", listOf(BUDGET_TENANT), jpy("1000"))
+            p.commit("ack-e", null)
+            p.acknowledgeUnpriced(ack("ack-e", jpy("600")))
+            assertEquals(AcknowledgeResult.AlreadyAcknowledged, p.acknowledgeUnpriced(ack("ack-e", jpy("900"), operator = "op-2")))
+            assertBd("600", p.usage(BUDGET_TENANT).committed)
+            assertEquals(0L, p.usage(BUDGET_TENANT).unpricedCalls)
+        }
+    }
+
+    @Test
+    fun `an unknown key, a key in another period, and a key that is not unpriced are refused (f)`() {
+        withBudget { f ->
+            val p = f.port
+            assertEquals(AcknowledgeResult.NotFound, p.acknowledgeUnpriced(ack("never-reserved")))
+
+            // The non-unpriced keys are reserved and settled before the unpriced one: once a scope has unpriced usage,
+            // nothing new is admitted.
+            p.reserve("ack-f2", listOf(BUDGET_TENANT), jpy("500"))
+            p.reserve("ack-f3", listOf(BUDGET_TENANT), jpy("500"))
+            p.reserve("ack-f4", listOf(BUDGET_TENANT), jpy("500"))
+            p.reserve("ack-f1", listOf(BUDGET_TENANT), jpy("1000"))
+            p.commit("ack-f3", jpy("400")) // settled with a known actual
+            p.release("ack-f4")
+            p.commit("ack-f1", null)
+
+            assertEquals(AcknowledgeResult.NotFound, p.acknowledgeUnpriced(ack("ack-f1", period = "2026-11")))
+            assertEquals(AcknowledgeResult.NotFound, p.acknowledgeUnpriced(ack("ack-f1", scope = BUDGET_RUN)))
+            // Still reserved: not unpriced.
+            assertEquals(AcknowledgeResult.NotUnpriced, p.acknowledgeUnpriced(ack("ack-f2")))
+            // Settled with a known actual: not unpriced.
+            assertEquals(AcknowledgeResult.NotUnpriced, p.acknowledgeUnpriced(ack("ack-f3")))
+            // Released: not unpriced.
+            assertEquals(AcknowledgeResult.NotUnpriced, p.acknowledgeUnpriced(ack("ack-f4")))
+
+            // None of the refusals changed the unpriced count.
+            assertEquals(1L, p.usage(BUDGET_TENANT).unpricedCalls)
+        }
+    }
+
+    @Test
+    fun `admission stays UNKNOWN_COST until every unpriced reservation of the scope is released (g)`() {
+        withBudget { f ->
+            val p = f.port
+            // Both are reserved before either is settled: once one is unpriced, nothing new is admitted.
+            p.reserve("ack-g1", listOf(BUDGET_TENANT), jpy("100"))
+            p.reserve("ack-g2", listOf(BUDGET_TENANT), jpy("100"))
+            p.commit("ack-g1", null)
+            p.commit("ack-g2", null)
+            assertEquals(2L, p.usage(BUDGET_TENANT).unpricedCalls)
+            assertEquals(BudgetDenial.UNKNOWN_COST, p.admission(listOf(BUDGET_TENANT), jpy("1"))?.code)
+
+            p.acknowledgeUnpriced(ack("ack-g1", jpy("90")))
+            assertEquals(1L, p.usage(BUDGET_TENANT).unpricedCalls)
+            assertEquals(BudgetDenial.UNKNOWN_COST, p.admission(listOf(BUDGET_TENANT), jpy("1"))?.code)
+
+            p.acknowledgeUnpriced(ack("ack-g2"))
+            assertEquals(0L, p.usage(BUDGET_TENANT).unpricedCalls)
+            assertNull(p.admission(listOf(BUDGET_TENANT), jpy("1")))
+            assertEquals(ReserveResult.Reserved, p.reserve("ack-g3", listOf(BUDGET_TENANT), jpy("1")))
+        }
+    }
+
+    @Test
+    fun `a lapsed reservation can be released with its actual cost (lapsed, g)`() {
+        withBudget { f ->
+            val p = f.port
+            p.reserve("ack-lapse", listOf(BUDGET_TENANT), jpy("3000"))
+            f.clock.advance(Duration.ofMinutes(6))
+            assertEquals(1L, p.usage(BUDGET_TENANT).unpricedCalls)
+            assertEquals(AcknowledgeResult.Acknowledged("ack-lapse", actualKnown = true), p.acknowledgeUnpriced(ack("ack-lapse", jpy("2500"))))
+            assertBd("2500", p.usage(BUDGET_TENANT).committed)
+            assertEquals(0L, p.usage(BUDGET_TENANT).unpricedCalls)
+        }
+    }
+
+    @Test
+    fun `a late actual that arrives after the lapse is the charge the release corrects from (late, g)`() {
+        withBudget { f ->
+            val p = f.port
+            p.reserve("ack-late", listOf(BUDGET_TENANT), jpy("1000"))
+            f.clock.advance(Duration.ofMinutes(6))
+            p.commit("ack-late", jpy("600"))
+            // The late actual trues the charge up, but the reservation still counts as unpriced until it is released.
+            assertBd("600", p.usage(BUDGET_TENANT).committed)
+            assertEquals(1L, p.usage(BUDGET_TENANT).unpricedCalls)
+            assertEquals(BudgetDenial.UNKNOWN_COST, p.admission(listOf(BUDGET_TENANT), jpy("1"))?.code)
+
+            p.acknowledgeUnpriced(ack("ack-late", jpy("500")))
+            assertBd("500", p.usage(BUDGET_TENANT).committed)
+            assertEquals(0L, p.usage(BUDGET_TENANT).unpricedCalls)
+        }
+    }
+
+    @Test
+    fun `two concurrent releases of the same key apply exactly once (j)`() {
+        withBudget(replicas = 2) { f ->
+            f.port.reserve("ack-j", listOf(BUDGET_TENANT), jpy("1000"))
+            f.port.commit("ack-j", null)
+            val pool = Executors.newFixedThreadPool(2)
+            try {
+                val start = CountDownLatch(1)
+                val futures = listOf("300", "700").mapIndexed { i, amount ->
+                    pool.submit<AcknowledgeResult> {
+                        start.await(20, TimeUnit.SECONDS)
+                        f.replica(i).acknowledgeUnpriced(ack("ack-j", jpy(amount)))
+                    }
+                }
+                start.countDown()
+                val results = futures.map { it.get(60, TimeUnit.SECONDS) }
+                assertEquals(1, results.count { it is AcknowledgeResult.Acknowledged })
+                assertEquals(1, results.count { it == AcknowledgeResult.AlreadyAcknowledged })
+                val u = f.port.usage(BUDGET_TENANT)
+                assertEquals(0L, u.unpricedCalls)
+                // The committed amount is the one winning actual, never both corrections.
+                assertTrue(u.committed.compareTo(BigDecimal("300")) == 0 || u.committed.compareTo(BigDecimal("700")) == 0, "committed was ${u.committed}")
+            } finally {
+                pool.shutdownNow()
+            }
         }
     }
 }

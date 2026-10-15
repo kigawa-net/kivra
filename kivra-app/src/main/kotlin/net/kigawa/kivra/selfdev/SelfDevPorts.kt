@@ -55,17 +55,24 @@ class DbDevelopmentRunStore(
     }
 }
 
-/** One file of the repository tree: a regular blob with its size in UTF-8 bytes. */
-data class RepoEntry(val path: String, val sizeBytes: Long)
+/**
+ * One path of the repository tree with its size in bytes. [readable] is false for a symlink or a submodule: such a path is listed (so it
+ * counts as existing, and is never overwritten as a new file) but its content is never read or shown to the LLM.
+ */
+data class RepoEntry(val path: String, val sizeBytes: Long, val readable: Boolean = true)
 
 /**
  * Read-only access to the repository at one commit. Contract: [listFiles] returns the complete tree. A truncated or partial listing
  * must be a failure, never a short list: a file missing from the list is treated as new, and new files may be written.
+ *
+ * [readFile] returns `Success(null)` for a file that is excluded by design: binary, not UTF-8, or over the reader's size limit. Such a
+ * file is left out of the LLM context. It still exists in the listing, so it is never overwritten (UNSEEN_OVERWRITE). Real failures
+ * (network, server error, a missing path after the listing) stay failures.
  */
 interface RepoReader {
     suspend fun listFiles(repo: RepoRef, commitSha: String): GitHubResult<List<RepoEntry>>
 
-    suspend fun readFile(repo: RepoRef, commitSha: String, path: String): GitHubResult<String>
+    suspend fun readFile(repo: RepoRef, commitSha: String, path: String): GitHubResult<String?>
 }
 
 /** The task the Developer works on. Untrusted text, written by the task author. Never logged, never put in a reason code. */

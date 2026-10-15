@@ -25,7 +25,7 @@ class StatesTest {
         DevelopmentRunState.PATCH_READY to setOf(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.UNKNOWN, DevelopmentRunState.CANCELLED, DevelopmentRunState.FAILED),
         DevelopmentRunState.PULL_REQUEST to setOf(
             DevelopmentRunState.WAITING_APPROVAL, DevelopmentRunState.RELEASING, DevelopmentRunState.TESTING, DevelopmentRunState.RETRY_WAITING,
-            DevelopmentRunState.ABANDONED, DevelopmentRunState.UNKNOWN, DevelopmentRunState.CANCELLED, DevelopmentRunState.FAILED,
+            DevelopmentRunState.UNKNOWN, DevelopmentRunState.CANCELLED, DevelopmentRunState.FAILED,
         ),
         DevelopmentRunState.WAITING_APPROVAL to setOf(DevelopmentRunState.RELEASING, DevelopmentRunState.CANCELLED, DevelopmentRunState.FAILED),
         DevelopmentRunState.RELEASING to setOf(DevelopmentRunState.VERIFYING, DevelopmentRunState.FAILED),
@@ -36,7 +36,6 @@ class StatesTest {
         DevelopmentRunState.COMPLETED to emptySet(),
         DevelopmentRunState.FAILED to emptySet(),
         DevelopmentRunState.CANCELLED to emptySet(),
-        DevelopmentRunState.ABANDONED to emptySet(),
     )
 
     @Test
@@ -51,18 +50,18 @@ class StatesTest {
     }
 
     @Test
-    fun `self-development states are not terminal except ABANDONED, and UNKNOWN is active without an evidence-free exit`() {
-        assertTrue(DevelopmentRunState.ABANDONED.isTerminal)
+    fun `self-development states are active, and UNKNOWN has no evidence-free exit`() {
         assertFalse(DevelopmentRunState.UNKNOWN.isTerminal, "UNKNOWN is active: it holds the one-active-run key")
+        assertFalse(DevelopmentRunState.PATCH_READY.isTerminal, "PATCH_READY is active: it holds the one-active-run key")
         assertTrue(DevelopmentRunState.UNKNOWN.next.isEmpty())
-        assertEquals(setOf(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.FAILED, DevelopmentRunState.ABANDONED), DevelopmentRunState.UNKNOWN.evidenceGated)
+        assertEquals(setOf(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.FAILED), DevelopmentRunState.UNKNOWN.evidenceGated)
         for (to in DevelopmentRunState.UNKNOWN.evidenceGated) {
             assertFalse(DevelopmentRunState.UNKNOWN.canTransitionTo(to), "$to needs verified evidence")
         }
-        assertFalse(DevelopmentRunState.PATCH_READY.isTerminal)
         assertTrue(DevelopmentRunState.PATCH_READY.canTransitionTo(DevelopmentRunState.PULL_REQUEST))
         assertTrue(DevelopmentRunState.DEVELOPING.canTransitionTo(DevelopmentRunState.PATCH_READY))
         assertTrue(DevelopmentRunState.CREATED.canTransitionTo(DevelopmentRunState.DEVELOPING), "self-development start (ADR 0008)")
+        assertTrue(DevelopmentRunState.PULL_REQUEST.canTransitionTo(DevelopmentRunState.CANCELLED), "a closed pull request is CANCELLED with PR_ABANDONED")
     }
 
     @Test
@@ -76,7 +75,7 @@ class StatesTest {
 
     @Test
     fun `development run terminal states have no transitions`() {
-        assertEquals(setOf("COMPLETED", "FAILED", "CANCELLED", "ABANDONED"), DevelopmentRunState.terminalNames)
+        assertEquals(setOf("COMPLETED", "FAILED", "CANCELLED"), DevelopmentRunState.terminalNames)
         DevelopmentRunState.entries.filter { it.isTerminal }.forEach { assertTrue(it.next.isEmpty()) }
     }
 

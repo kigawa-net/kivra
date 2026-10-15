@@ -29,8 +29,6 @@ enum class DevelopmentRunState : StateMachine<DevelopmentRunState> {
     RELEASING, VERIFYING, RETRY_WAITING, COMPLETED, FAILED, CANCELLED,
     /** Self-development (ADR 0008 item 6): the PatchSet passed PatchPolicy and waits for commit. */
     PATCH_READY,
-    /** Self-development: the PR was closed without merge, or timed out. Terminal, distinct from FAILED. */
-    ABANDONED,
     /** Self-development: an external result is unknown (ADR 0005). Active, never re-dispatched. See [evidenceGated]. */
     UNKNOWN;
 
@@ -46,13 +44,13 @@ enum class DevelopmentRunState : StateMachine<DevelopmentRunState> {
             TESTING -> setOf(REVIEWING, DEVELOPING, RETRY_WAITING, CANCELLED, FAILED)
             REVIEWING -> setOf(DEVELOPING, PULL_REQUEST, CANCELLED, FAILED)
             PATCH_READY -> setOf(PULL_REQUEST, UNKNOWN, CANCELLED, FAILED)
-            PULL_REQUEST -> setOf(WAITING_APPROVAL, RELEASING, TESTING, RETRY_WAITING, ABANDONED, UNKNOWN, CANCELLED, FAILED)
+            PULL_REQUEST -> setOf(WAITING_APPROVAL, RELEASING, TESTING, RETRY_WAITING, UNKNOWN, CANCELLED, FAILED)
             WAITING_APPROVAL -> setOf(RELEASING, CANCELLED, FAILED)
             RELEASING -> setOf(VERIFYING, FAILED)
             VERIFYING -> setOf(COMPLETED, FAILED)
             RETRY_WAITING -> setOf(PLANNING, DEVELOPING, CANCELLED, FAILED)
             UNKNOWN -> emptySet()
-            COMPLETED, FAILED, CANCELLED, ABANDONED -> emptySet()
+            COMPLETED, FAILED, CANCELLED -> emptySet()
         }
 
     /**
@@ -61,13 +59,13 @@ enum class DevelopmentRunState : StateMachine<DevelopmentRunState> {
      */
     val evidenceGated: Set<DevelopmentRunState>
         get() = when (this) {
-            UNKNOWN -> setOf(PULL_REQUEST, FAILED, ABANDONED)
+            UNKNOWN -> setOf(PULL_REQUEST, FAILED)
             else -> emptySet()
         }
 
     /** UNKNOWN is active, not terminal, although it has no evidence-free exit (so [next] is empty). */
     override val isTerminal: Boolean
-        get() = this == COMPLETED || this == FAILED || this == CANCELLED || this == ABANDONED
+        get() = this == COMPLETED || this == FAILED || this == CANCELLED
 
     companion object {
         /**
@@ -76,7 +74,7 @@ enum class DevelopmentRunState : StateMachine<DevelopmentRunState> {
          */
         fun fromStorage(name: String): DevelopmentRunState? = entries.firstOrNull { it.name == name }
 
-        /** Names of terminal states, shared with the `active_flag` generated column (V1, extended in V12). */
+        /** Names of terminal states, shared with the `active_flag` generated column (V1). */
         val terminalNames: Set<String> = entries.filter { it.isTerminal }.map { it.name }.toSet()
 
         /**

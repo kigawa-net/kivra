@@ -72,6 +72,9 @@ sealed interface TaskSubmitResult {
 }
 
 /** Another non-terminal run already exists for the task (`uk_dev_runs_active_task`). */
+/** Fixed reason code for a pull request closed without merge (ADR 0008 item 6). */
+const val PR_ABANDONED_REASON = "PR_ABANDONED"
+
 class DuplicateActiveRunException(val taskId: String) : RuntimeException("an active run already exists for task $taskId")
 
 /**
@@ -202,6 +205,10 @@ class DevelopmentRunRepository(
         to: DevelopmentRunState,
         actor: String,
         reason: String? = null,
+        /** When set, the stored state must be exactly this one (checked under the row lock). */
+        expectedFrom: DevelopmentRunState? = null,
+        /** A fixed machine reason code, written to the audit payload. Never free text. */
+        auditReasonCode: String? = null,
     ): DevelopmentRun {
         transaction(database) {
             // Locks the row; throws LeaseLostException / RunHaltedException (hold, or cancel request except the CANCELLED ack).
@@ -210,6 +217,9 @@ class DevelopmentRunRepository(
             val from = storedStateOrRefuse(lease.runId.value, row[DevelopmentRunsTable.state])
             if (row[DevelopmentRunsTable.version] != expectedVersion) {
                 throw VersionConflictException("run ${lease.runId} is at version ${row[DevelopmentRunsTable.version]}, expected $expectedVersion")
+            }
+            if (expectedFrom != null && from != expectedFrom) {
+                throw InvalidTransitionException("run ${lease.runId}: expected $expectedFrom, the run is in $from")
             }
             if (to in from.evidenceGated) {
                 throw InvalidTransitionException("run ${lease.runId}: $from -> $to requires verified evidence; no reconciliation path exists yet")
@@ -223,6 +233,9 @@ class DevelopmentRunRepository(
             }
             if (mode == RunCompletionMode.PR_ONLY && to in setOf(DevelopmentRunState.RELEASING, DevelopmentRunState.VERIFYING)) {
                 throw InvalidTransitionException("run ${lease.runId}: PR_ONLY runs never release ($from -> $to refused)")
+            }
+            if (to == DevelopmentRunState.PATCH_READY && mode != RunCompletionMode.PR_ONLY) {
+                throw InvalidTransitionException("run ${lease.runId}: PATCH_READY is only for PR_ONLY runs ($from -> $to, $mode refused)")
             }
 
             val updated = execUpdate(
@@ -242,12 +255,25 @@ class DevelopmentRunRepository(
             val traceId = row[DevelopmentRunsTable.traceId]
             audit.append(
                 this, lease.runId,
-                AuditEntry(actor = actor, action = "RUN_TRANSITION", result = "OK", resource = "task:$taskId", traceId = traceId, payload = transitionPayload(taskId, from, to)),
+                AuditEntry(actor = actor, action = "RUN_TRANSITION", result = "OK", resource = "task:$taskId", traceId = traceId, payload = transitionPayload(taskId, from, to, auditReasonCode)),
             )
             outbox.append(this, lease.runId, expectedVersion + 1, "RunStateChanged", transitionPayload(taskId, from, to), traceId)
         }
         return get(lease.runId)!!
     }
+
+    /**
+     * Closes a PULL_REQUEST run whose pull request was closed without merge, or timed out (ADR 0008 item 6). This is a plain
+     * PULL_REQUEST -> CANCELLED transition: it frees the one-active-run key, and the audit row carries the fixed reason code
+     * [PR_ABANDONED_REASON]. No pull request or task text is written.
+     */
+    fun closeAbandonedPullRequest(lease: Lease, expectedVersion: Long, actor: String): DevelopmentRun =
+        transition(
+            lease, expectedVersion, DevelopmentRunState.CANCELLED, actor,
+            reason = PR_ABANDONED_REASON,
+            expectedFrom = DevelopmentRunState.PULL_REQUEST,
+            auditReasonCode = PR_ABANDONED_REASON,
+        )
 
     /**
      * Records the pull request identity the run works on (Issue #53). Allowed only in PULL_REQUEST with the lease and version.
@@ -493,11 +519,12 @@ class DevelopmentRunRepository(
         }
     }
 
-    private fun transitionPayload(taskId: String, from: DevelopmentRunState?, to: DevelopmentRunState): String =
+    private fun transitionPayload(taskId: String, from: DevelopmentRunState?, to: DevelopmentRunState, reasonCode: String? = null): String =
         buildJsonObject {
             put("taskId", taskId)
             if (from != null) put("from", from.name)
             put("to", to.name)
+            if (reasonCode != null) put("reasonCode", reasonCode)
         }.toString()
 
     /** The stored state, or a refusal for a name this binary does not know. Writers never act on such a run (fail-closed). */

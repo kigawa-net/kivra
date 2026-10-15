@@ -23,7 +23,8 @@ import net.kigawa.kivra.routes.toTaskRunResponse
 import org.jetbrains.exposed.sql.transactions.transaction
 
 /**
- * Self-development states of a DevelopmentRun (ADR 0008 item 6): PATCH_READY, ABANDONED, UNKNOWN, plus CREATED -> DEVELOPING.
+ * Self-development states of a DevelopmentRun (ADR 0008 item 6): PATCH_READY, UNKNOWN, plus CREATED -> DEVELOPING.
+ * A closed pull request is CANCELLED with the reason code PR_ABANDONED (no ABANDONED state).
  * Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
  */
 class DevelopmentRunSelfDevStatesTest {
@@ -71,21 +72,49 @@ class DevelopmentRunSelfDevStatesTest {
     }
 
     @Test
-    fun `ABANDONED is terminal, frees the task for a new run, and holds no lease`() = TestDb().use { db ->
+    fun `a closed pull request is CANCELLED with PR_ABANDONED, frees the task, and is audited with the reason code`() = TestDb().use { db ->
         val first = db.runs.create("task-1", "test", RunCompletionMode.PR_ONLY)
         val lease = db.walk(
             first.runId,
             DevelopmentRunState.DEVELOPING, DevelopmentRunState.PATCH_READY, DevelopmentRunState.PULL_REQUEST,
         )
-        db.runs.transition(lease, db.runs.get(first.runId)!!.version, DevelopmentRunState.ABANDONED, "worker", reason = "PR_CLOSED")
+        // Only from PULL_REQUEST: a run in another state is refused and nothing is written.
+        val other = db.runs.create("task-4", "test", RunCompletionMode.PR_ONLY)
+        val otherLease = db.walk(other.runId, DevelopmentRunState.DEVELOPING)
+        assertFailsWith<InvalidTransitionException> {
+            db.runs.closeAbandonedPullRequest(otherLease, db.runs.get(other.runId)!!.version, "worker")
+        }
+        assertEquals(DevelopmentRunState.DEVELOPING, db.runs.get(other.runId)!!.state)
+        val version = db.runs.get(first.runId)!!.version
+        val closed = db.runs.closeAbandonedPullRequest(lease, version, "worker")
 
-        assertEquals(DevelopmentRunState.ABANDONED, db.runs.get(first.runId)!!.state)
-        assertEquals(1, db.count("development_runs", "run_id = '${first.runId}' AND active_flag IS NULL"), "ABANDONED is not active")
+        assertEquals(DevelopmentRunState.CANCELLED, closed.state)
+        assertEquals("PR_ABANDONED", closed.stateReason)
+        assertEquals(1, db.count("development_runs", "run_id = '${first.runId}' AND active_flag IS NULL"), "CANCELLED is not active")
+        assertEquals(1, db.count("audit_events", "run_id = '${first.runId}' AND payload LIKE '%\"reasonCode\":\"PR_ABANDONED\"%'"))
         // The one-active-run key is released, so the task can get a new run.
         val second = db.runs.create("task-1", "test", RunCompletionMode.PR_ONLY)
         assertTrue(second.runId != first.runId)
         // Nothing leaves a terminal state: no lease can be taken on it.
         assertNull(db.leases.acquire(first.runId, "other", ttl))
+    }
+
+    @Test
+    fun `PATCH_READY holds the one-active-run key like UNKNOWN does`() = TestDb().use { db ->
+        val run = db.runs.create("task-1", "test", RunCompletionMode.PR_ONLY)
+        db.walk(run.runId, DevelopmentRunState.DEVELOPING, DevelopmentRunState.PATCH_READY)
+        assertFailsWith<DuplicateActiveRunException> { db.runs.create("task-1", "test", RunCompletionMode.PR_ONLY) }
+        assertEquals(1, db.count("development_runs", "task_id = 'task-1' AND active_flag = 1"))
+    }
+
+    @Test
+    fun `PATCH_READY is only reachable by a PR_ONLY run`() = TestDb().use { db ->
+        val release = db.runs.create("task-1", "test", RunCompletionMode.RELEASE)
+        val lease = db.walk(release.runId, DevelopmentRunState.DEVELOPING)
+        assertFailsWith<InvalidTransitionException> {
+            db.runs.transition(lease, db.runs.get(release.runId)!!.version, DevelopmentRunState.PATCH_READY, "worker")
+        }
+        assertEquals(DevelopmentRunState.DEVELOPING, db.runs.get(release.runId)!!.state)
     }
 
     @Test
@@ -164,14 +193,15 @@ class DevelopmentRunSelfDevStatesTest {
         db.walk(runId, DevelopmentRunState.DEVELOPING, DevelopmentRunState.PATCH_READY, DevelopmentRunState.UNKNOWN)
         assertEquals(AdmissionResult.AlreadyActive(runId), runBlocking { admission.admit(task(2), "req-2") }, "UNKNOWN is active")
 
-        // The terminal case uses a second task: PULL_REQUEST -> ABANDONED under one lease.
+        // The terminal case uses a second task: a closed pull request is CANCELLED under one lease.
         val other = assertIs<AdmissionResult.Accepted>(runBlocking { admission.admit(task(3), "req-3") }).runId
-        db.walk(
+        val lease = db.walk(
             other,
-            DevelopmentRunState.DEVELOPING, DevelopmentRunState.PATCH_READY, DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.ABANDONED,
+            DevelopmentRunState.DEVELOPING, DevelopmentRunState.PATCH_READY, DevelopmentRunState.PULL_REQUEST,
         )
+        db.runs.closeAbandonedPullRequest(lease, db.runs.get(other)!!.version, "worker")
         assertEquals(AdmissionResult.AlreadyTerminal(other), runBlocking { admission.admit(task(3), "req-4") })
-        assertEquals(1, db.count("development_runs", "task_id = 'fusha:test:3'"), "no new run is created for the abandoned task")
+        assertEquals(1, db.count("development_runs", "task_id = 'fusha:test:3'"), "no new run is created for the closed task")
     }
 
     @Test

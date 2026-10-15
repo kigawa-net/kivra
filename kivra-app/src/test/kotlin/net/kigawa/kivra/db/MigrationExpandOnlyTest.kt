@@ -105,12 +105,6 @@ class MigrationExpandOnlyTest {
                 "NOT NULL without DEFAULT. A pre-V2 Writer INSERT into development_runs does not name this column, so on MariaDB " +
                 "(strict mode) it fails with ERROR 1364 once V2 is applied. The old Writer must be drained before V2, or the column " +
                 "needs a DEFAULT (V2 is the one unmerged migration that is edited in place, so this is still open).",
-            "V12:DROP (ALTER TABLE DEVELOPMENT_RUNS DROP CONSTRAINT UK_DEV_RUNS_ACTIVE_TASK)" to
-                "V12 (ADR 0008): the unique key on the derived column active_flag is rebuilt so that ABANDONED is terminal. Not Expand-only " +
-                "in the strict sense, but it drops no stored data: active_flag is a generated column recomputed from state, Writers never " +
-                "name it (Tables.kt), and the key is recreated by the next statement of the same migration.",
-            "V12:DROP (ALTER TABLE DEVELOPMENT_RUNS DROP COLUMN ACTIVE_FLAG)" to
-                "V12 (ADR 0008): the derived column active_flag is recreated with ABANDONED in its terminal list. See the key above.",
         )
     }
 }

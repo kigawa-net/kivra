@@ -57,6 +57,37 @@ interface GitHubPort {
      * was not moved is `Failure(NOT_APPLIED)`: the same request may be sent again, once. See [HttpGitHubAdapter.commitFiles].
      */
     suspend fun commitFiles(repo: RepoRef, request: CommitFilesRequest): GitHubResult<CommittedFiles>
+
+    /**
+     * Read-only (GET only). The whole tree at [ref], a branch name or a 40-hex commit SHA, listed recursively.
+     * A tree GitHub reports as truncated is `Failure(TREE_TRUNCATED)`, never a partial list: a file missing from the list
+     * would look new to the caller.
+     */
+    suspend fun listTree(repo: RepoRef, ref: String): GitHubResult<RepoTree>
+
+    /**
+     * Read-only (GET only). The regular file at [path] on [ref] (a branch name or a 40-hex commit SHA). `Success(null)`
+     * when the path does not exist (404). A directory, symlink, submodule or other non-file is `Failure(VALIDATION)`.
+     * A file whose reported size exceeds [maxBytes] is `Failure(TOO_LARGE)` and its content is not decoded. Content is
+     * decoded strictly from base64; binary (contains NUL) or non-UTF-8 content is returned with `isText = false`.
+     */
+    suspend fun readFile(repo: RepoRef, ref: String, path: String, maxBytes: Int): GitHubResult<RepoFileContent?>
+}
+
+enum class TreeEntryType { BLOB, TREE, COMMIT }
+
+/** One tree entry. [sizeBytes] is set for blobs only. */
+data class TreeEntry(val path: String, val type: TreeEntryType, val mode: String, val sizeBytes: Long?)
+
+/** A recursive tree listing. [truncated] is always false in a returned tree; a truncated listing is a failure. */
+data class RepoTree(val sha: String, val entries: List<TreeEntry>, val truncated: Boolean)
+
+/** One file's content. [isText] is false for binary (contains NUL) or non-UTF-8 content. [toString] never prints content. */
+class RepoFileContent(val path: String, val bytes: ByteArray, val isText: Boolean) {
+    /** The UTF-8 text when [isText]; null otherwise. */
+    val text: String? get() = if (isText) String(bytes, Charsets.UTF_8) else null
+
+    override fun toString() = "RepoFileContent(path=<redacted>, bytes=${bytes.size}, isText=$isText)"
 }
 
 /**
@@ -208,6 +239,10 @@ enum class GitHubFailureKind {
      * reported as [GitHubResult.Unknown] instead, because the server did receive the request.
      */
     REDIRECT,
+    /** A tree listing GitHub reported as truncated. A partial tree is never returned. */
+    TREE_TRUNCATED,
+    /** A file larger than the caller's byte limit. Its content is not decoded. */
+    TOO_LARGE,
     ;
 
     /** Fixed machine-readable code stored in [GitHubResult.Failure.message]. Never provider text. */

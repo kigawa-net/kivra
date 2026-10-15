@@ -28,6 +28,9 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 import java.util.Base64
 
@@ -749,5 +752,102 @@ class HttpGitHubAdapter(
             if (arr.size < 100) return GitHubResult.Success(out)
         }
         return GitHubResult.Failure(GitHubFailureKind.PROTOCOL, "too many pages of reviews")
+    }
+
+    // ---- read-only repository access (GET only) ----
+
+    /** A branch name or a 40-hex commit SHA, with no control characters, empty or dot segments. Checked before any request. */
+    private fun isValidRef(ref: String): Boolean =
+        sha40.matches(ref) || (
+            ref.isNotEmpty() && ref.length <= 255 &&
+                ref.none { it.code < 0x20 || it.code == 0x7f || it == ' ' } &&
+                ref.split('/').none { it.isEmpty() || it == "." || it == ".." }
+            )
+
+    /** Path segments are encoded one by one; `URLEncoder` writes a space as `+`, which is a literal plus in a path. */
+    private fun encodePath(path: String): String =
+        path.split('/').joinToString("/") { java.net.URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+
+    private fun encodeRef(ref: String): String = if (sha40.matches(ref)) ref else refPath(ref)
+
+    override suspend fun listTree(repo: RepoRef, ref: String): GitHubResult<RepoTree> {
+        if (!isValidRef(ref)) return validation("ref")
+        val raw = when (val g = get("${repoPath(repo)}/git/trees/${encodeRef(ref)}?recursive=1")) {
+            is GitHubResult.Success -> g.value
+            is GitHubResult.Failure -> return g
+            is GitHubResult.Unknown -> return g
+        }
+        val o = parse(raw) as? JsonObject ?: return protocol("tree")
+        val sha = o.str("sha")?.takeIf { sha40.matches(it) } ?: return protocol("tree.sha")
+        if (sha40.matches(ref) && sha != ref) return mismatch()
+        val truncated = o.bool("truncated") ?: return protocol("tree.truncated")
+        if (truncated) return GitHubResult.Failure(GitHubFailureKind.TREE_TRUNCATED, GitHubFailureKind.TREE_TRUNCATED.code)
+        val arr = o["tree"] as? JsonArray ?: return protocol("tree.tree")
+        val entries = ArrayList<TreeEntry>(arr.size)
+        for (el in arr) {
+            val e = el as? JsonObject ?: return protocol("tree entry")
+            val path = e.str("path") ?: return protocol("tree entry path")
+            val type = when (e.str("type")) {
+                "blob" -> TreeEntryType.BLOB
+                "tree" -> TreeEntryType.TREE
+                "commit" -> TreeEntryType.COMMIT
+                else -> return protocol("tree entry type")
+            }
+            val mode = e.str("mode") ?: return protocol("tree entry mode")
+            val size = if (type == TreeEntryType.BLOB) {
+                e.long("size") ?: return protocol("tree entry size")
+            } else {
+                null
+            }
+            entries += TreeEntry(path, type, mode, size)
+        }
+        return GitHubResult.Success(RepoTree(sha, entries, truncated = false))
+    }
+
+    override suspend fun readFile(repo: RepoRef, ref: String, path: String, maxBytes: Int): GitHubResult<RepoFileContent?> {
+        require(maxBytes > 0) { "maxBytes must be positive" }
+        if (!isValidRef(ref)) return validation("ref")
+        // Same rules as commitFiles: no empty, dot, `..`, backslash, control, absolute or `.git` path segment.
+        if (CommitFilesPolicy.pathViolation(path, CommitFilesLimits()) != null) return validation("path")
+        val query = "?ref=${java.net.URLEncoder.encode(ref, "UTF-8")}"
+        val raw = when (val g = get("${repoPath(repo)}/contents/${encodePath(path)}$query")) {
+            is GitHubResult.Success -> g.value
+            is GitHubResult.Failure -> return if (g.kind == GitHubFailureKind.NOT_FOUND) GitHubResult.Success(null) else g
+            is GitHubResult.Unknown -> return g
+        }
+        val parsed = parse(raw) ?: return protocol("contents")
+        // A directory answers with an array.
+        if (parsed is JsonArray) return validation("not a file")
+        val o = parsed as? JsonObject ?: return protocol("contents")
+        val type = o.str("type") ?: return protocol("contents.type")
+        if (type != "file") return validation("not a file")
+        if (o.str("path") != path) return mismatch()
+        val size = o.long("size") ?: return protocol("contents.size")
+        if (size < 0) return protocol("contents.size")
+        // The contents response carries the body, so the size is checked here and nothing is decoded for an oversize file.
+        if (size > maxBytes) return GitHubResult.Failure(GitHubFailureKind.TOO_LARGE, GitHubFailureKind.TOO_LARGE.code)
+        if (o.str("encoding") != "base64") return protocol("contents.encoding")
+        val encoded = o.str("content") ?: return protocol("contents.content")
+        // GitHub wraps base64 with LF only. The strict decoder rejects any other character.
+        val bytes = try {
+            Base64.getDecoder().decode(encoded.replace("\n", ""))
+        } catch (_: IllegalArgumentException) {
+            return protocol("contents.base64")
+        }
+        if (bytes.size.toLong() != size || bytes.size > maxBytes) return protocol("contents.length")
+        return GitHubResult.Success(RepoFileContent(path, bytes, isText = isUtf8Text(bytes)))
+    }
+
+    private fun isUtf8Text(bytes: ByteArray): Boolean {
+        if (bytes.any { it == 0.toByte() }) return false
+        return try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+            true
+        } catch (_: CharacterCodingException) {
+            false
+        }
     }
 }

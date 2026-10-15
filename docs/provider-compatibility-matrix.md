@@ -114,6 +114,7 @@
 |---|---|---|---|
 | 読み取り | 実装済み(`getBranch` / `getPullRequest` / `findPullRequestsByHead` / `getCheckRuns` / `getCombinedStatus` / `getReviews`) | **未確認**(本リポジトリに実 GitHub への接続試験の記録なし。テストは MockEngine) | 無効 |
 | 変更 | 実装済み: `createBranch` / `ensureRunBranch` / `createPullRequest` / `ensurePullRequest`。**Merge は存在しない** | **未確認**(本リポジトリの範囲外) | 無効 |
+| ref 更新 | 実装済み: `commitFiles`(`kivra/run-*` のみ、`force=false`、`expectedHeadSha` と不一致なら書かず `CONFLICT`、ref 更新の結果不明は照合のみで再送しない)。本番では未配線 | **未確認**(本リポジトリの範囲外) | 無効 |
 | 冪等キー | なし。照合は run 専用ブランチ名と head による PR 検索で行う(`ensurePullRequest`) | **未確認**(GitHub API の冪等性機構は本リポジトリでは確認していない) | 無効 |
 | Receipt / Operation-ID | PR 番号と head SHA を応答と照合(`IDENTITY_MISMATCH` で拒否)。Merge 観測は `GitHubPrMergeAuthority`(観測のみ) | — | 無効 |
 | 条件付き DELETE | 実装なし(ref 削除は設計上除外) | — | 無効 |

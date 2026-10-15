@@ -40,4 +40,5 @@ Policy を Agent や Tool Gateway から書き換えられると、Agent が自�
 - 済: 禁止操作の拒否(`kivra-policy` の `FORBIDDEN_ACTION_PATTERNS`。`policy.update`、`approval.grant` などは承認があっても拒否)。PR #143 のテストで保証。
 - 未確認: Policy の供給方法(イメージ同梱、またはマウント)の実装。今回の調査では、ファイルからの読み込み経路を確認できなかった。
 - 済: 承認への `policyHash` の結合。操作ダイジェスト(v2)に `policyHash` を含め、承認が発行時と違う Policy に対して使われたら `POLICY_CHANGED` で拒否する(承認は消費しない)。PR #162。
-- 未実装: 起動時の Policy のハッシュの計算・固定・報告。Issue #32 に残す。
+- 済(PR #161): 起動時の Policy のハッシュの計算・固定・報告。実行中のホットリロードは行わない(再起動で反映)。起動時の `logLine()` の呼び出しの配線は、本番未配線のため、配線時に行う。
+- 未実装: `issuedUnderPolicyHash` の本番実装(承認の発行時の policyHash の保存と照会)。承認の保存スキーマと配線が要る。#33 で扱う。ただし、ダイジェストの不一致による拒否は、本番でも働く(fail-closed)。

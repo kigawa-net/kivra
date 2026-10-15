@@ -10,6 +10,7 @@ COPY gradle/ gradle/
 COPY settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY kivra-app/build.gradle.kts kivra-app/build.gradle.kts
 COPY kivra-core/build.gradle.kts kivra-core/build.gradle.kts
+COPY kivra-developer/build.gradle.kts kivra-developer/build.gradle.kts
 COPY kivra-exkes/build.gradle.kts kivra-exkes/build.gradle.kts
 COPY kivra-fusha-poller/build.gradle.kts kivra-fusha-poller/build.gradle.kts
 COPY kivra-fusha-task/build.gradle.kts kivra-fusha-task/build.gradle.kts
@@ -26,6 +27,7 @@ RUN chmod +x gradlew && ./gradlew :kivra-app:dependencies --configuration runtim
 
 COPY kivra-app/ kivra-app/
 COPY kivra-core/ kivra-core/
+COPY kivra-developer/ kivra-developer/
 COPY kivra-exkes/ kivra-exkes/
 COPY kivra-fusha-poller/ kivra-fusha-poller/
 COPY kivra-fusha-task/ kivra-fusha-task/

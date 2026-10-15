@@ -53,7 +53,8 @@ interface GitHubPort {
      * Writes [CommitFilesRequest.changes] as one commit on `kivra/run-<runId>` (Git Data API: ref, commit, tree, blobs,
      * commit, ref update). Only run branches are accepted; anything else is `Failure(VALIDATION)` before any request.
      * `expectedHeadSha` differing from the live head is `Failure(CONFLICT)` with no write. A failed ref update whose
-     * outcome is unknown is reconciled by reading the ref back; it is never re-sent. See [HttpGitHubAdapter.commitFiles].
+     * outcome is unknown is reconciled by reading the ref back; it is never re-sent. A read-back that confirms the ref
+     * was not moved is `Failure(NOT_APPLIED)`: the same request may be sent again, once. See [HttpGitHubAdapter.commitFiles].
      */
     suspend fun commitFiles(repo: RepoRef, request: CommitFilesRequest): GitHubResult<CommittedFiles>
 }
@@ -195,6 +196,13 @@ enum class GitHubFailureKind {
     FOREIGN_OBJECT,
     /** Response body unparseable. */
     PROTOCOL,
+    /**
+     * A ref update was confirmed NOT applied: the ref still points at the expected head after a read-back (see
+     * [HttpGitHubAdapter.commitFiles]). Nothing was written, so the same request may be sent again, once, by the caller.
+     * Only a confirmed read-back produces this kind. A failed read-back stays [GitHubResult.Unknown], and a head moved by
+     * another writer is [CONFLICT].
+     */
+    NOT_APPLIED,
     /**
      * 3xx. Redirects are never followed (a bearer token must not reach another origin). On a POST this is
      * reported as [GitHubResult.Unknown] instead, because the server did receive the request.

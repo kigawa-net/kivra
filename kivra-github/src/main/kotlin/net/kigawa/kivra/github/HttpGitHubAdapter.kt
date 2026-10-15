@@ -622,7 +622,7 @@ class HttpGitHubAdapter(
     /**
      * Decides the outcome of a ref update whose response was lost (issue #56). Reads the ref only; never writes.
      * - head is [commitSha]: our update landed -> `Success(created = true)`.
-     * - head is [expectedHeadSha]: not applied. Reported as `Unknown` with that cause; the caller may run
+     * - head is [expectedHeadSha]: confirmed not applied -> `Failure(NOT_APPLIED)`. Nothing was written, so the caller may run
      *   `commitFiles` again from the start, because the blobs, trees and commit it left behind are unreferenced.
      * - any other head: another writer moved the branch -> `CONFLICT`.
      * A failed or unusable read stays `Unknown`.
@@ -644,7 +644,8 @@ class HttpGitHubAdapter(
         }
         return when (head) {
             commitSha -> GitHubResult.Success(CommittedFiles(commitSha, treeSha, created = true))
-            expectedHeadSha -> GitHubResult.Unknown(op, "ref not moved after reconcile; commitFiles may be run again")
+            // Confirmed not applied: the ref is still at expectedHeadSha. Nothing was written, so the caller may re-run once.
+            expectedHeadSha -> GitHubResult.Failure(GitHubFailureKind.NOT_APPLIED, GitHubFailureKind.NOT_APPLIED.code)
             else -> GitHubResult.Failure(GitHubFailureKind.CONFLICT, GitHubFailureKind.CONFLICT.code)
         }
     }

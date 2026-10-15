@@ -18,6 +18,9 @@ dependencies {
     implementation(project(":kivra-fusha-poller"))
     // Model Gateway budget port. The durable store (db/DbBudgetStore) implements it; the gateway itself never imports kivra-app.
     implementation(project(":kivra-model-gateway"))
+    // Self-development runner (ADR 0008 part 4, issue #56): the Developer port and the GitHub port. Not wired into Application.kt yet (part 6).
+    implementation(project(":kivra-developer"))
+    implementation(project(":kivra-github"))
 
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)

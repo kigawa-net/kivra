@@ -26,6 +26,7 @@ import net.kigawa.kivra.github.BranchInfo
 import net.kigawa.kivra.github.CommitFilesRequest
 import net.kigawa.kivra.github.CreatePullRequest
 import net.kigawa.kivra.github.FileWrite
+import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubPort
 import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.PullRequestState
@@ -221,10 +222,13 @@ class SelfDevRunner(
         )
         renewOrThrow(lease)
         var committed = github.commitFiles(config.repo, commitRequest)
-        // The adapter already read the ref back. "Not moved" means nothing was written, so one more attempt is safe.
-        if (committed is GitHubResult.Unknown && committed.cause == REF_NOT_MOVED) {
+        // NOT_APPLIED is a confirmed read-back: nothing was written, so the same request may be sent once more. Nothing else is retried.
+        if (committed is GitHubResult.Failure && committed.kind == GitHubFailureKind.NOT_APPLIED) {
             renewOrThrow(lease)
             committed = github.commitFiles(config.repo, commitRequest)
+            if (committed is GitHubResult.Failure && committed.kind == GitHubFailureKind.NOT_APPLIED) {
+                return persistAdvance(lease, run, DevelopmentRunState.UNKNOWN, COMMIT_NOT_APPLIED_TWICE)
+            }
         }
         val commitSha = when (committed) {
             is GitHubResult.Success -> committed.value.commitSha
@@ -328,8 +332,7 @@ class SelfDevRunner(
     }
 
     private companion object {
-        /** The adapter's reason when the ref was not moved; the only Unknown from commitFiles that may be retried. */
-        const val REF_NOT_MOVED = "ref not moved after reconcile; commitFiles may be run again"
+        const val COMMIT_NOT_APPLIED_TWICE = "COMMIT_NOT_APPLIED_TWICE"
         const val GITHUB_UNKNOWN = "GITHUB_UNKNOWN_OUTCOME"
         const val POLICY_REJECTED = "POLICY_REJECTED"
         const val DEVELOPER_PREFIX = "DEVELOPER_"

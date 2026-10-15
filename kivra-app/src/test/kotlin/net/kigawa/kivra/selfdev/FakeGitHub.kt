@@ -22,11 +22,17 @@ class CrashInjected(val op: String) : RuntimeException("crash injected at $op")
 
 /** What the fake does with a commitFiles call when the test asks for a fault. */
 enum class CommitFault {
-    /** The ref is not moved. Reported as the adapter reports it: Unknown with the "not moved" cause. */
-    UNKNOWN_NOT_MOVED,
+    /** Confirmed not applied: the ref is not moved. Reported as the adapter reports it: Failure(NOT_APPLIED). */
+    NOT_APPLIED,
 
     /** The ref is moved, but the response is lost. Reported as Unknown with an unrelated cause. */
     UNKNOWN_MOVED,
+
+    /** The ref is not moved, but the read-back failed, so the outcome is unknown. Reported as Unknown, never NOT_APPLIED. */
+    UNKNOWN_NOT_CONFIRMED,
+
+    /** Another writer moved the branch. Reported as Failure(CONFLICT) with no write. */
+    CONFLICT,
 }
 
 /**
@@ -49,6 +55,10 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
 
     /** Injected faults, consumed one per commitFiles call. */
     val commitFaults = ArrayDeque<CommitFault>()
+
+    /** Number of commitFiles calls, faulted or not. */
+    var commitCalls = 0
+        private set
 
     /** When set, the next write of that operation performs the write and then throws [CrashInjected]. */
     var crashAfter: String? = null
@@ -177,8 +187,12 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
         if (repo != this.repo) return foreign()
         val head = branches[request.branch]?.headSha ?: return foreign()
         val fault = commitFaults.removeFirstOrNull()
-        if (fault == CommitFault.UNKNOWN_NOT_MOVED) {
-            return GitHubResult.Unknown("updateRef", REF_NOT_MOVED)
+        commitCalls++
+        when (fault) {
+            CommitFault.NOT_APPLIED -> return GitHubResult.Failure(GitHubFailureKind.NOT_APPLIED, GitHubFailureKind.NOT_APPLIED.code)
+            CommitFault.UNKNOWN_NOT_CONFIRMED -> return GitHubResult.Unknown("updateRef", "reconcile read failed")
+            CommitFault.CONFLICT -> return GitHubResult.Failure(GitHubFailureKind.CONFLICT, GitHubFailureKind.CONFLICT.code)
+            else -> Unit
         }
         if (head != request.expectedHeadSha) return GitHubResult.Failure(GitHubFailureKind.CONFLICT, GitHubFailureKind.CONFLICT.code)
         val commitSha = sha(++counter)
@@ -194,7 +208,6 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
 
     companion object {
         const val BASE_BRANCH = "main"
-        const val REF_NOT_MOVED = "ref not moved after reconcile; commitFiles may be run again"
 
         /** A 40-character lowercase hex sha built from [n]. */
         fun sha(n: Int): String = n.toString(16).padStart(40, '0')

@@ -44,6 +44,7 @@ class GitHubPrMergeAuthority(
                 GitHubFailureKind.SERVER_ERROR,
                 GitHubFailureKind.NETWORK,
                 GitHubFailureKind.CONFLICT,
+                GitHubFailureKind.NOT_APPLIED,
                 -> throw PrMergeAuthorityUnavailableException("GitHub merge observation unavailable: ${r.kind.code}")
             }
             is GitHubResult.Unknown -> throw PrMergeAuthorityUnavailableException("GitHub merge observation unknown")

@@ -21,6 +21,7 @@ import net.kigawa.kivra.developer.DeveloperRefusal
 import net.kigawa.kivra.developer.DeveloperResult
 import net.kigawa.kivra.developer.DeveloperUnknown
 import net.kigawa.kivra.developer.FakeDeveloper
+import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubPort
 import net.kigawa.kivra.github.PullRequestState
 import org.slf4j.LoggerFactory
@@ -29,7 +30,6 @@ import net.kigawa.kivra.selfdev.AdvanceResult.Failed
 import net.kigawa.kivra.selfdev.AdvanceResult.Skipped
 import net.kigawa.kivra.selfdev.AdvanceResult.Waiting
 import net.kigawa.kivra.selfdev.CommitFault.UNKNOWN_MOVED
-import net.kigawa.kivra.selfdev.CommitFault.UNKNOWN_NOT_MOVED
 
 /**
  * Self-development runner (ADR 0008 part 4). Runs on H2 with the real run repository and the real lease store; GitHub, the Developer and
@@ -246,7 +246,7 @@ class SelfDevRunnerTest {
     fun aCommitWhoseRefWasNotMovedIsRetriedOnceAndLandsOnce() = runBlocking {
         TestDb().use { db ->
             val h = Harness(db, proposal("docs/a.md" to "new\n"))
-            h.github.commitFaults.add(UNKNOWN_NOT_MOVED)
+            h.github.commitFaults.add(CommitFault.NOT_APPLIED)
             val runner = h.runner()
             val runId = h.newRun()
             runner.advance(runId)
@@ -257,16 +257,16 @@ class SelfDevRunnerTest {
     }
 
     @Test
-    fun aCommitThatIsNotMovedTwiceBecomesUnknownAndWritesNoCommit() = runBlocking {
+    fun aCommitThatIsNotAppliedTwiceBecomesUnknownAndWritesNoCommit() = runBlocking {
         TestDb().use { db ->
             val h = Harness(db, proposal("docs/a.md" to "new\n"))
-            h.github.commitFaults.add(UNKNOWN_NOT_MOVED)
-            h.github.commitFaults.add(UNKNOWN_NOT_MOVED)
+            h.github.commitFaults.add(CommitFault.NOT_APPLIED)
+            h.github.commitFaults.add(CommitFault.NOT_APPLIED)
             val runner = h.runner()
             val runId = h.newRun()
             runner.advance(runId)
             assertEquals(
-                Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.UNKNOWN, "GITHUB_UNKNOWN_OUTCOME"),
+                Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.UNKNOWN, "COMMIT_NOT_APPLIED_TWICE"),
                 runner.advance(runId),
             )
             assertEquals(emptyList(), h.github.commitsOnBranch)
@@ -546,6 +546,59 @@ class SelfDevRunnerTest {
             assertEquals(listOf("README.md", "docs/a.md"), shown)
             assertFalse(shown.contains("docs/big.md"))
             assertFalse(shown.contains("src/Main.kt"))
+        }
+    }
+
+    @Test
+    fun aCommitRetriedOnceThatIsNotAppliedAgainBecomesUnknownAfterExactlyTwoCalls() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new\n"))
+            h.github.commitFaults.add(CommitFault.NOT_APPLIED)
+            h.github.commitFaults.add(CommitFault.NOT_APPLIED)
+            h.github.commitFaults.add(CommitFault.NOT_APPLIED) // must never be used
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(
+                Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.UNKNOWN, "COMMIT_NOT_APPLIED_TWICE"),
+                runner.advance(runId),
+            )
+            assertEquals(2, h.github.commitCalls, "one retry, never a third call")
+            assertEquals(emptyList(), h.github.commitsOnBranch)
+        }
+    }
+
+    @Test
+    fun aConflictIsFailedAndNeverRetried() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new\n"))
+            h.github.commitFaults.add(CommitFault.CONFLICT)
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(
+                Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.FAILED, GitHubFailureKind.CONFLICT.code),
+                runner.advance(runId),
+            )
+            assertEquals(1, h.github.commitCalls)
+            assertEquals(emptyList(), h.github.commitsOnBranch)
+        }
+    }
+
+    @Test
+    fun anUnconfirmedUnknownIsNeverRetried() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new\n"))
+            h.github.commitFaults.add(CommitFault.UNKNOWN_NOT_CONFIRMED)
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(
+                Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.UNKNOWN, "GITHUB_UNKNOWN_OUTCOME"),
+                runner.advance(runId),
+            )
+            assertEquals(1, h.github.commitCalls)
+            assertEquals(emptyList(), h.github.commitsOnBranch)
         }
     }
 }

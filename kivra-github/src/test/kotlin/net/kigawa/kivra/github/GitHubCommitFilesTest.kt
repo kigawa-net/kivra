@@ -366,11 +366,11 @@ class GitHubCommitFilesTest {
     // (f) ref update: never re-sent, reconciled by reading the ref
 
     @Test
-    fun `a lost ref update where the ref did not move is Unknown with exactly one PATCH and no resend`() = runTest {
+    fun `a lost ref update where the ref did not move is NOT_APPLIED with exactly one PATCH and no resend`() = runTest {
         for (mode in listOf(PatchMode.ERROR_NOT_APPLIED, PatchMode.TIMEOUT_NOT_APPLIED)) {
             val remote = CommitRemote().apply { patchMode = mode }
             val result = remote.adapter.commitFiles(CF_REPO, request(FileWrite.Write("a.txt", "x")))
-            assertIs<GitHubResult.Unknown>(result, "mode $mode")
+            assertFailureKind(GitHubFailureKind.NOT_APPLIED, result)
             assertEquals(1, remote.count(HttpMethod.Patch), "mode $mode must not re-send the PATCH")
             assertEquals(CF_HEAD, remote.head)
         }
@@ -399,13 +399,13 @@ class GitHubCommitFilesTest {
         suspend fun ours() = remote.adapter.reconcileCommit(CF_REPO, CF_BRANCH, CF_HEAD, CF_NEW_COMMIT, CF_NEW_TREE)
 
         remote.head = CF_HEAD
-        assertIs<GitHubResult.Unknown>(ours())
+        assertFailureKind(GitHubFailureKind.NOT_APPLIED, ours())
         remote.head = CF_NEW_COMMIT
         assertEquals(GitHubResult.Success(CommittedFiles(CF_NEW_COMMIT, CF_NEW_TREE, created = true)), ours())
         remote.head = CF_OTHER
         assertFailureKind(GitHubFailureKind.CONFLICT, ours())
         remote.refMissing = true
-        assertIs<GitHubResult.Unknown>(ours())
+        assertIs<GitHubResult.Unknown>(ours(), "a failed read-back is never reported as not applied")
         assertEquals(0, remote.count(HttpMethod.Patch), "reconciliation never writes")
     }
 
@@ -441,9 +441,9 @@ class GitHubCommitFilesTest {
     }
 
     @Test
-    fun `a redirected ref update is Unknown and is not followed`() = runTest {
+    fun `a redirected ref update is not followed and, once the read-back confirms the ref did not move, NOT_APPLIED`() = runTest {
         val remote = CommitRemote().apply { patchMode = PatchMode.REDIRECT }
-        assertIs<GitHubResult.Unknown>(remote.adapter.commitFiles(CF_REPO, request(FileWrite.Write("a.txt", "x"))))
+        assertFailureKind(GitHubFailureKind.NOT_APPLIED, remote.adapter.commitFiles(CF_REPO, request(FileWrite.Write("a.txt", "x"))))
         assertEquals(1, remote.count(HttpMethod.Patch))
         assertTrue(remote.requests.none { it.url.host == "untrusted.example" })
     }

@@ -31,8 +31,10 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 3. **安全性は多層で構造的に保証する**。プロンプトには頼らない。
    - (a) `PatchPolicy`(`kivra-core`)は次のパスを拒否する: `.github/`、`gradle/`、Flyway のマイグレーション(`db/migration/`)、`docs/adr/`、Policy・認証・予算の中核、`CLAUDE.md`、`.env*`、鍵ファイル。拒否はファイル単位で、1 つでも違反すれば PatchSet 全体を拒否する。
    - (b) `commitFiles`(`kivra-github`)は `kivra/run-<runId>` 以外のブランチに書かない(`main` に書けない)。`force=false` とし、既存 ref を更新しない。
-   - (c) kivra の GitHub トークンの権限は、対象リポジトリの `contents:write` と `pull_requests:write` のみとする。`administration` と `workflows` は付けない。**ブランチ保護で `main` への直接 push を禁止する**(既存の運用)。
-   - (d) **人間のマージが必須**(必須のレビュー・承認を Ruleset で要求する)。kivra は承認・マージの API を呼ばない。`GitHubPort` に merge が無いことはテストで固定済みであり、これを維持する。
+   - (c) kivra の GitHub トークンの権限は、対象リポジトリの `contents:write` と `pull_requests:write` のみとする。`administration` と `workflows` は付けない。**ブランチ保護で `main` への直接 push を禁止する**。ただし、2026-10-15 時点では `kigawa-net/kivra` の `main` に Ruleset もブランチ保護も無い(API で確認: Ruleset 0 件、`branches/main/protection` は 404)。書き込み権限のあるトークンがあれば、`main` に直接 push も force push もできる。保護は `kigawa-net/infra` の Terraform(`platform/github/variables.tf` の `var.repositories`)で管理する。`kivra` はそのリストに無かったため、kigawa-net/infra#295 と PR kigawa-net/infra#296(ドラフト)で追加する。
+     - **前提(自己開発を有効にする前に満たす)**: kigawa-net/infra#296 がマージされ、`terraform apply` で `kigawa-net/kivra` の `main` にブランチ保護が付いていること。既定の保護は PR 必須・承認 0 件・force push 禁止・削除禁止、`enforce_admins = false`。
+     - **`enforce_admins = false` のため、管理者の権限を持つトークンは保護を迂回できる。** kivra に渡す GitHub のトークンは、管理者の権限を持たない専用の細粒度の PAT(`kigawa-net/kivra` の `contents:write` と `pull_requests:write` のみ。`administration` なし、`workflows` なし)にする。
+   - (d) **人間のマージが必須**。kivra は承認・マージの API を呼ばない。`GitHubPort` に merge が無いことはテストで固定済みであり、これを維持する。保護(infra#296)の既定は承認 0 件であり、この場合「人間がマージする」は構造的な強制ではなく、運用による(マージ権限を持つのは人間のみ、という前提に依存する)。承認 1 件の必須化は、ユーザーの判断とする。
    - (e) **キルスイッチ**: 環境変数 `KIVRA_SELFDEV_ENABLED`(既定 `false`)で無効化できる。有効化は能力ゲート(`docs/provider-compatibility-matrix.md` の手順)を通してから行う。
    - (f) **予算**: LLM の呼び出しは `BudgetPort` の予約が必須とする(月 1 万円。超過・価格不明は拒否する = fail-closed)。Run ごとの上限も持つ。予算の正本は ADR 0004 に従い `BudgetPort` とする。
    - (g) **1 Run につき、変更案の提出(PR 作成)は 1 回**とする。自動の再試行で PR を増やさない。`ensurePullRequest` の冪等性(run 専用ブランチ名と head による照合)に依存する。
@@ -70,7 +72,7 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 
 - MVP の完了は「GitHub の PR が作られ、人間が GitHub でマージし、kivra がそのマージを照合して `PR_ONLY` で COMPLETED にする」ことである。
 - 自己開発の経路は既定で無効。有効化は能力ゲート経由に限る。
-- 安全性の根拠は、プロンプトではなく `PatchPolicy`、`commitFiles` の制約、GitHub 側の権限と Ruleset にある。
+- 安全性の根拠は、プロンプトではなく `PatchPolicy`、`commitFiles` の制約、GitHub 側の権限と、ブランチ保護(infra#296 の適用後)にある。
 - 状態表(6 節)の追加は Flyway V12 と合わせて行う(`development_runs.state` の取り得る値を広げる)。
 
 ## 実装の分割
@@ -78,23 +80,23 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 | 順 | PR の範囲 | 依存 | 触るモジュール | 他の PR と競合するか |
 |---|---|---|---|---|
 | ① | `PatchSet` と `PatchPolicy` | なし | `kivra-core` | 別の Haiku が実装中。`kivra-core` の他の変更とは重ならない想定 |
-| ② | `GitHubPort.commitFiles`(`kivra/run-<runId>` に限定、`force=false`) | なし | `kivra-github` | 別の Haiku が実装中。`GitHubPort` の既存の API は変えない |
-| ③ | `DeveloperPort` と、LLM を使う実装(プロンプト、構造化出力、予算の予約・確定)、Fake 実装 | ①(`PatchSet`)、`kivra-model-gateway` | `kivra-app` または新モジュール `kivra-developer`(要決定) | ①②と重ならない。`kivra-app` を触る場合は ⑥ と後で合わせる |
-| ④ | `SelfDevRunner`(状態機械。Run、Journal、GitHub、Developer をつなぐ)。Fake で Acceptance Harness の Happy path(#70 のシナリオ 1)を通す | ①②③、⑤(状態の追加は ④ と同時でも可) | `kivra-app`(`agent/` か新パッケージ)、`kivra-app/src/test/.../acceptance/` | ③と並行可能。Harness の追加は ④ のみ |
-| ⑤ | Run の状態の追加(`ABANDONED`、`UNKNOWN`、`PATCH_READY`、遷移表、Flyway V12 の `development_runs.state` の制約) | なし(④ より前か同時) | `kivra-core`(`States.kt`)、`kivra-app/src/main/resources/db/migration/V12__*.sql` | ①と同じ `kivra-core` を触るため、①の後に rebase する |
+| ② | `GitHubPort.commitFiles`(`kivra/run-<runId>` に限定、`force=false`)。Git Data API を使う(blob → tree → commit → ref の順。複数ファイルを 1 コミットで原子的に書く) | なし | `kivra-github` | 別の Haiku が実装中。`GitHubPort` の既存の API は変えない |
+| ③ | 新モジュール `kivra-developer`: `DeveloperPort`、LLM を使う実装(プロンプト、構造化出力、予算の予約・確定)、Fake 実装。`kivra-core` と `kivra-model-gateway` に依存し、DB を使わないので DB なしでテストできる | ①(`PatchSet`)、②(マージ後に着手)、`kivra-model-gateway` | `kivra-developer`(新規)、`settings.gradle.kts`(この PR で追加) | `settings.gradle.kts` を触るため、① と ② のマージ後に着手する |
+| ④ | `SelfDevRunner`(状態機械。Run、Journal、GitHub、Developer をつなぐ)。DB を使うので `kivra-app` に置く。Fake で Acceptance Harness の Happy path(#70 のシナリオ 1)を通す | ①②③⑤ | `kivra-app`(`agent/` か新パッケージ)、`kivra-app/src/test/.../acceptance/` | ③ の Fake を使うため、③ の後。Harness の追加は ④ のみ |
+| ⑤ | Run の状態の追加(`ABANDONED`、`UNKNOWN`、`PATCH_READY`、遷移表、Flyway V12 の `development_runs.state` の制約) | ①(`kivra-core` を共有するため、① の後) | `kivra-core`(`States.kt`)、`kivra-app/src/main/resources/db/migration/V12__*.sql` | ① の後に着手する(`kivra-core` の変更の順序は ① → ⑤) |
 | ⑥ | 配線(`Application.kt`: `KIVRA_SELFDEV_ENABLED`、設定、Anthropic の API キーと GitHub トークンの Secret の読み込み、能力ゲートの手順) | ②③④ | `kivra-app`(`Application.kt`、`config/KivraConfig.kt`) | `KivraConfig` を触るため、他の設定 PR と順序を合わせる |
-| ⑦ | 起動の経路。`POST /api/tasks` の拡張(`description` と `target` を受け付ける)、または別のエンドポイント | ④⑥ | `kivra-app`(`routes/TaskApiRoutes.kt`) | `TaskApiRoutes` の既存の挙動(SIMULATED)を変えないこと。拡張か別経路かは ⑦ の前に決める |
+| ⑦ | 起動の経路: 別のエンドポイント `POST /api/selfdev/tasks`。既存の `/api/tasks` の挙動は変えない(能力ゲートを明示できる)。認証は既存と同じ(`admin-panel:admin`)。`KIVRA_SELFDEV_ENABLED` が必須 | ④⑥ | `kivra-app`(新しいルート、`routes/` 配下) | `/api/tasks`(`TaskApiRoutes.kt`)は変えない |
 | ⑧ | k8s の Secret と設定、dev での最初の実行の手順(runbook) | ⑥⑦ | `kigawa-net-k8s` 系の manifest、`docs/`(runbook) | 別リポジトリ(k8s)の変更を含む。`docs/` の runbook は `docs/adr/` 以外の新規ファイル |
 
-依存の要点: ①②③は並行できる。④は ①②③が要る。⑥⑦⑧は ④ の後。⑤ は ① と `kivra-core` で競合するので、順序を決めてから着手する。
+依存の要点: ①と②は並行できる。③ は ①② のマージ後(`settings.gradle.kts` の競合を避けるため)。④ は ①②③⑤ が要る。⑤ は ① の後。⑥⑦⑧ は ④ の後。
 
 ### ユーザーにしか用意できないもの
 
 | 項目 | 内容 | いつ必要か |
 |---|---|---|
 | Anthropic の API キー | k8s の Secret として置く(値は ADR・ログに出さない) | ⑥ の後、dev で LLM を有効にするとき |
-| GitHub のトークン | 対象リポジトリの `contents:write` と `pull_requests:write` のみ。`administration` と `workflows` は付けない。k8s の Secret として置く | ⑥ の後、dev で GitHub を有効にするとき |
-| ブランチ保護の確認 | `kigawa-net/kivra` の `main` が直接 push 禁止であること、必須のレビュー・承認が有効であること | ⑧ の runbook を実行する前 |
+| GitHub のトークン | 管理者の権限を持たない専用の細粒度 PAT(`kigawa-net/kivra` の `contents:write` と `pull_requests:write` のみ。`administration` なし、`workflows` なし)。k8s の Secret として置く。`enforce_admins = false` のため、管理者の権限を持つトークンは保護を迂回できる | ⑥ の後、dev で GitHub を有効にするとき |
+| kigawa-net/infra#296 のマージと `terraform apply`(R2 の資格情報が要る)。必須レビューは既定の承認 0 件のままでよいか確認する(人間がマージ時に確認する運用。承認 1 件の必須化は、ユーザーの判断) | ⑧ の runbook の前 |
 | 予算の確認 | 月 1 万円の上限と、Run ごとの上限の値 | ③ の実装の前 |
 | 対象リポジトリの確定 | MVP の対象が `kigawa-net/kivra` のみでよいことの確認 | ⑥ の前 |
 
@@ -102,9 +104,10 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 
 - Happy path(#70 シナリオ 1)の Harness は、このリポジトリに無い(④ で作る)。
 - `ABANDONED` と `UNKNOWN` を `DevelopmentRunState` に足したときの、V1 の `active_flag` と既存の遷移テストへの影響は未確認。
-- `commitFiles` の GitHub API の具体的な呼び出し方(Git Data API か Contents API か)は未確認。
 - 月 1 万円の予算を、`BudgetController`(インメモリ)と V10 の永続的な台帳のどちらで強制するかは未決定。本番では永続的な台帳を使うべき(ADR 0004)。
-- GitHub の Ruleset で「必須のレビュー・承認」が対象リポジトリに設定されているかは、このリポジトリからは確認できない。
+- `kigawa-net/kivra` の `main` にはブランチ保護が無い(2026-10-15 に API で確認: Ruleset 0 件、`branches/main/protection` は 404)。infra#296 で追加予定。
+- `commitFiles` は Git Data API を使う(決定済み)。
+- 必須のレビュー・承認の有無(既定は承認 0 件)は、infra#296 の適用後に確認する。
 - `PatchPolicy` の「秘密らしい内容」の判定方法(パターン、エントロピー)は未決定。
 
 ## 見直しの条件

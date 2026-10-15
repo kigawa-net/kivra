@@ -2,6 +2,8 @@ package net.kigawa.kivra.policy
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.time.Clock
+import java.time.Instant
 
 class PolicyLoadException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
@@ -25,11 +27,37 @@ data class PolicyRule(
 @Serializable
 data class PolicyDocument(val version: Int = 1, val rules: List<PolicyRule>)
 
+/** Report of a loaded policy: hash and counts only. Rule contents (resource patterns etc.) are deliberately not included. */
+data class PolicyDescriptor(
+    val version: String,
+    val policyHash: String,
+    val ruleCount: Int,
+    val loadedAt: Instant,
+) {
+    /**
+     * 起動時のログ 1 行: ハッシュ先頭 12 桁と件数のみ(ルールの内容は含めない)。
+     * 配線時に起動時 1 回、呼び出し側のロガーで出す。`kivra-policy` はログ基盤に依存しない。
+     */
+    fun logLine(): String = "policy loaded: hash=${policyHash.take(12)} rules=$ruleCount"
+}
+
 /**
  * Static policy engine. Deny by default and fail-closed: anything not explicitly allowed, or that cannot
  * be evaluated, is denied. Rule files are declared as JSON; see [parse] / [loadOrDenyAll].
+ *
+ * The rules are copied on construction and exposed only as a read-only list. [policyHash] is computed once at
+ * load time (ADR 0007). Policy changes take effect only by restarting with a new policy (no hot reload).
  */
-class PolicyEngine private constructor(private val rules: List<PolicyRule>, private val loadError: String?) {
+class PolicyEngine private constructor(rules: List<PolicyRule>, private val loadError: String?, private val loadedAt: Instant) {
+    private val rules: List<PolicyRule> = rules.map { it.copy(roles = it.roles.toList()) }
+
+    /** Canonical SHA-256 (hex) of the rule set, fixed at load time. Independent of rule order and JSON formatting. */
+    val policyHash: String = PolicyHash.of(this.rules)
+
+    /** True when the rules still hash to [expectedHash]. Used by [ToolGateway] on every call (fail-closed on mismatch). */
+    fun verifyIntegrity(expectedHash: String): Boolean = PolicyHash.of(rules) == expectedHash
+
+    fun describe(): PolicyDescriptor = PolicyDescriptor(POLICY_HASH_VERSION, policyHash, rules.size, loadedAt)
 
     fun evaluate(principal: Principal, action: String, resource: String): Decision {
         if (loadError != null) return Decision.Deny("policy unavailable (fail-closed): $loadError")
@@ -57,28 +85,34 @@ class PolicyEngine private constructor(private val rules: List<PolicyRule>, priv
         private val json = Json { ignoreUnknownKeys = false }
 
         /** Strict parse. Throws [PolicyLoadException] on any invalid content. */
-        fun parse(text: String): PolicyEngine {
+        fun parse(text: String, clock: Clock = Clock.systemUTC()): PolicyEngine {
             val doc = try {
                 json.decodeFromString(PolicyDocument.serializer(), text)
             } catch (e: Exception) {
                 throw PolicyLoadException("invalid policy document: ${e.message}", e)
             }
             if (doc.version != 1) throw PolicyLoadException("unsupported policy version ${doc.version}")
-            for (r in doc.rules) {
+            return fromRules(doc.rules, clock)
+        }
+
+        /** Strict construction from already-decoded rules. The rules are copied, so later changes by the caller have no effect. */
+        fun fromRules(rules: List<PolicyRule>, clock: Clock = Clock.systemUTC()): PolicyEngine {
+            for (r in rules) {
                 if (r.action.isBlank() || r.resource.isBlank()) throw PolicyLoadException("rule with blank action/resource")
                 if (r.roles.isEmpty()) throw PolicyLoadException("rule for '${r.action}' has no roles")
                 if (r.risk != RiskClass.FORBIDDEN && FORBIDDEN_ACTION_PATTERNS.any { overlaps(it, r.action) }) {
                     throw PolicyLoadException("rule for '${r.action}' would allow a forbidden action")
                 }
             }
-            return PolicyEngine(doc.rules, null)
+            return PolicyEngine(rules, null, clock.instant())
         }
 
         /** Fail-closed loader: invalid policy yields an engine that denies everything. */
-        fun loadOrDenyAll(text: String): PolicyEngine =
-            try { parse(text) } catch (e: PolicyLoadException) { PolicyEngine(emptyList(), e.message ?: "invalid policy") }
+        fun loadOrDenyAll(text: String, clock: Clock = Clock.systemUTC()): PolicyEngine =
+            try { parse(text, clock) } catch (e: PolicyLoadException) { PolicyEngine(emptyList(), e.message ?: "invalid policy", clock.instant()) }
 
-        fun denyAll(reason: String = "no policy loaded"): PolicyEngine = PolicyEngine(emptyList(), reason)
+        fun denyAll(reason: String = "no policy loaded", clock: Clock = Clock.systemUTC()): PolicyEngine =
+            PolicyEngine(emptyList(), reason, clock.instant())
 
         // Conservative overlap: a rule pattern overlaps a forbidden pattern if either matches the other's literal prefix.
         private fun overlaps(forbidden: String, ruleAction: String): Boolean {

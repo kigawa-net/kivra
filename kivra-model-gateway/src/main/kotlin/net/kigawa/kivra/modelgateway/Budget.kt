@@ -4,6 +4,8 @@ import java.math.BigDecimal
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.YearMonth
+import java.time.ZoneId
 
 /** Limit for one scope, denominated in [currency] and [unit]. Spend in any other currency or unit cannot be added to it. */
 data class BudgetLimit(
@@ -51,6 +53,71 @@ sealed interface ReserveResult {
 }
 
 /**
+ * An operator's release of one unpriced reservation (ADR 0003, Issue #109). It names one reservation by [reservationKey]:
+ * there is no release of a whole scope. [actualAmount] is the cost the operator verified; null means the actual cost is not
+ * known, and the charged estimate stays as the settled cost. [evidence] is a short, secret-free description of how the
+ * cost was checked; it is kept in the audit record and never logged. [operatorId] must come from the authenticated caller,
+ * never from a request body.
+ */
+data class AcknowledgeUnpriced(
+    val scopeId: String,
+    val period: String,
+    val reservationKey: String,
+    val actualAmount: BudgetAmount?,
+    val evidence: String,
+    val operatorId: String,
+    val reason: String,
+)
+
+sealed interface AcknowledgeResult {
+    /** The reservation was released. [actualKnown] is false when the charged estimate was kept as the settled cost. */
+    data class Acknowledged(val reservationKey: String, val actualKnown: Boolean) : AcknowledgeResult
+
+    /** The same key was already released. Nothing changed. */
+    data object AlreadyAcknowledged : AcknowledgeResult
+
+    /** No such reservation, or it is not in the scope and period the request names. */
+    data object NotFound : AcknowledgeResult
+
+    /** The reservation is not unpriced (still reserved, settled with a known cost, or released). */
+    data object NotUnpriced : AcknowledgeResult
+
+    /** The request was refused. [reason] is fixed text that never echoes the input. Nothing changed. */
+    data class Rejected(val reason: String) : AcknowledgeResult
+
+    /** The store could not decide (I/O, lock or database error). Nothing changed. */
+    data object Failure : AcknowledgeResult
+}
+
+/** An acknowledged actual may be at most this many times the cost charged for the reservation (rejects absurd values). */
+const val ACKNOWLEDGE_MAX_MULTIPLE = 100L
+
+/** Refusal text for a value the store cannot compare with the budget. Fixed, so it never echoes the input. */
+const val ACKNOWLEDGE_NOT_COMPARABLE = "actual amount is not comparable with the budget"
+
+/** Refusal text for an actual cost far above the charged cost. Fixed, so it never echoes the input. */
+const val ACKNOWLEDGE_TOO_LARGE = "actual amount is too large for the charged cost"
+
+/**
+ * The rules every [BudgetPort.acknowledgeUnpriced] implementation applies before it touches state. Returns the fixed refusal
+ * text, or null when the request is well formed. Text fields must be non-blank, within their column size (code points), and
+ * free of control characters.
+ */
+fun validateAcknowledgement(r: AcknowledgeUnpriced): String? {
+    if (!plainText(r.operatorId, 256)) return "operatorId is invalid"
+    if (!plainText(r.reason, 500)) return "reason is invalid"
+    if (!plainText(r.evidence, 500)) return "evidence is invalid"
+    if (!plainText(r.reservationKey, 128)) return "reservationKey is invalid"
+    if (!plainText(r.scopeId, 128)) return "scopeId is invalid"
+    if (!plainText(r.period, 16)) return "period is invalid"
+    r.actualAmount?.let { if (it.amount.signum() < 0) return "actual amount is negative" }
+    return null
+}
+
+private fun plainText(value: String, maxCodePoints: Int): Boolean =
+    value.isNotBlank() && value.codePointCount(0, value.length) <= maxCodePoints && value.none { it.isISOControl() }
+
+/**
  * The budget operations the Model Gateway needs (design 05 section 7). Implementations: [BudgetController] (in-memory,
  * dev/test only) and the durable store in kivra-app (`DbBudgetStore`). Both must satisfy the same contract.
  */
@@ -72,6 +139,13 @@ interface BudgetPort {
 
     /** Return the reservation under [key] to the budget. Idempotent. */
     fun release(key: String)
+
+    /**
+     * Releases one unpriced reservation after an audited operator decision (ADR 0003). The charge is trued up to the verified
+     * actual cost (or kept at the estimate when no actual is known) and the unpriced count of each scope in its path drops by
+     * one. Per key: the second call returns [AcknowledgeResult.AlreadyAcknowledged] and changes nothing.
+     */
+    fun acknowledgeUnpriced(request: AcknowledgeUnpriced): AcknowledgeResult
 }
 
 /**
@@ -87,7 +161,13 @@ class BudgetController(
     private val clock: Clock = Clock.systemUTC(),
     private val reservationTtl: Duration = Duration.ofMinutes(5),
 ) : BudgetPort {
-    private class Reservation(val scopes: List<String>, val amount: BudgetAmount, val expiresAt: Instant)
+    private class Reservation(
+        val scopes: List<String>,
+        /** Period each scope is charged to (JST month, or ALL for run scopes), fixed at reserve time. */
+        val periods: Map<String, String>,
+        val amount: BudgetAmount,
+        val expiresAt: Instant,
+    )
 
     private val committed = HashMap<String, BigDecimal>()
     private val unpriced = HashMap<String, Long>()
@@ -100,6 +180,15 @@ class BudgetController(
      * dropped). The key stays here so a late [commit] can true it up when the actual cost is known.
      */
     private val lapsed = HashMap<String, Reservation>()
+
+    /** Every key ever reserved. Kept so [acknowledgeUnpriced] can name a settled reservation. Dev/test only: never pruned. */
+    private val history = HashMap<String, Reservation>()
+
+    /** Keys that currently count as unpriced, with the cost charged for them: the estimate, or a late known actual. */
+    private val unpricedCharged = HashMap<String, BigDecimal>()
+
+    /** Keys released by [acknowledgeUnpriced]. */
+    private val acknowledged = HashSet<String>()
 
     @Synchronized
     override fun usage(scopeId: String): BudgetUsage {
@@ -136,7 +225,10 @@ class BudgetController(
         if (key in reservations || key in lapsed || key in settledKeys) return ReserveResult.Denied("", "duplicate reservation key")
         denial(scopes, amount)?.let { return it }
         val a = checkNotNull(amount) { "denial() admits only a known amount" }
-        reservations[key] = Reservation(scopes, a, clock.instant().plus(reservationTtl))
+        val now = clock.instant()
+        val r = Reservation(scopes, periodsAt(scopes, now), a, now.plus(reservationTtl))
+        reservations[key] = r
+        history[key] = r
         return ReserveResult.Reserved
     }
 
@@ -147,33 +239,66 @@ class BudgetController(
      */
     @Synchronized
     override fun commit(key: String, actual: BudgetAmount?) {
+        // Expire first, as every operation does (the durable store does the same): a commit after the TTL is a late commit.
+        purgeExpired()
         lapsed.remove(key)?.let { r ->
             settledKeys.add(key)
             // The estimate was already charged and counted as unpriced at lapse; only a known actual trues it up.
+            // The key stays unpriced (the count is not reduced here): an operator must acknowledge it.
             actual?.takeIf { r.amount.sameUnitAs(it) }?.let { a ->
                 for (s in r.scopes) committed[s] = (committed[s] ?: BigDecimal.ZERO) - r.amount.amount + a.amount
+                unpricedCharged[key] = a.amount
             }
             return
         }
         val r = reservations.remove(key) ?: return
         if (!settledKeys.add(key)) return
         val known = actual?.takeIf { r.amount.sameUnitAs(it) }
-        if (known == null) for (s in r.scopes) unpriced[s] = (unpriced[s] ?: 0L) + 1
         val charge = known?.amount ?: r.amount.amount
+        if (known == null) {
+            for (s in r.scopes) unpriced[s] = (unpriced[s] ?: 0L) + 1
+            unpricedCharged[key] = charge
+        }
         for (s in r.scopes) committed[s] = (committed[s] ?: BigDecimal.ZERO) + charge
     }
 
     @Synchronized
     override fun release(key: String) {
+        purgeExpired()
         lapsed.remove(key)?.let { r ->
             settledKeys.add(key)
             for (s in r.scopes) {
                 committed[s] = (committed[s] ?: BigDecimal.ZERO) - r.amount.amount // definitively not billed
                 unpriced[s]?.let { n -> if (n > 1) unpriced[s] = n - 1 else unpriced.remove(s) }
             }
+            unpricedCharged.remove(key)
             return
         }
         if (reservations.remove(key) != null) settledKeys.add(key)
+    }
+
+    @Synchronized
+    override fun acknowledgeUnpriced(request: AcknowledgeUnpriced): AcknowledgeResult {
+        purgeExpired()
+        validateAcknowledgement(request)?.let { return AcknowledgeResult.Rejected(it) }
+        val key = request.reservationKey
+        val r = history[key] ?: return AcknowledgeResult.NotFound
+        if (request.scopeId !in r.scopes || r.periods[request.scopeId] != request.period) return AcknowledgeResult.NotFound
+        if (key in acknowledged) return AcknowledgeResult.AlreadyAcknowledged
+        val charged = unpricedCharged[key] ?: return AcknowledgeResult.NotUnpriced
+        val actual = request.actualAmount
+        if (actual != null) {
+            if (!r.amount.sameUnitAs(actual)) return AcknowledgeResult.Rejected(ACKNOWLEDGE_NOT_COMPARABLE)
+            if (actual.amount > charged * BigDecimal(ACKNOWLEDGE_MAX_MULTIPLE)) return AcknowledgeResult.Rejected(ACKNOWLEDGE_TOO_LARGE)
+        }
+        val settled = actual?.amount ?: charged
+        for (s in r.scopes) {
+            committed[s] = (committed[s] ?: BigDecimal.ZERO) + settled - charged
+            unpriced[s]?.let { n -> if (n > 1) unpriced[s] = n - 1 else unpriced.remove(s) }
+        }
+        unpricedCharged.remove(key)
+        acknowledged.add(key)
+        return AcknowledgeResult.Acknowledged(key, actualKnown = actual != null)
     }
 
     private fun reservedFor(scopeId: String): BigDecimal =
@@ -197,6 +322,11 @@ class BudgetController(
         return null
     }
 
+    private fun periodsAt(scopes: List<String>, now: Instant): Map<String, String> {
+        val month = YearMonth.from(now.atZone(JST)).toString()
+        return scopes.associateWith { if (it.startsWith(RUN_PREFIX)) PERIOD_ALL else month }
+    }
+
     private fun purgeExpired() {
         val now = clock.instant()
         val it = reservations.entries.iterator()
@@ -205,11 +335,18 @@ class BudgetController(
             if (r.expiresAt <= now) {
                 it.remove()
                 lapsed[key] = r
+                unpricedCharged[key] = r.amount.amount
                 for (s in r.scopes) {
                     committed[s] = (committed[s] ?: BigDecimal.ZERO) + r.amount.amount
                     unpriced[s] = (unpriced[s] ?: 0L) + 1
                 }
             }
         }
+    }
+
+    private companion object {
+        const val RUN_PREFIX = "run:"
+        const val PERIOD_ALL = "ALL"
+        val JST: ZoneId = ZoneId.of("Asia/Tokyo")
     }
 }

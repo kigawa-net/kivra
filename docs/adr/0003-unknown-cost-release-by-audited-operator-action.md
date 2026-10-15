@@ -39,6 +39,6 @@
 ## 実装状況
 
 - 済: `unpriced_calls > 0` のスコープを `UNKNOWN_COST` で拒否する(`DbBudgetStore`、V10)。
-- 未実装: `acknowledgeUnpriced` 相当の解除操作、解除イベントの台帳への追記(B3 以降)。
+- 済: `acknowledgeUnpriced` 相当の解除操作(`BudgetPort.acknowledgeUnpriced`、`DbBudgetStore` と `BudgetController`。監査の記録は V12 の `budget_acknowledgements`、HTTP は `POST /api/admin/budget/acknowledge`)。本番への配線は未実施(⑥ の PR)。
 - 未実装: 4xx / 429 の課金有無に基づく緩和(#71 の能力表に依存)。
 - 別作業: 4xx / 429 の分類そのもの(Transient / Unknown)は #72 で確認中。本 ADR はその分類を前提に「送信済みの可能性あり」として扱う。

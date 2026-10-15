@@ -27,26 +27,30 @@
 | `budget_periods` | 主キー `(scope_id, period)`。`committed_micro_yen`、`unpriced_calls`、`hard_micro_yen`(作成時の記録) |
 | `budget_reservations` | 主キー `reservation_key`(requestId/attempt)。`state`、`amount_micro_yen`、`expires_at` |
 | `budget_reservation_scopes` | 予約の経路の各スコープと、課金先の期間 |
+| `budget_acknowledgements`(V12) | 運用者による解除の監査行。主キー `reservation_key`(1 予約につき 1 行)。`operator_id`、`reason`、`evidence`、`charged_before_micro_yen`、`actual_micro_yen`、`actual_known`、`acknowledged_at`。追記専用(アプリは INSERT のみ) |
 
 - 予約中の額(reserved)は `budget_periods` に持たず、`RESERVED` の予約の合計として都度求める。状態遷移だけで整合する。
+- `budget_reservations.amount_micro_yen` は、**その予約が現在 committed に計上している額(充当額 charged)** を表す。通常は見積額と同じ。遅れた実コストの commit で、実コストに更新される(計上の補正と同じ値)。解除直前の額は `budget_acknowledgements.charged_before_micro_yen` に残る。元の見積額は、遅れた実コストで更新された後は予約の行には残らない。
 - DML のみ使う。アプリ起動後に DDL は発行しない。H2(MODE=MySQL)と MariaDB の両方で通る DDL。
 
 ## 4. 予約の状態遷移
 
 ```
-            reserve                 commit(actual)          commit(actual|null)
- (none) ──────────────▶ RESERVED ─────────────────▶ COMMITTED
-                          │  │
-                 release  │  │  TTL 経過(操作の先頭で遅延判定)
-                          ▼  ▼
-                     RELEASED   LAPSED ── commit(actual): 額を補正 ──▶ COMMITTED
-                                   │
-                                   └── release: 計上を取り消す ─────▶ RELEASED
+ (none) ── reserve ──▶ RESERVED ── commit(actual) ──────────────▶ COMMITTED
+                         │  │
+                         │  └── commit(actual=null) ──┐
+                 release │                            ▼
+                         │     TTL 経過 ──▶ LAPSED ──▶ UNPRICED ── acknowledgeUnpriced ──▶ ACKNOWLEDGED
+                         ▼                    │  ▲          (監査つき。1 件ずつ)
+                     RELEASED                 │  └ commit(actual): 額だけ補正し、unpriced は残す
+                                              └ release: 計上を取り消す ──▶ RELEASED
 ```
 
 - `RESERVED`: 上限の計算に含まれる(reserved)。
 - `LAPSED`: 保守的に committed に積み、unpriced として数える。以後の admission は `UNKNOWN_COST` で拒否される(現行の `BudgetController` と同じ)。
-- `COMMITTED` / `RELEASED`: 終端。commit / release は冪等(再実行は無視)。同じ key は終端後も再予約できない。
+- `UNPRICED`(V10 の時点では `COMMITTED` として扱っていたものを、解除の対象として区別する): 実コストが確定しなかった予約。見積額を committed に積み、unpriced を数える。遅れた実コストの commit は、額を補正するが **unpriced は下げない**(`LAPSED` から遷移した場合も同じ)。運用者が `acknowledgeUnpriced` で解除するまで `UNPRICED` のまま。
+- `ACKNOWLEDGED`: 運用者の監査つきの解除で終端。計上を実コスト(または充当額)に確定し、各スコープの unpriced を 1 つ下げる。`budget_acknowledgements` に 1 行を追加する(同じトランザクション)。
+- `COMMITTED` / `RELEASED` / `UNPRICED` / `ACKNOWLEDGED`: 終端(`UNPRICED` は解除まで unpriced の計上を持つ)。commit / release は冪等(再実行は無視)。同じ key は終端後も再予約できない。
 - key は `reservation_key` の主キーで守る。レプリカ間でも二重予約しない。
 
 ## 5. 原子性とロック順
@@ -77,6 +81,7 @@
 ## 9. 配線していない点
 
 - 本番の起動(`Application.kt`)には組み込まない。有料 API の呼び出し経路がまだ無いため。
+- `acknowledgeUnpriced` と `POST /api/admin/budget/acknowledge`(PR #168)も、本番には未配線(`Application.kt` で `DbBudgetStore` を構築せず、ルートも登録しない)。配線は ⑥ の PR で行う。
 - 設定: `kivra.budget.tenantId`(`KIVRA_BUDGET_TENANT_ID`)、`kivra.budget.monthlyLimitJpy`(`KIVRA_BUDGET_MONTHLY_LIMIT_JPY`、既定 10000)、`kivra.budget.softRatio`(`KIVRA_BUDGET_SOFT_RATIO`、既定 0.8)。読み込みは `BudgetConfig.from`。
 - `ModelGateway` は現在も `BudgetPort` を受けるだけで、本番用に DB 版のみを許す制約は未実装。
 - 呼び出し元は同期 JDBC を使う。コルーチンのスレッドで呼ぶ場合は別途 `Dispatchers.IO` 等に逃がす必要がある(配線時に扱う)。
@@ -84,6 +89,7 @@
 ## 10. 今後(B2〜B4)
 
 - B2: 実装済み(§11)。
+- 解除: `acknowledgeUnpriced` は済(PR #168)。運用者が予約キー単位で、根拠つきで解除する(ADR 0003)。台帳へのイベントの追記は、B3 以降で扱う。
 - B3: Batch の提出・冪等・ポーリング結果の対応付け、`UNKNOWN_HELD`、再提出の禁止、取消と返金の照合。Batch と realtime が同じ台帳を共有する。
 - B4: 支出のレポート(task / stage / model / provider 別、キャッシュ率、エスカレーション率)。
 

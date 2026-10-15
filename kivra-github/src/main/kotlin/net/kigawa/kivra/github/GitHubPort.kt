@@ -3,9 +3,10 @@ package net.kigawa.kivra.github
 /**
  * GitHub Port (issue #34, design #9 section 5.3 / #11 section 4.4).
  *
- * Deliberately absent from this interface: merge, force push, deleting refs, updating an existing ref,
- * and any write to the default branch. Those are human-only in M3 (merge by SHA is M8). A test pins this
- * by reflection; adding such a method here is a design change, not a refactor.
+ * Deliberately absent from this interface: merge, force push, deleting refs, and any write to the default branch.
+ * Those are human-only in M3 (merge by SHA is M8). A test pins this by reflection; adding such a method here is a
+ * design change, not a refactor. The one ref update, [commitFiles], is restricted to `kivra/run-<runId>` branches
+ * and never forces (`force=false`).
  *
  * Idempotency contract: GitHub accepts no idempotency key. Branch name `kivra/run-<runId>` is deterministic,
  * and a PR is matched by its head branch. A POST whose outcome is unknown is NEVER re-sent by the adapter:
@@ -47,6 +48,14 @@ interface GitHubPort {
     suspend fun getCombinedStatus(repo: RepoRef, sha: String): GitHubResult<CombinedStatus>
 
     suspend fun getReviews(repo: RepoRef, number: Int): GitHubResult<List<Review>>
+
+    /**
+     * Writes [CommitFilesRequest.changes] as one commit on `kivra/run-<runId>` (Git Data API: ref, commit, tree, blobs,
+     * commit, ref update). Only run branches are accepted; anything else is `Failure(VALIDATION)` before any request.
+     * `expectedHeadSha` differing from the live head is `Failure(CONFLICT)` with no write. A failed ref update whose
+     * outcome is unknown is reconciled by reading the ref back; it is never re-sent. See [HttpGitHubAdapter.commitFiles].
+     */
+    suspend fun commitFiles(repo: RepoRef, request: CommitFilesRequest): GitHubResult<CommittedFiles>
 }
 
 /**
@@ -79,6 +88,12 @@ object RunBranch {
         require(RUN_ID.matches(runId)) { "invalid runId: $runId" }
         return "kivra/run-$runId"
     }
+
+    /** True only for a name that [name] could have produced. The only branch kind [GitHubPort.commitFiles] may write. */
+    fun isRunBranch(branch: String): Boolean =
+        branch.startsWith(PREFIX) && RUN_ID.matches(branch.removePrefix(PREFIX))
+
+    private const val PREFIX = "kivra/run-"
 
     /** Machine-readable marker embedded in PR bodies; used to tell our PR from a foreign one on the same head. */
     fun marker(runId: String): String {

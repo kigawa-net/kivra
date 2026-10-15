@@ -16,6 +16,7 @@ import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -27,6 +28,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import java.security.MessageDigest
+import java.util.Base64
 
 data class GitHubAdapterConfig(
     val apiBase: String = "https://api.github.com",
@@ -37,8 +40,12 @@ data class GitHubAdapterConfig(
     val maxPages: Int = 10,
     /** An operator-approved host allowlist. GHES installations must opt in explicitly. */
     val trustedApiHosts: Set<String> = setOf("api.github.com"),
+    /** Ceilings for [GitHubPort.commitFiles], checked before any request. */
+    val commitFiles: CommitFilesLimits = CommitFilesLimits(),
 ) {
     init {
+        require(commitFiles.maxFiles > 0 && commitFiles.maxFileBytes > 0 && commitFiles.maxTotalBytes > 0 &&
+            commitFiles.maxPathChars > 0 && commitFiles.maxMessageChars > 0) { "commitFiles limits must be positive" }
         // Messages are fixed strings and the URI parse failure is not chained: both could echo the configured URL.
         val uri = try {
             java.net.URI(apiBase)
@@ -160,15 +167,35 @@ class HttpGitHubAdapter(
 
     /** POST: exactly one send. Transport error or 5xx means the outcome is unknown. */
     private suspend fun post(operation: String, path: String, body: JsonObject): GitHubResult<Raw> =
-        when (val t = send(HttpMethod.Post, path, body)) {
+        mutate(HttpMethod.Post, operation, path, body)
+
+    /**
+     * PATCH (ref update): exactly one send, same outcome rules as POST. A 422 is a rejected non-fast-forward update
+     * (another writer moved the branch first), so it is `CONFLICT`.
+     */
+    private suspend fun patch(operation: String, path: String, body: JsonObject): GitHubResult<Raw> =
+        mutate(HttpMethod.Patch, operation, path, body, unprocessableIsConflict = true)
+
+    private suspend fun mutate(
+        method: HttpMethod,
+        operation: String,
+        path: String,
+        body: JsonObject,
+        unprocessableIsConflict: Boolean = false,
+    ): GitHubResult<Raw> =
+        when (val t = send(method, path, body)) {
             is Transport.Error -> GitHubResult.Unknown(operation, t.message)
             is Transport.Ok -> when {
                 t.raw.status in 200..299 -> GitHubResult.Success(t.raw)
-                // The server received the POST but we did not follow the redirect: the outcome is unknown.
+                // The server received the request but we did not follow the redirect: the outcome is unknown.
                 t.raw.status >= 500 || t.raw.status in 300..399 -> GitHubResult.Unknown(operation, "HTTP ${t.raw.status}")
                 else -> {
                     if (t.raw.status == 401) tokens.invalidate()
-                    classify(t.raw)
+                    if (unprocessableIsConflict && t.raw.status == 422) {
+                        GitHubResult.Failure(GitHubFailureKind.CONFLICT, GitHubFailureKind.CONFLICT.code, t.raw.status)
+                    } else {
+                        classify(t.raw)
+                    }
                 }
             }
         }
@@ -475,6 +502,162 @@ class HttpGitHubAdapter(
             1 -> GitHubResult.Success(EnsuredPullRequest(matching.single(), created = false))
             else -> GitHubResult.Failure(GitHubFailureKind.CONFLICT, "multiple open PRs match this run; refusing to choose")
         }
+    }
+
+    // ---- commits ----
+
+    override suspend fun commitFiles(repo: RepoRef, request: CommitFilesRequest): GitHubResult<CommittedFiles> {
+        CommitFilesPolicy.violation(request, config.commitFiles)?.let { return validation(it) }
+        val branch = request.branch
+        val expected = request.expectedHeadSha
+        val readUrl = "${repoPath(repo)}/git/ref/heads/${refPath(branch)}"
+        val writeUrl = "${repoPath(repo)}/git/refs/heads/${refPath(branch)}"
+
+        // (a) Nothing is written unless the live head is the base the caller worked from.
+        val headSha = when (val r = get(readUrl)) {
+            is GitHubResult.Success -> when (val b = parseBranchRef(repo, branch, r.value)) {
+                is GitHubResult.Success -> b.value.headSha
+                is GitHubResult.Failure -> return b
+                is GitHubResult.Unknown -> return b
+            }
+            is GitHubResult.Failure -> return r
+            is GitHubResult.Unknown -> return r
+        }
+        if (headSha != expected) return GitHubResult.Failure(GitHubFailureKind.CONFLICT, GitHubFailureKind.CONFLICT.code)
+
+        // (b) Base tree of the current head.
+        val baseTree = when (val r = get("${repoPath(repo)}/git/commits/$headSha")) {
+            is GitHubResult.Success -> {
+                val o = parse(r.value) as? JsonObject ?: return protocol("commit")
+                if (o.str("sha") != headSha) return mismatch()
+                o.str("tree", "sha")?.takeIf { sha40.matches(it) } ?: return protocol("commit.tree.sha")
+            }
+            is GitHubResult.Failure -> return r
+            is GitHubResult.Unknown -> return r
+        }
+
+        // (c) One blob per written file. Each response is checked against the git blob id computed locally.
+        val blobShas = HashMap<Int, String>()
+        request.changes.forEachIndexed { index, change ->
+            if (change is FileWrite.Write) {
+                val body = buildJsonObject {
+                    put("content", Base64.getEncoder().encodeToString(change.content))
+                    put("encoding", "base64")
+                }
+                when (val r = post("createBlob", "${repoPath(repo)}/git/blobs", body)) {
+                    is GitHubResult.Success -> {
+                        val o = parse(r.value) as? JsonObject ?: return protocol("blob")
+                        val sha = o.str("sha")?.takeIf { sha40.matches(it) } ?: return protocol("blob.sha")
+                        if (sha != gitBlobSha(change.content)) return mismatch()
+                        blobShas[index] = sha
+                    }
+                    is GitHubResult.Failure -> return r
+                    is GitHubResult.Unknown -> return r
+                }
+            }
+        }
+
+        // (d) New tree on top of the base tree. Mode is always 100644; a Delete is an entry with sha null.
+        val entries = request.changes.mapIndexed { index, change ->
+            buildJsonObject {
+                put("path", change.path)
+                put("mode", "100644")
+                put("type", "blob")
+                put("sha", blobShas[index]?.let { JsonPrimitive(it) } ?: JsonNull)
+            }
+        }
+        val treeSha = when (val r = post(
+            "createTree",
+            "${repoPath(repo)}/git/trees",
+            buildJsonObject {
+                put("base_tree", baseTree)
+                put("tree", JsonArray(entries))
+            },
+        )) {
+            is GitHubResult.Success -> {
+                val o = parse(r.value) as? JsonObject ?: return protocol("tree")
+                o.str("sha")?.takeIf { sha40.matches(it) } ?: return protocol("tree.sha")
+            }
+            is GitHubResult.Failure -> return r
+            is GitHubResult.Unknown -> return r
+        }
+
+        // (e) The commit, parented on the head we verified in (a).
+        val commitSha = when (val r = post(
+            "createCommit",
+            "${repoPath(repo)}/git/commits",
+            buildJsonObject {
+                put("message", request.message)
+                put("tree", treeSha)
+                put("parents", JsonArray(listOf(JsonPrimitive(headSha))))
+            },
+        )) {
+            is GitHubResult.Success -> {
+                val o = parse(r.value) as? JsonObject ?: return protocol("commit")
+                if (o.str("tree", "sha") != treeSha) return mismatch()
+                o.str("sha")?.takeIf { sha40.matches(it) } ?: return protocol("commit.sha")
+            }
+            is GitHubResult.Failure -> return r
+            is GitHubResult.Unknown -> return r
+        }
+
+        // (f) The only ref write. force=false: a non-fast-forward is rejected (422 -> CONFLICT), never forced.
+        // An unknown outcome is reconciled by reading the ref back; the PATCH is not re-sent.
+        return when (val r = patch("updateRef", writeUrl, buildJsonObject {
+            put("sha", commitSha)
+            put("force", false)
+        })) {
+            is GitHubResult.Success -> when (val b = parseBranchRef(repo, branch, r.value)) {
+                is GitHubResult.Success ->
+                    if (b.value.headSha == commitSha) GitHubResult.Success(CommittedFiles(commitSha, treeSha, created = true))
+                    else mismatch()
+                is GitHubResult.Failure -> b
+                is GitHubResult.Unknown -> b
+            }
+            is GitHubResult.Failure -> r
+            is GitHubResult.Unknown -> reconcileCommit(repo, branch, expected, commitSha, treeSha)
+        }
+    }
+
+    /**
+     * Decides the outcome of a ref update whose response was lost (issue #56). Reads the ref only; never writes.
+     * - head is [commitSha]: our update landed -> `Success(created = true)`.
+     * - head is [expectedHeadSha]: not applied. Reported as `Unknown` with that cause; the caller may run
+     *   `commitFiles` again from the start, because the blobs, trees and commit it left behind are unreferenced.
+     * - any other head: another writer moved the branch -> `CONFLICT`.
+     * A failed or unusable read stays `Unknown`.
+     */
+    internal suspend fun reconcileCommit(
+        repo: RepoRef,
+        branch: String,
+        expectedHeadSha: String,
+        commitSha: String,
+        treeSha: String,
+    ): GitHubResult<CommittedFiles> {
+        val op = "updateRef"
+        val head = when (val r = get("${repoPath(repo)}/git/ref/heads/${refPath(branch)}")) {
+            is GitHubResult.Success -> when (val b = parseBranchRef(repo, branch, r.value)) {
+                is GitHubResult.Success -> b.value.headSha
+                else -> return GitHubResult.Unknown(op, "reconcile read unusable")
+            }
+            else -> return GitHubResult.Unknown(op, "reconcile read failed")
+        }
+        return when (head) {
+            commitSha -> GitHubResult.Success(CommittedFiles(commitSha, treeSha, created = true))
+            expectedHeadSha -> GitHubResult.Unknown(op, "ref not moved after reconcile; commitFiles may be run again")
+            else -> GitHubResult.Failure(GitHubFailureKind.CONFLICT, GitHubFailureKind.CONFLICT.code)
+        }
+    }
+
+    private fun validation(reason: String) =
+        GitHubResult.Failure(GitHubFailureKind.VALIDATION, "${GitHubFailureKind.VALIDATION.code}:$reason")
+
+    /** The object id git computes for a blob: SHA-1 over `blob <size>\0<content>`. */
+    private fun gitBlobSha(content: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-1")
+        digest.update("blob ${content.size}\u0000".toByteArray(Charsets.US_ASCII))
+        digest.update(content)
+        return digest.digest().joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
     }
 
     // ---- checks / status / reviews ----

@@ -406,4 +406,46 @@ class PatchPolicyTest {
         assertTrue(!text.contains("SECRET_BODY_TEXT"), text)
         assertTrue(!text.contains("SUMMARY_TEXT"), text)
     }
+
+    // ---- UNSEEN_OVERWRITE (ADR 0008 item 5) ----
+
+    @Test
+    fun writingAnExistingFileThatWasNotInContextIsRejected() {
+        val repo = InMemoryRepoSnapshot(mapOf("docs/a.md" to "old\n"), inContext = setOf("README.md"))
+        assertRejectedWith(RejectReason.UNSEEN_OVERWRITE, Write("docs/a.md", "new\n"), current = repo)
+    }
+
+    @Test
+    fun deletingAnExistingFileThatWasNotInContextIsRejected() {
+        val repo = InMemoryRepoSnapshot(mapOf("docs/a.md" to "old\n"), inContext = emptySet())
+        assertRejectedWith(RejectReason.UNSEEN_OVERWRITE, Delete("docs/a.md"), current = repo)
+    }
+
+    @Test
+    fun writingAnExistingFileThatWasInContextIsAccepted() {
+        val repo = InMemoryRepoSnapshot(mapOf("docs/a.md" to "old\n"), inContext = setOf("docs/a.md"))
+        assertAccepted(Write("docs/a.md", "new\n"), current = repo)
+    }
+
+    @Test
+    fun creatingAFileOutsideContextIsAccepted() {
+        val repo = InMemoryRepoSnapshot(mapOf("docs/a.md" to "old\n"), inContext = emptySet())
+        assertAccepted(Write("docs/new.md", "x\n"), current = repo)
+    }
+
+    @Test
+    fun unseenOverwriteIsNotReportedWithoutRepositoryState() {
+        // Without a snapshot there is no notion of "existing", so the check cannot apply.
+        assertAccepted(Write("docs/a.md", "x\n"))
+    }
+
+    @Test
+    fun defaultSnapshotTreatsEveryFileAsInContext() {
+        val snapshot = object : RepoSnapshot {
+            override fun exists(path: String): Boolean = path == "docs/a.md"
+            override fun size(path: String): Long? = if (path == "docs/a.md") 4L else null
+        }
+        assertTrue(snapshot.isInContext("docs/a.md"))
+        assertAccepted(Write("docs/a.md", "new\n"), current = snapshot)
+    }
 }

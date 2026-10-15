@@ -44,6 +44,8 @@ enum class RejectReason {
 
     DELETE_MISSING_FILE,
     LARGE_SHRINK,
+    /** A Write or Delete of an existing file that was not in the LLM's context (see [RepoSnapshot.isInContext]). */
+    UNSEEN_OVERWRITE,
 
     SUMMARY_EMPTY,
     SUMMARY_TOO_LONG,
@@ -166,6 +168,9 @@ class PatchPolicy(private val config: PatchPolicyConfig = PatchPolicyConfig()) {
                 is Delete -> {
                     deletes++
                     if (current != null && !current.exists(file.path)) reasons.add(RejectReason.DELETE_MISSING_FILE)
+                    if (current != null && current.exists(file.path) && !current.isInContext(file.path)) {
+                        reasons.add(RejectReason.UNSEEN_OVERWRITE)
+                    }
                 }
             }
         }
@@ -224,6 +229,7 @@ class PatchPolicy(private val config: PatchPolicyConfig = PatchPolicyConfig()) {
         if (bytes > config.maxFileBytes) reasons.add(RejectReason.FILE_TOO_LARGE)
 
         if (current != null && current.exists(file.path)) {
+            if (!current.isInContext(file.path)) reasons.add(RejectReason.UNSEEN_OVERWRITE)
             val old = current.size(file.path)
             // bytes < old * percent / 100, computed without division to keep it exact
             if (old != null && old > 0 && bytes * 100 < old * config.shrinkThresholdPercent) {

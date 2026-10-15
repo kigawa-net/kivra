@@ -43,4 +43,11 @@ interface RepoSnapshot {
 
     /** UTF-8 byte size of the file at [path], or null when it is absent or unknown. */
     fun size(path: String): Long?
+
+    /**
+     * True when the file at [path] was shown to the LLM (ADR 0008 item 5). A Write or Delete of an existing file that is not in
+     * the context is rejected as UNSEEN_OVERWRITE: the model never saw its content, so it cannot have meant to replace it.
+     * The default is true, which keeps every existing caller's behaviour.
+     */
+    fun isInContext(path: String): Boolean = true
 }

@@ -26,4 +26,5 @@ include(
     "kivra-app",
     "kivra-observability",
     "kivra-ui-api",
+    "kivra-developer",
 )

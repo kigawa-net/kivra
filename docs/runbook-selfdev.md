@@ -11,7 +11,7 @@
 - 自己開発は既定で無効。`KIVRA_SELFDEV_ENABLED` が正確に `true` のときだけ有効になる。無効のときは、自己開発の他の環境変数を一切読まず、ワーカーも `/api/selfdev/*` も登録しない(`selfdev/SelfDevSettings.kt`、`Application.kt`)。
 - 有効化すると、`SelfDevWorker` が起動し、`POST /api/selfdev/tasks`、`GET /api/selfdev/runs`、`GET /api/selfdev/runs/{id}` が登録される(`routes/SelfDevRoutes.kt`)。
 - 本番で動かすには、ブランチ保護、GitHub 認証(App 推奨。PAT は代替)、Anthropic 認証(WIF 推奨。静的キーは代替)、モデル registry、為替の設定が必要。§1 を参照する。
-- **未実装**: マージ検証(ADR 0008 の ⑩。マージ済みの PR は `PULL_REQUEST` に残るだけで、完了しない)(§4.3)。
+- **未配線**: マージ検証(ADR 0008 の ⑩)の判定と完了の経路はコードにあるが、本番の認証器は未配線(`NoPrMergeAuthority`)のため、マージ済みの PR は完了しない(`PULL_REQUEST` のまま待機)(§4.3)。
 
 ## 1. 有効化の前提
 
@@ -138,7 +138,17 @@ curl -X POST "https://<kivra-host>/api/admin/budget/acknowledge" \
 
 kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を記録する手順は無い。
 
-**未実装(マージ検証、ADR 0008 の ⑩)。** PR がマージされると、Run は `PULL_REQUEST` に残り、待機理由は `AWAITING_MERGE_VERIFICATION` になる。完了(`COMPLETED`)へ進める経路は無い。
+**マージ済みの PR(ADR 0008 の ⑩、ADR 0011)。** PR を開いた直後に、Run は PR の束縛(binding: リポジトリ、PR 番号、node id、base、kivra が commit した head SHA)を記録する。マージ済みの PR は、binding があれば `TrustedPrMergeAuthority` で検証し、検証に通ったときだけ `COMPLETED` になる(理由 `PR_MERGED`)。検証は GitHub の読み取りだけで行い、PR 本文や人の申告は根拠にしない。kivra は PR をマージも閉じもしない。
+
+この PR の時点では、本番の認証器は `NoPrMergeAuthority` のまま(配線は後続の PR で行う)。そのため、マージ済みの PR は完了せず、`AWAITING_MERGE_VERIFICATION` で待機する。認証器が GitHub を読めない場合も同じ待機になり、次の tick で再試行する。
+
+待機理由と意味:
+
+- `AWAITING_MERGE_VERIFICATION`: 認証器が答えない(未配線、または GitHub の一時的な障害)。自動で再試行する。
+- `MERGE_NOT_VERIFIED`: 認証器が検証を拒否した。ログの `code` に固定の理由が出る(例: `HEAD_SHA_MISMATCH` は、マージ後に head が変わった、`AUTHOR_MISMATCH` は PR の作者が kivra の App ではない、`MERGE_COMMIT_SHA_MISSING` はマージの SHA が無い)。自動では解決しない。運用者が PR と Run を確認する。
+- `BINDING_MISSING`: PR は開いているが binding が無い。この PR の前に開かれた Run(binding の記録より前に作られたもの)がこれに当たる。kivra は binding を自分で組み立てない(GitHub の値から推測しない)ため、完了させない。運用者が確認して解消する。
+
+ログは `self-development run waiting: runId=... reason=... code=...` の形で出る(`code` は固定の理由コードだけ)。
 
 ### 4.4 キルスイッチで止める
 

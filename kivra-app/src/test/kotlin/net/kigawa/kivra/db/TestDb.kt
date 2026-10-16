@@ -77,6 +77,11 @@ class TestDb(
         )
     }
 
+    /** Clears the pull request binding columns of [runId], as a run opened before the binding was recorded has them (simulates a crash). */
+    fun clearBinding(runId: String) = transaction(database) {
+        execUpdate("UPDATE development_runs SET pr_repository = NULL, pr_head_sha = NULL, pr_number = NULL, pr_node_id = NULL, pr_repository_id = NULL, pr_base_ref = NULL, pr_policy_revision = NULL, pr_review_manifest_digest = NULL WHERE run_id = ?", runId)
+    }
+
     /** Moves an outbox claim into the past on the DB clock (simulates a publisher that crashed or stalled). */
     fun expireClaim(eventId: String) = transaction(database) {
         execUpdate("UPDATE outbox_events SET claim_expires_at = TIMESTAMPADD(SECOND, -10, NOW(6)) WHERE event_id = ?", eventId)

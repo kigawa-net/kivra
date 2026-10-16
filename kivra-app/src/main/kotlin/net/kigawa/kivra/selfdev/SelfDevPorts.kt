@@ -4,6 +4,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.Lease
+import net.kigawa.kivra.core.PullRequestBinding
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
@@ -28,6 +29,19 @@ interface DevelopmentRunStore {
 
     /** PULL_REQUEST -> CANCELLED with the reason code PR_ABANDONED. Pull requests are never touched. */
     fun closeAbandonedPullRequest(lease: Lease, expectedVersion: Long): DevelopmentRun
+
+    /** The pull request binding the run records, or null when it has none (see [DevelopmentRunRepository.loadPullRequestBinding]). */
+    fun loadBinding(runId: RunId): PullRequestBinding?
+
+    /** Records the binding in PULL_REQUEST. Fenced like every write. A second bind overwrites the binding, so the runner binds once. */
+    fun bindPullRequest(lease: Lease, expectedVersion: Long, binding: PullRequestBinding): DevelopmentRun
+
+    /**
+     * PULL_REQUEST -> COMPLETED after the merge Authority verified the merge. Throws the same exceptions as
+     * [DevelopmentRunRepository.completePrOnlyRun]: [net.kigawa.kivra.db.PrMergeNotVerifiedException] for a refusal,
+     * [net.kigawa.kivra.core.PrMergeAuthorityUnavailableException] when the Authority cannot answer.
+     */
+    suspend fun completePrOnlyRun(lease: Lease, expectedVersion: Long): DevelopmentRun
 }
 
 class DbDevelopmentRunStore(
@@ -49,6 +63,14 @@ class DbDevelopmentRunStore(
 
     override fun closeAbandonedPullRequest(lease: Lease, expectedVersion: Long): DevelopmentRun =
         runs.closeAbandonedPullRequest(lease, expectedVersion, actor)
+
+    override fun loadBinding(runId: RunId): PullRequestBinding? = runs.loadPullRequestBinding(runId)
+
+    override fun bindPullRequest(lease: Lease, expectedVersion: Long, binding: PullRequestBinding): DevelopmentRun =
+        runs.bindPullRequest(lease, expectedVersion, binding, actor)
+
+    override suspend fun completePrOnlyRun(lease: Lease, expectedVersion: Long): DevelopmentRun =
+        runs.completePrOnlyRun(lease, expectedVersion, actor)
 
     private companion object {
         const val ACTOR = "selfdev-runner"

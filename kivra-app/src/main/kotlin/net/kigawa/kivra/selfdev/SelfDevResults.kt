@@ -18,8 +18,11 @@ sealed interface AdvanceResult {
         val reasonCode: String? = null,
     ) : AdvanceResult
 
-    /** Nothing can be done yet. The run is left as it is. */
-    data class Waiting(val reason: WaitReason) : AdvanceResult
+    /**
+     * Nothing can be done yet. The run is left as it is. [reasonCode] is an optional fixed code that explains the wait (for
+     * MERGE_NOT_VERIFIED, the core verifier's refusal code such as HEAD_SHA_MISMATCH), never provider text.
+     */
+    data class Waiting(val reason: WaitReason, val reasonCode: String? = null) : AdvanceResult
 
     /** This call did nothing and wrote nothing. */
     data class Skipped(val reason: SkipReason) : AdvanceResult
@@ -35,8 +38,23 @@ enum class WaitReason {
     /** The pull request is open and younger than the review timeout. A human reviews and merges it. */
     AWAITING_HUMAN_REVIEW,
 
-    /** The pull request is merged. Merge verification is not wired yet, so the run is not completed (see SelfDevRunner). */
+    /**
+     * The pull request is merged, but the merge Authority cannot answer yet (no Authority in this deployment, or a provider
+     * error). The run stays in PULL_REQUEST and is checked again on the next call.
+     */
     AWAITING_MERGE_VERIFICATION,
+
+    /**
+     * The pull request is merged, but the merge Authority refused to verify it (the reason code is in [AdvanceResult.Waiting]).
+     * The run stays in PULL_REQUEST. Nothing resolves this on its own, so an operator looks at it.
+     */
+    MERGE_NOT_VERIFIED,
+
+    /**
+     * The run is in PULL_REQUEST but has no pull request binding (for example the process stopped between opening the pull request
+     * and recording the binding). The runner does not complete it, and does not build a binding itself. An operator resolves it.
+     */
+    BINDING_MISSING,
 
     /** UNKNOWN: an operator must resolve the run. The runner never retries an unknown outcome on its own. */
     AWAITING_OPERATOR,

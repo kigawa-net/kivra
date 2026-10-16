@@ -10,7 +10,8 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
 
 この方式には限界がある。
 
-- 提案は全文を LLM の出力で返すため、大きなファイルを編集すると出力上限を超える。dev の 2026-10-17 の実行で、この事例が起きたと報告されている(#187 の起票理由。ログの原本は未確認)。
+- 提案は全文を LLM の出力で返すため、大きなファイルを編集すると出力上限を超える。dev の 2026-10-17 に次の事例が起きた。thinking を無効にした状態で、README.md(46,398 バイト)の 1 箇所の修正を依頼したところ、PatchSet が全文を返す形式のため出力が 8000 トークンの上限に達して途切れた(Run 01M52RC1G2CQYCGYV85W5D4WHV。2 試行とも outputChars=11753 / 11752、startsWithObject=true、endsWithObject=false、finishReason=LENGTH。MALFORMED_JSON となり FAILED)。本 ADR の動機はこの事例である。
+- 同じ日の別の事例は、thinking が出力上限を使い切ったもの(outputChars=0、finishReason=LENGTH)である。これは ADR 0008 追補(2026-10-17)の thinking 無効化で対処済み(#184)。#188 で LENGTH の再送を止めた。
 - 提案は 1 回の呼び出しで終わる。編集してテストを流し、失敗を直す、という複数ターンの作業ができない。
 - 変更の途中経過を見ることができず、失敗時に作業を再開する手段がない。
 
@@ -63,7 +64,7 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
 
 - kivra 側: `coding_attempts`(想定 V14。expand のみ)、`CodingRuntimePort`、`/api/agent/*` の認可(JWT のロール・audience・client id を検証し、ヘッダーは信頼しない)、result の受付から `PatchPolicy` を経て既存の `commitAndOpenPullRequest` へつなぐ経路。
 - Keycloak: ロール `kivra-agent`、PC ごとの client(client credentials)。ユーザーが管理作業を行う。
-- ingress: kivra-dev は oauth2-proxy の背後にあり、`--allowed-role=admin-panel:admin` のため、agent の Bearer は通らない。agent 用の経路を別に作る必要がある。
+- ingress: kivra-dev は oauth2-proxy の背後にあり、`--allowed-role=admin-panel:admin` のため、agent の Bearer は通らない。決定: 現在の公開 HTTPS(kivra-dev.kigawa.net)に、`/api/agent/` の別経路を足す。VPN は使わない。kivra が JWT のロール・audience・azp を検証する。
 - 新しいコンポーネント: PC 上の `kivra-agent`(JVM。配布、`systemd --user` のユニット、設定、停止の手段)、ホスト側の Anthropic プロキシ(認証ヘッダーを付与して `api.anthropic.com` へ転送)、実行イメージ(claude CLI、git、JDK、非 root)、許可リストのプロキシ。
 - **ADR 0008 の改定(受け入れ済み)**: ADR 0008 は「kivra は生成コードを実行しない」「テストは CI のみ」としている。本 ADR により、テストは PC の隔離コンテナで行い、最終確認は CI で行う。ただし kivra 自身(kivra-app)が生成コードを実行することはない。この例外は kivra-agent の隔離コンテナ内の実行に限る。
 - **#187 のコメントとの差**: #187 のコメントは「同じ OS ユーザーで `claude login` を行う」方式を示している。本 ADR は案 K(API キー、ホスト側プロキシ)に切り替えるため、そのコメントの認証の節は本 ADR で置き換える。
@@ -86,10 +87,9 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
 - **A3 の実機での成立**: コンテナ内の `claude` が、認証なしで `ANTHROPIC_BASE_URL` のプロキシを経由して起動し、応答を得られるか。PR 0 で検証する。成り立たない場合は、本 ADR の認証の決定を改める。
 - **プロキシの許可ドメインの確定**: Gradle と Maven の取得先の正確な一覧。PR 0 で確認する。
 - **Run の上限値**: 1 Run の時間(例: 30 分)、ラウンド数、出力量、差分の件数とサイズ。
-- 到達経路: PC から kivra へ、公開の HTTPS(JWT で守る)か、VPN か。kivra-dev は #112 で「非公開」とされている。
-- 実行イメージ: claude CLI のインストール方法とバージョンの固定、JDK と Gradle のバージョン、配布先(Harbor か GitHub Release)。
-- `PatchPolicy` の上限の食い違い: `PatchPolicyConfig.maxFiles = 20` と、`DeveloperConstraints.maxFiles` の既定 10 を、実装時に統一する。
-- 既存の問題: `/api/agent/*` を含む Task API がヘッダーを信頼する問題(NetworkPolicy が効かないため、クラスタ内の Pod が偽ヘッダーで操作できる)を、別 Issue として扱うか。
+- 実行イメージの詳細: claude CLI のインストール方法とバージョンの固定、JDK と Gradle のバージョン、配布先(Harbor か GitHub Release)。PR 10 で決める。
+- `PatchPolicy` の上限の食い違い: `PatchPolicyConfig.maxFiles = 20` と、`DeveloperConstraints.maxFiles` の既定 10 を、PR 9(kivra 側の result 受付)で統一する。確定する実装課題として記載する。
+- 既存の問題: `/api/agent/*` を含む Task API がヘッダーを信頼する問題(NetworkPolicy が効かないため、クラスタ内の Pod が偽ヘッダーで操作できる)は別 Issue で扱い、本 ADR の対象外とする。
 - 未確認の事実: `--max-turns` の有無、`claude auth status` の出力、利用上限の挙動、oauth2-proxy の JWT Bearer 用のフラグ。
 
 ## 見直しの条件

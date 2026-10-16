@@ -108,7 +108,7 @@ class TestDb(
     fun allPersistedText(): String = transaction(database) {
         listOf(
             "development_runs", "stage_executions", "agents", "execution_sessions", "external_operations",
-            "outbox_events", "inbox_events", "audit_events",
+            "outbox_events", "inbox_events", "audit_events", "coding_attempts", "coding_events",
         ).flatMap { table ->
             execQuery("SELECT * FROM $table") { rs -> (1..rs.metaData.columnCount).joinToString("|") { rs.getString(it).orEmpty() } }
         }.joinToString("\n")

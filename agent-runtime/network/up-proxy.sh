@@ -5,13 +5,14 @@
 #
 # Inputs (none of them is a secret value, except the secret file, which is mounted and never printed):
 #   KIVRA_AGENT_PROXY_ENV_FILE         env file with KIVRA_PROXY_* settings (WIF IDs, URLs). Default /etc/kivra-agent/proxy.env
-#   KIVRA_AGENT_KEYCLOAK_SECRET_FILE   host file with the Keycloak client secret. Default /etc/kivra-agent/keycloak_client_secret
+#   KIVRA_AGENT_KEYCLOAK_SECRET_FILE   host file with the Keycloak client secret (root:kivra-agent 0640). Default /etc/kivra-agent/client-secret.
+#                                      Mounted read-only into the proxy only. Work containers never get it.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${KIVRA_AGENT_PREFIX:-kivra-agent}"
 PROXY_IMAGE="${KIVRA_AGENT_PROXY_IMAGE:-kivra-agent-proxy:local}"
 ENV_FILE="${KIVRA_AGENT_PROXY_ENV_FILE:-/etc/kivra-agent/proxy.env}"
-SECRET_HOST_FILE="${KIVRA_AGENT_KEYCLOAK_SECRET_FILE:-/etc/kivra-agent/keycloak_client_secret}"
+SECRET_HOST_FILE="${KIVRA_AGENT_KEYCLOAK_SECRET_FILE:-/etc/kivra-agent/client-secret}"
 NAME="${PREFIX}-proxy"
 
 [ -r "$ENV_FILE" ] || { echo "env file is not readable: $ENV_FILE" >&2; exit 1; }

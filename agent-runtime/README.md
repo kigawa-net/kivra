@@ -77,15 +77,20 @@ KIVRA_PROXY_WIF_SERVICE_ACCOUNT_ID=svac_...
 KIVRA_PROXY_WIF_WORKSPACE_ID=wrkspc_...      # 任意
 ```
 
-client secret: `/etc/kivra-agent/keycloak_client_secret`(0400)。proxy にだけ read-only で mount され、
-`/run/secrets/keycloak_client_secret` に見えます。**チャット・git・ログに貼らないでください。**
+client secret: `/etc/kivra-agent/client-secret`。
+- 所有者 root、グループ `kivra-agent`、モード 0640。ディレクトリ `/etc/kivra-agent` は root:kivra-agent の 0750。
+- 読めるのは、ホストの kivra-agent ユーザーで動く proxy コンテナとエージェント本体だけです。作業用コンテナには一切マウントしません。
+- proxy には read-only の bind mount で `/run/secrets/keycloak_client_secret` として見せます。
+- 正本は Bitwarden(infra の `kivra-agent-keycloak-client-secret`)です。配置はユーザーが配置スクリプトで行います。手順の概要は、Bitwarden から値を取り出し、root で所有者・グループ・モードを設定することです。
+- **チャット・git・ログに貼らないでください。**
 
-> **未解決の矛盾(要判断)**: 仕様は「client secret はホストの root 専用ファイル」としています。
-> しかし docker がルートレス(kivra-agent ユーザーの docker)の場合、kivra-agent ユーザーは root 所有の 0400 ファイルを読めず、
-> mount もできません。そのため本 README は「kivra-agent 所有の 0400」を前提にしています。
-> root 専用にする場合の代案: rootful docker で proxy を動かす、または systemd の `LoadCredential=` で
-> 権限を持つ経路から渡す。どちらにするかはユーザーの判断が要ります。
-> proxy コンテナは root(コンテナ内)で動かし、`--cap-drop=ALL` を付けます。ルートレスでは、コンテナ内の root は kivra-agent に対応するため、所有者のファイルが読めます。
+> **決定(2026-10-17、ユーザー)**: client secret は root 所有・グループ kivra-agent・0640 にする。
+> ルートレス docker では、コンテナ内の root がホストの kivra-agent に対応し、グループ kivra-agent の読み取り権限で secret を読めます。
+> proxy コンテナは root(コンテナ内)で動かし、`--cap-drop=ALL` を付けます。
+> **この前提は kivra-agent での実機確認が必要です(未確認)。** 読めない場合は下の代案を検討します。
+>
+> 採らなかった代案: (a) rootful docker で proxy を動かす(kivra-agent に docker を root 相当で使わせることになる)。
+> (b) systemd の `LoadCredential=` で、権限のある経路から secret を渡す(system unit が要る。user unit で使えるかは未確認)。
 
 ## 起動手順(kivra-agent ユーザーで)
 
@@ -102,7 +107,7 @@ docker build -t kivra-agent-proxy:local proxy
 
 # 2. ネットワーク(冪等)と proxy の起動
 network/create-networks.sh
-network/up-proxy.sh          # /etc/kivra-agent/proxy.env と keycloak_client_secret を読む
+network/up-proxy.sh          # /etc/kivra-agent/proxy.env と client-secret を読む
 
 # 3. Run(作業ディレクトリは Run ごとに作る。ホストの他のパスは mount しない)
 network/run-agent.sh /path/to/run-workdir claude -p "..."
@@ -121,7 +126,7 @@ verify/run-all.sh            # build、Go 単体試験、egress、proxy e2e(模�
 verify/run-all.sh --no-build # 既存イメージを使う
 ```
 
-テストのリソースは `kivra-agent-verify-` の接頭辞です。終了時に、コンテナ・ネットワーク・テスト用イメージを削除します。
+テストのリソースは `kivra-agent-verify-` の接頭辞です。secret は実機のものを使わず、`run-all.sh` が偽の値の一時ファイルを作ります。終了時に、コンテナ・ネットワーク・テスト用イメージを削除します。
 `DOCKER_HOST` を尊重するので、ルートレス docker でも同じスクリプトが動きます。
 
 | 検証 | 内容 |
@@ -155,8 +160,7 @@ verify/live-smoke.sh
 - **確認済み(公式ドキュメント)**: Claude Code がゲートウェイに呼ぶ必須エンドポイントは `POST /v1/messages`(`?beta=true` 付き)。`/v1/messages/count_tokens` は任意。`anthropic-beta` と `anthropic-version` は無改変で転送が必要(`code.claude.com/docs/en/llm-gateway-protocol`)。両方を許可している。
 - **確認済み(公式ドキュメント)**: 起動時の `HEAD /api/hello`(接続の事前確認)は、拒否されても動作に影響しない。本 proxy は 403 を返す。既定では `GET /v1/models` も呼ばない(`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` のときだけ)。
 - **確認済み(公式ドキュメント)**: 導入は `downloads.claude.ai/claude-code-releases/<version>/manifest.json`(+ `.sig`)と `<version>/<platform>/claude`、署名鍵の指紋 `31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE`。Dockerfile はこれに従い、manifest の署名と SHA256 を検査する。
-- **未確認(live で確認が必要)**: OAuth のアクセストークンを `Authorization: Bearer` で送ったときに、Messages API が必要とする beta ヘッダーがあるか。
-  本試作では `anthropic-beta` を、コンテナが送った値のまま転送するだけで、OAuth 用の値は付けていません。live-smoke で 401 や 400 が出たら、ここを見直してください。
+- **確認済み(2026-10-17、実機)**: OAuth の beta ヘッダーは不要。`authorization: Bearer <WIF のアクセストークン>` と `anthropic-version: 2023-06-01` だけで Messages API が HTTP 200 を返した。プロキシは `anthropic-beta` / `anthropic-version` を無改変で転送する(Claude Code が自分で付けるヘッダーのため)。
 - **未確認**: 上の一覧にないパスを Claude Code が呼ぶか。許可外は 403 になるので、live-smoke で 403 が出たらパスを `proxy/anthropic.go` に追加します。
 - 許可ドメインへの送信は防げません。Anthropic・Gradle・Maven の先に秘密を送ることは、ドメイン単位の許可では止められません(設計案 §3.3 の残存リスク)。
 - Gradle は JVM の設定でプロキシを使うため、`JAVA_TOOL_OPTIONS` で `https.proxyHost` を渡しています(環境変数の `HTTPS_PROXY` だけでは効きません)。
@@ -164,3 +168,8 @@ verify/live-smoke.sh
 - Gradle の依存取得は、許可リストの 3 ホストだけです(`services.gradle.org`、`plugins.gradle.org`、`repo.maven.apache.org`。kivra の `settings.gradle.kts` と wrapper の設定に一致)。`github.com` は含めていません。kivra のビルドで必要になれば追加します。
 - 名前 `kivra-agent-proxy` は内部ネットワーク上の DNS 名に依存します。別の名前空間では `KIVRA_AGENT_PREFIX` を揃えてください。
 - CI(`.github/workflows/ci.yml`)は、このディレクトリの Go 試験を実行しません。Go 試験と検証スクリプトは手元の docker で実行します。
+
+## 実運用の注意
+
+- **未確認: Gradle のプラグイン解決。** `plugins.gradle.org` から別のホスト(例: `plugins-artifacts.gradle.org`)へリダイレクトされる場合があります。許可リストに無いと、そのホストへの接続が拒否されます。コンテナ内で kivra の実ビルドを動かして確認してください。本試作では `./gradlew` は走らせていません。
+- **不足の見つけ方**: proxy のログで `deny method=CONNECT dest=<host>:443 reason=not_allowlisted` の `dest` を見ます。そのホストを `proxy/allowlist.txt` に追加し、proxy イメージを作り直して `network/up-proxy.sh` で起動し直します。

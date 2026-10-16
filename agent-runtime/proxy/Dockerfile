@@ -15,7 +15,8 @@ COPY --from=build /out/mockupstream /usr/local/bin/mockupstream
 ENTRYPOINT ["/usr/local/bin/mockupstream"]
 
 # Runs as root inside the container on purpose: under rootless docker, root in the container is the
-# host kivra-agent user, which is the owner of the secret file. Run with --cap-drop=ALL.
+# host kivra-agent user. The secret file is root:kivra-agent 0640, so the container root reads it through the group.
+# Run with --cap-drop=ALL.
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /out/kivra-agent-proxy /usr/local/bin/kivra-agent-proxy
 COPY allowlist.txt /etc/kivra-agent-proxy/allowlist.txt

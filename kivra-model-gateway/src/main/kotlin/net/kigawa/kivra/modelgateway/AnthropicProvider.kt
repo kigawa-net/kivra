@@ -120,7 +120,7 @@ class AnthropicProvider(
                     val data = line.removePrefix("data:").trim()
                     if (data.isEmpty()) continue
                     val ev = try { json.parseToJsonElement(data).jsonObject } catch (e: Exception) { continue }
-                    for (chunk in acc.accept(ev, authz.secrets)) emit(chunk)
+                    for (chunk in acc.accept(ev)) emit(chunk)
                 }
             }
         } catch (e: CancellationException) {
@@ -308,7 +308,7 @@ class AnthropicProvider(
             return Message(Role.ASSISTANT, all)
         }
 
-        fun accept(ev: JsonObject, secrets: List<String>): List<StreamChunk> {
+        fun accept(ev: JsonObject): List<StreamChunk> {
             val out = ArrayList<StreamChunk>()
             when (ev["type"]?.jsonPrimitive?.contentOrNull) {
                 "message_start" -> {
@@ -365,16 +365,16 @@ class AnthropicProvider(
                 }
                 "message_stop" -> finished = true
                 "error" -> {
+                    // Only error.type is kept. The message is not read, so it cannot reach an error or a log.
                     val err = ev["error"]?.jsonObject
-                    val type = err?.get("type")?.jsonPrimitive?.contentOrNull
-                    val msg = ErrorClassifier.redact(err?.get("message")?.jsonPrimitive?.contentOrNull.orEmpty(), secrets)
+                    val type = ProviderErrorType.normalize(err?.get("type")?.jsonPrimitive?.contentOrNull)
                     val kind = when (type) {
                         "rate_limit_error" -> ErrorKind.RATE_LIMITED
                         "authentication_error", "permission_error" -> ErrorKind.AUTH
                         "invalid_request_error", "not_found_error" -> ErrorKind.INVALID_REQUEST
                         else -> ErrorKind.TRANSIENT
                     }
-                    throw GatewayException(GatewayError(kind, "stream error $type: $msg"))
+                    throw GatewayException(GatewayError(kind, "stream error", providerErrorType = type))
                 }
             }
             return out

@@ -56,6 +56,10 @@
 - **App の秘密鍵は Bitwarden(Secrets Manager)に置き、`BitwardenSecret` で k8s Secret に同期する。** 鍵を git に置かない。Secret は読み取り専用で pod にマウントし、`KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY` にそのファイルのパスを渡す。
 - **WIF のルール(Anthropic 側の設定。本リポジトリには無い)**: `oauth_scope` は `workspace:inference`、`token_lifetime_seconds` は `3600`、ワークスペースは専用のものを使う(`KIVRA_SELFDEV_ANTHROPIC_WORKSPACE_ID` で指定する)。ルールが `600` 秒のままだと、JWT は 1 回限りのため、再送を待つ間に認証が止まる。
 - **inline JWKS の更新**: k8s の inline JWKS は、クラスターの署名鍵のローテーションに合わせて更新する。更新を忘れると交換が失敗する(`docs/provider-compatibility-matrix.md` §3.6)。
+- **許容している既知のリスク(2026-10-17、運用者の判断。上の推奨を満たしていない現状)**:
+  - GitHub App `kivra-gh` のインストール対象が "All repositories" のまま。秘密鍵が漏れると、kigawa-net の全リポジトリに `contents:write` と `pull_requests:write` ができる。kivra 自身は、インストールトークンを `kivra` リポジトリだけに限定して要求する(`GitHubAppTokenMinter`)ので、通常の動作では他のリポジトリに書かない。
+  - Anthropic の WIF ルールの `oauth_scope` が `workspace:developer` のまま(推奨は `workspace:inference`)。専用ワークスペースの中で、Messages 以外(Files、Skills、Managed Agents)も呼べる。kivra は Messages だけを呼ぶ。
+  - どちらも、設定画面(GitHub / Claude Console)での変更だけで解消でき、kivra の再デプロイは要らない。本番相当の環境に広げる前に、推奨の設定にする。
 - **既知の制限**: 起動直後に一時的な通信失敗が起きると、同じ JWT は再送できないため、kubelet によるトークンの更新を待つことになる。運用上の目安は最大 48 分(有効期限 3600 秒の 80% に相当する)。この数値は本リポジトリの文書やコードでは確認していない。その間は LLM の呼び出しが失敗する。
 
 ## 2. 有効化の順序

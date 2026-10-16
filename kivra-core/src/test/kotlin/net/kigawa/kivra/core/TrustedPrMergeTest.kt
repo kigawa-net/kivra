@@ -11,6 +11,7 @@ class TrustedPrMergeTest {
     private val now = Instant.parse("2026-10-13T10:00:00Z")
     private val head = "a1".repeat(20)
     private val merge = "c3".repeat(20)
+    private val botId = 9001L
     private val binding = PullRequestBinding(
         runId = RunId("01HZRUN0000000000000000001"),
         repository = "kigawa-net/kivra",
@@ -32,9 +33,10 @@ class TrustedPrMergeTest {
         headSha: String = head,
         merged: Boolean = true,
         mergeCommitSha: String? = merge,
-    ) = ObservedPullRequest(repository, repositoryId, number, nodeId, baseRef, headSha, merged, mergeCommitSha)
+        authorId: Long? = botId,
+    ) = ObservedPullRequest(repository, repositoryId, number, nodeId, baseRef, headSha, merged, mergeCommitSha, authorId)
 
-    private fun verify(o: ObservedPullRequest) = PrMergeVerifier.verify(binding, o, now)
+    private fun verify(o: ObservedPullRequest) = PrMergeVerifier.verify(binding, botId, o, now)
 
     private fun refusedReason(o: ObservedPullRequest): String =
         assertIs<PrMergeVerification.Refused>(verify(o)).reason
@@ -67,6 +69,18 @@ class TrustedPrMergeTest {
         assertEquals("BASE_REF_MISMATCH", refusedReason(observed(baseRef = "release")))
         assertEquals("HEAD_SHA_MISMATCH", refusedReason(observed(headSha = "d4".repeat(20))))
         assertEquals("HEAD_SHA_MISMATCH", refusedReason(observed(headSha = "not-a-sha")))
+    }
+
+    @Test
+    fun `a pull request authored by the expected bot verifies, another author is refused`() {
+        assertIs<PrMergeVerification.Verified>(verify(observed(authorId = botId)))
+        assertEquals("AUTHOR_MISMATCH", refusedReason(observed(authorId = botId + 1)))
+        assertEquals("AUTHOR_MISMATCH", refusedReason(observed(authorId = 1L)))
+    }
+
+    @Test
+    fun `a missing author id is refused (fail closed)`() {
+        assertEquals("AUTHOR_MISMATCH", refusedReason(observed(authorId = null)))
     }
 
     @Test
@@ -103,7 +117,7 @@ class TrustedPrMergeTest {
     @Test
     fun `an Authority built on the base class cannot return a merge that the verifier did not confirm`() = kotlinx.coroutines.runBlocking {
         // The provider answer names another PR. The base class verifies it, so the result is a refusal, never Verified.
-        val authority = object : PrMergeAuthorityBase() {
+        val authority = object : PrMergeAuthorityBase(expectedAuthorId = 9001L) {
             override suspend fun observe(binding: PullRequestBinding): PrMergeObservation =
                 PrMergeObservation.Found(observed().copy(number = 8L))
         }

@@ -14,7 +14,7 @@ import net.kigawa.kivra.core.PullRequestBinding
  * TEST ONLY merge Authority. It extends [PrMergeAuthorityBase] like the production GitHub Authority, so every Verified result
  * goes through the same core verification. [answer] plays GitHub's reply for a binding (null = not found).
  */
-class FakeTrustedPrMergeAuthority(val clock: AdjustableClock = AdjustableClock()) : PrMergeAuthorityBase(clock) {
+class FakeTrustedPrMergeAuthority(val clock: AdjustableClock = AdjustableClock()) : PrMergeAuthorityBase(BOT_ID, clock) {
     var answer: (PullRequestBinding) -> ObservedPullRequest? = { merged(it) }
 
     /** When set, [observe] throws this instead of answering. */
@@ -36,7 +36,7 @@ class FakeTrustedPrMergeAuthority(val clock: AdjustableClock = AdjustableClock()
 
     companion object {
         /** A merged PR as GitHub reports it for [b]. The merge commit differs from the head (squash-like) by default. */
-        fun merged(b: PullRequestBinding, mergeSha: String? = MERGE_SHA) = ObservedPullRequest(
+        fun merged(b: PullRequestBinding, mergeSha: String? = MERGE_SHA, authorId: Long? = BOT_ID) = ObservedPullRequest(
             repository = b.repository,
             repositoryId = b.repositoryId,
             number = b.prNumber,
@@ -45,8 +45,11 @@ class FakeTrustedPrMergeAuthority(val clock: AdjustableClock = AdjustableClock()
             headSha = b.headSha,
             merged = true,
             mergeCommitSha = mergeSha,
+            authorId = authorId,
         )
 
+        /** The App bot user id this fake expects as PR author. */
+        const val BOT_ID = 9001L
         const val MERGE_SHA = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
     }
 }

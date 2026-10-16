@@ -42,11 +42,20 @@ enum class CommitFault {
  * so that the tests can count provider side effects. There is no merge operation, as in [GitHubPort].
  * Any call with a repository other than [repo] returns NOT_FOUND. Shas are sequential, so runs are deterministic.
  */
+/** The App bot's numeric user id as the fake reports it for pull requests it creates. */
+const val BOT_USER_ID = 9001L
+
 class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha: String = sha(1)) : GitHubPort {
     private val branches = LinkedHashMap<String, BranchInfo>()
     private val commits = ArrayList<String>()
     private val pulls = ArrayList<PullRequest>()
     private var counter = 100
+
+    /** Author id given to pull requests created from now on (the App bot by default). Null simulates a response without an author. */
+    var prAuthorId: Long? = BOT_USER_ID
+
+    /** Changes the author of an existing pull request, to simulate a PR opened by someone else. */
+    fun setPullAuthor(number: Int, authorId: Long?) = replacePull(number) { it.copy(authorId = authorId) }
 
     /** Write operations in call order: createRef, commit, updateRef, createPr. */
     val writes = ArrayList<String>()
@@ -170,7 +179,7 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
             repo = repo, number = number, state = PullRequestState.OPEN, merged = false, draft = request.draft,
             headRef = request.head, headSha = request.headSha, baseRef = request.base,
             body = request.renderedBody(), htmlUrl = "https://example.invalid/pull/$number",
-            nodeId = "PR_node_$number", baseRepositoryId = 42L,
+            nodeId = "PR_node_$number", baseRepositoryId = 42L, authorId = prAuthorId,
         )
         writes += "createPr"
         pulls += pr

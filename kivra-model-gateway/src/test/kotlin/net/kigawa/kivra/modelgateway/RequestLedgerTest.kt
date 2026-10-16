@@ -17,6 +17,11 @@ class RequestLedgerTest {
         assertEquals(digest(request()), digest(request()))
     }
 
+    /** Pinned on the pre-thinking encoding: a request without thinking must keep its digest (ledger rows stay comparable). */
+    @Test fun requestWithoutThinkingKeepsItsDigest() {
+        assertEquals("e3ac0dba5d276203c37e7c23c011c36f232a9e80af21e0621670541e1c510994", digest(request()))
+    }
+
     @Test fun everyOutcomeRelevantFieldChangesTheDigest() {
         val base = request()
         val variants = listOf(
@@ -34,6 +39,7 @@ class RequestLedgerTest {
             base.copy(requirements = Requirements(locality = Locality.LOCAL_ONLY)),
             base.copy(preference = RoutingPreference(quality = 0.9)),
             base.copy(timeout = 61.seconds),
+            base.copy(generation = base.generation.copy(thinking = ThinkingMode.DISABLED)),
         )
         val digests = variants.map { digest(it) }
         assertTrue(digests.all { it != digest(base) })

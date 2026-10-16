@@ -46,10 +46,17 @@ sealed interface ResponseFormat {
     data class JsonSchema(val name: String, val schema: JsonObject) : ResponseFormat
 }
 
+/**
+ * Extended thinking control. Null (the default) sends nothing, so the model's own default applies (for some models
+ * that is adaptive thinking, which spends the output budget before any text).
+ */
+enum class ThinkingMode { DISABLED }
+
 data class GenerationParams(
     val maxOutputTokens: Int = 1024,
     val temperature: Double? = null,
     val stopSequences: List<String> = emptyList(),
+    val thinking: ThinkingMode? = null,
 )
 
 data class Requirements(

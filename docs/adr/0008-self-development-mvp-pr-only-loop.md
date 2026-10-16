@@ -93,6 +93,11 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 - 前提: projected token は `expirationSeconds: 3600`、audience は `https://api.anthropic.com`。k8s の inline JWKS は、クラスターの署名鍵のローテーションに合わせて更新が必要(更新を忘れると交換が失敗する)。
 - 例外・ログ・`toString` には、JWT・アクセストークン・レスポンス本文・ファイルの内容を出さない(固定メッセージ)。
 
+## 追補(2026-10-17): 自己開発の提案呼び出しでは thinking を無効にする
+
+- Haiku 5.5 は adaptive thinking が既定で有効で、`max_tokens`(`DEVELOPER_MAX_OUTPUT_TOKENS`=8000)を thinking だけで使い切り、text を 1 文字も返さないことがあった(dev, 2026-10-17: 2 試行とも `finishReason=LENGTH`、`outputChars=0`)。自己開発の `DeveloperConfig.thinking` の既定は `DISABLED` とし、本文に `"thinking":{"type":"disabled"}` を送る。上書きは `DeveloperConfig` で行う。
+- 費用の上限見積りは変えない。thinking のトークンも `max_tokens` の内側に収まるため、上限は既存の式のままで足りる。
+
 ## 実装の分割
 
 | 順 | PR の範囲 | 依存 | 触るモジュール | 他の PR と競合するか |

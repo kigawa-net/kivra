@@ -116,7 +116,7 @@
 | 変更 | 実装済み: `createBranch` / `ensureRunBranch` / `createPullRequest` / `ensurePullRequest`。**Merge は存在しない** | **未確認**(本リポジトリの範囲外) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
 | ref 更新 | 実装済み: `commitFiles`(`kivra/run-*` のみ、`force=false`、`expectedHeadSha` と不一致なら書かず `CONFLICT`、ref 更新の結果不明は照合のみで再送しない)。本番では未配線 | **未確認**(本リポジトリの範囲外) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
 | 冪等キー | なし。照合は run 専用ブランチ名と head による PR 検索で行う(`ensurePullRequest`) | **未確認**(GitHub API の冪等性機構は本リポジトリでは確認していない) | 無効 |
-| Receipt / Operation-ID | PR 番号と head SHA を応答と照合(`IDENTITY_MISMATCH` で拒否)。Merge 観測は `GitHubPrMergeAuthority`(観測のみ) | — | 無効 |
+| Receipt / Operation-ID | PR 番号と head SHA を応答と照合(`IDENTITY_MISMATCH` で拒否)。Merge 観測は `GitHubPrMergeAuthority`(観測のみ。作者は `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` と照合。自己開発の有効時のみ本番に配線、runbook §4.3) | — | 無効(自己開発: 有効時のみ構築) |
 | 条件付き DELETE | 実装なし(ref 削除は設計上除外) | — | 無効 |
 | 照合 API | `findPullRequestsByHead`、`getPullRequest`。404 は「merge されていない」と読まない | 確認済み(REST の該当 endpoint が存在することは、コードのテストが前提としている範囲のみ) | 無効 |
 | 認証 | `TokenProvider` を要求ごとに呼ぶ。GitHub App の installation token を既定とする(`InstallationTokenProvider`。JWT は RS256、PKCS#1 / PKCS#8 を受け、期限の 5 分前まで再利用、同時発行は 1 回に束ねる)。PAT は `StaticTokenProvider`(互換)。App の権限は `contents:write` / `pull_requests:write` / `metadata:read` のみ、インストール先は `kigawa-net/kivra` のみ | **未確認**(本番の App の作成・インストールと実 GitHub への接続は未実施。admin-panel #224 で扱う予定) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
@@ -169,7 +169,7 @@
 9. レプリカは 1 にする。`KIVRA_SELFDEV_MAX_ACTIVE_RUNS` の上限は、プロセス内の直列化で守っている。複数のレプリカでは、同時の投入で上限を超えうる。
 10. 予算の `UNKNOWN_COST` は、運用者が監査つきで解除する(`POST /api/admin/budget/acknowledge`、`admin-panel:admin`)。`UNKNOWN` の自己開発 Run は、運用者専用の経路で `CANCELLED` に解放する(`POST /api/admin/selfdev/runs/{id}/release`、ADR 0009、runbook §4.1)。
 
-設定の一覧(値は書かない): `KIVRA_SELFDEV_ENABLED`、`KIVRA_SELFDEV_TARGET_REPO`(既定 `kigawa-net/kivra`、1 つだけ。リクエストでは指定できない)、`KIVRA_SELFDEV_BASE_BRANCH`(既定 `main`)、`KIVRA_SELFDEV_GITHUB_TOKEN`(PAT、互換)または `KIVRA_SELFDEV_GITHUB_APP_ID` / `KIVRA_SELFDEV_GITHUB_APP_INSTALLATION_ID` / `KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY`(App、推奨)、`KIVRA_SELFDEV_ANTHROPIC_API_KEY`(静的キー)または `KIVRA_SELFDEV_ANTHROPIC_FEDERATION_RULE_ID` / `_ORGANIZATION_ID` / `_SERVICE_ACCOUNT_ID` / `_IDENTITY_TOKEN_FILE`(WIF、推奨)と `_WORKSPACE_ID`(任意)、`KIVRA_SELFDEV_MODEL_REGISTRY_PATH`、`KIVRA_SELFDEV_CONTEXT_PREFIXES`(既定 `README.md,docs/`)、`KIVRA_SELFDEV_MAX_CONTEXT_FILE_BYTES`(既定 102400)、`KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`(既定 7)、`KIVRA_SELFDEV_ADVANCE_INTERVAL_SECONDS`(既定 30、最小 10)、`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`(既定 1)、`KIVRA_FX_USD_JPY`、`KIVRA_FX_AS_OF`。
+設定の一覧(値は書かない): `KIVRA_SELFDEV_ENABLED`、`KIVRA_SELFDEV_TARGET_REPO`(既定 `kigawa-net/kivra`、1 つだけ。リクエストでは指定できない)、`KIVRA_SELFDEV_BASE_BRANCH`(既定 `main`)、`KIVRA_SELFDEV_GITHUB_TOKEN`(PAT、互換)または `KIVRA_SELFDEV_GITHUB_APP_ID` / `KIVRA_SELFDEV_GITHUB_APP_INSTALLATION_ID` / `KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY`(App、推奨)、`KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID`(必須、PR 作者の user id)、`KIVRA_SELFDEV_ANTHROPIC_API_KEY`(静的キー)または `KIVRA_SELFDEV_ANTHROPIC_FEDERATION_RULE_ID` / `_ORGANIZATION_ID` / `_SERVICE_ACCOUNT_ID` / `_IDENTITY_TOKEN_FILE`(WIF、推奨)と `_WORKSPACE_ID`(任意)、`KIVRA_SELFDEV_MODEL_REGISTRY_PATH`、`KIVRA_SELFDEV_CONTEXT_PREFIXES`(既定 `README.md,docs/`)、`KIVRA_SELFDEV_MAX_CONTEXT_FILE_BYTES`(既定 102400)、`KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`(既定 7)、`KIVRA_SELFDEV_ADVANCE_INTERVAL_SECONDS`(既定 30、最小 10)、`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`(既定 1)、`KIVRA_FX_USD_JPY`、`KIVRA_FX_AS_OF`。
 
 ## 5. 既定値の固定(テスト)
 

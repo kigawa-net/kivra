@@ -25,6 +25,7 @@ private class TrapEnv(private val base: Map<String, String>) : Map<String, Strin
 
 private const val TOKEN = "ghp_TOKEN_VALUE_MUST_NOT_LEAK_1234"
 private const val API_KEY = "sk-ant-KEY_VALUE_MUST_NOT_LEAK_5678"
+private const val BOT_PR_AUTHOR_ID = "343288952"
 
 private fun enabledEnv(vararg overrides: Pair<String, String?>): Map<String, String> {
     val base = mutableMapOf(
@@ -32,6 +33,7 @@ private fun enabledEnv(vararg overrides: Pair<String, String?>): Map<String, Str
         "KIVRA_AUTH_MODE" to "oidc-jwt",
         "KIVRA_SELFDEV_GITHUB_TOKEN" to TOKEN,
         "KIVRA_SELFDEV_ANTHROPIC_API_KEY" to API_KEY,
+        "KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID" to BOT_PR_AUTHOR_ID,
         "KIVRA_SELFDEV_MODEL_REGISTRY_PATH" to "/etc/kivra/model-registry.yaml",
         "KIVRA_FX_USD_JPY" to "150",
         "KIVRA_FX_AS_OF" to "2026-10-01",
@@ -73,6 +75,7 @@ class SelfDevSettingsTest {
             "KIVRA_SELFDEV_GITHUB_TOKEN",
             "KIVRA_SELFDEV_ANTHROPIC_API_KEY",
             "KIVRA_SELFDEV_MODEL_REGISTRY_PATH",
+            "KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID",
             "KIVRA_FX_USD_JPY",
             "KIVRA_FX_AS_OF",
         )) {
@@ -99,6 +102,22 @@ class SelfDevSettingsTest {
         assertEquals(Duration.ofDays(7), s.config!!.prReviewTimeout)
         assertEquals(Duration.ofSeconds(30), s.advanceInterval)
         assertEquals(1, s.maxActiveRuns)
+    }
+
+    @Test
+    fun `the PR author's bot user id is required and must be a positive integer, and no value is echoed`() {
+        assertEquals(BOT_PR_AUTHOR_ID, SelfDevSettings.fromEnv(enabledEnv()).githubBotUserId!!.reveal())
+        for (bad in listOf("0", "-1", "12a", "+5", "", "99999999999999999999", "bot-$BOT_PR_AUTHOR_ID")) {
+            val e = assertFailsWith<IllegalStateException>(bad) {
+                SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID" to bad))
+            }
+            assertTrue("KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID" in e.message!!, e.message)
+            assertFalse(bad.isNotEmpty() && bad in e.message!!, e.message)
+        }
+        val unset = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID" to null)) }
+        assertTrue("KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID" in unset.message!!)
+        assertFalse(SelfDevSettings.fromEnv(TrapEnv(emptyMap())).enabled)
+        assertNull(SelfDevSettings.fromEnv(TrapEnv(emptyMap())).githubBotUserId)
     }
 
     @Test

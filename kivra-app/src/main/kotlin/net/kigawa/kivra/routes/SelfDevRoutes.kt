@@ -136,7 +136,10 @@ private suspend fun pullRequestOf(deps: SelfDevRouteDeps, runId: String): net.ki
     return list.filter { it.repo == deps.repo && it.hasMarker(runId) }.singleOrNull()
 }
 
-/** Fields a caller may see. The title is task text and is never returned. */
+/**
+ * Fields a caller may see on the self-development API (paths under `/api/selfdev`). The title is not returned here. The Task API views
+ * (`/api/runs`, `/api/admin/runs`) do show it, to the principal and operators (ADR 0008 addendum, 2026-10-17).
+ */
 private fun DevelopmentRun.toSelfDevResponse(note: String? = null): SelfDevRunResponse = SelfDevRunResponse(
     runId = runId.value,
     state = state.name,

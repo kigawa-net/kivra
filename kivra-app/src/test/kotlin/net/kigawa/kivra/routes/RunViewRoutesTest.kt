@@ -126,7 +126,8 @@ class RunViewRoutesTest {
             val sd = list.getValue(selfDev).jsonObject
             assertEquals("SELF_DEV", sd["mode"]!!.jsonPrimitive.content)
             assertIs<JsonNull>(sd["executed"])
-            assertIs<JsonNull>(sd["title"])
+            // The title is shown to the owner and to operators, as the task title the owner submitted (ADR 0008 addendum).
+            assertEquals(SECRET_TITLE, sd["title"]!!.jsonPrimitive.content)
             assertEquals("CREATES_PULL_REQUEST", sd["effect"]!!.jsonPrimitive.content)
             assertEquals("CREATED", sd["state"]!!.jsonPrimitive.content)
 
@@ -136,11 +137,8 @@ class RunViewRoutesTest {
             assertEquals("通知の文言を直す", sim["title"]!!.jsonPrimitive.content)
             assertEquals("SIMULATED_ONLY", sim["effect"]!!.jsonPrimitive.content)
 
-            // The task text of a self-development run never leaves the server, in any Task API view.
-            val text = read("/api/runs", "alice").bodyAsText()
-            assertFalse("SECRET-TITLE-MARKER" in text)
-            assertFalse("<script>" in text)
-            assertFalse(read("/api/runs/$selfDev", "alice").bodyAsText().contains("SECRET-TITLE-MARKER"))
+            // The title is the owner's own; the detail view carries it too.
+            assertTrue(read("/api/runs/$selfDev", "alice").bodyAsText().contains("SECRET-TITLE-MARKER"))
         }
     }
 
@@ -180,7 +178,7 @@ class RunViewRoutesTest {
             assertEquals("alice", byId.getValue(aliceSelf).jsonObject["createdBy"]!!.jsonPrimitive.content)
             assertEquals("bob", byId.getValue(bobSim).jsonObject["createdBy"]!!.jsonPrimitive.content)
             assertEquals("SELF_DEV", byId.getValue(aliceSelf).jsonObject["mode"]!!.jsonPrimitive.content)
-            assertFalse("SECRET-TITLE-MARKER" in allText)
+            assertTrue(SECRET_TITLE.substringBefore(" ") in allText, "operators see the title")
 
             // The operator can read another owner's run in detail; a missing run is the same 404 as a malformed id.
             assertEquals(HttpStatusCode.OK, read("/api/admin/runs/$aliceSelf", "carol").status)

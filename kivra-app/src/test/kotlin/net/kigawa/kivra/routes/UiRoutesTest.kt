@@ -146,9 +146,12 @@ class UiRoutesTest {
     }
 
     @Test
-    fun `self-development titles are never shown, and only a simulated run shows its title`() {
-        assertContains(appJs, "if (run.mode === 'SIMULATED') return clip(run.title, MAX_TITLE);")
-        assertContains(appJs, "（非表示：自己開発）")
+    fun `titles are shown as text for both kinds, and an unknown kind shows no title`() {
+        assertContains(appJs, "if (run.mode === 'SIMULATED' || run.mode === 'SELF_DEV') return clip(run.title, MAX_TITLE);")
+        assertContains(appJs, "（非表示：種別が不明）")
+        assertFalse(appJs.contains("（非表示：自己開発）"), "self-development titles are shown (ADR 0008 addendum)")
+        // The title is only ever written with textContent (through h()'s text prop), never as markup.
+        assertContains(appJs, "h('span', { className: 'run-title', text: titleOf(run) })")
         // Every value from the server goes into the DOM as text: no markup is ever built from strings.
         assertFalse(Regex("\\.(textContent|innerText)\\s*=\\s*[^;]*\\+\\s*'<").containsMatchIn(appJs))
         assertFalse(Regex("<[a-z]+[^>]*\\$\\{").containsMatchIn(appJs))

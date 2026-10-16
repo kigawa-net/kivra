@@ -32,16 +32,16 @@ data class SubmitTaskRequest(val title: String, val idempotencyKey: String)
 /**
  * The Run snapshot returned by POST, GET /api/runs/{id}, GET /api/runs and the operator views (GET /api/admin/runs...).
  *
- * A self-development run (mode SELF_DEV) has no [title] (its task text is never returned, ADR 0008), no [executed] (it is not a
- * simulation, and kivra does not claim it ran), and [effect] CREATES_PULL_REQUEST. Its pull request, when one exists, comes
- * from the run's binding in the database. GitHub is not called. [pullRequestUrl] is set only when the repository is the
- * configured target repository.
+ * [title] is the task title the authenticated principal submitted, for both kinds. It is shown only to that principal and to
+ * operators (ADR 0008 addendum, 2026-10-17). A self-development run (mode SELF_DEV) has no [executed] (it is not a simulation,
+ * and kivra does not claim it ran), and [effect] CREATES_PULL_REQUEST. Its pull request, when one exists, comes from the run's
+ * binding in the database. GitHub is not called. [pullRequestUrl] is set only when the repository is the configured target repository.
  */
 @Serializable
 data class TaskRunResponse(
     val runId: String,
     val taskId: String,
-    val title: String?,
+    val title: String,
     val state: String,
     val mode: String,
     val executed: Boolean?,
@@ -101,7 +101,7 @@ internal fun DevelopmentRun.toTaskRunResponse(
     return TaskRunResponse(
         runId = runId.value,
         taskId = taskId,
-        title = if (selfDev) null else taskTitle.orEmpty(),
+        title = taskTitle.orEmpty(),
         state = state.name,
         mode = if (selfDev) "SELF_DEV" else "SIMULATED",
         executed = if (selfDev) null else false,

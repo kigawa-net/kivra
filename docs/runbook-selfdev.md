@@ -170,7 +170,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - **上部の注意書き**: `GET /api/selfdev/status` の `enabled` で出し分ける。有効なら「自己開発の Run は GitHub に PR を作成します(実際に実行されます)」、無効なら「自己開発は無効です」。状態を取れなければ「設定を取得できていません」と出す(有効・無効は推測しない)。
 - **一覧**: 既定は「自分の Run」(`GET /api/runs`)。「全員の Run(運用者向け)」は `GET /api/admin/runs` で、作成者(`createdBy`)を併記する。ロールを持つ運用者は、どの Run も見られる。
 - **種別バッジ**: `シミュレーション`(SIMULATED。AI や GitHub は呼ばれない)、`自己開発(PR を作成)`(SELF_DEV。GitHub に PR を作る)。想定外の値は「不明な種別」と値そのものを出す。
-- **タイトル**: シミュレーションの Run だけ表示する。自己開発の Run のタイトルは、一覧にも詳細にも出さない(「(非表示:自己開発)」)。
+- **タイトル**: 種別によらず、投入した本人と運用者の画面に表示する(`textContent` で表示し、長さは表示側で制限する)。MVP では、認証済みの運用者が投入したタイトルを、同じ運用者の画面に表示する。将来 Issue 由来のテキストを扱う場合(ADR 0008 の ⑪)は、信頼できない入力として再検討する(`textContent` のみ、長さ制限は維持)。種別が不明な Run は、タイトルを表示しない。(ADR 0008 の追補、2026-10-17)
 - **状態**: 日本語の説明を併記する。`UNKNOWN` は「結果不明。自動では動かない。運用者が確認して解放するまで、同時上限を占有する」。知らない値は値をそのまま出す。
 - **理由コード**(`reasonCode`): 次の意味で出す。`PR_ABANDONED` PR が閉じられた(マージされず)。`OPERATOR_RELEASED` 運用者が解放した。`CANCEL_REQUESTED` 中止が要求された。`PR_MERGED` PR がマージされ、マージを検証した。`PR_NOT_FOUND` / `PR_AMBIGUOUS` PR が見つからない / 一つに決まらない(GitHub 側の確認が要る)。`GITHUB_UNKNOWN_OUTCOME` GitHub の結果が不明。`COMMIT_NOT_APPLIED_TWICE` コミットが二度とも反映されなかった。`POLICY_REJECTED` 変更がポリシーに通らなかった。`BRANCH_ADVANCED_BEFORE_COMMIT` コミットの前にブランチが進んでいた。`DEVELOPER_*` モデルの結果を使えなかった(コードの末尾が詳細)。知らないコードは、コードだけを出す。
 - **PR**: 番号と、リポジトリ。リンクになるのは、リポジトリが設定の対象(`kigawa-net/kivra` など)と一致し、URL が `https://github.com/<owner>/<repo>/pull/<番号>` の形のときだけ。それ以外は文字だけ出す。

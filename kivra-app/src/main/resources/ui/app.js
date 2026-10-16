@@ -1,7 +1,7 @@
 /*
  * Kivra minimal UI (see README "UI"). Plain JavaScript, no framework, no HTML string injection.
  * Server data enters the DOM only through textContent (see h() and str()). A link is made only from a validated
- * pull request URL (see safePrUrl()). A self-development Run never shows its title.
+ * pull request URL (see safePrUrl()).
  */
 (function () {
   'use strict';
@@ -185,10 +185,13 @@
     return { label: '不明な種別（' + (c === '' ? '空' : c) + '）', cls: 'badge warn', note: '' };
   }
 
-  /** The title of a run for display. A self-development run never shows its title (ADR 0008). Unknown kinds do not either. */
+  /**
+   * The title of a run for display, as text. Both kinds show the title the authenticated principal submitted (ADR 0008
+   * addendum, 2026-10-17). An unknown kind does not show it: its meaning is not known, so nothing is shown.
+   */
   function titleOf(run) {
-    if (run.mode === 'SIMULATED') return clip(run.title, MAX_TITLE);
-    return run.mode === 'SELF_DEV' ? '（非表示：自己開発）' : '（非表示：種別が不明）';
+    if (run.mode === 'SIMULATED' || run.mode === 'SELF_DEV') return clip(run.title, MAX_TITLE);
+    return '（非表示：種別が不明）';
   }
 
   /** The reason code as text: the explanation, then the code itself. Unknown codes are shown as codes only. */

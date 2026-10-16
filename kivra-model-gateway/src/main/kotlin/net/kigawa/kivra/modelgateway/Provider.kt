@@ -55,18 +55,32 @@ object Estimator {
 
     fun outputTokens(req: ModelRequest, model: ModelEntry): Int = minOf(req.generation.maxOutputTokens, model.maxOutputTokens)
 
+    /** The upper-bound estimate, or the reason it cannot be made (fail closed). */
+    sealed interface MaxCost {
+        data class Priced(val amount: BudgetAmount) : MaxCost
+        data class Unknown(val reason: UnknownCostReason) : MaxCost
+    }
+
     /**
-     * Upper-bound amount for budget admission in the budget currency. Null when no price version is in force at [now], or
-     * when the cost cannot be expressed in the budget currency (fail closed). Upper bound: the highest-tier rate is used.
+     * Upper-bound amount for budget admission in the budget currency. Upper bound: the highest-tier rate is used.
+     * Unknown (never zero) when no price version is in force at [now], the cost has cache writes without a rate, or the
+     * cost cannot be expressed in the budget currency.
      */
+    fun maxCost(
+        req: ModelRequest, model: ModelEntry, provider: ProviderEntry, registryVersion: String, now: Instant, converter: CostConverter?,
+    ): MaxCost {
+        val price = model.priceAt(now) ?: return MaxCost.Unknown(UnknownCostReason.PRICE_MISSING)
+        val usage = Usage(inputTokens(req), outputTokens(req, model).toLong())
+        val native = CostCalculator.cost(usage, price.rateFor(null), price.currency, CostBasis.ESTIMATED)?.amount
+            ?: return MaxCost.Unknown(UnknownCostReason.CACHE_WRITE_UNPRICED)
+        val amount = toBudget(native, price, model.ref, provider, registryVersion, now, converter)
+            ?: return MaxCost.Unknown(UnknownCostReason.FX_UNUSABLE)
+        return MaxCost.Priced(amount)
+    }
+
     fun maxBudgetAmount(
         req: ModelRequest, model: ModelEntry, provider: ProviderEntry, registryVersion: String, now: Instant, converter: CostConverter?,
-    ): BudgetAmount? {
-        val price = model.priceAt(now) ?: return null
-        val usage = Usage(inputTokens(req), outputTokens(req, model).toLong())
-        val native = CostCalculator.cost(usage, price.rateFor(null), price.currency, CostBasis.ESTIMATED)?.amount ?: return null
-        return toBudget(native, price, model.ref, provider, registryVersion, now, converter)
-    }
+    ): BudgetAmount? = (maxCost(req, model, provider, registryVersion, now, converter) as? MaxCost.Priced)?.amount
 
     /**
      * Converts a native-currency amount into a budget amount. A local model with an explicitly zero price is free: it is

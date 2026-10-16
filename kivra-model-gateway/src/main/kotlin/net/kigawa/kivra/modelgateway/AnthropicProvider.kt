@@ -37,11 +37,19 @@ import kotlinx.serialization.json.putJsonArray
 /** Adapter for the Anthropic Messages API. Never talks to the network unless an [HttpClient] with a real engine is given. */
 class AnthropicProvider(
     client: HttpClient,
-    private val credentials: CredentialSource,
+    private val auth: AnthropicAuth,
     override val providerId: String = "anthropic",
     private val apiVersion: String = "2023-06-01",
 ) : ModelProvider {
-    // Never follow redirects: the API key header must not be forwarded to another host.
+    /** Static API key (`x-api-key`) through a [CredentialSource]. */
+    constructor(
+        client: HttpClient,
+        credentials: CredentialSource,
+        providerId: String = "anthropic",
+        apiVersion: String = "2023-06-01",
+    ) : this(client, StaticKeyAuth(credentials), providerId, apiVersion)
+
+    // Never follow redirects: the credential header must not be forwarded to another host.
     private val client: HttpClient = client.config { followRedirects = false }
 
     companion object {
@@ -58,21 +66,17 @@ class AnthropicProvider(
         }
     }
 
-    private fun key(target: ResolvedTarget): String =
-        credentials.get(target.provider)
-            ?: throw GatewayException(GatewayError(ErrorKind.AUTH, "credential '${target.provider.credentialRef}' is not configured", code = "NO_CREDENTIAL", sendState = SendState.NOT_SENT))
-
     /** Local check only (credential configured); makes no network call and incurs no cost. */
     override suspend fun health(target: ResolvedTarget): ProviderHealth =
-        if (credentials.get(target.provider) != null) ProviderHealth(ProviderHealthState.UP)
+        if (auth.isConfigured(target)) ProviderHealth(ProviderHealthState.UP)
         else ProviderHealth(ProviderHealthState.DOWN, "credential not configured")
 
     /** Lists models available to the credential (free call). Used for registry sync. */
     override suspend fun listModels(target: ResolvedTarget): List<ProviderModelInfo> {
-        val apiKey = key(target)
-        val resp = wrap(apiKey) { client.get("${target.provider.endpoint.trimEnd('/')}/v1/models") { common(apiKey) } }
+        val authz = auth.authorize(target)
+        val resp = wrap(authz) { client.get("${target.provider.endpoint.trimEnd('/')}/v1/models") { common(authz) } }
         val text = resp.bodyAsText()
-        if (!resp.status.isSuccess()) throw httpError(resp, text, apiKey)
+        if (!resp.status.isSuccess()) throw httpError(resp, text, authz)
         return json.parseToJsonElement(text).jsonObject["data"]?.jsonArray.orEmpty().map {
             val o = it.jsonObject
             ProviderModelInfo(o.getValue("id").jsonPrimitive.content, o["display_name"]?.jsonPrimitive?.contentOrNull)
@@ -80,17 +84,17 @@ class AnthropicProvider(
     }
 
     override suspend fun invoke(req: ModelRequest, target: ResolvedTarget, ctx: CallContext): ModelResponse {
-        val apiKey = key(target)
+        val authz = auth.authorize(target)
         val started = System.nanoTime()
-        val resp = wrap(apiKey) {
+        val resp = wrap(authz) {
             client.post("${target.provider.endpoint.trimEnd('/')}/v1/messages") {
-                common(apiKey)
+                common(authz)
                 contentType(ContentType.Application.Json)
                 setBody(buildBody(req, target, stream = false).toString())
             }
         }
         val text = resp.bodyAsText()
-        if (!resp.status.isSuccess()) throw httpError(resp, text, apiKey)
+        if (!resp.status.isSuccess()) throw httpError(resp, text, authz)
         val obj = try { json.parseToJsonElement(text).jsonObject } catch (e: Exception) {
             throw GatewayException(GatewayError(ErrorKind.TRANSIENT, "unparseable provider response", code = "BAD_RESPONSE"))
         }
@@ -98,17 +102,17 @@ class AnthropicProvider(
     }
 
     override fun stream(req: ModelRequest, target: ResolvedTarget, ctx: CallContext): Flow<StreamChunk> = flow {
-        val apiKey = key(target)
+        val authz = auth.authorize(target)
         val started = System.nanoTime()
         val acc = StreamAccumulator()
         try {
             client.prepareRequest("${target.provider.endpoint.trimEnd('/')}/v1/messages") {
                 method = io.ktor.http.HttpMethod.Post
-                common(apiKey)
+                common(authz)
                 contentType(ContentType.Application.Json)
                 setBody(buildBody(req, target, stream = true).toString())
             }.execute { resp ->
-                if (!resp.status.isSuccess()) throw httpError(resp, resp.bodyAsText(), apiKey)
+                if (!resp.status.isSuccess()) throw httpError(resp, resp.bodyAsText(), authz)
                 val ch = resp.bodyAsChannel()
                 while (true) {
                     val line = ch.readUTF8Line() ?: break
@@ -116,7 +120,7 @@ class AnthropicProvider(
                     val data = line.removePrefix("data:").trim()
                     if (data.isEmpty()) continue
                     val ev = try { json.parseToJsonElement(data).jsonObject } catch (e: Exception) { continue }
-                    for (chunk in acc.accept(ev, apiKey)) emit(chunk)
+                    for (chunk in acc.accept(ev, authz.secrets)) emit(chunk)
                 }
             }
         } catch (e: CancellationException) {
@@ -124,7 +128,7 @@ class AnthropicProvider(
         } catch (e: GatewayException) {
             throw e
         } catch (e: Exception) {
-            throw GatewayException(ErrorClassifier.fromThrowable(e, listOf(apiKey)), e)
+            throw GatewayException(ErrorClassifier.fromThrowable(e, authz.secrets), e)
         }
         val message = acc.toMessage()
         if (!acc.finished) throw GatewayException(GatewayError(ErrorKind.TRANSIENT, "stream ended before message_stop", code = "TRUNCATED_STREAM"))
@@ -140,8 +144,8 @@ class AnthropicProvider(
 
     // ---- request building -------------------------------------------------------------------------
 
-    private fun io.ktor.client.request.HttpRequestBuilder.common(apiKey: String) {
-        header("x-api-key", apiKey)
+    private fun io.ktor.client.request.HttpRequestBuilder.common(authz: AnthropicAuthorization) {
+        header(authz.headerName, authz.headerValue)
         header("anthropic-version", apiVersion)
     }
 
@@ -256,13 +260,16 @@ class AnthropicProvider(
 
     // ---- errors --------------------------------------------------------------------------------------
 
-    private suspend fun wrap(apiKey: String, block: suspend () -> HttpResponse): HttpResponse =
+    private suspend fun wrap(authz: AnthropicAuthorization, block: suspend () -> HttpResponse): HttpResponse =
         try { block() } catch (e: CancellationException) { throw e } catch (e: GatewayException) { throw e } catch (e: Exception) {
-            throw GatewayException(ErrorClassifier.fromThrowable(e, listOf(apiKey)), e)
+            throw GatewayException(ErrorClassifier.fromThrowable(e, authz.secrets), e)
         }
 
-    private fun httpError(resp: HttpResponse, body: String, apiKey: String): GatewayException =
-        GatewayException(ErrorClassifier.fromHttp(resp.status.value, body, resp.headers[HttpHeaders.RetryAfter], listOf(apiKey)))
+    /** A 401 drops the cached credential (no retry here: the next request re-authenticates). */
+    private fun httpError(resp: HttpResponse, body: String, authz: AnthropicAuthorization): GatewayException {
+        if (resp.status.value == 401) auth.onUnauthorized(authz)
+        return GatewayException(ErrorClassifier.fromHttp(resp.status.value, body, resp.headers[HttpHeaders.RetryAfter], authz.secrets))
+    }
 
     /** Accumulates SSE events into chunks and a final message. */
     private inner class StreamAccumulator {
@@ -285,7 +292,7 @@ class AnthropicProvider(
             return Message(Role.ASSISTANT, all)
         }
 
-        fun accept(ev: JsonObject, apiKey: String): List<StreamChunk> {
+        fun accept(ev: JsonObject, secrets: List<String>): List<StreamChunk> {
             val out = ArrayList<StreamChunk>()
             when (ev["type"]?.jsonPrimitive?.contentOrNull) {
                 "message_start" -> {
@@ -344,7 +351,7 @@ class AnthropicProvider(
                 "error" -> {
                     val err = ev["error"]?.jsonObject
                     val type = err?.get("type")?.jsonPrimitive?.contentOrNull
-                    val msg = ErrorClassifier.redact(err?.get("message")?.jsonPrimitive?.contentOrNull.orEmpty(), listOf(apiKey))
+                    val msg = ErrorClassifier.redact(err?.get("message")?.jsonPrimitive?.contentOrNull.orEmpty(), secrets)
                     val kind = when (type) {
                         "rate_limit_error" -> ErrorKind.RATE_LIMITED
                         "authentication_error", "permission_error" -> ErrorKind.AUTH

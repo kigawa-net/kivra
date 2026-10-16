@@ -183,4 +183,68 @@ class SelfDevSettingsTest {
         val missingFile = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(appEnv("KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY" to "/nonexistent/key.pem")) }
         assertFalse("/nonexistent" in missingFile.message!!)
     }
+
+    private val wifVars = mapOf(
+        "KIVRA_SELFDEV_ANTHROPIC_FEDERATION_RULE_ID" to "fdrl_WIF_RULE_MUST_NOT_LEAK",
+        "KIVRA_SELFDEV_ANTHROPIC_ORGANIZATION_ID" to "11111111-2222-3333-4444-555555555555",
+        "KIVRA_SELFDEV_ANTHROPIC_SERVICE_ACCOUNT_ID" to "svac_WIF_SA_MUST_NOT_LEAK",
+        "KIVRA_SELFDEV_ANTHROPIC_IDENTITY_TOKEN_FILE" to "/nonexistent/anthropic/token",
+    )
+
+    private fun withoutStaticKey(vararg overrides: Pair<String, String?>): Map<String, String> =
+        enabledEnv("KIVRA_SELFDEV_ANTHROPIC_API_KEY" to null, *overrides.toList().toTypedArray())
+
+    @Test
+    fun `workload identity federation is accepted without reading the identity token file`() {
+        // /nonexistent is not read at startup: the pod may start before the projected token appears.
+        val s = SelfDevSettings.fromEnv(withoutStaticKey(*wifVars.map { it.key to it.value }.toTypedArray()))
+        assertTrue(s.enabled)
+        assertNull(s.anthropicApiKeyEnvVar)
+        val wif = assertIs<AnthropicWifSettings>(s.anthropicWif)
+        assertEquals("/nonexistent/anthropic/token", wif.identityTokenFile.reveal())
+        assertNull(wif.workspaceId)
+        assertFalse(s.toString().contains("fdrl_WIF"))
+        assertFalse(wif.toString().contains("svac_WIF") || wif.toString().contains("fdrl_WIF"))
+    }
+
+    @Test
+    fun `workspace id is optional and validated when set`() {
+        val s = SelfDevSettings.fromEnv(withoutStaticKey(*(wifVars.map { it.key to it.value } + ("KIVRA_SELFDEV_ANTHROPIC_WORKSPACE_ID" to "wrkspc_WS")).toTypedArray()))
+        assertEquals("wrkspc_WS", assertIs<AnthropicWifSettings>(s.anthropicWif).workspaceId!!.reveal())
+        val bad = assertFailsWith<IllegalStateException> {
+            SelfDevSettings.fromEnv(withoutStaticKey(*(wifVars.map { it.key to it.value } + ("KIVRA_SELFDEV_ANTHROPIC_WORKSPACE_ID" to "bad-ws-value")).toTypedArray()))
+        }
+        assertTrue("KIVRA_SELFDEV_ANTHROPIC_WORKSPACE_ID" in bad.message!!)
+        assertFalse("bad-ws-value" in bad.message!!)
+    }
+
+    @Test
+    fun `exactly one anthropic method is allowed`() {
+        val both = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv(*wifVars.map { it.key to it.value }.toTypedArray())) }
+        assertTrue("KIVRA_SELFDEV_ANTHROPIC_API_KEY" in both.message!!)
+        assertFalse(API_KEY in both.message!!)
+        val neither = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(withoutStaticKey()) }
+        assertTrue("KIVRA_SELFDEV_ANTHROPIC_API_KEY" in neither.message!!)
+    }
+
+    @Test
+    fun `a partial federation setup fails and names only the variable`() {
+        for (missing in wifVars.keys) {
+            val e = assertFailsWith<IllegalStateException>(missing) {
+                SelfDevSettings.fromEnv(withoutStaticKey(*(wifVars - missing).map { it.key to it.value }.toTypedArray()))
+            }
+            assertTrue(missing in e.message!!, missing)
+        }
+        // A workspace id alone is still a partial federation setup.
+        assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(withoutStaticKey("KIVRA_SELFDEV_ANTHROPIC_WORKSPACE_ID" to "wrkspc_WS")) }
+    }
+
+    @Test
+    fun `federation id formats are checked without echoing the value`() {
+        val e = assertFailsWith<IllegalStateException> {
+            SelfDevSettings.fromEnv(withoutStaticKey(*(wifVars + ("KIVRA_SELFDEV_ANTHROPIC_ORGANIZATION_ID" to "not-a-uuid-VALUE")).map { it.key to it.value }.toTypedArray()))
+        }
+        assertTrue("KIVRA_SELFDEV_ANTHROPIC_ORGANIZATION_ID" in e.message!!)
+        assertFalse("not-a-uuid-VALUE" in e.message!!)
+    }
 }

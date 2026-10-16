@@ -84,6 +84,15 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 - 認証の方式は PAT か App のどちらか一方だけを設定する。両方、またはどちらも無いときは起動に失敗する(fail-closed)。
 - installation token は期限の 5 分前まで再利用し、同時の要求は 1 回の発行にまとめる。401 では token を破棄して 1 回だけ再取得する。
 
+## 追補(2026-10-16): Anthropic の認証は Workload Identity Federation を推奨し、静的キーは代替として残す
+
+- Anthropic への認証は、**Workload Identity Federation(WIF)を推奨**する。k8s の projected ServiceAccount トークン(JWT)を `POST /v1/oauth/token` で Anthropic アクセストークンに交換し、Messages API には `Authorization: Bearer` で送る。`x-api-key` は送らない。静的キー(`KIVRA_SELFDEV_ANTHROPIC_API_KEY`)は代替として残す。
+- 設定は一方のみ(fail-closed)。WIF は `KIVRA_SELFDEV_ANTHROPIC_FEDERATION_RULE_ID` / `_ORGANIZATION_ID` / `_SERVICE_ACCOUNT_ID` / `_IDENTITY_TOKEN_FILE` の 4 つが必須、`_WORKSPACE_ID` は任意。トークンファイルの存在は起動時に検査しない(Pod の起動順で遅れうるため、交換時に読む)。
+- OAuth のスコープは `workspace:inference` で足りる。JWT の `jti` は既定で 1 回限りのため、同じ JWT は再送しない。交換のたびにファイルを読み直し、ローテーションを待つ。失敗時の再試行は最大 2 回・指数バックオフ。
+- アクセストークンは期限の 120 秒前に推奨更新(失敗しても、キャッシュを使い続ける)、30 秒前以降は必須更新(失敗はエラー)。同時の更新は 1 回にまとめる。401 ではキャッシュを破棄し、次の要求で再交換する(その場の再送はしない)。
+- 前提: projected token は `expirationSeconds: 3600`、audience は `https://api.anthropic.com`。k8s の inline JWKS は、クラスターの署名鍵のローテーションに合わせて更新が必要(更新を忘れると交換が失敗する)。
+- 例外・ログ・`toString` には、JWT・アクセストークン・レスポンス本文・ファイルの内容を出さない(固定メッセージ)。
+
 ## 実装の分割
 
 | 順 | PR の範囲 | 依存 | 触るモジュール | 他の PR と競合するか |

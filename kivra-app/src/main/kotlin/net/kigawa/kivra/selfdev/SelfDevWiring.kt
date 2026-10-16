@@ -17,7 +17,10 @@ import net.kigawa.kivra.github.RsaJwtSigner
 import net.kigawa.kivra.github.StaticTokenProvider
 import net.kigawa.kivra.github.TokenProvider
 import net.kigawa.kivra.github.githubHttpClient
+import net.kigawa.kivra.modelgateway.AnthropicAuth
 import net.kigawa.kivra.modelgateway.AnthropicProvider
+import net.kigawa.kivra.modelgateway.AnthropicWifAuth
+import net.kigawa.kivra.modelgateway.AnthropicWifConfig
 import net.kigawa.kivra.modelgateway.BoundCredentialSource
 import net.kigawa.kivra.modelgateway.BudgetPort
 import net.kigawa.kivra.modelgateway.Capability
@@ -27,6 +30,7 @@ import net.kigawa.kivra.modelgateway.DataClass
 import net.kigawa.kivra.modelgateway.ModelGateway
 import net.kigawa.kivra.modelgateway.ModelRegistry
 import net.kigawa.kivra.modelgateway.RegistryLoader
+import net.kigawa.kivra.modelgateway.StaticKeyAuth
 import net.kigawa.kivra.modelgateway.Requirements
 import net.kigawa.kivra.routes.SelfDevRouteDeps
 import org.jetbrains.exposed.sql.Database
@@ -59,7 +63,6 @@ internal fun buildSelfDev(
 ): SelfDevParts {
     val config = checkNotNull(settings.config) { "self-development settings are not enabled" }
     val auth = checkNotNull(settings.githubAuth) { "self-development GitHub authentication is missing" }
-    val keyVar = checkNotNull(settings.anthropicApiKeyEnvVar)
     val fx = checkNotNull(settings.fx) { "fx settings are missing" }
 
     val githubConfig = GitHubAdapterConfig()
@@ -79,13 +82,27 @@ internal fun buildSelfDev(
 
     val registry: ModelRegistry = loadRegistry(checkNotNull(settings.modelRegistryPath))
     val anthropicClient = HttpClient(CIO) { AnthropicProvider.installDefaults(this) }
-    val credentials = BoundCredentialSource(
-        listOf(CredentialBinding(PROVIDER_ID, ANTHROPIC_HOST, ANTHROPIC_CREDENTIAL_REF, keyVar)),
-        env,
+    // Workload Identity Federation when configured; otherwise the static key, released only to the bound host.
+    val anthropicAuth: AnthropicAuth = settings.anthropicWif?.let { wif ->
+        AnthropicWifAuth(
+            anthropicClient,
+            AnthropicWifConfig(
+                federationRuleId = wif.federationRuleId.reveal(),
+                organizationId = wif.organizationId.reveal(),
+                serviceAccountId = wif.serviceAccountId.reveal(),
+                workspaceId = wif.workspaceId?.reveal(),
+                identityTokenFile = File(wif.identityTokenFile.reveal()).toPath(),
+            ),
+        )
+    } ?: StaticKeyAuth(
+        BoundCredentialSource(
+            listOf(CredentialBinding(PROVIDER_ID, ANTHROPIC_HOST, ANTHROPIC_CREDENTIAL_REF, checkNotNull(settings.anthropicApiKeyEnvVar))),
+            env,
+        ),
     )
     val gateway = ModelGateway(
         registry = registry,
-        providers = mapOf(PROVIDER_ID to AnthropicProvider(anthropicClient, credentials)),
+        providers = mapOf(PROVIDER_ID to AnthropicProvider(anthropicClient, anthropicAuth)),
         budget = budget,
         ledger = DbRequestLedger(database),
         devAllowInMemoryLedger = false,

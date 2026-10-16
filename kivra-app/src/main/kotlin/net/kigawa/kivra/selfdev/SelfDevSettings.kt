@@ -29,6 +29,21 @@ sealed class GitHubAuth {
 }
 
 /**
+ * Anthropic Workload Identity Federation settings (ADR 0008 part 7). The IDs are not secret, but they are held in [Secret] so a
+ * settings dump cannot print them. [identityTokenFile] is a path to the projected ServiceAccount token; it is read at exchange time,
+ * not at startup, because the pod may start before the file appears.
+ */
+class AnthropicWifSettings(
+    val federationRuleId: Secret,
+    val organizationId: Secret,
+    val serviceAccountId: Secret,
+    val workspaceId: Secret?,
+    val identityTokenFile: Secret,
+) {
+    override fun toString(): String = "AnthropicWifSettings(***)"
+}
+
+/**
  * Self-development settings from the environment (ADR 0008 part 7, Issue #56). Fail-closed:
  *
  * - `KIVRA_SELFDEV_ENABLED` is off unless it is exactly `true`. While it is off, **no other self-development variable is read**:
@@ -37,6 +52,9 @@ sealed class GitHubAuth {
  *   The required settings must all be present. Every failure message names the variable, never its value.
  * - GitHub authentication is either `KIVRA_SELFDEV_GITHUB_TOKEN` (a PAT) or the three `KIVRA_SELFDEV_GITHUB_APP_*` variables
  *   (a GitHub App). Both, or neither, is a startup failure.
+ * - Anthropic authentication is either `KIVRA_SELFDEV_ANTHROPIC_API_KEY` (a static key) or the Workload Identity Federation
+ *   variables (`KIVRA_SELFDEV_ANTHROPIC_FEDERATION_RULE_ID`, `_ORGANIZATION_ID`, `_SERVICE_ACCOUNT_ID`, `_IDENTITY_TOKEN_FILE`,
+ *   and the optional `_WORKSPACE_ID`). Exactly one method: both, neither, or a partial federation setup is a startup failure.
  *
  * [toString] never shows a secret or a path to a secret.
  */
@@ -48,8 +66,10 @@ class SelfDevSettings private constructor(
     val maxActiveRuns: Int,
     /** Present only when [enabled]. */
     val githubAuth: GitHubAuth?,
-    /** Present only when [enabled]. The name of the secret env var, passed to the credential binding. */
+    /** Present only when [enabled] and the static key is used. The name of the secret env var, passed to the credential binding. */
     val anthropicApiKeyEnvVar: String?,
+    /** Present only when [enabled] and Workload Identity Federation is used. */
+    val anthropicWif: AnthropicWifSettings?,
     /** Present only when [enabled]. */
     val modelRegistryPath: String?,
     val fx: FxConfig?,
@@ -66,6 +86,11 @@ class SelfDevSettings private constructor(
         /** A path to the PEM file (preferred, e.g. a mounted Secret), or the PEM text itself. */
         const val ENV_GITHUB_APP_PRIVATE_KEY = "KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY"
         const val ENV_ANTHROPIC_API_KEY = "KIVRA_SELFDEV_ANTHROPIC_API_KEY"
+        const val ENV_ANTHROPIC_FEDERATION_RULE_ID = "KIVRA_SELFDEV_ANTHROPIC_FEDERATION_RULE_ID"
+        const val ENV_ANTHROPIC_ORGANIZATION_ID = "KIVRA_SELFDEV_ANTHROPIC_ORGANIZATION_ID"
+        const val ENV_ANTHROPIC_SERVICE_ACCOUNT_ID = "KIVRA_SELFDEV_ANTHROPIC_SERVICE_ACCOUNT_ID"
+        const val ENV_ANTHROPIC_IDENTITY_TOKEN_FILE = "KIVRA_SELFDEV_ANTHROPIC_IDENTITY_TOKEN_FILE"
+        const val ENV_ANTHROPIC_WORKSPACE_ID = "KIVRA_SELFDEV_ANTHROPIC_WORKSPACE_ID"
         const val ENV_MODEL_REGISTRY_PATH = "KIVRA_SELFDEV_MODEL_REGISTRY_PATH"
         const val ENV_CONTEXT_PREFIXES = "KIVRA_SELFDEV_CONTEXT_PREFIXES"
         const val ENV_MAX_CONTEXT_FILE_BYTES = "KIVRA_SELFDEV_MAX_CONTEXT_FILE_BYTES"
@@ -90,6 +115,7 @@ class SelfDevSettings private constructor(
             maxActiveRuns = DEFAULT_MAX_ACTIVE_RUNS,
             githubAuth = null,
             anthropicApiKeyEnvVar = null,
+            anthropicWif = null,
             modelRegistryPath = null,
             fx = null,
         )
@@ -110,7 +136,7 @@ class SelfDevSettings private constructor(
             val repo = parseRepo(env[ENV_TARGET_REPO]?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_TARGET_REPO)
             val baseBranch = env[ENV_BASE_BRANCH]?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_BASE_BRANCH
             val auth = githubAuth(env)
-            required(env, ENV_ANTHROPIC_API_KEY)
+            val wif = anthropicAuth(env)
             val registry = required(env, ENV_MODEL_REGISTRY_PATH)
             val fx = FxConfig.fromEnv(env)
             check(fx.usdJpyRate != null && fx.fxAsOf != null) {
@@ -139,7 +165,8 @@ class SelfDevSettings private constructor(
                 advanceInterval = Duration.ofSeconds(interval),
                 maxActiveRuns = maxActive.toInt(),
                 githubAuth = auth,
-                anthropicApiKeyEnvVar = ENV_ANTHROPIC_API_KEY,
+                anthropicApiKeyEnvVar = if (wif == null) ENV_ANTHROPIC_API_KEY else null,
+                anthropicWif = wif,
                 modelRegistryPath = registry,
                 fx = fx,
             )
@@ -167,6 +194,44 @@ class SelfDevSettings private constructor(
                 throw IllegalStateException("$ENV_GITHUB_APP_PRIVATE_KEY is not a usable RSA private key")
             }
             return GitHubAuth.App(appId, installationId, Secret(pem))
+        }
+
+        private val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+        /**
+         * Returns the Workload Identity Federation settings, or null when the static key is used. Exactly one method must be
+         * configured. Failure messages name variables only, never values.
+         */
+        private fun anthropicAuth(env: Map<String, String>): AnthropicWifSettings? {
+            val key = env[ENV_ANTHROPIC_API_KEY]?.trim()?.takeIf { it.isNotEmpty() }
+            val wifVars = listOf(
+                ENV_ANTHROPIC_FEDERATION_RULE_ID, ENV_ANTHROPIC_ORGANIZATION_ID, ENV_ANTHROPIC_SERVICE_ACCOUNT_ID,
+                ENV_ANTHROPIC_IDENTITY_TOKEN_FILE, ENV_ANTHROPIC_WORKSPACE_ID,
+            )
+            val wifSet = wifVars.any { env[it]?.trim()?.isNotEmpty() == true }
+            check(!(key != null && wifSet)) {
+                "$ENV_ANTHROPIC_API_KEY and ${wifVars.joinToString(", ")} are mutually exclusive: configure one Anthropic authentication method"
+            }
+            if (key != null) return null
+            check(wifSet) {
+                "$ENV_ENABLED=true requires either $ENV_ANTHROPIC_API_KEY or all of ${wifVars.take(4).joinToString(", ")}"
+            }
+            val ruleId = required(env, ENV_ANTHROPIC_FEDERATION_RULE_ID)
+            check(ruleId.startsWith("fdrl_")) { "$ENV_ANTHROPIC_FEDERATION_RULE_ID must be a federation rule id (fdrl_...)" }
+            val orgId = required(env, ENV_ANTHROPIC_ORGANIZATION_ID)
+            check(UUID_PATTERN.matches(orgId)) { "$ENV_ANTHROPIC_ORGANIZATION_ID must be a UUID" }
+            val serviceAccountId = required(env, ENV_ANTHROPIC_SERVICE_ACCOUNT_ID)
+            check(serviceAccountId.startsWith("svac_")) { "$ENV_ANTHROPIC_SERVICE_ACCOUNT_ID must be a service account id (svac_...)" }
+            val identityFile = required(env, ENV_ANTHROPIC_IDENTITY_TOKEN_FILE)
+            val workspaceId = env[ENV_ANTHROPIC_WORKSPACE_ID]?.trim()?.takeIf { it.isNotEmpty() }
+            check(workspaceId == null || workspaceId.startsWith("wrkspc_")) { "$ENV_ANTHROPIC_WORKSPACE_ID must be a workspace id (wrkspc_...)" }
+            return AnthropicWifSettings(
+                federationRuleId = Secret(ruleId),
+                organizationId = Secret(orgId),
+                serviceAccountId = Secret(serviceAccountId),
+                workspaceId = workspaceId?.let { Secret(it) },
+                identityTokenFile = Secret(identityFile),
+            )
         }
 
         /** A value that names an existing file is read as the file; anything else is taken as the PEM text. Failures never echo it. */

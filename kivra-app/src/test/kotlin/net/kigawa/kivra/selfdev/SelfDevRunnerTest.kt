@@ -228,6 +228,15 @@ class SelfDevRunnerTest {
             )
             assertEquals(emptyList(), refused.github.writes)
 
+            val truncated = Harness(db, FakeDeveloper.returning(DeveloperResult.Refused(DeveloperRefusal.OUTPUT_TRUNCATED)))
+            val truncatedRun = truncated.newRun()
+            truncated.runner().advance(truncatedRun)
+            assertEquals(
+                Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.FAILED, "DEVELOPER_OUTPUT_TRUNCATED"),
+                truncated.runner().advance(truncatedRun),
+            )
+            assertEquals(emptyList(), truncated.github.writes)
+
             val unknown = Harness(db, FakeDeveloper.returning(DeveloperResult.Unknown(DeveloperUnknown.OUTCOME_UNKNOWN)))
             val unknownRun = unknown.newRun()
             unknown.runner().advance(unknownRun)

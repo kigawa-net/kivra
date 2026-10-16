@@ -18,7 +18,31 @@ import java.nio.charset.StandardCharsets
 sealed interface ParseResult {
     data class Parsed(val patch: PatchSet) : ParseResult
 
-    data class Invalid(val reason: ParseReason) : ParseResult
+    data class Invalid(val reason: ParseReason, val shape: OutputShape) : ParseResult
+}
+
+/**
+ * Facts about the raw answer that do not reveal its content: a length and four booleans. Used only for the
+ * outcome log, so an operator can tell a truncated answer from a fenced one without seeing the text.
+ * [fenced] is true when the whole answer was wrapped in one Markdown code fence, which the parser then strips.
+ */
+data class OutputShape(
+    val charCount: Int,
+    val startsWithObject: Boolean,
+    val endsWithObject: Boolean,
+    val fenced: Boolean,
+) {
+    companion object {
+        fun of(text: String, fenced: Boolean): OutputShape {
+            val t = text.trim()
+            return OutputShape(
+                charCount = text.length,
+                startsWithObject = t.startsWith('{'),
+                endsWithObject = t.endsWith('}'),
+                fenced = fenced,
+            )
+        }
+    }
 }
 
 enum class ParseReason {
@@ -42,16 +66,35 @@ object PatchSetParser {
 
     fun parse(json: String): ParseResult {
         // UTF-8 never takes fewer bytes than UTF-16 units, so this check is safe before encoding.
-        if (json.length > MAX_INPUT_BYTES) return ParseResult.Invalid(ParseReason.INPUT_TOO_LARGE)
+        if (json.length > MAX_INPUT_BYTES) return invalid(ParseReason.INPUT_TOO_LARGE, json, fenced = false)
         if (json.toByteArray(StandardCharsets.UTF_8).size > MAX_INPUT_BYTES) {
-            return ParseResult.Invalid(ParseReason.INPUT_TOO_LARGE)
+            return invalid(ParseReason.INPUT_TOO_LARGE, json, fenced = false)
         }
+        val body = stripFence(json)
+        val fenced = body !== json
         return try {
-            ParseResult.Parsed(toPatchSet(JsonReader(json).readDocument()))
+            ParseResult.Parsed(toPatchSet(JsonReader(body).readDocument()))
         } catch (e: ParseFailure) {
-            ParseResult.Invalid(e.reason)
+            invalid(e.reason, json, fenced)
         }
     }
+
+    private fun invalid(reason: ParseReason, json: String, fenced: Boolean) =
+        ParseResult.Invalid(reason, OutputShape.of(json, fenced))
+
+    /**
+     * Removes one Markdown code fence that encloses the whole answer (an optional language tag after the opening
+     * fence). Only the outer fence is removed. The inside is still parsed strictly, and any text outside the fence
+     * is still rejected. Returns [text] itself when there is no such fence.
+     */
+    private fun stripFence(text: String): String {
+        val t = text.trim()
+        val open = FENCE_OPEN.find(t) ?: return text
+        if (!t.endsWith("```") || t.length < open.value.length + 3) return text
+        return t.substring(open.value.length, t.length - 3)
+    }
+
+    private val FENCE_OPEN = Regex("^```[A-Za-z0-9_+-]*[ \\t]*\\r?\\n")
 }
 
 private class ParseFailure(val reason: ParseReason) : RuntimeException(null, null, false, false)
@@ -162,7 +205,9 @@ private class JsonReader(private val s: String) {
             when {
                 c == '"' -> break
                 c == '\\' -> sb.append(readEscape())
-                c < ' ' -> fail(ParseReason.MALFORMED_JSON)
+                // Raw line breaks and tabs are not valid JSON, but they decode to the same text as their escapes.
+                // Other control characters stay rejected.
+                c < ' ' && c != '\n' && c != '\r' && c != '\t' -> fail(ParseReason.MALFORMED_JSON)
                 else -> sb.append(c)
             }
         }

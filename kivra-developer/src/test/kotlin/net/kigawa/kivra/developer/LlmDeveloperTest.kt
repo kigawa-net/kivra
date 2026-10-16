@@ -122,19 +122,26 @@ class LlmDeveloperTest {
     // (d) output parsing and the single retry
 
     @Test
-    fun `markdown-wrapped output is retried once and then succeeds`() {
+    fun `markdown-wrapped output is accepted on the first attempt`() {
+        val h = Harness(script = { _, _ -> reply("```json\n$VALID_PATCH_JSON\n```") })
+        val proposed = assertIs<DeveloperResult.Proposed>(propose(h.developer(), taskRequest(runId = "run-r")))
+
+        assertEquals(1, proposed.usage.attempts)
+        assertEquals(1, h.provider.calls.size)
+    }
+
+    @Test
+    fun `prose around the JSON is retried once and then succeeds`() {
         val h = Harness(script = { call, _ ->
-            if (call == 1) reply("```json\n$VALID_PATCH_JSON\n```") else reply(VALID_PATCH_JSON)
+            if (call == 1) reply("Here is the change:\n$VALID_PATCH_JSON\nLet me know.") else reply(VALID_PATCH_JSON)
         })
         val result = propose(h.developer(), taskRequest(runId = "run-r"))
 
         val proposed = assertIs<DeveloperResult.Proposed>(result)
         assertEquals(2, proposed.usage.attempts)
-        assertEquals(2, h.provider.calls.size)
-        // Each attempt has its own requestId, derived from the runId and the attempt number.
         assertEquals(listOf("developer-run-r-1", "developer-run-r-2"), h.provider.calls.map { it.requestId })
         // The retry turn does not echo the bad output.
-        assertFalse(userText(h.provider.calls[1]).contains("```json"))
+        assertFalse(userText(h.provider.calls[1]).contains("Let me know."))
     }
 
     @Test
@@ -279,8 +286,12 @@ class LlmDeveloperTest {
             assertFalse(logged.contains("n0nce-fixed-for-tests"))
             // Refusals and unknowns are logged at WARN, but only as the fixed outcome line (see LlmDeveloper).
             val outcomeLine = Regex("developer (refused|outcome unknown): runId=run-1 .*")
+            val invalidLine = Regex("developer output invalid: runId=run-1 attempt=\\d parseReason=[A-Z_]+ .*")
             appender.list.filter { it.level.isGreaterOrEqual(Level.WARN) }.forEach {
-                assertTrue(outcomeLine.matches(it.formattedMessage), "unexpected warning line: ${it.formattedMessage}")
+                assertTrue(
+                    outcomeLine.matches(it.formattedMessage) || invalidLine.matches(it.formattedMessage),
+                    "unexpected warning line: ${it.formattedMessage}",
+                )
             }
         } finally {
             root.detachAppender(appender)
@@ -395,5 +406,46 @@ class LlmDeveloperTest {
         val events = captureLogs { propose(Harness().developer(), taskRequest(runId = "run-p")) }
         assertEquals(listOf("developer proposed: runId=run-p attempts=1"), events.filter { it.loggerName.endsWith("LlmDeveloper") }.map { it.formattedMessage })
         assertEquals(Level.INFO, events.single { it.loggerName.endsWith("LlmDeveloper") }.level)
+    }
+
+    // (h) parse failure diagnostics: one WARN per attempt, fixed codes and shape only
+
+    @Test
+    fun `each unparseable attempt logs its parse reason and shape, never the output`() {
+        val secret = "SECRET-PATCH-CONTENT-ZZZ"
+        val events = captureLogs {
+            val h = Harness(script = { _, _ -> reply("{\"files\":[],\"summary\":\"$secret") })
+            assertEquals(DeveloperResult.Refused(DeveloperRefusal.INVALID_OUTPUT), propose(h.developer(), taskRequest(runId = "run-x")))
+        }
+        val invalid = events.filter { it.formattedMessage.startsWith("developer output invalid") }
+        assertEquals(2, invalid.size)
+        assertEquals(Level.WARN, invalid[0].level)
+        assertEquals(
+            "developer output invalid: runId=run-x attempt=1 parseReason=MALFORMED_JSON outputChars=${"{\"files\":[],\"summary\":\"$secret".length} " +
+                "startsWithObject=true endsWithObject=false fenced=false finishReason=STOP",
+            invalid[0].formattedMessage,
+        )
+        assertTrue(invalid[1].formattedMessage.startsWith("developer output invalid: runId=run-x attempt=2 "))
+        val logged = events.joinToString("\n") { it.formattedMessage }
+        assertFalse(logged.contains(secret))
+        assertFalse(logged.contains("files"))
+    }
+
+    @Test
+    fun `fenced and empty answers are reported with their shape`() {
+        val events = captureLogs {
+            val h = Harness(script = { call, _ -> if (call == 1) reply("") else reply("```json\n[1]\n```") })
+            propose(h.developer(), taskRequest(runId = "run-s"))
+        }
+        val invalid = events.filter { it.formattedMessage.startsWith("developer output invalid") }.map { it.formattedMessage }
+        assertEquals(
+            listOf(
+                "developer output invalid: runId=run-s attempt=1 parseReason=MALFORMED_JSON outputChars=0 " +
+                    "startsWithObject=false endsWithObject=false fenced=false finishReason=STOP",
+                "developer output invalid: runId=run-s attempt=2 parseReason=WRONG_TYPE outputChars=15 " +
+                    "startsWithObject=false endsWithObject=false fenced=true finishReason=STOP",
+            ),
+            invalid,
+        )
     }
 }

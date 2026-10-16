@@ -187,4 +187,57 @@ class PatchSetParserTest {
         val v = PatchPolicy().validate(r.patch)
         assertTrue(v is PatchVerdict.Rejected)
     }
+
+    private val validJson = """{"files":[{"op":"delete","path":"docs/a.md"}],"summary":"s"}"""
+
+    @Test
+    fun answerWrappedInOneCodeFenceIsAccepted() {
+        for (wrapped in listOf("```json\n$validJson\n```", "```\n$validJson\n```", "  ```json\r\n$validJson\n```\n")) {
+            val r = PatchSetParser.parse(wrapped)
+            assertIs<ParseResult.Parsed>(r, wrapped.take(12))
+            assertEquals(listOf(Delete("docs/a.md")), r.patch.files)
+        }
+    }
+
+    @Test
+    fun textOutsideTheFenceStillRejected() {
+        assertEquals(ParseReason.MALFORMED_JSON, invalid("Here it is:\n```json\n$validJson\n```"))
+        assertEquals(ParseReason.MALFORMED_JSON, invalid("```json\n$validJson\n```\nDone."))
+        // An unclosed fence is not stripped.
+        assertEquals(ParseReason.MALFORMED_JSON, invalid("```json\n$validJson"))
+    }
+
+    @Test
+    fun rawLineBreakAndTabInsideStringDecodeAsTheirEscapes() {
+        val raw = "{\"files\":[{\"op\":\"write\",\"path\":\"a.kt\",\"content\":\"fun a() {\n\tTODO()\r\n}\"}],\"summary\":\"s\"}"
+        val escaped = raw.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+        val r = PatchSetParser.parse(raw)
+        assertIs<ParseResult.Parsed>(r)
+        assertEquals(PatchSetParser.parse(escaped), r)
+        assertEquals("fun a() {\n\tTODO()\r\n}", (r.patch.files.single() as Write).content)
+    }
+
+    @Test
+    fun otherRawControlCharactersInsideStringStillRejected() {
+        assertEquals(ParseReason.MALFORMED_JSON, invalid("{\"files\":[],\"summary\":\"a\u0008b\"}"))
+    }
+
+    @Test
+    fun invalidResultReportsShapeWithoutContent() {
+        val truncated = "{\"files\":[],\"summary\":\"SECRET-QQQ"
+        val r = PatchSetParser.parse(truncated)
+        assertIs<ParseResult.Invalid>(r)
+        assertEquals(OutputShape(charCount = truncated.length, startsWithObject = true, endsWithObject = false, fenced = false), r.shape)
+        assertFalse(r.toString().contains("SECRET"))
+
+        val fenced = PatchSetParser.parse("```json\n[1]\n```")
+        assertIs<ParseResult.Invalid>(fenced)
+        assertEquals(ParseReason.WRONG_TYPE, fenced.reason)
+        assertTrue(fenced.shape.fenced)
+        assertFalse(fenced.shape.startsWithObject)
+
+        val empty = PatchSetParser.parse("")
+        assertIs<ParseResult.Invalid>(empty)
+        assertEquals(OutputShape(0, startsWithObject = false, endsWithObject = false, fenced = false), empty.shape)
+    }
 }

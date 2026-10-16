@@ -11,6 +11,7 @@ import net.kigawa.kivra.modelgateway.BudgetDenial
 import net.kigawa.kivra.modelgateway.DataClass
 import net.kigawa.kivra.modelgateway.Cost
 import net.kigawa.kivra.modelgateway.ErrorKind
+import net.kigawa.kivra.modelgateway.FinishReason
 import net.kigawa.kivra.modelgateway.GatewayError
 import net.kigawa.kivra.modelgateway.GatewayException
 import net.kigawa.kivra.modelgateway.GenerationParams
@@ -104,6 +105,7 @@ class LlmDeveloper(
 
             when (val parsed = PatchSetParser.parse(text(response))) {
                 is ParseResult.Invalid -> {
+                    logInvalidAttempt(request.runId, attempt, parsed, response.finishReason)
                     if (attempt >= MAX_ATTEMPTS) return DeveloperResult.Refused(DeveloperRefusal.INVALID_OUTPUT)
                     attempt++
                 }
@@ -135,6 +137,17 @@ class LlmDeveloper(
                 else -> "gateway=none"
             }
         }
+    }
+
+    /** One WARN line per unparseable answer. Fixed codes, counts and booleans only, never the answer itself. */
+    private fun logInvalidAttempt(runId: String, attempt: Int, invalid: ParseResult.Invalid, finish: FinishReason) {
+        val shape = invalid.shape
+        logger.warn(
+            "developer output invalid: runId={} attempt={} parseReason={} outputChars={} startsWithObject={} " +
+                "endsWithObject={} fenced={} finishReason={}",
+            runId, attempt, invalid.reason.name, shape.charCount, shape.startsWithObject, shape.endsWithObject,
+            shape.fenced, finish.name,
+        )
     }
 
     private fun logOutcome(runId: String, result: DeveloperResult, diagnostics: Diagnostics) {

@@ -163,6 +163,9 @@ class AnthropicProvider(
             if (stream) put("stream", true)
             if (system.isNotEmpty()) put("system", system)
             req.generation.temperature?.let { put("temperature", it) }
+            req.generation.thinking?.let { mode ->
+                put("thinking", buildJsonObject { put("type", when (mode) { ThinkingMode.DISABLED -> "disabled" }) })
+            }
             if (req.generation.stopSequences.isNotEmpty()) put("stop_sequences", JsonArray(req.generation.stopSequences.map(::JsonPrimitive)))
             put("messages", buildJsonArray {
                 for (m in req.messages.filter { it.role != Role.SYSTEM }) add(messageJson(m))

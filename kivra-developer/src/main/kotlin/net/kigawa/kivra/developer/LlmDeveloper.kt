@@ -25,6 +25,7 @@ import net.kigawa.kivra.modelgateway.Requirements
 import net.kigawa.kivra.modelgateway.ResponseFormat
 import net.kigawa.kivra.modelgateway.Role
 import net.kigawa.kivra.modelgateway.RoutingPreference
+import net.kigawa.kivra.modelgateway.ThinkingMode
 import net.kigawa.kivra.modelgateway.Usage
 import java.nio.charset.StandardCharsets
 import kotlin.time.Duration
@@ -142,6 +143,16 @@ class LlmDeveloper(
     /** One WARN line per unparseable answer. Fixed codes, counts and booleans only, never the answer itself. */
     private fun logInvalidAttempt(runId: String, attempt: Int, invalid: ParseResult.Invalid, finish: FinishReason) {
         val shape = invalid.shape
+        if (finish == FinishReason.LENGTH && shape.charCount == 0) {
+            // The output limit was reached with no text: the budget may have gone to thinking (see DeveloperConfig.thinking).
+            logger.warn(
+                "developer output invalid: runId={} attempt={} parseReason={} outputChars={} startsWithObject={} " +
+                    "endsWithObject={} fenced={} finishReason={} emptyAtLimit=true",
+                runId, attempt, invalid.reason.name, shape.charCount, shape.startsWithObject, shape.endsWithObject,
+                shape.fenced, finish.name,
+            )
+            return
+        }
         logger.warn(
             "developer output invalid: runId={} attempt={} parseReason={} outputChars={} startsWithObject={} " +
                 "endsWithObject={} fenced={} finishReason={}",
@@ -186,7 +197,11 @@ class LlmDeveloper(
         dataClass = config.dataClass,
         budgetScopes = config.budgetScopes,
         responseFormat = ResponseFormat.Text,
-        generation = GenerationParams(maxOutputTokens = config.maxOutputTokens, temperature = config.temperature),
+        generation = GenerationParams(
+            maxOutputTokens = config.maxOutputTokens,
+            temperature = config.temperature,
+            thinking = config.thinking,
+        ),
         requirements = config.requirements,
         preference = config.preference,
         timeout = config.timeout,
@@ -265,6 +280,11 @@ data class DeveloperConfig(
      * reject an explicit temperature. Set it only for a model known to accept it.
      */
     val temperature: Double? = null,
+    /**
+     * Extended thinking for the proposal call. Default DISABLED: a model with adaptive thinking on by default (Haiku 5.5)
+     * can spend the whole [maxOutputTokens] on thinking and return no text (dev, 2026-10-17). Null sends nothing.
+     */
+    val thinking: ThinkingMode? = ThinkingMode.DISABLED,
     val preference: RoutingPreference = RoutingPreference(),
     val timeout: Duration = 120.seconds,
     /** Upper bound on the UTF-8 size of the task and the repository context together. Input over it is refused. */

@@ -10,8 +10,12 @@ import net.kigawa.kivra.core.patch.RejectReason
 import net.kigawa.kivra.core.patch.Write
 import net.kigawa.kivra.modelgateway.ErrorKind
 import net.kigawa.kivra.modelgateway.GatewayError
+import net.kigawa.kivra.modelgateway.DataClass
+import net.kigawa.kivra.modelgateway.FinishReason
 import net.kigawa.kivra.modelgateway.GatewayException
 import net.kigawa.kivra.modelgateway.Price
+import net.kigawa.kivra.modelgateway.Requirements
+import net.kigawa.kivra.modelgateway.ThinkingMode
 import org.slf4j.LoggerFactory
 import java.math.BigDecimal
 import kotlin.test.Test
@@ -447,5 +451,58 @@ class LlmDeveloperTest {
             ),
             invalid,
         )
+    }
+
+    // (i) extended thinking: the proposal call disables it by default and the output limit is not spent on thinking
+
+    @Test
+    fun `proposal call disables thinking by default`() {
+        val h = Harness()
+        propose(h.developer())
+        assertEquals(ThinkingMode.DISABLED, h.provider.calls.single().generation.thinking)
+    }
+
+    @Test
+    fun `thinking can be left unset through DeveloperConfig`() {
+        val h = Harness()
+        val dev = LlmDeveloper(
+            h.gateway,
+            DeveloperConfig(
+                principal = "kivra-developer-test",
+                dataClass = DataClass.PUBLIC,
+                budgetScopes = listOf("task"),
+                requirements = Requirements(),
+                maxOutputTokens = 1000,
+                thinking = null,
+            ),
+            { "n0nce-fixed-for-tests" },
+        )
+        propose(dev)
+        assertEquals(null, h.provider.calls.single().generation.thinking)
+    }
+
+    @Test
+    fun `empty answer at the output limit is logged with emptyAtLimit`() {
+        val events = captureLogs {
+            val h = Harness(script = { _, _ -> reply("").copy(finishReason = FinishReason.LENGTH) })
+            assertEquals(DeveloperResult.Refused(DeveloperRefusal.INVALID_OUTPUT), propose(h.developer(), taskRequest(runId = "run-l")))
+        }
+        val invalid = events.filter { it.formattedMessage.startsWith("developer output invalid") }.map { it.formattedMessage }
+        assertEquals(2, invalid.size)
+        assertEquals(
+            "developer output invalid: runId=run-l attempt=1 parseReason=MALFORMED_JSON outputChars=0 " +
+                "startsWithObject=false endsWithObject=false fenced=false finishReason=LENGTH emptyAtLimit=true",
+            invalid[0],
+        )
+    }
+
+    @Test
+    fun `non-empty answer at the output limit does not get emptyAtLimit`() {
+        val events = captureLogs {
+            val h = Harness(script = { _, _ -> reply("{\"files\":").copy(finishReason = FinishReason.LENGTH) })
+            propose(h.developer(), taskRequest(runId = "run-n"))
+        }
+        val first = events.first { it.formattedMessage.startsWith("developer output invalid") }.formattedMessage
+        assertFalse(first.contains("emptyAtLimit"))
     }
 }

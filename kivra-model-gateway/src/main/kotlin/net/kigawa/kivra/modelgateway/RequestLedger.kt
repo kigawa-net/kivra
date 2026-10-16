@@ -118,6 +118,8 @@ internal object RequestDigest {
         c.s(req.generation.maxOutputTokens.toString())
         c.s(req.generation.temperature?.toString())
         c.list(req.generation.stopSequences) { c.s(it) }
+        // Appended only when set, so every request without thinking keeps its existing digest.
+        req.generation.thinking?.let { c.s("thinking"); c.s(it.name) }
         val r = req.requirements
         c.list(r.requiredCapabilities.map { it.name }.sorted()) { c.s(it) }
         c.s(r.minContextTokens?.toString()); c.s(r.minQualityTier?.name)

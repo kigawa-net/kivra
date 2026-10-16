@@ -191,6 +191,24 @@ class AnthropicProviderTest : ModelProviderContract() {
         assertEquals(0.2, bodyOf(seen.last())["temperature"]!!.jsonPrimitive.content.toDouble())
     }
 
+    @Test fun thinkingDisabledIsSentOnlyWhenSet() = runTest {
+        val seen = mutableListOf<HttpRequestData>()
+        build(Scenario.TEXT, seen).invoke(request().copy(generation = GenerationParams(321)), target, ctx)
+        assertFalse(bodyOf(seen.last()).containsKey("thinking"), "default: the key is absent")
+        build(Scenario.TEXT, seen).invoke(request().copy(generation = GenerationParams(321, thinking = ThinkingMode.DISABLED)), target, ctx)
+        assertEquals("disabled", bodyOf(seen.last())["thinking"]!!.jsonObject["type"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun thinkingDisabledIsAlsoSentOnTheStreamPath() {
+        val withThinking = build(Scenario.TEXT).buildBody(
+            request().copy(generation = GenerationParams(321, thinking = ThinkingMode.DISABLED)), target, stream = true,
+        )
+        assertEquals("disabled", withThinking["thinking"]!!.jsonObject["type"]!!.jsonPrimitive.content)
+        assertEquals(true, withThinking["stream"]!!.jsonPrimitive.content.toBoolean())
+        val without = build(Scenario.TEXT).buildBody(request().copy(generation = GenerationParams(321)), target, stream = true)
+        assertFalse(without.containsKey("thinking"))
+    }
+
     @Test fun badRequestKeepsOnlyErrorTypeNotTheMessage() = runTest {
         val secretBody = """{"type":"error","error":{"type":"invalid_request_error","message":"SECRET-PROMPT-FRAGMENT"}}"""
         val p = AnthropicProvider(HttpClient(MockEngine { respond(secretBody, HttpStatusCode.BadRequest, jsonHeaders) }), { API_KEY }, "contract")

@@ -55,6 +55,7 @@ internal fun Route.configureBudgetAdminRoutes(budget: BudgetPort, identity: Task
             call.respond(HttpStatusCode.Unauthorized, BudgetAdminError("unauthorized"))
             return@post
         }
+        if (!call.requireJsonSameOrigin()) return@post
         val body = try {
             budgetAdminJson.decodeFromString(AcknowledgeBudgetRequest.serializer(), call.receiveText())
         } catch (_: Exception) {

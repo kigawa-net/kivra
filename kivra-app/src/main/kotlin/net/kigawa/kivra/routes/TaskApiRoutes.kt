@@ -69,6 +69,7 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.Unauthorized, TaskApiError("unauthorized"))
             return@post
         }
+        if (!call.requireJsonSameOrigin()) return@post
         val request = try { call.receive<SubmitTaskRequest>() } catch (_: Exception) {
             call.respond(HttpStatusCode.BadRequest, TaskApiError("invalid request body"))
             return@post

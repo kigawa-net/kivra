@@ -68,6 +68,7 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
             call.respond(HttpStatusCode.Unauthorized, SelfDevError("unauthorized"))
             return@post
         }
+        if (!call.requireJsonSameOrigin()) return@post
         val request = try {
             strictJson.decodeFromString(SubmitSelfDevTaskRequest.serializer(), call.receiveText())
         } catch (_: Exception) {

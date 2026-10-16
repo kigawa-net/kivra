@@ -10,10 +10,14 @@ import io.ktor.server.routing.post
 import java.time.ZoneOffset
 import kotlinx.serialization.Serializable
 import net.kigawa.kivra.auth.TaskApiIdentity
+import net.kigawa.kivra.core.PullRequestBinding
 import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.db.AuditTrailEntry
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.SELF_DEV_TASK_PREFIX
 import net.kigawa.kivra.db.TaskSubmitResult
+import net.kigawa.kivra.github.RepoRef
 
 /**
  * Task API (Issue #112): authenticated, persisted Task submission. Every Run here is SIMULATED and CREATED only. No
@@ -25,16 +29,44 @@ import net.kigawa.kivra.db.TaskSubmitResult
 @Serializable
 data class SubmitTaskRequest(val title: String, val idempotencyKey: String)
 
-/** The Run snapshot returned by POST, GET /api/runs/{id} and GET /api/runs. */
+/**
+ * The Run snapshot returned by POST, GET /api/runs/{id}, GET /api/runs and the operator views (GET /api/admin/runs...).
+ *
+ * A self-development run (mode SELF_DEV) has no [title] (its task text is never returned, ADR 0008), no [executed] (it is not a
+ * simulation, and kivra does not claim it ran), and [effect] CREATES_PULL_REQUEST. Its pull request, when one exists, comes
+ * from the run's binding in the database. GitHub is not called. [pullRequestUrl] is set only when the repository is the
+ * configured target repository.
+ */
 @Serializable
 data class TaskRunResponse(
     val runId: String,
     val taskId: String,
-    val title: String,
+    val title: String?,
     val state: String,
     val mode: String,
-    val executed: Boolean,
+    val executed: Boolean?,
+    val effect: String,
+    val reasonCode: String?,
     val createdAt: String,
+    val updatedAt: String,
+    val pullRequestRepository: String? = null,
+    val pullRequestNumber: Long? = null,
+    val pullRequestUrl: String? = null,
+    /** Only in the operator view (GET /api/admin/runs). The authenticated principal that submitted the run. */
+    val createdBy: String? = null,
+    /** Only in a detail response. The run's audit events (time, action, result, fixed codes). */
+    val events: List<RunEventResponse>? = null,
+)
+
+/** One audit event of a run. [toState] and [reasonCode] are set only for a state transition. Actors and payloads are not shown. */
+@Serializable
+data class RunEventResponse(
+    val seq: Long,
+    val occurredAt: String,
+    val action: String,
+    val result: String,
+    val toState: String? = null,
+    val reasonCode: String? = null,
 )
 
 @Serializable
@@ -52,17 +84,68 @@ internal fun validatedText(raw: String, maxCodePoints: Int): String? {
     return value
 }
 
-internal fun DevelopmentRun.toTaskRunResponse(): TaskRunResponse = TaskRunResponse(
-    runId = runId.value,
-    taskId = taskId,
-    title = taskTitle.orEmpty(),
-    state = state.name,
-    mode = "SIMULATED",
-    executed = false,
-    createdAt = createdAt.toInstant(ZoneOffset.UTC).toString(),
+/** True for a self-development run (its task id carries [SELF_DEV_TASK_PREFIX]). */
+internal fun DevelopmentRun.isSelfDev(): Boolean = taskId.startsWith(SELF_DEV_TASK_PREFIX)
+
+/**
+ * The caller-facing view of a run. [binding] is the run's pull request binding (null when there is none), [targetRepo] the
+ * configured self-development repository (null when self-development is not configured: then no link is made).
+ */
+internal fun DevelopmentRun.toTaskRunResponse(
+    binding: PullRequestBinding? = null,
+    targetRepo: RepoRef? = null,
+    createdBy: String? = null,
+    events: List<RunEventResponse>? = null,
+): TaskRunResponse {
+    val selfDev = isSelfDev()
+    return TaskRunResponse(
+        runId = runId.value,
+        taskId = taskId,
+        title = if (selfDev) null else taskTitle.orEmpty(),
+        state = state.name,
+        mode = if (selfDev) "SELF_DEV" else "SIMULATED",
+        executed = if (selfDev) null else false,
+        effect = if (selfDev) "CREATES_PULL_REQUEST" else "SIMULATED_ONLY",
+        reasonCode = stateReason,
+        createdAt = createdAt.toInstant(ZoneOffset.UTC).toString(),
+        updatedAt = updatedAt.toInstant(ZoneOffset.UTC).toString(),
+        pullRequestRepository = binding?.repository,
+        pullRequestNumber = binding?.prNumber,
+        pullRequestUrl = binding?.let { pullRequestUrlOf(it, targetRepo) },
+        createdBy = createdBy,
+        events = events,
+    )
+}
+
+/** A link only for the configured repository and a positive pull request number. Anything else is not a link. */
+internal fun pullRequestUrlOf(binding: PullRequestBinding, targetRepo: RepoRef?): String? {
+    if (targetRepo == null || binding.prNumber <= 0) return null
+    if (!binding.repository.equals("${targetRepo.owner}/${targetRepo.repo}", ignoreCase = true)) return null
+    return "https://github.com/${targetRepo.owner}/${targetRepo.repo}/pull/${binding.prNumber}"
+}
+
+/** Builds the view of a run from the database: its binding (self-development only) and, for a detail, its audit events. */
+internal fun DevelopmentRunRepository.viewOf(
+    run: DevelopmentRun,
+    targetRepo: RepoRef?,
+    createdBy: String? = null,
+    withEvents: Boolean = false,
+): TaskRunResponse {
+    val binding = if (run.isSelfDev()) loadPullRequestBinding(run.runId) else null
+    val events = if (withEvents) auditTrail(run.runId).map { it.toRunEventResponse() } else null
+    return run.toTaskRunResponse(binding, targetRepo, createdBy, events)
+}
+
+private fun AuditTrailEntry.toRunEventResponse(): RunEventResponse = RunEventResponse(
+    seq = seq,
+    occurredAt = occurredAt.toInstant(ZoneOffset.UTC).toString(),
+    action = action,
+    result = result,
+    toState = toState,
+    reasonCode = reasonCode,
 )
 
-internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity) {
+internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity, targetRepo: RepoRef? = null) {
     post("/api/tasks") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
@@ -95,7 +178,7 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
         }
         val run = call.parameters["id"]?.let { runs.getTask(RunId(it), principal) }
         if (run == null) call.respond(HttpStatusCode.NotFound, TaskApiError("run not found"))
-        else call.respond(run.toTaskRunResponse())
+        else call.respond(runs.viewOf(run, targetRepo, withEvents = true))
     }
 
     get("/api/runs") {
@@ -104,6 +187,6 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.Unauthorized, TaskApiError("unauthorized"))
             return@get
         }
-        call.respond(runs.listTasks(principal, limit = 50).map { it.toTaskRunResponse() })
+        call.respond(runs.listTasks(principal, limit = 50).map { runs.viewOf(it, targetRepo) })
     }
 }

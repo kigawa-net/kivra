@@ -99,22 +99,85 @@ class UiRoutesTest {
         assertFalse(Regex("setAttribute\\(\\s*['\"]on", RegexOption.IGNORE_CASE).containsMatchIn(appJs))
         // Only fixed attribute names are set by the helper.
         assertFalse(Regex("setAttribute\\(\\s*['\"](?!href['\"]|type['\"])").containsMatchIn(appJs))
-        // fetch targets are same-origin paths only.
-        val fetchTargets = Regex("apiFetch\\(\\s*'([^']*)'").findAll(appJs).map { it.groupValues[1] }.toList()
-        assertTrue(fetchTargets.isNotEmpty())
-        assertTrue(fetchTargets.all { it.startsWith("/api/") || it == "/health" }, "fetch targets: $fetchTargets")
+        // fetch targets are same-origin paths only. Every call is checked, whatever the quote style (', ", or a template literal).
+        val fetchTargets = Regex("(?<!function )apiFetch\\(\\s*([^,)]*)").findAll(appJs).map { it.groupValues[1].trim() }.toList()
+        assertTrue(fetchTargets.size >= 5, "fetch calls: $fetchTargets")
+        assertTrue(
+            fetchTargets.all { it.startsWith("'/api/") || it == "'/health'" },
+            "every fetch target must be a literal path under /api/ or /health: $fetchTargets",
+        )
+        assertFalse(appJs.contains("`"), "app.js must not use template literals")
         // Authorization is added by oauth2-proxy, never by the page.
         assertFalse(appJs.contains("Authorization"))
     }
 
     @Test
-    fun `page shows the simulation banner and the executed false marker`() {
-        assertContains(indexHtml, "このサーバーの Run は、すべてシミュレーションです")
-        assertContains(indexHtml, "executed: false")
-        assertContains(indexHtml, "SIMULATED")
+    fun `page no longer claims that every run is a simulation, and shows the kind and the self-development note`() {
+        // The fixed sentence is gone: self-development runs are listed too (see the kind badges).
+        assertFalse(indexHtml.contains("すべてシミュレーション"))
+        assertFalse(indexHtml.contains("executed: false"))
+        assertFalse(appJs.contains("executed"), "app.js must not display the executed flag")
+        assertContains(indexHtml, "id=\"mode-note\"")
+        // The banner text depends on GET /api/selfdev/status, and says nothing when the status is unknown.
+        assertContains(appJs, "apiFetch('/api/selfdev/status', 'GET')")
+        assertContains(appJs, "自己開発の Run は、GitHub に PR を作成します")
+        assertContains(appJs, "自己開発は無効です")
+        assertContains(appJs, "自己開発の設定を取得できていません")
+        // Kind badges: the two fixed kinds, and anything else is shown as unknown.
+        assertContains(appJs, "SIMULATED: { label: 'シミュレーション'")
+        assertContains(appJs, "SELF_DEV: { label: '自己開発（PR を作成）'")
+        assertContains(appJs, "不明な種別")
         // Never claim that a Run ran.
         assertFalse(indexHtml.contains("実行中"))
         assertFalse(appJs.contains("実行中"))
+    }
+
+    @Test
+    fun `operators can switch between their own runs and all runs, and the detail keeps the scope`() {
+        assertContains(indexHtml, "id=\"scope-form\"")
+        assertContains(indexHtml, "id=\"scope-mine\"")
+        assertContains(indexHtml, "id=\"scope-all\"")
+        assertContains(appJs, "apiFetch('/api/admin/runs?limit=100', 'GET')")
+        assertContains(appJs, "apiFetch('/api/runs', 'GET')")
+        assertContains(appJs, "apiFetch('/api/admin/runs/' + encodeURIComponent(id), 'GET')")
+        assertContains(appJs, "scope=all")
+        // A response for a scope that is no longer selected is dropped.
+        assertContains(appJs, "if (scope !== state.scope) return;")
+    }
+
+    @Test
+    fun `self-development titles are never shown, and only a simulated run shows its title`() {
+        assertContains(appJs, "if (run.mode === 'SIMULATED') return clip(run.title, MAX_TITLE);")
+        assertContains(appJs, "（非表示：自己開発）")
+        // Every value from the server goes into the DOM as text: no markup is ever built from strings.
+        assertFalse(Regex("\\.(textContent|innerText)\\s*=\\s*[^;]*\\+\\s*'<").containsMatchIn(appJs))
+        assertFalse(Regex("<[a-z]+[^>]*\\$\\{").containsMatchIn(appJs))
+    }
+
+    @Test
+    fun `a pull request is a link only when its url has the exact github shape, otherwise it is text`() {
+        // The only href that comes from the server is checked by safePrUrl(); the list link is a fixed path.
+        assertContains(appJs, "var PR_URL = /^https:\\/\\/github\\.com\\/[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+\\/pull\\/[0-9]+$/;")
+        assertContains(appJs, "return typeof url === 'string' && PR_URL.test(url) ? url : null;")
+        assertContains(appJs, "var url = safePrUrl(run.pullRequestUrl);")
+        assertContains(appJs, "if (url === null) return h('span', { text: label });")
+        assertContains(appJs, "h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: label + ' ↗' })")
+        // Exactly two href sites: the list link (fixed path plus an encoded id) and the checked PR link.
+        assertEquals(2, Regex("\\bhref:").findAll(appJs).count(), "href sites")
+        assertContains(appJs, "href: '#/runs/' + encodeURIComponent(id)")
+        // target and rel are assigned only from constants, through the allow-listed prop names.
+        assertContains(appJs, "else if (k === 'target' || k === 'rel') node[k] = v;")
+    }
+
+    @Test
+    fun `reason codes and states are looked up by own keys only, and unknown values are shown as they are`() {
+        // Object lookups use hasOwnProperty, so a code such as "constructor" is not a known reason.
+        assertContains(appJs, "return Object.prototype.hasOwnProperty.call(map, key);")
+        assertContains(appJs, "if (has(REASONS, c)) return REASONS[c] + '（' + c + '）';")
+        assertContains(appJs, "if (has(STATES, c)) return { label: c, desc: STATES[c] };")
+        // Unknown states and reasons are shown as text, never as an empty or fabricated explanation.
+        assertContains(appJs, "不明な状態です")
+        assertContains(appJs, "不明な理由（")
     }
 
     @Test

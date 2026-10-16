@@ -20,7 +20,7 @@
   <button type="button" id="reload-btn">再読み込みしてログインし直す</button>
 </div>
 
-<p class="sim-banner" role="note">このサーバーの Run は、すべてシミュレーションです（AI は実行されていません。<code>executed: false</code>）</p>
+<p class="sim-banner" id="mode-note" role="note">自己開発の設定を確認しています…</p>
 
 <main>
   <div id="view-list">
@@ -43,6 +43,13 @@
         <h2 id="h-runs">Run の一覧</h2>
         <button type="button" id="refresh-btn" class="secondary">今すぐ更新</button>
       </div>
+      <form id="scope-form" class="scope">
+        <fieldset>
+          <legend>表示する範囲</legend>
+          <label><input type="radio" name="scope" id="scope-mine" value="mine" checked> 自分の Run</label>
+          <label><input type="radio" name="scope" id="scope-all" value="all"> 全員の Run（運用者向け）</label>
+        </fieldset>
+      </form>
       <p id="runs-status" class="meta" role="status">未取得</p>
       <ul id="runs-list" class="run-list"></ul>
     </section>
@@ -56,8 +63,8 @@
 </main>
 
 <footer class="legend">
-  <p><span class="badge">SIMULATED</span> シミュレーションの Run です。Agent や外部システムは起動されません。</p>
-  <p><span class="badge">executed: false</span> 実行されていないことを示します。状態（作成済みなど）とは別に表示しています。</p>
+  <p><span class="badge">シミュレーション</span> SIMULATED の Run です。AI や GitHub は呼ばれません。</p>
+  <p><span class="badge kind-self">自己開発（PR を作成）</span> SELF_DEV の Run です。GitHub に PR を作成します。kivra は PR をマージしません。タイトルは表示しません。</p>
 </footer>
 
 <script src="/ui/app.js" defer></script>

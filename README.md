@@ -183,7 +183,7 @@ Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込み
 | `GET /api/runs` | 自分の Run を新しい順に最大 50 件 |
 | `GET /api/runs/{id}/operations` | 自分の Run の Operation を作成順に最大 100 件（読み取り専用）。他人の Run・存在しない Run は同じ 404。`{schemaVersion, runId, operations, limit, truncated}`。`?after=<operationId>` で次ページを取得でき、`truncated=true` のとき応答の `nextAfter` がその値（不正な `after` は 400）。`state` は Journal の状態名をそのまま返す（UNKNOWN / RECONCILIATION_REQUIRED を成功・完了とは表示しない）。トークン、request hash、外部参照、生のエラー、Evidence は含まない |
 
-応答（Run のスナップショット）: `{runId, taskId, title, state, mode, executed, createdAt}`。`state` は `CREATED`、`mode` は `SIMULATED`、`executed` は `false`。
+応答（Run のスナップショット）: `{runId, taskId, title, state, mode, executed, effect, reasonCode, createdAt, updatedAt, ...}`。投入は `state` が `CREATED`、`mode` が `SIMULATED`、`executed` が `false`。自己開発の Run は `mode` が `SELF_DEV` で、`title` と `executed` は null（タイトルは返さない）、`effect` は `CREATES_PULL_REQUEST`。PR の番号とリンクは DB の binding から作る（GitHub は呼ばない）。
 入力: `title` は 1〜200 文字（前後の空白は除去）、`idempotencyKey` は 1〜128 文字、どちらも制御文字を含まないこと。違反は 400。
 
 **認証（`KIVRA_AUTH_MODE`）**
@@ -221,7 +221,8 @@ Run の `task_id` は `api:<runId>`（fusha-task のタスクとは紐づかな�
 
 - **有効化**: Task API と同じく `KIVRA_AUTH_MODE` が設定されているときだけ登録する。未設定なら `/ui` は 404。
 - **認証**: HTML 自体には秘密が無いので `/ui` には認証を掛けていない。画面が呼ぶ `/api/*` は Task API の認証（本番は oauth2-proxy が付ける Keycloak の JWT を kivra が検証）で保護される。画面の JS は `Authorization` を付けない。
-- **シミュレーション**: この画面の Run はすべてシミュレーション（`mode: SIMULATED`、`executed: false`）。画面にもその旨を常時表示し、「実行中」「成功」のような実行されたと誤認させる表現は使わない。
+- **種別**: 一覧と詳細には、シミュレーションの Run（`mode: SIMULATED`）と自己開発の Run（`mode: SELF_DEV`、GitHub に PR を作成する）の両方を出し、種別のバッジで区別する。自己開発の Run のタイトルは表示しない。「実行中」「成功」のような実行されたと誤認させる表現は使わない。
+- **運用者の表示**: 「全員の Run」で、ロールを持つ運用者は全員の Run を見られる（`GET /api/admin/runs`）。自己開発の有効・無効（`GET /api/selfdev/status`）に応じた注意書きと、理由コードの説明を出す。詳細は `docs/runbook-selfdev.md` の 4.5。
 - **CSP**: `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`。インラインの script と style は使わない（別ファイル）。あわせて `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`。
 - **XSS 対策**: サーバーからのデータ（title など）は `textContent` だけで DOM に入れる。`innerHTML` などの HTML 文字列を解釈する API、`eval`、`new Function` は使わない（テストで静的に検査している）。
 - **外部依存なし**: CDN やフォント等の外部 URL は使わない（テストで検査している）。

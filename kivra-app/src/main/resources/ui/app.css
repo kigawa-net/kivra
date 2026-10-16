@@ -231,6 +231,56 @@ button.secondary {
   gap: 0.5rem;
 }
 
+.run-item {
+  list-style: none;
+}
+
+.run-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  margin: 0.3rem 0.2rem 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.badge.kind-self {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.scope fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  border: 0;
+  padding: 0;
+  margin: 0 0 0.75rem;
+}
+
+.scope legend {
+  font-size: 0.85rem;
+  color: var(--muted);
+  padding: 0;
+  margin-bottom: 0.25rem;
+}
+
+.scope label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 400;
+  font-size: 0.9rem;
+  color: var(--fg);
+}
+
+.events {
+  padding-left: 1.25rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .run-list.stale {
   opacity: 0.6;
 }

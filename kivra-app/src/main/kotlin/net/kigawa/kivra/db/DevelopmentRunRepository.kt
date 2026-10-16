@@ -76,6 +76,21 @@ sealed interface TaskSubmitResult {
 /** Fixed reason code for a pull request closed without merge (ADR 0008 item 6). */
 const val PR_ABANDONED_REASON = "PR_ABANDONED"
 
+/** Result of [DevelopmentRunRepository.releaseUnknownSelfDev]. */
+sealed interface ReleaseResult {
+    /** The run was UNKNOWN and is now CANCELLED. */
+    data class Released(val run: DevelopmentRun) : ReleaseResult
+
+    /** No self-development run with that id. A run of another kind is reported the same way. */
+    data object NotFound : ReleaseResult
+
+    /** The run is not UNKNOWN (or changed under this call). Nothing is written. */
+    data object NotUnknown : ReleaseResult
+}
+
+/** Fixed state reason of a run released by an operator (ADR 0009). The free-text reason goes only to the audit payload. */
+const val OPERATOR_RELEASED_REASON = "OPERATOR_RELEASED"
+
 /** Thrown when a self-development submission would exceed the active-run cap. Nothing is written. */
 class ActiveSelfDevLimitException : RuntimeException("active self-development run limit reached")
 
@@ -543,6 +558,48 @@ class DevelopmentRunRepository(
         audit.append(this, runId, AuditEntry(actor = actor, action = "RUN_TRANSITION", result = "OK", resource = "task:$taskId", traceId = traceId, payload = payload))
         outbox.append(this, runId, row[DevelopmentRunsTable.version] + 1, "RunStateChanged", payload, traceId)
         true
+    }
+
+    /**
+     * Operator release of a self-development run that is UNKNOWN (ADR 0009): UNKNOWN -> CANCELLED. This is the only way out of
+     * UNKNOWN without evidence, and it exists only here, not in [transition]. The run row, its RUN_RELEASED audit event (which
+     * carries [reason] in its payload) and its RunStateChanged outbox event are written in one transaction, or not at all.
+     * The row is locked and the update is guarded on state = UNKNOWN, so a second release is NotUnknown.
+     */
+    fun releaseUnknownSelfDev(runId: RunId, operator: String, reason: String): ReleaseResult = transaction(database) {
+        val row = lockRun(runId)
+        if (row == null || !row[DevelopmentRunsTable.taskId].startsWith(SELF_DEV_TASK_PREFIX)) return@transaction ReleaseResult.NotFound
+        val from = DevelopmentRunState.fromStorage(row[DevelopmentRunsTable.state])
+        if (from != DevelopmentRunState.UNKNOWN) return@transaction ReleaseResult.NotUnknown
+        val version = row[DevelopmentRunsTable.version]
+        val taskId = row[DevelopmentRunsTable.taskId]
+        val traceId = row[DevelopmentRunsTable.traceId]
+        val updated = execUpdate(
+            """
+            UPDATE development_runs
+               SET state = ?, state_reason = ?, version = version + 1, updated_at = ?
+             WHERE run_id = ? AND version = ? AND state = ?
+            """.trimIndent(),
+            DevelopmentRunState.CANCELLED.name, OPERATOR_RELEASED_REASON, utcNow(clock), runId.value, version, DevelopmentRunState.UNKNOWN.name,
+        )
+        if (updated != 1) throw VersionConflictException("run $runId changed concurrently")
+        audit.append(
+            this, runId,
+            AuditEntry(
+                actor = operator, action = "RUN_RELEASED", result = "OK", resource = "task:$taskId", traceId = traceId,
+                payload = buildJsonObject {
+                    put("taskId", taskId)
+                    put("from", DevelopmentRunState.UNKNOWN.name)
+                    put("to", DevelopmentRunState.CANCELLED.name)
+                    put("reasonCode", OPERATOR_RELEASED_REASON)
+                    put("reason", reason)
+                }.toString(),
+            ),
+        )
+        outbox.append(this, runId, version + 1, "RunStateChanged", transitionPayload(taskId, DevelopmentRunState.UNKNOWN, DevelopmentRunState.CANCELLED), traceId)
+        // Read in this transaction: a nested transaction would not see the update above.
+        val released = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.single().toDevelopmentRunOrNull()
+        ReleaseResult.Released(checkNotNull(released) { "released run $runId has an unknown state" })
     }
 
     private fun lockRun(runId: RunId): ResultRow? =

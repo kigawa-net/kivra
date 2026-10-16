@@ -168,6 +168,7 @@
 8. `org.mariadb` のログを `TRACE` / `DEBUG` にしない(INSERT の値がログに出る)。
 9. レプリカは 1 にする。`KIVRA_SELFDEV_MAX_ACTIVE_RUNS` の上限は、プロセス内の直列化で守っている。複数のレプリカでは、同時の投入で上限を超えうる。
 10. 予算の `UNKNOWN_COST` は、運用者が監査つきで解除する(`POST /api/admin/budget/acknowledge`、`admin-panel:admin`)。`UNKNOWN` の自己開発 Run は、運用者専用の経路で `CANCELLED` に解放する(`POST /api/admin/selfdev/runs/{id}/release`、ADR 0009、runbook §4.1)。
+11. 状態を変える POST(`/api/tasks`、`/api/selfdev/tasks`、release、budget acknowledge)は、`Content-Type: application/json` 以外を 415、`Sec-Fetch-Site` が `same-origin` / `none` 以外、または `Origin` が `Host` と一致しないものを 403 で拒否する(`RequestGuards.kt`、`RequestGuardsTest`)。Ingress / oauth2-proxy が `Host` を元のホスト名のまま kivra に渡すことを前提にする(`X-Forwarded-Host` は信頼しない)。
 
 設定の一覧(値は書かない): `KIVRA_SELFDEV_ENABLED`、`KIVRA_SELFDEV_TARGET_REPO`(既定 `kigawa-net/kivra`、1 つだけ。リクエストでは指定できない)、`KIVRA_SELFDEV_BASE_BRANCH`(既定 `main`)、`KIVRA_SELFDEV_GITHUB_TOKEN`(PAT、互換)または `KIVRA_SELFDEV_GITHUB_APP_ID` / `KIVRA_SELFDEV_GITHUB_APP_INSTALLATION_ID` / `KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY`(App、推奨)、`KIVRA_SELFDEV_ANTHROPIC_API_KEY`(静的キー)または `KIVRA_SELFDEV_ANTHROPIC_FEDERATION_RULE_ID` / `_ORGANIZATION_ID` / `_SERVICE_ACCOUNT_ID` / `_IDENTITY_TOKEN_FILE`(WIF、推奨)と `_WORKSPACE_ID`(任意)、`KIVRA_SELFDEV_MODEL_REGISTRY_PATH`、`KIVRA_SELFDEV_CONTEXT_PREFIXES`(既定 `README.md,docs/`)、`KIVRA_SELFDEV_MAX_CONTEXT_FILE_BYTES`(既定 102400)、`KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`(既定 7)、`KIVRA_SELFDEV_ADVANCE_INTERVAL_SECONDS`(既定 30、最小 10)、`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`(既定 1)、`KIVRA_FX_USD_JPY`、`KIVRA_FX_AS_OF`。
 

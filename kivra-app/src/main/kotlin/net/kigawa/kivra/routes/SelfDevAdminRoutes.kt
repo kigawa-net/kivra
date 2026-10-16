@@ -43,6 +43,7 @@ internal fun Route.configureSelfDevAdminRoutes(runs: DevelopmentRunRepository, i
             call.respond(HttpStatusCode.Unauthorized, SelfDevAdminError("unauthorized"))
             return@post
         }
+        if (!call.requireJsonSameOrigin()) return@post
         val body = try {
             releaseJson.decodeFromString(ReleaseSelfDevRunRequest.serializer(), call.receiveText())
         } catch (_: Exception) {

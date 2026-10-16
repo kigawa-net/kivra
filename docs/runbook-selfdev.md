@@ -161,6 +161,12 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。
 
+状態を変える POST(`/api/tasks`、`/api/selfdev/tasks`、`/api/admin/selfdev/runs/{id}/release`、`/api/admin/budget/acknowledge`)は、CSRF 対策のため次を満たさないと拒否される(本文は読まれず、状態は変わらない)。
+
+- `content-type: application/json` を必ず付ける(curl は `-H 'content-type: application/json'`。無いと 415)。
+- ブラウザから呼ぶときは、同じオリジンの画面から `fetch` で呼ぶ。別のサイトのページから呼ぶと 403 になる(`Sec-Fetch-Site` が `same-origin` / `none` 以外、または `Origin` が `Host` と一致しない)。
+- `Authorization: Bearer` の curl は、`Origin` も `Sec-Fetch-Site` も付かないので、そのまま通る。
+
 ```sh
 # タスクの投入(本文は title と idempotencyKey だけ。ほかの項目は 400)
 curl -X POST "https://<kivra-host>/api/selfdev/tasks" \

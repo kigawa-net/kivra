@@ -112,12 +112,15 @@ class ModelGateway(
                 ErrorKind.OUTCOME_UNKNOWN,
                 "provider responded but the call could not be recorded; reconcile before issuing a new requestId",
                 code = "RECONCILIATION_REQUIRED",
+                // The reason the cost could not be booked, when the failure was an unknown cost (fixed code, no values).
+                costReason = (cause as? GatewayException)?.error?.costReason,
             ),
             cause,
         )
     }
 
-    private fun denied(code: String, msg: String) = GatewayException(GatewayError(ErrorKind.POLICY_DENIED, msg, code = code))
+    private fun denied(code: String, msg: String, costReason: UnknownCostReason? = null) =
+        GatewayException(GatewayError(ErrorKind.POLICY_DENIED, msg, code = code, costReason = costReason))
 
     /** Settles a possibly-billed failure: estimate is charged, the error is no longer retryable or fallback-able. */
     private fun outcomeUnknown(raw: GatewayError) = GatewayError(
@@ -296,7 +299,7 @@ class ModelGateway(
                 val key = "${req.requestId}/$attemptId"
                 val denied = budget.reserve(key, req.budgetScopes, reservation(req, target))
                 if (denied is ReserveResult.Denied) {
-                    last = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = denied.code)
+                    last = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = denied.code, costReason = denied.costReason)
                     auditAttempt(req, attemptId, ref, decision, Usage.ZERO, null, 0, null, last)
                     break
                 }
@@ -356,8 +359,12 @@ class ModelGateway(
      * provider is not called. Routing already excludes unpriced models; this keeps the invariant local to the reservation.
      */
     private fun reservation(req: ModelRequest, target: ResolvedTarget): BudgetAmount =
-        Estimator.maxBudgetAmount(req, target.model, target.provider, registry.registryVersion, clock.instant(), costConverter)
-            ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price in force or cost cannot be converted; provider not called")
+        when (val est = Estimator.maxCost(req, target.model, target.provider, registry.registryVersion, clock.instant(), costConverter)) {
+            is Estimator.MaxCost.Priced -> est.amount
+            is Estimator.MaxCost.Unknown -> throw denied(
+                "UNKNOWN_COST", "model ${target.model.id} has no price in force or cost cannot be converted; provider not called", est.reason,
+            )
+        }
 
     /**
      * Books a completed provider call. With complete usage, the actual cost is committed and bound to its price revision,
@@ -372,15 +379,21 @@ class ModelGateway(
             return Cost(est.amount, est.currency, CostBasis.ESTIMATED, est.unit, rev, target.model.ref, req.requestId)
         }
         val now = clock.instant()
-        val price = target.model.priceAt(now) ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price in force")
+        val price = target.model.priceAt(now)
+            ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price in force", UnknownCostReason.PRICE_MISSING)
         // Tier is chosen from the actual input size (input + cache reads + cache writes), so the actual cost is exact for the tier that applied.
         val rate = price.rateFor(usage.inputTokens + usage.cachedInputTokens + usage.cacheCreationInputTokens)
         // Cache writes without a registry rate for their TTL: the cost is unknown. Throwing here makes the caller commit the
         // estimate as unpriced, so the scope is UNKNOWN_COST until an operator acknowledges it (fail closed, never booked as zero).
         val native = CostCalculator.cost(usage, rate, price.currency, CostBasis.ACTUAL)
-            ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has cache write tokens without a cache write price; cost unknown")
+            ?: throw denied(
+                "UNKNOWN_COST", "model ${target.model.id} has cache write tokens without a cache write price; cost unknown",
+                UnknownCostReason.CACHE_WRITE_UNPRICED,
+            )
         val amount = Estimator.toBudget(native.amount, price, target.model.ref, target.provider, rev, now, costConverter)
-            ?: throw denied("UNKNOWN_COST", "model ${target.model.id} cost cannot be converted to the budget currency")
+            ?: throw denied(
+                "UNKNOWN_COST", "model ${target.model.id} cost cannot be converted to the budget currency", UnknownCostReason.FX_UNUSABLE,
+            )
         budget.commit(key, amount)
         return native.copy(priceRevision = rev, model = target.model.ref, requestId = req.requestId)
     }

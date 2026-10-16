@@ -19,7 +19,13 @@ enum class ExclusionReason {
     BUDGET_POLICY_MISSING, BUDGET, UNHEALTHY, QUALITY_BELOW_MIN,
 }
 
-data class CandidateTrace(val model: ModelRef, val exclusion: ExclusionReason?, val score: Double? = null) {
+data class CandidateTrace(
+    val model: ModelRef,
+    val exclusion: ExclusionReason?,
+    val score: Double? = null,
+    /** Why the cost was unknown, when [exclusion] is UNKNOWN_COST. */
+    val costReason: UnknownCostReason? = null,
+) {
     val passed: Boolean get() = exclusion == null
 }
 
@@ -61,12 +67,13 @@ class RoutingEngine(
         val survivors = ArrayList<Pair<ModelEntry, BigDecimal>>()
         for (m in registry.models) {
             val provider = registry.providers.getValue(m.providerId)
-            val reason = exclusion(req, m, provider, required, inTokens, today, now)
+            val costHolder = CostHolder()
+            val reason = exclusion(req, m, provider, required, inTokens, today, now, costHolder)
             if (reason == null) {
                 // Survivors have a known budget amount; it is the score's cost so models are compared in the budget currency.
                 val amount = Estimator.maxBudgetAmount(req, m, provider, registry.registryVersion, now, converter)?.amount ?: BigDecimal.ZERO
                 survivors.add(m to amount)
-            } else traces.add(CandidateTrace(m.ref, reason))
+            } else traces.add(CandidateTrace(m.ref, reason, costReason = costHolder.reason))
         }
 
         val maxCost = survivors.maxOfOrNull { it.second } ?: BigDecimal.ZERO
@@ -107,8 +114,14 @@ class RoutingEngine(
         return c
     }
 
+    /** Carries the reason of an UNKNOWN_COST exclusion out of [exclusion]. */
+    private class CostHolder {
+        var reason: UnknownCostReason? = null
+    }
+
     private fun exclusion(
         req: ModelRequest, m: ModelEntry, p: ProviderEntry, required: Set<Capability>, inTokens: Long, today: LocalDate, now: Instant,
+        costHolder: CostHolder,
     ): ExclusionReason? {
         // 1. Sensitivity x trust zone / locality.
         when (req.dataClass) {
@@ -130,10 +143,18 @@ class RoutingEngine(
         if (!p.enabled || p.id !in availableProviders || m.lifecycle != Lifecycle.ACTIVE || (m.retireAt != null && !m.retireAt.isAfter(today)))
             return ExclusionReason.LIFECYCLE
         // 5. Budget. The cost must be known in the budget's currency and unit: an unknown cost is never treated as zero.
-        val amount = Estimator.maxBudgetAmount(req, m, p, registry.registryVersion, now, converter) ?: return ExclusionReason.UNKNOWN_COST
+        val estimate = Estimator.maxCost(req, m, p, registry.registryVersion, now, converter)
+        if (estimate is Estimator.MaxCost.Unknown) {
+            costHolder.reason = estimate.reason
+            return ExclusionReason.UNKNOWN_COST
+        }
+        val amount = (estimate as Estimator.MaxCost.Priced).amount
         budget.admission(req.budgetScopes, amount)?.let { denied ->
             return when (denied.code) {
-                BudgetDenial.UNKNOWN_COST -> ExclusionReason.UNKNOWN_COST
+                BudgetDenial.UNKNOWN_COST -> {
+                    costHolder.reason = denied.costReason ?: UnknownCostReason.UNSPECIFIED
+                    ExclusionReason.UNKNOWN_COST
+                }
                 BudgetDenial.BUDGET_POLICY_MISSING -> ExclusionReason.BUDGET_POLICY_MISSING
                 else -> ExclusionReason.BUDGET
             }
@@ -148,8 +169,11 @@ class RoutingEngine(
 
     private fun rejectionFor(traces: List<CandidateTrace>): GatewayError {
         // Any candidate that reached the cost check and could not be priced makes the cost unknown: reported as such.
-        if (traces.any { it.exclusion == ExclusionReason.UNKNOWN_COST }) {
-            return GatewayError(ErrorKind.POLICY_DENIED, "cost is unknown; provider not called", code = "UNKNOWN_COST")
+        traces.firstOrNull { it.exclusion == ExclusionReason.UNKNOWN_COST }?.let {
+            return GatewayError(
+                ErrorKind.POLICY_DENIED, "cost is unknown; provider not called", code = "UNKNOWN_COST",
+                costReason = it.costReason ?: UnknownCostReason.UNSPECIFIED,
+            )
         }
         val deepest = traces.mapNotNull { it.exclusion }.maxOrNull()
         return when (deepest) {

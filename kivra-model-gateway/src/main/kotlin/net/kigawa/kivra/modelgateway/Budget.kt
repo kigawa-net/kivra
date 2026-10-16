@@ -47,9 +47,30 @@ object BudgetDenial {
     const val STORE_UNAVAILABLE = "BUDGET_STORE_UNAVAILABLE"
 }
 
+/**
+ * Why a cost is UNKNOWN_COST. Fixed codes only (no values), so they can be logged. Set where the cost is determined or refused.
+ * - [NO_AMOUNT]: no estimate was given to the budget.
+ * - [PRICE_MISSING]: no price version is in force for the model at the time.
+ * - [FX_UNUSABLE]: the cost cannot be converted to the budget currency (rate absent, out of range, future, or older than the max age).
+ * - [CACHE_WRITE_UNPRICED]: cache write tokens without a registry rate for their TTL.
+ * - [CURRENCY_MISMATCH]: the cost's currency or unit is not the budget's.
+ * - [AMOUNT_INVALID]: negative or too large for the budget's micro-unit.
+ * - [UNPRICED_IN_SCOPE]: an earlier call on the scope was recorded as unpriced and not yet acknowledged (ADR 0003).
+ * - [UNSPECIFIED]: the budget port denied without a reason.
+ */
+enum class UnknownCostReason {
+    NO_AMOUNT, PRICE_MISSING, FX_UNUSABLE, CACHE_WRITE_UNPRICED, CURRENCY_MISMATCH, AMOUNT_INVALID, UNPRICED_IN_SCOPE, UNSPECIFIED,
+}
+
 sealed interface ReserveResult {
     data object Reserved : ReserveResult
-    data class Denied(val scopeId: String, val reason: String, val code: String = BudgetDenial.BUDGET) : ReserveResult
+    data class Denied(
+        val scopeId: String,
+        val reason: String,
+        val code: String = BudgetDenial.BUDGET,
+        /** Set when [code] is UNKNOWN_COST. */
+        val costReason: UnknownCostReason? = null,
+    ) : ReserveResult
 }
 
 /**
@@ -306,13 +327,15 @@ class BudgetController(
 
     private fun denial(scopes: List<String>, amount: BudgetAmount?): ReserveResult.Denied? {
         if (scopes.isEmpty()) return ReserveResult.Denied("", "no budget scope given", BudgetDenial.BUDGET_POLICY_MISSING)
-        val a = amount ?: return ReserveResult.Denied(scopes.first(), "price unknown", BudgetDenial.UNKNOWN_COST)
+        val a = amount ?: return ReserveResult.Denied(scopes.first(), "price unknown", BudgetDenial.UNKNOWN_COST, UnknownCostReason.NO_AMOUNT)
         for (id in scopes) {
             val limit = limits[id] ?: return ReserveResult.Denied(id, "unknown budget scope", BudgetDenial.BUDGET_POLICY_MISSING)
             if (a.currency != limit.currency || a.unit != limit.unit) {
-                return ReserveResult.Denied(id, "cost currency/unit does not match the budget", BudgetDenial.UNKNOWN_COST)
+                return ReserveResult.Denied(id, "cost currency/unit does not match the budget", BudgetDenial.UNKNOWN_COST, UnknownCostReason.CURRENCY_MISMATCH)
             }
-            if ((unpriced[id] ?: 0L) > 0L) return ReserveResult.Denied(id, "unpriced usage recorded in scope", BudgetDenial.UNKNOWN_COST)
+            if ((unpriced[id] ?: 0L) > 0L) {
+                return ReserveResult.Denied(id, "unpriced usage recorded in scope", BudgetDenial.UNKNOWN_COST, UnknownCostReason.UNPRICED_IN_SCOPE)
+            }
         }
         for (id in scopes) {
             val limit = limits.getValue(id)

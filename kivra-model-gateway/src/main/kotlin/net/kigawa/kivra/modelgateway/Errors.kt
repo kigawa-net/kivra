@@ -40,6 +40,8 @@ data class GatewayError(
     val providerStatus: Int? = null,
     /** Conservative default: an error is treated as possibly billed unless proven otherwise. */
     val sendState: SendState = SendState.MAYBE_SENT,
+    /** Why the cost could not be established, when [code] is UNKNOWN_COST or the failure left a billed call unpriced. Fixed codes only. */
+    val costReason: UnknownCostReason? = null,
 )
 
 class GatewayException(val error: GatewayError, cause: Throwable? = null) :

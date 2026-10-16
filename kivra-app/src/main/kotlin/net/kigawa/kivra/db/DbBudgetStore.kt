@@ -20,6 +20,7 @@ import net.kigawa.kivra.modelgateway.BudgetLimit
 import net.kigawa.kivra.modelgateway.BudgetPort
 import net.kigawa.kivra.modelgateway.BudgetUsage
 import net.kigawa.kivra.modelgateway.Cost
+import net.kigawa.kivra.modelgateway.UnknownCostReason
 import net.kigawa.kivra.modelgateway.ReserveResult
 import net.kigawa.kivra.modelgateway.validateAcknowledgement
 import org.jetbrains.exposed.sql.Database
@@ -262,12 +263,16 @@ class DbBudgetStore(
         if (scopes.distinct().size != scopes.size || tenantScope !in scopes) {
             return ReserveResult.Denied(scopes.first(), "path must contain the tenant scope once", BudgetDenial.BUDGET_POLICY_MISSING)
         }
-        val a = amount ?: return ReserveResult.Denied(scopes.first(), "price unknown", BudgetDenial.UNKNOWN_COST)
-        if (microOrNull(a) == null) return ReserveResult.Denied(scopes.first(), "cost is negative or too large", BudgetDenial.UNKNOWN_COST)
+        val a = amount ?: return ReserveResult.Denied(scopes.first(), "price unknown", BudgetDenial.UNKNOWN_COST, UnknownCostReason.NO_AMOUNT)
+        if (microOrNull(a) == null) {
+            return ReserveResult.Denied(scopes.first(), "cost is negative or too large", BudgetDenial.UNKNOWN_COST, UnknownCostReason.AMOUNT_INVALID)
+        }
         for (id in scopes) {
             val limit = limitFor(id) ?: return ReserveResult.Denied(id, "unknown budget scope", BudgetDenial.BUDGET_POLICY_MISSING)
             if (a.currency != limit.currency || a.unit != limit.unit) {
-                return ReserveResult.Denied(id, "cost currency/unit does not match the budget", BudgetDenial.UNKNOWN_COST)
+                return ReserveResult.Denied(
+                    id, "cost currency/unit does not match the budget", BudgetDenial.UNKNOWN_COST, UnknownCostReason.CURRENCY_MISMATCH,
+                )
             }
         }
         return null
@@ -277,7 +282,9 @@ class DbBudgetStore(
     private fun Transaction.admissionDenial(scopes: List<String>, micro: Long, now: Instant): ReserveResult.Denied? {
         for (id in scopes) {
             val row = periodRow(id, periodFor(id, now))
-            if ((row?.unpriced ?: 0L) > 0L) return ReserveResult.Denied(id, "unpriced usage recorded in scope", BudgetDenial.UNKNOWN_COST)
+            if ((row?.unpriced ?: 0L) > 0L) {
+                return ReserveResult.Denied(id, "unpriced usage recorded in scope", BudgetDenial.UNKNOWN_COST, UnknownCostReason.UNPRICED_IN_SCOPE)
+            }
         }
         for (id in scopes) {
             val hard = microFloor(limitFor(id)!!.hard)

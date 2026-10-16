@@ -129,7 +129,8 @@ class LlmDeveloper(
             val error = gateway
             return when {
                 error != null -> "errorKind=${error.kind.name} errorCode=${safeCode(error.code)} " +
-                    "providerStatus=${error.providerStatus ?: "none"} sendState=${error.sendState.name}"
+                    "providerStatus=${error.providerStatus ?: "none"} sendState=${error.sendState.name} " +
+                    "costReason=${error.costReason?.name ?: "none"}"
                 exceptionName != null -> "exception=$exceptionName"
                 else -> "gateway=none"
             }

@@ -366,7 +366,7 @@ class LlmDeveloperTest {
         val warn = events.single { it.level == Level.WARN }
         assertEquals(
             "developer outcome unknown: runId=run-u unknown=OUTCOME_UNKNOWN errorKind=OUTCOME_UNKNOWN " +
-                "errorCode=PROVIDER_OUTCOME_UNKNOWN providerStatus=503 sendState=MAYBE_SENT",
+                "errorCode=PROVIDER_OUTCOME_UNKNOWN providerStatus=503 sendState=MAYBE_SENT costReason=none",
             warn.formattedMessage,
         )
         assertFalse(events.any { it.formattedMessage.contains("SECRET-PROVIDER-BODY-AAA") })

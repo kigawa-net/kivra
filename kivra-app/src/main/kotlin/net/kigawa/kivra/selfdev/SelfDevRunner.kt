@@ -1,5 +1,6 @@
 package net.kigawa.kivra.selfdev
 
+import java.security.MessageDigest
 import java.time.Clock
 import java.time.Duration
 import net.kigawa.kivra.core.DevelopmentRunState
@@ -7,6 +8,8 @@ import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.Lease
 import net.kigawa.kivra.core.LeaseLostException
 import net.kigawa.kivra.core.LeaseStore
+import net.kigawa.kivra.core.PrMergeAuthorityUnavailableException
+import net.kigawa.kivra.core.PullRequestBinding
 import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.RunHaltedException
 import net.kigawa.kivra.core.RunId
@@ -18,6 +21,7 @@ import net.kigawa.kivra.core.patch.PatchVerdict
 import net.kigawa.kivra.core.patch.RepoSnapshot
 import net.kigawa.kivra.core.patch.Write
 import net.kigawa.kivra.db.DevelopmentRun
+import net.kigawa.kivra.db.PrMergeNotVerifiedException
 import net.kigawa.kivra.developer.DeveloperPort
 import net.kigawa.kivra.developer.DeveloperRequest
 import net.kigawa.kivra.developer.DeveloperResult
@@ -29,6 +33,7 @@ import net.kigawa.kivra.github.FileWrite
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubPort
 import net.kigawa.kivra.github.GitHubResult
+import net.kigawa.kivra.github.PullRequest
 import net.kigawa.kivra.github.PullRequestState
 import net.kigawa.kivra.github.RunBranch
 import net.kigawa.kivra.selfdev.AdvanceResult.Advanced
@@ -39,13 +44,13 @@ import net.kigawa.kivra.selfdev.AdvanceResult.Waiting
 /**
  * Self-development runner (ADR 0008 part 4, Issue #56). It moves one PR_ONLY run forward, one [advance] call at a time:
  *
- * | state at call          | what the call does                                                                 | persisted                          |
- * |------------------------|-------------------------------------------------------------------------------------|------------------------------------|
- * | CREATED                | nothing else                                                                        | -> DEVELOPING                      |
- * | DEVELOPING             | propose (LLM), PatchPolicy, commit, pull request                                    | -> PATCH_READY -> PULL_REQUEST     |
- * | PATCH_READY (resume)   | propose again, PatchPolicy, commit, pull request                                    | -> PULL_REQUEST (or a failure)     |
- * | PULL_REQUEST           | read the pull request: wait, abandon (closed or timed out), or wait for verification | -> CANCELLED / UNKNOWN, or nothing |
- * | UNKNOWN                | nothing (waits for an operator)                                                     | nothing                            |
+ * | state at call          | what the call does                                                                        | persisted                              |
+ * |------------------------|--------------------------------------------------------------------------------------------|----------------------------------------|
+ * | CREATED                | nothing else                                                                               | -> DEVELOPING                          |
+ * | DEVELOPING             | propose (LLM), PatchPolicy, commit, pull request, binding                                  | -> PATCH_READY -> PULL_REQUEST         |
+ * | PATCH_READY (resume)   | propose again, PatchPolicy, commit, pull request, binding                                  | -> PULL_REQUEST (or a failure)         |
+ * | PULL_REQUEST           | read the pull request: wait, abandon (closed or timed out), or complete (merged and verified) | -> CANCELLED / COMPLETED, or nothing   |
+ * | UNKNOWN                | nothing (waits for an operator)                                                            | nothing                                |
  *
  * A call may persist two transitions (DEVELOPING -> PATCH_READY -> PULL_REQUEST). PATCH_READY is committed before the first GitHub
  * write, so a crash after it leaves a PATCH_READY run.
@@ -56,9 +61,11 @@ import net.kigawa.kivra.selfdev.AdvanceResult.Waiting
  *   normally ends in UNKNOWN, which an operator releases. A resume never commits without a fresh, policy-checked proposal.
  * - **Double commit guard.** A resumed run whose branch is not at the current base head is treated as already committed, and goes to
  *   UNKNOWN. This can also fire when the base moved, which is safe (fail closed) but needs an operator.
- * - **Merge is not completed.** Completion must go through `completePrOnlyRun`, which needs a PullRequestBinding with a policy revision
- *   and a review manifest digest. This flow has neither, so a merged pull request keeps the run in PULL_REQUEST with
- *   [WaitReason.AWAITING_MERGE_VERIFICATION]. kivra never merges and never closes a pull request.
+ * - **Merge completes only through the Authority.** The pull request binding (repository, repository id, PR number, node id, base,
+ *   head SHA, policy revision, review manifest digest) is recorded once, right after the pull request is opened. A merged pull request
+ *   completes the run only via `completePrOnlyRun`, which asks the merge Authority. A refusal keeps the run in PULL_REQUEST with
+ *   [WaitReason.MERGE_NOT_VERIFIED]; an unavailable Authority keeps it with [WaitReason.AWAITING_MERGE_VERIFICATION]. A PULL_REQUEST run
+ *   without a binding is never completed: it waits with [WaitReason.BINDING_MISSING]. kivra never merges and never closes a pull request.
  *
  * Safety layers: the kill switch ([SelfDevConfig.enabled]); the fenced lease (a stale worker's writes are refused by the database,
  * and the lease is renewed before each GitHub write); [PatchPolicy] again on the runner side (the Developer is not trusted); the
@@ -244,15 +251,45 @@ class SelfDevRunner(
             body = sanitizedSummary(patch.summary),
             headSha = commitSha,
         )
-        when (val r = github.ensurePullRequest(config.repo, pullRequest)) {
-            is GitHubResult.Success -> Unit
+        val ensured = when (val r = github.ensurePullRequest(config.repo, pullRequest)) {
+            is GitHubResult.Success -> r.value
             is GitHubResult.Failure -> return persistAdvance(lease, run, DevelopmentRunState.FAILED, r.kind.code)
             is GitHubResult.Unknown -> return persistAdvance(lease, run, DevelopmentRunState.UNKNOWN, GITHUB_UNKNOWN)
         }
-        return persistAdvance(lease, run, DevelopmentRunState.PULL_REQUEST, null)
+        // bindPullRequest is allowed only in PULL_REQUEST, so the binding is recorded right after the transition, with the new version.
+        val pullRequestRun = transitionTo(lease, run.state, DevelopmentRunState.PULL_REQUEST, null)
+        bindOpenedPullRequest(lease, pullRequestRun, ensured.pullRequest, commitSha)
+        return Advanced(run.state, DevelopmentRunState.PULL_REQUEST, null)
     }
 
-    // ---- PULL_REQUEST: read only, then close the run if the pull request was abandoned ----
+    /**
+     * Records the binding of the pull request this run just opened. It is recorded once: a run that already has a binding is left
+     * alone. Nothing is recorded when the provider's answer does not match what kivra committed (repository, base, head) or lacks the
+     * identity fields; the run then waits with [WaitReason.BINDING_MISSING] instead of being completed later on a guess.
+     */
+    private fun bindOpenedPullRequest(lease: Lease, run: DevelopmentRun, pullRequest: PullRequest, headSha: String) {
+        if (runs.loadBinding(run.runId) != null) return
+        if (pullRequest.repo != config.repo || pullRequest.headSha != headSha || pullRequest.baseRef != config.baseBranch) return
+        val repositoryId = pullRequest.baseRepositoryId ?: return
+        val nodeId = pullRequest.nodeId ?: return
+        runs.bindPullRequest(
+            lease,
+            currentVersion(lease),
+            PullRequestBinding(
+                runId = run.runId,
+                repository = config.repo.toString(),
+                repositoryId = repositoryId,
+                prNumber = pullRequest.number.toLong(),
+                prNodeId = nodeId,
+                baseRef = config.baseBranch,
+                headSha = headSha,
+                policyRevision = POLICY_REVISION,
+                reviewManifestDigest = manifestDigest(run.runId.value, headSha),
+            ),
+        )
+    }
+
+    // ---- PULL_REQUEST: read the pull request; complete it when merged and verified, abandon it when closed or timed out ----
 
     private suspend fun pullRequestStep(lease: Lease, run: DevelopmentRun): AdvanceResult {
         val runId = run.runId.value
@@ -266,7 +303,7 @@ class SelfDevRunner(
             else -> return persistAdvance(lease, run, DevelopmentRunState.UNKNOWN, PR_AMBIGUOUS)
         }
 
-        if (pullRequest.merged) return Waiting(WaitReason.AWAITING_MERGE_VERIFICATION)
+        if (pullRequest.merged) return completeMergedPullRequest(lease, run)
         val abandoned = pullRequest.state == PullRequestState.CLOSED ||
             clock.instant().isAfter(run.updatedInstant().plus(config.prReviewTimeout))
         if (abandoned) {
@@ -274,6 +311,25 @@ class SelfDevRunner(
             return Advanced(run.state, closed.state, PR_ABANDONED)
         }
         return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
+    }
+
+    /**
+     * A merged pull request completes the run only through the merge Authority (`completePrOnlyRun`, which also checks the author and
+     * the binding). Without a binding nothing is asked and nothing is completed. A refusal and an unavailable Authority both leave the
+     * run in PULL_REQUEST, with a wait reason. A second completion (another worker finished the run first) is reported as skipped.
+     */
+    private suspend fun completeMergedPullRequest(lease: Lease, run: DevelopmentRun): AdvanceResult {
+        if (runs.loadBinding(run.runId) == null) return Waiting(WaitReason.BINDING_MISSING)
+        return try {
+            val completed = runs.completePrOnlyRun(lease, currentVersion(lease))
+            Advanced(run.state, completed.state, PR_MERGED)
+        } catch (e: PrMergeNotVerifiedException) {
+            Waiting(WaitReason.MERGE_NOT_VERIFIED, e.reason)
+        } catch (e: PrMergeAuthorityUnavailableException) {
+            Waiting(WaitReason.AWAITING_MERGE_VERIFICATION)
+        } catch (e: InvalidTransitionException) {
+            if (runs.find(run.runId)?.state == DevelopmentRunState.COMPLETED) Skipped(SkipReason.TERMINAL) else throw e
+        }
     }
 
     // ---- helpers ----
@@ -342,7 +398,17 @@ class SelfDevRunner(
         const val PR_AMBIGUOUS = "PR_AMBIGUOUS"
         const val PR_ABANDONED = "PR_ABANDONED"
         const val CANCEL_REQUESTED = "CANCEL_REQUESTED"
+        const val PR_MERGED = "PR_MERGED"
         const val MAX_BODY_CHARS = 4_000
+
+        /** Recorded in the binding. Not checked against any provider fact yet (ADR 0011 / #49, #50 own the real policy revision). */
+        const val POLICY_REVISION = "patchpolicy-v1"
+
+        /** Placeholder review manifest digest, derived from the run and the head. Not checked yet (#49 owns the real manifest). */
+        fun manifestDigest(runId: String, headSha: String): String =
+            MessageDigest.getInstance("SHA-256")
+                .digest("manifest-$runId-$headSha".toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
 
         /** Removes control characters (keeps line breaks and tabs) and bounds the length. The text is model output: it is never trusted. */
         fun sanitizedSummary(summary: String): String =

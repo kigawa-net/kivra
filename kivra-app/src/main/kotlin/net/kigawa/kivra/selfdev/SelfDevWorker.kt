@@ -76,7 +76,11 @@ class SelfDevWorker(
                 "self-development run advanced: runId={} from={} to={} reason={}",
                 runId.value, result.from.name, result.to.name, result.reasonCode ?: "none",
             )
-            is AdvanceResult.Waiting -> logger.info("self-development run waiting: runId={} reason={}", runId.value, result.reason.name)
+            is AdvanceResult.Waiting -> if (result.reasonCode == null) {
+                logger.info("self-development run waiting: runId={} reason={}", runId.value, result.reason.name)
+            } else {
+                logger.info("self-development run waiting: runId={} reason={} code={}", runId.value, result.reason.name, result.reasonCode)
+            }
             is AdvanceResult.Skipped -> logger.info("self-development run skipped: runId={} reason={}", runId.value, result.reason.name)
             is AdvanceResult.Failed -> logger.warn("self-development run step failed: runId={} code={}", runId.value, result.code.name)
         }

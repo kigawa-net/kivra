@@ -396,8 +396,9 @@ class DevelopmentRunRepository(
      * PR_ONLY completion: PULL_REQUEST or WAITING_APPROVAL -> COMPLETED (Issue #53). The caller supplies no merge evidence.
      *
      * 1. The run's current [PullRequestBinding] is read (no transaction lock is held while the Authority is asked).
-     * 2. The injected [TrustedPrMergeAuthority] verifies the merge. A refusal throws [InvalidTransitionException] and an
-     *    unavailable Authority or any other exception propagates. In both cases nothing has been written.
+     * 2. The injected [TrustedPrMergeAuthority] verifies the merge. A refusal throws [PrMergeNotVerifiedException] (an
+     *    [InvalidTransitionException] that carries the fixed reason code) and an unavailable Authority or any other exception
+     *    propagates. In all these cases nothing has been written.
      * 3. [commitPrOnlyCompletion] re-checks the verified merge against the binding in the database inside the transaction
      *    and performs the compare-and-set. A re-bind (for example a push) in between makes the merge refused.
      */
@@ -406,9 +407,7 @@ class DevelopmentRunRepository(
             ?: throw InvalidTransitionException("run ${lease.runId}: PR_ONLY completion refused: the run has no complete pull request binding")
         val merge = when (val verification = prMergeAuthority.verifyMerge(binding)) {
             is PrMergeVerification.Verified -> verification.merge
-            is PrMergeVerification.Refused -> throw InvalidTransitionException(
-                "run ${lease.runId}: PR_ONLY completion refused by the merge authority: ${verification.reason}",
-            )
+            is PrMergeVerification.Refused -> throw PrMergeNotVerifiedException(verification.reason)
         }
         return commitPrOnlyCompletion(lease, expectedVersion, merge, actor)
     }
@@ -669,3 +668,10 @@ class DevelopmentRunRepository(
         idempotencyKey = this[DevelopmentRunsTable.idempotencyKey],
     )
 }
+
+/**
+ * The merge Authority refused to verify the merge of the bound pull request. [reason] is a fixed code from the core verifier
+ * (for example HEAD_SHA_MISMATCH) or from the Authority, never provider text. The run is left as it is.
+ */
+class PrMergeNotVerifiedException(val reason: String) :
+    InvalidTransitionException("PR_ONLY completion refused by the merge authority: $reason")

@@ -47,4 +47,4 @@ class RunHaltedException(message: String) : LeaseLostException(message)
 /** The expected `version` / state did not match; reload and re-decide. */
 class VersionConflictException(message: String) : RuntimeException(message)
 
-class InvalidTransitionException(message: String) : RuntimeException(message)
+open class InvalidTransitionException(message: String) : RuntimeException(message)

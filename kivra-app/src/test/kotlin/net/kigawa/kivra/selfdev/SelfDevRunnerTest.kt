@@ -95,10 +95,10 @@ class SelfDevRunnerTest {
             assertEquals(1, h.github.pullRequests().size)
             assertEquals(listOf("createRef", "commit", "createPr"), h.github.writes)
 
-            // A human merges the pull request. The runner does not complete the run (see the next test).
+            // A human merges the pull request. The merge Authority verifies it, and the run completes. kivra writes nothing to GitHub.
             h.github.humanMerges(h.github.pullRequests().single().number)
-            assertEquals(Waiting(WaitReason.AWAITING_MERGE_VERIFICATION), runner.advance(runId))
-            assertEquals(DevelopmentRunState.PULL_REQUEST, h.state(runId))
+            assertEquals(Advanced(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.COMPLETED, "PR_MERGED"), runner.advance(runId))
+            assertEquals(DevelopmentRunState.COMPLETED, h.state(runId))
             assertEquals(listOf("createRef", "commit", "createPr"), h.github.writes)
         }
     }
@@ -107,20 +107,6 @@ class SelfDevRunnerTest {
     fun theProviderPortHasNoMergeOperationAndTheRunnerNeverCallsOne() {
         val names = GitHubPort::class.java.methods.map { it.name.lowercase() }
         assertTrue(names.none { "merge" in it }, names.toString())
-    }
-
-    @Test
-    fun aMergedPullRequestIsNotCompletedWithoutVerifiedMergeEvidence() = runBlocking {
-        TestDb().use { db ->
-            val h = Harness(db, proposal("docs/a.md" to "new\n"))
-            val runner = h.runner()
-            val runId = h.newRun()
-            runner.advance(runId)
-            runner.advance(runId)
-            h.github.humanMerges(h.github.pullRequests().single().number)
-            repeat(3) { runner.advance(runId) }
-            assertEquals(DevelopmentRunState.PULL_REQUEST, h.state(runId))
-        }
     }
 
     // ---- kill switch and scope ----

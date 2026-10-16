@@ -41,10 +41,22 @@ data class PriceTier(
     val inputPerMtok: BigDecimal,
     val outputPerMtok: BigDecimal,
     val cachedInputPerMtok: BigDecimal? = null,
+    /** Cache write rates. Not defaulted: a cache write without its rate is unpriced (fail closed). */
+    val cacheWrite5mPerMtok: BigDecimal? = null,
+    val cacheWrite1hPerMtok: BigDecimal? = null,
 )
 
-/** Per-million-token rates with the cached rate resolved (defaults to the input rate). */
-data class Rate(val inputPerMtok: BigDecimal, val outputPerMtok: BigDecimal, val cachedInputPerMtok: BigDecimal)
+/**
+ * Per-million-token rates with the cached rate resolved (defaults to the input rate). Cache write rates stay null when the
+ * registry does not give them; a cache write token billed at a null rate cannot be priced.
+ */
+data class Rate(
+    val inputPerMtok: BigDecimal,
+    val outputPerMtok: BigDecimal,
+    val cachedInputPerMtok: BigDecimal,
+    val cacheWrite5mPerMtok: BigDecimal? = null,
+    val cacheWrite1hPerMtok: BigDecimal? = null,
+)
 
 /**
  * One price version of a model (design 13 B2). [effectiveFrom] is the first JST date on which this version applies;
@@ -58,11 +70,13 @@ data class Price(
     val sourceRef: String? = null,
     val effectiveFrom: LocalDate? = null,
     val tiers: List<PriceTier> = emptyList(),
+    val cacheWrite5mPerMtok: BigDecimal? = null,
+    val cacheWrite1hPerMtok: BigDecimal? = null,
 ) {
     init {
         if (currency.isBlank()) throw RegistryException("price currency is required")
-        val rates = listOf(inputPerMtok, outputPerMtok, cachedInputPerMtok) + tiers.flatMap {
-            listOf(it.inputPerMtok, it.outputPerMtok, it.cachedInputPerMtok)
+        val rates = listOf(inputPerMtok, outputPerMtok, cachedInputPerMtok, cacheWrite5mPerMtok, cacheWrite1hPerMtok) + tiers.flatMap {
+            listOf(it.inputPerMtok, it.outputPerMtok, it.cachedInputPerMtok, it.cacheWrite5mPerMtok, it.cacheWrite1hPerMtok)
         }
         if (rates.any { it != null && it.signum() < 0 }) throw RegistryException("price rates must not be negative")
         for (i in 1 until tiers.size) {
@@ -71,15 +85,20 @@ data class Price(
         if (tiers.any { it.inputTokensUpTo <= 0 }) throw RegistryException("inputTokensUpTo must be positive")
     }
 
-    /** Rate for a request whose total input tokens are known. Null [totalInputTokens] means the tier is unknown: the highest rate per component is used. */
+    /**
+     * Rate for a request whose total input tokens (input + cache reads + cache writes) are known. Null [totalInputTokens] means
+     * the tier is unknown: the highest rate per component is used.
+     */
     fun rateFor(totalInputTokens: Long?): Rate {
         if (totalInputTokens == null) {
             val all = listOf(topRate()) + tiers.map { tierRate(it) }
-            // The input-side rate also covers cached reads, which may be priced above the input rate in theory.
+            // The input-side rate also covers cached reads and cache writes, which may be priced above the input rate.
             return Rate(
-                inputPerMtok = all.maxOf { maxOf(it.inputPerMtok, it.cachedInputPerMtok) },
+                inputPerMtok = all.maxOf { listOfNotNull(it.inputPerMtok, it.cachedInputPerMtok, it.cacheWrite5mPerMtok, it.cacheWrite1hPerMtok).max() },
                 outputPerMtok = all.maxOf { it.outputPerMtok },
                 cachedInputPerMtok = all.maxOf { it.cachedInputPerMtok },
+                cacheWrite5mPerMtok = all.map { it.cacheWrite5mPerMtok }.maxOrNullIfAnyNull(),
+                cacheWrite1hPerMtok = all.map { it.cacheWrite1hPerMtok }.maxOrNullIfAnyNull(),
             )
         }
         val tier = tiers.firstOrNull { totalInputTokens <= it.inputTokensUpTo }
@@ -88,11 +107,16 @@ data class Price(
 
     /** True when every rate is explicitly zero (a free model). */
     fun isExplicitlyZero(): Boolean =
-        (listOf(inputPerMtok, outputPerMtok, cachedInputPerMtok) + tiers.flatMap { listOf(it.inputPerMtok, it.outputPerMtok, it.cachedInputPerMtok) })
+        (listOf(inputPerMtok, outputPerMtok, cachedInputPerMtok, cacheWrite5mPerMtok, cacheWrite1hPerMtok) +
+            tiers.flatMap { listOf(it.inputPerMtok, it.outputPerMtok, it.cachedInputPerMtok, it.cacheWrite5mPerMtok, it.cacheWrite1hPerMtok) })
             .all { it == null || it.signum() == 0 }
 
-    private fun topRate() = Rate(inputPerMtok, outputPerMtok, cachedInputPerMtok ?: inputPerMtok)
-    private fun tierRate(t: PriceTier) = Rate(t.inputPerMtok, t.outputPerMtok, t.cachedInputPerMtok ?: t.inputPerMtok)
+    private fun topRate() = Rate(inputPerMtok, outputPerMtok, cachedInputPerMtok ?: inputPerMtok, cacheWrite5mPerMtok, cacheWrite1hPerMtok)
+    private fun tierRate(t: PriceTier) = Rate(t.inputPerMtok, t.outputPerMtok, t.cachedInputPerMtok ?: t.inputPerMtok, t.cacheWrite5mPerMtok, t.cacheWrite1hPerMtok)
+
+    /** Largest value, or null when any entry is null (the rate is unknown for some tier). */
+    private fun List<BigDecimal?>.maxOrNullIfAnyNull(): BigDecimal? =
+        if (any { it == null }) null else maxOfOrNull { it!! }
 }
 
 /** Token-count and price-version timing use the JST calendar, matching the monthly budget period (design 13 section 2). */
@@ -247,6 +271,8 @@ object RegistryLoader {
                 inputPerMtok = dec(req(t, "inputPerMtok", ctx), ctx),
                 outputPerMtok = dec(req(t, "outputPerMtok", ctx), ctx),
                 cachedInputPerMtok = t["cachedInputPerMtok"]?.let { dec(it, ctx) },
+                cacheWrite5mPerMtok = t["cacheWrite5mPerMtok"]?.let { dec(it, ctx) },
+                cacheWrite1hPerMtok = t["cacheWrite1hPerMtok"]?.let { dec(it, ctx) },
             )
         } ?: emptyList()
         if (p["tiers"] != null && p["tiers"] !is List<*>) throw RegistryException("$ctx: tiers must be a list")
@@ -258,6 +284,8 @@ object RegistryLoader {
             sourceRef = p["sourceRef"]?.toString(),
             effectiveFrom = p["effectiveFrom"]?.let { date(it, ctx) },
             tiers = tiers,
+            cacheWrite5mPerMtok = p["cacheWrite5mPerMtok"]?.let { dec(it, ctx) },
+            cacheWrite1hPerMtok = p["cacheWrite1hPerMtok"]?.let { dec(it, ctx) },
         )
     }
 

@@ -93,7 +93,18 @@ data class ModelRef(val providerId: String, val modelId: String, val providerMod
 
 enum class FinishReason { STOP, LENGTH, TOOL_CALL, CONTENT_FILTER, CANCELLED, ERROR }
 
-data class Usage(val inputTokens: Long = 0, val outputTokens: Long = 0, val cachedInputTokens: Long = 0) {
+/**
+ * Provider-reported token counts. [cachedInputTokens] are cache reads. [cacheCreationInputTokens] are cache writes (all TTLs),
+ * billed at the cache write rate. [cacheCreation1hInputTokens] is the part of them written with the 1-hour TTL; the rest is
+ * the 5-minute TTL. Invariant: 0 <= cacheCreation1hInputTokens <= cacheCreationInputTokens.
+ */
+data class Usage(
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val cachedInputTokens: Long = 0,
+    val cacheCreationInputTokens: Long = 0,
+    val cacheCreation1hInputTokens: Long = 0,
+) {
     companion object { val ZERO = Usage() }
 }
 

@@ -64,7 +64,7 @@ object Estimator {
     ): BudgetAmount? {
         val price = model.priceAt(now) ?: return null
         val usage = Usage(inputTokens(req), outputTokens(req, model).toLong())
-        val native = CostCalculator.cost(usage, price.rateFor(null), price.currency, CostBasis.ESTIMATED).amount
+        val native = CostCalculator.cost(usage, price.rateFor(null), price.currency, CostBasis.ESTIMATED)?.amount ?: return null
         return toBudget(native, price, model.ref, provider, registryVersion, now, converter)
     }
 
@@ -93,11 +93,23 @@ object Estimator {
 object CostCalculator {
     private val MILLION = BigDecimal(1_000_000)
 
-    fun cost(usage: Usage, rate: Rate, currency: String, basis: CostBasis): Cost {
+    /**
+     * Cost of [usage] at [rate]. Null when cache write tokens are present but the registry has no rate for their TTL: the cost
+     * is then unknown and must not be booked as zero (fail closed, the caller records it as unpriced).
+     */
+    fun cost(usage: Usage, rate: Rate, currency: String, basis: CostBasis): Cost? {
         fun part(tokens: Long, perMtok: BigDecimal) = BigDecimal(tokens).multiply(perMtok).divide(MILLION, 10, RoundingMode.UP)
+        val writes1h = usage.cacheCreation1hInputTokens
+        val writes5m = usage.cacheCreationInputTokens - writes1h
+        val rate5m = rate.cacheWrite5mPerMtok
+        val rate1h = rate.cacheWrite1hPerMtok
+        if (writes5m > 0 && rate5m == null) return null
+        if (writes1h > 0 && rate1h == null) return null
         val total = part(usage.inputTokens, rate.inputPerMtok) +
             part(usage.outputTokens, rate.outputPerMtok) +
-            part(usage.cachedInputTokens, rate.cachedInputPerMtok)
+            part(usage.cachedInputTokens, rate.cachedInputPerMtok) +
+            (if (writes5m > 0) part(writes5m, rate5m!!) else BigDecimal.ZERO) +
+            (if (writes1h > 0) part(writes1h, rate1h!!) else BigDecimal.ZERO)
         return Cost(total, currency, basis)
     }
 }

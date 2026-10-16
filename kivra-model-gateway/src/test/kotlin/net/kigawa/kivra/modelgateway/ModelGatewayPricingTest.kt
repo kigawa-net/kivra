@@ -45,4 +45,25 @@ class ModelGatewayPricingTest {
         assertEquals("UNKNOWN_COST", e.error.code)
         assertEquals(0, fake.calls)
     }
+
+    @Test fun cacheWriteIsBookedInYenAtItsRate() = runTest {
+        val m = model("m", "ext", price = Price(BigDecimal("3"), BigDecimal("15"), cacheWrite5mPerMtok = BigDecimal("3.75")))
+        val fake = FakeProvider("ext") { okResponse(m.ref, Usage(0, 0, cacheCreationInputTokens = 1_000_000)) }
+        val b = BudgetController(mapOf("task" to BudgetLimit(BigDecimal("1000"), currency = "JPY")), clock)
+        gateway(m, fake, b, converter("150")).invoke(request(id = "r3"))
+        // 1M cache writes x 3.75 USD = 3.75 USD -> 3.75 x 150 x 1.1 x 1.1 = 680.625 yen
+        assertEquals(0, BigDecimal("680.625").compareTo(b.usage("task").committed))
+        assertEquals(0L, b.usage("task").unpricedCalls)
+    }
+
+    @Test fun cacheWriteWithoutItsPriceIsUnpricedAndBlocksTheScope() = runTest {
+        val m = model("m", "ext", price = Price(BigDecimal("3"), BigDecimal("15")))
+        val fake = FakeProvider("ext") { okResponse(m.ref, Usage(1000, 500, cacheCreationInputTokens = 200)) }
+        val b = BudgetController(mapOf("task" to BudgetLimit(BigDecimal("10"), currency = "JPY")), clock)
+        assertFailsWith<GatewayException> { gateway(m, fake, b, converter("150")).invoke(request(id = "r4")) }
+        assertEquals(1L, b.usage("task").unpricedCalls)
+        // The scope is now UNKNOWN_COST: the next call is refused before the provider is reached.
+        assertFailsWith<GatewayException> { gateway(m, fake, b, converter("150")).invoke(request(id = "r5")) }
+        assertEquals(1, fake.calls)
+    }
 }

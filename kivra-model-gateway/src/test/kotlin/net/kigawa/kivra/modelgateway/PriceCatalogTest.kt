@@ -76,9 +76,9 @@ class PriceCatalogTest {
 
     @Test fun actualCostIsChargedAtTheTierOfTheActualInputSize() {
         val usage = Usage(inputTokens = 60, outputTokens = 0, cachedInputTokens = 40) // 100 total: still tier 1
-        assertDec("0.000192", CostCalculator.cost(usage, tiered.rateFor(100), "USD", CostBasis.ACTUAL).amount)
+        assertDec("0.000192", CostCalculator.cost(usage, tiered.rateFor(100), "USD", CostBasis.ACTUAL)!!.amount)
         val over = Usage(inputTokens = 60, outputTokens = 0, cachedInputTokens = 41) // 101 total: top tier
-        assertDec("0.0003846", CostCalculator.cost(over, tiered.rateFor(101), "USD", CostBasis.ACTUAL).amount)
+        assertDec("0.0003846", CostCalculator.cost(over, tiered.rateFor(101), "USD", CostBasis.ACTUAL)!!.amount)
     }
 
     @Test fun tiersMustBeStrictlyAscendingAndPositive() {

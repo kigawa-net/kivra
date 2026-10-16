@@ -139,6 +139,31 @@ class AnthropicProviderTest : ModelProviderContract() {
         assertEquals(Usage(12, 5, 3), providerFor(Scenario.TEXT).invoke(request(), target, ctx).usage)
     }
 
+    private fun parsed(json: String) = build(Scenario.TEXT).parseUsage(Json.Default.parseToJsonElement(json))
+
+    @Test fun cacheWriteBreakdownIsReadPerTtl() {
+        val u = parsed("""{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20}}""")
+        assertEquals(Usage(1, 2, 3, 30, 20), u)
+    }
+
+    @Test fun cacheWriteTotalWithoutBreakdownIsBilledAsOneHour() {
+        assertEquals(Usage(1, 2, 0, 30, 30), parsed("""{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":30}"""))
+    }
+
+    @Test fun cacheWriteBreakdownWithoutTopLevelTotalIsSummed() {
+        assertEquals(Usage(0, 0, 0, 30, 20), parsed("""{"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20}}"""))
+    }
+
+    @Test fun cacheWriteWithOnly5mBreakdownBillsTheUnexplainedRemainderAsOneHour() {
+        // 30 in total, 10 explicitly 5-minute: the other 20 are priced at the higher 1-hour rate.
+        assertEquals(Usage(0, 0, 0, 30, 20), parsed("""{"cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":10}}"""))
+    }
+
+    @Test fun missingCacheWriteFieldsReadAsZero() {
+        assertEquals(Usage(1, 2, 0, 0, 0), parsed("""{"input_tokens":1,"output_tokens":2}"""))
+        assertEquals(Usage.ZERO, parsed("""{}"""))
+    }
+
     @Test fun usageIsFlaggedCompleteOnlyWhenTokenCountsArrive() = runTest {
         assertTrue(providerFor(Scenario.TEXT).invoke(request(), target, ctx).usageComplete)
         val complete = providerFor(Scenario.TEXT).stream(request(), target, ctx).toList().last() as StreamChunk.Finished

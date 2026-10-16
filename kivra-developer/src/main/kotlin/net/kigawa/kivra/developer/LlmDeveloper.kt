@@ -163,6 +163,8 @@ class LlmDeveloper(
         inputTokens = inputTokens + other.inputTokens,
         outputTokens = outputTokens + other.outputTokens,
         cachedInputTokens = cachedInputTokens + other.cachedInputTokens,
+        cacheCreationInputTokens = cacheCreationInputTokens + other.cacheCreationInputTokens,
+        cacheCreation1hInputTokens = cacheCreation1hInputTokens + other.cacheCreation1hInputTokens,
     )
 
     /** Read-only view of the repository context. A path not in the context is treated as missing. */

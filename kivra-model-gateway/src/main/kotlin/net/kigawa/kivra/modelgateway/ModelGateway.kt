@@ -373,9 +373,12 @@ class ModelGateway(
         }
         val now = clock.instant()
         val price = target.model.priceAt(now) ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has no price in force")
-        // Tier is chosen from the actual input size (input + cached), so the actual cost is exact for the tier that applied.
-        val rate = price.rateFor(usage.inputTokens + usage.cachedInputTokens)
+        // Tier is chosen from the actual input size (input + cache reads + cache writes), so the actual cost is exact for the tier that applied.
+        val rate = price.rateFor(usage.inputTokens + usage.cachedInputTokens + usage.cacheCreationInputTokens)
+        // Cache writes without a registry rate for their TTL: the cost is unknown. Throwing here makes the caller commit the
+        // estimate as unpriced, so the scope is UNKNOWN_COST until an operator acknowledges it (fail closed, never booked as zero).
         val native = CostCalculator.cost(usage, rate, price.currency, CostBasis.ACTUAL)
+            ?: throw denied("UNKNOWN_COST", "model ${target.model.id} has cache write tokens without a cache write price; cost unknown")
         val amount = Estimator.toBudget(native.amount, price, target.model.ref, target.provider, rev, now, costConverter)
             ?: throw denied("UNKNOWN_COST", "model ${target.model.id} cost cannot be converted to the budget currency")
         budget.commit(key, amount)

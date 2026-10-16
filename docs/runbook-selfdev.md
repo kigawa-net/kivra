@@ -11,7 +11,7 @@
 - 自己開発は既定で無効。`KIVRA_SELFDEV_ENABLED` が正確に `true` のときだけ有効になる。無効のときは、自己開発の他の環境変数を一切読まず、ワーカーも `/api/selfdev/*` も登録しない(`selfdev/SelfDevSettings.kt`、`Application.kt`)。
 - 有効化すると、`SelfDevWorker` が起動し、`POST /api/selfdev/tasks`、`GET /api/selfdev/runs`、`GET /api/selfdev/runs/{id}` が登録される(`routes/SelfDevRoutes.kt`)。
 - 本番で動かすには、ブランチ保護、GitHub 認証(App 推奨。PAT は代替)、Anthropic 認証(WIF 推奨。静的キーは代替)、モデル registry、為替の設定が必要。§1 を参照する。
-- **未実装**: UNKNOWN の Run を運用者が解放する操作(§4.1)、マージ検証(ADR 0008 の ⑩。マージ済みの PR は `PULL_REQUEST` に残るだけで、完了しない)(§4.3)。
+- **未実装**: マージ検証(ADR 0008 の ⑩。マージ済みの PR は `PULL_REQUEST` に残るだけで、完了しない)(§4.3)。
 
 ## 1. 有効化の前提
 
@@ -70,7 +70,7 @@
    SELECT state, COUNT(*) FROM development_runs WHERE state IN ('PATCH_READY', 'UNKNOWN') GROUP BY state;
    ```
 
-   旧イメージ(V13 までを知るもの)が残っていないことも確認する(`docs/provider-compatibility-matrix.md` §4a の 7)。ロールバックするときは、新しい状態の Run が残らない状態にしてから旧イメージに戻す。残っている `UNKNOWN` の解放は未実装(§4.1)なので、解放できないときはロールバックの判断をエスカレーションする。
+   旧イメージ(V13 までを知るもの)が残っていないことも確認する(`docs/provider-compatibility-matrix.md` §4a の 7)。ロールバックするときは、新しい状態の Run が残らない状態にしてから旧イメージに戻す。残っている `UNKNOWN` の Run は §4.1 の手順で解放する。解放しないまま旧イメージに戻すと、解放されない `UNKNOWN` が残る。
 
 ## 3. やってはいけないこと
 
@@ -84,7 +84,23 @@
 
 ### 4.1 UNKNOWN の Run を解放する
 
-**未実装。** Run が `UNKNOWN` になると、Runner は `AWAITING_OPERATOR` で待つだけで、解放の API、CLI、手順は無い。DB を直接書き換える手順は本書に書かない。
+**実装済み(ADR 0009)。** `POST /api/admin/selfdev/runs/{id}/release`。`KIVRA_AUTH_MODE` が設定されているときに登録される(`Application.kt`)。自己開発の無効化とは独立しており、無効化したあとの UNKNOWN も解放できる。
+
+- 対象: 自己開発の Run(`taskId` が `selfdev:` で始まるもの)で、状態が `UNKNOWN` のもの。遷移は `UNKNOWN` → `CANCELLED` だけである。
+- 認証: 予算の acknowledge(§4.2)と同じ。オペレーターは認証された主体になる。
+- リクエスト: `{"reason":"<理由。1〜500 文字>"}`。ほかのフィールドは 400。
+- 応答: 200 `{"runId","state":"CANCELLED","reasonCode":"OPERATOR_RELEASED"}`、400 不正な入力、401 未認証、404 該当なし(自己開発でない Run を含む)、409 `UNKNOWN` ではない(解放済みを含む)。
+- 監査: 同じトランザクションで `RUN_RELEASED` を監査に、`RunStateChanged` を outbox に書く。理由は監査の payload にだけ入り、ログには出ない。
+- 解放した Run は、同時 Run 上限(`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`)を占有しない。
+- 解放は原因を直さない。原因が残っていれば、次の Run も `UNKNOWN` になる。解放する前に、下の理由を確認する。
+- kivra は PR を閉じず、マージもしない。解放しても、GitHub 上の branch と PR は残る。その扱いは人が決める。
+
+```sh
+curl -X POST "https://<kivra-host>/api/admin/selfdev/runs/<runId>/release" \
+  -H "Authorization: Bearer <JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"<理由>"}'
+```
 
 `UNKNOWN` になる主な理由(コード上の事実):
 
@@ -100,7 +116,7 @@
 - リクエストの項目: `scopeId`、`period`、`reservationKey`、`actualAmountJpy`(任意。省略は「実費不明」、`"0"` は「検証済みの請求なし」)、`evidence`、`reason`
 - 応答: 200 `ACKNOWLEDGED` または `ALREADY_ACKNOWLEDGED`、400 不正な入力、401 未認証、404 該当なし、409 未価格の予約ではない、503 ストアが判断できない
 
-これは予算の予約だけが対象である。Run の `UNKNOWN` は解放できない(§4.1)。`docs/provider-compatibility-matrix.md` §4a の 10 は両方を並べて書いているが、Run の解放は未実装である。
+これは予算の予約だけが対象である。Run の `UNKNOWN` の解放は §4.1 を参照する。
 
 ```sh
 curl -X POST "https://<kivra-host>/api/admin/budget/acknowledge" \
@@ -125,7 +141,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 **実装済み。** `KIVRA_SELFDEV_ENABLED` を `false` にして再起動する。無効のときは、ワーカーが止まり、`/api/selfdev/*` は登録されず、自己開発の秘密の環境変数は読まれない。
 
 - 止まるのは Run の進行と新規の投入だけである。作成済みの PR は残る。kivra は PR を閉じない。
-- `UNKNOWN` の Run は、無効化しても解放されない(§4.1)。
+- `UNKNOWN` の Run は、無効化しても自動では解放されない。解放は §4.1 の API で行う。
 
 ## 5. 動作確認
 

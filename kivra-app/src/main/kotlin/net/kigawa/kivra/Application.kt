@@ -29,6 +29,7 @@ import net.kigawa.kivra.routes.configureTaskApiRoutes
 import net.kigawa.kivra.routes.configureOperationApiRoutes
 import net.kigawa.kivra.routes.readOnlyOperationJournal
 import net.kigawa.kivra.routes.configureUiRoutes
+import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.configureSelfDevRoutes
 import net.kigawa.kivra.selfdev.SelfDevSettings
 import net.kigawa.kivra.selfdev.buildSelfDev
@@ -74,6 +75,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()
             configureBudgetAdminRoutes(budgetStore, taskApiIdentity)
+            configureSelfDevAdminRoutes(runs, taskApiIdentity)
         }
         if (selfDevParts != null) configureSelfDevRoutes(selfDevParts.routes)
         configureObservabilityRoutes(metrics, config.metrics)

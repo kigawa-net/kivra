@@ -133,11 +133,11 @@
 | 読み取り | 実装済み(`listModels`。`health` はローカルの資格情報確認のみで、ネットワーク呼び出し・課金なし) | **未確認**(実 API への接続試験の記録なし) | 無効(未結線) |
 | 変更(推論 `invoke` / `stream`) | 実装済み。送信前の失敗のみ再試行(`SendState.NOT_SENT`)。送信後は予約を確定値で精算し、requestId を UNKNOWN で封印 | — | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
 | 冪等キー | Kivra 側の `requestId` を `RequestLedger` で管理。`Idempotency-Key` ヘッダは送っていない | **未確認** | 無効 |
-| Receipt / Operation-ID | 応答の `usage` を読む。`usageComplete` は入出力トークンが揃ったかを示す | **未確認** | 無効 |
+| Receipt / Operation-ID | 応答の `usage` を読む(入力・出力・キャッシュ読み取り・キャッシュ書き込み〔合計と 5 分 / 1 時間の内訳〕)。`usageComplete` は入出力トークンが揃ったかを示す | **未確認** | 無効 |
 | 照合 API | なし。UNKNOWN の requestId は再利用せず、新しい requestId を使う | — | 無効 |
 | 認証 | 2 方式(どちらか一方のみ。§4a)。**推奨は Workload Identity Federation(WIF)**: k8s の projected ServiceAccount トークン(JWT)を `POST /v1/oauth/token` で Anthropic アクセストークンに交換し、`Authorization: Bearer` で送る(`AnthropicWifAuth`)。代替は静的キー(`x-api-key`、`StaticKeyAuth`)。WIF の前提: OAuth スコープは `workspace:inference` で足りる。JWT の `jti` は既定で 1 回限りのため、同じ JWT は再送しない(交換のたびにファイルを読み直し、ローテーションを待つ)。401 ではアクセストークンを破棄し、その場では再送しない。k8s の inline JWKS は、クラスターの署名鍵のローテーションに合わせて更新が必要。projected token は `expirationSeconds: 3600`、audience `https://api.anthropic.com` を前提とする。資格情報の値は本書・ログ・例外に出さない | **未確認**(Anthropic 側の仕様は公式の記述に基づく。実 API への接続試験の記録なし) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
 | レート制限 | 429 は `RATE_LIMITED`(`retry-after` を解釈)。送信前の失敗のみ再試行 | **未確認** | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
-| 課金 | 応答の usage から費用を算出し(`CostConverter`、USD→JPY)、耐久的な予算台帳(`DbBudgetStore`)に反映。`ModelGateway` は耐久的 `RequestLedger` を要求し、既定は fail-fast | **未確認**(価格体系は本リポジトリに記録した価格カタログに依存) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| 課金 | 応答の usage から費用を算出し(`CostConverter`、USD→JPY)、耐久的な予算台帳(`DbBudgetStore`)に反映。キャッシュ書き込みは、レジストリの `cacheWrite5mPerMtok` / `cacheWrite1hPerMtok` で計上する。その単価が無いときは `UNKNOWN_COST`(0 円として扱わない。design 13 §11.8)。`ModelGateway` は耐久的 `RequestLedger` を要求し、既定は fail-fast | **未確認**(価格体系は本リポジトリに記録した価格カタログに依存) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
 
 ## 4. 本番 Capability が有効になる条件(Gate)
 

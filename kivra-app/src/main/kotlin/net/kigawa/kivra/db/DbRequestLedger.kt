@@ -12,6 +12,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.boolean
 import net.kigawa.kivra.modelgateway.Cost
 import net.kigawa.kivra.modelgateway.CostBasis
@@ -238,6 +239,8 @@ internal object ModelResponseCodec {
             put("inputTokens", r.usage.inputTokens)
             put("outputTokens", r.usage.outputTokens)
             put("cachedInputTokens", r.usage.cachedInputTokens)
+            put("cacheCreationInputTokens", r.usage.cacheCreationInputTokens)
+            put("cacheCreation1hInputTokens", r.usage.cacheCreation1hInputTokens)
         })
         put("cost", cost(r.cost))
         put("latencyMs", r.latencyMs)
@@ -259,7 +262,12 @@ internal object ModelResponseCodec {
             structured = o["structured"],
             finishReason = FinishReason.valueOf(o.str("finishReason")),
             usage = o.getValue("usage").jsonObject.let {
-                Usage(it.long("inputTokens"), it.long("outputTokens"), it.long("cachedInputTokens"))
+                Usage(
+                    it.long("inputTokens"), it.long("outputTokens"), it.long("cachedInputTokens"),
+                    // Rows written before cache writes were recorded have no such keys: they read as 0.
+                    it["cacheCreationInputTokens"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    it["cacheCreation1hInputTokens"]?.jsonPrimitive?.longOrNull ?: 0L,
+                )
             },
             cost = decodeCost(o.getValue("cost").jsonObject),
             latencyMs = o.long("latencyMs"),

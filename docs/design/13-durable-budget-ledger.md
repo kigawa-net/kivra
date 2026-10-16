@@ -80,8 +80,8 @@
 
 ## 9. 配線していない点
 
-- 本番の起動(`Application.kt`)には組み込まない。有料 API の呼び出し経路がまだ無いため。
-- `acknowledgeUnpriced` と `POST /api/admin/budget/acknowledge`(PR #168)も、本番には未配線(`Application.kt` で `DbBudgetStore` を構築せず、ルートも登録しない)。配線は ⑥ の PR で行う。
+- 本番の起動(`Application.kt`)は `DbBudgetStore` を**常に**構築する(`budgetStore`)。同じストアを `configureBudgetAdminRoutes` に渡し、`acknowledgeUnpriced` の `POST /api/admin/budget/acknowledge`(PR #168)も登録する。
+- 有料 API の呼び出し経路は既定で無効。`KIVRA_SELFDEV_ENABLED=true` のときだけ `SelfDevWiring` が `ModelGateway`(Anthropic、`CostConverter(FxConfig)`)を組み立て、`budgetStore` を予算として渡す。つまり、予算ストアは本番に配線済みだが、支出が発生しうるのは自己開発を有効にしたときだけ。
 - 設定: `kivra.budget.tenantId`(`KIVRA_BUDGET_TENANT_ID`)、`kivra.budget.monthlyLimitJpy`(`KIVRA_BUDGET_MONTHLY_LIMIT_JPY`、既定 10000)、`kivra.budget.softRatio`(`KIVRA_BUDGET_SOFT_RATIO`、既定 0.8)。読み込みは `BudgetConfig.from`。
 - `ModelGateway` は現在も `BudgetPort` を受けるだけで、本番用に DB 版のみを許す制約は未実装。
 - 呼び出し元は同期 JDBC を使う。コルーチンのスレッドで呼ぶ場合は別途 `Dispatchers.IO` 等に逃がす必要がある(配線時に扱う)。
@@ -108,8 +108,8 @@
 
 - `tiers`: `inputTokensUpTo`(その値以下の入力で適用)ごとに、入力・出力・キャッシュ読み取りの単価を持つ。境界は昇順で厳密増加に限る。
 - トップレベルの単価は、最後の境界より大きい入力に適用する。
-- 入力の大きさ = `inputTokens + cachedInputTokens`(実際の使用量)。
-- **予約時(見積もり)は階層が不明**なので、全階層の中で成分ごとに最も高い単価を使う(上限側)。キャッシュ読み取りは入力側の単価と比べて高い方を使う。
+- 入力の大きさ = `inputTokens + cachedInputTokens + cacheCreationInputTokens`(実際の使用量。キャッシュ書き込みを含む。§11.8)。
+- **予約時(見積もり)は階層が不明**なので、全階層の中で成分ごとに最も高い単価を使う(上限側)。キャッシュ読み取りと書き込みは入力側の単価と比べて高い方を使う。
 - **確定時(実コスト)**は、実際の使用量の入力の大きさで階層を選ぶ。
 
 ### 11.3 円換算
@@ -130,6 +130,7 @@
 - レートが未設定、または 1 円未満・1000 円超(範囲外)。
 - `fxAsOf` が未設定、未来、または現在から `maxAgeDays` より古い(境界の日数ちょうどは有効)。
 - 有効な価格の版が無い。
+- キャッシュ書き込み(§11.8)のトークンがあるのに、その TTL の単価がレジストリに無い。
 
 ローカル推論(`TrustZone.LOCAL`、かつ全単価が**明示的に 0**)は、無料として 0 円で計上する。レートは不要で、為替レートが無くても通る。価格が無い(UNKNOWN)のローカルモデルは無料ではなく、拒否する。外部プロバイダで単価が 0 の場合は、通常どおりレートが必要。
 
@@ -149,9 +150,19 @@
 
 ### 11.6 未配線
 
-- 本番の推論経路には未配線。`ModelGateway` / `RoutingEngine` は `costConverter` を任意で受け取る(未注入 = 従来どおり)。`kivra-app` 側の設定注入は B3 以降(有料 API の経路ができた時点)。
+- 既定の起動では推論経路は無効。`ModelGateway` / `RoutingEngine` は `costConverter` を任意で受け取る(未注入 = 従来どおり)。`kivra-app` では `KIVRA_SELFDEV_ENABLED=true` のときだけ `SelfDevWiring` が `CostConverter(FxConfig)` を注入する(§9)。
 - 残る懸念: 確定時に換算が失敗すると(レートが古くなった場合など)、その呼び出しは `unrecorded` 扱い(応答は返さず、requestId を封印する)になる。
 
 ### 11.7 テスト
 
-`PriceCatalogTest`(版の選択と JST 境界、未来の版、版なし、tier の境界と最高単価、YAML の読み込みと拒否)、`CostConverterTest`(換算式、端数、JPY、fail closed の各条件、為替の変動、月末の切り替え、ローカル無料と UNKNOWN の区別、設定の読み込み)、`ModelGatewayPricingTest`(確定コストが円で計上される、換算不能で provider を呼ばない)。
+`PriceCatalogTest`(版の選択と JST 境界、未来の版、版なし、tier の境界と最高単価、YAML の読み込みと拒否)、`CacheWriteCostTest`(キャッシュ書き込みの費用、単価なしの UNKNOWN、YAML の任意キー)、`AnthropicProviderTest`(usage のキャッシュ書き込みの内訳・合計のみ・欠落)、`CostConverterTest`(換算式、端数、JPY、fail closed の各条件、為替の変動、月末の切り替え、ローカル無料と UNKNOWN の区別、設定の読み込み)、`ModelGatewayPricingTest`(確定コストが円で計上される、換算不能で provider を呼ばない)。
+
+### 11.8 キャッシュ書き込み(cache write)
+
+- Anthropic の応答 `usage` の `cache_creation_input_tokens`(合計)と、`cache_creation` の `ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`(内訳)を読む(`AnthropicProvider.parseUsage`)。欠落は 0。
+- `Usage.cacheCreationInputTokens` は合計、`Usage.cacheCreation1hInputTokens` は 1 時間 TTL の分(残りは 5 分 TTL)。
+- 内訳が無く合計だけの場合は、全量を 1 時間の単価で見積もる(高い方に寄せ、過小計上を避ける)。内訳に 5 分の値だけがあり合計と合わない場合も、説明できない残りは 1 時間扱い。
+- 単価はレジストリの `cacheWrite5mPerMtok` / `cacheWrite1hPerMtok`(版・tier の両方に置ける。任意。未指定でも従来どおり読める)。
+- 費用 = 各 TTL の書き込みトークン × その単価 / 100 万。読み取り・入出力の費用と、通貨換算・為替余裕・税余裕は変えない。
+- **fail closed**: 書き込みトークンが 1 以上で、その TTL の単価が無い場合は費用を 0 にせず、`UNKNOWN_COST` 扱い(`CostCalculator.cost` が null、`ModelGateway.book` が拒否)。予約の見積もりは、書き込みの単価がある場合は入力側の最高単価に含める。
+- 本ゲートウェイは現在 `cache_control` を送っていない。書き込みが起きるのは、API 側がキャッシュを作ったときだけ。

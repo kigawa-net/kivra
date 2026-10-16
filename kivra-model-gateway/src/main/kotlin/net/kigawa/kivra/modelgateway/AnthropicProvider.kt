@@ -252,10 +252,26 @@ class AnthropicProvider(
     private fun hasTokens(u: JsonElement?, key: String): Boolean =
         ((u as? JsonObject)?.get(key) as? JsonPrimitive)?.longOrNull != null
 
-    private fun parseUsage(u: JsonElement?): Usage {
+    /**
+     * Token counts from a Message or message_start usage block. Cache writes: the top-level cache_creation_input_tokens is the
+     * total; cache_creation.ephemeral_1h_input_tokens gives the 1-hour part. Without a breakdown the whole total is treated as
+     * 1-hour (the higher rate), so the cost is never under-counted. A missing count is 0.
+     */
+    internal fun parseUsage(u: JsonElement?): Usage {
         val o = (u as? JsonObject) ?: return Usage.ZERO
         fun n(k: String) = (o[k] as? JsonPrimitive)?.longOrNull ?: 0L
-        return Usage(n("input_tokens"), n("output_tokens"), n("cache_read_input_tokens"))
+        val breakdown = o["cache_creation"] as? JsonObject
+        fun b(k: String): Long? = (breakdown?.get(k) as? JsonPrimitive)?.longOrNull?.coerceAtLeast(0L)
+        val fiveMin = b("ephemeral_5m_input_tokens")
+        val oneHour = b("ephemeral_1h_input_tokens")
+        val total = (o["cache_creation_input_tokens"] as? JsonPrimitive)?.longOrNull?.coerceAtLeast(0L)
+            ?: ((fiveMin ?: 0L) + (oneHour ?: 0L)).takeIf { breakdown != null } ?: 0L
+        // Without a 5-minute count, everything not explicitly 5-minute is priced as 1-hour (the higher rate).
+        val writes1h = if (breakdown == null) total else (total - (fiveMin ?: 0L)).coerceIn(0L, total)
+        return Usage(
+            n("input_tokens"), n("output_tokens"), n("cache_read_input_tokens"),
+            cacheCreationInputTokens = total, cacheCreation1hInputTokens = writes1h,
+        )
     }
 
     // ---- errors --------------------------------------------------------------------------------------

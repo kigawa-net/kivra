@@ -42,8 +42,15 @@ private class CountingTokens : TokenProvider {
     override fun invalidate() { invalidations++ }
 }
 
-private fun prJson(number: Int = 7, head: String = "kivra/run-r1", repo: String = "kigawa-net/kivra", body: String = "x\\n\\nkivra-run:r1", state: String = "open") =
-    """{"number":$number,"state":"$state","draft":false,"merged":false,"body":"$body","html_url":"https://github.com/$repo/pull/$number",
+private fun prJson(
+    number: Int = 7,
+    head: String = "kivra/run-r1",
+    repo: String = "kigawa-net/kivra",
+    body: String = "x\\n\\nkivra-run:r1",
+    state: String = "open",
+    author: String? = "\"user\":{\"login\":\"kivra-app[bot]\",\"id\":9001},",
+) =
+    """{"number":$number,"state":"$state","draft":false,"merged":false,${author ?: ""}"body":"$body","html_url":"https://github.com/$repo/pull/$number",
         "head":{"ref":"$head","sha":"$SHA","label":"kigawa-net:$head","repo":{"full_name":"$repo"}},
         "base":{"ref":"main","sha":"$SHA2","repo":{"full_name":"$repo"}}}"""
 
@@ -214,6 +221,20 @@ class HttpGitHubAdapterTest {
         val f = Fake { respond(prJson(number = 8), HttpStatusCode.OK, JSON_H) }
         val r = f.adapter.getPullRequest(REPO, 7)
         assertEquals(GitHubFailureKind.IDENTITY_MISMATCH, assertIs<GitHubResult.Failure>(r).kind)
+    }
+
+    @Test
+    fun `getPullRequest reads the author id from user id`() = runTest {
+        val f = Fake { respond(prJson(), HttpStatusCode.OK, JSON_H) }
+        assertEquals(9001L, assertIs<GitHubResult.Success<PullRequest>>(f.adapter.getPullRequest(REPO, 7)).value.authorId)
+    }
+
+    @Test
+    fun `getPullRequest leaves the author id null when user or its id is absent`() = runTest {
+        val noUser = Fake { respond(prJson(author = null), HttpStatusCode.OK, JSON_H) }
+        assertEquals(null, assertIs<GitHubResult.Success<PullRequest>>(noUser.adapter.getPullRequest(REPO, 7)).value.authorId)
+        val noId = Fake { respond(prJson(author = "\"user\":{\"login\":\"kivra-app[bot]\"},"), HttpStatusCode.OK, JSON_H) }
+        assertEquals(null, assertIs<GitHubResult.Success<PullRequest>>(noId.adapter.getPullRequest(REPO, 7)).value.authorId)
     }
 
     @Test

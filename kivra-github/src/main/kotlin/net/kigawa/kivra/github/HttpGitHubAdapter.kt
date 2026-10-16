@@ -316,6 +316,7 @@ class HttpGitHubAdapter(
                 nodeId = o.str("node_id"),
                 baseRepositoryId = o.nestedLong("base", "repo", "id"),
                 mergeCommitSha = o.str("merge_commit_sha")?.takeIf { sha40.matches(it) },
+                authorId = o.nestedLong("user", "id"),
             ),
         )
     }

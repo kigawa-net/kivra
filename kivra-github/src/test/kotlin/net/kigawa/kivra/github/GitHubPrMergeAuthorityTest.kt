@@ -21,6 +21,7 @@ private const val HEAD = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
 private const val BASE_SHA = "fedcba9876543210fedcba9876543210fedcba98"
 private const val MERGE = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
 private const val SECRET = "ghs_SECRET_TOKEN_VALUE"
+private const val BOT_ID = 9001L
 private val JSON_H = headersOf(HttpHeaders.ContentType, "application/json")
 
 private val BINDING = PullRequestBinding(
@@ -46,7 +47,8 @@ private fun prJson(
     nodeId: String? = "PR_node_7",
     mergeSha: String? = MERGE,
     body: String = "kivra-run:r1 $SECRET",
-) = """{"number":$number,"state":"$state","merged":$merged,"draft":false,"body":"$body",
+    authorId: Long? = BOT_ID,
+) = """{"number":$number,"state":"$state","merged":$merged,"draft":false,${authorId?.let { "\"user\":{\"login\":\"kivra-app[bot]\",\"id\":$it}," } ?: ""}"body":"$body",
     "html_url":"https://github.com/$repo/pull/$number","node_id":${nodeId?.let { "\"$it\"" } ?: "null"},
     "merge_commit_sha":${mergeSha?.let { "\"$it\"" } ?: "null"},
     "head":{"ref":"kivra/run-r1","sha":"$head","repo":{"full_name":"$repo"}},
@@ -63,6 +65,7 @@ private class Harness(handler: suspend io.ktor.client.engine.mock.MockRequestHan
             },
             backoff = {},
         ),
+        expectedAuthorId = BOT_ID,
     )
 }
 
@@ -94,6 +97,14 @@ class GitHubPrMergeAuthorityTest {
         assertEquals("GITHUB_IDENTITY_MISMATCH", assertIs<PrMergeVerification.Refused>(otherRepo.authority.verifyMerge(BINDING)).reason)
         val otherBase = Harness { respond(prJson(base = "release"), HttpStatusCode.OK, JSON_H) }
         assertEquals("BASE_REF_MISMATCH", assertIs<PrMergeVerification.Refused>(otherBase.authority.verifyMerge(BINDING)).reason)
+    }
+
+    @Test
+    fun `a PR opened by another user, or with no author id, is refused and never verified`() = runTest {
+        val other = Harness { respond(prJson(authorId = BOT_ID + 1), HttpStatusCode.OK, JSON_H) }
+        assertEquals("AUTHOR_MISMATCH", assertIs<PrMergeVerification.Refused>(other.authority.verifyMerge(BINDING)).reason)
+        val none = Harness { respond(prJson(authorId = null), HttpStatusCode.OK, JSON_H) }
+        assertEquals("AUTHOR_MISMATCH", assertIs<PrMergeVerification.Refused>(none.authority.verifyMerge(BINDING)).reason)
     }
 
     @Test

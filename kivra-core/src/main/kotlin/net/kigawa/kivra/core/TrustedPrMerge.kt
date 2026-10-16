@@ -74,6 +74,7 @@ data class PullRequestBinding(
 /**
  * What the provider reported for the pull request. Inert input to the base class's verification; holding one grants
  * nothing. Nullable identity fields mean the response did not carry them, and verification fails closed on them.
+ * [authorId] is the provider's numeric user id of the pull request author (the App bot, for kivra-created PRs).
  */
 data class ObservedPullRequest(
     val repository: String,
@@ -84,6 +85,7 @@ data class ObservedPullRequest(
     val headSha: String,
     val merged: Boolean,
     val mergeCommitSha: String?,
+    val authorId: Long?,
 )
 
 /**
@@ -148,8 +150,16 @@ sealed interface PrMergeObservation {
 
 /** Compares an observation with the binding. Internal: callers outside kivra-core reach it only through [PrMergeAuthorityBase]. */
 internal object PrMergeVerifier {
-    /** Every identity field must match exactly (repository name case-insensitively). The PR must be merged with a merge SHA. */
-    fun verify(binding: PullRequestBinding, observed: ObservedPullRequest, observedAt: Instant): PrMergeVerification {
+    /**
+     * Every identity field must match exactly (repository name case-insensitively). The PR must be authored by
+     * [expectedAuthorId] (a missing author id is refused), must be merged, and must carry a merge SHA.
+     */
+    fun verify(
+        binding: PullRequestBinding,
+        expectedAuthorId: Long,
+        observed: ObservedPullRequest,
+        observedAt: Instant,
+    ): PrMergeVerification {
         fun refuse(why: String) = PrMergeVerification.Refused(why)
         if (!observed.repository.equals(binding.repository, ignoreCase = true)) return refuse("REPOSITORY_NAME_MISMATCH")
         if (observed.repositoryId != binding.repositoryId) return refuse("REPOSITORY_ID_MISMATCH")
@@ -157,6 +167,7 @@ internal object PrMergeVerifier {
         if (observed.nodeId != binding.prNodeId) return refuse("PR_NODE_ID_MISMATCH")
         if (observed.baseRef != binding.baseRef) return refuse("BASE_REF_MISMATCH")
         if (!SHA40.matches(observed.headSha) || observed.headSha != binding.headSha) return refuse("HEAD_SHA_MISMATCH")
+        if (observed.authorId == null || observed.authorId != expectedAuthorId) return refuse("AUTHOR_MISMATCH")
         if (!observed.merged) return refuse("NOT_MERGED")
         val mergeSha = observed.mergeCommitSha
         if (mergeSha == null || !SHA40.matches(mergeSha)) return refuse("MERGE_COMMIT_SHA_MISSING")
@@ -177,8 +188,18 @@ interface TrustedPrMergeAuthority {
  * Base for production and test Authorities. The implementation only reports what the provider answered ([observe]).
  * [verifyMerge] is final: it runs [PrMergeVerifier] against that report, with the observation time taken from [clock] after
  * [observe] returned. This is the only route to [PrMergeVerification.Verified].
+ *
+ * [expectedAuthorId] is the provider user id that must have opened the pull request (the kivra App bot). It is supplied
+ * by whoever builds the Authority, not stored per run, so it needs no binding column.
  */
-abstract class PrMergeAuthorityBase(private val clock: Clock = Clock.systemUTC()) : TrustedPrMergeAuthority {
+abstract class PrMergeAuthorityBase(
+    private val expectedAuthorId: Long,
+    private val clock: Clock = Clock.systemUTC(),
+) : TrustedPrMergeAuthority {
+    init {
+        require(expectedAuthorId > 0) { "expectedAuthorId must be positive" }
+    }
+
     /**
      * Fetches the current state of the bound pull request from the provider. Return [PrMergeObservation.Refused] for a
      * definitive refusal (not found, identity mismatch, malformed answer). Throw [PrMergeAuthorityUnavailableException]
@@ -189,7 +210,7 @@ abstract class PrMergeAuthorityBase(private val clock: Clock = Clock.systemUTC()
     final override suspend fun verifyMerge(binding: PullRequestBinding): PrMergeVerification =
         when (val o = observe(binding)) {
             is PrMergeObservation.Refused -> PrMergeVerification.Refused(o.reason)
-            is PrMergeObservation.Found -> PrMergeVerifier.verify(binding, o.pullRequest, clock.instant())
+            is PrMergeObservation.Found -> PrMergeVerifier.verify(binding, expectedAuthorId, o.pullRequest, clock.instant())
         }
 }
 

@@ -12,6 +12,7 @@ import net.kigawa.kivra.core.PullRequestBinding
  * reports the answer. The core base class decides whether that answer matches the binding, so this class cannot produce a
  * verified merge by itself. Nothing comes from a webhook body, a caller's claim, or a search result.
  *
+ * - [expectedAuthorId] is the App bot user id that must have opened the PR. A missing author id is a refusal.
  * - A 404, an identity mismatch, a malformed body, a foreign object, or a redirect (never followed, so the bearer token
  *   does not travel to another origin) is a refusal.
  * - Auth, permission, rate limit, 5xx, I/O and unknown outcomes throw [PrMergeAuthorityUnavailableException]. "Not found" is
@@ -21,8 +22,9 @@ import net.kigawa.kivra.core.PullRequestBinding
  */
 class GitHubPrMergeAuthority(
     private val github: GitHubPort,
+    expectedAuthorId: Long,
     clock: Clock = Clock.systemUTC(),
-) : PrMergeAuthorityBase(clock) {
+) : PrMergeAuthorityBase(expectedAuthorId, clock) {
 
     override suspend fun observe(binding: PullRequestBinding): PrMergeObservation {
         val repo = parseRepo(binding.repository) ?: return PrMergeObservation.Refused("REPOSITORY_NAME_INVALID")
@@ -62,6 +64,7 @@ class GitHubPrMergeAuthority(
         headSha = headSha,
         merged = merged,
         mergeCommitSha = mergeCommitSha,
+        authorId = authorId,
     )
 
     private fun parseRepo(fullName: String): RepoRef? {

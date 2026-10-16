@@ -170,6 +170,8 @@ data class PullRequest(
     val baseRepositoryId: Long? = null,
     /** Merge commit SHA (`merge_commit_sha`). Set by GitHub for merged PRs; never equated with [headSha]. */
     val mergeCommitSha: String? = null,
+    /** Numeric id of the PR author (`user.id`). Null when absent; merge verification then fails closed. */
+    val authorId: Long? = null,
 ) {
     fun hasMarker(runId: String): Boolean = body.lines().any { it.trim() == RunBranch.marker(runId) }
 }

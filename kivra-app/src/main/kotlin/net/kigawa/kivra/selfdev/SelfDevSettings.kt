@@ -1,7 +1,9 @@
 package net.kigawa.kivra.selfdev
 
+import java.io.File
 import java.time.Duration
 import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.github.RsaJwtSigner
 import net.kigawa.kivra.modelgateway.FxConfig
 
 /** A secret value. [toString] never shows it, so a settings dump cannot leak it. */
@@ -11,12 +13,30 @@ class Secret(private val value: String) {
 }
 
 /**
+ * How the self-development worker authenticates to GitHub. Exactly one method is configured (fail-closed). [toString]
+ * never shows a value.
+ */
+sealed class GitHubAuth {
+    /** A personal access token. Kept for compatibility; a GitHub App is recommended. */
+    class Pat(val token: Secret) : GitHubAuth() {
+        override fun toString(): String = "GitHubAuth.Pat(***)"
+    }
+
+    /** A GitHub App installation: the App ID, the installation ID and the PEM private key. */
+    class App(val appId: String, val installationId: Long, val privateKeyPem: Secret) : GitHubAuth() {
+        override fun toString(): String = "GitHubAuth.App(***)"
+    }
+}
+
+/**
  * Self-development settings from the environment (ADR 0008 part 7, Issue #56). Fail-closed:
  *
  * - `KIVRA_SELFDEV_ENABLED` is off unless it is exactly `true`. While it is off, **no other self-development variable is read**:
  *   no secret, no registry file, no GitHub or model client. [enabled] is false and [config] is null.
  * - When it is `true`, the deployment must use `KIVRA_AUTH_MODE=oidc-jwt` and must not be `KIVRA_RUNTIME_ENV=development`.
  *   The required settings must all be present. Every failure message names the variable, never its value.
+ * - GitHub authentication is either `KIVRA_SELFDEV_GITHUB_TOKEN` (a PAT) or the three `KIVRA_SELFDEV_GITHUB_APP_*` variables
+ *   (a GitHub App). Both, or neither, is a startup failure.
  *
  * [toString] never shows a secret or a path to a secret.
  */
@@ -27,7 +47,7 @@ class SelfDevSettings private constructor(
     val advanceInterval: Duration,
     val maxActiveRuns: Int,
     /** Present only when [enabled]. */
-    val githubToken: Secret?,
+    val githubAuth: GitHubAuth?,
     /** Present only when [enabled]. The name of the secret env var, passed to the credential binding. */
     val anthropicApiKeyEnvVar: String?,
     /** Present only when [enabled]. */
@@ -41,6 +61,10 @@ class SelfDevSettings private constructor(
         const val ENV_TARGET_REPO = "KIVRA_SELFDEV_TARGET_REPO"
         const val ENV_BASE_BRANCH = "KIVRA_SELFDEV_BASE_BRANCH"
         const val ENV_GITHUB_TOKEN = "KIVRA_SELFDEV_GITHUB_TOKEN"
+        const val ENV_GITHUB_APP_ID = "KIVRA_SELFDEV_GITHUB_APP_ID"
+        const val ENV_GITHUB_APP_INSTALLATION_ID = "KIVRA_SELFDEV_GITHUB_APP_INSTALLATION_ID"
+        /** A path to the PEM file (preferred, e.g. a mounted Secret), or the PEM text itself. */
+        const val ENV_GITHUB_APP_PRIVATE_KEY = "KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY"
         const val ENV_ANTHROPIC_API_KEY = "KIVRA_SELFDEV_ANTHROPIC_API_KEY"
         const val ENV_MODEL_REGISTRY_PATH = "KIVRA_SELFDEV_MODEL_REGISTRY_PATH"
         const val ENV_CONTEXT_PREFIXES = "KIVRA_SELFDEV_CONTEXT_PREFIXES"
@@ -64,7 +88,7 @@ class SelfDevSettings private constructor(
             config = null,
             advanceInterval = Duration.ofSeconds(DEFAULT_ADVANCE_INTERVAL_SECONDS),
             maxActiveRuns = DEFAULT_MAX_ACTIVE_RUNS,
-            githubToken = null,
+            githubAuth = null,
             anthropicApiKeyEnvVar = null,
             modelRegistryPath = null,
             fx = null,
@@ -85,7 +109,7 @@ class SelfDevSettings private constructor(
 
             val repo = parseRepo(env[ENV_TARGET_REPO]?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_TARGET_REPO)
             val baseBranch = env[ENV_BASE_BRANCH]?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_BASE_BRANCH
-            val token = required(env, ENV_GITHUB_TOKEN)
+            val auth = githubAuth(env)
             required(env, ENV_ANTHROPIC_API_KEY)
             val registry = required(env, ENV_MODEL_REGISTRY_PATH)
             val fx = FxConfig.fromEnv(env)
@@ -114,11 +138,46 @@ class SelfDevSettings private constructor(
                 config = config,
                 advanceInterval = Duration.ofSeconds(interval),
                 maxActiveRuns = maxActive.toInt(),
-                githubToken = Secret(token),
+                githubAuth = auth,
                 anthropicApiKeyEnvVar = ENV_ANTHROPIC_API_KEY,
                 modelRegistryPath = registry,
                 fx = fx,
             )
+        }
+
+        private fun githubAuth(env: Map<String, String>): GitHubAuth {
+            val pat = env[ENV_GITHUB_TOKEN]?.trim()?.takeIf { it.isNotEmpty() }
+            val appVars = listOf(ENV_GITHUB_APP_ID, ENV_GITHUB_APP_INSTALLATION_ID, ENV_GITHUB_APP_PRIVATE_KEY)
+            val appSet = appVars.any { env[it]?.trim()?.isNotEmpty() == true }
+            check(!(pat != null && appSet)) {
+                "$ENV_GITHUB_TOKEN and ${appVars.joinToString(", ")} are mutually exclusive: configure one GitHub authentication method"
+            }
+            if (pat != null) return GitHubAuth.Pat(Secret(pat))
+            check(appSet) {
+                "$ENV_ENABLED=true requires either $ENV_GITHUB_TOKEN or all of ${appVars.joinToString(", ")}"
+            }
+            val appId = required(env, ENV_GITHUB_APP_ID)
+            check(appId.all { it in '0'..'9' }) { "$ENV_GITHUB_APP_ID must be a positive integer" }
+            val installationId = required(env, ENV_GITHUB_APP_INSTALLATION_ID).toLongOrNull()?.takeIf { it > 0 }
+                ?: throw IllegalStateException("$ENV_GITHUB_APP_INSTALLATION_ID must be a positive integer")
+            val pem = readPrivateKey(required(env, ENV_GITHUB_APP_PRIVATE_KEY))
+            try {
+                RsaJwtSigner(pem)
+            } catch (_: IllegalArgumentException) {
+                throw IllegalStateException("$ENV_GITHUB_APP_PRIVATE_KEY is not a usable RSA private key")
+            }
+            return GitHubAuth.App(appId, installationId, Secret(pem))
+        }
+
+        /** A value that names an existing file is read as the file; anything else is taken as the PEM text. Failures never echo it. */
+        private fun readPrivateKey(value: String): String {
+            val file = File(value)
+            if (!file.isFile) return value.replace("\\n", "\n")
+            return try {
+                file.readText(Charsets.UTF_8)
+            } catch (_: Exception) {
+                throw IllegalStateException("$ENV_GITHUB_APP_PRIVATE_KEY could not be read")
+            }
         }
 
         private fun required(env: Map<String, String>, name: String): String =

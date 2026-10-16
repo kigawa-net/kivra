@@ -1,8 +1,12 @@
 package net.kigawa.kivra.selfdev
 
+import java.nio.file.Files
+import java.security.KeyPairGenerator
+import java.util.Base64
 import java.time.Duration
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -44,7 +48,7 @@ class SelfDevSettingsTest {
         assertFalse(SelfDevSettings.fromEnv(TrapEnv(mapOf("KIVRA_SELFDEV_ENABLED" to ""))).enabled)
         val off = SelfDevSettings.fromEnv(TrapEnv(emptyMap()))
         assertNull(off.config)
-        assertNull(off.githubToken)
+        assertNull(off.githubAuth)
         assertNull(off.anthropicApiKeyEnvVar)
     }
 
@@ -101,8 +105,82 @@ class SelfDevSettingsTest {
     fun `secrets never appear in the settings text`() {
         val s = SelfDevSettings.fromEnv(enabledEnv())
         assertFalse(TOKEN in s.toString() || API_KEY in s.toString())
-        assertFalse(TOKEN in s.githubToken.toString())
+        val auth = assertIs<GitHubAuth.Pat>(s.githubAuth)
+        assertFalse(TOKEN in auth.toString())
         assertFalse(TOKEN in s.config.toString())
-        assertEquals("Secret(***)", s.githubToken.toString())
+        assertEquals("GitHubAuth.Pat(***)", auth.toString())
+        assertEquals("Secret(***)", auth.token.toString())
+    }
+
+    private val appKeyPem: String by lazy {
+        val pair = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
+        "-----BEGIN PRIVATE KEY-----\n" +
+            Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(pair.private.encoded) +
+            "\n-----END PRIVATE KEY-----\n"
+    }
+
+    private fun appEnv(vararg overrides: Pair<String, String?>): Map<String, String> = enabledEnv(
+        "KIVRA_SELFDEV_GITHUB_TOKEN" to null,
+        "KIVRA_SELFDEV_GITHUB_APP_ID" to "123456",
+        "KIVRA_SELFDEV_GITHUB_APP_INSTALLATION_ID" to "987654",
+        "KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY" to appKeyPem,
+        *overrides,
+    )
+
+    @Test
+    fun `a GitHub App configuration is accepted and carries no key text in its string forms`() {
+        val s = SelfDevSettings.fromEnv(appEnv())
+        val auth = assertIs<GitHubAuth.App>(s.githubAuth)
+        assertEquals("123456", auth.appId)
+        assertEquals(987654L, auth.installationId)
+        assertEquals(appKeyPem.trim(), auth.privateKeyPem.reveal())
+        assertEquals("GitHubAuth.App(***)", auth.toString())
+        assertFalse("PRIVATE KEY" in s.toString() || "PRIVATE KEY" in auth.toString())
+    }
+
+    @Test
+    fun `the App private key may be given as a file path, which is read`() {
+        val file = Files.createTempFile("app-key", ".pem").toFile()
+        try {
+            file.writeText(appKeyPem)
+            val auth = assertIs<GitHubAuth.App>(SelfDevSettings.fromEnv(appEnv("KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY" to file.absolutePath)).githubAuth)
+            assertEquals(appKeyPem, auth.privateKeyPem.reveal())
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `a PAT and any App variable together is a startup failure, and so is neither`() {
+        val both = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(appEnv("KIVRA_SELFDEV_GITHUB_TOKEN" to TOKEN)) }
+        assertTrue("KIVRA_SELFDEV_GITHUB_TOKEN" in both.message!!)
+        assertFalse(TOKEN in both.message!!)
+        assertFailsWith<IllegalStateException> {
+            SelfDevSettings.fromEnv(appEnv("KIVRA_SELFDEV_GITHUB_TOKEN" to TOKEN, "KIVRA_SELFDEV_GITHUB_APP_ID" to null))
+        }
+        val neither = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_GITHUB_TOKEN" to null)) }
+        assertTrue("KIVRA_SELFDEV_GITHUB_TOKEN" in neither.message!!)
+        assertTrue("KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY" in neither.message!!)
+    }
+
+    @Test
+    fun `a partial App configuration names the missing variable and no value`() {
+        for (name in listOf("KIVRA_SELFDEV_GITHUB_APP_ID", "KIVRA_SELFDEV_GITHUB_APP_INSTALLATION_ID", "KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY")) {
+            val e = assertFailsWith<IllegalStateException>(name) { SelfDevSettings.fromEnv(appEnv(name to null)) }
+            assertTrue(name in e.message!!, e.message)
+            assertFalse("123456" in e.message!! || "BEGIN" in e.message!!)
+        }
+        assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(appEnv("KIVRA_SELFDEV_GITHUB_APP_ID" to "12a")) }
+        assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(appEnv("KIVRA_SELFDEV_GITHUB_APP_INSTALLATION_ID" to "0")) }
+    }
+
+    @Test
+    fun `an unusable private key is refused without echoing it`() {
+        val bogus = "-----BEGIN PRIVATE KEY-----\nQUJDREVGR0hJSktMTU5PUA==\n-----END PRIVATE KEY-----"
+        val e = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(appEnv("KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY" to bogus)) }
+        assertTrue("KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY" in e.message!!)
+        assertFalse("QUJD" in e.message!!)
+        val missingFile = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(appEnv("KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY" to "/nonexistent/key.pem")) }
+        assertFalse("/nonexistent" in missingFile.message!!)
     }
 }

@@ -10,7 +10,11 @@ import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.developer.DeveloperConfig
 import net.kigawa.kivra.developer.LlmDeveloper
 import net.kigawa.kivra.github.GitHubAdapterConfig
+import net.kigawa.kivra.github.GitHubAppTokenMinter
 import net.kigawa.kivra.github.HttpGitHubAdapter
+import net.kigawa.kivra.github.InstallationTokenProvider
+import net.kigawa.kivra.github.RsaJwtSigner
+import net.kigawa.kivra.github.StaticTokenProvider
 import net.kigawa.kivra.github.TokenProvider
 import net.kigawa.kivra.github.githubHttpClient
 import net.kigawa.kivra.modelgateway.AnthropicProvider
@@ -54,15 +58,23 @@ internal fun buildSelfDev(
     identity: TaskApiIdentity,
 ): SelfDevParts {
     val config = checkNotNull(settings.config) { "self-development settings are not enabled" }
-    val token = checkNotNull(settings.githubToken) { "self-development token is missing" }
+    val auth = checkNotNull(settings.githubAuth) { "self-development GitHub authentication is missing" }
     val keyVar = checkNotNull(settings.anthropicApiKeyEnvVar)
     val fx = checkNotNull(settings.fx) { "fx settings are missing" }
 
-    val tokens = object : TokenProvider {
-        override suspend fun token(): String = token.reveal()
+    val githubConfig = GitHubAdapterConfig()
+    val githubClient = githubHttpClient(CIO.create(), githubConfig)
+    // The adapter asks for a token on every request; a GitHub App token is cached and refreshed inside the provider.
+    val tokens: TokenProvider = when (auth) {
+        is GitHubAuth.Pat -> StaticTokenProvider(auth.token.reveal())
+        is GitHubAuth.App -> InstallationTokenProvider(
+            appId = auth.appId,
+            installationId = auth.installationId,
+            signer = RsaJwtSigner(auth.privateKeyPem.reveal()),
+            minter = GitHubAppTokenMinter(githubClient, githubConfig.apiBase),
+        )
     }
-    val githubClient = githubHttpClient(CIO.create(), GitHubAdapterConfig())
-    val github = HttpGitHubAdapter(githubClient, tokens, GitHubAdapterConfig())
+    val github = HttpGitHubAdapter(githubClient, tokens, githubConfig)
     val reader = GitHubRepoReader(github)
 
     val registry: ModelRegistry = loadRegistry(checkNotNull(settings.modelRegistryPath))

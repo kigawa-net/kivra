@@ -28,6 +28,7 @@ import net.kigawa.kivra.modelgateway.Usage
 import java.nio.charset.StandardCharsets
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import org.slf4j.LoggerFactory
 
 /**
  * [DeveloperPort] backed by [ModelGateway]. Each proposal makes at most two provider calls (the second only when the
@@ -45,8 +46,10 @@ import kotlin.time.Duration.Companion.seconds
  * Model choice: the gateway routes by [DeveloperConfig.requirements] and [DeveloperConfig.preference]. It has no way
  * to pin one model id, so the model is not hard-coded here.
  *
- * Logging: this class logs nothing. Reason codes are the only output. Prompts, model output, task text, and API keys
- * never appear in an exception or a log line.
+ * Logging: one line per proposal, at INFO (proposed) or WARN (refused or unknown). A line carries the run id, the fixed
+ * result and reason names, and for a gateway failure the ErrorKind, the gateway's fixed error code, the HTTP status and
+ * the send state. It never carries a prompt, model output, task text, repository content, the gateway's error message, an
+ * exception message, or a key. An unclassified exception is logged by its class name only.
  */
 class LlmDeveloper(
     private val gateway: ModelGateway,
@@ -55,6 +58,13 @@ class LlmDeveloper(
 ) : DeveloperPort {
 
     override suspend fun propose(request: DeveloperRequest): DeveloperResult {
+        val diagnostics = Diagnostics()
+        val result = proposeWith(request, diagnostics)
+        logOutcome(request.runId, result, diagnostics)
+        return result
+    }
+
+    private suspend fun proposeWith(request: DeveloperRequest, diagnostics: Diagnostics): DeveloperResult {
         if (!withinLimits(request)) return DeveloperResult.Refused(DeveloperRefusal.CONTEXT_TOO_LARGE)
         val userMessage = freshUserMessage(request) ?: return DeveloperResult.Refused(DeveloperRefusal.PROMPT_UNSAFE)
 
@@ -82,9 +92,11 @@ class LlmDeveloper(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: GatewayException) {
+                diagnostics.gateway = e.error
                 return mapGatewayError(e.error)
             } catch (e: Exception) {
                 // Not a classified gateway error: the call may have been sent. Do not re-send.
+                diagnostics.exceptionName = e.javaClass.simpleName
                 return DeveloperResult.Unknown(DeveloperUnknown.OUTCOME_UNKNOWN)
             }
             usage = usage.plus(response.usage)
@@ -105,6 +117,33 @@ class LlmDeveloper(
                     is PatchVerdict.Rejected -> DeveloperResult.Refused(DeveloperRefusal.POLICY_REJECTED, verdict.reasons)
                 }
             }
+        }
+    }
+
+    /** What went wrong, for the outcome log. Only fixed codes and numbers; never a message. */
+    private class Diagnostics {
+        var gateway: GatewayError? = null
+        var exceptionName: String? = null
+
+        fun describe(): String {
+            val error = gateway
+            return when {
+                error != null -> "errorKind=${error.kind.name} errorCode=${safeCode(error.code)} " +
+                    "providerStatus=${error.providerStatus ?: "none"} sendState=${error.sendState.name}"
+                exceptionName != null -> "exception=$exceptionName"
+                else -> "gateway=none"
+            }
+        }
+    }
+
+    private fun logOutcome(runId: String, result: DeveloperResult, diagnostics: Diagnostics) {
+        when (result) {
+            is DeveloperResult.Proposed ->
+                logger.info("developer proposed: runId={} attempts={}", runId, result.usage.attempts)
+            is DeveloperResult.Refused ->
+                logger.warn("developer refused: runId={} refusal={} {}", runId, result.reason.name, diagnostics.describe())
+            is DeveloperResult.Unknown ->
+                logger.warn("developer outcome unknown: runId={} unknown={} {}", runId, result.reason.name, diagnostics.describe())
         }
     }
 
@@ -184,6 +223,16 @@ class LlmDeveloper(
         )
 
         private fun utf8Size(text: String): Long = text.toByteArray(StandardCharsets.UTF_8).size.toLong()
+
+        private val logger = LoggerFactory.getLogger(LlmDeveloper::class.java)
+        private val CODE_SHAPE = Regex("[A-Z0-9_]{1,64}")
+
+        /** A gateway code is logged only when it has the shape of a constant name. Anything else is shown as "other". */
+        private fun safeCode(code: String?): String = when {
+            code == null -> "none"
+            CODE_SHAPE.matches(code) -> code
+            else -> "other"
+        }
     }
 }
 

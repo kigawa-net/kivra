@@ -277,7 +277,11 @@ class LlmDeveloperTest {
             assertFalse(logged.contains(secretTask))
             assertFalse(logged.contains("SECRET-OUTPUT-QQQ"))
             assertFalse(logged.contains("n0nce-fixed-for-tests"))
-            assertEquals(0, appender.list.count { it.level.isGreaterOrEqual(Level.WARN) }, "no warning or error logs")
+            // Refusals and unknowns are logged at WARN, but only as the fixed outcome line (see LlmDeveloper).
+            val outcomeLine = Regex("developer (refused|outcome unknown): runId=run-1 .*")
+            appender.list.filter { it.level.isGreaterOrEqual(Level.WARN) }.forEach {
+                assertTrue(outcomeLine.matches(it.formattedMessage), "unexpected warning line: ${it.formattedMessage}")
+            }
         } finally {
             root.detachAppender(appender)
             root.level = oldLevel
@@ -334,5 +338,62 @@ class LlmDeveloperTest {
         val result = propose(h.developer())
         val patch: PatchSet = assertIs<DeveloperResult.Proposed>(result).patch
         assertIs<Write>(patch.files.single())
+    }
+
+    // (i) outcome logging: fixed codes and numbers only
+
+    /** Runs [block] with every log event at TRACE captured on the root logger. */
+    private fun captureLogs(block: () -> Unit): List<ILoggingEvent> {
+        val root = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start(); root.addAppender(it) }
+        val oldLevel = root.level
+        root.level = Level.TRACE
+        try {
+            block()
+        } finally {
+            root.detachAppender(appender)
+            root.level = oldLevel
+        }
+        return appender.list.toList()
+    }
+
+    @Test
+    fun `unknown outcome is logged with kind, code, HTTP status and send state, never the provider message`() {
+        val h = Harness(script = { _, _ ->
+            throw GatewayException(GatewayError(ErrorKind.TRANSIENT, "SECRET-PROVIDER-BODY-AAA upstream 503", providerStatus = 503))
+        })
+        val events = captureLogs { assertEquals(DeveloperResult.Unknown(DeveloperUnknown.OUTCOME_UNKNOWN), propose(h.developer(), taskRequest(runId = "run-u"))) }
+        val warn = events.single { it.level == Level.WARN }
+        assertEquals(
+            "developer outcome unknown: runId=run-u unknown=OUTCOME_UNKNOWN errorKind=OUTCOME_UNKNOWN " +
+                "errorCode=PROVIDER_OUTCOME_UNKNOWN providerStatus=503 sendState=MAYBE_SENT",
+            warn.formattedMessage,
+        )
+        assertFalse(events.any { it.formattedMessage.contains("SECRET-PROVIDER-BODY-AAA") })
+    }
+
+    @Test
+    fun `budget refusal is logged with the gateway kind and code`() {
+        val events = captureLogs {
+            propose(Harness(budgetHard = "0").developer(), taskRequest(runId = "run-b"))
+        }
+        val warn = events.single { it.level == Level.WARN }
+        assertTrue(warn.formattedMessage.startsWith("developer refused: runId=run-b refusal=BUDGET"), warn.formattedMessage)
+        assertTrue(warn.formattedMessage.contains("errorKind=POLICY_DENIED errorCode=BUDGET"), warn.formattedMessage)
+    }
+
+    @Test
+    fun `unclassified exception is logged without its message`() {
+        val h = Harness(script = { _, _ -> throw IllegalStateException("SECRET-EXCEPTION-MESSAGE-CCC") })
+        val events = captureLogs { propose(h.developer(), taskRequest(runId = "run-x")) }
+        assertFalse(events.any { it.formattedMessage.contains("SECRET-EXCEPTION-MESSAGE-CCC") })
+        assertFalse(events.any { (it.throwableProxy?.message ?: "").contains("SECRET-EXCEPTION-MESSAGE-CCC") })
+    }
+
+    @Test
+    fun `a successful proposal is logged at INFO with the attempt count only`() {
+        val events = captureLogs { propose(Harness().developer(), taskRequest(runId = "run-p")) }
+        assertEquals(listOf("developer proposed: runId=run-p attempts=1"), events.filter { it.loggerName.endsWith("LlmDeveloper") }.map { it.formattedMessage })
+        assertEquals(Level.INFO, events.single { it.loggerName.endsWith("LlmDeveloper") }.level)
     }
 }

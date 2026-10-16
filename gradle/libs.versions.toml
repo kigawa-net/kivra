@@ -39,6 +39,7 @@ mariadb-driver = { module = "org.mariadb.jdbc:mariadb-java-client", version.ref 
 h2 = { module = "com.h2database:h2", version.ref = "h2" }
 
 logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version = "2.0.17" }
 logstash-logback-encoder = { module = "net.logstash.logback:logstash-logback-encoder", version.ref = "logstash-encoder" }
 
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json-jvm", version.ref = "kotlinx-serialization-json" }

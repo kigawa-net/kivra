@@ -183,6 +183,32 @@ class AnthropicProviderTest : ModelProviderContract() {
         assertFalse(e.error.message.contains(API_KEY)); assertFalse((e.message ?: "").contains(API_KEY))
     }
 
+    @Test fun temperatureIsSentOnlyWhenExplicitlySet() = runTest {
+        val seen = mutableListOf<HttpRequestData>()
+        build(Scenario.TEXT, seen).invoke(request().copy(generation = GenerationParams(321)), target, ctx)
+        assertFalse(bodyOf(seen.last()).containsKey("temperature"), "default: the key is absent, not null")
+        build(Scenario.TEXT, seen).invoke(request().copy(generation = GenerationParams(321, temperature = 0.2)), target, ctx)
+        assertEquals(0.2, bodyOf(seen.last())["temperature"]!!.jsonPrimitive.content.toDouble())
+    }
+
+    @Test fun badRequestKeepsOnlyErrorTypeNotTheMessage() = runTest {
+        val secretBody = """{"type":"error","error":{"type":"invalid_request_error","message":"SECRET-PROMPT-FRAGMENT"}}"""
+        val p = AnthropicProvider(HttpClient(MockEngine { respond(secretBody, HttpStatusCode.BadRequest, jsonHeaders) }), { API_KEY }, "contract")
+        val e = assertFailsWith<GatewayException> { p.invoke(request(), target, ctx) }
+        assertEquals(ErrorKind.INVALID_REQUEST, e.error.kind)
+        assertEquals("invalid_request_error", e.error.providerErrorType)
+        assertEquals(400, e.error.providerStatus)
+        assertFalse(e.error.message.contains("SECRET-PROMPT-FRAGMENT")); assertFalse((e.message ?: "").contains("SECRET-PROMPT-FRAGMENT"))
+    }
+
+    @Test fun streamErrorKeepsOnlyErrorType() = runTest {
+        val sse = "data: {\"type\":\"error\",\"error\":{\"type\":\"not_a_known_type\",\"message\":\"SECRET-PROMPT-FRAGMENT\"}}\n\n"
+        val p = AnthropicProvider(HttpClient(MockEngine { respond(sse, HttpStatusCode.OK, sseHeaders) }), { API_KEY }, "contract")
+        val e = assertFailsWith<GatewayException> { p.stream(request(), target, ctx).toList() }
+        assertEquals("other", e.error.providerErrorType)
+        assertFalse(e.error.message.contains("SECRET-PROMPT-FRAGMENT")); assertFalse((e.message ?: "").contains("SECRET-PROMPT-FRAGMENT"))
+    }
+
     @Test fun structuredOutputUsesForcedToolAndReturnsParsedJson() = runTest {
         val seen = mutableListOf<HttpRequestData>()
         val engine = MockEngine { req ->

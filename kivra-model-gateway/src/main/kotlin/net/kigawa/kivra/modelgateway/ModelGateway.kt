@@ -128,6 +128,7 @@ class ModelGateway(
         "provider outcome unknown after ${raw.kind}: ${raw.message}",
         code = raw.code ?: "PROVIDER_OUTCOME_UNKNOWN",
         providerStatus = raw.providerStatus,
+        providerErrorType = raw.providerErrorType,
     )
 
     suspend fun invoke(req: ModelRequest): ModelResponse {

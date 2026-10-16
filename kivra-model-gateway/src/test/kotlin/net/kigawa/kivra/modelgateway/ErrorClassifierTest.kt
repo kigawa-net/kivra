@@ -39,7 +39,7 @@ class ErrorClassifierTest {
 
     @Test fun secretsAreRedactedAndMessagesBounded() {
         val e = ErrorClassifier.fromHttp(401, "bad key sk-secret-123 " + "z".repeat(2000), secrets = listOf("sk-secret-123"))
-        assertFalse(e.message.contains("sk-secret-123")); assertTrue(e.message.contains("[REDACTED]")); assertTrue(e.message.length < 600)
+        assertFalse(e.message.contains("sk-secret-123")); assertTrue(e.message.length < 600)
     }
 
     @Test fun fallbackAndRetryPolicyMatchesDesignTable() {
@@ -68,6 +68,24 @@ class ErrorClassifierTest {
     @Test fun gatewayErrorsKeepTheirOwnSendState() {
         val e = GatewayError(ErrorKind.AUTH, "no credential", sendState = SendState.NOT_SENT)
         assertEquals(SendState.NOT_SENT, ErrorClassifier.fromThrowable(GatewayException(e)).sendState)
+    }
+
+    @Test fun providerErrorTypeIsTakenFromTheFixedSetOnly() {
+        val body = """{"type":"error","error":{"type":"invalid_request_error","message":"SECRET-PROMPT-FRAGMENT"}}"""
+        assertEquals("invalid_request_error", ErrorClassifier.fromHttp(400, body).providerErrorType)
+        assertEquals("rate_limit_error", ErrorClassifier.fromHttp(429, """{"error":{"type":"rate_limit_error"}}""").providerErrorType)
+        assertEquals("other", ErrorClassifier.fromHttp(400, """{"error":{"type":"made_up_by_provider"}}""").providerErrorType)
+        assertEquals("other", ErrorClassifier.fromHttp(400, """{"error":{}}""").providerErrorType)
+        assertEquals(null, ErrorClassifier.fromHttp(502, "<html>bad gateway</html>").providerErrorType)
+    }
+
+    @Test fun providerMessageIsNeverKeptInHttpErrors() {
+        val body = """{"type":"error","error":{"type":"invalid_request_error","message":"SECRET-PROMPT-FRAGMENT"}}"""
+        for (status in listOf(400, 401, 404, 413, 422, 429, 500, 503)) {
+            val e = ErrorClassifier.fromHttp(status, body)
+            assertFalse(e.message.contains("SECRET-PROMPT-FRAGMENT"), "status $status")
+            assertEquals("HTTP $status", e.message)
+        }
     }
 
     @Test fun outcomeUnknownNeverRetriesOrFallsBack() {

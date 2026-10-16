@@ -130,7 +130,7 @@ class LlmDeveloper(
             return when {
                 error != null -> "errorKind=${error.kind.name} errorCode=${safeCode(error.code)} " +
                     "providerStatus=${error.providerStatus ?: "none"} sendState=${error.sendState.name} " +
-                    "costReason=${error.costReason?.name ?: "none"}"
+                    "costReason=${error.costReason?.name ?: "none"} providerErrorType=${error.providerErrorType ?: "none"}"
                 exceptionName != null -> "exception=$exceptionName"
                 else -> "gateway=none"
             }
@@ -247,7 +247,11 @@ data class DeveloperConfig(
     val budgetScopes: List<String>,
     val requirements: Requirements,
     val maxOutputTokens: Int,
-    val temperature: Double = 0.0,
+    /**
+     * Sampling temperature. Null (the default) omits the field, so the provider's own default applies: some newer models
+     * reject an explicit temperature. Set it only for a model known to accept it.
+     */
+    val temperature: Double? = null,
     val preference: RoutingPreference = RoutingPreference(),
     val timeout: Duration = 120.seconds,
     /** Upper bound on the UTF-8 size of the task and the repository context together. Input over it is refused. */

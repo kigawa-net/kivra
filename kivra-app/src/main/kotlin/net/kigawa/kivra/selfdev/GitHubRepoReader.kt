@@ -15,9 +15,9 @@ import net.kigawa.kivra.github.TreeEntryType
  * therefore counts as existing (not overwritable as new), whatever kind of object it is. A blob with any other mode is a
  * protocol failure.
  *
- * [readFile] returns a failure, never a silent skip, for: a file that is not text (binary or not UTF-8), a file over
- * [maxFileBytes], and a path that [listFiles] listed but GitHub now reports as missing. Any failure makes the runner fail the run
- * (`GITHUB_READ_FAILED`), so a file the LLM was supposed to see is never silently dropped.
+ * [readFile] returns `Success(null)` (excluded by design) for a file that is not text (binary or not UTF-8) or over [maxFileBytes].
+ * A path that [listFiles] listed but GitHub now reports as missing, and every other failure, stays a failure (`GITHUB_READ_FAILED`).
+ * Symlinks and submodules are not read at all (see [RepoEntry.readable]).
  *
  * Failures of [GitHubPort] are passed through unchanged. A truncated tree is `TREE_TRUNCATED`, so no partial listing is returned.
  */
@@ -36,14 +36,16 @@ class GitHubRepoReader(
             is GitHubResult.Unknown -> r
         }
 
-    override suspend fun readFile(repo: RepoRef, commitSha: String, path: String): GitHubResult<String> =
+    override suspend fun readFile(repo: RepoRef, commitSha: String, path: String): GitHubResult<String?> =
         when (val r = github.readFile(repo, commitSha, path, maxFileBytes)) {
             is GitHubResult.Success -> when (val content = r.value) {
+                // A path listed by listFiles that GitHub now reports as missing: a failure, not an exclusion.
                 null -> GitHubResult.Failure(GitHubFailureKind.NOT_FOUND, GitHubFailureKind.NOT_FOUND.code)
-                else -> content.text?.let { GitHubResult.Success(it) }
-                    ?: GitHubResult.Failure(GitHubFailureKind.VALIDATION, "GITHUB_VALIDATION:not text")
+                // Binary or not UTF-8: excluded by design. Never returned as text.
+                else -> GitHubResult.Success(content.text)
             }
-            is GitHubResult.Failure -> r
+            // Over the reader's limit: excluded by design.
+            is GitHubResult.Failure -> if (r.kind == GitHubFailureKind.TOO_LARGE) GitHubResult.Success(null) else r
             is GitHubResult.Unknown -> r
         }
 
@@ -52,10 +54,11 @@ class GitHubRepoReader(
         for (entry in tree.entries) {
             when (entry.type) {
                 TreeEntryType.TREE -> {}
-                TreeEntryType.COMMIT -> out += RepoEntry(entry.path, 0L)
+                TreeEntryType.COMMIT -> out += RepoEntry(entry.path, 0L, readable = false)
                 TreeEntryType.BLOB -> {
                     if (entry.mode !in BLOB_MODES) return GitHubResult.Failure(GitHubFailureKind.PROTOCOL, GitHubFailureKind.PROTOCOL.code)
-                    out += RepoEntry(entry.path, entry.sizeBytes ?: 0L)
+                    // A symlink is listed but never read: its target is not a file of this repository.
+                    out += RepoEntry(entry.path, entry.sizeBytes ?: 0L, readable = entry.mode != SYMLINK_MODE)
                 }
             }
         }
@@ -68,5 +71,6 @@ class GitHubRepoReader(
 
         /** Regular files, executable files and symlinks. */
         private val BLOB_MODES = setOf("100644", "100755", "120000")
+        private const val SYMLINK_MODE = "120000"
     }
 }

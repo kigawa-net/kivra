@@ -294,13 +294,14 @@ class SelfDevRunner(
         val files = ArrayList<RepoFile>(picked.size)
         for (entry in picked) {
             when (val r = repoReader.readFile(config.repo, baseSha, entry.path)) {
-                is GitHubResult.Success -> files += RepoFile(entry.path, r.value)
+                // Excluded by design (binary, not UTF-8, over the limit): not shown, so not in the snapshot's context either.
+                is GitHubResult.Success -> r.value?.let { files += RepoFile(entry.path, it) }
                 else -> return Step.Done(Failed(FailureCode.GITHUB_READ_FAILED))
             }
         }
         val snapshot = SelfDevSnapshot(
             sizes = entries.associate { it.path to it.sizeBytes },
-            inContext = picked.mapTo(HashSet()) { it.path },
+            inContext = files.mapTo(HashSet()) { it.path },
         )
         return Step.Go(RepoView(snapshot, files))
     }

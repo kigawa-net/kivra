@@ -76,8 +76,8 @@ class GitHubRepoReaderTest {
             listOf(
                 RepoEntry("a.md", 5),
                 RepoEntry("bin/run.sh", 7),
-                RepoEntry("link", 3),
-                RepoEntry("sub", 0),
+                RepoEntry("link", 3, readable = false),
+                RepoEntry("sub", 0, readable = false),
             ),
             entries,
         )
@@ -109,19 +109,23 @@ class GitHubRepoReaderTest {
     }
 
     @Test
-    fun `binary files fail the read and are never returned as text`() = runTest {
+    fun `binary files are excluded by design - the read succeeds with null, never as text`() = runTest {
         val remote = Remote { respond(fileBody("bin.dat", byteArrayOf(1, 0, 2)), HttpStatusCode.OK, JSON) }
-        val result = remote.reader.readFile(REPO, SHA, "bin.dat")
-        assertIs<GitHubResult.Failure>(result)
-        assertEquals(GitHubFailureKind.VALIDATION, result.kind)
+        assertEquals(GitHubResult.Success<String?>(null), remote.reader.readFile(REPO, SHA, "bin.dat"))
     }
 
     @Test
-    fun `a file over the reader limit fails the read`() = runTest {
+    fun `a file over the reader limit is excluded by design - the read succeeds with null`() = runTest {
         val remote = Remote { respond("""{"type":"file","path":"big.md","size":101,"encoding":"none","content":""}""", HttpStatusCode.OK, JSON) }
-        val result = remote.reader.readFile(REPO, SHA, "big.md")
+        assertEquals(GitHubResult.Success<String?>(null), remote.reader.readFile(REPO, SHA, "big.md"))
+    }
+
+    @Test
+    fun `a server error on the read is a real failure - not an exclusion`() = runTest {
+        val remote = Remote { respond("""{"message":"boom"}""", HttpStatusCode.InternalServerError, JSON) }
+        val result = remote.reader.readFile(REPO, SHA, "a.md")
         assertIs<GitHubResult.Failure>(result)
-        assertEquals(GitHubFailureKind.TOO_LARGE, result.kind)
+        assertEquals(GitHubFailureKind.SERVER_ERROR, result.kind)
     }
 
     @Test

@@ -26,6 +26,7 @@ import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.count
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -74,6 +75,15 @@ sealed interface TaskSubmitResult {
 /** Another non-terminal run already exists for the task (`uk_dev_runs_active_task`). */
 /** Fixed reason code for a pull request closed without merge (ADR 0008 item 6). */
 const val PR_ABANDONED_REASON = "PR_ABANDONED"
+
+/** Thrown when a self-development submission would exceed the active-run cap. Nothing is written. */
+class ActiveSelfDevLimitException : RuntimeException("active self-development run limit reached")
+
+/** Task id prefixes. A self-development run has [SELF_DEV_TASK_PREFIX]; the Task API keeps [API_TASK_PREFIX]. */
+const val SELF_DEV_TASK_PREFIX = "selfdev:"
+const val API_TASK_PREFIX = "api:"
+
+private val TERMINAL_STATE_NAMES: List<String> = DevelopmentRunState.entries.filter { it.isTerminal }.map { it.name }
 
 class DuplicateActiveRunException(val taskId: String) : RuntimeException("an active run already exists for task $taskId")
 
@@ -138,13 +148,24 @@ class DevelopmentRunRepository(
      * Idempotent per (principal, idempotencyKey). Concurrent identical submissions converge on one row: the loser of the
      * unique-index race re-reads the winner's row.
      */
-    fun submitTask(principal: String, idempotencyKey: String, title: String): TaskSubmitResult {
-        findTask(principal, idempotencyKey)?.let { return replayOrConflict(it, title) }
+    fun submitTask(
+        principal: String,
+        idempotencyKey: String,
+        title: String,
+        selfDev: Boolean = false,
+        maxActiveSelfDev: Int? = null,
+    ): TaskSubmitResult {
+        findTask(principal, idempotencyKey)?.let { return replayOrConflict(it, title, selfDev) }
         val runId = RunId(Ulid.generate(clock))
-        try {
+        val insert = {
             transaction(database) {
+                if (selfDev && maxActiveSelfDev != null && countActiveSelfDev(this) >= maxActiveSelfDev) {
+                    // Rolls back nothing yet written: the count is checked before any insert in this transaction.
+                    throw ActiveSelfDevLimitException()
+                }
                 val now = utcNow(clock)
-                val taskId = "api:${runId.value}"
+                // A self-development run is marked by its task id prefix; the Task API keeps "api:".
+                val taskId = (if (selfDev) SELF_DEV_TASK_PREFIX else API_TASK_PREFIX) + runId.value
                 DevelopmentRunsTable.insert {
                     it[DevelopmentRunsTable.runId] = runId.value
                     it[DevelopmentRunsTable.taskId] = taskId
@@ -160,17 +181,40 @@ class DevelopmentRunRepository(
                 audit.append(this, runId, AuditEntry(actor = principal, action = "RUN_CREATED", result = "OK", resource = "task:$taskId"))
                 outbox.append(this, runId, 0, "RunCreated", transitionPayload(taskId, null, DevelopmentRunState.CREATED), null)
             }
+        }
+        try {
+            // The count and the insert are serialized in this process. Two replicas can still race (see the self-development runbook).
+            if (selfDev) synchronized(selfDevAdmissionLock) { insert() } else insert()
         } catch (e: ExposedSQLException) {
             if (!e.isUniqueViolation()) throw e
             // Lost the race (or a replay): the winner's row is committed, so a fresh transaction sees it.
             val existing = findTask(principal, idempotencyKey) ?: throw e
-            return replayOrConflict(existing, title)
+            return replayOrConflict(existing, title, selfDev)
         }
         return TaskSubmitResult.Created(get(runId)!!)
     }
 
-    private fun replayOrConflict(existing: DevelopmentRun, title: String): TaskSubmitResult =
-        if (existing.taskTitle == title) TaskSubmitResult.Replayed(existing) else TaskSubmitResult.ConflictingTitle(existing)
+    private val selfDevAdmissionLock = Any()
+
+    private fun countActiveSelfDev(tx: Transaction): Long = with(tx) {
+        DevelopmentRunsTable.selectAll()
+            .where { (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%") and (DevelopmentRunsTable.state notInList TERMINAL_STATE_NAMES) }
+            .count()
+    }
+
+    /** Ids of the non-terminal self-development runs, oldest first. Used by the self-development worker. */
+    fun activeSelfDevRunIds(limit: Int = 100): List<RunId> = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%") and (DevelopmentRunsTable.state notInList TERMINAL_STATE_NAMES) }
+            .orderBy(DevelopmentRunsTable.createdAt to SortOrder.ASC, DevelopmentRunsTable.runId to SortOrder.ASC)
+            .limit(limit)
+            .map { RunId(it[DevelopmentRunsTable.runId]) }
+    }
+
+    /** A kind mismatch under the same (principal, idempotency key) is a conflict, never a replay of another kind of run. */
+    private fun replayOrConflict(existing: DevelopmentRun, title: String, selfDev: Boolean): TaskSubmitResult =
+        if (existing.taskTitle == title && existing.taskId.startsWith(SELF_DEV_TASK_PREFIX) == selfDev) TaskSubmitResult.Replayed(existing)
+        else TaskSubmitResult.ConflictingTitle(existing)
 
     private fun findTask(principal: String, idempotencyKey: String): DevelopmentRun? = transaction(database) {
         DevelopmentRunsTable.selectAll()
@@ -186,9 +230,16 @@ class DevelopmentRunRepository(
     }
 
     /** Runs submitted by [principal], newest first. */
-    fun listTasks(principal: String, limit: Int = 50): List<DevelopmentRun> = transaction(database) {
+    fun listTasks(principal: String, limit: Int = 50, selfDev: Boolean? = null): List<DevelopmentRun> = transaction(database) {
         DevelopmentRunsTable.selectAll()
-            .where { DevelopmentRunsTable.principal eq principal }
+            .where {
+                val byPrincipal = DevelopmentRunsTable.principal eq principal
+                when (selfDev) {
+                    null -> byPrincipal
+                    true -> byPrincipal and (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%")
+                    false -> byPrincipal and (DevelopmentRunsTable.taskId notLike "$SELF_DEV_TASK_PREFIX%")
+                }
+            }
             .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
             .limit(limit)
             .mapNotNull { it.toDevelopmentRunOrNull() }

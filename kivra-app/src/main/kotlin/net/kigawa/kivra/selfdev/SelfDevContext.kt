@@ -27,6 +27,7 @@ internal object ContextSelection {
         var total = 0L
         for (entry in entries.sortedBy { it.path }) {
             if (picked.size >= config.maxContextFiles) break
+            if (!entry.readable) continue
             if (config.contextPathPrefixes.none { matches(entry.path, it) }) continue
             if (entry.sizeBytes > config.maxContextFileBytes) continue
             if (total + entry.sizeBytes > config.maxContextTotalBytes) continue

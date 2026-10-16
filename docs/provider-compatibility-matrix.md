@@ -112,15 +112,15 @@
 
 | 項目 | kivra 側 | 相手側 | 本番での既定 |
 |---|---|---|---|
-| 読み取り | 実装済み(`getBranch` / `getPullRequest` / `findPullRequestsByHead` / `getCheckRuns` / `getCombinedStatus` / `getReviews` / `listTree` / `readFile`(GET のみ、自己開発の `RepoReader` 用)) | **未確認**(本リポジトリに実 GitHub への接続試験の記録なし。テストは MockEngine) | 無効 |
-| 変更 | 実装済み: `createBranch` / `ensureRunBranch` / `createPullRequest` / `ensurePullRequest`。**Merge は存在しない** | **未確認**(本リポジトリの範囲外) | 無効 |
-| ref 更新 | 実装済み: `commitFiles`(`kivra/run-*` のみ、`force=false`、`expectedHeadSha` と不一致なら書かず `CONFLICT`、ref 更新の結果不明は照合のみで再送しない)。本番では未配線 | **未確認**(本リポジトリの範囲外) | 無効 |
+| 読み取り | 実装済み(`getBranch` / `getPullRequest` / `findPullRequestsByHead` / `getCheckRuns` / `getCombinedStatus` / `getReviews` / `listTree` / `readFile`(GET のみ、自己開発の `RepoReader` 用)) | **未確認**(本リポジトリに実 GitHub への接続試験の記録なし。テストは MockEngine) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| 変更 | 実装済み: `createBranch` / `ensureRunBranch` / `createPullRequest` / `ensurePullRequest`。**Merge は存在しない** | **未確認**(本リポジトリの範囲外) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| ref 更新 | 実装済み: `commitFiles`(`kivra/run-*` のみ、`force=false`、`expectedHeadSha` と不一致なら書かず `CONFLICT`、ref 更新の結果不明は照合のみで再送しない)。本番では未配線 | **未確認**(本リポジトリの範囲外) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
 | 冪等キー | なし。照合は run 専用ブランチ名と head による PR 検索で行う(`ensurePullRequest`) | **未確認**(GitHub API の冪等性機構は本リポジトリでは確認していない) | 無効 |
 | Receipt / Operation-ID | PR 番号と head SHA を応答と照合(`IDENTITY_MISMATCH` で拒否)。Merge 観測は `GitHubPrMergeAuthority`(観測のみ) | — | 無効 |
 | 条件付き DELETE | 実装なし(ref 削除は設計上除外) | — | 無効 |
 | 照合 API | `findPullRequestsByHead`、`getPullRequest`。404 は「merge されていない」と読まない | 確認済み(REST の該当 endpoint が存在することは、コードのテストが前提としている範囲のみ) | 無効 |
-| 認証 | GitHub App の installation token(`TokenProvider`)。App の秘密鍵は署名器経由 | **未確認**(App の権限と token の運用は admin-panel #224 で扱う予定) | 無効 |
-| レート制限 | 429、および `retry-after` / `x-ratelimit-remaining=0` の 403 を `RATE_LIMITED` に分類(自動再送は変更系では行わない) | **未確認** | 無効 |
+| 認証 | GitHub App の installation token(`TokenProvider`)。App の秘密鍵は署名器経由 | **未確認**(App の権限と token の運用は admin-panel #224 で扱う予定) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| レート制限 | 429、および `retry-after` / `x-ratelimit-remaining=0` の 403 を `RATE_LIMITED` に分類(自動再送は変更系では行わない) | **未確認** | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
 | 課金 | 該当なし | **未確認** | — |
 | Merge | Kivra に Merge 経路はない。Human Merge のみ(#50 で Ruleset / 独立 Approval を設計) | — | **無効(Merge 不可)** |
 
@@ -131,13 +131,13 @@
 | 項目 | kivra 側 | 相手側 | 本番での既定 |
 |---|---|---|---|
 | 読み取り | 実装済み(`listModels`。`health` はローカルの資格情報確認のみで、ネットワーク呼び出し・課金なし) | **未確認**(実 API への接続試験の記録なし) | 無効(未結線) |
-| 変更(推論 `invoke` / `stream`) | 実装済み。送信前の失敗のみ再試行(`SendState.NOT_SENT`)。送信後は予約を確定値で精算し、requestId を UNKNOWN で封印 | — | 無効 |
+| 変更(推論 `invoke` / `stream`) | 実装済み。送信前の失敗のみ再試行(`SendState.NOT_SENT`)。送信後は予約を確定値で精算し、requestId を UNKNOWN で封印 | — | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
 | 冪等キー | Kivra 側の `requestId` を `RequestLedger` で管理。`Idempotency-Key` ヘッダは送っていない | **未確認** | 無効 |
 | Receipt / Operation-ID | 応答の `usage` を読む。`usageComplete` は入出力トークンが揃ったかを示す | **未確認** | 無効 |
 | 照合 API | なし。UNKNOWN の requestId は再利用せず、新しい requestId を使う | — | 無効 |
-| 認証 | `x-api-key` ヘッダ(資格情報は環境変数の参照)。資格情報の値は本書・ログに出さない | **未確認**(Anthropic 側の仕様の再確認は未実施) | 無効 |
-| レート制限 | 429 は `RATE_LIMITED`(`retry-after` を解釈)。送信前の失敗のみ再試行 | **未確認** | 無効 |
-| 課金 | 応答の usage から費用を算出し(`CostConverter`、USD→JPY)、耐久的な予算台帳(`DbBudgetStore`)に反映。`ModelGateway` は耐久的 `RequestLedger` を要求し、既定は fail-fast | **未確認**(価格体系は本リポジトリに記録した価格カタログに依存) | 無効 |
+| 認証 | `x-api-key` ヘッダ(資格情報は環境変数の参照)。資格情報の値は本書・ログに出さない | **未確認**(Anthropic 側の仕様の再確認は未実施) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| レート制限 | 429 は `RATE_LIMITED`(`retry-after` を解釈)。送信前の失敗のみ再試行 | **未確認** | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| 課金 | 応答の usage から費用を算出し(`CostConverter`、USD→JPY)、耐久的な予算台帳(`DbBudgetStore`)に反映。`ModelGateway` は耐久的 `RequestLedger` を要求し、既定は fail-fast | **未確認**(価格体系は本リポジトリに記録した価格カタログに依存) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
 
 ## 4. 本番 Capability が有効になる条件(Gate)
 
@@ -151,11 +151,32 @@
 6. Kivra 側で、外部 Mutation の直前に Capability Gate を評価し、Storage Authority / Lease / Replay Proof / Rate Permit と合わせて判定する(#60 #61)。
 7. 送信済みの Mutation は、Capability を無効化しても取り消されたものとして扱わない(UNKNOWN を保持し、照合する)。
 
+## 4a. 自己開発(ADR 0008)の有効化の手順
+
+既定は**無効**(fail-closed)。`KIVRA_SELFDEV_ENABLED=true` のときだけ、GitHub と Anthropic のクライアントを構築し、ワーカーと `/api/selfdev/*` を登録する。無効のときは、自己開発の秘密の環境変数を一切読まない(`SelfDevSettings`、テスト `SelfDevSettingsTest` と `SelfDevAppWiringTest`)。
+
+有効化の前提(すべて満たしてから有効にする。値はこの文書に書かない):
+
+1. `kigawa-net/kivra` の `main` のブランチ保護(kigawa-net/infra#296 で適用済み)が有効であること。
+2. GitHub のトークンは、**管理者の権限を持たない専用の細粒度 PAT**(`kigawa-net/kivra` の `contents:write` と `pull_requests:write` のみ)を Secret で `KIVRA_SELFDEV_GITHUB_TOKEN` に渡す。管理者のトークンは、保護を迂回しうるため使わない。
+3. Anthropic の API キーを Secret で `KIVRA_SELFDEV_ANTHROPIC_API_KEY` に渡す。予算(`KIVRA_BUDGET_*`)を設定する。
+4. 為替を `KIVRA_FX_USD_JPY` と `KIVRA_FX_AS_OF` で設定する。未設定だと、USD 建ての呼び出しは `UNKNOWN_COST` で拒否される(起動時に検査し、欠けていれば起動に失敗する)。
+5. モデルのレジストリを `KIVRA_SELFDEV_MODEL_REGISTRY_PATH` に置く。使うモデルだけを登録し、価格・能力・`dataHandling` を一次情報で確認する。自己開発は `DataClass.INTERNAL` でリポジトリ内容を送るため、**Anthropic の `dataHandling.status` が `CONFIRMED` であること**(`UNKNOWN` のままでは、そのプロバイダは使われず、Run は失敗する)。
+6. `KIVRA_AUTH_MODE=oidc-jwt` で動かす。`KIVRA_RUNTIME_ENV=development` と同時の有効化は拒否される。
+7. **旧イメージ(V13 までを知るもの)が残っていないこと**(全レプリカが新版であること)。
+8. `org.mariadb` のログを `TRACE` / `DEBUG` にしない(INSERT の値がログに出る)。
+9. レプリカは 1 にする。`KIVRA_SELFDEV_MAX_ACTIVE_RUNS` の上限は、プロセス内の直列化で守っている。複数のレプリカでは、同時の投入で上限を超えうる。
+10. `UNKNOWN` の Run と予算の `UNKNOWN_COST` は、運用者が監査つきで解除する(`POST /api/admin/budget/acknowledge`、`admin-panel:admin`)。
+
+設定の一覧(値は書かない): `KIVRA_SELFDEV_ENABLED`、`KIVRA_SELFDEV_TARGET_REPO`(既定 `kigawa-net/kivra`、1 つだけ。リクエストでは指定できない)、`KIVRA_SELFDEV_BASE_BRANCH`(既定 `main`)、`KIVRA_SELFDEV_GITHUB_TOKEN`、`KIVRA_SELFDEV_ANTHROPIC_API_KEY`、`KIVRA_SELFDEV_MODEL_REGISTRY_PATH`、`KIVRA_SELFDEV_CONTEXT_PREFIXES`(既定 `README.md,docs/`)、`KIVRA_SELFDEV_MAX_CONTEXT_FILE_BYTES`(既定 102400)、`KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`(既定 7)、`KIVRA_SELFDEV_ADVANCE_INTERVAL_SECONDS`(既定 30、最小 10)、`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`(既定 1)、`KIVRA_FX_USD_JPY`、`KIVRA_FX_AS_OF`。
+
 ## 5. 既定値の固定(テスト)
 
 `kivra-app/src/test/kotlin/net/kigawa/kivra/capability/` のテストが、本番の既定を固定する。
 
 - `ProductionCapabilityDefaultsTest`: 既定の `application.conf`(環境変数の上書きなし)で、状態書き戻し・Reaper 自動削除・recl 変更・dev デモ・インメモリ dedup / journal が無効であること、および開発専用の有効化に `KIVRA_*` の指定が必要なこと。
+- `SelfDevCapabilityDefaultsTest`: 既定の設定で自己開発が無効であること(`KIVRA_SELFDEV_ENABLED` 未設定、共有の `application.conf`)。
+- `SelfDevAppWiringTest`: 無効のとき `/api/selfdev/*` が登録されず、自己開発の秘密の環境変数が読まれないこと。有効化に `oidc-jwt` が必要なこと。
 - `ProviderCompatibilityMatrixTest`: この文書があり、既知の Provider とアダプタ名をすべて列挙していること。`src/main` に新しい `*Adapter` クラスが増えたら、テストが失敗して本書の更新を促す。
 
 ## 6. 確認できなかった事実(未確認の一覧)

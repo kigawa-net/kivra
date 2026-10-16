@@ -76,6 +76,14 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 - 安全性の根拠は、プロンプトではなく `PatchPolicy`、`commitFiles` の制約、GitHub 側の権限と、ブランチ保護(infra#296 の適用後)にある。
 - ⑤ に Flyway V12 は無い。`ABANDONED` を追加しないため、`development_runs.state` の制約と V1 の `active_flag` は変えない(`PATCH_READY` / `UNKNOWN` は非終端なので active 扱い)。
 
+## 追補(2026-10-16): GitHub 認証は App を推奨し、PAT は互換として残す
+
+- GitHub への認証は、**GitHub App の installation token を既定**とする。PAT(`KIVRA_SELFDEV_GITHUB_TOKEN`)は後方互換のために残す。
+- App の権限は `contents:write` / `pull_requests:write` / `metadata:read`(GitHub が自動で付与する読み取り)のみとする。インストール先は `kigawa-net/kivra` のみとする。token 発行の要求も、そのリポジトリ 1 つに限定する。
+- App の秘密鍵は k8s Secret で渡す(`KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY` はファイルパス優先。PEM 本文も受ける)。実値は文書・ログ・例外に書かない。
+- 認証の方式は PAT か App のどちらか一方だけを設定する。両方、またはどちらも無いときは起動に失敗する(fail-closed)。
+- installation token は期限の 5 分前まで再利用し、同時の要求は 1 回の発行にまとめる。401 では token を破棄して 1 回だけ再取得する。
+
 ## 実装の分割
 
 | 順 | PR の範囲 | 依存 | 触るモジュール | 他の PR と競合するか |

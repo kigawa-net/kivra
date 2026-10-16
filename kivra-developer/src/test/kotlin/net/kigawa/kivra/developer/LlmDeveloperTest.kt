@@ -482,13 +482,14 @@ class LlmDeveloperTest {
     }
 
     @Test
-    fun `empty answer at the output limit is logged with emptyAtLimit`() {
+    fun `empty answer at the output limit is logged with emptyAtLimit and not re-sent`() {
+        val h = Harness(script = { _, _ -> reply("").copy(finishReason = FinishReason.LENGTH) })
         val events = captureLogs {
-            val h = Harness(script = { _, _ -> reply("").copy(finishReason = FinishReason.LENGTH) })
-            assertEquals(DeveloperResult.Refused(DeveloperRefusal.INVALID_OUTPUT), propose(h.developer(), taskRequest(runId = "run-l")))
+            assertEquals(DeveloperResult.Refused(DeveloperRefusal.OUTPUT_TRUNCATED), propose(h.developer(), taskRequest(runId = "run-l")))
         }
+        assertEquals(1, h.provider.calls.size)
         val invalid = events.filter { it.formattedMessage.startsWith("developer output invalid") }.map { it.formattedMessage }
-        assertEquals(2, invalid.size)
+        assertEquals(1, invalid.size)
         assertEquals(
             "developer output invalid: runId=run-l attempt=1 parseReason=MALFORMED_JSON outputChars=0 " +
                 "startsWithObject=false endsWithObject=false fenced=false finishReason=LENGTH emptyAtLimit=true",
@@ -504,5 +505,40 @@ class LlmDeveloperTest {
         }
         val first = events.first { it.formattedMessage.startsWith("developer output invalid") }.formattedMessage
         assertFalse(first.contains("emptyAtLimit"))
+    }
+
+    // (j) output limit: a truncated answer is not re-sent, because the same request is cut at the same length
+
+    @Test
+    fun `truncated non-empty answer at the output limit is refused without a second call`() {
+        val h = Harness(script = { _, _ -> reply("{\"files\":").copy(finishReason = FinishReason.LENGTH) })
+        assertEquals(DeveloperResult.Refused(DeveloperRefusal.OUTPUT_TRUNCATED), propose(h.developer()))
+        assertEquals(1, h.provider.calls.size)
+    }
+
+    @Test
+    fun `invalid answer that is not cut at the limit is still retried once`() {
+        val h = Harness(script = { _, _ -> reply("I cannot help with that.").copy(finishReason = FinishReason.STOP) })
+        assertEquals(DeveloperResult.Refused(DeveloperRefusal.INVALID_OUTPUT), propose(h.developer()))
+        assertEquals(2, h.provider.calls.size)
+    }
+
+    @Test
+    fun `answer that parses despite finishReason LENGTH is still proposed`() {
+        val h = Harness(script = { _, _ -> reply(VALID_PATCH_JSON).copy(finishReason = FinishReason.LENGTH) })
+        val proposed = assertIs<DeveloperResult.Proposed>(propose(h.developer()))
+        assertEquals(1, proposed.usage.attempts)
+        assertEquals(1, h.provider.calls.size)
+    }
+
+    @Test
+    fun `refusal for output truncation is logged with its reason code`() {
+        val events = captureLogs {
+            val h = Harness(script = { _, _ -> reply("{\"files\":").copy(finishReason = FinishReason.LENGTH) })
+            propose(h.developer(), taskRequest(runId = "run-t"))
+        }
+        val refused = events.filter { it.formattedMessage.startsWith("developer refused") }.map { it.formattedMessage }
+        assertEquals(1, refused.size)
+        assertTrue(refused.single().startsWith("developer refused: runId=run-t refusal=OUTPUT_TRUNCATED"), refused.single())
     }
 }

@@ -34,7 +34,7 @@ import org.slf4j.LoggerFactory
 
 /**
  * [DeveloperPort] backed by [ModelGateway]. Each proposal makes at most two provider calls (the second only when the
- * first answer is not a PatchSet). Every call has its own requestId, derived from the runId and the attempt number.
+ * first answer is not a PatchSet and was not cut at the output limit). Every call has its own requestId, derived from the runId and the attempt number.
  *
  * Safety layers, in order:
  * 1. Limits on the task and on the repository context. Oversize input is refused, never truncated.
@@ -107,6 +107,8 @@ class LlmDeveloper(
             when (val parsed = PatchSetParser.parse(text(response))) {
                 is ParseResult.Invalid -> {
                     logInvalidAttempt(request.runId, attempt, parsed, response.finishReason)
+                    // The output limit cut the answer. The same request would be cut at the same length, so do not re-send it.
+                    if (response.finishReason == FinishReason.LENGTH) return DeveloperResult.Refused(DeveloperRefusal.OUTPUT_TRUNCATED)
                     if (attempt >= MAX_ATTEMPTS) return DeveloperResult.Refused(DeveloperRefusal.INVALID_OUTPUT)
                     attempt++
                 }

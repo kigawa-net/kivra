@@ -74,6 +74,9 @@ enum class DeveloperRefusal {
     /** The model did not return a PatchSet JSON, even after one retry. */
     INVALID_OUTPUT,
 
+    /** The answer was cut at the output limit (finishReason LENGTH) and is not a PatchSet. Not retried: the same request is cut the same way. */
+    OUTPUT_TRUNCATED,
+
     /** [net.kigawa.kivra.core.patch.PatchPolicy] rejected the PatchSet. See `policyReasons`. */
     POLICY_REJECTED,
 

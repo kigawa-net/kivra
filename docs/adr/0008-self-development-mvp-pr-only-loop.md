@@ -98,6 +98,10 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 - Haiku 5.5 は adaptive thinking が既定で有効で、`max_tokens`(`DEVELOPER_MAX_OUTPUT_TOKENS`=8000)を thinking だけで使い切り、text を 1 文字も返さないことがあった(dev, 2026-10-17: 2 試行とも `finishReason=LENGTH`、`outputChars=0`)。自己開発の `DeveloperConfig.thinking` の既定は `DISABLED` とし、本文に `"thinking":{"type":"disabled"}` を送る。上書きは `DeveloperConfig` で行う。
 - 費用の上限見積りは変えない。thinking のトークンも `max_tokens` の内側に収まるため、上限は既存の式のままで足りる。
 
+## 追補(2026-10-17): ADR 0010 により一部改定(Proposed)
+
+- ADR 0010 により一部改定(Proposed): テストは PC の隔離コンテナで行い、最終確認は CI。kivra 自身は生成コードを実行しない。ADR 0010 の承認までは本 ADR の記述が有効。
+
 ## 実装の分割
 
 | 順 | PR の範囲 | 依存 | 触るモジュール | 他の PR と競合するか |

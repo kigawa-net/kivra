@@ -55,6 +55,8 @@ class AnthropicWifSettings(
  * - Anthropic authentication is either `KIVRA_SELFDEV_ANTHROPIC_API_KEY` (a static key) or the Workload Identity Federation
  *   variables (`KIVRA_SELFDEV_ANTHROPIC_FEDERATION_RULE_ID`, `_ORGANIZATION_ID`, `_SERVICE_ACCOUNT_ID`, `_IDENTITY_TOKEN_FILE`,
  *   and the optional `_WORKSPACE_ID`). Exactly one method: both, neither, or a partial federation setup is a startup failure.
+ * - `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` is required (a positive integer, the GitHub user id of the PR author: the App bot, or the
+ *   owner of the PAT). A merge is verified only when the pull request was opened by this id (ADR 0008 part 7, #56).
  *
  * [toString] never shows a secret or a path to a secret.
  */
@@ -70,6 +72,8 @@ class SelfDevSettings private constructor(
     val anthropicApiKeyEnvVar: String?,
     /** Present only when [enabled] and Workload Identity Federation is used. */
     val anthropicWif: AnthropicWifSettings?,
+    /** Present only when [enabled]. The GitHub user id that must have opened a merged pull request (the App bot or the PAT owner). */
+    val githubBotUserId: Secret?,
     /** Present only when [enabled]. */
     val modelRegistryPath: String?,
     val fx: FxConfig?,
@@ -91,6 +95,8 @@ class SelfDevSettings private constructor(
         const val ENV_ANTHROPIC_SERVICE_ACCOUNT_ID = "KIVRA_SELFDEV_ANTHROPIC_SERVICE_ACCOUNT_ID"
         const val ENV_ANTHROPIC_IDENTITY_TOKEN_FILE = "KIVRA_SELFDEV_ANTHROPIC_IDENTITY_TOKEN_FILE"
         const val ENV_ANTHROPIC_WORKSPACE_ID = "KIVRA_SELFDEV_ANTHROPIC_WORKSPACE_ID"
+        /** The GitHub user id of the pull request author (the App bot, or the PAT owner). A positive integer, required when enabled. */
+        const val ENV_GITHUB_APP_BOT_USER_ID = "KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID"
         const val ENV_MODEL_REGISTRY_PATH = "KIVRA_SELFDEV_MODEL_REGISTRY_PATH"
         const val ENV_CONTEXT_PREFIXES = "KIVRA_SELFDEV_CONTEXT_PREFIXES"
         const val ENV_MAX_CONTEXT_FILE_BYTES = "KIVRA_SELFDEV_MAX_CONTEXT_FILE_BYTES"
@@ -116,6 +122,7 @@ class SelfDevSettings private constructor(
             githubAuth = null,
             anthropicApiKeyEnvVar = null,
             anthropicWif = null,
+            githubBotUserId = null,
             modelRegistryPath = null,
             fx = null,
         )
@@ -137,6 +144,7 @@ class SelfDevSettings private constructor(
             val baseBranch = env[ENV_BASE_BRANCH]?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_BASE_BRANCH
             val auth = githubAuth(env)
             val wif = anthropicAuth(env)
+            val botUserId = botUserId(env)
             val registry = required(env, ENV_MODEL_REGISTRY_PATH)
             val fx = FxConfig.fromEnv(env)
             check(fx.usdJpyRate != null && fx.fxAsOf != null) {
@@ -167,6 +175,7 @@ class SelfDevSettings private constructor(
                 githubAuth = auth,
                 anthropicApiKeyEnvVar = if (wif == null) ENV_ANTHROPIC_API_KEY else null,
                 anthropicWif = wif,
+                githubBotUserId = Secret(botUserId),
                 modelRegistryPath = registry,
                 fx = fx,
             )
@@ -194,6 +203,15 @@ class SelfDevSettings private constructor(
                 throw IllegalStateException("$ENV_GITHUB_APP_PRIVATE_KEY is not a usable RSA private key")
             }
             return GitHubAuth.App(appId, installationId, Secret(pem))
+        }
+
+        /** The PR author id. Validated as a positive decimal integer; the message names the variable, never the value. */
+        private fun botUserId(env: Map<String, String>): String {
+            val raw = required(env, ENV_GITHUB_APP_BOT_USER_ID)
+            check(raw.all { it in '0'..'9' } && (raw.toLongOrNull() ?: 0L) > 0) {
+                "$ENV_GITHUB_APP_BOT_USER_ID must be a positive integer"
+            }
+            return raw
         }
 
         private val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")

@@ -11,7 +11,8 @@
 - 自己開発は既定で無効。`KIVRA_SELFDEV_ENABLED` が正確に `true` のときだけ有効になる。無効のときは、自己開発の他の環境変数を一切読まず、ワーカーも `/api/selfdev/*` も登録しない(`selfdev/SelfDevSettings.kt`、`Application.kt`)。
 - 有効化すると、`SelfDevWorker` が起動し、`POST /api/selfdev/tasks`、`GET /api/selfdev/runs`、`GET /api/selfdev/runs/{id}` が登録される(`routes/SelfDevRoutes.kt`)。
 - 本番で動かすには、ブランチ保護、GitHub 認証(App 推奨。PAT は代替)、Anthropic 認証(WIF 推奨。静的キーは代替)、モデル registry、為替の設定が必要。§1 を参照する。
-- **未配線**: マージ検証(ADR 0008 の ⑩)の判定と完了の経路はコードにあるが、本番の認証器は未配線(`NoPrMergeAuthority`)のため、マージ済みの PR は完了しない(`PULL_REQUEST` のまま待機)(§4.3)。
+- マージ検証(ADR 0008 の ⑩)は配線済み。有効時は `GitHubPrMergeAuthority` が、作者 `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` と head SHA を照合して、マージ済みの PR の Run を `COMPLETED` にする(§4.3)。無効時は `NoPrMergeAuthority`(完了しない)。
+- binding が無い既存の Run(binding の記録より前に作られたもの)は、解放の経路が無いため `BINDING_MISSING` で待つ。解消は運用者の手作業(別 PR で解放の経路を足す予定)。
 
 ## 1. 有効化の前提
 
@@ -23,9 +24,12 @@
 | 認証 | `KIVRA_AUTH_MODE` | `oidc-jwt` が必須。 |
 | 実行環境 | `KIVRA_RUNTIME_ENV` | `development` と同時の有効化は拒否される |
 | GitHub 認証 | 推奨: GitHub App の `KIVRA_SELFDEV_GITHUB_APP_ID`、`KIVRA_SELFDEV_GITHUB_APP_INSTALLATION_ID`、`KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY` の 3 つ。代替: PAT の `KIVRA_SELFDEV_GITHUB_TOKEN` | どちらか一方だけ。両方、またはどちらも無いと起動に失敗する。App の秘密鍵は、値が既存のファイルのパスならそのファイルを読み、そうでなければ PEM 本文として扱う。読めない鍵は起動に失敗する。PAT を使う場合は、管理者の権限を持たない専用の細粒度 PAT(`contents:write` と `pull_requests:write` のみ) |
+| GitHub の PR 作者 | `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` | 必須(GitHub App でも PAT でも)。PR の作者として期待する GitHub の user id の正の整数。値は秘密ではないが、起動のエラーには値を出さない。未設定・非数値・0 以下は起動に失敗する。PAT を使う場合は PAT の持ち主の user id を指定する。調べ方: `gh api /users/<app-slug>%5Bbot%5D --jq .id`(kivra-gh は 343288952)。マージ検証は、この id が開いた PR だけを完了の根拠にする |
 | Anthropic 認証 | 推奨: Workload Identity Federation の `KIVRA_SELFDEV_ANTHROPIC_FEDERATION_RULE_ID`、`_ORGANIZATION_ID`、`_SERVICE_ACCOUNT_ID`、`_IDENTITY_TOKEN_FILE` の 4 つ(任意で `_WORKSPACE_ID`)。代替: 静的キーの `KIVRA_SELFDEV_ANTHROPIC_API_KEY` | どちらか一方だけ。WIF の一部だけ、両方、どちらも無いと起動に失敗する。ID の書式は、rule が `fdrl_`、service account が `svac_`、workspace が `wrkspc_`、organization が UUID。トークンファイルは起動時には読まず、交換のたびに読み直す。値は読み取るだけで、ログや設定の表示には出ない |
 | モデル registry | `KIVRA_SELFDEV_MODEL_REGISTRY_PATH` | 必須。読み込めなければ起動に失敗する。エラーに path や内容は出ない |
 | 為替 | `KIVRA_FX_USD_JPY`、`KIVRA_FX_AS_OF` | 両方必須。`KIVRA_FX_USD_JPY` は 1 以上 1000 以下。`KIVRA_FX_AS_OF` は ISO-8601 の瞬間か日付(日付は UTC 0 時) |
+
+`KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` は、無効のときは読まれない。有効化には、k8s の設定にこの値(kivra-gh は 343288952)を入れてからデプロイする。未設定の Pod は自己開発が有効でも起動に失敗する。
 
 ### 1.2 任意の設定(既定値つき)
 
@@ -140,13 +144,15 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 
 **マージ済みの PR(ADR 0008 の ⑩、ADR 0011)。** PR を開いた直後に、Run は PR の束縛(binding: リポジトリ、PR 番号、node id、base、kivra が commit した head SHA)を記録する。マージ済みの PR は、binding があれば `TrustedPrMergeAuthority` で検証し、検証に通ったときだけ `COMPLETED` になる(理由 `PR_MERGED`)。検証は GitHub の読み取りだけで行い、PR 本文や人の申告は根拠にしない。kivra は PR をマージも閉じもしない。
 
-この PR の時点では、本番の認証器は `NoPrMergeAuthority` のまま(配線は後続の PR で行う)。そのため、マージ済みの PR は完了せず、`AWAITING_MERGE_VERIFICATION` で待機する。認証器が GitHub を読めない場合も同じ待機になり、次の tick で再試行する。
+有効時、本番の認証器は `GitHubPrMergeAuthority` で、作者が `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` と一致し、head が kivra の commit と一致する PR だけが完了の根拠になる。ワーカーは認証器を差し込んでから起動する。認証器が GitHub を読めない場合は `AWAITING_MERGE_VERIFICATION` で待機し、次の tick で再試行する。
+
+**既存の占有 Run は手作業で解消する。** binding の記録(PR2)より前に作られた `PULL_REQUEST` の Run は binding が無いため、マージ済みでも `BINDING_MISSING` で待つ。kivra は binding を推測しないので、自動では完了しない。解消は運用者の手作業になる(別 PR で解放の経路を足す予定)。
 
 待機理由と意味:
 
 - `AWAITING_MERGE_VERIFICATION`: 認証器が答えない(未配線、または GitHub の一時的な障害)。自動で再試行する。
 - `MERGE_NOT_VERIFIED`: 認証器が検証を拒否した。ログの `code` に固定の理由が出る(例: `HEAD_SHA_MISMATCH` は、マージ後に head が変わった、`AUTHOR_MISMATCH` は PR の作者が kivra の App ではない、`MERGE_COMMIT_SHA_MISSING` はマージの SHA が無い)。自動では解決しない。運用者が PR と Run を確認する。
-- `BINDING_MISSING`: PR は開いているが binding が無い。この PR の前に開かれた Run(binding の記録より前に作られたもの)がこれに当たる。kivra は binding を自分で組み立てない(GitHub の値から推測しない)ため、完了させない。運用者が確認して解消する。
+- `BINDING_MISSING`: PR は開いているが binding が無い。binding の記録より前に開かれた Run(既存の占有 Run)がこれに当たる。kivra は binding を自分で組み立てない(GitHub の値から推測しない)ため、完了させない。運用者が確認して解消する(上記)。
 
 ログは `self-development run waiting: runId=... reason=... code=...` の形で出る(`code` は固定の理由コードだけ)。
 

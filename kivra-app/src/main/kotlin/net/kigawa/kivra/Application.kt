@@ -31,6 +31,7 @@ import net.kigawa.kivra.routes.readOnlyOperationJournal
 import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.configureSelfDevRoutes
+import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
 import net.kigawa.kivra.selfdev.SelfDevSettings
 import net.kigawa.kivra.selfdev.buildSelfDev
 
@@ -46,7 +47,14 @@ internal fun Application.appModule(env: Map<String, String>) {
     val dataSource = createDataSource(config.database)
     migrateDatabase(config.database, dataSource)
     val database = connectDatabase(dataSource)
-    val runs = DevelopmentRunRepository(database, OutboxRepository(database), AuditRepository(), NoPrMergeAuthority)
+    // Self-development installs the GitHub merge Authority later (in buildSelfDev, before the worker starts). Without it, nothing is verified.
+    val deferredPrMerge = DeferredPrMergeAuthority()
+    val runs = DevelopmentRunRepository(
+        database,
+        OutboxRepository(database),
+        AuditRepository(),
+        if (selfDevSettings.enabled) deferredPrMerge else NoPrMergeAuthority,
+    )
     val budgetConfig = BudgetConfig.from(environment.config)
     val budgetStore = DbBudgetStore(database, budgetConfig.tenantId, budgetConfig.tenantLimit())
     // Built only when self-development is enabled: this is where the GitHub and model clients and their secrets come into play.
@@ -54,6 +62,7 @@ internal fun Application.appModule(env: Map<String, String>) {
         buildSelfDev(
             selfDevSettings, env, database, runs, budgetStore, budgetConfig.tenantId,
             requireNotNull(taskApiIdentity) { "self-development requires KIVRA_AUTH_MODE=oidc-jwt" },
+            deferredPrMerge,
         )
     } else {
         null

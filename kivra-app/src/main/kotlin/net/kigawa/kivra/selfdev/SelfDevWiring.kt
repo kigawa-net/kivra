@@ -10,6 +10,7 @@ import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.developer.DeveloperConfig
 import net.kigawa.kivra.developer.LlmDeveloper
 import net.kigawa.kivra.github.GitHubAdapterConfig
+import net.kigawa.kivra.github.GitHubPrMergeAuthority
 import net.kigawa.kivra.github.GitHubAppTokenMinter
 import net.kigawa.kivra.github.HttpGitHubAdapter
 import net.kigawa.kivra.github.InstallationTokenProvider
@@ -49,6 +50,9 @@ private const val DEVELOPER_MAX_OUTPUT_TOKENS = 8_000
  * Builds the self-development components (ADR 0008 part 7). Called only when [settings] is enabled: it is the only place that creates
  * the GitHub and model clients and that reads the secrets. [env] is the same environment map the settings were read from.
  *
+ * It also installs the production merge Authority ([GitHubPrMergeAuthority], expecting the configured bot user id as the PR author)
+ * into [prMergeAuthority]. This happens before the caller starts the worker, so no merged run is advanced without it.
+ *
  * The developer's data class is INTERNAL: repository content goes to the model, so the provider must have a CONFIRMED data-handling
  * status in the registry before the feature is enabled (see docs/provider-compatibility-matrix.md).
  */
@@ -60,10 +64,12 @@ internal fun buildSelfDev(
     budget: BudgetPort,
     tenantId: String,
     identity: TaskApiIdentity,
+    prMergeAuthority: DeferredPrMergeAuthority,
 ): SelfDevParts {
     val config = checkNotNull(settings.config) { "self-development settings are not enabled" }
     val auth = checkNotNull(settings.githubAuth) { "self-development GitHub authentication is missing" }
     val fx = checkNotNull(settings.fx) { "fx settings are missing" }
+    val botUserId = checkNotNull(settings.githubBotUserId) { "self-development bot user id is missing" }
 
     val githubConfig = GitHubAdapterConfig()
     val githubClient = githubHttpClient(CIO.create(), githubConfig)
@@ -78,6 +84,7 @@ internal fun buildSelfDev(
         )
     }
     val github = HttpGitHubAdapter(githubClient, tokens, githubConfig)
+    prMergeAuthority.install(GitHubPrMergeAuthority(github, botUserId.reveal().toLong()))
     val reader = GitHubRepoReader(github)
 
     val registry: ModelRegistry = loadRegistry(checkNotNull(settings.modelRegistryPath))

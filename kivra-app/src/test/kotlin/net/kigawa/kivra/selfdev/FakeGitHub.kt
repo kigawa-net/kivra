@@ -57,6 +57,12 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
     /** Changes the author of an existing pull request, to simulate a PR opened by someone else. */
     fun setPullAuthor(number: Int, authorId: Long?) = replacePull(number) { it.copy(authorId = authorId) }
 
+    /** Changes the head sha of an existing pull request, to simulate a push after the binding. */
+    fun setPullHead(number: Int, headSha: String) = replacePull(number) { it.copy(headSha = headSha) }
+
+    /** When set, [getPullRequest] fails with this kind (for example AUTH) until it is cleared. */
+    var pullReadFailure: GitHubFailureKind? = null
+
     /** Write operations in call order: createRef, commit, updateRef, createPr. */
     val writes = ArrayList<String>()
 
@@ -152,6 +158,7 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
 
     override suspend fun getPullRequest(repo: RepoRef, number: Int): GitHubResult<PullRequest> {
         touch("getPullRequest")
+        pullReadFailure?.let { return GitHubResult.Failure(it, it.code) }
         if (repo != this.repo) return foreign()
         return pulls.firstOrNull { it.number == number }?.let { GitHubResult.Success(it) } ?: foreign()
     }

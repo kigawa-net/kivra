@@ -43,7 +43,27 @@ class DockerCommandBuilderTest {
             "--env=HTTPS_PROXY=$TEST_PROXY",
             "--env=HTTP_PROXY=$TEST_PROXY",
             "--env=NO_PROXY=localhost,127.0.0.1",
+            "--env=JAVA_TOOL_OPTIONS=-Dhttp.proxyHost=kivra-agent-proxy -Dhttp.proxyPort=8080 " +
+                "-Dhttps.proxyHost=kivra-agent-proxy -Dhttps.proxyPort=8080",
             TEST_IMAGE,
+            "claude",
+            "-p",
+            CliCommand.PROMPT,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--permission-mode",
+            "dontAsk",
+            "--no-session-persistence",
+            "--max-turns",
+            "40",
+            "--allowedTools",
+            "Read",
+            "Edit",
+            "Write",
+            "Glob",
+            "Grep",
+            "Bash",
         )
         assertEquals(expected, fixture.golden())
     }

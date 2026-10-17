@@ -81,8 +81,10 @@ class DockerArgsGuardTest {
             "--init" to (golden.withExtra("--init") to GuardRule.UNKNOWN_OPTION),
             "unknown --foo" to (golden.withExtra("--foo=bar") to GuardRule.UNKNOWN_OPTION),
             "--sig-proxy" to (golden.withExtra("--sig-proxy=false") to GuardRule.UNKNOWN_OPTION),
-            "trailing command" to (golden + listOf("/bin/sh", "-c", "id") to GuardRule.TRAILING_ARGUMENT),
-            "image not allowed" to (golden.dropLast(1) + "evil/image:latest" to GuardRule.FORBIDDEN_VALUE),
+            "trailing command" to (golden + listOf("/bin/sh", "-c", "id") to GuardRule.COMMAND_UNKNOWN_ARGUMENT),
+            "image not allowed" to (
+                golden.take(golden.imageIndex()) + "evil/image:latest" + golden.drop(golden.imageIndex() + 1) to GuardRule.FORBIDDEN_VALUE
+            ),
             "space inside name value" to (
                 golden.replacing("--name=", "--name=kivra-run-$TEST_RUN_ID-att-1 --privileged") to GuardRule.FORBIDDEN_VALUE
                 ),
@@ -92,7 +94,7 @@ class DockerArgsGuardTest {
                 ),
             "memory-swap differs" to (golden.replacing("--memory-swap=", "--memory-swap=-1") to GuardRule.FORBIDDEN_VALUE),
             "pids-limit zero" to (golden.replacing("--pids-limit=", "--pids-limit=0") to GuardRule.FORBIDDEN_VALUE),
-            "space form of an option" to (golden.replacing("--cpus=", "--cpus", "4") to GuardRule.TRAILING_ARGUMENT),
+            "space form of an option" to (golden.replacing("--cpus=", "--cpus", "4") to GuardRule.MALFORMED),
         )
         val failures = mutableListOf<String>()
         for ((label, c) in cases) {
@@ -183,7 +185,7 @@ class DockerArgsGuardTest {
 
     @Test
     fun missingRequiredOptionIsRefused() {
-        for (index in 1 until golden.size - 1) {
+        for (index in 1 until golden.imageIndex()) {
             val without = golden.filterIndexed { i, _ -> i != index }
             assertEquals(GuardRule.MISSING_OPTION, rule(without), "without ${golden[index]}")
         }
@@ -209,7 +211,7 @@ class DockerArgsGuardTest {
     fun argumentListWithoutRunOrImageIsRefused() {
         assertEquals(GuardRule.MALFORMED, rule(emptyList()))
         assertEquals(GuardRule.MALFORMED, rule(golden.drop(1).let { listOf("ps") + it.dropLast(1) }))
-        assertEquals(GuardRule.MALFORMED, rule(golden.dropLast(1)))
+        assertEquals(GuardRule.MALFORMED, rule(golden.take(golden.imageIndex())))
     }
 
     @Test

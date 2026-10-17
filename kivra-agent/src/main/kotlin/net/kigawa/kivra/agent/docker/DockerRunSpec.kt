@@ -6,7 +6,7 @@ import java.time.Duration
 /**
  * What one container run needs (ADR 0010, design #187 section 3.3). Every string is validated here, so nothing reaches the docker
  * command line unchecked. There is deliberately no field for free text: the task title and body never become an argument, an
- * environment value or a container name. They go to the work directory as a file (the contract is set in PR 7).
+ * environment value or a container name. They go to the work directory as a file ([TaskFile]).
  *
  * The container name is `kivra-run-<runId>-<attemptId>`. The labels are derived by the builder from [runId].
  */
@@ -26,6 +26,8 @@ class DockerRunSpec(
     val cpus: String = DockerConstants.DEFAULT_CPUS,
     val pidsLimit: Int = DockerConstants.DEFAULT_PIDS_LIMIT,
     val stopTimeoutSeconds: Int = DockerConstants.DEFAULT_STOP_TIMEOUT_SECONDS,
+    /** The `--max-turns` of the CLI command (see [CliCommand]). The only value of the command that a caller chooses. */
+    val maxTurns: Int = CliCommand.DEFAULT_MAX_TURNS,
 ) {
     /** `kivra-run-<runId>-<attemptId>`. Validated in [init], so it is safe as a docker name. */
     val containerName: String = "${DockerConstants.CONTAINER_PREFIX}$runId-$attemptId"
@@ -44,6 +46,7 @@ class DockerRunSpec(
         if (!DockerPatterns.CPUS.matches(cpus)) throw DockerSpecException("cpus is invalid")
         if (pidsLimit !in 1..MAX_PIDS_LIMIT) throw DockerSpecException("pidsLimit is out of range")
         if (stopTimeoutSeconds !in 1..MAX_STOP_TIMEOUT_SECONDS) throw DockerSpecException("stopTimeoutSeconds is out of range")
+        if (maxTurns !in 1..CliCommand.MAX_MAX_TURNS) throw DockerSpecException("maxTurns is out of range")
     }
 
     override fun toString(): String = "DockerRunSpec(runId=$runId, attemptId=$attemptId)"

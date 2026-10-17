@@ -37,7 +37,31 @@ object DockerConstants {
     const val PROXY_PATH = "/anthropic"
 
     /** The only environment names a container may receive. Anything else, including a host variable, is refused. */
-    val ENV_NAMES: Set<String> = setOf("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY")
+    val ENV_NAMES: Set<String> = setOf(
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "JAVA_TOOL_OPTIONS",
+    )
+}
+
+/**
+ * The `JAVA_TOOL_OPTIONS` value that points the JVMs in the container (for example `./gradlew test` run by the CLI) at the egress
+ * proxy. It is built only from the host and port of the proxy URL, in one fixed form, so no other text can be put in it. The guard
+ * compares the value with this form exactly.
+ */
+internal object ProxyEnv {
+    private val PROXY = Regex("http://([a-z0-9][a-z0-9-]{0,62}):([0-9]{1,5})")
+
+    fun javaToolOptions(proxyUrl: String): String {
+        val match = PROXY.matchEntire(proxyUrl) ?: throw DockerSpecException("proxyUrl must be http://host:port")
+        val port = match.groupValues[2].toIntOrNull()?.takeIf { it in 1..65535 }
+            ?: throw DockerSpecException("proxy port is out of range")
+        val host = match.groupValues[1]
+        return "-Dhttp.proxyHost=$host -Dhttp.proxyPort=$port -Dhttps.proxyHost=$host -Dhttps.proxyPort=$port"
+    }
 }
 
 /** Patterns for every value that reaches the docker command line. Matching is whole-string (`matches`), so a newline never passes. */

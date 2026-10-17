@@ -43,14 +43,21 @@ internal class DockerFixture {
     }
 }
 
-/** Replaces every element that starts with [prefix] by [replacement] (none, when [replacement] is empty). */
+/** The index of the image: the first argument after `run` that does not start with `-`. The command follows it. */
+internal fun List<String>.imageIndex(): Int = (1 until size).first { !this[it].startsWith("-") }
+
+/** Replaces every option (before the image) that starts with [prefix] by [replacement] (none, when [replacement] is empty). */
 internal fun List<String>.replacing(prefix: String, vararg replacement: String): List<String> {
-    val kept = filterNot { it.startsWith(prefix) }
-    return kept.dropLast(1) + replacement + kept.last()
+    val image = imageIndex()
+    val head = take(image).filterNot { it.startsWith(prefix) }
+    return head + replacement + drop(image)
 }
 
-/** Inserts [extra] before the image, the last element. */
-internal fun List<String>.withExtra(vararg extra: String): List<String> = dropLast(1) + extra + last()
+/** Inserts [extra] before the image, after the options. */
+internal fun List<String>.withExtra(vararg extra: String): List<String> {
+    val image = imageIndex()
+    return take(image) + extra + drop(image)
+}
 
 /** A fake docker CLI for the runner tests. It records every call, and the containers it "runs" are controlled by the test. */
 internal class FakeDocker : DockerLauncher {

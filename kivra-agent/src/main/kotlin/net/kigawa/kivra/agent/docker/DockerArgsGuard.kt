@@ -6,7 +6,6 @@ import java.nio.file.Path
 /** Why an argument list was refused. The rule is the only detail: no option value, path or secret is ever in the message. */
 enum class GuardRule {
     MALFORMED,
-    TRAILING_ARGUMENT,
     FORBIDDEN_OPTION,
     UNKNOWN_OPTION,
     MISSING_OPTION,
@@ -14,6 +13,14 @@ enum class GuardRule {
     FORBIDDEN_VALUE,
     PATH_REJECTED,
     ENV_REJECTED,
+    /** The command after the image is not the fixed one (wrong program, wrong order, or a missing or out-of-range value). */
+    COMMAND_NOT_ALLOWED,
+    /** The command has an extra or changed argument that is not in the allowlist. */
+    COMMAND_UNKNOWN_ARGUMENT,
+    /** A token of the command holds a shell operator, an expansion, a quote or a control character. */
+    COMMAND_SHELL_SYNTAX,
+    /** The prompt position holds something other than the fixed prompt, which is how task text would enter the command. */
+    COMMAND_TASK_TEXT,
 }
 
 class DockerArgsRejectedException(val rule: GuardRule) : IllegalArgumentException("docker argument rejected: ${rule.name}")
@@ -22,20 +29,23 @@ class DockerArgsRejectedException(val rule: GuardRule) : IllegalArgumentExceptio
  * The last check before a `docker run` (ADR 0010 invariant 2, design #187 section 3.3). It works on the complete argument list,
  * so a forbidden item is refused even when the builder did not add it, and even when an allowed option is given a forbidden value.
  *
- * Rules, in order (fail-closed; the first failure throws):
- * 1. Forbidden options: a name on the explicit list (`--privileged`, `--cap-add`, `--device`, `--pid`, `--volume`, `--env-file`, ...),
- *    and every short option (`-e`, `-v`, `-it`). They are refused whatever their value.
+ * The argument list is `run`, the options, the image, and the command ([CliCommand]). The image is the first argument that does not
+ * start with `-`. Rules, in order (fail-closed; the first failure throws):
+ * 1. Options: a short option (`-e`, `-v`, `-it`) is refused whatever its value. A name on the explicit forbidden list (`--privileged`,
+ *    `--cap-add`, `--device`, `--pid`, `--volume`, `--env-file`, ...) is refused.
  * 2. Allowlist: any option not in [BOOL_OPTIONS] or [VALUE_OPTIONS] is refused.
  * 3. Shape: a value option must use `--name=value`; a flag must not have a value. The space form is never accepted, so a value cannot
  *    be mistaken for an option.
  * 4. Values: each option's value must match its exact allowed form. The network is one of the configured internal networks (never
  *    host, none, container:, or bridge). The mount is the one work directory. Each environment entry has an allowed name and value,
- *    and no value contains `sk-ant-`.
+ *    and no value contains `sk-ant-`. `JAVA_TOOL_OPTIONS` has the fixed proxy form.
  * 5. Duplicates: a single-valued option may not repeat.
  * 6. Required: every option the container needs must be present (read-only, cap-drop, network, memory, mount, ...).
- * 7. Cross checks: the memory-swap equals the memory; the container name starts with the run label; the proxy URLs agree.
- *
- * The image must be the last argument, and nothing may follow it: there is no command after the image in this design.
+ * 7. Cross checks: the memory-swap equals the memory; the container name starts with the run label; the proxy URLs agree, and
+ *    `JAVA_TOOL_OPTIONS` equals the form built from the proxy.
+ * 8. Image: one of the configured images.
+ * 9. Command: exactly [CliCommand.argv] with an in-range `--max-turns`. Checked by [checkCommand]: the program, the prompt position
+ *    (must be the fixed prompt, so no task text), shell syntax in any other token, and any extra or changed argument are refused.
  */
 class DockerArgsGuard(private val settings: DockerSettings) {
 
@@ -43,18 +53,15 @@ class DockerArgsGuard(private val settings: DockerSettings) {
 
     fun check(args: List<String>) {
         if (args.isEmpty() || args[0] != "run") reject(GuardRule.MALFORMED)
+        // Every option starts with "-", so the first other argument is the image, and everything after it is the command.
+        val imageIndex = (1 until args.size).firstOrNull { !args[it].startsWith("-") } ?: reject(GuardRule.MALFORMED)
+        val imageName = args[imageIndex]
         val opts = ArrayList<Opt>()
-        var image: String? = null
-        for (i in 1 until args.size) {
+        for (i in 1 until imageIndex) {
             val token = args[i]
-            when {
-                token.startsWith("--") -> opts += parseLong(token)
-                token.startsWith("-") -> reject(GuardRule.FORBIDDEN_OPTION)
-                i == args.lastIndex -> image = token
-                else -> reject(GuardRule.TRAILING_ARGUMENT)
-            }
+            if (!token.startsWith("--")) reject(GuardRule.FORBIDDEN_OPTION)
+            opts += parseLong(token)
         }
-        val imageName = image ?: reject(GuardRule.MALFORMED)
 
         // 1. Explicit forbidden names.
         for (o in opts) if (o.name in FORBIDDEN_NAMES) reject(GuardRule.FORBIDDEN_OPTION)
@@ -75,7 +82,42 @@ class DockerArgsGuard(private val settings: DockerSettings) {
         checkRequiredEntries(opts)
         // 7. Cross checks.
         checkCrossValues(opts)
+        // 8. Image.
         if (imageName !in settings.allowedImages) reject(GuardRule.FORBIDDEN_VALUE)
+        // 9. Command.
+        checkCommand(args.subList(imageIndex + 1, args.size))
+    }
+
+    /**
+     * The command must be exactly [CliCommand.argv], except for the `--max-turns` value, which must be an integer in range. The
+     * prompt position may only hold the fixed prompt. Shell syntax is refused in every other token, so that a value cannot be
+     * passed to a shell even if a later change ran it through one.
+     */
+    private fun checkCommand(tokens: List<String>) {
+        if (tokens.isEmpty() || tokens[0] != CLAUDE_PROGRAM) reject(GuardRule.COMMAND_NOT_ALLOWED)
+        for ((i, token) in tokens.withIndex()) {
+            if (i != CliCommand.PROMPT_INDEX && (token.any { it in SHELL_CHARS || it.isISOControl() })) {
+                reject(GuardRule.COMMAND_SHELL_SYNTAX)
+            }
+        }
+        val template = CliCommand.argv(CliCommand.DEFAULT_MAX_TURNS)
+        if (tokens.size != template.size) reject(GuardRule.COMMAND_UNKNOWN_ARGUMENT)
+        for (i in tokens.indices) {
+            if (i == CliCommand.MAX_TURNS_INDEX) {
+                val turns = tokens[i].toIntOrNull()
+                if (turns == null || tokens[i] != turns.toString() || turns !in 1..CliCommand.MAX_MAX_TURNS) {
+                    reject(GuardRule.COMMAND_NOT_ALLOWED)
+                }
+                continue
+            }
+            if (tokens[i] == template[i]) continue
+            reject(
+                when (i) {
+                    CliCommand.PROMPT_INDEX -> GuardRule.COMMAND_TASK_TEXT
+                    else -> GuardRule.COMMAND_UNKNOWN_ARGUMENT
+                },
+            )
+        }
     }
 
     private fun parseLong(token: String): Opt {
@@ -153,6 +195,7 @@ class DockerArgsGuard(private val settings: DockerSettings) {
                 if (proxy == value || !DockerPatterns.PROXY_URL.matches(proxy)) reject(GuardRule.ENV_REJECTED)
             }
             "NO_PROXY" -> if (value != DockerConstants.NO_PROXY) reject(GuardRule.ENV_REJECTED)
+            "JAVA_TOOL_OPTIONS" -> if (!JAVA_TOOL_OPTIONS_FORMAT.matches(value)) reject(GuardRule.ENV_REJECTED)
         }
     }
 
@@ -195,6 +238,12 @@ class DockerArgsGuard(private val settings: DockerSettings) {
         val proxy = env["HTTPS_PROXY"]
         if (proxy == null || env["HTTP_PROXY"] != proxy) reject(GuardRule.ENV_REJECTED)
         if (env["ANTHROPIC_BASE_URL"] != proxy + DockerConstants.PROXY_PATH) reject(GuardRule.ENV_REJECTED)
+        val expectedJavaOptions = try {
+            ProxyEnv.javaToolOptions(proxy)
+        } catch (e: DockerSpecException) {
+            reject(GuardRule.ENV_REJECTED)
+        }
+        if (env["JAVA_TOOL_OPTIONS"] != expectedJavaOptions) reject(GuardRule.ENV_REJECTED)
     }
 
     private fun reject(rule: GuardRule): Nothing = throw DockerArgsRejectedException(rule)
@@ -220,7 +269,14 @@ class DockerArgsGuard(private val settings: DockerSettings) {
 
         const val MAX_PIDS = 4096
         const val MAX_STOP_TIMEOUT = 120
+        const val CLAUDE_PROGRAM = "claude"
         val PIDS = Regex("[1-9][0-9]{0,3}")
         val STOP_TIMEOUT = Regex("[1-9][0-9]{0,2}")
+        val JAVA_TOOL_OPTIONS_FORMAT = Regex(
+            "-Dhttp\\.proxyHost=[a-z0-9-]+ -Dhttp\\.proxyPort=[0-9]+ -Dhttps\\.proxyHost=[a-z0-9-]+ -Dhttps\\.proxyPort=[0-9]+",
+        )
+
+        /** Characters that a shell would interpret. A command token may not contain any of them, or a control character. */
+        val SHELL_CHARS: Set<Char> = setOf(';', '&', '|', '$', '`', '<', '>', '(', ')', '{', '}', '[', ']', '\\', '\'', '"', '*', '?', '!', '~', '#')
     }
 }

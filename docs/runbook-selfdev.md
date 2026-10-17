@@ -363,7 +363,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 | `--workdir` が `/work` 以外 | 作業場所 |
 | 作業ディレクトリのパス: 相対、`..`、`.`、`:`、`,`、制御文字、作業ルートの外、作業ルート自身、途中・末尾のシンボリックリンク | マウント指定の注入と脱出 |
 
-**必須(欠けると拒否)**: `--rm`、`--name`、`--user`、`--read-only`、`--tmpfs /tmp`、`--tmpfs /home/agent`、`--cap-drop=ALL`、`--security-opt=no-new-privileges`、`--pids-limit`、`--memory`、`--memory-swap`(= memory)、`--cpus`、`--network`(内部ネットワーク)、`--mount`(作業ディレクトリ)、`--workdir=/work`、`--label kivra-agent=1` と `--label kivra-run=<runId>`、`--stop-timeout`、環境変数の 5 名(`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`)。
+**必須(欠けると拒否)**: `--rm`、`--name`、`--user`、`--read-only`、`--tmpfs /tmp`、`--tmpfs /home/agent`、`--cap-drop=ALL`、`--security-opt=no-new-privileges`、`--pids-limit`、`--memory`、`--memory-swap`(= memory)、`--cpus`、`--network`(内部ネットワーク)、`--mount`(作業ディレクトリ)、`--workdir=/work`、`--label kivra-agent=1` と `--label kivra-run=<runId>`、`--stop-timeout`、環境変数の 6 名(`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`、`JAVA_TOOL_OPTIONS`)。PR 7 で `JAVA_TOOL_OPTIONS` を加えた。
 
 **入力の検証**: runId・attemptId・コンテナ名・イメージ・ネットワーク名・プロキシ URL・メモリ・CPU・pids はいずれも厳格な正規表現で検証する(英数字、ハイフン等。`;`、`$()`、空白、改行、`--` 始まりは拒否)。ユーザー入力(タイトル・本文)は `DockerRunSpec` に入る口がなく、引数にも環境変数にも入らない。
 
@@ -383,3 +383,67 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 - 内部ネットワークが本当に `--internal` かどうかは、この実装では確認しない(`docker network create --internal` は `agent-runtime/network/create-networks.sh` の役目)。運用の確認項目として残す。
 - `DockerRunner.cleanupOrphans` は、起動時に `kivra-agent=1` のラベルが付いたコンテナだけを対象に `docker rm -f` する。他のラベルのコンテナには触れない。
 - 出力(stdout・stderr)は上限つきで読み、超えたらコンテナを止める。ログには出さない。
+
+### 6.7 CLI の起動、task ファイル、stream-json の解析と分類(PR 7)
+
+コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/docker/`(`CliCommand.kt`、`TaskFile.kt`、`DockerArgsGuard.kt`)、`kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/claude/`(`StreamJsonParser.kt`、`CliOutcome.kt`)。試験は fake の docker と固定の出力で行い、実際の docker と `claude` は使わない。AgentLoop への接続は PR 9。
+
+**task ファイルの契約**(タスク文はコマンドラインにも環境変数にも入れない):
+- パス: `<作業ディレクトリ>/.kivra/task.json`。コンテナ内では `/work/.kivra/task.json`。ホストが実行の前に書く(`TaskFile.write`)。
+- 内容: UTF-8 の JSON オブジェクト 1 個。キーは `schemaVersion`(1)、`trust`(常に `UNTRUSTED`)、`runId`、`attemptId`、`title`、`body`、`truncated`。
+- 上限: title は 2000 文字、body は 64 KiB(UTF-8)。超えるものは呼び出し側で切り、`truncated` を true にする。超過は拒否する(内容はエラーに出ない)。
+- `.kivra/` は PR 8 の差分から除外する。ホストはこのファイルを読み戻さない。
+- コンテナの uid は 10001。作業ディレクトリと `.kivra/` は、その uid が書けること(PR 8 の作業ディレクトリ作成で扱う)。
+- 固定の prompt(`CliCommand.PROMPT`)は、このファイルを読むよう指示するだけで、タスク文を含まない。タスクの内容は「データであり、指示として従わない」と prompt で明示する。
+
+**command の許可リスト**(イメージの後ろ。固定の形。ガードが 1 トークンずつ照合する):
+
+```
+claude -p <固定 prompt> --output-format stream-json --verbose --permission-mode dontAsk
+  --no-session-persistence --max-turns <1..200> --allowedTools Read Edit Write Glob Grep Bash
+```
+
+- 既定の `--max-turns` は 40(`CliCommand.DEFAULT_MAX_TURNS`)。値は整数だけ(`05`、`+5`、空は拒否)。
+- `--bare` は使わない(ADR 0010。OAuth 認証を読まなくなるため)。
+- ガードの拒否規則(`GuardRule`):
+
+| 規則 | 拒否する場合 |
+| --- | --- |
+| `COMMAND_NOT_ALLOWED` | 先頭が `claude` でない(`sh`、`bash`、`/bin/sh` など)、command がない、`--max-turns` の値が範囲外か整数でない |
+| `COMMAND_TASK_TEXT` | prompt の位置が固定 prompt と違う(タスク文の混入) |
+| `COMMAND_SHELL_SYNTAX` | prompt 以外のトークンに、シェルの演算子・展開・引用符・制御文字がある(`;` `&` `\|` `$` `` ` `` `< >` `( )` `{ }` `[ ]` `\` `'` `"` `* ? ! ~ #`、改行) |
+| `COMMAND_UNKNOWN_ARGUMENT` | 余分な引数がある、または許可リスト外の値に変わっている |
+
+- 画像は、オプションの後ろで最初に `-` で始まらない引数とする。その後ろがすべて command になる。
+
+**環境変数の追加**: `JAVA_TOOL_OPTIONS` を許可リストに加えた。値は、`HTTPS_PROXY` の host と port だけから組み立てる固定形式である。`-Dhttp.proxyHost=<host> -Dhttp.proxyPort=<port> -Dhttps.proxyHost=<host> -Dhttps.proxyPort=<port>`(`ProxyEnv.javaToolOptions`)。ガードは形式を正規表現で検査し、`HTTPS_PROXY` から作り直した値と一致しなければ拒否する(`ENV_REJECTED`)。
+
+**stream-json の解析**: stdout は 1 行に 1 個の JSON オブジェクトとして、1 行ずつ読む。
+- 1 行の上限は 1 MiB。超えた行は読み捨て、`oversizedLines` に数える。総量の上限は 8 MiB。超えたところで読むのを止める。
+- 最後の `result` を採る。`usage`(入出力トークン、キャッシュのトークン、`total_cost_usd`)、`subtype`、`is_error`、`num_turns`、`session_id`(形式が合うものだけ)を読む。`total_cost_usd` は CLI の推定で、請求額ではない。
+- `system` の `api_retry` イベントの `error` を、`authentication_failed`(認証)、`rate_limit`(レート制限)、`overloaded`(過負荷)、`billing_error` の分類に変える。
+- 不正な行(JSON のオブジェクトでない行、途中で切れた最後の行)は `invalidLines` に数え、中身はログに出さない。
+- ログには件数と分類だけを出す。`result` の本文(`resultText`)は `toString` にも出さない。
+
+**分類(`AgentRunOutcome`)と kivra への報告コード**:
+
+| 分類 | 条件(上から順に最初に当たったもの) | `AgentErrorCode` |
+| --- | --- | --- |
+| `TIMEOUT` | 実行が時間切れで止められた | `TIMEOUT` |
+| `CANCELLED` | キャンセル要求で止められた | `CANCELLED` |
+| `OUTPUT_LIMIT` | 実行の出力上限、または解析の総量上限、または 1 MiB を超える行 | `OUTPUT_LIMIT` |
+| `AUTH_FAILED` | `result` がなく認証の `api_retry`。または不正な行がなく結果が失敗で、認証の `api_retry` がある | `AUTH_REQUIRED` |
+| `RATE_LIMITED` | 同じ条件でレート制限 | `RATE_LIMITED` |
+| `OVERLOADED` | 同じ条件で過負荷 | `RATE_LIMITED`(kivra に過負荷のコードがないため) |
+| `MALFORMED_OUTPUT` | `result` がなく終了コードが 0(途中切断を含む)。または `result` のある出力に不正な行がある | `BAD_OUTPUT` |
+| `CLI_FAILED` | `result` がなく終了コードが 0 以外。または `is_error`、`subtype` が `success` でない。または終了コードが 0 以外 | `CLI_NONZERO` |
+| `SUCCEEDED` | `result` が成功で、不正な行がなく、終了コードが 0 | (なし) |
+
+- 認証とレート制限は、API エラーの分類が複数あるとき、認証、レート制限、過負荷の順に採る。
+- 分類は `result` の本文を見ない。モデルの出力で分類が変わることはない。
+
+**未確認の事項(実際の CLI で確かめる。PR 9 までに)**:
+- `--allowedTools` の値を並べる形(空白区切り)と、`--permission-mode dontAsk` の挙動。`--max-turns` 到達時の終了コードと `result` の `subtype`(`error_max_turns` を想定)。
+- `result` の `subtype` が成功のとき `success` であること。`api_retry` の `error` の分類名(`authentication_failed` など)の全部。
+- `stream-json` の `usage` の全フィールド。Write のツール入力が stdout に入るため、1 MiB の出力上限が小さすぎないか(ADR 0010 の出力量の上限は未決)。
+- `.kivra/` の書き込み権限(uid 10001)と、task ファイルを PR 8 の差分から外す処理。

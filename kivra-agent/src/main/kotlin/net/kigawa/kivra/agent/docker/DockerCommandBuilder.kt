@@ -5,7 +5,8 @@ package net.kigawa.kivra.agent.docker
  * of options in a fixed order, each as one `--option=value` token, one work mount, and the image last. No shell is involved.
  *
  * The output is checked again by [DockerArgsGuard] right before it runs. This builder is the first line of that double check.
- * The task text is not an input: [DockerRunSpec] has no field for it, so it cannot reach an argument or an environment value.
+ * The task text is not an input: [DockerRunSpec] has no field for it, so it cannot reach an argument or an environment value. The
+ * command after the image is [CliCommand.argv], a constant shape; the task is read from the work directory ([TaskFile]).
  */
 class DockerCommandBuilder(private val settings: DockerSettings) {
 
@@ -39,7 +40,8 @@ class DockerCommandBuilder(private val settings: DockerSettings) {
             "--env=HTTPS_PROXY=$proxy",
             "--env=HTTP_PROXY=$proxy",
             "--env=NO_PROXY=${DockerConstants.NO_PROXY}",
+            "--env=JAVA_TOOL_OPTIONS=${ProxyEnv.javaToolOptions(proxy)}",
             spec.image,
-        )
+        ) + CliCommand.argv(spec.maxTurns)
     }
 }

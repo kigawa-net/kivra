@@ -1,0 +1,256 @@
+package net.kigawa.kivra.agent
+
+import io.ktor.client.HttpClient
+import io.ktor.client.HttpClientConfig
+import io.ktor.client.network.sockets.ConnectTimeoutException
+import io.ktor.client.network.sockets.SocketTimeoutException
+import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.request.header
+import io.ktor.client.request.request
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
+import io.ktor.http.content.TextContent
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/**
+ * The HTTP settings every kivra-agent client shares: no redirects (a Bearer token is never sent to another origin), a request
+ * timeout and a connect timeout. Used by the real client in `main` and by the MockEngine tests.
+ */
+fun HttpClientConfig<*>.agentClientConfig() {
+    expectSuccess = false
+    followRedirects = false
+    install(HttpTimeout) {
+        requestTimeoutMillis = 30_000
+        connectTimeoutMillis = 10_000
+        socketTimeoutMillis = 30_000
+    }
+}
+
+/**
+ * The fixed categories of a failed call. The agent logs and branches on these names only: never a response body, a header, a
+ * token, a URL or an exception message.
+ */
+enum class AgentApiErrorKind {
+    UNAUTHORIZED,
+    FORBIDDEN,
+    NOT_FOUND,
+    CONFLICT,
+    REJECTED,
+    CLIENT_ERROR,
+    SERVER,
+    REDIRECT,
+    NETWORK,
+    TIMEOUT,
+    MALFORMED_RESPONSE,
+    TOKEN_REJECTED,
+    TOKEN_UNAVAILABLE,
+    SECRET_UNREADABLE,
+}
+
+/** A failed call. It carries only [kind]; the cause is deliberately not chained, since it may name a URL or a header. */
+class AgentApiException(val kind: AgentApiErrorKind) : Exception(kind.name)
+
+/** The outcome of `claim`: a 200 with an attempt, or a 204 with nothing to do. */
+sealed interface ClaimResult {
+    data class Assigned(val attempt: ClaimedAttempt) : ClaimResult
+    data object NoAssignment : ClaimResult
+}
+
+/** The state of an attempt and whether kivra has asked to cancel it. */
+data class AttemptStatus(val state: String, val cancelRequested: Boolean)
+
+/**
+ * The kivra agent API client (`/api/agent/v1`, runbook-selfdev section 6). Every request carries `Authorization: Bearer` only.
+ * A response is parsed strictly: a missing or wrongly typed required field is [AgentApiErrorKind.MALFORMED_RESPONSE]. Unknown
+ * fields are ignored.
+ */
+class KivraAgentClient(
+    private val http: HttpClient,
+    baseUrl: String,
+    private val tokens: TokenSource,
+) {
+    private val base = baseUrl.trimEnd('/')
+
+    suspend fun claim(): ClaimResult {
+        val reply = send(HttpMethod.Post, "/api/agent/v1/claim", "{}")
+        if (reply.status == 204) return ClaimResult.NoAssignment
+        requireSuccess(reply.status)
+        return ClaimResult.Assigned(parseClaim(reply.body))
+    }
+
+    /** Returns the state the server reports. [progress] is optional; null means no progress change. */
+    suspend fun heartbeat(attemptId: String, generation: Long, progress: ProgressPhase?): String {
+        val body = buildJsonObject {
+            put("generation", generation)
+            if (progress != null) put("progress", progress.name)
+        }.toString()
+        val reply = send(HttpMethod.Post, attemptPath(attemptId, "heartbeat"), body)
+        requireSuccess(reply.status)
+        return parseState(reply.body)
+    }
+
+    suspend fun fail(attemptId: String, generation: Long, code: AgentErrorCode): String {
+        val body = buildJsonObject {
+            put("generation", generation)
+            put("errorCode", code.name)
+        }.toString()
+        val reply = send(HttpMethod.Post, attemptPath(attemptId, "fail"), body)
+        requireSuccess(reply.status)
+        return parseState(reply.body)
+    }
+
+    suspend fun status(attemptId: String): AttemptStatus {
+        val reply = send(HttpMethod.Get, attemptPath(attemptId, "status"), null)
+        requireSuccess(reply.status)
+        val parsed = decode<StatusBody>(reply.body)
+        validState(parsed.state)
+        return AttemptStatus(parsed.state, parsed.cancelRequested)
+    }
+
+    private class Reply(val status: Int, val body: String)
+
+    private suspend fun send(method: HttpMethod, path: String, json: String?): Reply {
+        val token = tokens.token()
+        val reply = try {
+            http.request("$base$path") {
+                this.method = method
+                header(HttpHeaders.Authorization, "Bearer ${token.reveal()}")
+                if (json != null) setBody(TextContent(json, ContentType.Application.Json))
+            }.let { Reply(it.status.value, it.bodyAsText()) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw AgentApiException(if (e.isTimeout()) AgentApiErrorKind.TIMEOUT else AgentApiErrorKind.NETWORK)
+        }
+        if (reply.status == 401) tokens.invalidate()
+        return reply
+    }
+
+    private fun attemptPath(attemptId: String, action: String): String {
+        require(ID.matches(attemptId)) { "attempt id is not an identifier" }
+        return "/api/agent/v1/attempts/$attemptId/$action"
+    }
+
+    private fun parseClaim(text: String): ClaimedAttempt {
+        val body = decode<ClaimBody>(text)
+        validId(body.runId)
+        validId(body.attemptId)
+        if (body.generation < 0) malformed()
+        val input = body.input
+        if (!SHA.matches(input.baseSha)) malformed()
+        if (input.task.trust != TRUST_UNTRUSTED) malformed()
+        val l = input.limits
+        val positive = l.maxRuntimeSeconds > 0 && l.maxTurns > 0 && l.maxOutputBytes > 0 && l.maxChangedFiles > 0 &&
+            l.maxFileBytes > 0 && l.maxTotalBytes > 0 && l.maxDeletes >= 0
+        if (!positive) malformed()
+        return ClaimedAttempt(
+            runId = body.runId,
+            attemptId = body.attemptId,
+            generation = body.generation,
+            baseSha = input.baseSha,
+            task = AgentTask(input.task.origin, input.task.value, input.task.trust, input.task.truncated),
+            limits = AgentLimits(
+                maxRuntimeSeconds = l.maxRuntimeSeconds,
+                maxTurns = l.maxTurns,
+                maxOutputBytes = l.maxOutputBytes,
+                maxChangedFiles = l.maxChangedFiles,
+                maxFileBytes = l.maxFileBytes,
+                maxTotalBytes = l.maxTotalBytes,
+                maxDeletes = l.maxDeletes,
+            ),
+            allowedPathPatterns = input.allowedPathPatterns,
+            deniedPathPatterns = input.deniedPathPatterns,
+        )
+    }
+
+    private fun parseState(text: String): String {
+        val parsed = decode<StateBody>(text)
+        validId(parsed.attemptId)
+        validState(parsed.state)
+        return parsed.state
+    }
+
+    private inline fun <reified T> decode(text: String): T =
+        try {
+            JSON.decodeFromString<T>(text)
+        } catch (e: Exception) {
+            malformed()
+        }
+
+    private fun validId(value: String) {
+        if (!ID.matches(value)) malformed()
+    }
+
+    private fun validState(value: String) {
+        if (!STATE.matches(value)) malformed()
+    }
+
+    private fun malformed(): Nothing = throw AgentApiException(AgentApiErrorKind.MALFORMED_RESPONSE)
+
+    private companion object {
+        val JSON = Json { ignoreUnknownKeys = true }
+        val ID = Regex("^[A-Za-z0-9_-]{1,64}$")
+        val SHA = Regex("^[0-9a-f]{40}$")
+        val STATE = Regex("^[A-Z_]{1,32}$")
+    }
+}
+
+/** Maps a status code to the fixed category, or null for a 2xx. */
+internal fun statusKind(status: Int): AgentApiErrorKind? = when (status) {
+    in 200..299 -> null
+    401 -> AgentApiErrorKind.UNAUTHORIZED
+    403 -> AgentApiErrorKind.FORBIDDEN
+    404 -> AgentApiErrorKind.NOT_FOUND
+    409 -> AgentApiErrorKind.CONFLICT
+    400, 413, 415, 422 -> AgentApiErrorKind.REJECTED
+    in 300..399 -> AgentApiErrorKind.REDIRECT
+    in 500..599 -> AgentApiErrorKind.SERVER
+    else -> AgentApiErrorKind.CLIENT_ERROR
+}
+
+private fun requireSuccess(status: Int) {
+    statusKind(status)?.let { throw AgentApiException(it) }
+}
+
+internal fun Throwable.isTimeout(): Boolean =
+    this is HttpRequestTimeoutException || this is ConnectTimeoutException || this is SocketTimeoutException
+
+@Serializable
+private class ClaimBody(val attemptId: String, val runId: String, val generation: Long, val input: InputBody)
+
+@Serializable
+private class InputBody(
+    val baseSha: String,
+    val task: TaskBody,
+    val limits: LimitsBody,
+    val allowedPathPatterns: List<String>,
+    val deniedPathPatterns: List<String>,
+)
+
+@Serializable
+private class TaskBody(val origin: String, val value: String, val trust: String, val truncated: Boolean)
+
+@Serializable
+private class LimitsBody(
+    val maxRuntimeSeconds: Long,
+    val maxTurns: Int,
+    val maxOutputBytes: Long,
+    val maxChangedFiles: Int,
+    val maxFileBytes: Long,
+    val maxTotalBytes: Long,
+    val maxDeletes: Int,
+)
+
+@Serializable
+private class StateBody(val attemptId: String, val state: String)
+
+@Serializable
+private class StatusBody(val attemptId: String, val state: String, val cancelRequested: Boolean)

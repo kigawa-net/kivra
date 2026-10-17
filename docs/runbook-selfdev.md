@@ -327,3 +327,15 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 - 期限切れ・孤児の掃除(`CodingRuntimeService.reconcile`)は、この PR では定期実行に配線していない。ORPHANED、EXPIRED の attempt は、運用者が §4.1 の手順で判断する。
 - 有効化の前に、`KIVRA_AGENT_AZP` と `KIVRA_AGENT_REQUIRED_ROLE` が Keycloak の設定と一致しているか確認する。一致しなければ、正しいトークンでも 403 になる。
 
+
+### 6.5 エージェント本体(`kivra-agent`)の構成
+
+ローカル PC で動く常駐エージェントの Gradle モジュール(`kivra-agent`、ADR 0010、設計 #187 §7)。PR 5 の範囲は kivra との通信だけ。
+
+- **PR 5(この範囲)**: 設定(環境変数。`KIVRA_AGENT_*`、起動時は fail-closed)、Keycloak の client credentials によるトークン取得(毎回の新しいトークン、期限の少し前に再取得、secret はファイルから読む)、エージェント API の client(claim・heartbeat・fail・status。応答は厳格に解析し、エラーは固定の分類)、ループ(STOP ファイル、claim、heartbeat、409/404 での即時中止、cancelRequested での CANCELLED、SIGTERM での CANCELLED、失敗時の指数バックオフ)、作業ディレクトリのロックファイル(二重起動の拒否)。
+- **スタブ**: claim したアテンプトは実行せず、`fail(NEEDS_HUMAN)` で返す。NEEDS_HUMAN は kivra で UNKNOWN になり、運用者が判断する(自動再試行しない)。サーバーに NOT_IMPLEMENTED のような名前は無い。
+- **PR 6**: 実行(docker の引数の組み立て、禁止項目の検査、タイムアウトの `docker kill`、ネットワークとプロキシ)。
+- **PR 7**: Claude Code CLI の起動と stream-json の解析、エラーの分類、認証の検査。
+- **PR 8**: 作業ディレクトリ(`git archive` の展開)と差分(PatchSet)の生成。
+
+設定の環境変数: `KIVRA_AGENT_KIVRA_URL`、`KIVRA_AGENT_TOKEN_URL`(https。localhost の http だけ可)、`KIVRA_AGENT_CLIENT_ID`、`KIVRA_AGENT_CLIENT_SECRET_FILE`(絶対パス。グループとその他が読めない権限 0600 が必要)、`KIVRA_AGENT_WORK_DIR`(絶対パス)、`KIVRA_AGENT_POLL_INTERVAL_MS`(既定 5000、1000〜60000)、`KIVRA_AGENT_HEARTBEAT_INTERVAL_MS`(既定 30000、5000〜120000)、`KIVRA_AGENT_STOP_FILE`(既定は作業ディレクトリ直下の `STOP`)。

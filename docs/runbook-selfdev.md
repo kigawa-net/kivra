@@ -12,7 +12,7 @@
 - 有効化すると、`SelfDevWorker` が起動し、`POST /api/selfdev/tasks`、`GET /api/selfdev/runs`、`GET /api/selfdev/runs/{id}` が登録される(`routes/SelfDevRoutes.kt`)。
 - 本番で動かすには、ブランチ保護、GitHub 認証(App 推奨。PAT は代替)、Anthropic 認証(WIF 推奨。静的キーは代替)、モデル registry、為替の設定が必要。§1 を参照する。
 - マージ検証(ADR 0008 の ⑩)は配線済み。有効時は `GitHubPrMergeAuthority` が、作者 `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` と head SHA を照合して、マージ済みの PR の Run を `COMPLETED` にする(§4.3)。無効時は `NoPrMergeAuthority`(完了しない)。
-- binding が無い既存の Run(binding の記録より前に作られたもの)は、解放の経路が無いため `BINDING_MISSING` で待つ。解消は運用者の手作業(別 PR で解放の経路を足す予定)。
+- binding が無い既存の `PULL_REQUEST` の Run(binding の記録より前に作られたもの)は、マージされても `BINDING_MISSING` で待つ。運用者が §4.1b の API で解放する(`CANCELLED`。PR は残る)。
 
 ## 1. 有効化の前提
 
@@ -116,6 +116,43 @@ curl -X POST "https://<kivra-host>/api/admin/selfdev/runs/<runId>/release" \
 - 再開時に、ブランチが現在の base の head に無い(base が動いただけでも起きる)。
 - LLM の呼び出し結果が不明。GitHub の書き込みの結果が不明。
 
+### 4.1b 束縛の無い PULL_REQUEST の Run を解放する
+
+**実装済み(ADR 0009 追補)。** `POST /api/admin/selfdev/runs/{id}/release-unbound-pr`。`KIVRA_AUTH_MODE` が設定されているときに登録される(`Application.kt`)。§4.1 の解放とは別の経路である。
+
+- 対象: 自己開発の Run(`taskId` が `selfdev:` で始まるもの)で、状態が `PULL_REQUEST`、かつ束縛(binding)が無いもの。
+  束縛の記録(PR2)より前に作られた Run が該当し、`BINDING_MISSING` で待つ(§4.3)。遷移は `PULL_REQUEST` → `CANCELLED` だけである。
+- 対象外: 束縛がある `PULL_REQUEST` の Run(409)。マージされれば自動で `COMPLETED` になる。人が止める経路は、この手順には無い(ADR 0009 追補の「未対応」)。
+- 認証・CSRF: §4.1 と同じ。ブラウザのセッション(oauth2-proxy)か、`Authorization: Bearer` の JWT で行う。`Content-Type: application/json` が必須(text/plain は 415)。
+- リクエスト: `{"reason":"<理由。1〜500 文字>"}`。ほかのフィールドは 400。
+- 応答: 200 `{"runId","state":"CANCELLED","reasonCode":"OPERATOR_RELEASED_UNBOUND_PR"}`、400 不正な入力、401 未認証、404 該当なし(自己開発でない Run を含む)、409 `PULL_REQUEST` ではない、または束縛がある(解放済みを含む)。
+- 監査: 同じトランザクションで `RUN_RELEASED` を監査に(payload に理由)、`RunStateChanged` を outbox に書く。理由はログに出ない。
+- **GitHub には何もしない。** kivra は PR を閉じず、マージもしない。解放後、PR は GitHub に残る。人がマージしても、Run は `CANCELLED` のままで、kivra は追跡しない。PR を閉じるかどうかは人が決める。
+- 解放した Run は、同時 Run 上限(`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`)を占有しない。
+
+ブラウザのコンソール(管理画面を開いたタブで実行。`<runId>` と理由を書き換える)。`<runId>` は 26 文字の ULID:
+
+```js
+const runId = "<runId>";
+const res = await fetch(`/api/admin/selfdev/runs/${runId}/release-unbound-pr`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ reason: "<理由>" }),
+});
+console.log(res.status, await res.text());
+```
+
+curl で行う場合:
+
+```sh
+curl -X POST "https://<kivra-host>/api/admin/selfdev/runs/<runId>/release-unbound-pr" \
+  -H "Authorization: Bearer <JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"<理由>"}'
+```
+
+解放の前に、その PR が本当に束縛されていないことと、GitHub 上の状態を確認する。解放は PR に触れないため、解放後も PR は残る。
+
 ### 4.2 UNKNOWN_COST の acknowledge(予算の予約)
 
 **実装済み。** `POST /api/admin/budget/acknowledge`。`KIVRA_AUTH_MODE` が設定されているときに登録される(`Application.kt`)。
@@ -146,13 +183,13 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 
 有効時、本番の認証器は `GitHubPrMergeAuthority` で、作者が `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` と一致し、head が kivra の commit と一致する PR だけが完了の根拠になる。ワーカーは認証器を差し込んでから起動する。認証器が GitHub を読めない場合は `AWAITING_MERGE_VERIFICATION` で待機し、次の tick で再試行する。
 
-**既存の占有 Run は手作業で解消する。** binding の記録(PR2)より前に作られた `PULL_REQUEST` の Run は binding が無いため、マージ済みでも `BINDING_MISSING` で待つ。kivra は binding を推測しないので、自動では完了しない。解消は運用者の手作業になる(別 PR で解放の経路を足す予定)。
+**既存の占有 Run は運用者が解放する。** binding の記録(PR2)より前に作られた `PULL_REQUEST` の Run は binding が無いため、マージ済みでも `BINDING_MISSING` で待つ。kivra は binding を推測しないので、自動では完了しない。束縛の無い `PULL_REQUEST` の Run は §4.1b の経路で `CANCELLED` にする(PR は残る)。
 
 待機理由と意味:
 
 - `AWAITING_MERGE_VERIFICATION`: 認証器が答えない(未配線、または GitHub の一時的な障害)。自動で再試行する。
 - `MERGE_NOT_VERIFIED`: 認証器が検証を拒否した。ログの `code` に固定の理由が出る(例: `HEAD_SHA_MISMATCH` は、マージ後に head が変わった、`AUTHOR_MISMATCH` は PR の作者が kivra の App ではない、`MERGE_COMMIT_SHA_MISSING` はマージの SHA が無い)。自動では解決しない。運用者が PR と Run を確認する。
-- `BINDING_MISSING`: PR は開いているが binding が無い。binding の記録より前に開かれた Run(既存の占有 Run)がこれに当たる。kivra は binding を自分で組み立てない(GitHub の値から推測しない)ため、完了させない。運用者が確認して解消する(上記)。
+- `BINDING_MISSING`: PR は開いているが binding が無い。binding の記録より前に開かれた Run(既存の占有 Run)がこれに当たる。kivra は binding を自分で組み立てない(GitHub の値から推測しない)ため、完了させない。運用者が確認して解消する。束縛が無い Run は §4.1b で解放する(束縛がある Run は、この待機理由にならない)。
 
 ログは `self-development run waiting: runId=... reason=... code=...` の形で出る(`code` は固定の理由コードだけ)。
 

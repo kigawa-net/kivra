@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -46,7 +47,12 @@ func (h *anthropicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := h.auth.Authorize(r.Context())
 	if err != nil {
-		h.logf("deny method=%s path=%s reason=authorization_unavailable", r.Method, path)
+		stage, status := authFailure(err)
+		if status != 0 {
+			h.logf("deny method=%s path=%s reason=authorization_unavailable stage=%s upstream_status=%d", r.Method, path, stage, status)
+		} else {
+			h.logf("deny method=%s path=%s reason=authorization_unavailable stage=%s", r.Method, path, stage)
+		}
 		http.Error(w, "upstream authorization unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -91,6 +97,16 @@ func (h *anthropicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 	n, _ := copyFlushing(w, resp.Body)
 	h.logf("allow method=%s path=%s status=%d bytes_down=%d", r.Method, path, resp.StatusCode, n)
+}
+
+// authFailure returns the fixed stage label and the upstream HTTP status (0 if none) for an Authorize error.
+// It never returns the error text.
+func authFailure(err error) (string, int) {
+	var ae *AuthError
+	if errors.As(err, &ae) {
+		return ae.Stage, ae.Status
+	}
+	return stageOther, 0
 }
 
 // copyFlushing streams the body and flushes each chunk, so SSE (streaming) responses are not buffered.

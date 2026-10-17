@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -268,5 +269,141 @@ func TestExchangeRejectsRedirect(t *testing.T) {
 	a := NewWIFAuth(cfg, http.DefaultClient, nil)
 	if _, err := a.Authorize(context.Background()); err == nil {
 		t.Fatal("a redirected exchange must fail, not follow")
+	}
+}
+
+// logMarker stands for response bodies, tokens and JWTs. It must never reach a log line or an error message.
+const logMarker = "LEAK-MARKER-BODY-0042"
+
+func TestWIFFailureStages(t *testing.T) {
+	okKeycloak := func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"jwt-` + logMarker + `"}`))
+	}
+	failKeycloak := func(status int) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, logMarker+" "+testSecret, status)
+		}
+	}
+	failExchange := func(status int) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, logMarker, status)
+		}
+	}
+	exchangeOK := func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"at-` + logMarker + `","expires_in":3600}`))
+	}
+	badJSON := func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("not-json-" + logMarker)) }
+
+	cases := []struct {
+		name       string
+		kc         http.HandlerFunc // nil: Keycloak URL is a closed server (network failure)
+		ex         http.HandlerFunc // nil: exchange URL is a closed server (network failure)
+		secret     string           // "" with absent=false: written empty; absent=true: no file
+		absent     bool
+		wantStage  string
+		wantStatus int
+	}{
+		{name: "secret_unreadable", kc: okKeycloak, ex: exchangeOK, absent: true, wantStage: stageSecretUnreadable},
+		{name: "secret_empty", kc: okKeycloak, ex: exchangeOK, secret: " \n", wantStage: stageSecretEmpty},
+		{name: "keycloak_401", kc: failKeycloak(401), ex: exchangeOK, wantStage: stageKeycloak, wantStatus: 401},
+		{name: "keycloak_network", kc: nil, ex: exchangeOK, wantStage: stageKeycloakNetwork},
+		{name: "keycloak_malformed", kc: badJSON, ex: exchangeOK, wantStage: stageMalformed},
+		{name: "exchange_500", kc: okKeycloak, ex: failExchange(500), wantStage: stageExchange, wantStatus: 500},
+		{name: "exchange_network", kc: okKeycloak, ex: nil, wantStage: stageExchangeNetwork},
+		{name: "exchange_malformed", kc: okKeycloak, ex: badJSON, wantStage: stageMalformed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kcURL := closedURL(t)
+			if tc.kc != nil {
+				s := httptest.NewServer(tc.kc)
+				defer s.Close()
+				kcURL = s.URL
+			}
+			exURL := closedURL(t)
+			if tc.ex != nil {
+				s := httptest.NewServer(tc.ex)
+				defer s.Close()
+				exURL = s.URL
+			}
+			secretPath := secretFileWith(t, testSecret)
+			switch {
+			case tc.absent:
+				secretPath = filepath.Join(t.TempDir(), "absent")
+			case tc.secret != "":
+				secretPath = secretFileWith(t, tc.secret)
+			}
+			cfg := WIFConfig{
+				KeycloakTokenURL: kcURL + "/token", KeycloakClientID: "kivra-agent", ClientSecretFile: secretPath,
+				AnthropicTokenURL: exURL + "/v1/oauth/token", FederationRuleID: "r", OrganizationID: "o", ServiceAccountID: "s",
+			}
+			a := NewWIFAuth(cfg, http.DefaultClient, nil)
+			_, err := a.Authorize(context.Background())
+			var ae *AuthError
+			if !errors.As(err, &ae) {
+				t.Fatalf("want *AuthError, got %T %v", err, err)
+			}
+			if ae.Stage != tc.wantStage || ae.Status != tc.wantStatus {
+				t.Fatalf("stage=%q status=%d, want stage=%q status=%d", ae.Stage, ae.Status, tc.wantStage, tc.wantStatus)
+			}
+			for _, bad := range []string{logMarker, testSecret, "jwt", "at-", "127.0.0.1"} {
+				if strings.Contains(err.Error(), bad) {
+					t.Fatalf("error message leaks %q: %v", bad, err)
+				}
+			}
+		})
+	}
+}
+
+// closedURL returns a base URL that refuses connections (a server that has already been shut down).
+func closedURL(t *testing.T) string {
+	t.Helper()
+	s := httptest.NewServer(http.NotFoundHandler())
+	u := s.URL
+	s.Close()
+	return u
+}
+
+// TestAuthFailureLogLine checks the deny line that anthropicHandler writes for each failure kind.
+// The log is captured with the arguments formatted, so a leaked value would show up.
+func TestAuthFailureLogLine(t *testing.T) {
+	kc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, logMarker+" "+testSecret, http.StatusUnauthorized)
+	}))
+	defer kc.Close()
+	var lines []string
+	logf := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	cfg := WIFConfig{
+		KeycloakTokenURL: kc.URL + "/token", KeycloakClientID: "kivra-agent", ClientSecretFile: secretFileWith(t, testSecret),
+		AnthropicTokenURL: kc.URL + "/v1/oauth/token", FederationRuleID: "r", OrganizationID: "o", ServiceAccountID: "s",
+	}
+	h := &anthropicHandler{upstream: kc.URL, auth: NewWIFAuth(cfg, http.DefaultClient, nil), client: http.DefaultClient, logf: logf}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader("{}")))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503", rec.Code)
+	}
+	cfg.KeycloakTokenURL = closedURL(t) + "/token"
+	h.auth = NewWIFAuth(cfg, http.DefaultClient, nil)
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader("{}")))
+
+	if len(lines) != 2 {
+		t.Fatalf("want 2 log lines, got %d: %q", len(lines), lines)
+	}
+	want := []string{
+		"reason=authorization_unavailable stage=keycloak upstream_status=401",
+		"reason=authorization_unavailable stage=keycloak_network\n",
+	}
+	for i, w := range want {
+		if !strings.Contains(lines[i], strings.TrimSuffix(w, "\n")) || strings.Contains(lines[i], "upstream_status") != (i == 0) {
+			t.Errorf("line %d = %q, want it to contain %q", i, lines[i], w)
+		}
+	}
+	for _, l := range lines {
+		for _, bad := range []string{logMarker, testSecret, "jwt", "127.0.0.1", "connection refused"} {
+			if strings.Contains(l, bad) {
+				t.Fatalf("log line leaks %q: %q", bad, l)
+			}
+		}
 	}
 }

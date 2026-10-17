@@ -94,11 +94,11 @@ func sortedCopy(s []string) []string {
 func readFileTrimmed(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", errors.New("secret file could not be read")
+		return "", errSecretUnreadable
 	}
 	v := strings.TrimSpace(string(b))
 	if v == "" {
-		return "", errors.New("secret file is empty")
+		return "", errSecretEmpty
 	}
 	return v, nil
 }

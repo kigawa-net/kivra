@@ -76,7 +76,7 @@
 ### 6.1 位置づけ
 
 - HTTP は無い。`CodingRuntimeService`(`kivra-app/.../coding/`)が attempt の遷移と、エージェントからの値の検査を行う。PR 4a の `/api/agent/v1/*`(`routes/AgentApiRoutes.kt`)は、この上に薄く載せた。エージェント本体は別の PR。
-- `SelfDevRunner` の DEVELOPING 段は、`KIVRA_SELFDEV_RUNTIME=cli` のときだけ `CodingAttemptPatchSource`(`selfdev/CodingPatchSource.kt`)を通る。既定は `api` で、その経路は変わらない。本番では `cli` を起動時に拒否する(§6.8)。
+- `SelfDevRunner` の DEVELOPING 段は、`KIVRA_SELFDEV_RUNTIME=cli` のときだけ `CodingAttemptPatchSource`(`selfdev/CodingPatchSource.kt`)を通る。既定は `api` で、その経路は変わらない。`cli` は `KIVRA_AGENT_API_ENABLED=true` のときだけ起動を許可し、それ以外は起動時に拒否する(§6.8)。
 
 ### 6.2 操作
 
@@ -194,7 +194,7 @@ Run は DEVELOPING のまま attempt で進行を表す(設計案 §2.5)。attem
 
 ### 6.8 配線と安全装置
 
-- `KIVRA_SELFDEV_RUNTIME`: `api`(既定)か `cli`。`cli` は `SelfDevSettings` が起動時に拒否する(エージェント本体が完成するまで。PR 4a のエージェント API を有効にしても解除しない)。読むのは自己開発が有効なときだけ。
+- `KIVRA_SELFDEV_RUNTIME`: `api`(既定)か `cli`。`cli` は `KIVRA_AGENT_API_ENABLED=true` のときだけ起動を許可する(PR 9。それ以外は `SelfDevSettings` が起動時に拒否する)。読むのは自己開発が有効なときだけ。
 - `SelfDevRunner`: `runtime = CLI` のときに coding source が無ければ構築時に失敗する。`API` のときは coding source を使わない(既存のテストで固定)。
 - 本番の配線(`buildSelfDev`)は変えていない。`CodingRuntimeService` を作る箇所は、この PR には無い。
 
@@ -205,5 +205,5 @@ Run は DEVELOPING のまま attempt で進行を表す(設計案 §2.5)。attem
 
 ### 6.10 未実装(後続の PR)
 
-- `cli` の起動拒否の解除(PR 9)。エージェント本体(PR 5〜8)。reconcile の定期実行の配線。
-- エージェント本体(PR 5〜8)。結果本体の保存(§6.5)。`RATE_LIMITED` の待機と再試行。`cli` の起動許可(PR 9)。
+- エージェント本体(PR 5〜8)の配備。reconcile の定期実行の配線。(`cli` の起動の条件は PR 9 で定めた。)
+- エージェント本体(PR 5〜8)。結果本体の保存(§6.5)。`RATE_LIMITED` の待機と再試行。

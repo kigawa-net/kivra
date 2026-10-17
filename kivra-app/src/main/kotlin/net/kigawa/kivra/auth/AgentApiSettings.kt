@@ -10,8 +10,8 @@ package net.kigawa.kivra.auth
  *   - The agent role must differ from the operator's `KIVRA_OIDC_REQUIRED_ROLE`, so an operator token can never satisfy the agent check.
  * - Any other value is a startup error.
  *
- * Enabling this does not allow the CLI runtime: `KIVRA_SELFDEV_RUNTIME=cli` stays refused by `SelfDevSettings` until the agent itself is
- * complete.
+ * Enabling this is also the condition for the CLI runtime: `KIVRA_SELFDEV_RUNTIME=cli` is allowed only when this is `true` (checked by
+ * `SelfDevSettings`). Nothing else allows it.
  */
 class AgentApiSettings private constructor(val auth: AgentAuthConfig?) {
     val enabled: Boolean get() = auth != null

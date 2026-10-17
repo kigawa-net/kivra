@@ -125,8 +125,17 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
    - 401(未認証・不正)と 403(認証は通るが azp かロールが不足)を区別する。理由は本文に出さず、固定の文言だけを返す。
    - agent_id は、検証済みトークンの `sub` だけを使う。リクエストの本文・ヘッダーで名乗らせない。attempt の操作は、その attempt を claim した agent_id と一致する場合だけ許す。他人の attempt は存在しないものと同じ 404 にする。
    - 世代(lease generation)だけでは守られない。世代は小さな整数で推測できるため、所有者の一致を CAS の `WHERE` 句に含める。
-   - 既定で無効(`KIVRA_AGENT_API_ENABLED`)。無効のときはルートを登録せず、`CodingRuntimeService` も作らない。`KIVRA_SELFDEV_RUNTIME=cli` の起動拒否は、この PR では解除しない(エージェント本体の完成後の PR で解除する)。
+   - 既定で無効(`KIVRA_AGENT_API_ENABLED`)。無効のときはルートを登録せず、`CodingRuntimeService` も作らない。`KIVRA_SELFDEV_RUNTIME=cli` の起動拒否は、この PR では解除しない(エージェント本体の完成後の PR で解除する)。※ 解除の条件は追補 3(PR 9)で定めた。
    - ブラウザからの呼び出しを拒否する: `Sec-Fetch-*` か `Origin` があれば 403。`Content-Type` は `application/json` を要求する(415)。本文は 2 MiB を上限とし、超えれば 413。
    - 監査: claim、結果の受理、失敗、結果の拒否を、Run の監査連鎖に書く(actor は agent の sub。内容・パス・理由の本文は入れない)。
    - 担保するテスト: `AgentIdentityTest`(認証と認可の表)、`AgentApiSettingsTest`(設定の fail-closed)、`AgentApiRoutesTest`(HTTP の網羅、他人の attempt、世代、413、422、ログと応答の秘密、監査)、`AgentApiWiringTest`(既定で無効、有効時の起動検査)。
    - ingress(oauth2-proxy)は、エージェント API を通さない。`--allowed-role=admin-panel:admin` のため、エージェントの Bearer は通らない。この経路は PR 4b(Keycloak と ingress の作業)で決める。
+
+3. **CLI の結線と起動の条件(PR 9, 2026-10-17)。** 決定 10 の `cli` を、次の条件つきで有効にする。既定は `api` のまま、エージェント API も既定で無効のまま。
+   - **起動の条件**: `KIVRA_SELFDEV_RUNTIME=cli` は `KIVRA_AGENT_API_ENABLED=true` のときだけ起動を許可する。それ以外は起動を拒否し、変数名と ADR 0010 を含む理由だけを出す(値は出さない)。`true` のときは §6.1 の検査がすべて通ること。
+   - **DeveloperPort の CLI 版は作らない。** 決定 1 の `DeveloperPort` は 1 回の同期の提案で、「まだ結果が無い(待ち)」を表せない。runner には、待ちを表せる `CodingPatchSource` の口がすでにあり、CLI はそこで結線する(`CodingAttemptPatchSource`)。`DeveloperPort` の CLI 版を作ると、待ちの状態を失うか、待ちを UNKNOWN と誤るため、採らない。
+   - **結果の流れ**: 結果の受理(`submitResult`)で、件数、形、PatchPolicy を検査し、通ったものだけを `coding_results` に保存して RESULT_RECEIVED にする。Run 側は base のスナップショットで PatchPolicy を再検査し、通ったら既存の commit と PR の経路へ進む。拒否の段階では何も保存せず、attempt は CLAIMED のまま。
+   - **EMPTY_PATCH**: 変更の無い結果は受理の段階で拒否する(PatchPolicy の `EMPTY_PATCH`)。「直す必要がなかった」を正常な結果として Run に進める経路は作らない。エージェントが変更を送らないまま lease が切れれば ORPHANED になり、Run は UNKNOWN で運用者が判断する(安全側)。エージェント側で「変更なし」をどの失敗コードで報告するかは、エージェント本体の PR で決める。
+   - **期限切れの扱い**: 期限を過ぎた QUEUED は EXPIRED、lease の切れた CLAIMED / RUNNING は ORPHANED とし、Run の次の進行で UNKNOWN にする(理由 `CODING_QUEUE_EXPIRED` / `CODING_ORPHANED`)。定期の reconcile は未配線である。
+   - **失敗時の Run の状態**: 表は runbook の `docs/runbook-selfdev.md` §6.9 に置く(attempt の状態ごとに、Run の状態と理由コードを書く)。
+   - **未了**: エージェント本体の配備、k8s の設定、既定値の変更(別 PR)。`coding_results` の保持期間と掃除(§6.5.3)。reconcile の定期実行の配線。

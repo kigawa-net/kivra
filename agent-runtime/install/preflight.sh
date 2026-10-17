@@ -14,7 +14,9 @@ mode="$(stat -c %a "$SECRET" 2>/dev/null)" || fail "client secret のモード�
 
 if [ "${KIVRA_AGENT_EXECUTOR:-stub}" = real ]; then
   command -v docker >/dev/null 2>&1 || fail "docker CLI がありません"
-  timeout 15 docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || fail "docker デーモンに接続できません(DOCKER_HOST を確認)"
+  if ! dv_err="$(timeout 15 docker version --format '{{.Server.Version}}' 2>&1 >/dev/null)"; then
+    fail "docker デーモンに接続できません(DOCKER_HOST=${DOCKER_HOST:-未設定}): $(printf '%s\n' "$dv_err" | head -n 1)"
+  fi
   [ "$(docker inspect -f '{{.State.Running}}' kivra-agent-proxy 2>/dev/null)" = true ] \
     || fail "egress proxy が動いていません(kivra-agent-proxy.service を確認)"
   docker network inspect "${KIVRA_AGENT_DOCKER_NETWORK:-kivra-agent-internal}" >/dev/null 2>&1 \

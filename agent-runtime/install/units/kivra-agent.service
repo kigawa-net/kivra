@@ -25,14 +25,12 @@ KillSignal=SIGTERM
 TimeoutStopSec=30s
 UMask=0077
 
-# 硬化(user manager でも効く範囲)。書けるのは作業ディレクトリだけ。
+# 硬化は、名前空間を要しないものだけを付ける。
+# 外したもの: ProtectSystem、ProtectHome、PrivateTmp、ReadWritePaths、ProtectKernelTunables、ProtectControlGroups。
+# 理由: user manager ではこれらが新しいマウント名前空間で実現される。その中では、ホストの kivra-agent(uid 1001)所有の
+# /run/user/1001/docker.sock が別 uid に見え、preflight.sh の docker version が permission denied で失敗する(実機で確認)。
+# ルートレス docker と両立しないため外した。書き込み範囲は作業ディレクトリ(0700、kivra-agent 所有)の権限で守る。
 NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=full
-ProtectHome=read-only
-ReadWritePaths=/var/lib/kivra-agent
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes

@@ -702,6 +702,31 @@ sudo bash ~/.cache/kivra-agent-dist/agent-runtime/install/install.sh --dist ~/.c
   実行中の container(proxy を含む)は止まる。ユニットは自動では上がらないので、必要なら `sudo kivra-agentctl start`。
 - 自動化: `install.sh` は、この実行で `/etc/kivra-agent` を新しく作った場合、または secret がディレクトリに見える場合に docker.service を再起動し、そう表示する(`--skip-images` と `DESTDIR` のドライランでは再起動しない)。`preflight.sh`(real のとき)は、secret がディレクトリに見えると起動を止める。`kivra-agentctl status` は見え方を表示する。
 
+**c の補足 2. 落とし穴: user manager の名前空間型の硬化と、ルートレス docker**
+
+`kivra-agent.service` の `ProtectSystem`、`ProtectHome`、`PrivateTmp` などは、user manager ではマウント名前空間で実現される。その名前空間の中では、ホストの `kivra-agent`(uid 1001)所有の `/run/user/1001/docker.sock` が別 uid に見えるため、`preflight.sh`(`ExecStartPre`)の `docker version` が `permission denied while trying to connect to the docker API` で失敗する。この PR でユニットからこれらを外したので、新しいユニットではこの問題は起きない。
+
+既に旧ユニットで配置してある環境(`/etc/systemd/user/kivra-agent.service` が旧版のまま)では、次のドロップインで同じ硬化を打ち消す。root で置く(kivra-agent からは書けない)。
+
+```bash
+sudo install -d -m 0755 /etc/systemd/user/kivra-agent.service.d
+sudo tee /etc/systemd/user/kivra-agent.service.d/no-mountns.conf >/dev/null <<'CONF'
+# 旧ユニットの名前空間型の硬化を打ち消す(docker.sock を user manager の名前空間から見えるようにする)。
+[Service]
+ProtectSystem=no
+ProtectHome=no
+PrivateTmp=no
+ReadWritePaths=
+ProtectKernelTunables=no
+ProtectControlGroups=no
+CONF
+sudo runuser -u kivra-agent -- env XDG_RUNTIME_DIR=/run/user/1001 systemctl --user daemon-reload
+```
+
+- 反映: 上の daemon-reload の後に、kivra-agent の user manager で `systemctl --user restart kivra-agent.service`(`kivra-agentctl stop` は STOP ファイルを作るだけで、ユニットは止めない)。
+- ドロップインは新しいユニットと両立する。新しいユニットでは各指示が既定値(`no`)と同じで、`ReadWritePaths=` は空に戻すだけなので、無害である。`install.sh` の再実行では、ユニットは入れ直されるが、ドロップインは削除されず残る(残してよい)。`uninstall.sh` も `/etc/systemd/user/kivra-agent.service.d/` は消さないので、完全に取り除くときは手で消す(`sudo rm -rf /etc/systemd/user/kivra-agent.service.d`)。
+- 注意: 将来ユニットに名前空間型の硬化を戻すと、このドロップインがそれを打ち消す。戻すなら、ドロップインも消すこと。
+
 **d. 検証(有効化の順序 ②、③。`kivra-agent` ユーザーの docker で行う)**
 
 ```bash
@@ -747,7 +772,7 @@ sudo runuser -u kivra-agent -- env XDG_RUNTIME_DIR=/run/user/1001 journalctl --u
 
 **未確認の点(実機で確かめること)**
 
-- `systemd --user` の硬化(`ProtectSystem=full`、`ProtectHome=read-only`、`PrivateTmp`)が、このユーザー環境で効くか。Ubuntu のユーザー名前空間の制限で失敗する場合は `ExecStartPre` の段階で分かる。
+- ~~`systemd --user` の硬化(`ProtectSystem=full`、`ProtectHome=read-only`、`PrivateTmp`)が、このユーザー環境で効くか。~~ **確認済み(結果: 名前空間を使う硬化はルートレス docker と両立しない。外した)**。`kivra-agent.service` から `ProtectSystem`、`ProtectHome`、`PrivateTmp`、`ReadWritePaths`、`ProtectKernelTunables`、`ProtectControlGroups` を外した。user manager では、これらがマウント名前空間で実現される。その中では、ホストの kivra-agent(uid 1001)所有の `/run/user/1001/docker.sock` が別 uid に見え、`preflight.sh` の `docker version` が `permission denied while trying to connect to the docker API` で失敗する。残した硬化は `NoNewPrivileges`、`RestrictSUIDSGID`、`RestrictRealtime`、`LockPersonality`、`SystemCallArchitectures`、`UMask` である。配置済みの環境の扱いは §6.11 の「c の補足 2」を参照。
 - `RestartSteps=` と `RestartMaxDelaySec=`(systemd 254 以上)。古い systemd では無視される。
 - `%t`(`/run/user/<uid>`)による `DOCKER_HOST`、`docker.service`(ルートレス)との依存順。
 - `build-dist.sh` の `installDist` の出力名(`kivra-agent/build/install/kivra-agent/bin/kivra-agent`)。スクリプトはこの名前を前提にする。

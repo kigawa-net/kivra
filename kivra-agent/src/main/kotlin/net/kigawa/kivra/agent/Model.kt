@@ -4,10 +4,19 @@ package net.kigawa.kivra.agent
 const val TRUST_UNTRUSTED = "UNTRUSTED"
 
 /**
- * The task text of an attempt. [value] is untrusted data and must never be logged; [toString] shows its length only.
+ * The task text of an attempt. [value] (the title) and [body] are untrusted data and must never be logged; [toString] shows lengths
+ * only. [body] is "" and [bodyTruncated] is false for a claim from a kivra that does not send the body yet.
  */
-class AgentTask(val origin: String, val value: String, val trust: String, val truncated: Boolean) {
-    override fun toString(): String = "AgentTask(origin=$origin, chars=${value.length}, truncated=$truncated)"
+class AgentTask(
+    val origin: String,
+    val value: String,
+    val trust: String,
+    val truncated: Boolean,
+    val body: String = "",
+    val bodyTruncated: Boolean = false,
+) {
+    override fun toString(): String =
+        "AgentTask(origin=$origin, chars=${value.length}, truncated=$truncated, bodyChars=${body.length}, bodyTruncated=$bodyTruncated)"
 }
 
 /** The limits the agent must enforce for one attempt (copied from the server's CodingLimits). */

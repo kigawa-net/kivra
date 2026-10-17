@@ -9,9 +9,12 @@ import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import net.kigawa.kivra.agent.claude.ReportedUsage
 
 class KivraAgentClientTest {
+    private val FIXTURE_TASK = """"task":{"origin":"title","value":"do the thing","trust":"UNTRUSTED","truncated":false}"""
     private fun client(recorded: MutableList<Recorded>, tokens: FixedTokens = FixedTokens(), handler: (Recorded) -> Canned) =
         KivraAgentClient(fakeKivraHttp(recorded, handler = handler), KIVRA_BASE, tokens)
 
@@ -229,5 +232,64 @@ class KivraAgentClientTest {
             recorded[1].body,
         )
         assertFalse(recorded.any { it.body.contains("usage") })
+    }
+
+    /** The claim fixture with its `task` object replaced by [task]. */
+    private fun claimWithTask(task: String): String = CLAIM_BODY.replace(FIXTURE_TASK, """"task":$task""")
+
+    @Test
+    fun claimWithoutBodyFromAnOlderKivraHasEmptyBodyAndNoTruncation() = runBlocking {
+        val attempt = assertIs<ClaimResult.Assigned>(client(synchronizedList()) { Canned(200, CLAIM_BODY) }.claim()).attempt
+        assertEquals("", attempt.task.body)
+        assertFalse(attempt.task.bodyTruncated)
+        assertEquals("do the thing", attempt.task.value)
+    }
+
+    @Test
+    fun claimWithBodyKeepsJapaneseNewlinesAndQuotesAsTheyAre() = runBlocking {
+        val body = "1行目 日本語\n2行目 \"引用\" </script> \\ 末尾"
+        val json = Json.encodeToString(JsonPrimitive.serializer(), JsonPrimitive(body))
+        val attempt = assertIs<ClaimResult.Assigned>(
+            client(synchronizedList()) { Canned(200, claimWithTask("""{"origin":"title","value":"t","trust":"UNTRUSTED","truncated":false,"body":$json,"bodyTruncated":true}""")) }.claim(),
+        ).attempt
+        assertEquals(body, attempt.task.body)
+        assertTrue(attempt.task.bodyTruncated)
+    }
+
+    @Test
+    fun claimBodyLongerThanTheLimitIsCutToCodePointsAndMarked() = runBlocking {
+        val long = "😀".repeat(8_001)
+        val json = Json.encodeToString(JsonPrimitive.serializer(), JsonPrimitive(long))
+        val attempt = assertIs<ClaimResult.Assigned>(
+            client(synchronizedList()) { Canned(200, claimWithTask("""{"origin":"title","value":"t","trust":"UNTRUSTED","truncated":false,"body":$json}""")) }.claim(),
+        ).attempt
+        assertEquals(8_000, attempt.task.body.codePointCount(0, attempt.task.body.length))
+        assertEquals("😀".repeat(8_000), attempt.task.body)
+        assertTrue(attempt.task.bodyTruncated)
+        assertFalse(attempt.task.truncated, "the title flag is not changed by the body")
+    }
+
+    @Test
+    fun claimBodyOfExactlyTheLimitIsNotCut() = runBlocking {
+        val exact = "あ".repeat(8_000)
+        val json = Json.encodeToString(JsonPrimitive.serializer(), JsonPrimitive(exact))
+        val attempt = assertIs<ClaimResult.Assigned>(
+            client(synchronizedList()) { Canned(200, claimWithTask("""{"origin":"title","value":"t","trust":"UNTRUSTED","truncated":false,"body":$json}""")) }.claim(),
+        ).attempt
+        assertEquals(exact, attempt.task.body)
+        assertFalse(attempt.task.bodyTruncated)
+    }
+
+    @Test
+    fun claimIgnoresUnknownTaskFieldsAndRejectsAWrongBodyType() = runBlocking {
+        val ok = assertIs<ClaimResult.Assigned>(
+            client(synchronizedList()) { Canned(200, claimWithTask("""{"origin":"title","value":"t","trust":"UNTRUSTED","truncated":false,"futureTaskField":[1,2],"body":"b"}""")) }.claim(),
+        ).attempt
+        assertEquals("b", ok.task.body)
+        for (bad in listOf("""{"origin":"title","value":"t","trust":"UNTRUSTED","truncated":false,"body":5}""",
+            """{"origin":"title","value":"t","trust":"UNTRUSTED","truncated":false,"bodyTruncated":"yes"}""")) {
+            val e = assertFailsWith<AgentApiException> { client(synchronizedList()) { Canned(200, claimWithTask(bad)) }.claim() }
+            assertEquals(AgentApiErrorKind.MALFORMED_RESPONSE, e.kind)
+        }
     }
 }

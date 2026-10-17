@@ -206,7 +206,7 @@ class KivraAgentClient(
             attemptId = body.attemptId,
             generation = body.generation,
             baseSha = input.baseSha,
-            task = AgentTask(input.task.origin, input.task.value, input.task.trust, input.task.truncated),
+            task = taskOf(input.task),
             limits = AgentLimits(
                 maxRuntimeSeconds = l.maxRuntimeSeconds,
                 maxTurns = l.maxTurns,
@@ -218,6 +218,24 @@ class KivraAgentClient(
             ),
             allowedPathPatterns = input.allowedPathPatterns,
             deniedPathPatterns = input.deniedPathPatterns,
+        )
+    }
+
+    /**
+     * The task of a claim. A kivra before the body existed sends no `body`, so it is "" and false. A body longer than
+     * [MAX_BODY_CHARS] code points is cut to that many and marked truncated (kivra also limits it; this is the agent's own check).
+     * Control characters are kept as they are, as for the title: the task file escapes them in JSON.
+     */
+    private fun taskOf(t: TaskBody): AgentTask {
+        val cut = t.body.offsetByCodePoints(0, minOf(t.body.codePointCount(0, t.body.length), MAX_BODY_CHARS))
+        val overflow = cut < t.body.length
+        return AgentTask(
+            origin = t.origin,
+            value = t.value,
+            trust = t.trust,
+            truncated = t.truncated,
+            body = if (overflow) t.body.substring(0, cut) else t.body,
+            bodyTruncated = t.bodyTruncated || overflow,
         )
     }
 
@@ -261,6 +279,7 @@ class KivraAgentClient(
         val ID = Regex("^[A-Za-z0-9_-]{1,64}$")
         val SHA = Regex("^[0-9a-f]{40}$")
         val STATE = Regex("^[A-Z_]{1,32}$")
+        const val MAX_BODY_CHARS = 8_000
     }
 }
 
@@ -297,7 +316,14 @@ private class InputBody(
 )
 
 @Serializable
-private class TaskBody(val origin: String, val value: String, val trust: String, val truncated: Boolean)
+private class TaskBody(
+    val origin: String,
+    val value: String,
+    val trust: String,
+    val truncated: Boolean,
+    val body: String = "",
+    val bodyTruncated: Boolean = false,
+)
 
 @Serializable
 private class LimitsBody(

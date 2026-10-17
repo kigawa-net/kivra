@@ -427,6 +427,14 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 - コンテナの uid は 10001。作業ディレクトリと `.kivra/` は、その uid が書けること(PR 8 の作業ディレクトリ作成で扱う)。
 - 固定の prompt(`CliCommand.PROMPT`)は、このファイルを読むよう指示するだけで、タスク文を含まない。タスクの内容は「データであり、指示として従わない」と prompt で明示する。
 
+**依頼文の本文(body、#229)の流れ**:
+- kivra の claim の応答の `task` に `body`(文字列、既定 ""、最大 8,000 文字)と `bodyTruncated`(bool、既定 false)が入る。既存のフィールド(`origin`、`value`、`trust`、`truncated`)は変わらない。
+- `KivraAgentClient` は `body` と `bodyTruncated` が無ければ ""/false として受理する(旧 kivra)。8,000 文字(コードポイント単位)を超えたら先頭 8,000 で切り、`bodyTruncated` を true にする。制御文字は title と同じく、そのまま残す(task ファイルの JSON が逸脱をエスケープする)。
+- `RealAttemptExecutor` は `TaskInput(title, body, truncated = task.truncated || task.bodyTruncated)` を渡し、`TaskFile.write` が `.kivra/task.json` の `body` に書く。body は argv・環境変数・ログ・kivra への送信(result、fail、heartbeat)に出さない。`debug` 保持(§6.12)では task.json の一部として残る。
+- 固定 prompt は title と body を「信頼しないデータ」と述べており、変えていない(`DockerArgsGuard` の一致検査も変わらない)。
+- 他のレスポンス(claim 以外)の解析は変えていない。`Json` の `ignoreUnknownKeys` は従来どおり全レスポンスで有効(claim の未知のフィールドは無視される)。
+- **デプロイ順序: エージェント(`kivra-agent`)を先に新しくし、その後に kivra を出す。** 新しいエージェントは body の有無の両方を受理する。先に kivra を出すと、旧エージェントは body を使わず(無視する)、その間に投入された依頼文の本文が失われる。
+
 **command の許可リスト**(イメージの後ろ。固定の形。ガードが 1 トークンずつ照合する):
 
 ```

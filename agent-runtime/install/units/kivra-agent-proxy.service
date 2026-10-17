@@ -1,0 +1,20 @@
+# kivra-agent: egress proxy(WIF 認証を持つ唯一の容器)を起動する。停止時は proxy と実行中の work 用容器を消す。
+# 順序: kivra-agent-network.service の後。Wants のみ(kivra-agent.service は preflight で proxy の起動を確かめる)。
+[Unit]
+Description=kivra-agent: egress proxy (WIF)
+Documentation=file:///opt/kivra-agent/agent-runtime/README.md
+Wants=docker.service kivra-agent-network.service
+After=docker.service kivra-agent-network.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=DOCKER_HOST=unix://%t/docker.sock
+Environment=KIVRA_AGENT_PROXY_ENV_FILE=/etc/kivra-agent/proxy.env
+Environment=KIVRA_AGENT_KEYCLOAK_SECRET_FILE=/etc/kivra-agent/client-secret
+ExecStart=/opt/kivra-agent/agent-runtime/network/up-proxy.sh
+ExecStop=/opt/kivra-agent/agent-runtime/network/down.sh
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,42 @@
+# kivra-agent 本体(JVM)。ADR 0010。Restart は異常終了だけ。終了コード 2(設定の誤り)と 3(二重起動)では再起動しない。
+# 順序: network / proxy の後(Wants。stub の間は両方が無くても動く。real は preflight が proxy と network を確かめる)。
+# STOP ファイル(既定 /var/lib/kivra-agent/work/STOP)が有ると claim しない。止めるのは kivra-agentctl stop。
+[Unit]
+Description=kivra-agent: ローカルのコーディング attempt 実行エージェント
+Documentation=file:///opt/kivra-agent/agent-runtime/README.md
+Wants=kivra-agent-network.service kivra-agent-proxy.service
+After=docker.service kivra-agent-network.service kivra-agent-proxy.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/kivra-agent/agent.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=DOCKER_HOST=unix://%t/docker.sock
+ExecStartPre=/opt/kivra-agent/agent-runtime/install/preflight.sh
+ExecStart=/opt/kivra-agent/app/bin/kivra-agent
+Restart=on-failure
+RestartSec=10s
+RestartSteps=6
+RestartMaxDelaySec=600
+RestartPreventExitStatus=2 3
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+UMask=0077
+
+# 硬化(user manager でも効く範囲)。書けるのは作業ディレクトリだけ。
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/kivra-agent
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

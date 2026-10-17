@@ -4,7 +4,10 @@ import java.time.Clock
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.Lease
@@ -90,6 +93,20 @@ sealed interface ReleaseResult {
 
 /** Fixed state reason of a run released by an operator (ADR 0009). The free-text reason goes only to the audit payload. */
 const val OPERATOR_RELEASED_REASON = "OPERATOR_RELEASED"
+
+/** One audit event of a run, as the run's own views may show it (see [DevelopmentRunRepository.auditTrail]). */
+data class AuditTrailEntry(
+    val seq: Long,
+    val occurredAt: LocalDateTime,
+    val action: String,
+    val result: String,
+    /** The state a RUN_TRANSITION moved the run to (a fixed code), else null. */
+    val toState: String?,
+    /** The fixed reason code of a RUN_TRANSITION, else null. Never free text. */
+    val reasonCode: String?,
+)
+
+private val CODE_SHAPE = Regex("[A-Z][A-Z0-9_]{0,63}")
 
 /** Thrown when a self-development submission would exceed the active-run cap. Nothing is written. */
 class ActiveSelfDevLimitException : RuntimeException("active self-development run limit reached")
@@ -258,6 +275,65 @@ class DevelopmentRunRepository(
             .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
             .limit(limit)
             .mapNotNull { it.toDevelopmentRunOrNull() }
+    }
+
+    /**
+     * Every Task API run of any principal (the operator view, Issue #56 UI), newest first. Workflow runs (no principal) are
+     * never listed. [selfDev] null lists both kinds, true only self-development runs, false only the simulated ones.
+     */
+    fun listAllTasks(limit: Int, selfDev: Boolean? = null): List<DevelopmentRun> = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where {
+                val owned = DevelopmentRunsTable.principal.isNotNull()
+                when (selfDev) {
+                    null -> owned
+                    true -> owned and (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%")
+                    false -> owned and (DevelopmentRunsTable.taskId notLike "$SELF_DEV_TASK_PREFIX%")
+                }
+            }
+            .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
+            .limit(limit)
+            .mapNotNull { it.toDevelopmentRunOrNull() }
+    }
+
+    /** Any Task API run, for the operator view. Null for a missing run or a workflow run (no principal). */
+    fun getAnyTask(runId: RunId): DevelopmentRun? = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { (DevelopmentRunsTable.runId eq runId.value) and DevelopmentRunsTable.principal.isNotNull() }
+            .firstOrNull()?.toDevelopmentRunOrNull()
+    }
+
+    /**
+     * The audit events of one run, oldest first. Only the time, the action, the result and the fixed codes of a state
+     * transition are returned. The actor and the free-text payload (for example an operator's release reason) are never read out.
+     */
+    fun auditTrail(runId: RunId, limit: Int = 100): List<AuditTrailEntry> = transaction(database) {
+        AuditEventsTable.selectAll()
+            .where { AuditEventsTable.runId eq runId.value }
+            .orderBy(AuditEventsTable.seq to SortOrder.ASC)
+            .limit(limit)
+            .map { row ->
+                val action = row[AuditEventsTable.action]
+                val codes = if (action == "RUN_TRANSITION") transitionCodes(row[AuditEventsTable.payload]) else TransitionCodes(null, null)
+                AuditTrailEntry(
+                    seq = row[AuditEventsTable.seq],
+                    occurredAt = row[AuditEventsTable.occurredAt],
+                    action = action,
+                    result = row[AuditEventsTable.result],
+                    toState = codes.toState,
+                    reasonCode = codes.reasonCode,
+                )
+            }
+    }
+
+    private data class TransitionCodes(val toState: String?, val reasonCode: String?)
+
+    /** Only the fixed state and reason codes of a transition payload are kept. Anything else (or a malformed payload) is dropped. */
+    private fun transitionCodes(payload: String?): TransitionCodes {
+        if (payload == null) return TransitionCodes(null, null)
+        val obj = try { Json.parseToJsonElement(payload).jsonObject } catch (_: Exception) { return TransitionCodes(null, null) }
+        fun code(key: String): String? = (obj[key] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { CODE_SHAPE.matches(it) }
+        return TransitionCodes(code("to"), code("reasonCode"))
     }
 
     /**

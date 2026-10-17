@@ -690,6 +690,43 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 - 実際の docker、`claude` CLI、`/etc/subuid` の所有権、作業ディレクトリの削除は、この PR では実機で確かめていない(§6.6、§6.7、§6.8 の未確認事項)。
 - 有効化: `KIVRA_AGENT_EXECUTOR=real` は既定で無効。実機の確認の後、別の PR で有効にする。
 
+### 6.10c 費用の報告(`usage`、#230)
+
+エージェントは、CLI の最後の `result` イベントから使用量を作り、結果の送信(`POST .../result`)と失敗の報告(`POST .../fail`)の JSON 本文の最上位に `usage` を付ける。kivra は受け取った費用を予算 ledger に計上する(計上は kivra-app 側の #230 の PR)。コード: `claude/StreamJsonParser.kt`(`ReportedUsage`、`CliResult.reportedUsage`)、`KivraAgentClient.kt`(`submitResult` と `fail` の任意引数 `usage`)。
+
+**形**(kivra と合わせた固定の契約):
+
+```json
+"usage": {
+  "totalCostUsd": "0.004268",
+  "model": "claude-haiku-5-5",
+  "numTurns": 3,
+  "inputTokens": 120,
+  "outputTokens": 45,
+  "cacheCreationTokens": 10,
+  "cacheReadTokens": 300
+}
+```
+
+| フィールド | 値の出どころ | 制約 |
+| --- | --- | --- |
+| `totalCostUsd` | `result.total_cost_usd` | 10 進の文字列。0 から 100。小数 6 桁まで(7 桁目以降は四捨五入) |
+| `model` | `result.modelUsage` のキー | `^[a-z0-9][a-z0-9.-]{0,63}$`。キーが複数なら `costUSD` が最も大きいもの(同額なら名前の小さいもの) |
+| `numTurns` | `result.num_turns` | 0 から 1000 |
+| `inputTokens` `outputTokens` `cacheCreationTokens` `cacheReadTokens` | `result.usage` の `input_tokens` `output_tokens` `cache_creation_input_tokens` `cache_read_input_tokens` | 0 から 10^10 |
+
+- **全部があるか、全く無いか**: どれか 1 つでも欠ける、範囲の外、費用が JSON の数(文字列でない)でない、モデル名の形式が合わない、`modelUsage` が無い・空、のいずれかなら `usage` は送らない。一部だけ送ることはない。
+- **いつ付くか**: CLI が実行されて `result` が得られたとき。成功(結果の送信)、変更が無い(`EMPTY_PATCH`)、差分の拒否、kivra の 422 による拒否、費用上限(`BUDGET_EXCEEDED`)、CLI の終了コードが非 0(`CLI_NONZERO`)、API エラーの後の結果など。`result` を送る直前に cancelRequested が見えたとき(`CANCELLED`)も、結果が得られていれば付く。
+- **付かないとき**: CLI が実行されなかった失敗(準備の失敗、docker の引数の検査)、`result` が無い失敗(時間制限、出力の上限、stream が途中で切れた、API エラーだけ)、例外による `NEEDS_HUMAN`、loop の CANCELLED(SIGTERM、kivra の cancelRequested による中断)。これらは `usage` 無しで送られ、kivra は予約を戻さない(#230 の安全側の扱い)。
+- **値の出し方**: `total_cost_usd` は CLI の見積もりであり、請求額ではない。
+- **後方互換**: `usage` が無いときの本文は従来と同じ(`{"generation":3,"errorCode":"NEEDS_HUMAN"}` など。テストで固定)。
+- **ログ**: 新しく出すものは無い。既存の `cli run ended` の `totalCostUsd`、`numTurns` の 2 つだけ。モデル名、応答の本文、ツールの入力、パスは、ログにも例外にも出さない(テスト `usageIsSentButNeverLogged`)。
+
+**デプロイの順序(重要)**: kivra の受信側(`AgentApiRoutes`)は `Json { ignoreUnknownKeys = false }` で、未知のフィールドを拒否する。kivra-app が `usage` を受け付ける版より前にエージェントを新しくすると、`result` と `fail` が 400 になる。kivra-app 側の #230 の PR をマージし、本番に出してから、エージェントを新しくすること。
+
+**Console の上限との関係(#230)**: 共有ワークスペースの Console 側の支出上限は、kivra の月次予算(1 万円)より大きいこと。kivra の予算ゲート(claim の制限と予約)は kivra-app 側の #230 の PR で行い、このエージェント側では扱わない。
+- **未解決**: `error_max_budget_usd` の subtype と、Haiku 5.5 での 1 アテンプトの費用は、実機ではまだ確かめていない(§6.10b)。
+
 ### 6.11 ローカル PC へのインストールと常駐(PR 10)
 
 資材: `agent-runtime/install/`(スクリプトとユニット)。前提は ADR 0010 の決定 2・3。Ubuntu 26.04、専用ユーザー `kivra-agent`(uid 1001、sudo・docker グループなし、linger 有効、ルートレス docker)、client secret は `/etc/kivra-agent/client-secret`(配置済みの前提)。

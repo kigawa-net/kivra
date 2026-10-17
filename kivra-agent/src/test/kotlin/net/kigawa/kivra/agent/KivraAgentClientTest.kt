@@ -3,11 +3,13 @@ package net.kigawa.kivra.agent
 import java.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import net.kigawa.kivra.agent.claude.ReportedUsage
 
 class KivraAgentClientTest {
     private fun client(recorded: MutableList<Recorded>, tokens: FixedTokens = FixedTokens(), handler: (Recorded) -> Canned) =
@@ -181,5 +183,51 @@ class KivraAgentClientTest {
             c.submitResult("att-1", 3, net.kigawa.kivra.agent.workdir.AgentResult("done", emptyList(), 0, null))
         }
         assertEquals(AgentApiErrorKind.CONFLICT, error.kind)
+    }
+
+    private val usage = ReportedUsage(
+        totalCostUsd = "0.004268",
+        model = "claude-haiku-5-5",
+        numTurns = 3,
+        inputTokens = 120,
+        outputTokens = 45,
+        cacheCreationTokens = 10,
+        cacheReadTokens = 300,
+    )
+    private val usageJson = """"usage":{"totalCostUsd":"0.004268","model":"claude-haiku-5-5","numTurns":3,""" +
+        """"inputTokens":120,"outputTokens":45,"cacheCreationTokens":10,"cacheReadTokens":300}"""
+
+    @Test
+    fun failWithUsageSendsTheUsageObjectNextToTheCode() = runBlocking {
+        val recorded = synchronizedList()
+        client(recorded) { Canned(200, """{"attemptId":"att-1","state":"FAILED"}""") }
+            .fail("att-1", 3, AgentErrorCode.CLI_NONZERO, usage)
+        assertEquals("""{"generation":3,"errorCode":"CLI_NONZERO",$usageJson}""", recorded.single().body)
+    }
+
+    @Test
+    fun resultWithUsageSendsTheUsageAtTheTopLevel() = runBlocking {
+        val recorded = synchronizedList()
+        val c = client(recorded) { Canned(200, """{"attemptId":"att-1","state":"RESULT_RECEIVED"}""") }
+        val accepted = c.submitResult("att-1", 3, net.kigawa.kivra.agent.workdir.AgentResult("done", emptyList(), 0, null), usage)
+        assertEquals(ResultReply.Accepted("RESULT_RECEIVED"), accepted)
+        assertEquals(
+            """{"generation":3,"result":{"summary":"done","exitStatus":0,"sessionId":null,"changes":[]},$usageJson}""",
+            recorded.single().body,
+        )
+    }
+
+    @Test
+    fun withoutUsageTheBodiesAreExactlyTheOldOnes() = runBlocking {
+        val recorded = synchronizedList()
+        val c = client(recorded) { Canned(200, """{"attemptId":"att-1","state":"RESULT_RECEIVED"}""") }
+        c.fail("att-1", 3, AgentErrorCode.NEEDS_HUMAN, null)
+        c.submitResult("att-1", 3, net.kigawa.kivra.agent.workdir.AgentResult("done", emptyList(), 0, null), null)
+        assertEquals("""{"generation":3,"errorCode":"NEEDS_HUMAN"}""", recorded[0].body)
+        assertEquals(
+            """{"generation":3,"result":{"summary":"done","exitStatus":0,"sessionId":null,"changes":[]}}""",
+            recorded[1].body,
+        )
+        assertFalse(recorded.any { it.body.contains("usage") })
     }
 }

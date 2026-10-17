@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import net.kigawa.kivra.agent.claude.AgentRunOutcome
 import net.kigawa.kivra.agent.claude.CliOutcomeClassifier
 import net.kigawa.kivra.agent.claude.CliResultLog
+import net.kigawa.kivra.agent.claude.ReportedUsage
 import net.kigawa.kivra.agent.claude.StreamJsonParser
 import net.kigawa.kivra.agent.claude.StreamReport
 import net.kigawa.kivra.agent.docker.CliCommand
@@ -176,8 +177,10 @@ class RealAttemptExecutor(
             run.outcome,
             CliResultLog.describe(run.report.result),
         )
+        // The CLI ran and gave a result, so its cost is reported with the failure (null when there is no result).
+        val usage = run.report.result?.reportedUsage
         if (run.outcome != AgentRunOutcome.SUCCEEDED) {
-            return AttemptOutcome.Failed(run.outcome.errorCode ?: AgentErrorCode.NEEDS_HUMAN)
+            return AttemptOutcome.Failed(run.outcome.errorCode ?: AgentErrorCode.NEEDS_HUMAN, usage)
         }
 
         val work = checkNotNull(state.prepared) { "the work directory is missing after a run" }
@@ -203,9 +206,9 @@ class RealAttemptExecutor(
                     run.report.result?.numTurns,
                     run.report.result?.permissionDenials,
                 )
-                AttemptOutcome.Failed(code)
+                AttemptOutcome.Failed(code, usage)
             }
-            is CollectOutcome.Accepted -> submit(attempt, collected.result)
+            is CollectOutcome.Accepted -> submit(attempt, collected.result, usage)
         }
     }
 
@@ -221,18 +224,18 @@ class RealAttemptExecutor(
      * Sends the result if the lease is still ours. A stale lease (409) or a missing attempt (404) throws, and the result is discarded.
      * A cancel request seen just before the send means the attempt is reported as CANCELLED, and nothing is sent.
      */
-    private suspend fun submit(attempt: ClaimedAttempt, result: AgentResult): AttemptOutcome {
+    private suspend fun submit(attempt: ClaimedAttempt, result: AgentResult, usage: ReportedUsage?): AttemptOutcome {
         currentCoroutineContext().ensureActive()
         client.heartbeat(attempt.attemptId, attempt.generation, ProgressPhase.FINALIZING)
-        if (client.status(attempt.attemptId).cancelRequested) return AttemptOutcome.Failed(AgentErrorCode.CANCELLED)
-        return when (client.submitResult(attempt.attemptId, attempt.generation, result)) {
+        if (client.status(attempt.attemptId).cancelRequested) return AttemptOutcome.Failed(AgentErrorCode.CANCELLED, usage)
+        return when (client.submitResult(attempt.attemptId, attempt.generation, result, usage)) {
             is ResultReply.Accepted -> {
                 logger.info("result sent: runId={} attemptId={} changes={}", attempt.runId, attempt.attemptId, result.changes.size)
                 AttemptOutcome.ResultSubmitted
             }
             ResultReply.Rejected -> {
                 logger.warn("result refused by kivra: runId={} attemptId={}", attempt.runId, attempt.attemptId)
-                AttemptOutcome.Failed(AgentErrorCode.BAD_OUTPUT)
+                AttemptOutcome.Failed(AgentErrorCode.BAD_OUTPUT, usage)
             }
         }
     }

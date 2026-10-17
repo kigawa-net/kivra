@@ -4,6 +4,8 @@ import java.io.BufferedInputStream
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.math.BigDecimal
+import java.math.RoundingMode
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -30,6 +32,23 @@ class CliUsage(
 }
 
 /**
+ * The usage that kivra receives in the `usage` field of the result and fail bodies (runbook-selfdev section 6.10c). It holds numbers and
+ * one model name only. [totalCostUsd] is a decimal string in 0 to 100 with six decimals at most. All fields are checked by
+ * [StreamJsonParser] before a value of this type exists, so a value here is always well-formed. [toString] shows no value.
+ */
+data class ReportedUsage(
+    val totalCostUsd: String,
+    val model: String,
+    val numTurns: Int,
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val cacheCreationTokens: Long,
+    val cacheReadTokens: Long,
+) {
+    override fun toString(): String = "ReportedUsage(***)"
+}
+
+/**
  * The final `result` event. [resultText] is the model's final text, which may contain anything the task touched. It is kept for the
  * caller, and never logged. [toString] shows no text.
  */
@@ -46,6 +65,8 @@ class CliResult(
     /** `stop_reason` and `terminal_reason`, kept only when they have the shape of an enum name (see [CliResultLog]). */
     val stopReason: String? = null,
     val terminalReason: String? = null,
+    /** The usage for kivra, or null when any part of it is missing or malformed (then no usage is sent at all). */
+    val reportedUsage: ReportedUsage? = null,
 ) {
     override fun toString(): String =
         "CliResult(subtype=$subtype, isError=$isError, numTurns=$numTurns, resultChars=${resultText?.length ?: 0}, usage=$usage)"
@@ -140,18 +161,60 @@ class StreamJsonParser(
             costUsd = (obj["total_cost_usd"] as? JsonPrimitive)?.doubleOrNull,
         )
         val sessionId = str(obj, "session_id")?.takeIf { SESSION_ID.matches(it) }
+        val numTurns = (obj["num_turns"] as? JsonPrimitive)?.intOrNull
         return CliResult(
             subtype = str(obj, "subtype"),
             isError = (obj["is_error"] as? JsonPrimitive)?.booleanOrNull ?: false,
             resultText = str(obj, "result")?.take(MAX_RESULT_CHARS),
-            numTurns = (obj["num_turns"] as? JsonPrimitive)?.intOrNull,
+            numTurns = numTurns,
             sessionId = sessionId,
             usage = usage,
             permissionDenials = (obj["permission_denials"] as? JsonArray)?.size,
             stopReason = str(obj, "stop_reason")?.takeIf { ENUM_NAME.matches(it) },
             terminalReason = str(obj, "terminal_reason")?.takeIf { ENUM_NAME.matches(it) },
+            reportedUsage = reportedUsage(obj, usageObj, numTurns),
         )
     }
+
+    /**
+     * Builds the usage for kivra from the final result. All of it or nothing: a missing value, a value out of range, a cost that is not a
+     * plain JSON number, or a model name that does not have the expected shape makes the whole usage null.
+     */
+    private fun reportedUsage(obj: JsonObject, usageObj: JsonObject?, numTurns: Int?): ReportedUsage? {
+        val cost = decimalCost((obj["total_cost_usd"] as? JsonPrimitive)?.takeIf { !it.isString }?.content) ?: return null
+        val model = modelName(obj["modelUsage"] as? JsonObject) ?: return null
+        val turns = numTurns?.takeIf { it in 0..MAX_TURNS } ?: return null
+        val input = tokens(usageObj, "input_tokens") ?: return null
+        val output = tokens(usageObj, "output_tokens") ?: return null
+        val cacheCreation = tokens(usageObj, "cache_creation_input_tokens") ?: return null
+        val cacheRead = tokens(usageObj, "cache_read_input_tokens") ?: return null
+        return ReportedUsage(cost, model, turns, input, output, cacheCreation, cacheRead)
+    }
+
+    /** A plain decimal in 0 to 100, rounded to six decimals. Null for anything else (including NaN, a sign, or an exponent out of range). */
+    private fun decimalCost(text: String?): String? {
+        if (text == null) return null
+        val value = runCatching { BigDecimal(text) }.getOrNull() ?: return null
+        if (value.signum() < 0 || value > MAX_COST) return null
+        return value.setScale(COST_SCALE, RoundingMode.HALF_UP).toPlainString()
+    }
+
+    /**
+     * The model that cost the most, from the keys of `modelUsage`. Every key must have the model-name shape, or there is no model at all.
+     * A tie goes to the smaller name, so the choice does not depend on the order of the keys.
+     */
+    private fun modelName(models: JsonObject?): String? {
+        if (models == null || models.isEmpty()) return null
+        if (!models.keys.all { MODEL_NAME.matches(it) }) return null
+        return models.entries
+            .map { (name, value) -> name to ((value as? JsonObject)?.get("costUSD") as? JsonPrimitive)?.doubleOrNull.orZero() }
+            .sortedWith(compareByDescending<Pair<String, Double>> { it.second }.thenBy { it.first })
+            .first().first
+    }
+
+    private fun Double?.orZero(): Double = this ?: 0.0
+
+    private fun tokens(obj: JsonObject?, key: String): Long? = long(obj, key)?.takeIf { it in 0..MAX_TOKENS }
 
     private fun apiErrorKind(category: String?): ApiErrorKind? = when (category) {
         "authentication_failed" -> ApiErrorKind.AUTHENTICATION
@@ -211,7 +274,12 @@ class StreamJsonParser(
         const val MAX_LINE_BYTES = 1024 * 1024
         const val MAX_TOTAL_BYTES = 8L * 1024 * 1024
         const val MAX_RESULT_CHARS = 64 * 1024
+        private const val MAX_TURNS = 1000
+        private const val MAX_TOKENS = 10_000_000_000L
+        private const val COST_SCALE = 6
+        private val MAX_COST = BigDecimal("100")
         private val SESSION_ID = Regex("[A-Za-z0-9-]{1,128}")
+        private val MODEL_NAME = Regex("[a-z0-9][a-z0-9.-]{0,63}")
         val ENUM_NAME = Regex("[a-z][a-z_]{0,63}")
     }
 }

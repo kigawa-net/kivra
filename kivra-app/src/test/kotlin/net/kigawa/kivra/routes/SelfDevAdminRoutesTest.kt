@@ -3,7 +3,7 @@ package net.kigawa.kivra.routes
 import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.Logger
 import ch.qos.logback.classic.spi.ILoggingEvent
-import ch.qos.logback.core.read.ListAppender
+import ch.qos.logback.core.AppenderBase
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -19,6 +19,7 @@ import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
 import io.ktor.serialization.kotlinx.json.json
 import java.time.Duration
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
@@ -190,22 +191,28 @@ class SelfDevAdminRoutesTest {
     fun `the release reason is never logged`() = TestDb().use { db ->
         val secret = "SECRET-OPERATOR-REASON-QQQ"
         val runId = db.unknownRun()
-        val root = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
-        val appender = ListAppender<ILoggingEvent>().also { it.start(); root.addAppender(it) }
-        val oldLevel = root.level
-        root.level = Level.TRACE
+        // Application loggers only: the collector hangs on the net.kigawa logger, not on root. Root would also receive third-party
+        // TRACE output (the MariaDB driver logs every packet) and output of other threads, and an unsynchronized ListAppender list
+        // then fails with ConcurrentModificationException while it is read. Third-party SQL tracing is driver diagnostics and not
+        // an application log line (the same scope as BudgetAdminLogTest).
+        val appLogger = LoggerFactory.getLogger("net.kigawa") as Logger
+        val events = CopyOnWriteArrayList<ILoggingEvent>()
+        val appender = object : AppenderBase<ILoggingEvent>() {
+            override fun append(event: ILoggingEvent) {
+                events.add(event)
+            }
+        }.also { it.context = appLogger.loggerContext; it.start(); appLogger.addAppender(it) }
+        val oldLevel = appLogger.level
+        appLogger.level = Level.TRACE
         try {
             testApplication {
                 setUp(db)
                 assertEquals(HttpStatusCode.OK, release(runId.value, """{"reason":"$secret"}""").status)
             }
-            // Application loggers only. Third-party SQL tracing (Exposed) prints bound parameters when enabled, which is driver
-            // diagnostics and not an application log line (the same scope as BudgetAdminLogTest).
-            val appEvents = appender.list.filter { it.loggerName.startsWith("net.kigawa") }
-            assertFalse(appEvents.any { it.formattedMessage.contains(secret) || (it.throwableProxy?.message ?: "").contains(secret) })
+            assertFalse(events.any { it.formattedMessage.contains(secret) || (it.throwableProxy?.message ?: "").contains(secret) })
         } finally {
-            root.detachAppender(appender)
-            root.level = oldLevel
+            appLogger.detachAppender(appender)
+            appLogger.level = oldLevel
         }
         assertEquals(1, db.count("audit_events", "run_id = '$runId' AND payload LIKE '%$secret%'"))
     }

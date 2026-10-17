@@ -16,8 +16,17 @@ import net.kigawa.kivra.github.RepoRef
  * [prReviewTimeout]: an open pull request older than this (measured from the last run update) is closed by abandoning the run,
  * never by closing the pull request. kivra never merges and never closes a pull request.
  */
+/**
+ * How the DEVELOPING step produces its change set. [API] is the existing single model call (LlmDeveloper). [CLI] queues a coding attempt
+ * for the local agent and waits for its result (ADR 0010, design section 9 PR 3). The default is [API]. [CLI] is refused at startup by
+ * SelfDevSettings until the agent API is wired (PR 4a); the runner itself refuses to run [CLI] without a coding source.
+ */
+enum class SelfDevRuntime { API, CLI }
+
 data class SelfDevConfig(
     val enabled: Boolean = false,
+    /** The DEVELOPING step's source of change sets (see [SelfDevRuntime]). */
+    val runtime: SelfDevRuntime = SelfDevRuntime.API,
     /** The only repository the runner may touch (ADR 0008 item 4). */
     val repo: RepoRef = RepoRef("kigawa-net", "kivra"),
     val baseBranch: String = "main",

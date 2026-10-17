@@ -36,11 +36,24 @@ internal class SelfDevRouteDeps(
 )
 
 /**
- * Body of `POST /api/selfdev/tasks`. Strict: any other field (`target`, `repo`, `branch`, `description`, ...) is rejected with 400
- * and never reflected. The MVP task text is the title only (see `DbTaskTextSource`).
+ * Body of `POST /api/selfdev/tasks`. Strict: any other field (`target`, `repo`, `branch`, ...) is rejected with 400 and never reflected.
+ * [body] is the optional task body (Issue #229, at most 8,000 characters, see [validatedBody]). The title may be a reference (an issue),
+ * which kivra resolves (see `TaskReference`).
  */
 @Serializable
-data class SubmitSelfDevTaskRequest(val title: String, val idempotencyKey: String)
+data class SubmitSelfDevTaskRequest(val title: String, val idempotencyKey: String, val body: String? = null)
+
+/** The task body of a submission: trimmed, at most [MAX_TASK_BODY_CODE_POINTS] code points, with no control characters but line feed and tab. Null when empty. */
+internal fun validatedBody(raw: String?): String? {
+    if (raw == null) return null
+    val value = raw.trim()
+    if (value.isEmpty()) return null
+    if (value.codePointCount(0, value.length) > MAX_TASK_BODY_CODE_POINTS) return null
+    if (value.any { it.isISOControl() && it != '\n' && it != '\t' }) return null
+    return value
+}
+
+internal const val MAX_TASK_BODY_CODE_POINTS = 8_000
 
 /** A self-development run as the caller may see it. Never the task text, a patch, or model output. */
 @Serializable
@@ -81,10 +94,18 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
             call.respond(HttpStatusCode.BadRequest, SelfDevError("title must be 1-200 characters and idempotencyKey 1-128 characters, without control characters"))
             return@post
         }
+        // A blank body is the same as none. A non-blank body that fails the rules is a 400, and nothing is stored.
+        val rawBody = request.body
+        val body = validatedBody(rawBody)
+        if (rawBody != null && body == null && rawBody.isNotBlank()) {
+            call.respond(HttpStatusCode.BadRequest, SelfDevError("body must be at most 8000 characters, and may contain line breaks but no other control characters"))
+            return@post
+        }
         try {
-            when (val result = deps.runs.submitTask(principal, key, title, selfDev = true, maxActiveSelfDev = deps.maxActiveRuns)) {
-                is TaskSubmitResult.Created -> call.respond(HttpStatusCode.Accepted, result.run.toSelfDevResponse(note = SELF_DEV_NOTE))
-                is TaskSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, result.run.toSelfDevResponse(note = SELF_DEV_NOTE))
+            val submitted = deps.runs.submitTask(principal, key, title, selfDev = true, maxActiveSelfDev = deps.maxActiveRuns, body = body)
+            when (submitted) {
+                is TaskSubmitResult.Created -> call.respond(HttpStatusCode.Accepted, submitted.run.toSelfDevResponse(note = SELF_DEV_NOTE))
+                is TaskSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, submitted.run.toSelfDevResponse(note = SELF_DEV_NOTE))
                 is TaskSubmitResult.ConflictingTitle ->
                     call.respond(HttpStatusCode.Conflict, SelfDevError("idempotency key was already used with a different request"))
             }

@@ -122,7 +122,7 @@ class CodingRuntimeService(
             }
             val title = tasks.title(run)?.takeIf { it.isNotBlank() } ?: continue
             val claimed = attempts.claim(attemptId, agentId, config.leaseTtl)
-            if (claimed is CodingAttemptResult.Ok) return CodingClaimOutcome.Claimed(inputFor(claimed.attempt, title))
+            if (claimed is CodingAttemptResult.Ok) return CodingClaimOutcome.Claimed(inputFor(claimed.attempt, title, run.taskBody))
         }
         return CodingClaimOutcome.NothingToClaim
     }
@@ -299,7 +299,7 @@ class CodingRuntimeService(
         }
     }
 
-    private fun inputFor(attempt: CodingAttempt, title: String): CodingInput = CodingInput(
+    private fun inputFor(attempt: CodingAttempt, title: String, body: String?): CodingInput = CodingInput(
         runId = attempt.runId,
         attemptId = attempt.attemptId,
         leaseGeneration = attempt.leaseGeneration,
@@ -309,6 +309,13 @@ class CodingRuntimeService(
             value = title.take(MAX_TASK_CHARS),
             trust = Trust.UNTRUSTED,
             truncated = title.length > MAX_TASK_CHARS,
+        ),
+        // The stored body is already within its limit (TaskBodyText); the truncation is recorded by its mark, never by a second cut here.
+        taskBody = UntrustedText(
+            origin = "task_body",
+            value = body.orEmpty(),
+            trust = Trust.UNTRUSTED,
+            truncated = body != null && TaskBodyText.isTruncated(body),
         ),
         limits = limits,
         allowedPathPatterns = policyConfig.allowedPathPatterns,

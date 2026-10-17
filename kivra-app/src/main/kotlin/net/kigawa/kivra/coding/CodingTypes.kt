@@ -56,6 +56,8 @@ data class CodingInput(
     val leaseGeneration: Long,
     val baseSha: String,
     val task: UntrustedText,
+    /** The task body after the title (Issue #229 addendum). Empty when the run has none. UNTRUSTED. */
+    val taskBody: UntrustedText = UntrustedText(origin = "task_body", value = "", trust = Trust.UNTRUSTED, truncated = false),
     val limits: CodingLimits,
     /** Path patterns the PatchPolicy accepts (summary for the agent; the server decides again). */
     val allowedPathPatterns: List<String>,

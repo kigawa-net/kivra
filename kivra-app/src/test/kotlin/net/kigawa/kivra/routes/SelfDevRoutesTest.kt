@@ -20,6 +20,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.auth.TaskApiIdentity
@@ -171,6 +173,56 @@ class SelfDevRoutesTest {
             assertEquals(HttpStatusCode.OK, list.status)
             assertEquals(1, Json.parseToJsonElement(list.bodyAsText()).let { (it as kotlinx.serialization.json.JsonArray).size })
             assertFalse("SECRET-TITLE-MARKER" in list.bodyAsText())
+        }
+    }
+
+    // ---- the optional task body (Issue #229, addendum) ----
+
+    private fun body(title: String, key: String, text: String?): String = buildJsonObject {
+        put("title", title)
+        put("idempotencyKey", key)
+        if (text != null) put("body", text)
+    }.toString()
+
+    @Test
+    fun `a body is accepted, stored with the run, and never returned`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            val response = submit("alice", "b1", body(title, "b1", "手順:\n1. README を直す\n\tインデント"))
+            assertEquals(HttpStatusCode.Accepted, response.status)
+            assertFalse(response.bodyAsText().contains("手順"), "the body is not echoed back")
+            val stored = db.runs.listTasks("alice", selfDev = true).single()
+            assertEquals("手順:\n1. README を直す\n\tインデント", stored.taskBody)
+        }
+    }
+
+    @Test
+    fun `a body that is too long, or has a control character other than line feed and tab, is 400 and nothing is stored`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            assertEquals(HttpStatusCode.BadRequest, submit("alice", "b2", body(title, "b2", "x".repeat(8_001))).status)
+            assertEquals(HttpStatusCode.BadRequest, submit("alice", "b3", body(title, "b3", "a\u0007b")).status)
+            assertEquals(HttpStatusCode.BadRequest, submit("alice", "b4", body(title, "b4", "a\rb")).status)
+            assertTrue(db.runs.listTasks("alice", selfDev = true).isEmpty())
+        }
+    }
+
+    @Test
+    fun `a blank body is the same as no body, and the same key with another body is 409`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            assertEquals(HttpStatusCode.Accepted, submit("alice", "b5", body(title, "b5", "   ")).status)
+            assertEquals(HttpStatusCode.OK, submit("alice", "b5", body(title, "b5", null)).status)
+            assertEquals(HttpStatusCode.Conflict, submit("alice", "b5", body(title, "b5", "手順")).status)
+        }
+    }
+
+    @Test
+    fun `a title-only submission is accepted as before, with no body`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            assertEquals(HttpStatusCode.Accepted, submit("alice", "b6").status)
+            assertEquals(null, db.runs.listTasks("alice", selfDev = true).single().taskBody)
         }
     }
 }

@@ -141,6 +141,7 @@ internal fun buildSelfDev(
         repoReader = reader,
         taskTexts = DbTaskTextSource,
         coding = coding,
+        references = TaskReferenceResolvers(listOf(GitHubIssueResolver(github, config.repo))),
     )
     val worker = SelfDevWorker(
         activeRunIds = { runs.activeSelfDevRunIds() },

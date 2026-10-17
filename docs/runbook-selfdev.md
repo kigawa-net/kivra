@@ -334,8 +334,52 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 
 - **PR 5(この範囲)**: 設定(環境変数。`KIVRA_AGENT_*`、起動時は fail-closed)、Keycloak の client credentials によるトークン取得(毎回の新しいトークン、期限の少し前に再取得、secret はファイルから読む)、エージェント API の client(claim・heartbeat・fail・status。応答は厳格に解析し、エラーは固定の分類)、ループ(STOP ファイル、claim、heartbeat、409/404 での即時中止、cancelRequested での CANCELLED、SIGTERM での CANCELLED、失敗時の指数バックオフ)、作業ディレクトリのロックファイル(二重起動の拒否)。
 - **スタブ**: claim したアテンプトは実行せず、`fail(NEEDS_HUMAN)` で返す。NEEDS_HUMAN は kivra で UNKNOWN になり、運用者が判断する(自動再試行しない)。サーバーに NOT_IMPLEMENTED のような名前は無い。
-- **PR 6**: 実行(docker の引数の組み立て、禁止項目の検査、タイムアウトの `docker kill`、ネットワークとプロキシ)。
+- **PR 6(この範囲の docker 部分。§6.6)**: docker run の引数の組み立て(`DockerCommandBuilder`)、実行の直前の禁止項目の検査(`DockerArgsGuard`)、起動・タイムアウト・キャンセル・出力上限での `docker kill`、孤児掃除(`DockerRunner`)。CLI の起動は PR 7、差分は PR 8。
 - **PR 7**: Claude Code CLI の起動と stream-json の解析、エラーの分類、認証の検査。
 - **PR 8**: 作業ディレクトリ(`git archive` の展開)と差分(PatchSet)の生成。
 
 設定の環境変数: `KIVRA_AGENT_KIVRA_URL`、`KIVRA_AGENT_TOKEN_URL`(https。localhost の http だけ可)、`KIVRA_AGENT_CLIENT_ID`、`KIVRA_AGENT_CLIENT_SECRET_FILE`(絶対パス。グループとその他が読めない権限 0600 が必要)、`KIVRA_AGENT_WORK_DIR`(絶対パス)、`KIVRA_AGENT_POLL_INTERVAL_MS`(既定 5000、1000〜60000)、`KIVRA_AGENT_HEARTBEAT_INTERVAL_MS`(既定 30000、5000〜120000)、`KIVRA_AGENT_STOP_FILE`(既定は作業ディレクトリ直下の `STOP`)。
+
+### 6.6 docker の実行引数の不変条件と禁止項目(PR 6)
+
+コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/docker/`。試験は fake の docker(`FakeDocker`)で行い、実際の docker は使わない。
+
+**二重の防御**: `DockerCommandBuilder` が許可リストの形で引数を組み立て、`DockerRunner.run` が実行の直前に `DockerArgsGuard` で同じ配列を検査する。検査が 1 つでも失敗すれば、プロセスは起動しない。
+
+**許可リスト方式**: 認識できるオプションは固定の集合だけ。未知のオプション、短いフラグ(`-e`、`-v`、`-it` など)、スペース区切りの値、値の付いたフラグ、最後の画像名の後ろの引数は拒否する。値は必ず `--name=value` の 1 トークン。
+
+**禁止項目(明示的に拒否。`FORBIDDEN_OPTION` / `FORBIDDEN_VALUE` 等)**:
+
+| 項目 | 拒否の理由 |
+| --- | --- |
+| `--privileged`、`--cap-add`(任意の値)、`--device`、`--gpus`、`--sysctl`、`--runtime`、`--pull` | 権限・デバイスの拡張 |
+| `--pid`、`--ipc`、`--uts`、`--userns`、`--cgroupns`、`--net`、`--network` の host・none・container:・bridge | ホストの名前空間 |
+| `--security-opt` の値。`no-new-privileges` 以外(`seccomp=unconfined`、`apparmor=unconfined`、`no-new-privileges=false` など) | 保護の無効化 |
+| `--volume`、`-v`、`--volumes-from`、`--mount` の作業ディレクトリ以外(`docker.sock`、`/var/run`、`/run`、ホストの `$HOME`、`/home/*`、`/etc`、`/proc`、`/sys`、`/dev`、`~/.ssh`、`~/.claude`、`~/.config`、`/etc/kivra-agent`) | マウントは作業ディレクトリ 1 つだけ |
+| `--env-file`、`-e NAME`(名前だけ。ホストの値の継承)、許可リスト外の環境変数(`KEYCLOAK*`、`CLIENT_SECRET`、`GITHUB_TOKEN`、`GH_TOKEN`、`BWS_ACCESS_TOKEN`、`SSH_AUTH_SOCK` など) | 秘密の持ち込み |
+| 環境変数の `ANTHROPIC_API_KEY` が固定のダミー以外、どの値にも `sk-ant-` を含む | 本物の API キーの混入 |
+| `--cgroup-parent`、`--add-host`、`--dns`、`--dns-*`、`--entrypoint`(任意の値) | 名前解決・cgroup・起動コマンドの変更 |
+| `--user` が `10001:10001` 以外(`0`、`root`、`0:0`、`10001:0` を含む) | 非 root |
+| `--workdir` が `/work` 以外 | 作業場所 |
+| 作業ディレクトリのパス: 相対、`..`、`.`、`:`、`,`、制御文字、作業ルートの外、作業ルート自身、途中・末尾のシンボリックリンク | マウント指定の注入と脱出 |
+
+**必須(欠けると拒否)**: `--rm`、`--name`、`--user`、`--read-only`、`--tmpfs /tmp`、`--tmpfs /home/agent`、`--cap-drop=ALL`、`--security-opt=no-new-privileges`、`--pids-limit`、`--memory`、`--memory-swap`(= memory)、`--cpus`、`--network`(内部ネットワーク)、`--mount`(作業ディレクトリ)、`--workdir=/work`、`--label kivra-agent=1` と `--label kivra-run=<runId>`、`--stop-timeout`、環境変数の 5 名(`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`)。
+
+**入力の検証**: runId・attemptId・コンテナ名・イメージ・ネットワーク名・プロキシ URL・メモリ・CPU・pids はいずれも厳格な正規表現で検証する(英数字、ハイフン等。`;`、`$()`、空白、改行、`--` 始まりは拒否)。ユーザー入力(タイトル・本文)は `DockerRunSpec` に入る口がなく、引数にも環境変数にも入らない。
+
+**ADR 0010 の不変条件 7 項目との対応**:
+
+| # | 不変条件 | 実装での担保 | 試験 |
+| --- | --- | --- | --- |
+| 1 | docker.sock をどのコンテナにも渡さない | マウントは作業ディレクトリのみ。`DOCKER_HOST` は docker CLI のプロセス環境にだけ渡し、引数には入れない | `dockerSocketAndHostPathsNeverAppearInArguments`、`successfulRunGivesExitCodeAndOnlyDockerHostInEnvironment`、`docker.sock` の禁止項目 |
+| 2 | `--privileged` を使わず、ホストの PID・NET・IPC を使わない | 禁止項目の明示拒否と、許可リスト(未知のオプションは拒否) | 禁止項目の表による試験(1 項目 1 ケース) |
+| 3 | マウントは作業ディレクトリだけ | `--mount` は 1 つだけ。パスの検査(作業ルート配下の strict な子、シンボリックリンクなし) | `workMountMustBeTheRunWorkDirectoryOnly`、`symlinkAsLeafIsRefused`、`symlinkInsideTheRootToAnotherPartOfItIsRefused` |
+| 4 | コンテナに kivra・GitHub・Anthropic の資格情報を置かない | 環境変数の許可リスト。`ANTHROPIC_API_KEY` は固定のダミー。本物の値は拒否 | `environmentOutsideTheAllowlistAndSecretsAreRefused`、`environmentValueWithSecretPrefixAnywhereIsRefused` |
+| 5 | ホストは作業ツリーに対して git を実行しない | この PR では git を実行するコードがない(差分は PR 8 で、ファイル比較で作る) | 確認項目(PR 8 の試験で固定する) |
+| 6 | 外向き通信は内部ネットワークとプロキシだけ | `--network` は設定の内部ネットワークだけ。host・none・container:・bridge は拒否。プロキシ URL は `http://host:port` の形だけ | `imageNetworkAndProxyRejectInjection`、`imageOrNetworkOutsideTheSettingsIsRefused` |
+| 7 | ログイン済みアカウントはサンドボックスではない(認証はホスト側に置く) | 認証はコンテナに置かず、プロキシが付与する(ADR 0010 の決定 6)。ここでは秘密の値の混入を拒否する | 上記 4 と同じ |
+
+**運用上の注意**:
+- 内部ネットワークが本当に `--internal` かどうかは、この実装では確認しない(`docker network create --internal` は `agent-runtime/network/create-networks.sh` の役目)。運用の確認項目として残す。
+- `DockerRunner.cleanupOrphans` は、起動時に `kivra-agent=1` のラベルが付いたコンテナだけを対象に `docker rm -f` する。他のラベルのコンテナには触れない。
+- 出力(stdout・stderr)は上限つきで読み、超えたらコンテナを止める。ログには出さない。

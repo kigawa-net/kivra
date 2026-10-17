@@ -409,7 +409,7 @@ claude -p <固定 prompt> --output-format stream-json --verbose --permission-mod
 
 | 規則 | 拒否する場合 |
 | --- | --- |
-| `COMMAND_NOT_ALLOWED` | 先頭が `claude` でない(`sh`、`bash`、`/bin/sh` など)、command がない、`--max-turns` の値が範囲外か整数でない |
+| `COMMAND_NOT_ALLOWED` | 先頭が `claude` でない(`sh`、`bash`、`/bin/sh` など)、command がない、`--max-turns` の値が範囲外か整数でない、`--model` が許可リスト外、`--max-budget-usd` が 0.01〜20.00 の 2 桁形式でない(§6.10b) |
 | `COMMAND_TASK_TEXT` | prompt の位置が固定 prompt と違う(タスク文の混入) |
 | `COMMAND_SHELL_SYNTAX` | prompt 以外のトークンに、シェルの演算子・展開・引用符・制御文字がある(`;` `&` `\|` `$` `` ` `` `< >` `( )` `{ }` `[ ]` `\` `'` `"` `* ? ! ~ #`、改行) |
 | `COMMAND_UNKNOWN_ARGUMENT` | 余分な引数がある、または許可リスト外の値に変わっている |
@@ -642,8 +642,44 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 | `KIVRA_AGENT_DOCKER_PROXY_URL` | real で必須 | `http://host:port`(egress プロキシ) |
 | `KIVRA_AGENT_GIT_BIN` | real で必須 | git の絶対パス(ホストで公開リポジトリを読むだけ) |
 | `KIVRA_AGENT_REPO` | real で必須 | `owner/repo`(公開 GitHub。資格情報は使わない) |
+| `KIVRA_AGENT_MODEL` | 任意 | CLI の `--model`。既定 `claude-haiku-5-5`。形式は `^[a-z0-9][a-z0-9.-]{0,63}$` |
+| `KIVRA_AGENT_MAX_BUDGET_USD` | 任意 | CLI の `--max-budget-usd`(1 アテンプトの費用上限、ドル)。既定 `0.50`。0.01 から 20.00、小数 2 桁まで(`0.5` は `0.50` に直す) |
 
-起動時に `DockerSettings` と作業ルートの検査が通らなければ、終了コード 2 で止まる(アテンプトは claim しない)。
+起動時に `DockerSettings` と作業ルートの検査が通らなければ、終了コード 2 で止まる(アテンプトは claim しない)。モデルと費用上限の値が不正なときも、同じく終了コード 2 で、変数名だけを出す。
+
+### 6.10b モデルと費用上限(2026-10-17 の実機の結果から)
+
+**なぜ必要か**: 実機のコンテナで `claude -p` を 1 ターン走らせたところ、`--model` を指定しなかったため CLI の既定モデル(`claude-opus-5-5`)になり、`total_cost_usd=0.12`(cache_creation 約 24k トークン)かかった。kivra の方針は Haiku 5.5(`claude-haiku-5-5`)だけである。費用の上限も無かった。そこで `--model` と `--max-budget-usd` を CLI の引数に入れ、既定値を Haiku 5.5 と 0.50 ドルにした。
+
+**引数の確認**:
+- `--max-budget-usd` は、ローカルの `claude --help`(CLI 2.1.302)で「API 呼び出しの費用の上限(`--print` のときだけ有効)」と書かれている。`-p` は print モードなので有効になる。
+- イメージが固定している CLI 2.1.301 では、この項目を確かめていない(未確認)。実機の 1 回目で `--max-budget-usd` がエラーになれば、CLI が引数を拒否して exit に失敗する。その場合は `KIVRA_AGENT_MAX_BUDGET_USD` を使わず、イメージの CLI を上げて確かめる。
+- 費用上限で止まったときの stream-json の `result.subtype` は、`error_max_budget_usd` と想定している。**実機ではまだ見ていない(未確認)**。ただし、`error_` で始まる subtype は、既存の規則で `CLI_FAILED`(報告は `CLI_NONZERO`)になる。subtype が `error_max_budget_usd` と一致したときだけ、ログ用の `BUDGET_EXCEEDED` になる。報告のコードは変わらない。
+
+**分類(判断)**: kivra の `AgentErrorCode` に費用上限の専用コードは無い。そこで `BUDGET_EXCEEDED` は `CLI_NONZERO` に写す。kivra 側のコード表を変えないため。API の再試行で出た rate limit より優先する(予算で止まったのに `RATE_LIMITED` と誤分類しないため)。
+
+**ガード**: `DockerArgsGuard` は `--model` の値が設定の許可リスト(`allowedModels`、既定は Haiku 5.5 だけ)にあるか、`--max-budget-usd` が 0.01 から 20.00 の 2 桁形式か検査する。どちらも、同じフラグの重複を拒否する。拒否の理由は `COMMAND_NOT_ALLOWED`(値)か `COMMAND_UNKNOWN_ARGUMENT`(重複)。
+
+**コストの記録**:
+- 実測(2026-10-17、`--model` 未指定、CLI の既定の Opus): 1 ターン、`total_cost_usd=0.12`。
+- Haiku 5.5 での実測は、まだ無い(未確認)。既定の 0.50 ドルが 1 アテンプトに足りるかは、実測の後に決める。
+
+**ログの見方**: 実行ごとに `cli run ended` の INFO が出る。項目は次のとおり(数値と列挙だけ。応答の本文、ツールの入力、パスは出ない)。
+- `outcome`: 分類(`SUCCEEDED`、`BUDGET_EXCEEDED`、`CLI_FAILED` など)
+- `hasResult`、`subtype`、`isError`
+- `numTurns`: CLI が回したターン数
+- `totalCostUsd`: CLI の費用の見積もり(4 桁)
+- `permissionDenials`: `dontAsk` で拒否されたツール呼び出しの件数
+- `stopReason`、`terminalReason`: CLI の終了理由(enum 名の形のときだけ出る。それ以外は `unrecognized`)
+
+変更が無かった(`EMPTY_PATCH`)ときは、`change set rejected` の WARN に `numTurns` と `permissionDenials` が付く。読み方の目安:
+- `permissionDenials` が 1 以上: ツールが拒否された。`--allowedTools` と `dontAsk` の組み合わせを疑う。
+- `numTurns` が 1 以下で、拒否が 0: モデルが何もせず終わった。プロンプトかモデルを疑う。
+- `numTurns` が多く、拒否も 0: 作業はしたが編集していない。タスクの内容を疑う。
+- `outcome=BUDGET_EXCEEDED`: 費用上限に達した。上限を上げるか、タスクを小さくする。
+
+**未確認のまま残すもの**: `error_max_budget_usd` の subtype(実機で未観測)、2.1.301 での `--max-budget-usd` の受理、Haiku 5.5 での 1 アテンプトの費用、`stop_reason` と `terminal_reason` の実際の値。
+
 
 **未解決(この PR の範囲外)**:
 - claim が渡す `allowedPathPatterns` と `deniedPathPatterns` は、差分の検査に使っていない。差分は kivra-core の既定値の写し(§6.8)で検査する。これは厳しい側なので、サーバーの設定が広い場合でも危険な結果が通ることはない(サーバーが 422 で拒否し、`BAD_OUTPUT` になる)。サーバー側の設定と揃えるかは PR 9b までに決める。

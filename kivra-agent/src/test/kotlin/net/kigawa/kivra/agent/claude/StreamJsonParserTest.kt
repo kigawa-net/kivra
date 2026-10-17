@@ -28,6 +28,23 @@ class StreamJsonParserTest {
         CliOutcomeClassifier.classify(run(exit, stdout), parser.parse(stdout))
 
     @Test
+    fun loggedFieldsAreCountsAndEnumNamesOnly() {
+        val denied = """{"type":"result","subtype":"success","is_error":false,"num_turns":5,"result":"MARKER-TEXT",""" +
+            """"permission_denials":[{"tool_name":"Bash","tool_input":{"command":"MARKER-INPUT"}},{"tool_name":"Write"}],""" +
+            """"stop_reason":"end_turn","terminal_reason":"Bad Value With Spaces"}"""
+        val result = assertNotNull(parser.parse(stream(denied)).result)
+        assertEquals(2, result.permissionDenials)
+        assertEquals("end_turn", result.stopReason)
+        assertNull(result.terminalReason, "a value that is not an enum name is not kept")
+        val described = CliResultLog.describe(result)
+        assertTrue(described.contains("permissionDenials=2"), described)
+        assertTrue(described.contains("numTurns=5"), described)
+        assertTrue(described.contains("terminalReason=none"), described)
+        assertFalse(described.contains("MARKER"), described)
+        assertEquals("hasResult=false", CliResultLog.describe(null))
+    }
+
+    @Test
     fun successfulStreamGivesFinalResultUsageAndSession() {
         val text = stream(init, assistant, success)
         val report = parser.parse(text)

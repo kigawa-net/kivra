@@ -28,6 +28,10 @@ class DockerRunSpec(
     val stopTimeoutSeconds: Int = DockerConstants.DEFAULT_STOP_TIMEOUT_SECONDS,
     /** The `--max-turns` of the CLI command (see [CliCommand]). The only value of the command that a caller chooses. */
     val maxTurns: Int = CliCommand.DEFAULT_MAX_TURNS,
+    /** The `--model` of the CLI. It must be in [DockerSettings.allowedModels]. */
+    val model: String = CliCommand.DEFAULT_MODEL,
+    /** The `--max-budget-usd` of the CLI: a dollar amount in the fixed two-decimal form, from 0.01 to 20.00 (see [DockerPatterns]). */
+    val budgetUsd: String = CliCommand.DEFAULT_BUDGET_USD,
 ) {
     /** `kivra-run-<runId>-<attemptId>`. Validated in [init], so it is safe as a docker name. */
     val containerName: String = "${DockerConstants.CONTAINER_PREFIX}$runId-$attemptId"
@@ -47,6 +51,8 @@ class DockerRunSpec(
         if (pidsLimit !in 1..MAX_PIDS_LIMIT) throw DockerSpecException("pidsLimit is out of range")
         if (stopTimeoutSeconds !in 1..MAX_STOP_TIMEOUT_SECONDS) throw DockerSpecException("stopTimeoutSeconds is out of range")
         if (maxTurns !in 1..CliCommand.MAX_MAX_TURNS) throw DockerSpecException("maxTurns is out of range")
+        if (!DockerPatterns.MODEL.matches(model)) throw DockerSpecException("model is invalid")
+        if (!DockerPatterns.isBudgetInRange(budgetUsd)) throw DockerSpecException("budgetUsd is out of range")
     }
 
     override fun toString(): String = "DockerRunSpec(runId=$runId, attemptId=$attemptId)"

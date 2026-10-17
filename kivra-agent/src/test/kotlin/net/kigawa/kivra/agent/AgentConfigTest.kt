@@ -120,6 +120,52 @@ class AgentConfigTest {
         assertFalse(config.toString().contains("kivra-agent-internal"))
     }
 
+    private fun realEnv(vararg extra: Pair<String, String?>): Map<String, String> = env(
+        AgentConfig.ENV_EXECUTOR to "real",
+        AgentConfig.ENV_DOCKER_BIN to "/usr/bin/docker",
+        AgentConfig.ENV_DOCKER_NETWORK to "kivra-agent-internal",
+        AgentConfig.ENV_DOCKER_IMAGE to "kivra-agent-runtime:local",
+        AgentConfig.ENV_DOCKER_PROXY_URL to "http://kivra-agent-proxy:8080",
+        AgentConfig.ENV_GIT_BIN to "/usr/bin/git",
+        AgentConfig.ENV_REPO to "kigawa-net/kivra",
+        *extra,
+    )
+
+    @Test
+    fun modelAndBudgetDefaultToHaikuAndFiftyCents() {
+        val config = AgentConfig.fromEnv(realEnv())
+        assertEquals("claude-haiku-5-5", config.realExecutor!!.model)
+        assertEquals("0.50", config.realExecutor!!.budgetUsd)
+    }
+
+    @Test
+    fun modelAndBudgetAreReadFromTheEnvironment() {
+        val config = AgentConfig.fromEnv(realEnv(AgentConfig.ENV_MODEL to "claude-sonnet-5-0", AgentConfig.ENV_MAX_BUDGET_USD to "5"))
+        assertEquals("claude-sonnet-5-0", config.realExecutor!!.model)
+        assertEquals("5.00", config.realExecutor!!.budgetUsd, "the budget is written with two decimals")
+        assertEquals("0.50", AgentConfig.fromEnv(realEnv(AgentConfig.ENV_MAX_BUDGET_USD to "0.5")).realExecutor!!.budgetUsd)
+        assertEquals("20.00", AgentConfig.fromEnv(realEnv(AgentConfig.ENV_MAX_BUDGET_USD to "20")).realExecutor!!.budgetUsd)
+    }
+
+    @Test
+    fun invalidModelAndBudgetAreRejectedByNameOnly() {
+        for (budget in listOf("0", "0.00", "0.001", "20.01", "21", "-1", "abc", "1e2", "1.")) {
+            val e = assertFailsWith<ConfigException> { AgentConfig.fromEnv(realEnv(AgentConfig.ENV_MAX_BUDGET_USD to budget)) }
+            assertEquals("KIVRA_AGENT_MAX_BUDGET_USD must be a dollar amount from 0.01 to 20.00 with at most two decimals", e.message, budget)
+        }
+        for (model in listOf("Claude-Haiku", "claude haiku", "claude/x", "-x", "a".repeat(65))) {
+            val e = assertFailsWith<ConfigException> { AgentConfig.fromEnv(realEnv(AgentConfig.ENV_MODEL to model)) }
+            assertEquals("KIVRA_AGENT_MODEL must be a model id (letters, digits, dots, hyphens)", e.message, model)
+        }
+    }
+
+    @Test
+    fun modelAndBudgetAreIgnoredWhenTheStubIsUsed() {
+        // They are read only for KIVRA_AGENT_EXECUTOR=real, so an invalid value does not stop the stub.
+        val config = AgentConfig.fromEnv(env(AgentConfig.ENV_MAX_BUDGET_USD to "999", AgentConfig.ENV_MODEL to "BAD MODEL"))
+        assertEquals(null, config.realExecutor)
+    }
+
     @Test
     fun realExecutorRequiresItsSettings() {
         val base = arrayOf(

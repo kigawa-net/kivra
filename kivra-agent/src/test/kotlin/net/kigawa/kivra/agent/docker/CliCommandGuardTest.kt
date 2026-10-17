@@ -81,6 +81,36 @@ class CliCommandGuardTest {
         guard.check(head + command.toMutableList().also { it[CliCommand.MAX_TURNS_INDEX] = "1" })
     }
 
+    private fun withValue(index: Int, value: String): List<String> = head + command.toMutableList().also { it[index] = value }
+
+    @Test
+    fun modelMustBeAnAllowedModelId() {
+        // The guard's settings allow the default model only, so any other id is an unknown value, even when it has a valid form.
+        for (value in listOf("claude-opus-5-5", "Claude-Haiku", "", "-x")) {
+            assertEquals(GuardRule.COMMAND_NOT_ALLOWED, rule(withValue(CliCommand.MODEL_INDEX, value)), value)
+        }
+        // A shell character in the model is refused by the shell rule, before the value is read.
+        assertEquals(GuardRule.COMMAND_SHELL_SYNTAX, rule(withValue(CliCommand.MODEL_INDEX, "claude-haiku-5-5;id")))
+        guard.check(withValue(CliCommand.MODEL_INDEX, "claude-haiku-5-5"))
+    }
+
+    @Test
+    fun budgetMustBeTwoDecimalsBetweenOneCentAndTwentyDollars() {
+        for (value in listOf("0.00", "0.001", "0.5", "20.01", "21.00", "100.00", "1", "-0.50", "00.50", "1e2", "")) {
+            assertEquals(GuardRule.COMMAND_NOT_ALLOWED, rule(withValue(CliCommand.BUDGET_INDEX, value)), value)
+        }
+        for (value in listOf("0.01", "0.50", "20.00", "9.99")) guard.check(withValue(CliCommand.BUDGET_INDEX, value))
+    }
+
+    @Test
+    fun aRepeatedValueFlagIsRefused() {
+        val repeatedModel = head + command + listOf("--model", "claude-haiku-5-5")
+        assertEquals(GuardRule.COMMAND_UNKNOWN_ARGUMENT, rule(repeatedModel))
+        val repeatedBudget = head + command + listOf("--max-budget-usd", "0.50")
+        assertEquals(GuardRule.COMMAND_UNKNOWN_ARGUMENT, rule(repeatedBudget))
+        assertEquals(GuardRule.COMMAND_UNKNOWN_ARGUMENT, rule(with("--max-budget-usd" to "--model")))
+    }
+
     @Test
     fun aCommandAfterTheImageNeverStartsAnOption() {
         // A docker-looking option after the command is part of the command, so it is refused as an unknown argument.

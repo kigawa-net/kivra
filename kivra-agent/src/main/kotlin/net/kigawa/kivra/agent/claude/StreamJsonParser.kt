@@ -5,6 +5,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -40,6 +41,11 @@ class CliResult(
     /** The session id, only when it has the expected shape. */
     val sessionId: String?,
     val usage: CliUsage,
+    /** The number of entries in `permission_denials` (the tools the permission mode refused). The entries themselves are not kept. */
+    val permissionDenials: Int? = null,
+    /** `stop_reason` and `terminal_reason`, kept only when they have the shape of an enum name (see [CliResultLog]). */
+    val stopReason: String? = null,
+    val terminalReason: String? = null,
 ) {
     override fun toString(): String =
         "CliResult(subtype=$subtype, isError=$isError, numTurns=$numTurns, resultChars=${resultText?.length ?: 0}, usage=$usage)"
@@ -141,6 +147,9 @@ class StreamJsonParser(
             numTurns = (obj["num_turns"] as? JsonPrimitive)?.intOrNull,
             sessionId = sessionId,
             usage = usage,
+            permissionDenials = (obj["permission_denials"] as? JsonArray)?.size,
+            stopReason = str(obj, "stop_reason")?.takeIf { ENUM_NAME.matches(it) },
+            terminalReason = str(obj, "terminal_reason")?.takeIf { ENUM_NAME.matches(it) },
         )
     }
 
@@ -203,5 +212,6 @@ class StreamJsonParser(
         const val MAX_TOTAL_BYTES = 8L * 1024 * 1024
         const val MAX_RESULT_CHARS = 64 * 1024
         private val SESSION_ID = Regex("[A-Za-z0-9-]{1,128}")
+        val ENUM_NAME = Regex("[a-z][a-z_]{0,63}")
     }
 }

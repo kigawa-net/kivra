@@ -16,12 +16,22 @@
     session: 'セッションが切れました（ログインが必要です）。「再読み込みしてログインし直す」からログインし直してください。',
     notFound: '見つかりません（他のユーザーの Run は見えません）',
     badRequest: '入力内容を確認してください（1〜200 文字、制御文字は使えません）',
-    conflict: 'この投入は受け付けられませんでした（同じ投入キーで別のタイトルが使われていました）。もう一度投入してください。',
+    conflict: 'この投入キーは、別の内容（別のタイトル、または別の種別）で既に使われていました。投入キーを作り直しました。内容を確認して、もう一度投入してください。',
+    tooMany: '自己開発の Run が上限に達しています。完了か解放を待ってから、もう一度投入してください。',
+    unsupported: '送信の形式がサーバーに受け付けられませんでした。ページを再読み込みしてから、もう一度お試しください。',
     server: 'サーバーでエラーが起きました。時間をおいてもう一度お試しください。',
     network: '通信に失敗しました。',
     submitNetwork: '通信に失敗しました。Run が作成されたかどうかは確認できていません。同じ内容で投入し直しても、同じ Run として扱われます（二重には作られません）。',
-    invalid: '応答の形式が想定と違います。ログインが切れている可能性があります。ページを再読み込みしてください。'
+    invalid: '応答の形式が想定と違います。ログインが切れている可能性があります。ページを再読み込みしてください。',
+    releaseBadRequest: '理由を確認してください（1〜500 文字、空白だけは使えません）。',
+    releaseConflict: 'この Run は解放できる状態ではありません（状態が既に変わっています）。一覧と詳細を確認してください。',
+    releaseNetwork: '通信に失敗しました。解放されたかどうかは、詳細を開き直して確認してください。',
+    releaseDone: '解放しました（状態: CANCELLED）。'
   };
+
+  var RELEASE_MAX = 500;
+  var SELF_DEV_KIND = 'SELF_DEV';
+  var SIMULATED_KIND = 'SIMULATED';
 
   // Display text for the fixed codes. Unknown values are shown as they are (see the helpers below).
   var KINDS = {
@@ -75,6 +85,9 @@
 
   var state = {
     idempotencyKey: newKey(),
+    // The kind and the title the key was first used with (null: not used yet). A change of either gets a new key.
+    keyFor: null,
+    kind: SIMULATED_KIND,
     scope: 'mine',
     runs: null,
     runsOkAt: 0,
@@ -93,7 +106,9 @@
     healthLoading: false,
     submitting: false,
     detailSeq: 0,
-    timer: null
+    timer: null,
+    release: null,
+    releasing: false
   };
 
   function $(id) {
@@ -225,6 +240,8 @@
     if (status === 401) return 'session';
     if (status === 404) return 'notFound';
     if (status === 409) return 'conflict';
+    if (status === 415) return 'unsupported';
+    if (status === 429) return 'tooMany';
     return 'server';
   }
 
@@ -297,6 +314,58 @@
     el.className = 'result' + (cls ? ' ' + cls : '');
   }
 
+  /** Whether a self-development task may be submitted: only when the status API says enabled (never on a guess). */
+  function selfDevAvailable() {
+    return state.selfDevEnabled === true;
+  }
+
+  /** The kind radios: self-development only when available; both locked while a send or an expired session blocks submit. */
+  function updateKindControls() {
+    var blocked = state.submitting || state.sessionExpired;
+    $('kind-sim').disabled = blocked;
+    $('kind-self').disabled = blocked || !selfDevAvailable();
+    $('kind-self').checked = state.kind === SELF_DEV_KIND;
+    $('kind-sim').checked = state.kind === SIMULATED_KIND;
+  }
+
+  function renderKindNote() {
+    var el = $('kind-note');
+    if (state.selfDevEnabled === true) {
+      el.textContent = '自己開発を選ぶと、GitHub に PR を作成する Run になります（kivra は PR をマージしません）。';
+    } else if (state.selfDevEnabled === false) {
+      el.textContent = '自己開発は無効のため、シミュレーションだけ投入できます。';
+    } else {
+      el.textContent = '自己開発の設定を取得できていないため、自己開発は選べません。';
+    }
+  }
+
+  /** Called after every status read. A self-development selection is dropped when it is no longer available. */
+  function applySelfDevAvailability() {
+    if (state.kind === SELF_DEV_KIND && !selfDevAvailable()) {
+      state.kind = SIMULATED_KIND;
+      newSubmitKey();
+    }
+    updateKindControls();
+    renderKindNote();
+  }
+
+  /** A new key for the next submission. Used after a success, a 409, or a change of kind. */
+  function newSubmitKey() {
+    state.idempotencyKey = newKey();
+    state.keyFor = null;
+  }
+
+  function onKindChange() {
+    var next = $('kind-self').checked && selfDevAvailable() ? SELF_DEV_KIND : SIMULATED_KIND;
+    if (next === state.kind) {
+      updateKindControls();
+      return;
+    }
+    state.kind = next;
+    newSubmitKey();
+    updateKindControls();
+  }
+
   /**
    * The only place that decides whether the submit button is enabled. Use it after every change to
    * submitting or sessionExpired, so a finished send never re-enables the button after the session expired.
@@ -305,11 +374,25 @@
     var blocked = state.submitting || state.sessionExpired;
     $('submit-btn').disabled = blocked;
     $('submit-note').hidden = !state.sessionExpired;
+    updateKindControls();
   }
 
   function updateCounter() {
     var n = Array.from($('title').value).length;
     $('title-count').textContent = n + ' / ' + MAX_TITLE;
+  }
+
+  /**
+   * The key stays the same while the kind and the title stay the same, so a retry after a network failure is the same
+   * submission. A change of either one makes a new key (the server would refuse the old key with 409 anyway).
+   */
+  function keyForSubmission(kind, title) {
+    var sig = kind + '\n' + title;
+    if (state.keyFor !== sig) {
+      if (state.keyFor !== null) state.idempotencyKey = newKey();
+      state.keyFor = sig;
+    }
+    return state.idempotencyKey;
   }
 
   async function onSubmit(ev) {
@@ -325,13 +408,21 @@
       showResult(MESSAGES.badRequest, 'error');
       return;
     }
+    var kind = state.kind;
+    if (kind === SELF_DEV_KIND && !selfDevAvailable()) {
+      showResult(MESSAGES.invalid, 'error');
+      return;
+    }
+    var body = { title: title, idempotencyKey: keyForSubmission(kind, title) };
     state.submitting = true;
     updateSubmitEnabled();
     showResult('送信中です…', '');
 
     var r;
     try {
-      r = await apiFetch('/api/tasks', 'POST', { title: title, idempotencyKey: state.idempotencyKey });
+      r = kind === SELF_DEV_KIND
+        ? await apiFetch('/api/selfdev/tasks', 'POST', body)
+        : await apiFetch('/api/tasks', 'POST', body);
     } finally {
       state.submitting = false;
       updateSubmitEnabled();
@@ -339,11 +430,12 @@
 
     var accepted = r.ok && (r.status === 202 || r.status === 200) && r.data && typeof r.data.runId === 'string';
     if (accepted) {
-      // A new key only after success. (Same key + same title is a replay that returns the same Run.)
-      state.idempotencyKey = newKey();
+      // A new key only after success. (Same key + same content is a replay that returns the same Run.)
+      newSubmitKey();
       $('title').value = '';
       updateCounter();
-      var stateText = '状態: ' + stateInfo(r.data.state).label + '（シミュレーション）';
+      var kindLabel = kind === SELF_DEV_KIND ? '自己開発' : 'シミュレーション';
+      var stateText = '状態: ' + stateInfo(r.data.state).label + '（' + kindLabel + '）';
       if (r.status === 202) {
         showResult('受け付けました。Run ID: ' + str(r.data.runId) + ' / ' + stateText, 'ok');
       } else {
@@ -353,7 +445,8 @@
       return;
     }
 
-    if (r.kind === 'conflict') state.idempotencyKey = newKey();
+    // 409: the key was used with other content. Make a new key; the operator sends again on purpose.
+    if (r.kind === 'conflict') newSubmitKey();
     var msg = r.kind === 'network' ? MESSAGES.submitNetwork : (r.ok ? MESSAGES.invalid : (MESSAGES[r.kind] || MESSAGES.server));
     showResult(msg, 'error');
   }
@@ -495,6 +588,7 @@
     } finally {
       state.statusLoading = false;
       renderModeNote();
+      applySelfDevAvailability();
     }
   }
 
@@ -585,6 +679,8 @@
       dl.appendChild(h('dd', {}, [row[1]]));
     });
     container.appendChild(dl);
+    var releaseKind = releaseKindOf(run);
+    if (releaseKind !== null) container.appendChild(releaseActionNode(run, all, releaseKind));
     if (Array.isArray(run.events)) {
       container.appendChild(h('h3', { text: '状態の経過' }));
       if (run.events.length === 0) {
@@ -645,11 +741,131 @@
     var showDetail = r !== null;
     $('view-list').hidden = showDetail;
     $('view-detail').hidden = !showDetail;
+    $('detail-notice').textContent = '';
     if (showDetail) {
       loadDetail(r.id, r.all);
     } else {
       window.scrollTo(0, 0);
     }
+  }
+
+  // ---- Release (UNKNOWN, and a PULL_REQUEST without a binding) ----------
+
+  var RUN_ID_RE = /^[0-9A-Z]{26}$/;
+
+  var RELEASE_TEXT = {
+    UNKNOWN: {
+      button: '運用者の解放…',
+      title: '運用者の解放（UNKNOWN から CANCELLED へ）',
+      explain: 'この Run を CANCELLED にします。PR は閉じません・マージしません（PR の扱いは人が決めます）。同じ原因が続けば、次の Run も UNKNOWN になる可能性があります。解放は監査ログに残ります。'
+    },
+    UNBOUND_PR: {
+      button: '解放（束縛なし）…',
+      title: '解放（GitHub の PR と結び付いていない Run）',
+      explain: 'この Run を CANCELLED にします。この Run は GitHub の PR と結び付いていないため、PR の状態は確認しません。GitHub には何も書き込みません（PR は閉じず、マージもしません）。'
+    }
+  };
+
+  /**
+   * Which release a run gets, or null. UNKNOWN (POST .../release) for a self-development run in UNKNOWN; UNBOUND_PR
+   * (POST .../release-unbound-pr) for a self-development PULL_REQUEST with no pull request binding in the detail response.
+   * The server decides again on every request.
+   */
+  function releaseKindOf(run) {
+    if (run.mode !== SELF_DEV_KIND || typeof run.runId !== 'string' || !RUN_ID_RE.test(run.runId)) return null;
+    if (run.state === 'UNKNOWN') return 'UNKNOWN';
+    if (run.state === 'PULL_REQUEST' && typeof run.pullRequestNumber !== 'number') return 'UNBOUND_PR';
+    return null;
+  }
+
+  function releaseActionNode(run, all, kind) {
+    var button = h('button', { type: 'button', className: 'secondary', text: RELEASE_TEXT[kind].button });
+    button.addEventListener('click', function () {
+      openRelease(run, all, kind);
+    });
+    return h('div', { className: 'detail-actions' }, [button]);
+  }
+
+  /** The reason as sent: trimmed. It must be 1 to 500 characters (code points) and have no control characters. */
+  function releaseReasonText() {
+    return $('release-reason').value.trim();
+  }
+
+  function reasonIsValid(text) {
+    var n = Array.from(text).length;
+    return n >= 1 && n <= RELEASE_MAX && !CONTROL_CHARS.test(text);
+  }
+
+  function showReleaseError(text) {
+    var el = $('release-error');
+    el.textContent = text;
+    el.hidden = text === '';
+  }
+
+  /** The send button is enabled only for a valid reason and while no send is running. */
+  function updateReleaseControls() {
+    var text = releaseReasonText();
+    $('release-count').textContent = Array.from(text).length + ' / ' + RELEASE_MAX;
+    $('release-submit').disabled = state.releasing || !reasonIsValid(text);
+    $('release-cancel').disabled = state.releasing;
+  }
+
+  function openRelease(run, all, kind) {
+    var text = RELEASE_TEXT[kind];
+    state.release = { runId: run.runId, all: all, kind: kind };
+    $('release-title').textContent = text.title;
+    $('release-explain').textContent = text.explain;
+    $('release-reason').value = '';
+    showReleaseError('');
+    updateReleaseControls();
+    $('release-dialog').showModal();
+  }
+
+  /** Reloads the detail only when it is still the page on screen (the operator may have navigated away). */
+  function reloadReleasedRun(rel) {
+    var cur = parseRoute();
+    if (cur && cur.id === rel.runId) loadDetail(rel.runId, rel.all);
+  }
+
+  async function submitRelease() {
+    var rel = state.release;
+    if (!rel || state.releasing || state.sessionExpired) return;
+    var reason = releaseReasonText();
+    if (!reasonIsValid(reason)) {
+      showReleaseError(MESSAGES.releaseBadRequest);
+      updateReleaseControls();
+      return;
+    }
+    state.releasing = true;
+    showReleaseError('');
+    updateReleaseControls();
+    var r;
+    try {
+      r = rel.kind === 'UNKNOWN'
+        ? await apiFetch('/api/admin/selfdev/runs/' + encodeURIComponent(rel.runId) + '/release', 'POST', { reason: reason })
+        : await apiFetch('/api/admin/selfdev/runs/' + encodeURIComponent(rel.runId) + '/release-unbound-pr', 'POST', { reason: reason });
+    } finally {
+      state.releasing = false;
+    }
+
+    if (r.ok) {
+      state.release = null;
+      $('release-dialog').close();
+      $('detail-notice').textContent = MESSAGES.releaseDone;
+      reloadReleasedRun(rel);
+      refreshRuns();
+      return;
+    }
+    updateReleaseControls();
+    var msg;
+    if (r.kind === 'network') msg = MESSAGES.releaseNetwork;
+    else if (r.status === 400) msg = MESSAGES.releaseBadRequest;
+    else if (r.status === 409) msg = MESSAGES.releaseConflict;
+    else if (r.status === 404) msg = MESSAGES.notFound;
+    else msg = MESSAGES[r.kind] || MESSAGES.server;
+    showReleaseError(msg);
+    // A 409 means the run has changed: show its current state under the dialog.
+    if (r.status === 409) reloadReleasedRun(rel);
   }
 
   // ---- Timers (stopped while the tab is hidden) --------------------------
@@ -694,6 +910,14 @@
     updateCounter();
     renderHealth();
     renderModeNote();
+    renderKindNote();
+    updateKindControls();
+    $('kind-form').addEventListener('change', onKindChange);
+    $('release-reason').addEventListener('input', updateReleaseControls);
+    $('release-cancel').addEventListener('click', function () {
+      $('release-dialog').close();
+    });
+    $('release-submit').addEventListener('click', submitRelease);
     renderRunsStatus(Date.now());
     route();
     if (!document.hidden) startTimers();

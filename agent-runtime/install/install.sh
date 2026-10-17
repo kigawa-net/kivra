@@ -119,6 +119,8 @@ KIVRA_AGENT_EXECUTOR=stub
 #KIVRA_AGENT_REPO=owner/repo
 #KIVRA_AGENT_MODEL=claude-haiku-5-5
 #KIVRA_AGENT_MAX_BUDGET_USD=0.50
+# 失敗した attempt の出力(stream、task、結果コード)を作業ディレクトリ下の debug/ に残す。既定は無効。内容は秘密を含みうる(runbook §6.12)。
+#KIVRA_AGENT_DEBUG_KEEP=1
 # systemd が JVM の起動スクリプトに使う JDK
 JAVA_HOME=$JAVA_HOME_DIR
 ENV

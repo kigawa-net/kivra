@@ -58,6 +58,9 @@ enum class WaitReason {
 
     /** UNKNOWN: an operator must resolve the run. The runner never retries an unknown outcome on its own. */
     AWAITING_OPERATOR,
+
+    /** CLI runtime: the coding attempt is queued or running on the local agent. The Run stays DEVELOPING; the next call looks again. */
+    AWAITING_CODING_AGENT,
 }
 
 enum class SkipReason {

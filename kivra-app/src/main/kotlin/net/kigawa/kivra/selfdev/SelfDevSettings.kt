@@ -103,6 +103,8 @@ class SelfDevSettings private constructor(
         const val ENV_PR_REVIEW_TIMEOUT_DAYS = "KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS"
         const val ENV_ADVANCE_INTERVAL_SECONDS = "KIVRA_SELFDEV_ADVANCE_INTERVAL_SECONDS"
         const val ENV_MAX_ACTIVE_RUNS = "KIVRA_SELFDEV_MAX_ACTIVE_RUNS"
+        /** `api` (default) or `cli`. Read only when enabled. See [runtime]. */
+        const val ENV_RUNTIME = "KIVRA_SELFDEV_RUNTIME"
 
         const val DEFAULT_TARGET_REPO = "kigawa-net/kivra"
         const val DEFAULT_BASE_BRANCH = "main"
@@ -161,6 +163,7 @@ class SelfDevSettings private constructor(
 
             val config = SelfDevConfig(
                 enabled = true,
+                runtime = runtime(env),
                 repo = repo,
                 baseBranch = baseBranch,
                 prReviewTimeout = Duration.ofDays(timeoutDays),
@@ -180,6 +183,20 @@ class SelfDevSettings private constructor(
                 fx = fx,
             )
         }
+
+        /**
+         * `KIVRA_SELFDEV_RUNTIME`: `api` (the default, the single model call) or `cli` (the local coding agent, ADR 0010).
+         * `cli` is refused at startup: the agent API that would claim its attempts (PR 4a) is not wired, so a `cli` deployment would
+         * queue attempts that nothing ever claims. Refusing is the fail-closed choice; the runner itself also needs a coding source.
+         */
+        private fun runtime(env: Map<String, String>): SelfDevRuntime =
+            when (val raw = env[ENV_RUNTIME]?.trim()?.takeIf { it.isNotEmpty() } ?: "api") {
+                "api" -> SelfDevRuntime.API
+                "cli" -> throw IllegalStateException(
+                    "$ENV_RUNTIME=cli is not available: the coding agent API is not wired yet (ADR 0010, PR 4a). Use api.",
+                )
+                else -> throw IllegalStateException("$ENV_RUNTIME must be api or cli")
+            }
 
         private fun githubAuth(env: Map<String, String>): GitHubAuth {
             val pat = env[ENV_GITHUB_TOKEN]?.trim()?.takeIf { it.isNotEmpty() }

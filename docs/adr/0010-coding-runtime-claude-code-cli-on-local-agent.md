@@ -113,3 +113,7 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
 ## 実装状況
 
 - 未着手。本 ADR の承認後、設計案 `design-coding-runtime.md` の §9 の順で、小さな PR に分けて進める。
+
+## 追補(2026-10-17)
+
+1. **CLI 経路は UNSEEN_OVERWRITE を適用しない。** エージェントはベースのリポジトリ全体を扱うため、LLM の文脈(README と docs)の外のファイルも「見た」扱いにする。ADR 0008 の UNSEEN_OVERWRITE は LLM の限られた文脈のための規則で、CLI 経路には当てはめない。最終関門は結果受信時の PatchPolicy(許可・拒否パス、サイズ、秘密らしい内容、symlink などの形)で、これは緩めていない。担保する既存テスト: `CodingRuntimeServiceTest` の「shape checks or the PatchPolicy refuse」(秘密らしい内容、拒否パス、許可外パス、サイズ超過、symlink、submodule、実行ビット、バイナリ、件数超過、形の不正、終了コード、空の要約を拒否)、`SelfDevCodingRuntimeTest` の「refuses against the base snapshot」(縮小と欠けた削除をベースのスナップショットで拒否)。

@@ -78,6 +78,8 @@ sealed interface EnqueueResult {
     data class Enqueued(val attempt: CodingAttempt) : EnqueueResult
     /** The Run already has an active attempt; it is returned and nothing is created. */
     data class Existing(val attempt: CodingAttempt) : EnqueueResult
+    /** The Run has no active attempt but already has a terminal one, and the caller asked not to queue again. Nothing is created. */
+    data class Settled(val latest: CodingAttempt) : EnqueueResult
     /** No development_runs row with this run id. */
     data object RunNotFound : EnqueueResult
 }
@@ -126,7 +128,7 @@ class CodingAttemptRepository(
      * attempt is returned. The Run row is locked (FOR UPDATE) for the duration, so two enqueues for one Run are serialized and
      * attempt_no is allocated without a gap race.
      */
-    fun enqueue(runId: String, baseSha: String, queueTtl: Duration): EnqueueResult {
+    fun enqueue(runId: String, baseSha: String, queueTtl: Duration, allowAfterSettled: Boolean = true): EnqueueResult {
         require(BASE_SHA.matches(baseSha)) { "base_sha must be a lowercase hex commit id" }
         require(!queueTtl.isNegative && !queueTtl.isZero) { "queue ttl must be positive" }
         return transaction(database) {
@@ -137,6 +139,9 @@ class CodingAttemptRepository(
             if (locked == null) return@transaction EnqueueResult.RunNotFound
 
             activeIn(this, runId)?.let { return@transaction EnqueueResult.Existing(it) }
+            // With allowAfterSettled = false, a Run whose attempts all ended is not queued again (no retry loop). Checked under the
+            // Run row lock, so it cannot race with another enqueue for the same Run.
+            if (!allowAfterSettled) latestIn(this, runId)?.let { return@transaction EnqueueResult.Settled(it) }
 
             val nextNo = execQuery("SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM coding_attempts WHERE run_id = ?", runId) { it.getInt(1) }.single()
             val attemptId = Ulid.generate(clock)
@@ -201,8 +206,12 @@ class CodingAttemptRepository(
         }
     }
 
-    /** Extends the lease of the current generation for [leaseTtl]. Accepted in CLAIMED or RUNNING only. */
-    fun heartbeat(attemptId: String, generation: Long, leaseTtl: Duration): CodingAttemptResult {
+    /**
+     * Extends the lease of the current generation for [leaseTtl]. Accepted in CLAIMED or RUNNING only. [progressPayload] is an
+     * optional small fixed-field JSON for a PROGRESS event. Heartbeats normally write no event; a progress event is written only
+     * while the attempt has fewer than [MAX_PROGRESS_EVENTS] of them, so a chatty agent cannot grow the table without limit.
+     */
+    fun heartbeat(attemptId: String, generation: Long, leaseTtl: Duration, progressPayload: String? = null): CodingAttemptResult {
         require(!leaseTtl.isNegative && !leaseTtl.isZero) { "lease ttl must be positive" }
         return transaction(database) {
             val now = utcNow(clock)
@@ -215,7 +224,59 @@ class CodingAttemptRepository(
                 leaseTtl.seconds, now, attemptId, generation,
             )
             if (updated != 1) return@transaction CodingAttemptResult.Refused(classify(this, attemptId, claiming = false, generation = generation))
+            if (progressPayload != null) {
+                val written = execQuery("SELECT COUNT(*) FROM coding_events WHERE attempt_id = ? AND type = 'PROGRESS'", attemptId) { it.getLong(1) }.single()
+                if (written < MAX_PROGRESS_EVENTS) appendEvent(this, attemptId, "PROGRESS", now, progressPayload)
+            }
             CodingAttemptResult.Ok(getIn(this, attemptId) ?: error("coding attempt vanished after heartbeat"))
+        }
+    }
+
+    /**
+     * QUEUED -> CANCELLED: the attempt was never claimed, so nothing runs. A CLAIMED or RUNNING attempt is not touched here (its holder
+     * learns of the cancel another way). Refused with NOT_ACTIVE for any other state.
+     */
+    fun cancelQueued(attemptId: String): CodingAttemptResult = transaction(database) {
+        val now = utcNow(clock)
+        val updated = execUpdate(
+            "UPDATE coding_attempts SET state = 'CANCELLED', error_code = 'CANCELLED', version = version + 1, updated_at = ? " +
+                "WHERE attempt_id = ? AND state = 'QUEUED'",
+            now, attemptId,
+        )
+        if (updated != 1) return@transaction CodingAttemptResult.Refused(classify(this, attemptId, claiming = false))
+        appendEvent(this, attemptId, "CANCELLED", now)
+        CodingAttemptResult.Ok(getIn(this, attemptId) ?: error("coding attempt vanished after cancel"))
+    }
+
+    /** Ids of QUEUED attempts whose queue has not expired, oldest first. A hint only: [claim] is the CAS that decides. */
+    fun listClaimable(limit: Int): List<String> {
+        require(limit > 0) { "limit must be positive" }
+        return transaction(database) {
+            execQuery(
+                "SELECT attempt_id FROM coding_attempts WHERE state = 'QUEUED' AND queued_expires_at > ${DbTime.NOW} " +
+                    "ORDER BY created_at, attempt_id LIMIT ?",
+                limit,
+            ) { it.getString(1) }
+        }
+    }
+
+    /** The attempt with the highest attempt_no of [runId] (active or terminal), or null. */
+    fun latestAttempt(runId: String): CodingAttempt? = transaction(database) { latestIn(this, runId) }
+
+    /**
+     * ORPHANED or EXPIRED attempts whose Run is still DEVELOPING: the ones reconcile has to settle. Oldest first, at most [limit]. The
+     * join keeps attempts of Runs that were already settled from using up the limit.
+     */
+    fun unsettledOfDevelopingRuns(limit: Int): List<CodingAttempt> {
+        require(limit > 0) { "limit must be positive" }
+        return transaction(database) {
+            val ids = execQuery(
+                "SELECT a.attempt_id FROM coding_attempts a JOIN development_runs r ON r.run_id = a.run_id " +
+                    "WHERE a.state IN ('ORPHANED', 'EXPIRED') AND r.state = 'DEVELOPING' " +
+                    "ORDER BY a.updated_at, a.attempt_id LIMIT ?",
+                limit,
+            ) { it.getString(1) }
+            ids.mapNotNull { getIn(this, it) }
         }
     }
 
@@ -356,6 +417,15 @@ class CodingAttemptRepository(
             ?.toAttempt()
     }
 
+    private fun latestIn(tx: Transaction, runId: String): CodingAttempt? = with(tx) {
+        CodingAttemptsTable.selectAll()
+            .where { CodingAttemptsTable.runId eq runId }
+            .orderBy(CodingAttemptsTable.attemptNo to SortOrder.DESC)
+            .limit(1)
+            .firstOrNull()
+            ?.toAttempt()
+    }
+
     private fun getIn(tx: Transaction, attemptId: String): CodingAttempt? = with(tx) {
         CodingAttemptsTable.selectAll().where { CodingAttemptsTable.attemptId eq attemptId }.firstOrNull()?.toAttempt()
     }
@@ -391,6 +461,7 @@ class CodingAttemptRepository(
     companion object {
         const val DEFAULT_EXPIRE_LIMIT = 100
         const val MAX_PAYLOAD_CHARS = 512
+        const val MAX_PROGRESS_EVENTS = 100L
         private val ACTIVE_STATES = listOf("QUEUED", "CLAIMED", "RUNNING")
         private val BASE_SHA = Regex("^[0-9a-f]{40}([0-9a-f]{24})?$")
         private val SHA256_HEX = Regex("^[0-9a-f]{64}$")

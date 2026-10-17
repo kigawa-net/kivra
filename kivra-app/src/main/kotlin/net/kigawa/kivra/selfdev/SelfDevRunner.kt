@@ -74,6 +74,11 @@ import org.slf4j.LoggerFactory
  * and the lease is renewed before each GitHub write); [PatchPolicy] again on the runner side (the Developer is not trusted); the
  * UNSEEN_OVERWRITE check (the snapshot knows which files the LLM saw); and fixed reason codes only.
  *
+ * CLI runtime (ADR 0010, `KIVRA_SELFDEV_RUNTIME=cli`): the DEVELOPING step takes its change set from a coding attempt instead of the
+ * model ([CodingPatchSource]). A pending attempt waits ([WaitReason.AWAITING_CODING_AGENT]). A ready one goes through the same PatchPolicy
+ * (here with the base snapshot), PATCH_READY and the commit path. The "not stored" limit above is the API path's; a CLI resume reads the
+ * stored result. The CLI path is not wired in production yet (SelfDevSettings refuses it).
+ *
  * Logging and results: the only log line is the WARN for a rejected patch, with its fixed reason names and a count. Results and reason
  * codes never contain task text, model output, patch content, tokens or paths. Errors from the store and the lease are mapped to
  * [AdvanceResult] codes, not passed on.
@@ -88,7 +93,16 @@ class SelfDevRunner(
     private val taskTexts: TaskTextSource,
     private val clock: Clock = Clock.systemUTC(),
     private val policy: PatchPolicy = PatchPolicy(),
+    /**
+     * The change-set source of the CLI runtime (ADR 0010). Required when [SelfDevConfig.runtime] is CLI, unused for API. The runner refuses
+     * CLI without it, so a missing wiring cannot fall back to anything else.
+     */
+    private val coding: CodingPatchSource? = null,
 ) {
+    init {
+        require(config.runtime == SelfDevRuntime.API || coding != null) { "the CLI runtime needs a coding patch source" }
+    }
+
     /** Advances [runId] by one call (see the class KDoc). Never throws for a provider or lease condition. */
     suspend fun advance(runId: RunId): AdvanceResult {
         if (!config.enabled) return Skipped(SkipReason.DISABLED)
@@ -171,6 +185,7 @@ class SelfDevRunner(
      * where a refusal or unknown outcome becomes UNKNOWN instead of FAILED: the run had already promised a proposal.
      */
     private suspend fun propose(lease: Lease, run: DevelopmentRun, base: BranchInfo, resuming: Boolean): Step<PatchSet> {
+        if (config.runtime == SelfDevRuntime.CLI) return proposeFromAgent(lease, run, base)
         val task = taskTexts.taskText(run) ?: return Step.Done(Failed(FailureCode.TASK_TEXT_UNAVAILABLE))
         val view = when (val s = loadView(base.headSha, TitlePaths.extract("${task.title}\n${task.description}"))) {
             is Step.Go -> s.value
@@ -199,6 +214,34 @@ class SelfDevRunner(
 
             is DeveloperResult.Unknown ->
                 Step.Done(persistAdvance(lease, run, DevelopmentRunState.UNKNOWN, "$DEVELOPER_PREFIX${result.reason.name}"))
+        }
+    }
+
+    /**
+     * CLI runtime (ADR 0010): the change set comes from a coding attempt instead of the model. It is checked exactly like an API proposal,
+     * with the same PatchPolicy and the base snapshot. The snapshot marks every file of the base as seen: the agent works on the whole
+     * tree at the base commit, so UNSEEN_OVERWRITE (which guards the LLM's limited context) does not apply to it.
+     */
+    private suspend fun proposeFromAgent(lease: Lease, run: DevelopmentRun, base: BranchInfo): Step<PatchSet> {
+        val source = checkNotNull(coding) { "the CLI runtime has no coding patch source" }
+        val entries = when (val r = repoReader.listFiles(config.repo, base.headSha)) {
+            is GitHubResult.Success -> r.value
+            else -> return Step.Done(Failed(FailureCode.GITHUB_READ_FAILED))
+        }
+        val snapshot = SelfDevSnapshot(
+            sizes = entries.associate { it.path to it.sizeBytes },
+            inContext = entries.mapTo(HashSet()) { it.path },
+        )
+        return when (val proposal = source.proposal(run, base.headSha)) {
+            is CodingProposal.Pending -> Step.Done(Waiting(WaitReason.AWAITING_CODING_AGENT))
+            is CodingProposal.Failed -> Step.Done(persistAdvance(lease, run, proposal.to, proposal.reasonCode))
+            is CodingProposal.Ready -> when (val verdict = policy.validate(proposal.patch, snapshot)) {
+                is PatchVerdict.Accepted -> Step.Go(verdict.patch)
+                is PatchVerdict.Rejected -> {
+                    logPatchRejected(run.runId.value, verdict.reasons)
+                    Step.Done(persistAdvance(lease, run, DevelopmentRunState.FAILED, POLICY_REJECTED))
+                }
+            }
         }
     }
 

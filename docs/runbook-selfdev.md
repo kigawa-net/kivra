@@ -42,11 +42,20 @@
 | `KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS` | `7` | PR が開いたまま、最終更新からこの日数を過ぎると Run を中止する |
 | `KIVRA_SELFDEV_ADVANCE_INTERVAL_SECONDS` | `30`(最小 10) | ワーカーの周期 |
 | `KIVRA_SELFDEV_MAX_ACTIVE_RUNS` | `1` | 同時に進行する自己開発 Run の上限 |
+| `KIVRA_SELFDEV_RUNTIME` | `api` | コーディングの実行方式。`api` は従来の 1 回の LLM 呼び出し。`cli` はローカル PC のエージェント方式(ADR 0010)。**`cli` は起動時に拒否される**(下記) |
 | `KIVRA_FX_MARGIN_RATIO` | `0.10` | 為替の余裕 |
 | `KIVRA_FX_MAX_AGE_DAYS` | `7` | レートの最大の古さ |
 | `KIVRA_BUDGET_TENANT_ID` | `default` | 予算のテナント |
 | `KIVRA_BUDGET_MONTHLY_LIMIT_JPY` | `10000` | 月の上限(円)。ADR 0008 の記載どおり |
 | `KIVRA_BUDGET_SOFT_RATIO` | `0.8` | 警告の比率 |
+
+### 1.2.1 `KIVRA_SELFDEV_RUNTIME`(`api` / `cli`)
+
+- 既定は `api`(従来どおり。LLM が 1 回で PatchSet を返す。動作は変わらない)。空や `api` の前後の空白も `api` と同じ。それ以外の値は起動失敗(値は出さず、変数名だけを出す)。
+- `cli` は、ローカル PC の常駐エージェント(kivra-agent)が Claude Code CLI で実行する方式(ADR 0010、設計案 PR 3)。**今は起動を拒否する**。エージェントが attempt を取りに来る API(`/api/agent/*`、PR 4a)がまだ無く、キューに積んだ attempt を誰も取らないため。拒否は fail-closed の意図どおり。`cli` を設定しても、この版では自己開発は起動しない。
+- この変数は、自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)のときだけ読まれる。無効のときは読まれず、拒否もされない。
+- 本番の既定を変えるのは、PR 4a と Keycloak / ingress の作業が終わり、エージェントの動作確認が済んでから。それまで `api` のままにする。
+- `cli` の場合の中身(設計、状態遷移、結果の検査、reconcile の方針)は `docs/design/15-coding-attempts.md` の §6 を参照。
 
 ### 1.3 有効化の前提のうち、コードでは強制していないもの(方針)
 

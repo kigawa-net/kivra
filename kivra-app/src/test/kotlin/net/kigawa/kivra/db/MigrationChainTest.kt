@@ -37,10 +37,11 @@ internal val MIGRATION_FILES = mapOf(
     11 to "V11__task_bindings.sql",
     12 to "V12__budget_acknowledgements.sql",
     13 to "V13__request_ledger.sql",
+    14 to "V14__coding_attempts.sql",
 )
 
 /**
- * Migration chain V1 -> V2 -> ... -> V13 (Issue #88, #94, #53, #100, #112, #26). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
+ * Migration chain V1 -> V2 -> ... -> V14 (Issue #88, #94, #53, #100, #112, #26, #56). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
  *
  * Partial histories are built from copies of the real migration files in a temporary directory. Nothing here repairs,
  * skips or baselines a history: a mismatch must fail.
@@ -48,10 +49,10 @@ internal val MIGRATION_FILES = mapOf(
 class MigrationChainTest {
 
     @Test
-    fun `empty database applies V1 to V13 in order and flyway validate passes`() = TestDb().use { db ->
+    fun `empty database applies V1 to V14 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
-        assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"), appliedVersions(db.dataSource))
+        assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"), appliedVersions(db.dataSource))
         assertTrue(flyway.info().all().all { it.state == MigrationState.SUCCESS })
         assertEquals(1, db.tableCount("approvals"))
         assertEquals(1, db.tableCount("budget_periods"))
@@ -78,7 +79,7 @@ class MigrationChainTest {
             // The later migrations are applied on top of the existing history, in order.
             runMigrations(db.dataSource)
             classpathFlyway(db.dataSource).validate()
-            assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"), appliedVersions(db.dataSource))
+            assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"), appliedVersions(db.dataSource))
 
             // The row is kept as written: no backfill, no guessed binding.
             assertEquals(before, db.snapshot(opId))

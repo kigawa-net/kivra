@@ -222,7 +222,7 @@ Run の `task_id` は `api:<runId>`（fusha-task のタスクとは紐づかな�
 - **有効化**: Task API と同じく `KIVRA_AUTH_MODE` が設定されているときだけ登録する。未設定なら `/ui` は 404。
 - **認証**: HTML 自体には秘密が無いので `/ui` には認証を掛けていない。画面が呼ぶ `/api/*` は Task API の認証（本番は oauth2-proxy が付ける Keycloak の JWT を kivra が検証）で保護される。画面の JS は `Authorization` を付けない。
 - **種別**: 一覧と詳細には、シミュレーションの Run（`mode: SIMULATED`）と自己開発の Run（`mode: SELF_DEV`、GitHub に PR を作成する）の両方を出し、種別のバッジで区別する。自己開発の Run のタイトルは表示しない。「実行中」「成功」のような実行されたと誤認させる表現は使わない。
-- **運用者の表示**: 「全員の Run」で、ロールを持つ運用者は全員の Run を見られる（`GET /api/admin/runs`）。自己開発の有効・無効（`GET /api/selfdev/status`）に応じた注意書きと、理由コードの説明を出す。詳細は `docs/runbook-selfdev.md` の 4.5。
+- **運用者の表示**: 「全員の Run」で、ロールを持つ運用者は全員の Run を見られる（`GET /api/admin/runs`）。自己開発の有効・無効（`GET /api/selfdev/status`）に応じた注意書きと、理由コードの説明を出す。詳細は `docs/runbook-selfdev.md` の 4.7。
 - **CSP**: `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`。インラインの script と style は使わない（別ファイル）。あわせて `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`。
 - **XSS 対策**: サーバーからのデータ（title など）は `textContent` だけで DOM に入れる。`innerHTML` などの HTML 文字列を解釈する API、`eval`、`new Function` は使わない（テストで静的に検査している）。
 - **外部依存なし**: CDN やフォント等の外部 URL は使わない（テストで検査している）。

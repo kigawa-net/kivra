@@ -40,8 +40,8 @@ import net.kigawa.kivra.selfdev.FakeGitHub
 import org.slf4j.LoggerFactory
 
 /**
- * The CSRF guard ([requireJsonSameOrigin]) on the four state-changing POST routes (`/api/tasks`, `/api/selfdev/tasks`,
- * `/api/admin/selfdev/runs/{id}/release`, `/api/admin/budget/acknowledge`). A refused request must be refused before the handler
+ * The CSRF guard ([requireJsonSameOrigin]) on the five state-changing POST routes (`/api/tasks`, `/api/selfdev/tasks`,
+ * `/api/admin/selfdev/runs/{id}/release`, `/api/admin/selfdev/runs/{id}/release-unbound-pr`, `/api/admin/budget/acknowledge`). A refused request must be refused before the handler
  * runs, must change no state, must answer with fixed text, and must not log or echo the refused header values.
  */
 private const val KIVRA_HOST = "kivra.example.net"
@@ -72,6 +72,7 @@ class RequestGuardsTest {
         TASKS("/api/tasks", HttpStatusCode.Accepted),
         SELFDEV_TASKS("/api/selfdev/tasks", HttpStatusCode.Accepted),
         RELEASE("/api/admin/selfdev/runs/01ARZ3NDEKTSV4RRFFQ69G5FAV/release", HttpStatusCode.NotFound),
+        RELEASE_UNBOUND_PR("/api/admin/selfdev/runs/01ARZ3NDEKTSV4RRFFQ69G5FAV/release-unbound-pr", HttpStatusCode.NotFound),
         BUDGET("/api/admin/budget/acknowledge", HttpStatusCode.NotFound),
     }
 
@@ -80,7 +81,7 @@ class RequestGuardsTest {
     /** A fresh idempotency key per call, so a second accepted submit is not a replay (200). */
     private fun body(endpoint: Endpoint): String = when (endpoint) {
         Endpoint.TASKS, Endpoint.SELFDEV_TASKS -> """{"title":"README を直す","idempotencyKey":"csrf-key-${keySeq.incrementAndGet()}"}"""
-        Endpoint.RELEASE -> """{"reason":"csrf"}"""
+        Endpoint.RELEASE, Endpoint.RELEASE_UNBOUND_PR -> """{"reason":"csrf"}"""
         Endpoint.BUDGET ->
             """{"scopeId":"tenant","period":"2026-10","reservationKey":"csrf-missing","actualAmountJpy":"0","evidence":"e","reason":"r"}"""
     }

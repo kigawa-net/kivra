@@ -94,6 +94,27 @@ sealed interface ReleaseResult {
 /** Fixed state reason of a run released by an operator (ADR 0009). The free-text reason goes only to the audit payload. */
 const val OPERATOR_RELEASED_REASON = "OPERATOR_RELEASED"
 
+/**
+ * Fixed state reason of a PULL_REQUEST self-development run without a binding, released by an operator (ADR 0009 addendum).
+ * The free-text reason goes only to the audit payload.
+ */
+const val OPERATOR_RELEASED_UNBOUND_PR_REASON = "OPERATOR_RELEASED_UNBOUND_PR"
+
+/** Result of [DevelopmentRunRepository.releaseUnboundPullRequestSelfDev]. */
+sealed interface UnboundPrReleaseResult {
+    /** The run was an unbound PULL_REQUEST and is now CANCELLED. */
+    data class Released(val run: DevelopmentRun) : UnboundPrReleaseResult
+
+    /** No self-development run with that id. A run of another kind is reported the same way. */
+    data object NotFound : UnboundPrReleaseResult
+
+    /**
+     * The run is not in PULL_REQUEST, or it is in PULL_REQUEST with a binding (it completes by itself when the pull request is
+     * merged). Nothing is written.
+     */
+    data object NotEligible : UnboundPrReleaseResult
+}
+
 /** One audit event of a run, as the run's own views may show it (see [DevelopmentRunRepository.auditTrail]). */
 data class AuditTrailEntry(
     val seq: Long,
@@ -675,6 +696,59 @@ class DevelopmentRunRepository(
         // Read in this transaction: a nested transaction would not see the update above.
         val released = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.single().toDevelopmentRunOrNull()
         ReleaseResult.Released(checkNotNull(released) { "released run $runId has an unknown state" })
+    }
+
+    /**
+     * Operator release of a self-development run that waits in PULL_REQUEST with no pull request binding (ADR 0009 addendum):
+     * PULL_REQUEST -> CANCELLED, only when the binding is absent. Such a run was opened before the binding was recorded, so it
+     * could never complete on merge (BINDING_MISSING). A run with a binding is NotEligible: it completes by itself on merge.
+     * This path is separate from [transition] and from [releaseUnknownSelfDev]; the generic transition table is unchanged.
+     *
+     * The row is locked, so a concurrent bind cannot slip in between the binding check and the update. The update is guarded on
+     * state and version. The run row, its RUN_RELEASED audit event (the reason only in its payload) and its RunStateChanged outbox
+     * event are written in one transaction, or not at all. Nothing is written to GitHub: the pull request stays open and unmerged.
+     */
+    fun releaseUnboundPullRequestSelfDev(runId: RunId, operator: String, reason: String): UnboundPrReleaseResult = transaction(database) {
+        val row = lockRun(runId)
+        if (row == null || !row[DevelopmentRunsTable.taskId].startsWith(SELF_DEV_TASK_PREFIX)) return@transaction UnboundPrReleaseResult.NotFound
+        val from = DevelopmentRunState.fromStorage(row[DevelopmentRunsTable.state])
+        if (from != DevelopmentRunState.PULL_REQUEST || row.toPullRequestBindingOrNull() != null) {
+            return@transaction UnboundPrReleaseResult.NotEligible
+        }
+        val version = row[DevelopmentRunsTable.version]
+        val taskId = row[DevelopmentRunsTable.taskId]
+        val traceId = row[DevelopmentRunsTable.traceId]
+        val updated = execUpdate(
+            """
+            UPDATE development_runs
+               SET state = ?, state_reason = ?, version = version + 1, updated_at = ?
+             WHERE run_id = ? AND version = ? AND state = ?
+            """.trimIndent(),
+            DevelopmentRunState.CANCELLED.name, OPERATOR_RELEASED_UNBOUND_PR_REASON, utcNow(clock), runId.value, version,
+            DevelopmentRunState.PULL_REQUEST.name,
+        )
+        if (updated != 1) throw VersionConflictException("run $runId changed concurrently")
+        audit.append(
+            this, runId,
+            AuditEntry(
+                actor = operator, action = "RUN_RELEASED", result = "OK", resource = "task:$taskId", traceId = traceId,
+                payload = buildJsonObject {
+                    put("taskId", taskId)
+                    put("from", DevelopmentRunState.PULL_REQUEST.name)
+                    put("to", DevelopmentRunState.CANCELLED.name)
+                    put("reasonCode", OPERATOR_RELEASED_UNBOUND_PR_REASON)
+                    put("reason", reason)
+                }.toString(),
+            ),
+        )
+        outbox.append(
+            this, runId, version + 1, "RunStateChanged",
+            transitionPayload(taskId, DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.CANCELLED, OPERATOR_RELEASED_UNBOUND_PR_REASON),
+            traceId,
+        )
+        // Read in this transaction: a nested transaction would not see the update above.
+        val released = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.single().toDevelopmentRunOrNull()
+        UnboundPrReleaseResult.Released(checkNotNull(released) { "released run $runId has an unknown state" })
     }
 
     private fun lockRun(runId: RunId): ResultRow? =

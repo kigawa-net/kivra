@@ -18,10 +18,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import net.kigawa.kivra.agent.claude.ReportedUsage
 import net.kigawa.kivra.agent.workdir.AgentChangeKind
 import net.kigawa.kivra.agent.workdir.AgentResult
 
@@ -108,10 +110,12 @@ class KivraAgentClient(
         return parseState(reply.body)
     }
 
-    suspend fun fail(attemptId: String, generation: Long, code: AgentErrorCode): String {
+    /** Reports a failure. [usage] is sent only when the CLI ran and gave a result; null leaves the body as it was before usage existed. */
+    suspend fun fail(attemptId: String, generation: Long, code: AgentErrorCode, usage: ReportedUsage? = null): String {
         val body = buildJsonObject {
             put("generation", generation)
             put("errorCode", code.name)
+            if (usage != null) put("usage", usage.toJson())
         }.toString()
         val reply = send(HttpMethod.Post, attemptPath(attemptId, "fail"), body)
         requireSuccess(reply.status)
@@ -122,7 +126,7 @@ class KivraAgentClient(
      * Sends the result of an attempt. A 422 (kivra refused the change set) is [ResultReply.Rejected]; the reasons it carries are not read.
      * A 409 or 404 is thrown as [AgentApiException], and the caller must then discard the result.
      */
-    suspend fun submitResult(attemptId: String, generation: Long, result: AgentResult): ResultReply {
+    suspend fun submitResult(attemptId: String, generation: Long, result: AgentResult, usage: ReportedUsage? = null): ResultReply {
         val body = buildJsonObject {
             put("generation", generation)
             putJsonObject("result") {
@@ -142,6 +146,7 @@ class KivraAgentClient(
                     }
                 }
             }
+            if (usage != null) put("usage", usage.toJson())
         }.toString()
         val reply = send(HttpMethod.Post, attemptPath(attemptId, "result"), body)
         if (reply.status == 422) return ResultReply.Rejected
@@ -239,6 +244,17 @@ class KivraAgentClient(
     }
 
     private fun malformed(): Nothing = throw AgentApiException(AgentApiErrorKind.MALFORMED_RESPONSE)
+
+    /** The `usage` object of the result and fail bodies. Numbers and the model name only (runbook-selfdev section 6.10c). */
+    private fun ReportedUsage.toJson(): JsonObject = buildJsonObject {
+        put("totalCostUsd", totalCostUsd)
+        put("model", model)
+        put("numTurns", numTurns)
+        put("inputTokens", inputTokens)
+        put("outputTokens", outputTokens)
+        put("cacheCreationTokens", cacheCreationTokens)
+        put("cacheReadTokens", cacheReadTokens)
+    }
 
     private companion object {
         val JSON = Json { ignoreUnknownKeys = true }

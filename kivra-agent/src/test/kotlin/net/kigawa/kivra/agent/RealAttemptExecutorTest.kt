@@ -17,7 +17,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
@@ -503,6 +505,98 @@ class RealAttemptExecutorTest {
                     repo = LocalPath(root),
                 ),
             )
+        }
+    }
+
+    /** The `usage` the CLI's final result gives for the cost fields; [model] is the modelUsage key. */
+    private fun usageLine(
+        cost: String = "0.004268",
+        subtype: String = "success",
+        isError: Boolean = false,
+        model: String = "claude-haiku-5-5",
+    ): String = """{"type":"result","subtype":"$subtype","is_error":$isError,"num_turns":3,"result":"$SUMMARY",""" +
+        """"session_id":"sess-42","total_cost_usd":$cost,"usage":{"input_tokens":120,"output_tokens":45,""" +
+        """"cache_creation_input_tokens":10,"cache_read_input_tokens":300},""" +
+        """"modelUsage":{"$model":{"costUSD":0.004268,"inputTokens":120}}}"""
+
+    private val usageObject = """"usage":{"totalCostUsd":"0.004268","model":"claude-haiku-5-5","numTurns":3,""" +
+        """"inputTokens":120,"outputTokens":45,"cacheCreationTokens":10,"cacheReadTokens":300}"""
+
+    /** Runs the loop until kivra gets a fail, and returns that fail's body. */
+    private suspend fun failBodyFromLoop(world: World): String = coroutineScope {
+        val config = AgentConfig.fromEnv(testConfigEnv(world.root, world.root.resolve("secret").writeSecret("s"), poll = 1_000))
+        val job = launch { AgentLoop(config, world.client, world.executor()).run() }
+        withTimeout(30_000) { while (world.paths("/fail") == 0) delay(20) }
+        job.cancelAndJoin()
+        world.recorded.single { it.path.endsWith("/fail") }.body
+    }
+
+    @Test
+    fun successSendsTheUsageWithTheResult() = runBlocking {
+        val world = World(docker = ScriptedDocker(
+            output = { lines(usageLine()) },
+            onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") },
+        ))
+        assertEquals(AttemptOutcome.ResultSubmitted, world.executor().execute(world.attempt()))
+        val body = world.recorded.single { it.path.endsWith("/result") }.body
+        assertTrue(body.endsWith("}," + usageObject + "}"), body)
+    }
+
+    @Test
+    fun aFailureAfterAResultCarriesTheUsage() = runBlocking {
+        val emptyPatch = World(docker = ScriptedDocker(output = { lines(usageLine()) }))
+        assertEquals(AgentErrorCode.CLI_NONZERO, assertIs<AttemptOutcome.Failed>(emptyPatch.executor().execute(emptyPatch.attempt())).code)
+        assertEquals("""{"generation":3,"errorCode":"CLI_NONZERO",$usageObject}""", failBodyFromLoop(emptyPatch))
+
+        val budget = World(docker = ScriptedDocker(output = { lines(usageLine(subtype = "error_max_budget_usd", isError = true)) }, exitCode = 1))
+        assertEquals(
+            """{"generation":3,"errorCode":"CLI_NONZERO",$usageObject}""",
+            failBodyFromLoop(budget),
+            "the budget stop reports the cost too",
+        )
+
+        val turns = World(docker = ScriptedDocker(output = { lines(usageLine(subtype = "error_max_turns", isError = true)) }, exitCode = 1))
+        assertEquals("""{"generation":3,"errorCode":"CLI_NONZERO",$usageObject}""", failBodyFromLoop(turns))
+
+        val rejected = World(
+            docker = ScriptedDocker(output = { lines(usageLine()) }, onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") }),
+            handler = { rec -> if (rec.path.endsWith("/result")) Canned(422, "{}") else World.defaultReply(rec) },
+        )
+        assertEquals(AgentErrorCode.BAD_OUTPUT, assertIs<AttemptOutcome.Failed>(rejected.executor().execute(rejected.attempt())).code)
+        assertEquals("""{"generation":3,"errorCode":"BAD_OUTPUT",$usageObject}""", failBodyFromLoop(rejected))
+    }
+
+    @Test
+    fun noResultOrMalformedUsageSendsNoUsage() = runBlocking {
+        val noResult = World(docker = ScriptedDocker(output = { "" }, exitCode = 1))
+        assertEquals("""{"generation":3,"errorCode":"CLI_NONZERO"}""", failBodyFromLoop(noResult))
+
+        val negativeCost = World(docker = ScriptedDocker(output = { lines(usageLine(cost = "-1")) }, exitCode = 1))
+        assertEquals("""{"generation":3,"errorCode":"CLI_NONZERO"}""", failBodyFromLoop(negativeCost), "a malformed value drops the whole usage")
+
+        val badModel = World(docker = ScriptedDocker(output = { lines(usageLine(model = "Not A Model")) }, exitCode = 1))
+        assertEquals("""{"generation":3,"errorCode":"CLI_NONZERO"}""", failBodyFromLoop(badModel))
+    }
+
+    @Test
+    fun usageIsSentButNeverLogged() = runBlocking {
+        val logger = LoggerFactory.getLogger("net.kigawa.kivra.agent") as Logger
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        val previousLevel = logger.level
+        logger.level = Level.DEBUG
+        logger.addAppender(appender)
+        try {
+            val world = World(docker = ScriptedDocker(output = { lines(usageLine(model = "claude-marker-9")) }))
+            val body = failBodyFromLoop(world)
+            assertTrue(body.contains("claude-marker-9"), "the model name goes to kivra in the body")
+            val text = appender.list.joinToString("\n") { it.formattedMessage }
+            // numTurns and totalCostUsd are logged already (CliResultLog), so only the usage body and the model name are checked here.
+            for (forbidden in listOf("claude-marker-9", SUMMARY, "usage", "cacheReadTokens")) {
+                assertFalse(text.contains(forbidden), "log must not contain: $forbidden")
+            }
+        } finally {
+            logger.detachAppender(appender)
+            logger.level = previousLevel
         }
     }
 }

@@ -9,12 +9,16 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import net.kigawa.kivra.agent.claude.ReportedUsage
 import org.slf4j.LoggerFactory
 
 /** What an executor leaves behind for the loop to report. */
 sealed interface AttemptOutcome {
-    /** The attempt failed with [code]. The loop reports it with `fail`. */
-    data class Failed(val code: AgentErrorCode) : AttemptOutcome
+    /**
+     * The attempt failed with [code]. The loop reports it with `fail`. [usage] is set only when the CLI ran and gave a result, so the
+     * cost can be booked; it is null otherwise.
+     */
+    data class Failed(val code: AgentErrorCode, val usage: ReportedUsage? = null) : AttemptOutcome
 
     /** The executor already sent the result (accepted by kivra). The loop must not send a `fail`. */
     data object ResultSubmitted : AttemptOutcome
@@ -116,7 +120,7 @@ class AgentLoop(
             throw e
         }
         when (outcome) {
-            is AttemptOutcome.Failed -> reportFail(attempt, outcome.code)
+            is AttemptOutcome.Failed -> reportFail(attempt, outcome.code, outcome.usage)
             AttemptOutcome.ResultSubmitted -> logger.info("attempt result submitted: runId={} attemptId={}", attempt.runId, attempt.attemptId)
         }
     }
@@ -158,9 +162,9 @@ class AgentLoop(
         }
     }
 
-    private suspend fun reportFail(attempt: ClaimedAttempt, code: AgentErrorCode) {
+    private suspend fun reportFail(attempt: ClaimedAttempt, code: AgentErrorCode, usage: ReportedUsage? = null) {
         try {
-            client.fail(attempt.attemptId, attempt.generation, code)
+            client.fail(attempt.attemptId, attempt.generation, code, usage)
             logger.info("attempt failed: runId={} attemptId={} code={}", attempt.runId, attempt.attemptId, code)
         } catch (e: AgentApiException) {
             logger.warn("fail not accepted: kind={} runId={} attemptId={}", e.kind, attempt.runId, attempt.attemptId)

@@ -218,4 +218,81 @@ class StreamJsonParserTest {
         assertFalse(report.result.toString().contains(secret))
         assertFalse(report.toString().contains(secret))
     }
+
+    private fun resultJson(
+        cost: String = "0.004268",
+        turns: String = "3",
+        usage: String = """{"input_tokens":120,"output_tokens":45,"cache_creation_input_tokens":10,"cache_read_input_tokens":300}""",
+        models: String? = """{"claude-haiku-5-5":{"costUSD":0.004268,"inputTokens":120}}""",
+    ): String {
+        val modelPart = if (models == null) "" else ""","modelUsage":$models"""
+        return """{"type":"result","subtype":"success","is_error":false,"num_turns":$turns,"result":"Done.",""" +
+            """"total_cost_usd":$cost,"usage":$usage$modelPart}"""
+    }
+
+    private fun reported(json: String): ReportedUsage? = parser.parse(stream(json)).result?.reportedUsage
+
+    @Test
+    fun reportedUsageIsBuiltFromTheFinalResult() {
+        val usage = assertNotNull(reported(resultJson()))
+        assertEquals("0.004268", usage.totalCostUsd)
+        assertEquals("claude-haiku-5-5", usage.model)
+        assertEquals(3, usage.numTurns)
+        assertEquals(120L, usage.inputTokens)
+        assertEquals(45L, usage.outputTokens)
+        assertEquals(10L, usage.cacheCreationTokens)
+        assertEquals(300L, usage.cacheReadTokens)
+    }
+
+    @Test
+    fun costIsRoundedToSixDecimalsAndKeptInZeroToOneHundred() {
+        assertEquals("0.000001", assertNotNull(reported(resultJson(cost = "0.0000005"))).totalCostUsd)
+        assertEquals("0.000000", assertNotNull(reported(resultJson(cost = "0.0000001"))).totalCostUsd)
+        assertEquals("100.000000", assertNotNull(reported(resultJson(cost = "100"))).totalCostUsd)
+        assertEquals("0.000000", assertNotNull(reported(resultJson(cost = "0"))).totalCostUsd)
+        assertNull(reported(resultJson(cost = "100.0000001")), "above 100 is refused, not clipped")
+        assertNull(reported(resultJson(cost = "-0.01")))
+        assertNull(reported(resultJson(cost = "\"0.004\"")), "a cost that is a JSON string is not a number")
+    }
+
+    @Test
+    fun aMissingOrMalformedPartMakesTheWholeUsageAbsent() {
+        val inputMissing = """{"output_tokens":45,"cache_creation_input_tokens":10,"cache_read_input_tokens":300}"""
+        val inputNegative = """{"input_tokens":-1,"output_tokens":45,"cache_creation_input_tokens":10,"cache_read_input_tokens":300}"""
+        val inputTooBig = """{"input_tokens":10000000001,"output_tokens":45,"cache_creation_input_tokens":10,"cache_read_input_tokens":300}"""
+        val inputFloat = """{"input_tokens":1.5,"output_tokens":45,"cache_creation_input_tokens":10,"cache_read_input_tokens":300}"""
+        for (usage in listOf(inputMissing, inputNegative, inputTooBig, inputFloat)) {
+            assertNull(reported(resultJson(usage = usage)), usage)
+        }
+        assertNull(reported(resultJson(turns = "1001")), "more than 1000 turns")
+        assertNull(reported(resultJson(turns = "-1")), "negative turns")
+        assertNull(reported(resultJson(models = null)), "no modelUsage")
+        assertNull(reported(resultJson(models = "{}")), "an empty modelUsage")
+        assertNull(reported(resultJson(models = """{"Claude-Haiku":{"costUSD":0.1}}""")), "a model name with capitals")
+        assertNull(
+            reported(resultJson(models = """{"claude-haiku-5-5":{"costUSD":0.1},"bad name":{"costUSD":0.2}}""")),
+            "one bad model name makes the usage absent",
+        )
+    }
+
+    @Test
+    fun theModelThatCostTheMostIsReported() {
+        val models = """{"claude-haiku-5-5":{"costUSD":0.001},"claude-opus-5-5":{"costUSD":0.003}}"""
+        assertEquals("claude-opus-5-5", assertNotNull(reported(resultJson(models = models))).model)
+        val tie = """{"claude-sonnet-5-5":{"costUSD":0.002},"claude-haiku-5-5":{"costUSD":0.002}}"""
+        assertEquals("claude-haiku-5-5", assertNotNull(reported(resultJson(models = tie))).model, "a tie goes to the smaller name")
+    }
+
+    @Test
+    fun noResultMeansNoReportedUsage() {
+        assertNull(parser.parse(stream(init, assistant)).result)
+        assertNull(reported("""{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":4}"""))
+    }
+
+    @Test
+    fun reportedUsageToStringShowsNoValue() {
+        val usage = assertNotNull(reported(resultJson()))
+        assertFalse(usage.toString().contains("0.004268"))
+        assertFalse(usage.toString().contains("haiku"))
+    }
 }

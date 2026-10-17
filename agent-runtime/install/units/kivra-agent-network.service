@@ -1,0 +1,17 @@
+# kivra-agent: work 用の内部ネットワーク(docker network create --internal)を作る。冪等。
+# 順序: docker.service(ルートレス)の後。kivra-agent-proxy.service と kivra-agent.service の前。
+[Unit]
+Description=kivra-agent: work 用ネットワーク(ルートレス docker)
+Documentation=file:///opt/kivra-agent/agent-runtime/README.md
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=DOCKER_HOST=unix://%t/docker.sock
+ExecStart=/opt/kivra-agent/agent-runtime/network/create-networks.sh
+
+[Install]
+WantedBy=default.target

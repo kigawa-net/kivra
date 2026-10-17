@@ -651,3 +651,92 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 - タスク文は title だけ(claim の入力に本文が無い)。
 - 実際の docker、`claude` CLI、`/etc/subuid` の所有権、作業ディレクトリの削除は、この PR では実機で確かめていない(§6.6、§6.7、§6.8 の未確認事項)。
 - 有効化: `KIVRA_AGENT_EXECUTOR=real` は既定で無効。実機の確認の後、別の PR で有効にする。
+
+### 6.11 ローカル PC へのインストールと常駐(PR 10)
+
+資材: `agent-runtime/install/`(スクリプトとユニット)。前提は ADR 0010 の決定 2・3。Ubuntu 26.04、専用ユーザー `kivra-agent`(uid 1001、sudo・docker グループなし、linger 有効、ルートレス docker)、client secret は `/etc/kivra-agent/client-secret`(配置済みの前提)。
+
+**実機で未確認**: この節の手順は、このリポジトリでは実行していない(sudo、systemctl、docker、ネットワークは使っていない)。スクリプトはテスト用ディレクトリへのドライラン、`bash -n`、`systemd-analyze verify`(パス不在のエラーだけ)で確かめただけである。以下の手順を実機で行い、結果を確認すること。
+
+**a. 配布物の作成(一般ユーザーで実行。sudo 不要)**
+
+```bash
+cd /path/to/kivra   # origin/main を fetch 済みの作業ツリー
+bash agent-runtime/install/build-dist.sh            # 既定: origin/main の git archive を ./gradlew :kivra-agent:installDist
+# 出力: ~/.cache/kivra-agent-dist/{app,agent-runtime,VERSION}
+```
+
+**b. 配置(sudo。自分の端末で実行する)**
+
+```bash
+sudo bash ~/.cache/kivra-agent-dist/agent-runtime/install/install.sh --dist ~/.cache/kivra-agent-dist
+```
+
+- 配置先: `/opt/kivra-agent/`(root 所有。kivra-agent は読み取りと実行だけ)、作業ディレクトリ `/var/lib/kivra-agent/work`(kivra-agent 所有 0700)、設定 `/etc/kivra-agent/agent.env`(非秘密。0640 root:kivra-agent)と `proxy.env`(非秘密)、ユニット `/etc/systemd/user/kivra-agent*.service`(root 所有)。
+- JDK 21 以上(javac を含む)が必要。`/home/` 以下の JDK は拒否する(kivra-agent が読めないため)。
+- `install.sh` は client secret の中身を読まない。モードだけを見る。
+- 冪等。二回目以降は既存の `agent.env` と `proxy.env` を上書きしない。ユニットと `/opt` は入れ直す。
+- 常駐は開始しない。`--skip-images` を付けると docker イメージのビルドを省く(`kivra-agent-proxy:local` と `kivra-agent-runtime:local` は後で作る)。
+
+**c. 配置後に手で記入するもの**
+
+1. `/etc/kivra-agent/proxy.env` の WIF の ID 三つと、必要なら `KIVRA_PROXY_WIF_WORKSPACE_ID`(Anthropic Console の値。秘密ではない)。
+2. `/etc/kivra-agent/agent.env` の `KIVRA_AGENT_CLIENT_ID`(この PC の Keycloak client。例: `kivra-agent-<device>`)。空だと起動は終了コード 2 で止まる。
+3. **client secret のモード(注意)**: kivra-agent の JVM は、グループまたはその他が読めるファイルを拒否する(`StartupChecks.checkSecretFile`)。現在の `root:kivra-agent 0640` のままでは起動に失敗する。次のどちらかで直す。
+   - `sudo chown kivra-agent:kivra-agent /etc/kivra-agent/client-secret && sudo chmod 0600 /etc/kivra-agent/client-secret`(推奨。proxy コンテナも、所有者の kivra-agent としてこのファイルを読める)
+   - `install-kivra-agent-secret.sh` は 0640 で配置するため、再実行すると元に戻る。直すなら、そのスクリプトの `chmod 0640` と `chown root:kivra-agent` を変更する。
+   `install.sh` と `preflight.sh` はこの状態を検出する(中身は読まない)。
+
+**d. 検証(有効化の順序 ②、③。`kivra-agent` ユーザーの docker で行う)**
+
+```bash
+sudo -u kivra-agent env DOCKER_HOST=unix:///run/user/1001/docker.sock bash /opt/kivra-agent/agent-runtime/verify/run-all.sh
+```
+
+`run-all.sh` は検証用の一時リソース(`kivra-agent-verify-*`)だけを作り、後始末する。`live-smoke.sh` は実際の Anthropic API を呼ぶ(WIF の交換を含む)。Run ごとのコンテナの起動を含むので、ユーザーが実行する。秘密は表示しない設計だが、出力に値が無いことを確かめること。
+
+**e. 運用(root で実行する。`kivra-agentctl` は `/usr/local/bin` に入る)**
+
+| コマンド | 内容 |
+| --- | --- |
+| `sudo kivra-agentctl status` | 3 ユニットの状態、STOP の有無、docker への接続、直近のログ 10 行 |
+| `sudo kivra-agentctl start` | 3 ユニットを有効化して開始(再起動後も上がる) |
+| `sudo kivra-agentctl stop` | **キルスイッチ**。STOP ファイル(`/var/lib/kivra-agent/work/STOP`)を作る。claim を止め、実行中の attempt は `CANCELLED` で報告する。プロセスは残る |
+| `sudo kivra-agentctl resume` | STOP を消して claim を再開 |
+| `sudo kivra-agentctl disable` | 3 ユニットを停止して無効化。proxy と実行中の work 用容器も消える |
+
+起動順(ユニットの依存): `docker.service`(ルートレス)→ `kivra-agent-network.service`(内部ネットワーク)→ `kivra-agent-proxy.service`(egress proxy。停止時に down.sh)→ `kivra-agent.service`(JVM。`ExecStartPre` で preflight.sh)。依存は `Wants` と `After`。stub の間は network と proxy が無くても本体は動く。real では preflight が docker、proxy の稼働、内部ネットワークを確かめ、満たさなければ起動しない。`Restart=on-failure`(10 秒から指数的に延ばす)。終了コード 2(設定の誤り)と 3(二重起動)では再起動しない。
+
+**ログ**
+
+```bash
+sudo kivra-agentctl status                       # 直近 10 行
+sudo runuser -u kivra-agent -- env XDG_RUNTIME_DIR=/run/user/1001 journalctl --user -u kivra-agent -f
+```
+
+**f. 有効化の順序(この節の範囲)**
+
+1. install(b、c)。
+2. `verify/run-all.sh`(d)。
+3. `verify/live-smoke.sh`(実 API。ユーザーが実行する)。
+4. kivra 側で `KIVRA_AGENT_API_ENABLED=true` を有効化する(k8s。**別の PR**)。この前に `kivra-agentctl start` をしない。stub は claim した attempt を `NEEDS_HUMAN` で返し、kivra で UNKNOWN になって運用者の解放(§4.1)が要るため。
+5. `agent.env` の `KIVRA_AGENT_EXECUTOR=real` に変え、§6.10 の設定(`KIVRA_AGENT_DOCKER_*`、`KIVRA_AGENT_GIT_BIN`、`KIVRA_AGENT_REPO`。コメントを外す)を確かめる。環境変数は起動時に一度だけ読まれるため、`sudo kivra-agentctl disable` の後に `sudo kivra-agentctl start` で読み直す。
+6. kivra の `KIVRA_SELFDEV_RUNTIME=cli`(§1.2.1、§6.9)。
+
+**ロールバック**
+
+- 即時に止める: `sudo kivra-agentctl stop`(STOP)。完全に止めるなら `sudo kivra-agentctl disable`。
+- stub に戻す: `agent.env` の `KIVRA_AGENT_EXECUTOR=stub`、`sudo kivra-agentctl start`(再起動)。
+- kivra 側: `KIVRA_SELFDEV_RUNTIME=api`、`KIVRA_AGENT_API_ENABLED=false`。残っている attempt と UNKNOWN の Run は §4.1 で解放する。
+- 配置を取り除く: `sudo bash /opt/kivra-agent/agent-runtime/install/uninstall.sh`(データを残す)。`--purge` で `/var/lib/kivra-agent` と `/etc/kivra-agent`(client secret を含む)も消す。専用ユーザー、linger、docker イメージは消さない。
+
+**未確認の点(実機で確かめること)**
+
+- `systemd --user` の硬化(`ProtectSystem=full`、`ProtectHome=read-only`、`PrivateTmp`)が、このユーザー環境で効くか。Ubuntu のユーザー名前空間の制限で失敗する場合は `ExecStartPre` の段階で分かる。
+- `RestartSteps=` と `RestartMaxDelaySec=`(systemd 254 以上)。古い systemd では無視される。
+- `%t`(`/run/user/<uid>`)による `DOCKER_HOST`、`docker.service`(ルートレス)との依存順。
+- `build-dist.sh` の `installDist` の出力名(`kivra-agent/build/install/kivra-agent/bin/kivra-agent`)。スクリプトはこの名前を前提にする。
+- `kivra-agentctl`(root が必要)の `start`、`stop`、`status`。このリポジトリでは root が使えないため、実機で動かしていない。
+- client secret のモード(c.3)。
+- `KIVRA_AGENT_KIVRA_URL` の既定 `https://kivra-dev.kigawa.net`(dev の公開 URL。本番の値は決めていない)。
+- `install.sh` の docker イメージのビルド(images 段階。ネットワークを使う。ルートレス docker の接続も含む)。

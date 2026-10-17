@@ -173,3 +173,16 @@ verify/live-smoke.sh
 
 - **未確認: Gradle のプラグイン解決。** `plugins.gradle.org` から別のホスト(例: `plugins-artifacts.gradle.org`)へリダイレクトされる場合があります。許可リストに無いと、そのホストへの接続が拒否されます。コンテナ内で kivra の実ビルドを動かして確認してください。本試作では `./gradlew` は走らせていません。
 - **不足の見つけ方**: proxy のログで `deny method=CONNECT dest=<host>:443 reason=not_allowlisted` の `dest` を見ます。そのホストを `proxy/allowlist.txt` に追加し、proxy イメージを作り直して `network/up-proxy.sh` で起動し直します。
+
+## ローカル PC へのインストール(install/)
+
+専用ユーザー `kivra-agent` の PC に、kivra-agent 本体と上記の資材を配置し、`systemd --user` で常駐させる。手順、有効化の順序、ロールバックは `docs/runbook-selfdev.md` の §6.11 を参照する。
+
+- `install/build-dist.sh`: origin/main の archive から `kivra-agent` を一般ユーザーでビルドする。
+- `install/install.sh --dist <dir>`: sudo で `/opt/kivra-agent` に配置する(冪等。常駐は開始しない)。
+- `install/kivra-agentctl.sh`: `status` / `start` / `disable` / `stop`(キルスイッチ、STOP ファイル)/ `resume`。
+- `install/uninstall.sh`: 取り除く(`--purge` でデータと設定も消す)。
+- `install/units/`: `kivra-agent-network`、`kivra-agent-proxy`、`kivra-agent` の user unit。
+- `install/preflight.sh`: `kivra-agent.service` の `ExecStartPre`。client secret のモードと、real のときの docker・proxy・ネットワークを確かめる。
+
+実行器は既定で stub(`KIVRA_AGENT_EXECUTOR=stub`)のまま。`real` への切り替えは、runbook §6.11 の順序 ⑤ で行う。

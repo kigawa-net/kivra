@@ -108,7 +108,7 @@ class CodingAttemptRepositoryTest {
 
         // Once the active attempt is terminal, a new attempt is queued with the next attempt_no.
         val claimed = assertIs<CodingAttemptResult.Ok>(db.repo().claim(first.attemptId, "agent-1", leaseTtl)).attempt
-        assertIs<CodingAttemptResult.Ok>(db.repo().fail(first.attemptId, claimed.leaseGeneration, "CLI_NONZERO"))
+        assertIs<CodingAttemptResult.Ok>(db.repo().fail(first.attemptId, "agent-1", claimed.leaseGeneration, "CLI_NONZERO"))
         assertNull(db.repo().findActive(runId))
         val next = assertIs<EnqueueResult.Enqueued>(db.repo().enqueue(runId, baseSha, queueTtl)).attempt
         assertEquals(4, next.attemptNo)
@@ -157,25 +157,25 @@ class CodingAttemptRepositoryTest {
     fun `a stale generation cannot heartbeat, start, complete or fail`() = TestDb().use { db ->
         val claimed = db.claimed(db.newRun())
         val repo = db.repo()
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), repo.heartbeat(claimed.attemptId, 0, leaseTtl))
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), repo.start(claimed.attemptId, 0, leaseTtl))
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), repo.complete(claimed.attemptId, 0, digest, 0, null))
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), repo.fail(claimed.attemptId, 0, "TIMEOUT"))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), repo.heartbeat(claimed.attemptId, "agent-1", 0, leaseTtl))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), repo.start(claimed.attemptId, "agent-1", 0, leaseTtl))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), repo.complete(claimed.attemptId, "agent-1", 0, digest, 0, null))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), repo.fail(claimed.attemptId, "agent-1", 0, "TIMEOUT"))
         assertEquals(CodingAttemptState.CLAIMED, repo.get(claimed.attemptId)!!.state)
 
         // The current generation is accepted: CLAIMED -> RUNNING, then the result.
-        val running = assertIs<CodingAttemptResult.Ok>(repo.start(claimed.attemptId, 1, leaseTtl)).attempt
+        val running = assertIs<CodingAttemptResult.Ok>(repo.start(claimed.attemptId, "agent-1", 1, leaseTtl)).attempt
         assertEquals(CodingAttemptState.RUNNING, running.state)
-        assertIs<CodingAttemptResult.Ok>(repo.heartbeat(claimed.attemptId, 1, leaseTtl))
-        val done = assertIs<CodingAttemptResult.Ok>(repo.complete(claimed.attemptId, 1, digest, 0, "session-1")).attempt
+        assertIs<CodingAttemptResult.Ok>(repo.heartbeat(claimed.attemptId, "agent-1", 1, leaseTtl))
+        val done = assertIs<CodingAttemptResult.Ok>(repo.complete(claimed.attemptId, "agent-1", 1, digest, 0, "session-1")).attempt
         assertEquals(CodingAttemptState.RESULT_RECEIVED, done.state)
         assertEquals(digest, done.resultDigest)
         assertEquals(0, done.exitStatus)
         assertEquals("session-1", done.sessionId)
 
         // Terminal: nothing more is accepted, even with the right generation.
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_ACTIVE), repo.heartbeat(claimed.attemptId, 1, leaseTtl))
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_ACTIVE), repo.complete(claimed.attemptId, 1, digest, 0, null))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_ACTIVE), repo.heartbeat(claimed.attemptId, "agent-1", 1, leaseTtl))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_ACTIVE), repo.complete(claimed.attemptId, "agent-1", 1, digest, 0, null))
         assertEquals(
             listOf("QUEUED", "CLAIMED", "RUNNING", "RESULT_RECEIVED"),
             repo.events(claimed.attemptId).map { it.type },
@@ -187,17 +187,17 @@ class CodingAttemptRepositoryTest {
         val runId = db.newRun()
         val claimed = db.claimed(runId)
         val repo = db.repo()
-        assertIs<CodingAttemptResult.Ok>(repo.start(claimed.attemptId, 1, leaseTtl))
+        assertIs<CodingAttemptResult.Ok>(repo.start(claimed.attemptId, "agent-1", 1, leaseTtl))
         db.exec("UPDATE coding_attempts SET lease_expires_at = TIMESTAMPADD(SECOND, -10, NOW(6)) WHERE attempt_id = ?", claimed.attemptId)
 
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.LEASE_EXPIRED), repo.heartbeat(claimed.attemptId, 1, leaseTtl))
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.LEASE_EXPIRED), repo.complete(claimed.attemptId, 1, digest, 0, null))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.LEASE_EXPIRED), repo.heartbeat(claimed.attemptId, "agent-1", 1, leaseTtl))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.LEASE_EXPIRED), repo.complete(claimed.attemptId, "agent-1", 1, digest, 0, null))
 
         val result = repo.expire()
         assertEquals(listOf(claimed.attemptId), result.orphaned)
         assertTrue(result.expiredQueued.isEmpty())
         assertEquals(CodingAttemptState.ORPHANED, repo.get(claimed.attemptId)!!.state)
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_ACTIVE), repo.heartbeat(claimed.attemptId, 1, leaseTtl))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_ACTIVE), repo.heartbeat(claimed.attemptId, "agent-1", 1, leaseTtl))
         assertNull(repo.findActive(runId))
 
         // The Run is free to get a new attempt; its number follows the orphaned one.
@@ -220,13 +220,13 @@ class CodingAttemptRepositoryTest {
     @Test
     fun `fail records the fixed error code and accepts only FAILED or CANCELLED`() = TestDb().use { db ->
         val claimed = db.claimed(db.newRun())
-        assertFailsWith<IllegalArgumentException> { db.repo().fail(claimed.attemptId, 1, "timeout with spaces") }
-        assertFailsWith<IllegalArgumentException> { db.repo().fail(claimed.attemptId, 1, "TIMEOUT", CodingAttemptState.RUNNING) }
-        assertFailsWith<IllegalArgumentException> { db.repo().complete(claimed.attemptId, 1, "not-a-digest", 0, null) }
-        assertFailsWith<IllegalArgumentException> { db.repo().complete(claimed.attemptId, 1, digest, 0, "has space") }
+        assertFailsWith<IllegalArgumentException> { db.repo().fail(claimed.attemptId, "agent-1", 1, "timeout with spaces") }
+        assertFailsWith<IllegalArgumentException> { db.repo().fail(claimed.attemptId, "agent-1", 1, "TIMEOUT", CodingAttemptState.RUNNING) }
+        assertFailsWith<IllegalArgumentException> { db.repo().complete(claimed.attemptId, "agent-1", 1, "not-a-digest", 0, null) }
+        assertFailsWith<IllegalArgumentException> { db.repo().complete(claimed.attemptId, "agent-1", 1, digest, 0, "has space") }
 
         val cancelled = assertIs<CodingAttemptResult.Ok>(
-            db.repo().fail(claimed.attemptId, 1, "CANCELLED", CodingAttemptState.CANCELLED),
+            db.repo().fail(claimed.attemptId, "agent-1", 1, "CANCELLED", CodingAttemptState.CANCELLED),
         ).attempt
         assertEquals(CodingAttemptState.CANCELLED, cancelled.state)
         assertEquals("CANCELLED", cancelled.errorCode)
@@ -249,6 +249,21 @@ class CodingAttemptRepositoryTest {
             )
         }
         assertNotNull(db.repo().get(attempt.attemptId))
+    }
+
+    @Test
+    fun `another agent cannot heartbeat, start, complete or fail an attempt it does not hold, even with the right generation`() = TestDb().use { db ->
+        val claimed = db.claimed(db.newRun(), agent = "agent-1")
+        val repo = db.repo()
+        // The generation is a small integer that anyone can guess, so the holder must be checked in the same UPDATE.
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_FOUND), repo.heartbeat(claimed.attemptId, "agent-2", 1, leaseTtl))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_FOUND), repo.start(claimed.attemptId, "agent-2", 1, leaseTtl))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_FOUND), repo.complete(claimed.attemptId, "agent-2", 1, digest, 0, null))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.NOT_FOUND), repo.fail(claimed.attemptId, "agent-2", 1, "TIMEOUT"))
+        assertEquals(CodingAttemptState.CLAIMED, repo.get(claimed.attemptId)!!.state)
+        assertNull(repo.get(claimed.attemptId, "agent-2"))
+        assertEquals("agent-1", repo.get(claimed.attemptId, "agent-1")!!.claimedBy)
+        assertIs<CodingAttemptResult.Ok>(repo.heartbeat(claimed.attemptId, "agent-1", 1, leaseTtl))
     }
 
     /** Inserts a row without going through the repository (to test the constraints themselves). */

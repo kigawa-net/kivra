@@ -117,3 +117,16 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
 ## 追補(2026-10-17)
 
 1. **CLI 経路は UNSEEN_OVERWRITE を適用しない。** エージェントはベースのリポジトリ全体を扱うため、LLM の文脈(README と docs)の外のファイルも「見た」扱いにする。ADR 0008 の UNSEEN_OVERWRITE は LLM の限られた文脈のための規則で、CLI 経路には当てはめない。最終関門は結果受信時の PatchPolicy(許可・拒否パス、サイズ、秘密らしい内容、symlink などの形)で、これは緩めていない。担保する既存テスト: `CodingRuntimeServiceTest` の「shape checks or the PatchPolicy refuse」(秘密らしい内容、拒否パス、許可外パス、サイズ超過、symlink、submodule、実行ビット、バイナリ、件数超過、形の不正、終了コード、空の要約を拒否)、`SelfDevCodingRuntimeTest` の「refuses against the base snapshot」(縮小と欠けた削除をベースのスナップショットで拒否)。
+
+2. **エージェント API は、運用者の API と認可を分離する(PR 4a, 2026-10-17)。** `/api/agent/v1/*` は、運用者の API(`/api/selfdev/*`、`/api/admin/*`、`/api/runs` など)とは別の認証器(`AgentIdentity`)で認可する。
+   - 別のロール: エージェントには `KIVRA_AGENT_REQUIRED_ROLE`(既定の想定は `kivra-agent:agent`)が必要。運用者のロール `admin-panel:admin` は、エージェントの認可を通さない。`KIVRA_AGENT_REQUIRED_ROLE` が運用者のロール(`KIVRA_OIDC_REQUIRED_ROLE`)と同じなら起動に失敗する。
+   - 別の client: トークンの `azp` が `KIVRA_AGENT_AZP`(既定の想定は `kivra-agent`)と完全一致すること。audience は `KIVRA_OIDC_AUDIENCE`(kivra)を含むこと。
+   - ヘッダーを信頼しない: トークンは `Authorization: Bearer` だけから読む。`X-Forwarded-Access-Token`、cookie、`X-Auth-Request-*` は無視する。`Authorization` が 2 つあれば未認証とする。
+   - 401(未認証・不正)と 403(認証は通るが azp かロールが不足)を区別する。理由は本文に出さず、固定の文言だけを返す。
+   - agent_id は、検証済みトークンの `sub` だけを使う。リクエストの本文・ヘッダーで名乗らせない。attempt の操作は、その attempt を claim した agent_id と一致する場合だけ許す。他人の attempt は存在しないものと同じ 404 にする。
+   - 世代(lease generation)だけでは守られない。世代は小さな整数で推測できるため、所有者の一致を CAS の `WHERE` 句に含める。
+   - 既定で無効(`KIVRA_AGENT_API_ENABLED`)。無効のときはルートを登録せず、`CodingRuntimeService` も作らない。`KIVRA_SELFDEV_RUNTIME=cli` の起動拒否は、この PR では解除しない(エージェント本体の完成後の PR で解除する)。
+   - ブラウザからの呼び出しを拒否する: `Sec-Fetch-*` か `Origin` があれば 403。`Content-Type` は `application/json` を要求する(415)。本文は 2 MiB を上限とし、超えれば 413。
+   - 監査: claim、結果の受理、失敗、結果の拒否を、Run の監査連鎖に書く(actor は agent の sub。内容・パス・理由の本文は入れない)。
+   - 担保するテスト: `AgentIdentityTest`(認証と認可の表)、`AgentApiSettingsTest`(設定の fail-closed)、`AgentApiRoutesTest`(HTTP の網羅、他人の attempt、世代、413、422、ログと応答の秘密、監査)、`AgentApiWiringTest`(既定で無効、有効時の起動検査)。
+   - ingress(oauth2-proxy)は、エージェント API を通さない。`--allowed-role=admin-panel:admin` のため、エージェントの Bearer は通らない。この経路は PR 4b(Keycloak と ingress の作業)で決める。

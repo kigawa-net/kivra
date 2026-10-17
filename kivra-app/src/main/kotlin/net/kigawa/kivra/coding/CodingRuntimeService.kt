@@ -46,7 +46,7 @@ data class CodingRuntimeConfig(
 
 /**
  * The server side of the coding runtime (design: Issue #187 section 2; ADR 0010). It owns the attempt transitions that the local agent
- * drives, and it checks everything the agent sends. No HTTP here: the agent API (PR 4a) is a thin layer on top of this class.
+ * drives, and it checks everything the agent sends. No HTTP here: the agent API (`routes/AgentApiRoutes.kt`) is a thin layer on top of this class.
  *
  * - [enqueue] queues one attempt for a DEVELOPING Run, with the base sha fixed. It is idempotent while an attempt is active, and never
  *   queues again after a terminal attempt (no retry loop).
@@ -119,21 +119,34 @@ class CodingRuntimeService(
         return CodingClaimOutcome.NothingToClaim
     }
 
-    /** Extends the lease of the current generation. [progress] is a fixed phase; it is recorded only while the event cap allows. */
-    fun heartbeat(attemptId: String, generation: Long, progress: ProgressPhase? = null): CodingAttemptResult =
-        attempts.heartbeat(attemptId, generation, config.leaseTtl, progress?.let { """{"phase":"${it.name}"}""" })
+    /**
+     * Extends the lease of the current generation. [agentId] must be the holder that claimed the attempt; another agent gets NOT_FOUND.
+     * [progress] is a fixed phase; it is recorded only while the event cap allows.
+     */
+    fun heartbeat(attemptId: String, agentId: String, generation: Long, progress: ProgressPhase? = null): CodingAttemptResult =
+        attempts.heartbeat(attemptId, agentId, generation, config.leaseTtl, progress?.let { """{"phase":"${it.name}"}""" })
 
-    /** Terminal failure with a fixed code. The state follows the code ([CodingErrorCode.state]). */
-    fun fail(attemptId: String, generation: Long, code: CodingErrorCode): CodingAttemptResult =
-        attempts.fail(attemptId, generation, code.name, code.state)
+    /** Terminal failure with a fixed code, by the holder only. The state follows the code ([CodingErrorCode.state]). */
+    fun fail(attemptId: String, agentId: String, generation: Long, code: CodingErrorCode): CodingAttemptResult =
+        attempts.fail(attemptId, agentId, generation, code.name, code.state)
+
+    /**
+     * What the holder of [attemptId] may learn about it: the state, and whether the Run has a cancel request. Null for an attempt that
+     * is missing or held by another agent (the caller answers 404 for both).
+     */
+    fun statusOf(attemptId: String, agentId: String): AgentAttemptStatus? {
+        val attempt = attempts.get(attemptId, agentId) ?: return null
+        val run = runs.find(RunId(attempt.runId)) ?: return null
+        return AgentAttemptStatus(attempt.state, run.cancelRequested)
+    }
 
     /**
      * Accepts a result from the current holder. Order: the generation and state pre-check (nothing is read or stored for a stale holder),
      * then the shape and PatchPolicy checks (a refusal stores nothing), then the store, then the transition. A store that fails leaves
      * the attempt unchanged, so the agent may send the result again.
      */
-    fun submitResult(attemptId: String, generation: Long, result: CodingResult): CodingSubmitOutcome {
-        val current = attempts.get(attemptId) ?: return CodingSubmitOutcome.Refused(CodingRefusal.NOT_FOUND)
+    fun submitResult(attemptId: String, agentId: String, generation: Long, result: CodingResult): CodingSubmitOutcome {
+        val current = attempts.get(attemptId, agentId) ?: return CodingSubmitOutcome.Refused(CodingRefusal.NOT_FOUND)
         if (current.state != CodingAttemptState.CLAIMED && current.state != CodingAttemptState.RUNNING) {
             return CodingSubmitOutcome.Refused(CodingRefusal.NOT_ACTIVE)
         }
@@ -141,18 +154,18 @@ class CodingRuntimeService(
 
         return when (val verdict = validator.check(result)) {
             is CodingResultValidator.Verdict.Rejected -> {
-                logger.warn(
-                    "coding result rejected: attemptId={} reasons={} policyReasons={}",
-                    attemptId, verdict.reasons.joinToString(",") { it.name }, verdict.policyReasons.take(MAX_LOGGED).joinToString(",") { it.name },
-                )
+                val codes = (verdict.reasons.map { it.name } + verdict.policyReasons.map { it.name }).joinToString(",")
+                logger.warn("coding result rejected: attemptId={} reasons={}", attemptId, codes.take(MAX_LOGGED_CHARS))
+                attempts.recordResultRejected(attemptId, agentId, codes)
                 CodingSubmitOutcome.Rejected(verdict.reasons, verdict.policyReasons)
             }
-            is CodingResultValidator.Verdict.Accepted -> store(attemptId, generation, result, verdict.patch, verdict.digest)
+            is CodingResultValidator.Verdict.Accepted -> store(attemptId, agentId, generation, result, verdict.patch, verdict.digest)
         }
     }
 
     private fun store(
         attemptId: String,
+        agentId: String,
         generation: Long,
         result: CodingResult,
         patch: PatchSet,
@@ -165,7 +178,7 @@ class CodingRuntimeService(
             logger.error("coding result store failed: attemptId={}", attemptId)
             return CodingSubmitOutcome.StoreFailed
         }
-        return when (val done = attempts.complete(attemptId, generation, digest, result.exitStatus, result.sessionId)) {
+        return when (val done = attempts.complete(attemptId, agentId, generation, digest, result.exitStatus, result.sessionId)) {
             is CodingAttemptResult.Ok -> {
                 logger.info("coding result accepted: attemptId={} changes={}", attemptId, patch.files.size)
                 CodingSubmitOutcome.Accepted(digest)
@@ -255,6 +268,6 @@ class CodingRuntimeService(
         const val MAX_TASK_CHARS = 2_000
         const val REASON_ORPHANED = "CODING_ORPHANED"
         const val REASON_QUEUE_EXPIRED = "CODING_QUEUE_EXPIRED"
-        private const val MAX_LOGGED = 10
+        private const val MAX_LOGGED_CHARS = 200
     }
 }

@@ -73,8 +73,8 @@ class DbCodingRunPort(
  * Where an accepted change set is kept until the runner commits it. Keyed by (attempt, digest): a result that was refused, or a stale
  * one, can leave a row under another digest, and [load] never returns it for the row that was accepted.
  *
- * The MariaDB / H2 implementation is `DbCodingResultStore` (V15 `coding_results`). Its wiring into the runtime is PR 4a, so until
- * then the self-development runner still refuses the CLI runtime at startup (see SelfDevSettings) and nothing calls [save] in production.
+ * The MariaDB / H2 implementation is `DbCodingResultStore` (V15 `coding_results`). It is wired into the runtime only when the agent API
+ * is enabled (`KIVRA_AGENT_API_ENABLED`, PR 4a). The self-development runner still refuses the CLI runtime at startup (see SelfDevSettings).
  */
 interface CodingResultStore {
     /** Stores [patch] for ([attemptId], [digest]). Repeating the same pair is allowed. Throws when the write fails. */

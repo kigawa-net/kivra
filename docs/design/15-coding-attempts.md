@@ -2,7 +2,7 @@
 
 - 対象 Issue: kigawa-net/kivra#187(ローカル PC の常駐エージェントによるコーディング実行)、親 #56 #157
 - 位置づけ: 設計案 PR 2(DB マイグレーションとリポジトリ層のみ)。設計案の §2.5(Run 状態との対応)と §2.6(永続化)が根拠。設計案はリポジトリ外のドキュメント。
-- 状態: 実装済み(`CodingAttemptRepository`、サービス層 `CodingRuntimeService`)。HTTP の `/api/agent/*`(PR 4a)とエージェント本体は未実装(別の PR)。既定の実行方式は `api` で、動作は変わらない。
+- 状態: 実装済み(`CodingAttemptRepository`、サービス層 `CodingRuntimeService`、HTTP の `/api/agent/v1/*`(PR 4a、既定で無効))。エージェント本体は未実装(別の PR)。既定の実行方式は `api` で、動作は変わらない。
 
 ## 1. 位置づけ
 
@@ -75,7 +75,7 @@
 
 ### 6.1 位置づけ
 
-- HTTP は無い。`CodingRuntimeService`(`kivra-app/.../coding/`)が attempt の遷移と、エージェントからの値の検査を行う。PR 4a の `/api/agent/*` は、この上に薄く載せる。エージェント本体は別の PR。
+- HTTP は無い。`CodingRuntimeService`(`kivra-app/.../coding/`)が attempt の遷移と、エージェントからの値の検査を行う。PR 4a の `/api/agent/v1/*`(`routes/AgentApiRoutes.kt`)は、この上に薄く載せた。エージェント本体は別の PR。
 - `SelfDevRunner` の DEVELOPING 段は、`KIVRA_SELFDEV_RUNTIME=cli` のときだけ `CodingAttemptPatchSource`(`selfdev/CodingPatchSource.kt`)を通る。既定は `api` で、その経路は変わらない。本番では `cli` を起動時に拒否する(§6.8)。
 
 ### 6.2 操作
@@ -141,7 +141,7 @@
   - (b) attempt 行に JSON を持つ(V15 で列を足す)。行が大きくなるので、サイズ上限を強く守る必要がある。
   - (c) 本体を保存せず、commit の前にエージェントから取り直す。エージェントの作業ディレクトリは残らない設計なので、成り立たない。
 - **決定(2026-10-17)**: (a) を採る。V15 で本体の別テーブルを追加する(expand-only)。attempt 行に JSON 列は足さない(サイズ上限と削除のしやすさのため)。
-- **実装済み(V15、`DbCodingResultStore`)**。`CodingResultStore` の本番実装は `kivra-app/.../db/DbCodingResultStore.kt`。配線(`CodingRuntimeService` への注入と `cli` の起動拒否の解除)は PR 4a で行い、この PR では動作は変わらない。
+- **実装済み(V15、`DbCodingResultStore`)**。`CodingResultStore` の本番実装は `kivra-app/.../db/DbCodingResultStore.kt`。配線(`CodingRuntimeService` への注入)は PR 4a で行った。`KIVRA_AGENT_API_ENABLED=true` のときだけ作られる。`cli` の起動拒否は解除していない。
 
 #### 6.5.1 スキーマ(V15 `coding_results`)
 
@@ -194,7 +194,7 @@ Run は DEVELOPING のまま attempt で進行を表す(設計案 §2.5)。attem
 
 ### 6.8 配線と安全装置
 
-- `KIVRA_SELFDEV_RUNTIME`: `api`(既定)か `cli`。`cli` は `SelfDevSettings` が起動時に拒否する(PR 4a まで。エージェントの claim 口が無く、積んだ attempt を誰も取らないため)。読むのは自己開発が有効なときだけ。
+- `KIVRA_SELFDEV_RUNTIME`: `api`(既定)か `cli`。`cli` は `SelfDevSettings` が起動時に拒否する(エージェント本体が完成するまで。PR 4a のエージェント API を有効にしても解除しない)。読むのは自己開発が有効なときだけ。
 - `SelfDevRunner`: `runtime = CLI` のときに coding source が無ければ構築時に失敗する。`API` のときは coding source を使わない(既存のテストで固定)。
 - 本番の配線(`buildSelfDev`)は変えていない。`CodingRuntimeService` を作る箇所は、この PR には無い。
 
@@ -205,5 +205,5 @@ Run は DEVELOPING のまま attempt で進行を表す(設計案 §2.5)。attem
 
 ### 6.10 未実装(後続の PR)
 
-- HTTP `/api/agent/*` と認可(PR 4a)。キャンセルをエージェントに伝える経路(heartbeat の応答、PR 4a)。
+- `cli` の起動拒否の解除(PR 9)。エージェント本体(PR 5〜8)。reconcile の定期実行の配線。
 - エージェント本体(PR 5〜8)。結果本体の保存(§6.5)。`RATE_LIMITED` の待機と再試行。`cli` の起動許可(PR 9)。

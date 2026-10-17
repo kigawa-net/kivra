@@ -5,7 +5,16 @@ import io.ktor.server.application.Application
 import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.routing.routing
+import net.kigawa.kivra.auth.AgentApiSettings
+import net.kigawa.kivra.auth.AgentIdentity
+import net.kigawa.kivra.auth.RefreshingJwkProvider
 import net.kigawa.kivra.auth.resolveTaskApiIdentity
+import net.kigawa.kivra.coding.CodingRuntimeService
+import net.kigawa.kivra.coding.CodingTaskSource
+import net.kigawa.kivra.coding.DbCodingRunPort
+import net.kigawa.kivra.db.CodingAttemptRepository
+import net.kigawa.kivra.db.DbCodingResultStore
+import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.config.BudgetConfig
 import net.kigawa.kivra.config.KivraConfig
 import net.kigawa.kivra.db.DbBudgetStore
@@ -17,6 +26,8 @@ import net.kigawa.kivra.db.connectDatabase
 import net.kigawa.kivra.db.createDataSource
 import net.kigawa.kivra.db.migrateDatabase
 import net.kigawa.kivra.observability.MetricsRegistry
+import net.kigawa.kivra.routes.AgentApiDeps
+import net.kigawa.kivra.routes.configureAgentApiRoutes
 import net.kigawa.kivra.routes.configureBudgetAdminRoutes
 import net.kigawa.kivra.routes.configureDevPreviewRoutes
 import net.kigawa.kivra.routes.configureDevTaskSubmitRoutes
@@ -42,6 +53,8 @@ fun Application.module() = appModule(System.getenv())
 internal fun Application.appModule(env: Map<String, String>) {
     val devPreviewEnabled = isDevPreviewEnabled(env)
     val taskApiIdentity = resolveTaskApiIdentity(env)
+    // Fail-closed: when the agent API is off, no agent variable beyond the switch is read (PR 4a).
+    val agentApiSettings = AgentApiSettings.fromEnv(env)
     // Fail-closed: when self-development is off, no self-development variable beyond the switch is read (ADR 0008 part 7).
     val selfDevSettings = SelfDevSettings.fromEnv(env)
     val config = KivraConfig.from(environment.config)
@@ -50,10 +63,11 @@ internal fun Application.appModule(env: Map<String, String>) {
     val database = connectDatabase(dataSource)
     // Self-development installs the GitHub merge Authority later (in buildSelfDev, before the worker starts). Without it, nothing is verified.
     val deferredPrMerge = DeferredPrMergeAuthority()
+    val audit = AuditRepository()
     val runs = DevelopmentRunRepository(
         database,
         OutboxRepository(database),
-        AuditRepository(),
+        audit,
         if (selfDevSettings.enabled) deferredPrMerge else NoPrMergeAuthority,
     )
     val budgetConfig = BudgetConfig.from(environment.config)
@@ -69,6 +83,16 @@ internal fun Application.appModule(env: Map<String, String>) {
         null
     }
     selfDevParts?.worker?.start(this)
+    // Built only when the agent API is enabled. Nothing about the coding runtime is created otherwise.
+    val agentParts = agentApiSettings.auth?.let { auth ->
+        val service = CodingRuntimeService(
+            attempts = CodingAttemptRepository(database, audit = audit),
+            runs = DbCodingRunPort(runs, SqlLeaseStore(database)),
+            results = DbCodingResultStore(database),
+            tasks = CodingTaskSource { run -> run.taskTitle },
+        )
+        AgentApiDeps(service, AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)))
+    }
 
     install(ContentNegotiation) { json() }
     val metrics = MetricsRegistry()
@@ -89,6 +113,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings)
         }
         if (selfDevParts != null) configureSelfDevRoutes(selfDevParts.routes)
+        if (agentParts != null) configureAgentApiRoutes(agentParts)
         configureObservabilityRoutes(metrics, config.metrics)
     }
 }

@@ -33,6 +33,10 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # 為替更新スクリプト(標準ライブラリだけ。ネットワークは使わない)。
+      - name: Test fx-refresh.py
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
       # H2 (MODE=MySQL): fast tests without external services.
       - name: Test (H2)
         run: ./gradlew test --no-daemon

@@ -250,6 +250,35 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - **セッション切れ**: 401 や再ログインが要る応答は、従来どおり「セッションが切れました」のバナーになる。「再読み込みしてログインし直す」から、もう一度ログインする。
 
 
+### 4.8 為替(`KIVRA_FX_USD_JPY` / `KIVRA_FX_AS_OF`)の自動更新
+
+`KIVRA_FX_AS_OF` は基準日から 7 日(`KIVRA_FX_MAX_AGE_DAYS`)で失効する。失効すると USD の呼び出しが UNKNOWN_COST で止まるため、週 2 回の更新が要る。
+
+**仕組み(実装済み。実機の実行は未確認)**: `.github/workflows/fx-refresh.yml` が月・木 01:00 UTC と手動で走り、`scripts/fx-refresh.py` が kigawa-net-k8s の `kivra/dev/kivra.yaml` にある 2 つの value だけを書き換えた PR を作る。cd.yml と同じ方式で、OIDC ブローカーから短命トークンを取る。
+
+- 取得元: Frankfurter(ECB の参照レート。キー不要)。現在値と、今日(UTC)から 364 日前までの日次レート。
+- 式: `rate = floor(max(現在値, 52 週最高値)) + 1`(整数、円)。費用を多めに見積もる方針は変えない。kivra がさらに余裕 10%(`KIVRA_FX_MARGIN_RATIO`)と税 10%(`KIVRA_TAX_MARGIN_RATIO`)を上乗せする。
+- `KIVRA_FX_AS_OF` は実行日(UTC)。
+- 検査: 現在値は 1 以上 1000 以下で、日付は今日から 5 日以内。52 週は 100 件以上で、各値は 1 以上 1000 以下。1 つでも外れたら何も書き換えず、ジョブを失敗させる。
+- 変動の警告: 新しいレートが旧レートから 10% 以上動いたら、PR のタイトルと本文に警告を出す。
+- 同じ値なら変更なし(PR は作らない)。`KIVRA_FX_AS_OF` は毎回更新されるので、レートが同じでも日付だけの PR が出ることがある。
+- 既存の PR: 接頭辞 `chore/kivra-dev-fx-` の open な PR があれば、新しく作らず、そのブランチを更新する。無ければ `chore/kivra-dev-fx-<日付>` を作る。
+
+**人がやること**: 更新 PR(タイトル `chore(kivra-dev): 為替を更新 …`)の本文と 2 行の差分を確認し、マージする。警告が出ていれば、取得値を確かめてからマージする。マージで ArgoCD が dev に反映される。自動マージはしない。マージされないまま 7 日を過ぎると、USD の呼び出しが止まる。
+
+**失効時の症状**: USD を使う呼び出しが UNKNOWN_COST で止まる。JPY の呼び出しは影響を受けない。止まった Run の扱いは §4.1 を参照する。
+
+**手動の更新(自動が失敗した、または PR が作れないとき)**:
+1. GitHub Actions の `fx-refresh` を `workflow_dispatch` で再実行する。ログの `Refresh FX rate` に `CHANGED`、`NEW_RATE`、`AS_OF` などが出る。
+2. 手元で更新する場合: `python3 -I scripts/fx-refresh.py <kigawa-net-k8s の kivra/dev/kivra.yaml のパス>`(取得は実 API。ネットワークが要る)。終了コード 0 は書き換えた、3 は変更なし、1 は失敗(何も書き換えない)。
+3. 最後の手段として、`KIVRA_FX_USD_JPY` と `KIVRA_FX_AS_OF` の value を手で直す。レートは 1 以上 1000 以下の整数、AS_OF は `YYYY-MM-DD`(UTC)。
+
+**実行の確認**: `gh run list --repo kigawa-net/kivra --workflow fx-refresh.yml`。PR は `gh pr list --repo kigawa-net/kigawa-net-k8s --state open --json headRefName,title,url` で、接頭辞 `chore/kivra-dev-fx-` のものを見る。
+
+**方針を変える**: 式は `scripts/fx-refresh.py` の `compute_rate`。52 週の窓は `WINDOW_DAYS`、警告の閾値は `BIG_MOVE_RATIO`、検査の範囲は `MIN_RATE` / `MAX_RATE` / `MAX_STALE_DAYS` / `MIN_RANGE_POINTS`。変更は kivra リポジトリの PR で行い、`scripts/test_fx_refresh.py` を更新する。頻度は `fx-refresh.yml` の `cron`(7 日の失効より十分短く保つ)。余裕と税の比率は k8s 側の環境変数で、kivra の設定を変える。
+
+**k8s の他の PR との関係**: cd.yml の deploy PR も同じファイルを更新するが、触る行が違うので通常は競合しない。競合したら、この節の式で値を直し直す。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

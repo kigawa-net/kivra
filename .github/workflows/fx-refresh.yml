@@ -1,0 +1,102 @@
+name: fx-refresh
+
+# kivra dev の為替(KIVRA_FX_USD_JPY / KIVRA_FX_AS_OF)を更新する PR を kigawa-net-k8s に作る。
+# 週 2 回(月・木 01:00 UTC)。基準日から 7 日で USD の呼び出しが止まるため、それより短い間隔にしている。
+# マージは人が行う(自動マージはしない)。値の決め方は docs/runbook-selfdev.md §4.8 を参照。
+on:
+  schedule:
+    - cron: "0 1 * * 1,4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  manifestRepository: kigawa-net/kigawa-net-k8s
+  manifestPath: kivra/dev/kivra.yaml
+  branchPrefix: chore/kivra-dev-fx-
+
+# 同時に 2 つ走って同じブランチを奪い合わないようにする。
+concurrency:
+  group: fx-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: refresh FX rate
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # 静的 PAT ではなく、組織の GitHub Actions OIDC ブローカーから短命トークンを取得する(cd.yml と同じ)。
+      - name: Mint kigawa-net-k8s repo token
+        id: k8s-token
+        uses: kigawa-net/kinfra/.github/actions/kigawa-net-app-token@dev
+        with:
+          owner: kigawa-net
+          repositories: kigawa-net-k8s
+          permissions: '{"contents":"write","pull_requests":"write"}'
+
+      - name: checkout manifest repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.manifestRepository }}
+          ref: main
+          token: ${{ steps.k8s-token.outputs.token }}
+          path: manifests
+
+      # 終了コード: 0 = 書き換えた、3 = 変更なし、それ以外 = 失敗(何も書き換えず、ジョブを失敗させる)。
+      - name: Refresh FX rate in the manifest
+        id: fx
+        run: |
+          set +e
+          python3 -I scripts/fx-refresh.py "manifests/${{ env.manifestPath }}" \
+            --body-out "$RUNNER_TEMP/pr-body.md" > "$RUNNER_TEMP/fx.out"
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/fx.out"
+          case "$rc" in
+            0) changed=true ;;
+            3) changed=false ;;
+            *) echo "::error::fx-refresh.py が失敗しました(終了コード $rc)。上のログを確認してください。"; exit 1 ;;
+          esac
+          {
+            echo "changed=$changed"
+            echo "old_rate=$(sed -n 's/^OLD_RATE=//p' "$RUNNER_TEMP/fx.out")"
+            echo "new_rate=$(sed -n 's/^NEW_RATE=//p' "$RUNNER_TEMP/fx.out")"
+            echo "as_of=$(sed -n 's/^AS_OF=//p' "$RUNNER_TEMP/fx.out")"
+            echo "warn=$(sed -n 's/^WARN_BIG_MOVE=//p' "$RUNNER_TEMP/fx.out")"
+          } >> "$GITHUB_OUTPUT"
+
+      # 同じ接頭辞の open な PR があれば、その head ブランチを使い回す(create-pull-request がブランチを更新する)。
+      # 無ければ当日の日付のブランチを作る。
+      - name: Pick branch (reuse an open FX PR if any)
+        id: branch
+        if: steps.fx.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.k8s-token.outputs.token }}
+        run: |
+          existing=$(gh pr list --repo "${{ env.manifestRepository }}" --state open --limit 100 \
+            --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("${{ env.branchPrefix }}")) | .headRefName][0] // ""')
+          if [ -z "$existing" ]; then
+            existing="${{ env.branchPrefix }}$(date -u +%Y-%m-%d)"
+          fi
+          echo "name=$existing" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update manifest pull request
+        if: steps.fx.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.k8s-token.outputs.token }}
+          path: manifests
+          base: main
+          branch: ${{ steps.branch.outputs.name }}
+          add-paths: kivra/dev/kivra.yaml
+          commit-message: "chore(kivra-dev): 為替 USD/JPY ${{ steps.fx.outputs.old_rate }} -> ${{ steps.fx.outputs.new_rate }} (as-of ${{ steps.fx.outputs.as_of }})"
+          title: "chore(kivra-dev): 為替を更新 USD/JPY ${{ steps.fx.outputs.old_rate }} -> ${{ steps.fx.outputs.new_rate }}${{ steps.fx.outputs.warn == 'true' && ' (大きな変動の警告あり)' || '' }}"
+          body-path: ${{ runner.temp }}/pr-body.md
+          delete-branch: true

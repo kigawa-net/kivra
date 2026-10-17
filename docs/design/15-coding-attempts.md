@@ -140,8 +140,34 @@
   - (a) 本体の表を足す(V15、expand のみ)。サイズ上限(1 MiB 程度)と保存期間を決め、参照されない本体の掃除を入れる。
   - (b) attempt 行に JSON を持つ(V15 で列を足す)。行が大きくなるので、サイズ上限を強く守る必要がある。
   - (c) 本体を保存せず、commit の前にエージェントから取り直す。エージェントの作業ディレクトリは残らない設計なので、成り立たない。
-- **決定(2026-10-17)**: (a) を採る。V15 で本体の別テーブルを追加する(expand-only)。attempt 行に JSON 列は足さない(サイズ上限と削除のしやすさのため)。この PR では作らず、別 PR で人の確認を経て行う。CodingResultStore はこの PR では interface のまま。
-- この PR の `CodingResultStore` は interface のみで、本番の実装は無い。テストは in-memory の double。本番では `cli` を起動時に拒否するので、保存は呼ばれない(§6.8)。
+- **決定(2026-10-17)**: (a) を採る。V15 で本体の別テーブルを追加する(expand-only)。attempt 行に JSON 列は足さない(サイズ上限と削除のしやすさのため)。
+- **実装済み(V15、`DbCodingResultStore`)**。`CodingResultStore` の本番実装は `kivra-app/.../db/DbCodingResultStore.kt`。配線(`CodingRuntimeService` への注入と `cli` の起動拒否の解除)は PR 4a で行い、この PR では動作は変わらない。
+
+#### 6.5.1 スキーマ(V15 `coding_results`)
+
+| 列 | 内容 |
+|---|---|
+| `attempt_id` | CHAR(26)、主キー。`coding_attempts` への外部キー |
+| `result_digest` | CHAR(64)。受理された結果の SHA-256 hex(`coding_attempts.result_digest` と同じ値) |
+| `patch_json` | MEDIUMTEXT。PatchSet の JSON(`PatchSetParser` が読める形) |
+| `created_at` | DATETIME(6)、UTC |
+
+- 一つの attempt に一つの結果。主キーが `attempt_id` なので、同じ attempt に別の digest を保存することはできない。
+- `patch_json` の上限は `PatchSetParser.MAX_INPUT_BYTES`(2 MiB)。PatchPolicy が通すのは生の内容で合計 1 MiB まで(`maxTotalBytes`)だが、JSON のエスケープ(制御文字は `\u00XX` の 6 バイト)で最大 6 倍に膨らむため、読み戻せる上限(2 MiB)で止める。上限を超えるものは保存せず拒否する。MEDIUMTEXT(MariaDB で 16 MiB まで)は 2 MiB の上限を十分に収める。LONGTEXT は読めない大きさまで許すだけなので使わない(V13 `response_json` と同じ型)。
+- 保存するのは PatchPolicy を通った PatchSet だけ。stdout / stderr、プロンプト、モデルの本文、秘密は保存しない。`DbCodingResultStore` はログを出さず、例外メッセージに本文や digest を含めない。
+
+#### 6.5.2 `DbCodingResultStore` の振る舞い
+
+- `save(attemptId, digest, patch)`: 同じ attempt・同じ digest の再保存は成功して何もしない(冪等)。同じ attempt に異なる digest を保存しようとすると拒否する(結果の差し替え防止)。存在しない attempt は外部キーで拒否する。digest の形式が不正なら拒否する。
+- `load(attemptId, digest)`: 保存された digest と一致する場合だけ本体を返す。一致しなければ null。保存された本体が読めない場合は例外(呼び出し側の `loadResult` が null にする)。
+- **世代(fencing)**: store は世代を検査しない。`CodingRuntimeService.submitResult` が保存の前に世代と状態を検査し、保存の後に `complete` の CAS が世代を検査する。CLAIMED / RUNNING の間は世代が変わらない(世代を上げるのは claim だけで、claim は QUEUED からしか取れない)ので、古い保持者の保存は終端になった attempt の行にしか残らず、その行は参照されない。
+- **digest の検査(未決)**: 設計どおり「保存時に attempt の `result_digest` と一致することを検査する」は、現在の順序(保存 → `complete` で `result_digest` を書く)では成り立たない。保存の時点で attempt の `result_digest` はまだ NULL である。この PR では保存時の検査を入れていない。読み出し時は、`load` が digest で行を選び、`loadResult` が attempt の `result_digest` を渡すので、一致しない本体は返らない。保存時に検査するには、順序を変えるか(RESULT_RECEIVED の前に digest を別の列に書く等)、保存の時点の検査を別の方法にするかの決定が要る。
+
+#### 6.5.3 保持期間(未対応)
+
+- この PR には削除の仕組みが無い。`coding_results` の行は消えない。
+- 方針の案: Run が終端になった後、一定期間(例: 30 日)で本体を削除する。`complete` されず参照されない本体(保存後に拒否された結果)の掃除も同じ仕組みで行う。
+- 削除は別の運用 PR で、人の確認を経て行う。この PR で削除の機能は作らない。
 
 ### 6.6 attempt の結果と Run の扱い
 

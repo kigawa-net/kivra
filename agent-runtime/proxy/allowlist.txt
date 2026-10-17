@@ -1,0 +1,6 @@
+# kivra-agent egress allowlist. One host per line. Only HTTPS (CONNECT to port 443) is allowed.
+# Hosts are matched exactly (no wildcards). Exactly what kivra's build uses (checked in the repo):
+#   settings.gradle.kts: gradlePluginPortal(), mavenCentral(); gradle/wrapper: distributionUrl=services.gradle.org
+services.gradle.org
+plugins.gradle.org
+repo.maven.apache.org

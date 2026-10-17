@@ -11,12 +11,22 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 
+/** What an executor leaves behind for the loop to report. */
+sealed interface AttemptOutcome {
+    /** The attempt failed with [code]. The loop reports it with `fail`. */
+    data class Failed(val code: AgentErrorCode) : AttemptOutcome
+
+    /** The executor already sent the result (accepted by kivra). The loop must not send a `fail`. */
+    data object ResultSubmitted : AttemptOutcome
+}
+
 /**
- * Runs one claimed attempt and returns the error code to report with `fail`. PR 5 has only the stub [NotImplementedExecutor];
- * PR 6-8 add the docker run, the CLI and the diff behind this interface.
+ * Runs one claimed attempt and says how it ended. The stub [NotImplementedExecutor] fails it; [RealAttemptExecutor] runs the CLI and
+ * sends the result. A [AgentApiException] of kind CONFLICT or NOT_FOUND thrown from here means the lease is gone: the loop then stops
+ * without reporting anything.
  */
 fun interface AttemptExecutor {
-    suspend fun execute(attempt: ClaimedAttempt): AgentErrorCode
+    suspend fun execute(attempt: ClaimedAttempt): AttemptOutcome
 }
 
 /**
@@ -24,7 +34,7 @@ fun interface AttemptExecutor {
  * and nothing is retried automatically. There is no NOT_IMPLEMENTED code on the server.
  */
 object NotImplementedExecutor : AttemptExecutor {
-    override suspend fun execute(attempt: ClaimedAttempt): AgentErrorCode = AgentErrorCode.NEEDS_HUMAN
+    override suspend fun execute(attempt: ClaimedAttempt): AttemptOutcome = AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN)
 }
 
 /**
@@ -84,7 +94,7 @@ class AgentLoop(
 
     private suspend fun runAttempt(attempt: ClaimedAttempt) {
         logger.info("attempt claimed: runId={} attemptId={}", attempt.runId, attempt.attemptId)
-        val code = try {
+        val outcome = try {
             coroutineScope {
                 val heartbeats = launch { heartbeats(attempt) }
                 try {
@@ -97,7 +107,7 @@ class AgentLoop(
             logger.warn("attempt is stale or gone; stopping without fail: runId={} attemptId={}", attempt.runId, attempt.attemptId)
             return
         } catch (e: CancelRequestedException) {
-            AgentErrorCode.CANCELLED
+            AttemptOutcome.Failed(AgentErrorCode.CANCELLED)
         } catch (e: CancellationException) {
             // The loop is being stopped (for example SIGTERM). Report the cancel, bounded in time, then end.
             withContext(NonCancellable) {
@@ -105,17 +115,25 @@ class AgentLoop(
             }
             throw e
         }
-        reportFail(attempt, code)
+        when (outcome) {
+            is AttemptOutcome.Failed -> reportFail(attempt, outcome.code)
+            AttemptOutcome.ResultSubmitted -> logger.info("attempt result submitted: runId={} attemptId={}", attempt.runId, attempt.attemptId)
+        }
     }
 
-    private suspend fun executeOrNeedsHuman(attempt: ClaimedAttempt): AgentErrorCode =
+    private suspend fun executeOrNeedsHuman(attempt: ClaimedAttempt): AttemptOutcome =
         try {
             executor.execute(attempt)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: AgentApiException) {
+            // The lease is gone (409) or the attempt is not ours (404): stop without a fail, as for a heartbeat.
+            if (e.kind == AgentApiErrorKind.CONFLICT || e.kind == AgentApiErrorKind.NOT_FOUND) throw StaleAttemptException()
+            logger.error("executor failed: class={} kind={} runId={} attemptId={}", e.javaClass.simpleName, e.kind, attempt.runId, attempt.attemptId)
+            AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN)
         } catch (e: Exception) {
             logger.error("executor failed: class={} runId={} attemptId={}", e.javaClass.simpleName, attempt.runId, attempt.attemptId)
-            AgentErrorCode.NEEDS_HUMAN
+            AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN)
         }
 
     /** Sends a heartbeat each interval and reads the status. Ends the attempt by throwing when kivra says it is stale or cancelled. */

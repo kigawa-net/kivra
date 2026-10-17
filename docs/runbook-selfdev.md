@@ -541,3 +541,69 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 - 収集は、CLI コンテナが停止した後に行う前提。停止前に収集すると、書き込み中のファイルを読むことになる(PR 9 で順序を守る)。
 - 展開と収集の時間、大きなリポジトリでの上限の妥当性は未計測。
 - §6.7 の未確認の「`.kivra/` の書き込み権限と、task ファイルの差分からの除外」は、この PR で規則を決めた(上の所有権の節と差分の節)。実機での確認は残る。
+
+### 6.9 実行の結線(PR 9a。`RealAttemptExecutor`、既定は無効)
+
+コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/RealAttemptExecutor.kt`(`AgentLoop` が使う実行器)、`AgentConfig.kt`(`KIVRA_AGENT_EXECUTOR` と関連設定)、`KivraAgentClient.submitResult`(`POST .../result`)。試験は fake の docker、fake の kivra(MockEngine)、一時ディレクトリのローカル git リポジトリで行い、実際の docker、ネットワーク、`claude` は使わない。
+
+**既定は従来の stub**。`KIVRA_AGENT_EXECUTOR` が未設定または `stub` のときは、claim したアテンプトを `fail(NEEDS_HUMAN)` で返すだけ(§6.5)。`real` を明示したときだけ `RealAttemptExecutor` を使う。有効化(実機の docker・CLI・認証で確かめた後)は別の PR で行う。
+
+**実行の手順(1 アテンプト)**:
+1. 基底コミットを、ホスト側の bare mirror(`<KIVRA_AGENT_WORK_DIR>/.mirror.git`)へ取り込み、`baseSha` の tar を `WorkDirPreparer` で `<作業ルート>/<runId>-<attemptId>` に展開する。`.kivra/task.json` を書く(タスク文は title だけ。claim の入力に本文は無い)。
+2. `DockerRunner.cleanupOrphans` で、このエージェントのラベル付きの孤児コンテナを消す。
+3. CLI のコンテナを 1 つ起動する(§6.6、§6.7 の引数)。時間制限は `limits.maxRuntimeSeconds`。出力上限は `min(limits.maxOutputBytes, 1 MiB)`。
+4. コンテナが止まった後で `StreamJsonParser` と `CliOutcomeClassifier` で分類し、分類が成功なら `DiffCollector` で変更を集める(§6.8)。
+5. 結果は、heartbeat(世代の確認)と status(キャンセルの確認)の後に `POST /attempts/{id}/result` で送る。
+6. 作業ディレクトリとマニフェストを `RunDirCleanup` で消す。どの経路でも消す(失敗、キャンセル、例外)。消せなかったものが残ったときは、警告ログ(`work directory was not fully removed`、runId と attemptId だけ)を出す。残ったディレクトリは手で消す。
+7. ロック: `WorkDirLock` は `Main` が起動中ずっと保持する。この実行器は取り直さない。
+
+**停止との連動**(コンテナは止めてから収集する。止める経路はすべて `docker kill`):
+
+| 契機 | コンテナ | 報告(`fail`)のコード |
+| --- | --- | --- |
+| 時間制限を過ぎた | 止める | `TIMEOUT` |
+| kivra の `cancelRequested`(heartbeat の後の status で見える) | 止める | `CANCELLED` |
+| STOP ファイルがある(`KIVRA_AGENT_STOP_FILE`、既定は作業ルートの `STOP`) | 止める | `CANCELLED` |
+| 出力の上限を超えた | 止める | `OUTPUT_LIMIT` |
+| SIGTERM(ループのキャンセル) | 止める | `CANCELLED`(§6.5 のとおり、有限の時間で報告する) |
+| heartbeat か status が 409 または 404 | 止める | 送らない(破棄。§6.5) |
+
+**結果の報告先コードの表**(`fail` の `errorCode`。kivra への送り方は PR 9b で決める):
+
+| 状況 | 報告 |
+| --- | --- |
+| 分類 `SUCCEEDED` で、変更の集計も成功し、kivra が受理 | `result` を送る(`RESULT_RECEIVED`)。`fail` は送らない |
+| 分類 `TIMEOUT` `CANCELLED` `OUTPUT_LIMIT` `AUTH_FAILED` `RATE_LIMITED` `OVERLOADED` `CLI_FAILED` `MALFORMED_OUTPUT` | §6.7 の表どおり(`TIMEOUT`、`CANCELLED`、`OUTPUT_LIMIT`、`AUTH_REQUIRED`、`RATE_LIMITED`、`RATE_LIMITED`、`CLI_NONZERO`、`BAD_OUTPUT`) |
+| 変更がない(`EMPTY_PATCH`) | `CLI_NONZERO`。成功扱いにしない。`NEEDS_HUMAN` にもしない(下の判断) |
+| 差分の拒否(`DiffRejectReason` のどれか。秘密らしい内容、拒否パス、サイズ超過など) | `BAD_OUTPUT` |
+| 集計の拒否のうち、`EMPTY_PATCH` だけでないもの | `BAD_OUTPUT` |
+| `result` の応答が 422(kivra が方針で拒否) | `BAD_OUTPUT` |
+| `result` を送る直前に cancelRequested が見える | `CANCELLED`(結果は送らない) |
+| `result` または heartbeat・status が 409 / 404 | 何も送らない(破棄)。ループは fail を送らずに止まる |
+| 準備(git、展開)、docker の引数の検査、その他の例外、kivra の 5xx や通信の失敗 | `NEEDS_HUMAN`(運用者が判断する。自動の再試行はしない) |
+
+**判断(この PR で決めた)**:
+- `EMPTY_PATCH`(CLI は終わったが変更が無い)は成功にしない。`CLI_NONZERO` で fail する。`NEEDS_HUMAN` は「ホスト側の異常」を表すために残し、CLI の判断には使わない。kivra が `CLI_NONZERO` を受けてどう扱うかは PR 9b で決める。
+- 結果の送信は、heartbeat で世代を確かめてから行う。世代が古いとき(409)は結果を捨て、fail も送らない。kivra 側で別のエージェントが取っているため、fail を送ると別の attempt を汚すおそれがあるからである。
+
+**`KIVRA_AGENT_EXECUTOR=real` の設定**(`real` のときだけ読む。値は起動時に検査し、エラーは変数名だけを出す):
+
+| 変数 | 必須 | 内容 |
+| --- | --- | --- |
+| `KIVRA_AGENT_EXECUTOR` | 任意 | `stub`(既定)か `real`。ほかの値は起動に失敗する |
+| `KIVRA_AGENT_DOCKER_BIN` | real で必須 | docker CLI の絶対パス |
+| `KIVRA_AGENT_DOCKER_HOST` | 任意 | rootless の `unix:///...`。docker CLI のプロセスにだけ渡す |
+| `KIVRA_AGENT_DOCKER_NETWORK` | real で必須 | 内部ネットワーク名(`--internal`。確認は運用) |
+| `KIVRA_AGENT_DOCKER_IMAGE` | real で必須 | 実行イメージ(`agent-runtime/image`) |
+| `KIVRA_AGENT_DOCKER_PROXY_URL` | real で必須 | `http://host:port`(egress プロキシ) |
+| `KIVRA_AGENT_GIT_BIN` | real で必須 | git の絶対パス(ホストで公開リポジトリを読むだけ) |
+| `KIVRA_AGENT_REPO` | real で必須 | `owner/repo`(公開 GitHub。資格情報は使わない) |
+
+起動時に `DockerSettings` と作業ルートの検査が通らなければ、終了コード 2 で止まる(アテンプトは claim しない)。
+
+**未解決(この PR の範囲外)**:
+- claim が渡す `allowedPathPatterns` と `deniedPathPatterns` は、差分の検査に使っていない。差分は kivra-core の既定値の写し(§6.8)で検査する。これは厳しい側なので、サーバーの設定が広い場合でも危険な結果が通ることはない(サーバーが 422 で拒否し、`BAD_OUTPUT` になる)。サーバー側の設定と揃えるかは PR 9b までに決める。
+- 出力上限は、claim の `maxOutputBytes` を 1 MiB の上限まで縮めるだけに使う。
+- タスク文は title だけ(claim の入力に本文が無い)。
+- 実際の docker、`claude` CLI、`/etc/subuid` の所有権、作業ディレクトリの削除は、この PR では実機で確かめていない(§6.6、§6.7、§6.8 の未確認事項)。
+- 有効化: `KIVRA_AGENT_EXECUTOR=real` は既定で無効。実機の確認の後、別の PR で有効にする。

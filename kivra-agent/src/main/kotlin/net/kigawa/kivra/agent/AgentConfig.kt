@@ -4,6 +4,8 @@ import java.net.URI
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.time.Duration
+import net.kigawa.kivra.agent.docker.DockerPatterns
+import net.kigawa.kivra.agent.workdir.RepoSource
 
 /**
  * A setting is missing or invalid. The message names the variable only, never its value: a URL, a path or a secret must not reach
@@ -35,11 +37,18 @@ class AgentConfig private constructor(
     val heartbeatInterval: Duration,
     /** While this file exists, the agent does not claim (the kill switch). */
     val stopFile: Path,
+    /** Which executor runs the attempts. The default is the stub, which fails each attempt with NEEDS_HUMAN. */
+    val executorMode: ExecutorMode,
+    /** The settings of the real executor. Null unless [executorMode] is [ExecutorMode.REAL]. */
+    val realExecutor: RealExecutorSettings?,
 ) {
     /** One attempt at a time. Fixed, not configurable. */
     val maxConcurrent: Int get() = MAX_CONCURRENT
 
     override fun toString(): String = "AgentConfig(***)"
+
+    /** The executor of an attempt. REAL is enabled only by `KIVRA_AGENT_EXECUTOR=real` (see the runbook, section 6.9). */
+    enum class ExecutorMode { STUB, REAL }
 
     companion object {
         const val ENV_KIVRA_URL = "KIVRA_AGENT_KIVRA_URL"
@@ -50,6 +59,14 @@ class AgentConfig private constructor(
         const val ENV_POLL_INTERVAL_MS = "KIVRA_AGENT_POLL_INTERVAL_MS"
         const val ENV_HEARTBEAT_INTERVAL_MS = "KIVRA_AGENT_HEARTBEAT_INTERVAL_MS"
         const val ENV_STOP_FILE = "KIVRA_AGENT_STOP_FILE"
+        const val ENV_EXECUTOR = "KIVRA_AGENT_EXECUTOR"
+        const val ENV_DOCKER_BIN = "KIVRA_AGENT_DOCKER_BIN"
+        const val ENV_DOCKER_HOST = "KIVRA_AGENT_DOCKER_HOST"
+        const val ENV_DOCKER_NETWORK = "KIVRA_AGENT_DOCKER_NETWORK"
+        const val ENV_DOCKER_IMAGE = "KIVRA_AGENT_DOCKER_IMAGE"
+        const val ENV_DOCKER_PROXY_URL = "KIVRA_AGENT_DOCKER_PROXY_URL"
+        const val ENV_GIT_BIN = "KIVRA_AGENT_GIT_BIN"
+        const val ENV_REPO = "KIVRA_AGENT_REPO"
 
         const val MAX_CONCURRENT = 1
         const val DEFAULT_STOP_FILE_NAME = "STOP"
@@ -73,6 +90,11 @@ class AgentConfig private constructor(
             val workDir = absolutePath(env, ENV_WORK_DIR)
             val stopFile = optional(env, ENV_STOP_FILE)?.let { absolutePath(env, ENV_STOP_FILE) }
                 ?: workDir.resolve(DEFAULT_STOP_FILE_NAME)
+            val executorMode = when (optional(env, ENV_EXECUTOR)) {
+                null, "stub" -> ExecutorMode.STUB
+                "real" -> ExecutorMode.REAL
+                else -> throw ConfigException("$ENV_EXECUTOR must be stub or real")
+            }
             return AgentConfig(
                 kivraUrl = kivraUrl,
                 tokenUrl = tokenUrl,
@@ -84,6 +106,31 @@ class AgentConfig private constructor(
                     millis(env, ENV_HEARTBEAT_INTERVAL_MS, HEARTBEAT_DEFAULT_MS, HEARTBEAT_MIN_MS, HEARTBEAT_MAX_MS),
                 ),
                 stopFile = stopFile,
+                executorMode = executorMode,
+                realExecutor = if (executorMode == ExecutorMode.REAL) realExecutorSettings(env) else null,
+            )
+        }
+
+        /** Read only for `KIVRA_AGENT_EXECUTOR=real`. The docker and git paths are absolute; the repository is `owner/repo`. */
+        private fun realExecutorSettings(env: Map<String, String>): RealExecutorSettings {
+            val proxyUrl = required(env, ENV_DOCKER_PROXY_URL)
+            if (!DockerPatterns.PROXY_URL.matches(proxyUrl)) throw ConfigException("$ENV_DOCKER_PROXY_URL must be http://host:port")
+            val repoName = required(env, ENV_REPO)
+            val parts = repoName.split('/')
+            val repo = try {
+                if (parts.size != 2) throw IllegalArgumentException()
+                RepoSource.PublicGithub(parts[0], parts[1])
+            } catch (e: IllegalArgumentException) {
+                throw ConfigException("$ENV_REPO must be owner/repo")
+            }
+            return RealExecutorSettings(
+                dockerBinary = absolutePath(env, ENV_DOCKER_BIN),
+                dockerHost = optional(env, ENV_DOCKER_HOST),
+                network = required(env, ENV_DOCKER_NETWORK),
+                image = required(env, ENV_DOCKER_IMAGE),
+                proxyUrl = proxyUrl,
+                gitBinary = absolutePath(env, ENV_GIT_BIN),
+                repo = repo,
             )
         }
 

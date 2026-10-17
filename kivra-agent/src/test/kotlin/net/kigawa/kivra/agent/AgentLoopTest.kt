@@ -64,7 +64,7 @@ class AgentLoopTest {
     @Test
     fun heartbeatsCarryTheGenerationWhileTheAttemptRuns() = runTest {
         val recorded = synchronizedList()
-        val slow = AttemptExecutor { delay(12_000); AgentErrorCode.NEEDS_HUMAN }
+        val slow = AttemptExecutor { delay(12_000); AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN) }
         val loop = loopFor(recorded, config(heartbeat = 5_000), slow, kivraHandler())
         val job = launch { loop.run() }
         advanceTimeBy(11_000)
@@ -84,7 +84,7 @@ class AgentLoopTest {
         val slow = AttemptExecutor {
             try {
                 delay(60_000)
-                AgentErrorCode.NEEDS_HUMAN
+                AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN)
             } finally {
                 executorCancelled = true
             }
@@ -145,7 +145,7 @@ class AgentLoopTest {
     @Test
     fun cancelingTheLoopReportsCancelledForARunningAttempt() = runTest {
         val recorded = synchronizedList()
-        val forever = AttemptExecutor { delay(Long.MAX_VALUE / 4); AgentErrorCode.NEEDS_HUMAN }
+        val forever = AttemptExecutor { delay(Long.MAX_VALUE / 4); AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN) }
         val loop = loopFor(recorded, config(heartbeat = 5_000), forever, kivraHandler())
         val job = launch { loop.run() }
         advanceTimeBy(1_000)
@@ -157,7 +157,7 @@ class AgentLoopTest {
     @Test
     fun cancelRequestedFromKivraStopsTheWorkAndReportsCancelled() = runTest {
         val recorded = synchronizedList()
-        val forever = AttemptExecutor { delay(Long.MAX_VALUE / 4); AgentErrorCode.NEEDS_HUMAN }
+        val forever = AttemptExecutor { delay(Long.MAX_VALUE / 4); AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN) }
         val loop = loopFor(recorded, config(heartbeat = 5_000), forever, kivraHandler(extra = { rec ->
             if (rec.path.endsWith("/status")) Canned(200, STATUS_CANCEL) else null
         }))

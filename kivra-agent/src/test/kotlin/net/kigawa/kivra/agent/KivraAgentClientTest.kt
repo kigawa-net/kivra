@@ -151,4 +151,35 @@ class KivraAgentClientTest {
         assertFailsWith<IllegalArgumentException> { client(synchronizedList()) { Canned(200) }.status("../admin") }
         Unit
     }
+
+    @Test
+    fun resultBodyCarriesTheChangesAndARefusalIsAReply() = runBlocking {
+        val recorded = synchronizedList()
+        val result = net.kigawa.kivra.agent.workdir.AgentResult(
+            summary = "done",
+            changes = listOf(
+                net.kigawa.kivra.agent.workdir.AgentChange("kivra-agent/a.kt", net.kigawa.kivra.agent.workdir.AgentChangeKind.WRITE, "x\n"),
+                net.kigawa.kivra.agent.workdir.AgentChange("docs/b.md", net.kigawa.kivra.agent.workdir.AgentChangeKind.DELETE, null),
+            ),
+            exitStatus = 0,
+            sessionId = null,
+        )
+        val c = client(recorded) { Canned(422, "{}") }
+        assertEquals(ResultReply.Rejected, c.submitResult("att-1", 3, result))
+        val body = recorded.single().body
+        assertTrue(body.startsWith("""{"generation":3,"result":{"summary":"done","exitStatus":0,"sessionId":null,"changes":["""), body)
+        assertTrue(body.contains(""""path":"kivra-agent/a.kt","kind":"WRITE","fileKind":"REGULAR","content":"x\n""""), body)
+        assertTrue(body.contains(""""path":"docs/b.md","kind":"DELETE","fileKind":"REGULAR"}"""), body)
+        assertEquals(listOf("Bearer tok-1"), recorded.single().authorization)
+    }
+
+    @Test
+    fun resultOnAStaleLeaseIsAConflictForTheLoopToDiscard() = runBlocking {
+        val recorded = synchronizedList()
+        val c = client(recorded) { Canned(409, "{}") }
+        val error = assertFailsWith<AgentApiException> {
+            c.submitResult("att-1", 3, net.kigawa.kivra.agent.workdir.AgentResult("done", emptyList(), 0, null))
+        }
+        assertEquals(AgentApiErrorKind.CONFLICT, error.kind)
+    }
 }

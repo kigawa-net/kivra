@@ -88,4 +88,52 @@ class AgentConfigTest {
         assertEquals("AgentConfig(***)", config.toString())
         assertFalse(config.toString().contains("kivra.example"))
     }
+
+    @Test
+    fun executorIsTheStubUnlessRealIsAskedFor() {
+        val config = AgentConfig.fromEnv(env())
+        assertEquals(AgentConfig.ExecutorMode.STUB, config.executorMode)
+        assertEquals(null, config.realExecutor)
+        assertEquals(AgentConfig.ExecutorMode.STUB, AgentConfig.fromEnv(env(AgentConfig.ENV_EXECUTOR to "stub")).executorMode)
+    }
+
+    @Test
+    fun unknownExecutorValueIsRejectedByNameOnly() {
+        val error = rejected(AgentConfig.ENV_EXECUTOR to "docker")
+        assertEquals("KIVRA_AGENT_EXECUTOR must be stub or real", error.message)
+    }
+
+    @Test
+    fun realExecutorReadsItsSettingsOnlyWhenAskedFor() {
+        val real = env(
+            AgentConfig.ENV_EXECUTOR to "real",
+            AgentConfig.ENV_DOCKER_BIN to "/usr/bin/docker",
+            AgentConfig.ENV_DOCKER_NETWORK to "kivra-agent-internal",
+            AgentConfig.ENV_DOCKER_IMAGE to "kivra-agent-runtime:local",
+            AgentConfig.ENV_DOCKER_PROXY_URL to "http://kivra-agent-proxy:8080",
+            AgentConfig.ENV_GIT_BIN to "/usr/bin/git",
+            AgentConfig.ENV_REPO to "kigawa-net/kivra",
+        )
+        val config = AgentConfig.fromEnv(real)
+        assertEquals(AgentConfig.ExecutorMode.REAL, config.executorMode)
+        assertEquals("kivra-agent-internal", config.realExecutor!!.network)
+        assertFalse(config.toString().contains("kivra-agent-internal"))
+    }
+
+    @Test
+    fun realExecutorRequiresItsSettings() {
+        val base = arrayOf(
+            AgentConfig.ENV_EXECUTOR to "real",
+            AgentConfig.ENV_DOCKER_BIN to "/usr/bin/docker",
+            AgentConfig.ENV_DOCKER_NETWORK to "kivra-agent-internal",
+            AgentConfig.ENV_DOCKER_IMAGE to "kivra-agent-runtime:local",
+            AgentConfig.ENV_DOCKER_PROXY_URL to "http://kivra-agent-proxy:8080",
+            AgentConfig.ENV_GIT_BIN to "/usr/bin/git",
+            AgentConfig.ENV_REPO to "kigawa-net/kivra",
+        )
+        assertEquals("KIVRA_AGENT_DOCKER_IMAGE is required", rejected(*base.map { if (it.first == AgentConfig.ENV_DOCKER_IMAGE) it.first to null else it }.toTypedArray()).message)
+        assertEquals("KIVRA_AGENT_DOCKER_PROXY_URL must be http://host:port", rejected(*base.map { if (it.first == AgentConfig.ENV_DOCKER_PROXY_URL) it.first to "https://proxy.example" else it }.toTypedArray()).message)
+        assertEquals("KIVRA_AGENT_REPO must be owner/repo", rejected(*base.map { if (it.first == AgentConfig.ENV_REPO) it.first to "kivra" else it }.toTypedArray()).message)
+        assertEquals("KIVRA_AGENT_DOCKER_BIN must be an absolute path", rejected(*base.map { if (it.first == AgentConfig.ENV_DOCKER_BIN) it.first to "docker" else it }.toTypedArray()).message)
+    }
 }

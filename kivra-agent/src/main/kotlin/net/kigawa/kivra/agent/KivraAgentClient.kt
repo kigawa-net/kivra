@@ -17,8 +17,13 @@ import io.ktor.http.content.TextContent
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
+import net.kigawa.kivra.agent.workdir.AgentChangeKind
+import net.kigawa.kivra.agent.workdir.AgentResult
 
 /**
  * The HTTP settings every kivra-agent client shares: no redirects (a Bearer token is never sent to another origin), a request
@@ -64,6 +69,12 @@ sealed interface ClaimResult {
     data object NoAssignment : ClaimResult
 }
 
+/** The outcome of `result` when kivra did not refuse the request outright: accepted (with the new state) or rejected by policy (422). */
+sealed interface ResultReply {
+    data class Accepted(val state: String) : ResultReply
+    data object Rejected : ResultReply
+}
+
 /** The state of an attempt and whether kivra has asked to cancel it. */
 data class AttemptStatus(val state: String, val cancelRequested: Boolean)
 
@@ -105,6 +116,40 @@ class KivraAgentClient(
         val reply = send(HttpMethod.Post, attemptPath(attemptId, "fail"), body)
         requireSuccess(reply.status)
         return parseState(reply.body)
+    }
+
+    /**
+     * Sends the result of an attempt. A 422 (kivra refused the change set) is [ResultReply.Rejected]; the reasons it carries are not read.
+     * A 409 or 404 is thrown as [AgentApiException], and the caller must then discard the result.
+     */
+    suspend fun submitResult(attemptId: String, generation: Long, result: AgentResult): ResultReply {
+        val body = buildJsonObject {
+            put("generation", generation)
+            putJsonObject("result") {
+                put("summary", result.summary)
+                put("exitStatus", result.exitStatus)
+                if (result.sessionId != null) put("sessionId", result.sessionId) else put("sessionId", JsonNull)
+                putJsonArray("changes") {
+                    for (change in result.changes) {
+                        add(
+                            buildJsonObject {
+                                put("path", change.path)
+                                put("kind", change.kind.name)
+                                put("fileKind", "REGULAR")
+                                if (change.kind == AgentChangeKind.WRITE) put("content", change.content.orEmpty())
+                            },
+                        )
+                    }
+                }
+            }
+        }.toString()
+        val reply = send(HttpMethod.Post, attemptPath(attemptId, "result"), body)
+        if (reply.status == 422) return ResultReply.Rejected
+        requireSuccess(reply.status)
+        val parsed = decode<StateBody>(reply.body)
+        validId(parsed.attemptId)
+        validState(parsed.state)
+        return ResultReply.Accepted(parsed.state)
     }
 
     suspend fun status(attemptId: String): AttemptStatus {

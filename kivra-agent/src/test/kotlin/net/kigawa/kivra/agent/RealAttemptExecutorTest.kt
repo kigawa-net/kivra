@@ -1,0 +1,413 @@
+package net.kigawa.kivra.agent
+
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
+import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.Collections
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import net.kigawa.kivra.agent.docker.DockerLauncher
+import net.kigawa.kivra.agent.docker.DockerProcess
+import net.kigawa.kivra.agent.workdir.DiffRejectReason
+import net.kigawa.kivra.agent.workdir.GIT_BIN
+import net.kigawa.kivra.agent.workdir.LocalPath
+import net.kigawa.kivra.agent.workdir.LocalRepo
+import net.kigawa.kivra.agent.workdir.makeRepo
+import org.slf4j.LoggerFactory
+
+private const val RUN = "01M545K02Q6YB4M5ZHAM5792CS"
+private const val ATTEMPT = "att-1"
+private const val NETWORK = "kivra-agent-internal"
+private const val IMAGE = "kivra-agent-runtime:local"
+private const val PROXY = "http://kivra-agent-proxy:8080"
+private const val TITLE = "TASKSECRET-title-text"
+private const val SUMMARY = "SUMMARYSECRET done"
+private const val CONTENT = "CONTENTSECRET fun a() = 2"
+private const val CHANGED = "kivra-agent/src/Hygiene.kt"
+
+/** A fake docker CLI. `run` calls [onRun] with the host work directory (the mount source) and then writes [output] and ends with [exitCode]. */
+private class ScriptedDocker(
+    private val output: () -> String = { "" },
+    private val onRun: (Path) -> Unit = {},
+    private val blocks: Boolean = false,
+    private val exitCode: Int = 0,
+) : DockerLauncher {
+    val argvs: MutableList<List<String>> = Collections.synchronizedList(mutableListOf())
+
+    @Volatile
+    var killed = false
+
+    override fun start(argv: List<String>, env: Map<String, String>): DockerProcess {
+        argvs += argv
+        return when (argv[1]) {
+            "run" -> {
+                onRun(mountSource(argv))
+                Run(output().toByteArray())
+            }
+            "kill" -> {
+                killed = true
+                Immediate(0)
+            }
+            "ps" -> Immediate(0)
+            else -> Immediate(0)
+        }
+    }
+
+    private fun mountSource(argv: List<String>): Path {
+        val mount = argv.first { it.startsWith("--mount=") }
+        return Path.of(mount.split(',').first { it.startsWith("source=") }.removePrefix("source="))
+    }
+
+    private inner class Run(bytes: ByteArray) : DockerProcess {
+        override val stdout: InputStream = ByteArrayInputStream(bytes)
+        override val stderr: InputStream = ByteArrayInputStream(ByteArray(0))
+
+        override fun waitFor(millis: Long): Int? {
+            if (killed) return 137
+            if (blocks) {
+                Thread.sleep(minOf(millis, 20L))
+                return null
+            }
+            return exitCode
+        }
+
+        override fun destroy() {
+            killed = true
+        }
+    }
+
+    private class Immediate(private val code: Int) : DockerProcess {
+        override val stdout: InputStream = ByteArrayInputStream(ByteArray(0))
+        override val stderr: InputStream = ByteArrayInputStream(ByteArray(0))
+        override fun waitFor(millis: Long): Int? = code
+        override fun destroy() {}
+    }
+}
+
+private fun resultLine(summary: String = SUMMARY): String =
+    """{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"$summary","session_id":"sess-42"}"""
+
+private fun lines(vararg items: String): String = items.joinToString("\n", postfix = "\n")
+
+/** One test world: a work root, a local repository as the base, a scripted docker, and a fake kivra. */
+private class World(
+    val root: Path = Files.createTempDirectory("kivra-real-exec").toRealPath(),
+    val repo: LocalRepo = makeRepo(mapOf("kivra-agent/src/Main.kt" to "fun a() = 1\n", "kivra-agent/src/Hygiene.kt" to "fun h() = 1\n")),
+    val docker: ScriptedDocker,
+    handler: (Recorded) -> Canned = { defaultReply(it) },
+) {
+    val recorded: MutableList<Recorded> = synchronizedList()
+    private var claims = 0
+    val client = KivraAgentClient(
+        fakeKivraHttp(recorded, handler = { rec ->
+            if (rec.path.endsWith("/claim")) {
+                synchronized(this) { claims++ }
+                if (claims == 1) Canned(200, claimBody(repo.sha)) else Canned(204)
+            } else {
+                handler(rec)
+            }
+        }),
+        KIVRA_BASE,
+        FixedTokens(),
+    )
+    val stopFile: Path = root.resolve(AgentConfig.DEFAULT_STOP_FILE_NAME)
+
+    fun executor(maxOutput: Long = 1_048_576): RealAttemptExecutor = RealAttemptExecutor(
+        client = client,
+        workRoot = root,
+        stopFile = stopFile,
+        settings = RealExecutorSettings(
+            dockerBinary = Path.of("/usr/bin/docker"),
+            dockerHost = null,
+            network = NETWORK,
+            image = IMAGE,
+            proxyUrl = PROXY,
+            gitBinary = GIT_BIN,
+            repo = LocalPath(repo.repo),
+        ),
+        launcher = docker,
+        pollMillis = 20,
+    )
+
+    fun attempt(baseSha: String = repo.sha, maxRuntimeSeconds: Long = 600, maxOutputBytes: Long = 1_048_576) = ClaimedAttempt(
+        runId = RUN,
+        attemptId = ATTEMPT,
+        generation = 3,
+        baseSha = baseSha,
+        task = AgentTask("task_title", TITLE, TRUST_UNTRUSTED, false),
+        limits = AgentLimits(
+            maxRuntimeSeconds = maxRuntimeSeconds,
+            maxTurns = 30,
+            maxOutputBytes = maxOutputBytes,
+            maxChangedFiles = 20,
+            maxFileBytes = 200_000,
+            maxTotalBytes = 1_000_000,
+            maxDeletes = 5,
+        ),
+        allowedPathPatterns = listOf("kivra-*/src/**"),
+        deniedPathPatterns = listOf(".github/**"),
+    )
+
+    fun paths(suffix: String) = recorded.count { it.path.endsWith(suffix) }
+
+    /** No run directory and no manifest is left in the work root. */
+    fun assertNoRunLeft() {
+        Files.list(root).use { files ->
+            assertTrue(files.toList().none { it.fileName.toString().startsWith(RUN) }, "a run directory was left behind")
+        }
+    }
+
+    private fun claimBody(sha: String): String = """{"attemptId":"$ATTEMPT","runId":"$RUN","generation":3,"input":{""" +
+        """"baseSha":"$sha","task":{"origin":"task_title","value":"$TITLE","trust":"UNTRUSTED","truncated":false},""" +
+        """"limits":{"maxRuntimeSeconds":600,"maxTurns":30,"maxOutputBytes":1048576,"maxChangedFiles":20,""" +
+        """"maxFileBytes":200000,"maxTotalBytes":1000000,"maxDeletes":5},""" +
+        """"allowedPathPatterns":["kivra-*/src/**"],"deniedPathPatterns":[".github/**"]}}"""
+
+    companion object {
+        fun defaultReply(rec: Recorded): Canned = when {
+            rec.path.endsWith("/heartbeat") -> Canned(200, STATE_RUNNING)
+            rec.path.endsWith("/status") -> Canned(200, STATUS_OK)
+            rec.path.endsWith("/result") -> Canned(200, """{"attemptId":"att-1","state":"RESULT_RECEIVED"}""")
+            rec.path.endsWith("/fail") -> Canned(200, """{"attemptId":"att-1","state":"FAILED"}""")
+            else -> Canned(404)
+        }
+    }
+}
+
+class RealAttemptExecutorTest {
+    @Test
+    fun successSendsTheChangeSetAndRemovesTheWorkDirectory() = runBlocking {
+        val world = World(docker = ScriptedDocker(
+            output = { lines(resultLine("Changed a.")) },
+            onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") },
+        ))
+        val outcome = world.executor().execute(world.attempt())
+
+        assertEquals(AttemptOutcome.ResultSubmitted, outcome)
+        val result = world.recorded.single { it.path.endsWith("/result") }
+        assertTrue(result.body.startsWith("""{"generation":3,"result":{"summary":"Changed a.","exitStatus":0,"sessionId":"sess-42""""))
+        assertTrue(result.body.contains(""""path":"kivra-agent/src/Main.kt","kind":"WRITE","fileKind":"REGULAR","content":"fun a() = 2\n""""))
+        assertEquals(0, world.paths("/fail"), "a result that was sent must not be followed by a fail")
+        world.assertNoRunLeft()
+
+        val run = world.docker.argvs.single { it[1] == "run" }
+        assertTrue("--network=$NETWORK" in run)
+        assertFalse(run.any { it.startsWith("--privileged") })
+        assertEquals(1, run.count { it.startsWith("--mount=") }, "only the work directory is mounted")
+        assertTrue(run.any { it.startsWith("--mount=type=bind,source=") && it.endsWith(",target=/work") })
+    }
+
+    @Test
+    fun anEmptyChangeSetIsAFailureNotASuccess() = runBlocking {
+        val world = World(docker = ScriptedDocker(output = { lines(resultLine("Nothing to do.")) }))
+        val outcome = world.executor().execute(world.attempt())
+
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.CLI_NONZERO), outcome)
+        assertEquals(0, world.paths("/result"))
+        assertEquals(0, world.paths("/fail"), "the loop reports the fail; the executor must not send it")
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun cliOutcomesAreMappedToTheirCodes() = runBlocking {
+        val cases = listOf(
+            Triple("no result, exit 1", "", 1) to AgentErrorCode.CLI_NONZERO,
+            Triple("authentication", lines("""{"type":"system","subtype":"api_retry","error":"authentication_failed"}"""), 1) to AgentErrorCode.AUTH_REQUIRED,
+            Triple("rate limit", lines("""{"type":"system","subtype":"api_retry","error":"rate_limit"}"""), 1) to AgentErrorCode.RATE_LIMITED,
+            Triple("overloaded", lines("""{"type":"system","subtype":"api_retry","error":"overloaded"}"""), 1) to AgentErrorCode.RATE_LIMITED,
+            Triple("is_error result", lines("""{"type":"result","subtype":"error_max_turns","is_error":true,"result":"x"}"""), 1) to AgentErrorCode.CLI_NONZERO,
+            Triple("invalid line before result", lines("not json", resultLine()), 0) to AgentErrorCode.BAD_OUTPUT,
+            Triple("cut stream, exit 0", lines("""{"type":"assistant"}""") + "{\"type\":\"resu", 0) to AgentErrorCode.BAD_OUTPUT,
+        )
+        for ((case, expected) in cases) {
+            val (name, output, exit) = case
+            val world = World(docker = ScriptedDocker(output = { output }, exitCode = exit))
+            assertEquals(AttemptOutcome.Failed(expected), world.executor().execute(world.attempt()), name)
+            assertEquals(0, world.paths("/result"), name)
+            world.assertNoRunLeft()
+        }
+    }
+
+    @Test
+    fun timeoutKillsTheContainerAndFailsWithTimeout() = runBlocking {
+        val world = World(docker = ScriptedDocker(blocks = true))
+        val outcome = world.executor().execute(world.attempt(maxRuntimeSeconds = 1))
+
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.TIMEOUT), outcome)
+        assertTrue(world.docker.argvs.any { it[1] == "kill" })
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun stopFileKillsTheContainerAndFailsWithCancelled() = runBlocking {
+        val world = World(docker = ScriptedDocker(blocks = true))
+        Files.createFile(world.stopFile)
+        val outcome = world.executor().execute(world.attempt())
+
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.CANCELLED), outcome)
+        assertTrue(world.docker.killed)
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun cancelRequestedFromKivraStopsTheRunAndReportsCancelled() = runBlocking {
+        val world = World(
+            docker = ScriptedDocker(blocks = true),
+            handler = { rec ->
+                if (rec.path.endsWith("/status")) Canned(200, STATUS_CANCEL) else World.defaultReply(rec)
+            },
+        )
+        val config = AgentConfig.fromEnv(testConfigEnv(world.root, world.root.resolve("secret").writeSecret("s"), heartbeat = 5_000))
+        val loop = AgentLoop(config, world.client, world.executor())
+        val job = launch { loop.run() }
+        withTimeout(30_000) { while (world.paths("/fail") == 0) delay(50) }
+        job.cancelAndJoin()
+
+        val fail = world.recorded.single { it.path.endsWith("/fail") }
+        assertEquals("""{"generation":3,"errorCode":"CANCELLED"}""", fail.body)
+        assertEquals(0, world.paths("/result"))
+        assertTrue(world.docker.killed)
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun staleLeaseOrMissingAttemptOnResultDiscardsTheResultWithoutAFail() = runBlocking {
+        for (status in listOf(409, 404)) {
+            val world = World(
+                docker = ScriptedDocker(output = { lines(resultLine()) }, onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") }),
+                handler = { rec -> if (rec.path.endsWith("/result")) Canned(status, """{"error":"conflict"}""") else World.defaultReply(rec) },
+            )
+            val config = AgentConfig.fromEnv(testConfigEnv(world.root, world.root.resolve("secret").writeSecret("s"), poll = 1_000))
+            val loop = AgentLoop(config, world.client, world.executor())
+            val job = launch { loop.run() }
+            withTimeout(30_000) { while (world.paths("/result") == 0) delay(20) }
+            delay(300)
+            job.cancelAndJoin()
+
+            assertEquals(1, world.paths("/result"), "status $status: the result is sent once")
+            assertEquals(0, world.paths("/fail"), "status $status: a stale attempt must not get a fail")
+            world.assertNoRunLeft()
+        }
+    }
+
+    @Test
+    fun resultRefusedByKivraIsReportedAsBadOutput() = runBlocking {
+        val world = World(
+            docker = ScriptedDocker(output = { lines(resultLine()) }, onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") }),
+            handler = { rec -> if (rec.path.endsWith("/result")) Canned(422, """{"error":"rejected","reasons":["POLICY_REJECTED"],"policyReasons":[]}""") else World.defaultReply(rec) },
+        )
+        val outcome = world.executor().execute(world.attempt())
+
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.BAD_OUTPUT), outcome)
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun aSecretLikeSummaryIsRefusedAndNothingIsSent() = runBlocking {
+        val secret = "ghp_" + "a".repeat(36)
+        val world = World(docker = ScriptedDocker(
+            output = { lines(resultLine(secret)) },
+            onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") },
+        ))
+        val outcome = world.executor().execute(world.attempt())
+
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.BAD_OUTPUT), outcome)
+        assertEquals(0, world.paths("/result"))
+        assertEquals(0, world.paths("/heartbeat"), "nothing is sent for a refused change set")
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun rejectionCodeIsCliFailedOnlyForAnEmptyPatch() {
+        assertEquals(AgentErrorCode.CLI_NONZERO, RealAttemptExecutor.rejectionCode(listOf(DiffRejectReason.EMPTY_PATCH)))
+        assertEquals(
+            AgentErrorCode.BAD_OUTPUT,
+            RealAttemptExecutor.rejectionCode(listOf(DiffRejectReason.EMPTY_PATCH, DiffRejectReason.PATH_DENIED)),
+        )
+        assertEquals(AgentErrorCode.BAD_OUTPUT, RealAttemptExecutor.rejectionCode(listOf(DiffRejectReason.SECRET_LIKE_CONTENT)))
+    }
+
+    @Test
+    fun aServerErrorOnTheLeaseCheckRemovesTheWorkDirectoryAndPropagates() = runBlocking {
+        val world = World(
+            docker = ScriptedDocker(output = { lines(resultLine()) }, onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") }),
+            handler = { rec -> if (rec.path.endsWith("/heartbeat")) Canned(500, "") else World.defaultReply(rec) },
+        )
+        val error = assertFailsWith<AgentApiException> { world.executor().execute(world.attempt()) }
+
+        assertEquals(AgentApiErrorKind.SERVER, error.kind)
+        assertEquals(0, world.paths("/result"))
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun aFailedPreparationLeavesNoWorkDirectory() = runBlocking {
+        val world = World(docker = ScriptedDocker())
+        assertFailsWith<Exception> { world.executor().execute(world.attempt(baseSha = "f".repeat(40))) }
+
+        assertEquals(0, world.docker.argvs.count { it[1] == "run" }, "no container runs without a base")
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun logsCarryIdsAndCodesOnlyNeverTheTaskPathContentSummaryOrToken() = runBlocking {
+        val logger = LoggerFactory.getLogger("net.kigawa.kivra.agent") as Logger
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        val previousLevel = logger.level
+        logger.level = Level.DEBUG
+        logger.addAppender(appender)
+        try {
+            val world = World(docker = ScriptedDocker(
+                output = { lines(resultLine(SUMMARY)) },
+                onRun = { dir -> Files.writeString(dir.resolve(CHANGED), CONTENT + "\n") },
+            ))
+            // Any run of the same worker, with a refusal, to exercise the warn paths too.
+            world.executor().execute(world.attempt())
+            val refused = World(docker = ScriptedDocker(output = { lines(resultLine("ghp_" + "b".repeat(36))) }, onRun = { dir -> Files.writeString(dir.resolve(CHANGED), CONTENT + "\n") }))
+            refused.executor().execute(refused.attempt())
+
+            val text = appender.list.joinToString("\n") { it.formattedMessage }
+            assertTrue(text.isNotEmpty(), "the executor logs its outcome")
+            for (forbidden in listOf(TITLE, SUMMARY, CONTENT, CHANGED, "kivra-agent/", "tok-", "ghp_", "/tmp", world.root.toString())) {
+                assertFalse(text.contains(forbidden), "log must not contain: $forbidden")
+            }
+        } finally {
+            logger.detachAppender(appender)
+            logger.level = previousLevel
+        }
+    }
+
+    @Test
+    fun invalidExecutorSettingsFailBeforeAnyWork() {
+        val root = Files.createTempDirectory("kivra-real-exec-bad").toRealPath()
+        assertFailsWith<net.kigawa.kivra.agent.docker.DockerSpecException> {
+            RealAttemptExecutor(
+                client = KivraAgentClient(fakeKivraHttp(synchronizedList()) { World.defaultReply(it) }, KIVRA_BASE, FixedTokens()),
+                workRoot = root,
+                stopFile = root.resolve("STOP"),
+                settings = RealExecutorSettings(
+                    dockerBinary = Path.of("docker"),
+                    dockerHost = null,
+                    network = NETWORK,
+                    image = IMAGE,
+                    proxyUrl = PROXY,
+                    gitBinary = GIT_BIN,
+                    repo = LocalPath(root),
+                ),
+            )
+        }
+    }
+}

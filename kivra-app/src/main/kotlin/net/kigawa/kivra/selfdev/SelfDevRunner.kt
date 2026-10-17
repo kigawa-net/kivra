@@ -17,12 +17,14 @@ import net.kigawa.kivra.core.VersionConflictException
 import net.kigawa.kivra.core.patch.Delete
 import net.kigawa.kivra.core.patch.PatchPolicy
 import net.kigawa.kivra.core.patch.PatchSet
+import net.kigawa.kivra.core.patch.RejectReason
 import net.kigawa.kivra.core.patch.PatchVerdict
 import net.kigawa.kivra.core.patch.RepoSnapshot
 import net.kigawa.kivra.core.patch.Write
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.PrMergeNotVerifiedException
 import net.kigawa.kivra.developer.DeveloperPort
+import net.kigawa.kivra.developer.DeveloperRefusal
 import net.kigawa.kivra.developer.DeveloperRequest
 import net.kigawa.kivra.developer.DeveloperResult
 import net.kigawa.kivra.developer.RepoFile
@@ -40,6 +42,7 @@ import net.kigawa.kivra.selfdev.AdvanceResult.Advanced
 import net.kigawa.kivra.selfdev.AdvanceResult.Failed
 import net.kigawa.kivra.selfdev.AdvanceResult.Skipped
 import net.kigawa.kivra.selfdev.AdvanceResult.Waiting
+import org.slf4j.LoggerFactory
 
 /**
  * Self-development runner (ADR 0008 part 4, Issue #56). It moves one PR_ONLY run forward, one [advance] call at a time:
@@ -71,8 +74,9 @@ import net.kigawa.kivra.selfdev.AdvanceResult.Waiting
  * and the lease is renewed before each GitHub write); [PatchPolicy] again on the runner side (the Developer is not trusted); the
  * UNSEEN_OVERWRITE check (the snapshot knows which files the LLM saw); and fixed reason codes only.
  *
- * Logging and results: nothing here logs. Results and reason codes never contain task text, model output, patch content, tokens or
- * paths. Errors from the store and the lease are mapped to [AdvanceResult] codes, not passed on.
+ * Logging and results: the only log line is the WARN for a rejected patch, with its fixed reason names and a count. Results and reason
+ * codes never contain task text, model output, patch content, tokens or paths. Errors from the store and the lease are mapped to
+ * [AdvanceResult] codes, not passed on.
  */
 class SelfDevRunner(
     private val config: SelfDevConfig,
@@ -168,7 +172,7 @@ class SelfDevRunner(
      */
     private suspend fun propose(lease: Lease, run: DevelopmentRun, base: BranchInfo, resuming: Boolean): Step<PatchSet> {
         val task = taskTexts.taskText(run) ?: return Step.Done(Failed(FailureCode.TASK_TEXT_UNAVAILABLE))
-        val view = when (val s = loadView(base.headSha)) {
+        val view = when (val s = loadView(base.headSha, TitlePaths.extract("${task.title}\n${task.description}"))) {
             is Step.Go -> s.value
             is Step.Done -> return s
         }
@@ -181,10 +185,14 @@ class SelfDevRunner(
         return when (val result = developer.propose(request)) {
             is DeveloperResult.Proposed -> when (val verdict = policy.validate(result.patch, view.snapshot)) {
                 is PatchVerdict.Accepted -> Step.Go(verdict.patch)
-                is PatchVerdict.Rejected -> Step.Done(persistAdvance(lease, run, DevelopmentRunState.FAILED, POLICY_REJECTED))
+                is PatchVerdict.Rejected -> {
+                    logPatchRejected(run.runId.value, verdict.reasons)
+                    Step.Done(persistAdvance(lease, run, DevelopmentRunState.FAILED, POLICY_REJECTED))
+                }
             }
 
             is DeveloperResult.Refused -> {
+                if (result.reason == DeveloperRefusal.POLICY_REJECTED) logPatchRejected(run.runId.value, result.policyReasons)
                 val to = if (resuming) DevelopmentRunState.UNKNOWN else DevelopmentRunState.FAILED
                 Step.Done(persistAdvance(lease, run, to, "$DEVELOPER_PREFIX${result.reason.name}"))
             }
@@ -341,12 +349,12 @@ class SelfDevRunner(
 
     private class RepoView(val snapshot: RepoSnapshot, val contextFiles: List<RepoFile>)
 
-    private suspend fun loadView(baseSha: String): Step<RepoView> {
+    private suspend fun loadView(baseSha: String, titlePaths: List<String>): Step<RepoView> {
         val entries = when (val r = repoReader.listFiles(config.repo, baseSha)) {
             is GitHubResult.Success -> r.value
             else -> return Step.Done(Failed(FailureCode.GITHUB_READ_FAILED))
         }
-        val picked = ContextSelection.select(entries, config)
+        val picked = ContextSelection.select(entries, config, titlePaths, policy)
         val files = ArrayList<RepoFile>(picked.size)
         for (entry in picked) {
             when (val r = repoReader.readFile(config.repo, baseSha, entry.path)) {
@@ -360,6 +368,17 @@ class SelfDevRunner(
             inContext = files.mapTo(HashSet()) { it.path },
         )
         return Step.Go(RepoView(snapshot, files))
+    }
+
+    /**
+     * One WARN line with the fixed reason names (at most [MAX_LOGGED_REASONS]) and the total count. Never a path, a file content,
+     * a diff, model output or task text: a reason name says what kind of rule failed, not which file.
+     */
+    private fun logPatchRejected(runId: String, reasons: List<RejectReason>) {
+        logger.warn(
+            "self-development patch rejected: runId={} reasons={} count={}",
+            runId, reasons.take(MAX_LOGGED_REASONS).joinToString(",") { it.name }, reasons.size,
+        )
     }
 
     /** Writes a fenced transition from [from] to [to] and reports it. [reasonCode] is a fixed code, never free text. */
@@ -389,6 +408,8 @@ class SelfDevRunner(
     }
 
     private companion object {
+        val logger = LoggerFactory.getLogger(SelfDevRunner::class.java)
+        const val MAX_LOGGED_REASONS = 10
         const val COMMIT_NOT_APPLIED_TWICE = "COMMIT_NOT_APPLIED_TWICE"
         const val GITHUB_UNKNOWN = "GITHUB_UNKNOWN_OUTCOME"
         const val POLICY_REJECTED = "POLICY_REJECTED"

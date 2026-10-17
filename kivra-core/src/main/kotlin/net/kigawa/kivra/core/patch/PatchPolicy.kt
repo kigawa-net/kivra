@@ -183,6 +183,16 @@ class PatchPolicy(private val config: PatchPolicyConfig = PatchPolicyConfig()) {
         return if (reasons.isEmpty()) PatchVerdict.Accepted(patch) else PatchVerdict.Rejected(reasons.toList())
     }
 
+    /**
+     * True when [path] has a valid shape, is not denied and is allowed, which are the path rules a write must pass. Used to choose
+     * which repository files the model is shown. It never permits a write: the write check is still [validate].
+     */
+    fun allowsPath(path: String): Boolean {
+        if (pathShapeReason(path, config.maxPathChars) != null) return false
+        val key = nfc(path)
+        return allowed.any { it.matches(key) } && denied.none { it.matches(key) }
+    }
+
     private fun checkPath(path: String, reasons: MutableSet<RejectReason>) {
         val shape = pathShapeReason(path, config.maxPathChars)
         if (shape != null) {

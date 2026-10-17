@@ -173,6 +173,18 @@ verify/live-smoke.sh
 
 - **未確認: Gradle のプラグイン解決。** `plugins.gradle.org` から別のホスト(例: `plugins-artifacts.gradle.org`)へリダイレクトされる場合があります。許可リストに無いと、そのホストへの接続が拒否されます。コンテナ内で kivra の実ビルドを動かして確認してください。本試作では `./gradlew` は走らせていません。
 - **不足の見つけ方**: proxy のログで `deny method=CONNECT dest=<host>:443 reason=not_allowlisted` の `dest` を見ます。そのホストを `proxy/allowlist.txt` に追加し、proxy イメージを作り直して `network/up-proxy.sh` で起動し直します。
+- **503 `upstream authorization unavailable` の見分け方**: proxy のログ `deny method=POST path=/v1/messages reason=authorization_unavailable stage=<段階>` の `stage` で、失敗した段階が分かります。`upstream_status=<数値>` は、Keycloak または Anthropic の応答の HTTP ステータスです(本文は記録しません)。
+
+| stage | 意味 | 対処 |
+|---|---|---|
+| `secret_unreadable` | client secret のファイルを読めない | パス(`KIVRA_PROXY_KEYCLOAK_CLIENT_SECRET_FILE`)、所有者、権限(0600 か 0640 root:kivra-agent)を確認する |
+| `secret_empty` | secret のファイルが空(空白だけを含む) | ファイルの中身を入れ直す。中身は表示しない |
+| `keycloak` | Keycloak が 200 以外を返した(`upstream_status` を見る) | 401/403: client secret・client ID・Keycloak 側の client 設定を確認する。5xx: Keycloak の状態を確認する |
+| `keycloak_network` | Keycloak に接続できない(DNS、接続拒否、タイムアウト) | proxy 内の名前解決と経路、`KIVRA_PROXY_KEYCLOAK_TOKEN_URL` を確認する |
+| `exchange` | Anthropic のトークン交換が 200 以外を返した(`upstream_status` を見る) | 401/403: federation rule、organization、service account、workspace の ID を確認する。4xx/5xx: Anthropic 側の状態を確認する |
+| `exchange_network` | Anthropic のトークン交換先に接続できない | `api.anthropic.com` の名前解決と経路を確認する |
+| `malformed` | 200 だが応答の JSON が想定と違う(トークンが空を含む) | Keycloak か Anthropic の応答形式が変わっていないかを確認する。応答本文は記録しない |
+| `other` | 上のどれにも当たらない(リクエストの組み立てなど) | コードの経路を確認する。ログからは原因が分からないので、ソースを見る |
 
 ## ローカル PC へのインストール(install/)
 

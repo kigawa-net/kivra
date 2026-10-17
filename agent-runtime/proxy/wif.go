@@ -40,6 +40,45 @@ var (
 	errMalformed = errors.New("token response is malformed")
 )
 
+// Stage labels for AuthError.Stage. These fixed labels are the only failure details the proxy logs.
+const (
+	stageSecretUnreadable = "secret_unreadable"
+	stageSecretEmpty      = "secret_empty"
+	stageKeycloak         = "keycloak"         // Keycloak answered with a non-200 status
+	stageKeycloakNetwork  = "keycloak_network" // no HTTP response from Keycloak (DNS, refused, timeout)
+	stageExchange         = "exchange"         // Anthropic token endpoint answered with a non-200 status
+	stageExchangeNetwork  = "exchange_network" // no HTTP response from the Anthropic token endpoint
+	stageMalformed        = "malformed"        // a 200 response whose body is not the expected JSON
+	stageOther            = "other"
+)
+
+var (
+	errSecretUnreadable = errors.New("secret file could not be read")
+	errSecretEmpty      = errors.New("secret file is empty")
+)
+
+// AuthError is what Authorize returns on failure. Stage names the failed step and Status is the HTTP status
+// of the Keycloak or Anthropic response (0 when there was none). Neither field can carry a response body,
+// header, token or secret, so both are safe to log. The message is the fixed text of the cause.
+type AuthError struct {
+	Stage  string
+	Status int
+	cause  error
+}
+
+func (e *AuthError) Error() string {
+	if e.Status != 0 {
+		return fmt.Sprintf("%s (HTTP %d)", e.cause.Error(), e.Status)
+	}
+	return e.cause.Error()
+}
+
+func (e *AuthError) Unwrap() error { return e.cause }
+
+func authErr(stage string, status int, cause error) error {
+	return &AuthError{Stage: stage, Status: status, cause: cause}
+}
+
 // WIFAuth exchanges a fresh Keycloak JWT for an Anthropic access token and caches the access token.
 //
 // Each exchange uses a NEW JWT: the JWT jti is single-use, so a JWT is never sent twice.
@@ -126,31 +165,31 @@ func (w *WIFAuth) exchange(ctx context.Context) (*cachedToken, error) {
 		WorkspaceID:      w.cfg.WorkspaceID,
 	})
 	if err != nil {
-		return nil, errExchange
+		return nil, authErr(stageOther, 0, errExchange)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.cfg.AnthropicTokenURL, strings.NewReader(string(body)))
 	if err != nil {
-		return nil, errExchange
+		return nil, authErr(stageOther, 0, errExchange)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return nil, errExchange
+		return nil, authErr(stageExchangeNetwork, 0, errExchange)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
-		return nil, fmt.Errorf("%w (HTTP %d)", errExchange, resp.StatusCode)
+		return nil, authErr(stageExchange, resp.StatusCode, errExchange)
 	}
 	var out struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int64  `json:"expires_in"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
-		return nil, errMalformed
+		return nil, authErr(stageMalformed, 0, errMalformed)
 	}
 	if out.AccessToken == "" || out.ExpiresIn <= 0 {
-		return nil, errMalformed
+		return nil, authErr(stageMalformed, 0, errMalformed)
 	}
 	w.exchanges++
 	return &cachedToken{token: out.AccessToken, expiresAt: w.now().Add(time.Duration(out.ExpiresIn) * time.Second)}, nil
@@ -160,7 +199,10 @@ func (w *WIFAuth) exchange(ctx context.Context) (*cachedToken, error) {
 func (w *WIFAuth) fetchAssertion(ctx context.Context) (string, error) {
 	secret, err := readFileTrimmed(w.cfg.ClientSecretFile)
 	if err != nil {
-		return "", errKeycloak
+		if errors.Is(err, errSecretEmpty) {
+			return "", authErr(stageSecretEmpty, 0, errSecretEmpty)
+		}
+		return "", authErr(stageSecretUnreadable, 0, errSecretUnreadable)
 	}
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
@@ -168,23 +210,23 @@ func (w *WIFAuth) fetchAssertion(ctx context.Context) (string, error) {
 	form.Set("client_secret", secret)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.cfg.KeycloakTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", errKeycloak
+		return "", authErr(stageOther, 0, errKeycloak)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return "", errKeycloak
+		return "", authErr(stageKeycloakNetwork, 0, errKeycloak)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
-		return "", fmt.Errorf("%w (HTTP %d)", errKeycloak, resp.StatusCode)
+		return "", authErr(stageKeycloak, resp.StatusCode, errKeycloak)
 	}
 	var out struct {
 		AccessToken string `json:"access_token"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil || out.AccessToken == "" {
-		return "", errMalformed
+		return "", authErr(stageMalformed, 0, errMalformed)
 	}
 	return out.AccessToken, nil
 }

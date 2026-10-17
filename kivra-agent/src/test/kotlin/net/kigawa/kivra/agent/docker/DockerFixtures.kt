@@ -5,6 +5,8 @@ import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 internal const val TEST_IMAGE = "kivra-agent-runtime:local"
 internal const val TEST_NETWORK = "kivra-agent-internal"
@@ -12,6 +14,9 @@ internal const val TEST_PROXY = "http://kivra-agent-proxy:8080"
 internal const val TEST_RUN_ID = "01M545K02Q6YB4M5ZHAM5792CS"
 internal const val TEST_ATTEMPT_ID = "att-1"
 internal const val TEST_DOCKER_HOST = "unix:///run/user/1001/docker.sock"
+
+/** Upper bound for the fake's wait on its endless stream. A stream that is never read ends the wait, and the test then fails. */
+private const val READ_WAIT_SECONDS = 5L
 
 /** A work root with one run directory, and the settings that accept them. The root is a real temp directory. */
 internal class DockerFixture {
@@ -78,6 +83,14 @@ internal class FakeDocker : DockerLauncher {
     var endlessStdout = false
     var runExitCode = 0
 
+    /**
+     * Counts the reads of the endless stream. The fake clock advances only by polls, so without this a test could reach its
+     * virtual deadline before the reader thread has read anything, and the run would end as TIMEOUT. A poll therefore waits
+     * until the stream has been read twice: the first chunk is then already counted by the runner (the reader updates its
+     * total before the next read), so the output limit is seen on the first poll.
+     */
+    private val endlessReads = CountDownLatch(2)
+
     override fun start(argv: List<String>, env: Map<String, String>): DockerProcess {
         calls += argv
         envs += env
@@ -111,6 +124,7 @@ internal class FakeDocker : DockerLauncher {
         private val endless = object : InputStream() {
             override fun read(): Int = if (killed) -1 else 'x'.code
             override fun read(b: ByteArray, off: Int, len: Int): Int {
+                endlessReads.countDown()
                 if (killed) return -1
                 java.util.Arrays.fill(b, off, off + len, 'x'.code.toByte())
                 return len
@@ -123,6 +137,7 @@ internal class FakeDocker : DockerLauncher {
         override fun waitFor(millis: Long): Int? {
             if (killed) return 137
             if (!runBlocks) return runExitCode
+            if (endlessStdout) endlessReads.await(READ_WAIT_SECONDS, TimeUnit.SECONDS)
             clockNanos += millis * 1_000_000
             return null
         }

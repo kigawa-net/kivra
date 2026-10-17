@@ -284,6 +284,52 @@ class UiRoutesTest {
         assertEquals(HttpStatusCode.OK, client.get("/health").status)
     }
 
+    @Test
+    fun `the kind selector and the release dialog are in the page, with no inline handlers`() {
+        assertContains(indexHtml, "id=\"kind-form\"")
+        assertContains(indexHtml, "id=\"kind-sim\"")
+        assertContains(indexHtml, "id=\"kind-self\"")
+        assertContains(indexHtml, "value=\"SELF_DEV\"")
+        assertContains(indexHtml, "<dialog id=\"release-dialog\"")
+        assertContains(indexHtml, "id=\"release-reason\"")
+        assertContains(indexHtml, "id=\"release-submit\"")
+        assertContains(indexHtml, "id=\"release-cancel\"")
+        // CSP blocks inline event handlers; every handler is attached from app.js.
+        assertFalse(Regex("\\son[a-z]+\\s*=", RegexOption.IGNORE_CASE).containsMatchIn(indexHtml), "no inline event handler attributes")
+        assertFalse(indexHtml.contains("<form id=\"release"), "the release dialog is not a form (Enter must not submit)")
+    }
+
+    @Test
+    fun `self-development submit and release calls go through apiFetch with fixed paths and a JSON body`() {
+        // Kinds: the self-development submit is only reached through the kind check, and both paths are literals.
+        assertContains(appJs, "apiFetch('/api/selfdev/tasks', 'POST', body)")
+        assertContains(appJs, "apiFetch('/api/tasks', 'POST', body)")
+        assertContains(appJs, "apiFetch('/api/admin/selfdev/runs/' + encodeURIComponent(rel.runId) + '/release', 'POST', { reason: reason })")
+        assertContains(
+            appJs,
+            "apiFetch('/api/admin/selfdev/runs/' + encodeURIComponent(rel.runId) + '/release-unbound-pr', 'POST', { reason: reason })",
+        )
+        // apiFetch is the only place that sends a body, and it always sets the JSON content type (CSRF guard, #193).
+        assertContains(appJs, "init.headers['Content-Type'] = 'application/json';")
+        assertFalse(Regex("\\bfetch\\(").findAll(appJs).count() > 1, "fetch is called only from apiFetch")
+        // The idempotency key is never sent with an empty value and a kind change makes a new key.
+        assertContains(appJs, "newSubmitKey();")
+        assertContains(appJs, "if (state.keyFor !== null) state.idempotencyKey = newKey();")
+    }
+
+    @Test
+    fun `release and submit texts are fixed, and only text nodes receive server data in the new code`() {
+        // The response body is never shown: the messages are constants and the result is set from them.
+        assertContains(appJs, "showReleaseError(msg);")
+        assertContains(appJs, "showResult(msg, 'error');")
+        assertFalse(appJs.contains("r.data.error"), "no error body is shown")
+        assertContains(appJs, "$('release-explain').textContent = text.explain;")
+        assertContains(appJs, "$('release-title').textContent = text.title;")
+        assertContains(appJs, "$('detail-notice').textContent = MESSAGES.releaseDone;")
+        // The reason is only read from the input (value), never written into markup.
+        assertFalse(Regex("release-reason'\\)\\.value\\s*\\+").containsMatchIn(appJs))
+    }
+
     private fun h2Config() = MapApplicationConfig(
         "kivra.database.jdbcUrl" to "jdbc:h2:mem:kivra_ui_${System.nanoTime()};MODE=MySQL;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1",
         "kivra.database.user" to "sa",

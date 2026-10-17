@@ -27,6 +27,12 @@
     <section class="card" aria-labelledby="h-submit">
       <h2 id="h-submit">Task を投入</h2>
       <form id="submit-form">
+        <fieldset class="kind" id="kind-form">
+          <legend>種別</legend>
+          <label><input type="radio" name="kind" id="kind-sim" value="SIMULATED" checked> シミュレーション</label>
+          <label><input type="radio" name="kind" id="kind-self" value="SELF_DEV" disabled> 自己開発（GitHub に PR を作成）</label>
+        </fieldset>
+        <p class="meta" id="kind-note" role="note"></p>
         <label for="title">タイトル（1〜200 文字）</label>
         <input id="title" name="title" type="text" maxlength="200" required autocomplete="off">
         <div class="counter" id="title-count">0 / 200</div>
@@ -58,9 +64,25 @@
   <section id="view-detail" class="card" hidden aria-labelledby="h-detail">
     <p><a href="#/">← 一覧に戻る</a></p>
     <h2 id="h-detail">Run の詳細</h2>
+    <p id="detail-notice" class="result ok" role="status"></p>
     <div id="detail-body" aria-live="polite"></div>
   </section>
 </main>
+
+<dialog id="release-dialog" aria-labelledby="release-title">
+  <div class="release-body">
+    <h2 id="release-title">解放</h2>
+    <p id="release-explain"></p>
+    <label for="release-reason">理由（必須、1〜500 文字）</label>
+    <input id="release-reason" type="text" autocomplete="off">
+    <div class="counter" id="release-count">0 / 500</div>
+    <p class="error" id="release-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="release-cancel" autofocus>キャンセル</button>
+      <button type="button" id="release-submit" disabled>解放する</button>
+    </div>
+  </div>
+</dialog>
 
 <footer class="legend">
   <p><span class="badge">シミュレーション</span> SIMULATED の Run です。AI や GitHub は呼ばれません。</p>

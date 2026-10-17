@@ -33,6 +33,20 @@ agent_uid() {
 # Owner change, skipped in a dry run.
 own() { if ! is_dry; then chown "$@"; fi; }
 
+# Asks the rootless docker daemon how it sees the client secret at $1. The caller sets DOCKER_HOST (and the user).
+# Prints one word: file | dir | absent | nohost | error. The secret's content is never read.
+# dir: the daemon sees a directory at that path, which happens when /etc/kivra-agent was created after the daemon
+# started (RootlessKit copies /etc up at start). Fix: restart docker.service of the kivra-agent user.
+# nohost: the host path is not a regular file, so no probe runs (docker -v would create a directory there).
+secret_view() {
+  local secret="$1" img="${KIVRA_AGENT_DOCKER_IMAGE:-kivra-agent-runtime:local}" out
+  if [ ! -f "$secret" ]; then echo nohost; return 0; fi
+  out="$(timeout 60 docker run --rm --pull=never --network none --cap-drop=ALL --entrypoint sh \
+    -v "$secret:/s:ro" "$img" -c 'if [ -f /s ]; then echo file; elif [ -d /s ]; then echo dir; else echo absent; fi' 2>/dev/null)" \
+    || out=error
+  echo "${out:-error}"
+}
+
 # Finds a JDK of at least major version $1 and prints its java binary (resolved). Dies with a clear message otherwise.
 find_jdk() {
   local min="$1" java_bin major

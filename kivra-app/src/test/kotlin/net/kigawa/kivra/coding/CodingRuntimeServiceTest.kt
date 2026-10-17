@@ -72,6 +72,7 @@ class CodingRuntimeServiceTest {
             runs = DbCodingRunPort(db.runs, db.leases),
             results = store,
             tasks = tasks,
+            cost = UnmeteredCodingCost,
             policyConfig = policy,
             config = config,
         )

@@ -13,6 +13,7 @@ import net.kigawa.kivra.coding.CodingErrorCode
 import net.kigawa.kivra.coding.CodingInput
 import net.kigawa.kivra.coding.CodingResult
 import net.kigawa.kivra.coding.CodingRuntimeService
+import net.kigawa.kivra.coding.UnmeteredCodingCost
 import net.kigawa.kivra.coding.CodingSubmitOutcome
 import net.kigawa.kivra.coding.CodingTaskSource
 import net.kigawa.kivra.coding.DbCodingRunPort
@@ -49,6 +50,7 @@ class SelfDevCodingEndToEndTest {
             runs = DbCodingRunPort(db.runs, db.leases),
             results = DbCodingResultStore(db.database),
             tasks = CodingTaskSource { it.taskTitle },
+            cost = UnmeteredCodingCost,
         )
         val runner = SelfDevRunner(
             config = SelfDevConfig(enabled = true, runtime = SelfDevRuntime.CLI),

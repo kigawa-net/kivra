@@ -10,6 +10,7 @@ import net.kigawa.kivra.auth.AgentIdentity
 import net.kigawa.kivra.auth.RefreshingJwkProvider
 import net.kigawa.kivra.auth.resolveTaskApiIdentity
 import net.kigawa.kivra.coding.CodingRuntimeService
+import net.kigawa.kivra.coding.buildCodingCostLedger
 import net.kigawa.kivra.coding.CodingTaskSource
 import net.kigawa.kivra.coding.DbCodingRunPort
 import net.kigawa.kivra.db.CodingAttemptRepository
@@ -81,6 +82,9 @@ internal fun Application.appModule(env: Map<String, String>) {
             runs = DbCodingRunPort(runs, SqlLeaseStore(database)),
             results = DbCodingResultStore(database),
             tasks = CodingTaskSource { run -> run.taskTitle },
+            cost = buildCodingCostLedger(
+                env, agentApiSettings.attemptReserveUsd, budgetStore, budgetConfig.tenantId, database,
+            ),
         )
     }
     // Built only when self-development is enabled: this is where the GitHub and model clients and their secrets come into play.

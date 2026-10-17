@@ -34,9 +34,15 @@ import net.kigawa.kivra.auth.AgentIdentity
 import net.kigawa.kivra.auth.AgentTestTokens
 import net.kigawa.kivra.auth.OidcJwtVerifier
 import net.kigawa.kivra.auth.OidcTestTokens
+import net.kigawa.kivra.coding.COST_TENANT
 import net.kigawa.kivra.coding.CodingClaimOutcome
+import net.kigawa.kivra.coding.CodingCostPort
+import net.kigawa.kivra.coding.CodingCostUnavailableException
 import net.kigawa.kivra.coding.CodingEnqueueOutcome
 import net.kigawa.kivra.coding.CodingRuntimeService
+import net.kigawa.kivra.coding.UnmeteredCodingCost
+import net.kigawa.kivra.coding.CliUsage
+import net.kigawa.kivra.coding.costFixture
 import net.kigawa.kivra.coding.CodingTaskSource
 import net.kigawa.kivra.coding.DbCodingRunPort
 import net.kigawa.kivra.core.DevelopmentRunState
@@ -76,12 +82,13 @@ class AgentApiRoutesTest {
     private val contentMarker = "CONTENT-MARKER body"
     private val pathMarker = ".github/path-marker.yml"
 
-    private inner class Env(val db: TestDb) {
+    private inner class Env(val db: TestDb, cost: CodingCostPort = UnmeteredCodingCost) {
         val service = CodingRuntimeService(
             attempts = CodingAttemptRepository(db.database, audit = db.audit),
             runs = DbCodingRunPort(db.runs, db.leases),
             results = DbCodingResultStore(db.database),
             tasks = CodingTaskSource { it.taskTitle },
+            cost = cost,
         )
         val agents = AgentIdentity(AgentTestTokens.config(), OidcTestTokens.jwks())
         val operators = OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks()).asIdentity()
@@ -517,6 +524,76 @@ class AgentApiRoutesTest {
             assertTrue(coding.all { it.second == agentA }, "the actor is the agent's sub")
             val payloads = coding.joinToString("\n") { it.third.orEmpty() }
             for (secret in listOf(contentMarker, pathMarker, summaryMarker, title)) assertFalse(payloads.contains(secret))
+        }
+    }
+
+    // ---- the optional usage (ADR 0010 addendum 4) ----
+
+    private val usageJson = """{"totalCostUsd":"0.004268","model":"claude-haiku-5-5","numTurns":4,"inputTokens":1200,"outputTokens":300,"cacheCreationTokens":5000,"cacheReadTokens":800}"""
+
+    @Test
+    fun `a valid usage on a result is booked as reported, and the result is accepted`() = TestDb().use { db ->
+        val fixture = costFixture(db)
+        testApplication {
+            val env = Env(db, fixture.ledger)
+            setUp(env)
+            env.enqueue(env.newRun())
+            val (attemptId, generation) = claimAs(agentA)
+            val body = """{"generation":$generation,"result":{"summary":"docs","changes":[{"path":"docs/a.md","kind":"WRITE","content":"x\n"}],"exitStatus":0,"sessionId":"session-1"},"usage":$usageJson}"""
+            assertEquals(HttpStatusCode.OK, post(resultPath(attemptId), body).status)
+        }
+        val u = fixture.budget.usage(COST_TENANT)
+        assertEquals(0, BigDecimal("0.774642").compareTo(u.committed))
+        assertEquals(0L, u.unpricedCalls)
+    }
+
+    @Test
+    fun `an invalid usage is ignored - the fail is still accepted, and the reserve is booked as unpriced`() = TestDb().use { db ->
+        val fixture = costFixture(db)
+        testApplication {
+            val env = Env(db, fixture.ledger)
+            setUp(env)
+            env.enqueue(env.newRun())
+            val (attemptId, generation) = claimAs(agentA)
+            val bad = """{"generation":$generation,"errorCode":"TIMEOUT","usage":{"totalCostUsd":"SECRET-USAGE-MARKER"}}"""
+            val response = post(failPath(attemptId), bad)
+            assertEquals(HttpStatusCode.OK, response.status)
+            assertFalse(response.bodyAsText().contains("SECRET-USAGE-MARKER"))
+        }
+        val u = fixture.budget.usage(COST_TENANT)
+        assertEquals(0, BigDecimal("90.75").compareTo(u.committed))
+        assertEquals(1L, u.unpricedCalls)
+    }
+
+    @Test
+    fun `a usage is optional - a result without it is accepted and booked at the reserve`() = TestDb().use { db ->
+        val fixture = costFixture(db)
+        testApplication {
+            val env = Env(db, fixture.ledger)
+            setUp(env)
+            env.enqueue(env.newRun())
+            val (attemptId, generation) = claimAs(agentA)
+            assertEquals(HttpStatusCode.OK, post(resultPath(attemptId), resultBody(generation)).status)
+        }
+        assertEquals(1L, fixture.budget.usage(COST_TENANT).unpricedCalls)
+    }
+
+    @Test
+    fun `when the ledger cannot record the cost, the fail is 503 and the attempt stays claimed`() = TestDb().use { db ->
+        val refusing = object : CodingCostPort {
+            override fun claimDenial(): String? = null
+            override fun recordReported(attemptId: String, leaseGeneration: Long, usage: CliUsage): Boolean = false
+            override fun recordEstimated(attemptId: String, leaseGeneration: Long): Boolean = false
+        }
+        testApplication {
+            val env = Env(db, refusing)
+            setUp(env)
+            val attempt = env.enqueue(env.newRun())
+            val (attemptId, generation) = claimAs(agentA)
+            val response = post(failPath(attemptId), """{"generation":$generation,"errorCode":"TIMEOUT"}""")
+            assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
+            assertEquals("""{"error":"unavailable"}""", response.bodyAsText())
+            assertEquals(CodingAttemptState.CLAIMED, env.service.latest(attempt.runId)!!.state)
         }
     }
 }

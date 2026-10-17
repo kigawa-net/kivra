@@ -295,6 +295,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
   - `KIVRA_AGENT_AZP`(例: `kivra-agent`)
   - `KIVRA_AGENT_REQUIRED_ROLE`(`<client>:<role>`、例: `kivra-agent:agent`。`KIVRA_OIDC_REQUIRED_ROLE` と同じにはできない)
 - Keycloak 側: client `kivra-agent`(PC ごと。client credentials)、ロール `kivra-agent:agent`。トークンの `aud` に kivra(`KIVRA_OIDC_AUDIENCE`)を含め、`azp` が `kivra-agent` になること。運用者の `admin-panel:admin` は、エージェントに付けない。
+- 任意: `KIVRA_AGENT_ATTEMPT_RESERVE_USD`(既定 `0.50`。0 より大きく 100 以下、小数 6 桁まで)。報告の無い attempt に計上する予約額(§6.13)。`KIVRA_SELFDEV_MODEL_REGISTRY_PATH` が設定されていれば、その価格表で `model` を確かめる(未設定なら全ての model が UNPRICED)。
 - `KIVRA_SELFDEV_RUNTIME=cli` は、この変数が `true` のときだけ起動を許可される(§6.9)。エージェント API を有効にすると、自己開発の `cli` 経路が結線された状態で起動する。本番の既定は変えていない。
 
 ### 6.2 エンドポイント(エージェント本体が使う)
@@ -855,3 +856,50 @@ sudo runuser -u kivra-agent -- grep -o '"name":"[A-Za-z_]*"' /var/lib/kivra-agen
 ```
 
 **無効化**: `agent.env` の行を消すか `0` にして再起動する。無効にしても既存のエントリは消えない(消すのは有効なときの起動時と attempt 終了時の削除だけ)。すぐ消すなら、kivra-agent の所有者で `rm -rf /var/lib/kivra-agent/work/debug` を実行する。
+
+### 6.13 CLI の費用の計上(Issue #230、ADR 0010 追補 4)
+
+CLI 経路の費用は、kivra の月次の予算(`KIVRA_BUDGET_MONTHLY_LIMIT_JPY`)に入る。API 経路と同じ台帳(`budget_reservations`、`budget_periods`)に、キー `coding:<attemptId>:<世代>` で 1 回だけ計上する。使用量の記録は `coding_attempt_usage`(V16)にある。
+
+**設定(すべて既定値で動く。k8s の設定は変えていない)**
+
+| 名前 | 既定 | 内容 |
+| --- | --- | --- |
+| `KIVRA_AGENT_ATTEMPT_RESERVE_USD` | `0.50` | 1 attempt の予約額(USD)。報告の無い attempt に計上し、claim の前にも月次の残りがこの額(円換算後)以上あるかを確かめる |
+| `KIVRA_FX_USD_JPY`、`KIVRA_FX_AS_OF` | (なし) | API 経路と同じ為替。失効(既定 7 日)または未設定なら、claim は全て拒否され(UNKNOWN_COST)、報告は金額 0 の UNPRICED になる |
+| `KIVRA_FX_MARGIN_RATIO`、`KIVRA_FX_MAX_AGE_DAYS` | `0.10`、`7` | 為替の余裕と古さの上限(API 経路と同じ) |
+| `KIVRA_SELFDEV_MODEL_REGISTRY_PATH` | (なし) | 価格表。報告の `model` が価格表に無い(または価格が無い)と UNPRICED になる。未設定なら全て UNPRICED |
+
+**計上の流れ**
+
+1. claim の前に、月次の残り(上限 − 確定額 − 予約中の額)が、予約額(`KIVRA_AGENT_ATTEMPT_RESERVE_USD` × 為替 × 余裕 × 税)以上あるかを確かめる。足りなければ claim させない(Run は待ちのまま。ログに `coding claim refused: code=BUDGET`)。UNPRICED が残っていれば `UNKNOWN_COST` で拒否する。
+2. エージェントが結果または fail の本文に `usage` を付けると、その費用を円に換算して計上する。同じ attempt の同じ世代への 2 回目の報告は計上しない。`usage` が形式に合わなければ無視する(結果は受理され、警告ログ `coding usage ignored: attemptId=... reason=USAGE_INVALID` が出る)。
+3. 台帳に書けない場合は、結果と fail を受理せず 503 を返す。attempt は変わらないので、エージェントは送り直せる。
+4. 報告が無いまま終わった attempt(usage の無い fail、ORPHANED、EXPIRED、usage の無い結果)は、予約額を UNPRICED として計上する。
+
+**欠けた報告の扱い**: 費用が分からないので、使った前提で予約額を計上し、UNPRICED のフラグを立てる(安全側)。この状態の間、新しい claim は `UNKNOWN_COST` で止まる。止まった Run は待ちのままで、自動では解除されない。
+
+**運用者の確認手順**
+
+1. UNPRICED の予約を探す(ID と金額だけを見る。値は表示しない)。
+
+   ```sql
+   SELECT reservation_key, state, amount_micro_yen, created_at
+     FROM budget_reservations
+    WHERE state = 'UNPRICED'
+    ORDER BY created_at;
+   ```
+
+   `reservation_key` が `coding:<attemptId>:<世代>` の形のものが CLI 経路の計上である。`attemptId` で `coding_attempts` と `coding_attempt_usage` を見れば、報告があったか(`source` が `REPORTED` か `ESTIMATED_RESERVE` か)が分かる。
+2. Anthropic Console の、専用ワークスペースの支出を、その期間で確認する。
+3. 実額が分かったら、§4.2 の `acknowledge` を `reservationKey` を指定して呼ぶ(`actualAmountJpy` に円で実額を入れる)。実額が分からない、またはその予約の金額が 0 のとき(為替の失効で換算できなかったもの)は、`actualAmountJpy` を省略する(実費不明として残る)。金額 0 の予約に実額を入れると `TOO_LARGE` で拒否される(acknowledge の上限は計上額の 100 倍まで)。
+
+**Console 側の上限と kivra の上限の関係**: 共有ワークスペースの支出上限(Console)は、kivra の月次の上限より大きくする。kivra の上限は計上の範囲で止める。Console は、kivra の計上が漏れた場合の最終防壁になる。
+
+**既知の制限(この PR)**
+
+- 入場の確認と claim は別の操作である。同時に複数のエージェントが claim すると、予約額の数件分だけ超えうる(1 台の PC を前提とする)。
+- ORPHANED / EXPIRED の遷移は済んでいるが、その計上が失敗した場合は、警告ログ(`coding reserve not booked`)が出るだけで、再試行しない。定期の reconcile は配線されていない。このログが出たら、該当の attempt を §4.2 の手順で確認する。
+- 為替が失効していた間に報告された費用は金額 0 で計上される。この予約には実額を入れられない(上記の確認手順 3)。
+- 運用画面で API 経路と CLI 経路を区別して表示する作業(UI PR5)は、この PR に含まれない。
+

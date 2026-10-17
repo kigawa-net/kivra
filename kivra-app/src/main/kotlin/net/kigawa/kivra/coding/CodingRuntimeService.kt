@@ -13,6 +13,7 @@ import net.kigawa.kivra.db.CodingAttemptState
 import net.kigawa.kivra.db.CodingRefusal
 import net.kigawa.kivra.db.EnqueueResult
 import net.kigawa.kivra.db.DevelopmentRun
+import net.kigawa.kivra.db.ExpireResult
 import org.slf4j.LoggerFactory
 
 /** Task text for a Run. Returns the title of the Run, or null when it is not available (the attempt is then not claimed). */
@@ -65,6 +66,8 @@ class CodingRuntimeService(
     private val runs: CodingRunPort,
     private val results: CodingResultStore,
     private val tasks: CodingTaskSource,
+    /** The cost ledger (ADR 0010 addendum 4). Required: a claim is refused when the monthly budget cannot hold one reserve. */
+    private val cost: CodingCostPort,
     private val policyConfig: PatchPolicyConfig = PatchPolicyConfig(),
     private val config: CodingRuntimeConfig = CodingRuntimeConfig(),
 ) {
@@ -102,9 +105,14 @@ class CodingRuntimeService(
      * Claims the oldest queued attempt that can run, for [agentId]. Queued attempts of a Run that is no longer DEVELOPING, or that has a
      * cancel request, are cancelled instead of being handed out. A held Run keeps its queued attempt (it expires if the hold lasts).
      * The expiry check uses the DB clock, so the claim does not take a time argument.
+     *
+     * Admission first: when the monthly budget cannot hold one attempt's reserve, nothing is handed out (the same answer as an empty queue).
+     * The Run keeps its queued attempt and waits; the denial code is logged, never the Run's content.
      */
     fun claim(agentId: String): CodingClaimOutcome {
-        for (attemptId in attempts.listClaimable(config.maxClaimCandidates)) {
+        val candidates = attempts.listClaimable(config.maxClaimCandidates)
+        if (candidates.isEmpty() || cost.claimDenial() != null) return CodingClaimOutcome.NothingToClaim
+        for (attemptId in candidates) {
             val attempt = attempts.get(attemptId) ?: continue
             val run = runs.find(RunId(attempt.runId)) ?: continue
             if (run.holdReason != null) continue
@@ -126,9 +134,20 @@ class CodingRuntimeService(
     fun heartbeat(attemptId: String, agentId: String, generation: Long, progress: ProgressPhase? = null): CodingAttemptResult =
         attempts.heartbeat(attemptId, agentId, generation, config.leaseTtl, progress?.let { """{"phase":"${it.name}"}""" })
 
-    /** Terminal failure with a fixed code, by the holder only. The state follows the code ([CodingErrorCode.state]). */
-    fun fail(attemptId: String, agentId: String, generation: Long, code: CodingErrorCode): CodingAttemptResult =
-        attempts.fail(attemptId, agentId, generation, code.name, code.state)
+    /**
+     * Terminal failure with a fixed code, by the holder only. The state follows the code ([CodingErrorCode.state]). The cost is booked
+     * first, while the holder still holds the attempt: the reported [usage], or the per-attempt reserve when there is none. When the
+     * ledger cannot record it, nothing changes and [CodingCostUnavailableException] is thrown (the route answers 503, so the holder
+     * may send the fail again).
+     */
+    fun fail(attemptId: String, agentId: String, generation: Long, code: CodingErrorCode, usage: CliUsage? = null): CodingAttemptResult {
+        val current = attempts.get(attemptId, agentId)
+        if (current != null && current.leaseGeneration == generation && current.state.active) {
+            val booked = if (usage != null) cost.recordReported(attemptId, generation, usage) else cost.recordEstimated(attemptId, generation)
+            if (!booked) throw CodingCostUnavailableException()
+        }
+        return attempts.fail(attemptId, agentId, generation, code.name, code.state)
+    }
 
     /**
      * What the holder of [attemptId] may learn about it: the state, and whether the Run has a cancel request. Null for an attempt that
@@ -144,13 +163,18 @@ class CodingRuntimeService(
      * Accepts a result from the current holder. Order: the generation and state pre-check (nothing is read or stored for a stale holder),
      * then the shape and PatchPolicy checks (a refusal stores nothing), then the store, then the transition. A store that fails leaves
      * the attempt unchanged, so the agent may send the result again.
+     *
+     * The cost follows the holder's check: a reported [usage] is booked right after the holder check (a refused result keeps it, since the
+     * CLI cost is spent either way). With no usage, the reserve is booked before the transition to RESULT_RECEIVED. A ledger failure
+     * returns [CodingSubmitOutcome.StoreFailed] with nothing changed.
      */
-    fun submitResult(attemptId: String, agentId: String, generation: Long, result: CodingResult): CodingSubmitOutcome {
+    fun submitResult(attemptId: String, agentId: String, generation: Long, result: CodingResult, usage: CliUsage? = null): CodingSubmitOutcome {
         val current = attempts.get(attemptId, agentId) ?: return CodingSubmitOutcome.Refused(CodingRefusal.NOT_FOUND)
         if (current.state != CodingAttemptState.CLAIMED && current.state != CodingAttemptState.RUNNING) {
             return CodingSubmitOutcome.Refused(CodingRefusal.NOT_ACTIVE)
         }
         if (current.leaseGeneration != generation) return CodingSubmitOutcome.Refused(CodingRefusal.STALE_GENERATION)
+        if (usage != null && !cost.recordReported(attemptId, generation, usage)) return CodingSubmitOutcome.StoreFailed
 
         return when (val verdict = validator.check(result)) {
             is CodingResultValidator.Verdict.Rejected -> {
@@ -159,7 +183,8 @@ class CodingRuntimeService(
                 attempts.recordResultRejected(attemptId, agentId, codes)
                 CodingSubmitOutcome.Rejected(verdict.reasons, verdict.policyReasons)
             }
-            is CodingResultValidator.Verdict.Accepted -> store(attemptId, agentId, generation, result, verdict.patch, verdict.digest)
+            is CodingResultValidator.Verdict.Accepted ->
+                store(attemptId, agentId, generation, result, verdict.patch, verdict.digest, reported = usage != null)
         }
     }
 
@@ -170,6 +195,7 @@ class CodingRuntimeService(
         result: CodingResult,
         patch: PatchSet,
         digest: String,
+        reported: Boolean,
     ): CodingSubmitOutcome {
         try {
             results.save(attemptId, digest, patch)
@@ -178,6 +204,8 @@ class CodingRuntimeService(
             logger.error("coding result store failed: attemptId={}", attemptId)
             return CodingSubmitOutcome.StoreFailed
         }
+        // No usage was reported with this result: the reserve is booked before the attempt is marked received (fail closed).
+        if (!reported && !cost.recordEstimated(attemptId, generation)) return CodingSubmitOutcome.StoreFailed
         return when (val done = attempts.complete(attemptId, agentId, generation, digest, result.exitStatus, result.sessionId)) {
             is CodingAttemptResult.Ok -> {
                 logger.info("coding result accepted: attemptId={} changes={}", attemptId, patch.files.size)
@@ -208,7 +236,7 @@ class CodingRuntimeService(
      * reason, so an operator decides. Safe to call again: a Run already moved on is left alone.
      */
     fun reconcile(): CodingReconcileReport {
-        val expired = attempts.expire(config.reconcileLimit)
+        val expired = expireAndBookEstimates()
         var held = 0
         var skipped = 0
         for (attempt in attempts.unsettledOfDevelopingRuns(config.reconcileLimit)) {
@@ -237,7 +265,24 @@ class CodingRuntimeService(
      * no Run: the caller holds the Run's lease, and the Run's own advance moves it to UNKNOWN with the reason its attempt now carries.
      */
     fun expireOverdue() {
-        attempts.expire(config.reconcileLimit)
+        expireAndBookEstimates()
+    }
+
+    /**
+     * Expires the overdue attempts, then books the per-attempt reserve for each one: an EXPIRED attempt (generation 0, never claimed) and an
+     * ORPHANED one (its lease generation). Each attempt moves once, so each is booked once; a booking that fails is logged by id and is not
+     * retried here (a known gap, see the runbook).
+     */
+    private fun expireAndBookEstimates(): ExpireResult {
+        val expired = attempts.expire(config.reconcileLimit)
+        for (id in expired.expiredQueued) {
+            if (!cost.recordEstimated(id, 0)) logger.error("coding reserve not booked: attemptId={} code=LEDGER_UNAVAILABLE", id)
+        }
+        for (id in expired.orphaned) {
+            val generation = attempts.get(id)?.leaseGeneration ?: continue
+            if (!cost.recordEstimated(id, generation)) logger.error("coding reserve not booked: attemptId={} code=LEDGER_UNAVAILABLE", id)
+        }
+        return expired
     }
 
     /** The newest attempt of [runId], active or terminal. */

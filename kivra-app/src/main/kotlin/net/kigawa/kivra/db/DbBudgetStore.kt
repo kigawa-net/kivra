@@ -201,6 +201,43 @@ class DbBudgetStore(
     }
 
     /**
+     * Books spend that has already happened, outside the reserve / commit cycle (ADR 0010 addendum 4: the CLI runtime's cost). The
+     * row is a settled reservation under [key]: COMMITTED, or UNPRICED when [unpriced] (the cost is not verified and the scope is
+     * UNKNOWN_COST until an operator acknowledges it). Only the tenant scope is charged, in its current JST month.
+     *
+     * There is no hard-limit check here: the money is already spent, so refusing to record it would hide it. Admission is
+     * checked separately, before a claim ([admission]). Keyed by [key]: a second call with the same key changes nothing and
+     * returns [SpendResult.ALREADY_RECORDED]. Any failure is [SpendResult.FAILURE] with nothing written.
+     */
+    fun recordSpend(key: String, amount: BudgetAmount, unpriced: Boolean): SpendResult {
+        val micro = (if (amount.currency == tenantLimit.currency && amount.unit == tenantLimit.unit) microOrNull(amount) else null)
+            ?: return SpendResult.FAILURE
+        ensurePeriodRows(listOf(tenantScope), clock.instant())
+        return try {
+            transaction<SpendResult>(database) {
+                lockTenant()
+                expireDue(clock.instant())
+                if (reservationExists(key)) return@transaction SpendResult.ALREADY_RECORDED
+                val now = clock.instant()
+                val period = periodFor(tenantScope, now)
+                val at = utcNow(clock)
+                execUpdate(
+                    "INSERT INTO budget_reservations (reservation_key, amount_micro_yen, state, expires_at, created_at, settled_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    key, micro, if (unpriced) UNPRICED else COMMITTED, at, at, at,
+                )
+                execUpdate(
+                    "INSERT INTO budget_reservation_scopes (reservation_key, scope_id, period) VALUES (?, ?, ?)",
+                    key, tenantScope, period,
+                )
+                addToPeriod(tenantScope, period, micro, unpriced = if (unpriced) 1L else 0L)
+                SpendResult.RECORDED
+            }
+        } catch (e: Exception) {
+            if (e.isDuplicateKey()) SpendResult.ALREADY_RECORDED else SpendResult.FAILURE
+        }
+    }
+
+    /**
      * Releases one UNPRICED (or LAPSED) reservation after an operator's audited decision (ADR 0003). In one transaction, under the
      * tenant lock: the charge moves to the verified actual (or stays at the charged amount when no actual is known), the unpriced
      * count of each scope in the path drops by one, and the audit row is inserted. Any failure rolls all of it back and returns
@@ -462,3 +499,6 @@ class DbBudgetStore(
         }
     }
 }
+
+/** Outcome of [DbBudgetStore.recordSpend]. Fixed values only. */
+enum class SpendResult { RECORDED, ALREADY_RECORDED, FAILURE }

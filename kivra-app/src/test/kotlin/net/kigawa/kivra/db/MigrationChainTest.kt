@@ -39,10 +39,11 @@ internal val MIGRATION_FILES = mapOf(
     13 to "V13__request_ledger.sql",
     14 to "V14__coding_attempts.sql",
     15 to "V15__coding_results.sql",
+    16 to "V16__coding_attempt_usage.sql",
 )
 
 /**
- * Migration chain V1 -> V2 -> ... -> V15 (Issue #88, #94, #53, #100, #112, #26, #56). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
+ * Migration chain V1 -> V2 -> ... -> V16 (Issue #88, #94, #53, #100, #112, #26, #56). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
  *
  * Partial histories are built from copies of the real migration files in a temporary directory. Nothing here repairs,
  * skips or baselines a history: a mismatch must fail.
@@ -50,13 +51,14 @@ internal val MIGRATION_FILES = mapOf(
 class MigrationChainTest {
 
     @Test
-    fun `empty database applies V1 to V15 in order and flyway validate passes`() = TestDb().use { db ->
+    fun `empty database applies V1 to V16 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
-        assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"), appliedVersions(db.dataSource))
+        assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"), appliedVersions(db.dataSource))
         assertTrue(flyway.info().all().all { it.state == MigrationState.SUCCESS })
         assertEquals(1, db.tableCount("approvals"))
         assertEquals(1, db.tableCount("coding_results"))
+        assertEquals(1, db.tableCount("coding_attempt_usage"))
         assertEquals(1, db.tableCount("budget_periods"))
         assertEquals(1, db.tableCount("budget_reservations"))
         assertEquals(1, db.tableCount("budget_reservation_scopes"))
@@ -81,7 +83,7 @@ class MigrationChainTest {
             // The later migrations are applied on top of the existing history, in order.
             runMigrations(db.dataSource)
             classpathFlyway(db.dataSource).validate()
-            assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"), appliedVersions(db.dataSource))
+            assertEquals(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"), appliedVersions(db.dataSource))
 
             // The row is kept as written: no backfill, no guessed binding.
             assertEquals(before, db.snapshot(opId))

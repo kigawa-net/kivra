@@ -1,5 +1,7 @@
 package net.kigawa.kivra.auth
 
+import java.math.BigDecimal
+
 /**
  * `KIVRA_AGENT_API_ENABLED`: whether the agent API routes are registered at all (ADR 0010 addendum, PR 4a). Off by default.
  *
@@ -13,11 +15,21 @@ package net.kigawa.kivra.auth
  * Enabling this is also the condition for the CLI runtime: `KIVRA_SELFDEV_RUNTIME=cli` is allowed only when this is `true` (checked by
  * `SelfDevSettings`). Nothing else allows it.
  */
-class AgentApiSettings private constructor(val auth: AgentAuthConfig?) {
+class AgentApiSettings private constructor(
+    val auth: AgentAuthConfig?,
+    /**
+     * The per-attempt reserve in USD (`KIVRA_AGENT_ATTEMPT_RESERVE_USD`, ADR 0010 addendum 4). It is booked for an attempt that ends without a
+     * usage report, and one reserve must fit in the monthly budget before a claim. Read only when the agent API is on.
+     */
+    val attemptReserveUsd: BigDecimal = DEFAULT_RESERVE_USD,
+) {
     val enabled: Boolean get() = auth != null
 
     companion object {
         const val ENV_ENABLED = "KIVRA_AGENT_API_ENABLED"
+        const val ENV_RESERVE_USD = "KIVRA_AGENT_ATTEMPT_RESERVE_USD"
+        val DEFAULT_RESERVE_USD: BigDecimal = BigDecimal("0.50")
+        private val MAX_RESERVE_USD = BigDecimal("100")
 
         private val DISABLED = AgentApiSettings(auth = null)
 
@@ -25,7 +37,7 @@ class AgentApiSettings private constructor(val auth: AgentAuthConfig?) {
             val raw = env[ENV_ENABLED]?.trim()?.takeIf { it.isNotEmpty() } ?: return DISABLED
             return when (raw) {
                 "false" -> DISABLED
-                "true" -> AgentApiSettings(authConfig(env))
+                "true" -> AgentApiSettings(authConfig(env), reserveUsd(env))
                 else -> throw IllegalStateException("$ENV_ENABLED must be true or false")
             }
         }
@@ -55,6 +67,16 @@ class AgentApiSettings private constructor(val auth: AgentAuthConfig?) {
                 requiredClient = parts[0].trim(),
                 requiredRole = parts[1].trim(),
             )
+        }
+
+        private fun reserveUsd(env: Map<String, String>): BigDecimal {
+            val raw = env[ENV_RESERVE_USD]?.trim()?.takeIf { it.isNotEmpty() } ?: return DEFAULT_RESERVE_USD
+            val value = runCatching { BigDecimal(raw) }.getOrNull()
+                ?: throw IllegalStateException("$ENV_RESERVE_USD must be a decimal number")
+            require(value.signum() > 0 && value <= MAX_RESERVE_USD && value.stripTrailingZeros().scale() <= 6) {
+                "$ENV_RESERVE_USD must be above 0 and at most 100, with at most 6 decimals"
+            }
+            return value
         }
 
         private fun required(env: Map<String, String>, name: String): String =

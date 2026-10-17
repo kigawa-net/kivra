@@ -142,7 +142,11 @@ class RealAttemptExecutor(
                 attempt.runId,
                 attempt.attemptId,
                 mirror.openArchive(attempt.baseSha),
-                TaskInput(title = attempt.task.value, body = "", truncated = attempt.task.truncated),
+                TaskInput(
+                    title = attempt.task.value,
+                    body = attempt.task.body,
+                    truncated = attempt.task.truncated || attempt.task.bodyTruncated,
+                ),
             )
             state.prepared = work
             val spec = DockerRunSpec(

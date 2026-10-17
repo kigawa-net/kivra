@@ -25,6 +25,10 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.agent.docker.DockerLauncher
 import net.kigawa.kivra.agent.docker.DockerProcess
 import net.kigawa.kivra.agent.workdir.DiffRejectReason
@@ -52,12 +56,14 @@ private class ScriptedDocker(
     private val exitCode: Int = 0,
 ) : DockerLauncher {
     val argvs: MutableList<List<String>> = Collections.synchronizedList(mutableListOf())
+    val envs: MutableList<Map<String, String>> = Collections.synchronizedList(mutableListOf())
 
     @Volatile
     var killed = false
 
     override fun start(argv: List<String>, env: Map<String, String>): DockerProcess {
         argvs += argv
+        envs += env
         return when (argv[1]) {
             "run" -> {
                 onRun(mountSource(argv))
@@ -149,12 +155,18 @@ private class World(
         pollMillis = 20,
     )
 
-    fun attempt(baseSha: String = repo.sha, maxRuntimeSeconds: Long = 600, maxOutputBytes: Long = 1_048_576) = ClaimedAttempt(
+    fun attempt(
+        baseSha: String = repo.sha,
+        maxRuntimeSeconds: Long = 600,
+        maxOutputBytes: Long = 1_048_576,
+        body: String = "",
+        bodyTruncated: Boolean = false,
+    ) = ClaimedAttempt(
         runId = RUN,
         attemptId = ATTEMPT,
         generation = 3,
         baseSha = baseSha,
-        task = AgentTask("task_title", TITLE, TRUST_UNTRUSTED, false),
+        task = AgentTask("task_title", TITLE, TRUST_UNTRUSTED, false, body, bodyTruncated),
         limits = AgentLimits(
             maxRuntimeSeconds = maxRuntimeSeconds,
             maxTurns = 30,
@@ -598,5 +610,51 @@ class RealAttemptExecutorTest {
             logger.detachAppender(appender)
             logger.level = previousLevel
         }
+    }
+
+    /** A body marker with Japanese, a newline, quotes, a closing tag and a backslash: it must reach task.json and nowhere else. */
+    private val bodyMarker = "BODYSECRET-日本語\n\"引用\" </x> \\ end"
+
+    @Test
+    fun theBodyReachesTheTaskFileAndNeverTheLogsArgvOrEnvironment() = runBlocking {
+        val logger = LoggerFactory.getLogger("net.kigawa.kivra.agent") as Logger
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        val previousLevel = logger.level
+        logger.level = Level.DEBUG
+        logger.addAppender(appender)
+        try {
+            val world = World(docker = ScriptedDocker(
+                output = { lines(resultLine("Nothing to do.")) },
+            ))
+            world.executor(debugKeep = true).execute(world.attempt(body = bodyMarker, bodyTruncated = true))
+
+            val dir = world.root.resolve("debug").resolve("$RUN-$ATTEMPT")
+            val doc = Json.parseToJsonElement(Files.readString(dir.resolve("task.json"))).jsonObject
+            assertEquals(bodyMarker, doc["body"]!!.jsonPrimitive.content, "the body is in task.json, unchanged")
+            assertEquals(TITLE, doc["title"]!!.jsonPrimitive.content)
+            assertEquals(true, doc["truncated"]!!.jsonPrimitive.booleanOrNull, "a body cut by the claim marks the task truncated")
+
+            val text = appender.list.joinToString("\n") { it.formattedMessage }
+            assertTrue(text.isNotEmpty(), "the executor logs its outcome")
+            assertFalse(text.contains("BODYSECRET"), "log must not contain the body")
+            val argv = world.docker.argvs.flatten().joinToString("\n")
+            assertFalse(argv.contains("BODYSECRET"), "argv must not contain the body")
+            val env = world.docker.envs.flatMap { it.entries }.joinToString("\n") { "${it.key}=${it.value}" }
+            assertFalse(env.contains("BODYSECRET"), "env must not contain the body")
+            assertFalse(world.recorded.any { it.body.contains("BODYSECRET") && !it.path.endsWith("/result") }, "kivra gets no body")
+        } finally {
+            logger.detachAppender(appender)
+            logger.level = previousLevel
+        }
+    }
+
+    @Test
+    fun aTitleOnlyAttemptWritesAnEmptyBodyAndTheTitleTruncationFlagOnly() = runBlocking {
+        val world = World(docker = ScriptedDocker(output = { lines(resultLine("Nothing to do.")) }))
+        world.executor(debugKeep = true).execute(world.attempt())
+
+        val doc = Json.parseToJsonElement(Files.readString(world.root.resolve("debug").resolve("$RUN-$ATTEMPT").resolve("task.json"))).jsonObject
+        assertEquals("", doc["body"]!!.jsonPrimitive.content)
+        assertEquals(false, doc["truncated"]!!.jsonPrimitive.booleanOrNull)
     }
 }

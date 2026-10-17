@@ -34,6 +34,9 @@ object DevelopmentRunsTable : Table("development_runs") {
     val completionMergeSha = varchar("completion_merge_sha", 64).nullable()
     // V9: API-submitted Tasks (Issue #112). Null for runs created by the workflow path.
     val taskTitle = varchar("task_title", 200).nullable()
+    // V17: the task body (manual, plus the resolved reference after a separator) and the reference it came from (owner/repo#n).
+    val taskBody = text("task_body").nullable()
+    val taskSource = varchar("task_source", 255).nullable()
     val principal = varchar("principal", 256).nullable()
     val idempotencyKey = varchar("idempotency_key", 128).nullable()
     val completionEvidenceRef = varchar("completion_evidence_ref", 255).nullable()

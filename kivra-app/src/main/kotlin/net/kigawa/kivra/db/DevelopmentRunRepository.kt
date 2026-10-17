@@ -59,6 +59,10 @@ data class DevelopmentRun(
     /** Authenticated owner of an API-submitted Task (V9). Null for runs created by the workflow path. */
     val principal: String? = null,
     val idempotencyKey: String? = null,
+    /** The task body the coding agent receives (V17). Untrusted. Null when there is none. Never logged. */
+    val taskBody: String? = null,
+    /** The reference the body was resolved from, `owner/repo#n` (V17). Null when nothing was resolved. */
+    val taskSource: String? = null,
 )
 
 /** Result of [DevelopmentRunRepository.submitTask]. */
@@ -207,8 +211,10 @@ class DevelopmentRunRepository(
         title: String,
         selfDev: Boolean = false,
         maxActiveSelfDev: Int? = null,
+        /** The manual task body (V17), or null. It is part of the idempotency comparison: the same key with another body conflicts. */
+        body: String? = null,
     ): TaskSubmitResult {
-        findTask(principal, idempotencyKey)?.let { return replayOrConflict(it, title, selfDev) }
+        findTask(principal, idempotencyKey)?.let { return replayOrConflict(it, title, body, selfDev) }
         val runId = RunId(Ulid.generate(clock))
         val insert = {
             transaction(database) {
@@ -226,6 +232,7 @@ class DevelopmentRunRepository(
                     // PR_ONLY is the least-privileged completion mode: an API Task can never reach RELEASE.
                     it[completionMode] = RunCompletionMode.PR_ONLY.name
                     it[taskTitle] = title
+                    it[taskBody] = body
                     it[DevelopmentRunsTable.principal] = principal
                     it[DevelopmentRunsTable.idempotencyKey] = idempotencyKey
                     it[createdAt] = now
@@ -242,7 +249,7 @@ class DevelopmentRunRepository(
             if (!e.isUniqueViolation()) throw e
             // Lost the race (or a replay): the winner's row is committed, so a fresh transaction sees it.
             val existing = findTask(principal, idempotencyKey) ?: throw e
-            return replayOrConflict(existing, title, selfDev)
+            return replayOrConflict(existing, title, body, selfDev)
         }
         return TaskSubmitResult.Created(get(runId)!!)
     }
@@ -264,10 +271,18 @@ class DevelopmentRunRepository(
             .map { RunId(it[DevelopmentRunsTable.runId]) }
     }
 
-    /** A kind mismatch under the same (principal, idempotency key) is a conflict, never a replay of another kind of run. */
-    private fun replayOrConflict(existing: DevelopmentRun, title: String, selfDev: Boolean): TaskSubmitResult =
-        if (existing.taskTitle == title && existing.taskId.startsWith(SELF_DEV_TASK_PREFIX) == selfDev) TaskSubmitResult.Replayed(existing)
-        else TaskSubmitResult.ConflictingTitle(existing)
+    /**
+     * A kind mismatch under the same (principal, idempotency key) is a conflict, never a replay of another kind of run. A different
+     * body is a conflict too: the body changes what the agent is asked to do. An empty body and no body are the same.
+     */
+    private fun replayOrConflict(existing: DevelopmentRun, title: String, body: String?, selfDev: Boolean): TaskSubmitResult =
+        if (existing.taskTitle == title && existing.taskBody.orEmpty() == body.orEmpty() &&
+            existing.taskId.startsWith(SELF_DEV_TASK_PREFIX) == selfDev
+        ) {
+            TaskSubmitResult.Replayed(existing)
+        } else {
+            TaskSubmitResult.ConflictingTitle(existing)
+        }
 
     private fun findTask(principal: String, idempotencyKey: String): DevelopmentRun? = transaction(database) {
         DevelopmentRunsTable.selectAll()
@@ -478,6 +493,40 @@ class DevelopmentRunRepository(
                     put("prNumber", binding.prNumber)
                 }.toString(),
                 traceId,
+            )
+        }
+        return get(lease.runId)!!
+    }
+
+    /**
+     * Stores the resolved task body and its reference (V17) while the run is DEVELOPING. Fenced like every write: the lease must be held
+     * and [expectedVersion] must match. Writes no state change. The audit row carries the fixed action and no content.
+     */
+    fun saveTaskReference(lease: Lease, expectedVersion: Long, body: String, source: String, actor: String): DevelopmentRun {
+        transaction(database) {
+            requireLease(lease)
+            val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
+            val from = storedStateOrRefuse(lease.runId.value, row[DevelopmentRunsTable.state])
+            if (row[DevelopmentRunsTable.version] != expectedVersion) {
+                throw VersionConflictException("run ${lease.runId} is at version ${row[DevelopmentRunsTable.version]}, expected $expectedVersion")
+            }
+            if (from != DevelopmentRunState.DEVELOPING) throw InvalidTransitionException("run ${lease.runId} is in $from, not DEVELOPING")
+            if (row[DevelopmentRunsTable.taskSource] != null) throw InvalidTransitionException("run ${lease.runId} already has a task reference")
+            val updated = execUpdate(
+                """
+                UPDATE development_runs
+                   SET task_body = ?, task_source = ?, version = version + 1, updated_at = ?
+                 WHERE run_id = ? AND lease_generation = ? AND lease_owner = ? AND lease_expires_at > ${DbTime.NOW}
+                   AND hold_reason IS NULL AND version = ? AND state = ? AND task_source IS NULL
+                """.trimIndent(),
+                body, source, utcNow(clock),
+                lease.runId.value, lease.generation, lease.owner, expectedVersion, from.name,
+            )
+            if (updated != 1) throw LeaseLostException("fenced update rejected for run ${lease.runId}")
+            audit.append(
+                this,
+                lease.runId,
+                AuditEntry(actor = actor, action = "RUN_TASK_REFERENCE_RESOLVED", result = "OK", resource = "task:${row[DevelopmentRunsTable.taskId]}"),
             )
         }
         return get(lease.runId)!!
@@ -816,6 +865,8 @@ class DevelopmentRunRepository(
         taskTitle = this[DevelopmentRunsTable.taskTitle],
         principal = this[DevelopmentRunsTable.principal],
         idempotencyKey = this[DevelopmentRunsTable.idempotencyKey],
+        taskBody = this[DevelopmentRunsTable.taskBody],
+        taskSource = this[DevelopmentRunsTable.taskSource],
     )
 }
 

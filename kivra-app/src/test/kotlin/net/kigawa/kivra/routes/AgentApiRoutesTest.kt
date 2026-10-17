@@ -596,4 +596,48 @@ class AgentApiRoutesTest {
             assertEquals(CodingAttemptState.CLAIMED, env.service.latest(attempt.runId)!!.state)
         }
     }
+
+    // ---- the task body in the claim (Issue #229, addendum) ----
+
+    private suspend fun ApplicationTestBuilder.claimWithBody(env: Env, runId: String, body: String?): kotlinx.serialization.json.JsonObject {
+        if (body != null) transaction(env.db.database) { execUpdate("UPDATE development_runs SET task_body = ? WHERE run_id = ?", body, runId) }
+        env.enqueue(runId)
+        return parse(post(CLAIM, "{}").bodyAsText()).getValue("input").jsonObject.getValue("task").jsonObject
+    }
+
+    @Test
+    fun `the claim carries the stored body, marked untrusted, and the flag stays false for a body kivra did not cut`() = TestDb().use { db ->
+        testApplication {
+            val env = Env(db)
+            setUp(env)
+            val task = claimWithBody(env, env.newRun(), "BODY-MARKER 手順\n1. 直す")
+            assertEquals("BODY-MARKER 手順\n1. 直す", task.getValue("body").jsonPrimitive.content)
+            assertEquals(false, task.getValue("bodyTruncated").jsonPrimitive.content.toBoolean())
+            assertEquals("UNTRUSTED", task.getValue("trust").jsonPrimitive.content)
+            assertEquals(title, task.getValue("value").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `the claim without a stored body carries an empty body, and a body that kivra cut is flagged`() = TestDb().use { db ->
+        testApplication {
+            val env = Env(db)
+            setUp(env)
+            val none = claimWithBody(env, env.newRun(), null)
+            assertEquals("", none.getValue("body").jsonPrimitive.content)
+            assertEquals(false, none.getValue("bodyTruncated").jsonPrimitive.content.toBoolean())
+        }
+    }
+
+    @Test
+    fun `a body that ends with the truncation mark is reported as truncated`() = TestDb().use { db ->
+        testApplication {
+            val env = Env(db)
+            setUp(env)
+            val cut = "x".repeat(10) + net.kigawa.kivra.coding.TaskBodyText.TRUNCATION_MARK
+            val task = claimWithBody(env, env.newRun(), cut)
+            assertEquals(cut, task.getValue("body").jsonPrimitive.content)
+            assertEquals(true, task.getValue("bodyTruncated").jsonPrimitive.content.toBoolean())
+        }
+    }
 }

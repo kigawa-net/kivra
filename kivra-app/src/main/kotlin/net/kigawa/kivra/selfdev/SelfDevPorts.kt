@@ -18,14 +18,21 @@ import net.kigawa.kivra.github.RepoRef
 interface DevelopmentRunStore {
     fun find(runId: RunId): DevelopmentRun?
 
-    /** Fenced transition. Throws the same exceptions as [DevelopmentRunRepository.transition]. */
+    /**
+     * Fenced transition. Throws the same exceptions as [DevelopmentRunRepository.transition]. [auditReasonCode] is the fixed code written to
+     * the audit row; it defaults to [reasonCode] (the state reason).
+     */
     fun transition(
         lease: Lease,
         expectedVersion: Long,
         to: DevelopmentRunState,
         expectedFrom: DevelopmentRunState,
         reasonCode: String?,
+        auditReasonCode: String? = reasonCode,
     ): DevelopmentRun
+
+    /** Stores the resolved task body and reference (V17). Fenced; the run must be DEVELOPING and have no reference yet. */
+    fun saveTaskReference(lease: Lease, expectedVersion: Long, body: String, source: String): DevelopmentRun
 
     /** PULL_REQUEST -> CANCELLED with the reason code PR_ABANDONED. Pull requests are never touched. */
     fun closeAbandonedPullRequest(lease: Lease, expectedVersion: Long): DevelopmentRun
@@ -56,10 +63,14 @@ class DbDevelopmentRunStore(
         to: DevelopmentRunState,
         expectedFrom: DevelopmentRunState,
         reasonCode: String?,
+        auditReasonCode: String?,
     ): DevelopmentRun = runs.transition(
         lease, expectedVersion, to, actor,
-        reason = reasonCode, expectedFrom = expectedFrom, auditReasonCode = reasonCode,
+        reason = reasonCode, expectedFrom = expectedFrom, auditReasonCode = auditReasonCode,
     )
+
+    override fun saveTaskReference(lease: Lease, expectedVersion: Long, body: String, source: String): DevelopmentRun =
+        runs.saveTaskReference(lease, expectedVersion, body, source, actor)
 
     override fun closeAbandonedPullRequest(lease: Lease, expectedVersion: Long): DevelopmentRun =
         runs.closeAbandonedPullRequest(lease, expectedVersion, actor)

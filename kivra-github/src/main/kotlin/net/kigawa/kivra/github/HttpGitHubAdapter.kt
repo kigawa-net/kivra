@@ -7,10 +7,13 @@ import io.ktor.client.request.header
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
+import io.ktor.utils.io.core.readBytes
+import io.ktor.utils.io.readRemaining
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
@@ -90,6 +93,9 @@ data class GitHubAdapterConfig(
     }
 }
 
+/** Upper bound of one issue response. A GitHub issue body is at most 65,536 characters; the JSON around it is small. */
+internal const val ISSUE_MAX_RESPONSE_BYTES = 512 * 1024
+
 /** Builds the HTTP client with timeouts. Tests pass a MockEngine here. */
 fun githubHttpClient(engine: HttpClientEngine, config: GitHubAdapterConfig = GitHubAdapterConfig()): HttpClient =
     HttpClient(engine) {
@@ -112,7 +118,7 @@ class HttpGitHubAdapter(
     private val tokens: TokenProvider,
     private val config: GitHubAdapterConfig = GitHubAdapterConfig(),
     private val backoff: suspend (attempt: Int) -> Unit = { delay(200L * (1L shl (it - 1))) },
-) : GitHubPort {
+) : GitHubPort, GitHubIssueReader {
     private val json = Json { ignoreUnknownKeys = true }
 
     private class Raw(val status: Int, val body: String, val headers: Map<String, String>)
@@ -120,9 +126,15 @@ class HttpGitHubAdapter(
     private sealed interface Transport {
         class Ok(val raw: Raw) : Transport
         class Error(val message: String) : Transport
+
+        /** The body is longer than the caller's limit. It is not decoded, and it is not retried. */
+        data object TooLarge : Transport
     }
 
-    private suspend fun send(method: HttpMethod, path: String, body: JsonObject?): Transport = try {
+    /**
+     * One request. With [maxBodyBytes] the body is read only up to that limit; a longer body is [Transport.TooLarge].
+     */
+    private suspend fun send(method: HttpMethod, path: String, body: JsonObject?, maxBodyBytes: Int? = null): Transport = try {
         val resp: HttpResponse = client.request(config.apiBase.trimEnd('/') + path) {
             this.method = method
             header("Authorization", "Bearer ${tokens.token()}")
@@ -133,7 +145,12 @@ class HttpGitHubAdapter(
                 setBody(body.toString())
             }
         }
-        Transport.Ok(Raw(resp.status.value, resp.bodyAsText(), resp.headers.entries().associate { it.key.lowercase() to it.value.first() }))
+        val text = if (maxBodyBytes == null) resp.bodyAsText() else readBounded(resp, maxBodyBytes)
+        if (text == null) {
+            Transport.TooLarge
+        } else {
+            Transport.Ok(Raw(resp.status.value, text, resp.headers.entries().associate { it.key.lowercase() to it.value.first() }))
+        }
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
@@ -141,12 +158,19 @@ class HttpGitHubAdapter(
         Transport.Error("GitHub transport failure (${e::class.simpleName ?: "Exception"})")
     }
 
+    /** The body as UTF-8 text, or null when it is longer than [maxBytes]. Reads at most [maxBytes] + 1 bytes. */
+    private suspend fun readBounded(resp: HttpResponse, maxBytes: Int): String? {
+        val bytes = resp.bodyAsChannel().readRemaining(maxBytes + 1L).readBytes()
+        return if (bytes.size > maxBytes) null else bytes.toString(Charsets.UTF_8)
+    }
+
     /** GET with retry on 5xx / I/O and one token refresh on 401. Returns the raw 2xx response or a classified failure. */
-    private suspend fun get(path: String): GitHubResult<Raw> {
+    private suspend fun get(path: String, maxBodyBytes: Int? = null): GitHubResult<Raw> {
         var refreshed = false
         var attempt = 1
         while (true) {
-            when (val t = send(HttpMethod.Get, path, null)) {
+            when (val t = send(HttpMethod.Get, path, null, maxBodyBytes)) {
+                is Transport.TooLarge -> return GitHubResult.Failure(GitHubFailureKind.TOO_LARGE, GitHubFailureKind.TOO_LARGE.code)
                 is Transport.Error ->
                     if (attempt >= config.maxGetAttempts) return GitHubResult.Failure(GitHubFailureKind.NETWORK, t.message)
                 is Transport.Ok -> {
@@ -188,6 +212,8 @@ class HttpGitHubAdapter(
     ): GitHubResult<Raw> =
         when (val t = send(method, path, body)) {
             is Transport.Error -> GitHubResult.Unknown(operation, t.message)
+            // Not reachable: a mutation reads the whole body (no limit is passed).
+            is Transport.TooLarge -> GitHubResult.Unknown(operation, "response too large")
             is Transport.Ok -> when {
                 t.raw.status in 200..299 -> GitHubResult.Success(t.raw)
                 // The server received the request but we did not follow the redirect: the outcome is unknown.
@@ -803,6 +829,35 @@ class HttpGitHubAdapter(
             entries += TreeEntry(path, type, mode, size)
         }
         return GitHubResult.Success(RepoTree(sha, entries, truncated = false))
+    }
+
+    override suspend fun getIssue(repo: RepoRef, number: Long): GitHubResult<GitHubIssue> {
+        if (number <= 0) return validation("issue number")
+        val raw = when (val g = get("${repoPath(repo)}/issues/$number", maxBodyBytes = ISSUE_MAX_RESPONSE_BYTES)) {
+            is GitHubResult.Success -> g.value
+            is GitHubResult.Failure -> return g
+            is GitHubResult.Unknown -> return g
+        }
+        val o = parse(raw) as? JsonObject ?: return protocol("issue")
+        if (o.long("number") != number) return mismatch()
+        val title = o.str("title") ?: return protocol("issue.title")
+        val state = when (o.str("state")) {
+            "open" -> true
+            "closed" -> false
+            else -> return protocol("issue.state")
+        }
+        // The issues endpoint answers for a pull request too, and marks it with a `pull_request` key.
+        val isPullRequest = o.containsKey("pull_request")
+        return GitHubResult.Success(
+            GitHubIssue(
+                repo = repo,
+                number = number,
+                title = title,
+                body = o.str("body") ?: "",
+                open = state,
+                isPullRequest = isPullRequest,
+            ),
+        )
     }
 
     override suspend fun readFile(repo: RepoRef, ref: String, path: String, maxBytes: Int): GitHubResult<RepoFileContent?> {

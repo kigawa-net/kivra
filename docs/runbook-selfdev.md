@@ -290,11 +290,11 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - `Authorization: Bearer` の curl は、`Origin` も `Sec-Fetch-Site` も付かないので、そのまま通る。
 
 ```sh
-# タスクの投入(本文は title と idempotencyKey だけ。ほかの項目は 400)
+# タスクの投入(項目は title と idempotencyKey、任意で body。ほかの項目は 400)
 curl -X POST "https://<kivra-host>/api/selfdev/tasks" \
   -H "Authorization: Bearer <JWT>" \
   -H "Content-Type: application/json" \
-  -d '{"title":"<タイトル 1-200 文字>","idempotencyKey":"<キー 1-128 文字>"}'
+  -d '{"title":"<タイトル 1-200 文字。Issue の URL、#番号、owner/repo#番号も可>","idempotencyKey":"<キー 1-128 文字>","body":"<任意。0-8000 文字>"}'
 
 # 状態の確認(runId は 26 文字の ULID)
 curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs/<runId>"
@@ -311,6 +311,23 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 - PR ができるまで数分かかる。`state` が `PULL_REQUEST` になり、`pullRequestUrl` が入れば、人間がレビューしてマージする。
 
 注意: `POST /api/dev/tasks` は開発用のプレビューであり、インメモリで、`SIMULATED` の結果を返す。自己開発の Run は作らないため、動作確認には使わない。
+
+### 5.1 本文(body)と参照(Issue #229 追補、2026-10-18)
+
+- **body**(任意): 0〜8000 文字(コードポイント)。改行(LF)とタブは使えるが、ほかの制御文字(CR を含む)は 400。空白だけの body は body 無しと同じ。
+- **title の規則は変えない**: 1〜200 文字、制御文字なし。
+- **参照**: title が次のどれか一つの全体に一致すると、kivra が Issue を読んで本文にする。
+  - `https://github.com/<owner>/<repo>/issues/<n>`(`/pull/<n>` も受け付けて、後で PR として拒否する)
+  - `#<n>`(対象リポジトリの Issue)
+  - `<owner>/<repo>#<n>`
+  - 対象は `KIVRA_SELFDEV_TARGET_REPO` のリポジトリだけ。それ以外は失敗(`TASK_REFERENCE_REPO_NOT_ALLOWED`)。
+  - 読むのは Issue の title と本文と状態だけ(コメント、ラベル、作者は読まない)。Issue の本文は kivra の GitHub App の読み取りで取る。リダイレクトは辿らない。
+- **本文の組み立て**: 参照だけなら `Issue #<n>: <title>` と空行と Issue の本文。手動の body があれば、手動の本文を先に置き、`--- 参照 ---` の区切りの後ろに参照の本文を付ける。合計は 8000 文字以内で、超えた分は切り詰めて末尾に `[truncated by kivra ...]` を付ける(claim の `bodyTruncated` は、この印で決まる)。手動の本文が長すぎて参照の余地が 200 文字未満なら、Run は失敗する(`TASK_REFERENCE_NO_ROOM_FOR_REFERENCE`)。
+- **解決の時点**: Run が DEVELOPING に入り、最初に試みるとき(attempt を作る前)。一度だけ行い、結果(`task_body`、`task_source` = `owner/repo#n`)を Run に保存する。保存済みの Run は再度読まない。
+- **失敗**: Run は `FAILED`、理由は `TASK_REFERENCE_UNRESOLVED`。監査の行に、固定のサブ理由が入る(`TASK_REFERENCE_REPO_NOT_ALLOWED`、`TASK_REFERENCE_PULL_REQUEST`、`TASK_REFERENCE_CLOSED`、`TASK_REFERENCE_NOT_FOUND`、`TASK_REFERENCE_FORBIDDEN`、`TASK_REFERENCE_UNAVAILABLE`、`TASK_REFERENCE_RESPONSE_TOO_LARGE`、`TASK_REFERENCE_NO_ROOM_FOR_REFERENCE`)。5xx と通信の失敗は 2 回まで再試行してから `UNAVAILABLE` にする。attempt は作らない。ほかの Run は止まらない。再試行の操作は無い。投入し直す。
+- **冪等**: 同じ `idempotencyKey` で title も body も同じなら、既存の Run を返す(200)。title か body が違えば 409。body を無しにした再送は、body 無しの元の投入と同じなので 200 になる。
+- **大きな Issue**: 本文は 8000 文字に切り詰める。`maxFiles` などの PatchPolicy が最終ゲートである。大きな依頼は、Planner(#233)が分割する前提で、手動の body か分割された Issue で渡す。
+- **表示**: 投入者と運用者の Run 詳細に `解決元`(`owner/repo#n`)を表示する。本文と Issue の内容は、画面にもログにも監査にも出さない。
 
 ## 6. エージェント API(`/api/agent/v1`、無効が既定)
 
@@ -340,7 +357,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 | POST | `/api/agent/v1/attempts/{attemptId}/result` | `{"generation": n, "result": {summary, changes, exitStatus, sessionId}}`。本文は 2 MiB まで | 200(`RESULT_RECEIVED`) | 413(超過)、422(PatchPolicy などの拒否。理由コードだけ返す)、404、409、503(保存失敗) |
 | GET | `/api/agent/v1/attempts/{attemptId}/status` | なし | 200(`state`, `cancelRequested`)。キャンセル要求の伝達に使う | 404 |
 
-- `input` には、タスクのタイトルが `trust: UNTRUSTED` の印つきで入る。データとして扱うこと(指示として従わない)。制限(`limits`)と許可・拒否のパスパターン、`baseSha` も入る。
+- `input.task` には、タスクのタイトル(`value`)が `trust: UNTRUSTED` の印つきで入る。`input.task.body` と `input.task.bodyTruncated` には、本文(手動、または解決した参照。8000 文字以内)と、kivra が切り詰めたかどうかが入る。本文が無ければ `body` は空、`bodyTruncated` は false。いずれも UNTRUSTED のデータとして扱うこと(指示として従わない)。制限(`limits`)と許可・拒否のパスパターン、`baseSha` も入る。
 - 他のエージェントの attempt、存在しない attempt は、どちらも 404(同じ本文)。
 - 失敗の本文は固定の文言だけ。理由を表す名前は列挙名だけ(`STALE_GENERATION`、`NOT_ACTIVE` など)。自由文は返さない。
 
@@ -626,7 +643,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 **既定は従来の stub**。`KIVRA_AGENT_EXECUTOR` が未設定または `stub` のときは、claim したアテンプトを `fail(NEEDS_HUMAN)` で返すだけ(§6.5)。`real` を明示したときだけ `RealAttemptExecutor` を使う。有効化(実機の docker・CLI・認証で確かめた後)は別の PR で行う。
 
 **実行の手順(1 アテンプト)**:
-1. 基底コミットを、ホスト側の bare mirror(`<KIVRA_AGENT_WORK_DIR>/.mirror.git`)へ取り込み、`baseSha` の tar を `WorkDirPreparer` で `<作業ルート>/<runId>-<attemptId>` に展開する。`.kivra/task.json` を書く(タスク文は title だけ。claim の入力に本文は無い)。
+1. 基底コミットを、ホスト側の bare mirror(`<KIVRA_AGENT_WORK_DIR>/.mirror.git`)へ取り込み、`baseSha` の tar を `WorkDirPreparer` で `<作業ルート>/<runId>-<attemptId>` に展開する。`.kivra/task.json` を書く(タスク文は title。claim の `input.task.body` は、`.kivra/task.json` の `body` に渡す。エージェント側のこの変更は kivra 側より先に出す。ADR 0010 追補 5)。
 2. `DockerRunner.cleanupOrphans` で、このエージェントのラベル付きの孤児コンテナを消す。
 3. CLI のコンテナを 1 つ起動する(§6.6、§6.7 の引数)。時間制限は `limits.maxRuntimeSeconds`。出力上限は `min(limits.maxOutputBytes, 1 MiB)`。
 4. コンテナが止まった後で `StreamJsonParser` と `CliOutcomeClassifier` で分類し、分類が成功なら `DiffCollector` で変更を集める(§6.8)。
@@ -717,7 +734,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 **未解決(この PR の範囲外)**:
 - claim が渡す `allowedPathPatterns` と `deniedPathPatterns` は、差分の検査に使っていない。差分は kivra-core の既定値の写し(§6.8)で検査する。これは厳しい側なので、サーバーの設定が広い場合でも危険な結果が通ることはない(サーバーが 422 で拒否し、`BAD_OUTPUT` になる)。サーバー側の設定と揃えるかは PR 9b までに決める。
 - 出力上限は、claim の `maxOutputBytes` を 1 MiB の上限まで縮めるだけに使う。
-- タスク文は title だけ(claim の入力に本文が無い)。
+- タスク文は title と、Run に保存された本文(claim の `input.task.body`、§5.1)。
 - 実際の docker、`claude` CLI、`/etc/subuid` の所有権、作業ディレクトリの削除は、この PR では実機で確かめていない(§6.6、§6.7、§6.8 の未確認事項)。
 - 有効化: `KIVRA_AGENT_EXECUTOR=real` は既定で無効。実機の確認の後、別の PR で有効にする。
 

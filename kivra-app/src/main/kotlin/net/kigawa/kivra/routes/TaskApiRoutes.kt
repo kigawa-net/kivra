@@ -52,6 +52,8 @@ data class TaskRunResponse(
     val pullRequestRepository: String? = null,
     val pullRequestNumber: Long? = null,
     val pullRequestUrl: String? = null,
+    /** The reference a self-development run's task was resolved from, as `owner/repo#n`. Null when none. Shown like the title. */
+    val taskSource: String? = null,
     /** Only in the operator view (GET /api/admin/runs). The authenticated principal that submitted the run. */
     val createdBy: String? = null,
     /** Only in a detail response. The run's audit events (time, action, result, fixed codes). */
@@ -112,6 +114,7 @@ internal fun DevelopmentRun.toTaskRunResponse(
         pullRequestRepository = binding?.repository,
         pullRequestNumber = binding?.prNumber,
         pullRequestUrl = binding?.let { pullRequestUrlOf(it, targetRepo) },
+        taskSource = taskSource,
         createdBy = createdBy,
         events = events,
     )

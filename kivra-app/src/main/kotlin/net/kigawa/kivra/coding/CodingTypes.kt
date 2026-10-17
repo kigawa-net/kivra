@@ -5,6 +5,7 @@ import net.kigawa.kivra.core.patch.PatchPolicyConfig
 import net.kigawa.kivra.core.patch.RejectReason
 import net.kigawa.kivra.db.CodingAttempt
 import net.kigawa.kivra.db.CodingAttemptState
+import kotlinx.serialization.Serializable
 import net.kigawa.kivra.db.CodingRefusal
 
 /*
@@ -81,18 +82,21 @@ enum class CodingErrorCode(val state: CodingAttemptState) {
 }
 
 /** Whether a change writes a file or deletes it. */
+@Serializable
 enum class ChangeKind { WRITE, DELETE }
 
 /**
  * What kind of path entry a change is, as the agent saw it on the host (design section 1.4). Anything but [REGULAR] is refused by the
  * server: the agent is expected to refuse these too, and the server does not trust that.
  */
+@Serializable
 enum class FileKind { REGULAR, SYMLINK, SUBMODULE, EXECUTABLE, BINARY }
 
 /**
  * One change of a result. A WRITE carries the full text of the file ([content]); a DELETE carries none. Paths are relative to the
  * repository root. [toString] shows no path and no content.
  */
+@Serializable
 data class CodingChange(
     val path: String,
     val kind: ChangeKind,
@@ -106,6 +110,7 @@ data class CodingChange(
  * The agent's result for one attempt. [summary] becomes the PR body (after the runner's own sanitising). [exitStatus] and [sessionId]
  * describe the CLI run; [sessionId] is an identifier only. [toString] shows counts, never the summary or the changes.
  */
+@Serializable
 data class CodingResult(
     val summary: String,
     val changes: List<CodingChange>,
@@ -177,6 +182,9 @@ sealed interface CodingCancelOutcome {
     /** The Run is in a state that cannot reach CANCELLED. */
     data object RunNotCancellable : CodingCancelOutcome
 }
+
+/** What the holder of an attempt may see of it. [cancelRequested] is the Run's cancel flag. */
+data class AgentAttemptStatus(val state: CodingAttemptState, val cancelRequested: Boolean)
 
 /** Counts of one reconcile pass. No ids and no text: the caller logs the counts only. */
 data class CodingReconcileReport(

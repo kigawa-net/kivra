@@ -186,14 +186,15 @@ class SelfDevSettings private constructor(
 
         /**
          * `KIVRA_SELFDEV_RUNTIME`: `api` (the default, the single model call) or `cli` (the local coding agent, ADR 0010).
-         * `cli` is refused at startup: the agent API that would claim its attempts (PR 4a) is not wired, so a `cli` deployment would
-         * queue attempts that nothing ever claims. Refusing is the fail-closed choice; the runner itself also needs a coding source.
+         * `cli` is refused at startup: the local agent is not complete yet (ADR 0010), so a `cli` deployment would queue attempts that
+         * nothing ever claims. The agent API (`KIVRA_AGENT_API_ENABLED`, PR 4a) is separate and does not lift this refusal. Refusing is the
+         * fail-closed choice; the runner itself also needs a coding source.
          */
         private fun runtime(env: Map<String, String>): SelfDevRuntime =
             when (val raw = env[ENV_RUNTIME]?.trim()?.takeIf { it.isNotEmpty() } ?: "api") {
                 "api" -> SelfDevRuntime.API
                 "cli" -> throw IllegalStateException(
-                    "$ENV_RUNTIME=cli is not available: the coding agent API is not wired yet (ADR 0010, PR 4a). Use api.",
+                    "$ENV_RUNTIME=cli is not available: the local coding agent is not complete yet (ADR 0010). Use api.",
                 )
                 else -> throw IllegalStateException("$ENV_RUNTIME must be api or cli")
             }

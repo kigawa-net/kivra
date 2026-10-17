@@ -3,6 +3,7 @@ package net.kigawa.kivra.db
 import java.time.Clock
 import java.time.Duration
 import java.time.LocalDateTime
+import net.kigawa.kivra.core.RunId
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
@@ -121,6 +122,11 @@ internal object CodingEventsTable : Table("coding_events") {
 class CodingAttemptRepository(
     private val database: Database,
     private val clock: Clock = Clock.systemUTC(),
+    /**
+     * When set, every claim, result acceptance, failure and rejected result is also written to the Run's audit chain, in the same
+     * transaction, under the Run row lock. The actor is the agent's identifier. Only fixed codes go to the payload.
+     */
+    private val audit: AuditRepository? = null,
 ) {
 
     /**
@@ -169,6 +175,7 @@ class CodingAttemptRepository(
         require(!leaseTtl.isNegative && !leaseTtl.isZero) { "lease ttl must be positive" }
         return transaction(database) {
             val now = utcNow(clock)
+            val runId = lockRunOf(attemptId) ?: return@transaction CodingAttemptResult.Refused(CodingRefusal.NOT_FOUND)
             val updated = execUpdate(
                 """
                 UPDATE coding_attempts
@@ -180,6 +187,7 @@ class CodingAttemptRepository(
             )
             if (updated != 1) return@transaction CodingAttemptResult.Refused(classify(this, attemptId, claiming = true))
             appendEvent(this, attemptId, "CLAIMED", now)
+            auditIn(this, runId, agent, AUDIT_CLAIMED, attemptId, null)
             CodingAttemptResult.Ok(getIn(this, attemptId) ?: error("coding attempt vanished after claim"))
         }
     }
@@ -188,19 +196,20 @@ class CodingAttemptRepository(
      * CLAIMED -> RUNNING, with the lease extended by [leaseTtl]. Only the current generation may do this. The transition is
      * recorded as a RUNNING event.
      */
-    fun start(attemptId: String, generation: Long, leaseTtl: Duration): CodingAttemptResult {
+    fun start(attemptId: String, owner: String, generation: Long, leaseTtl: Duration): CodingAttemptResult {
         require(!leaseTtl.isNegative && !leaseTtl.isZero) { "lease ttl must be positive" }
+        require(AGENT_ID.matches(owner)) { "agent identifier has an invalid form" }
         return transaction(database) {
             val now = utcNow(clock)
             val updated = execUpdate(
                 """
                 UPDATE coding_attempts
                    SET state = 'RUNNING', lease_expires_at = ${DbTime.nowPlusSeconds()}, version = version + 1, updated_at = ?
-                 WHERE attempt_id = ? AND lease_generation = ? AND state = 'CLAIMED' AND lease_expires_at > ${DbTime.NOW}
+                 WHERE attempt_id = ? AND claimed_by = ? AND lease_generation = ? AND state = 'CLAIMED' AND lease_expires_at > ${DbTime.NOW}
                 """.trimIndent(),
-                leaseTtl.seconds, now, attemptId, generation,
+                leaseTtl.seconds, now, attemptId, owner, generation,
             )
-            if (updated != 1) return@transaction CodingAttemptResult.Refused(classify(this, attemptId, claiming = false, generation = generation))
+            if (updated != 1) return@transaction CodingAttemptResult.Refused(classify(this, attemptId, claiming = false, generation = generation, owner = owner))
             appendEvent(this, attemptId, "RUNNING", now)
             CodingAttemptResult.Ok(getIn(this, attemptId) ?: error("coding attempt vanished after start"))
         }
@@ -211,19 +220,20 @@ class CodingAttemptRepository(
      * optional small fixed-field JSON for a PROGRESS event. Heartbeats normally write no event; a progress event is written only
      * while the attempt has fewer than [MAX_PROGRESS_EVENTS] of them, so a chatty agent cannot grow the table without limit.
      */
-    fun heartbeat(attemptId: String, generation: Long, leaseTtl: Duration, progressPayload: String? = null): CodingAttemptResult {
+    fun heartbeat(attemptId: String, owner: String, generation: Long, leaseTtl: Duration, progressPayload: String? = null): CodingAttemptResult {
         require(!leaseTtl.isNegative && !leaseTtl.isZero) { "lease ttl must be positive" }
+        require(AGENT_ID.matches(owner)) { "agent identifier has an invalid form" }
         return transaction(database) {
             val now = utcNow(clock)
             val updated = execUpdate(
                 """
                 UPDATE coding_attempts
                    SET lease_expires_at = ${DbTime.nowPlusSeconds()}, version = version + 1, updated_at = ?
-                 WHERE attempt_id = ? AND lease_generation = ? AND state IN ('CLAIMED', 'RUNNING') AND lease_expires_at > ${DbTime.NOW}
+                 WHERE attempt_id = ? AND claimed_by = ? AND lease_generation = ? AND state IN ('CLAIMED', 'RUNNING') AND lease_expires_at > ${DbTime.NOW}
                 """.trimIndent(),
-                leaseTtl.seconds, now, attemptId, generation,
+                leaseTtl.seconds, now, attemptId, owner, generation,
             )
-            if (updated != 1) return@transaction CodingAttemptResult.Refused(classify(this, attemptId, claiming = false, generation = generation))
+            if (updated != 1) return@transaction CodingAttemptResult.Refused(classify(this, attemptId, claiming = false, generation = generation, owner = owner))
             if (progressPayload != null) {
                 val written = execQuery("SELECT COUNT(*) FROM coding_events WHERE attempt_id = ? AND type = 'PROGRESS'", attemptId) { it.getLong(1) }.single()
                 if (written < MAX_PROGRESS_EVENTS) appendEvent(this, attemptId, "PROGRESS", now, progressPayload)
@@ -284,19 +294,34 @@ class CodingAttemptRepository(
      * Terminal success: CLAIMED or RUNNING -> RESULT_RECEIVED, with the result digest, the exit status and an optional Claude CLI
      * session identifier. Only the current generation may do this. The row and its event are written in one transaction.
      */
-    fun complete(attemptId: String, generation: Long, resultDigest: String, exitStatus: Int, sessionId: String?): CodingAttemptResult {
+    fun complete(attemptId: String, owner: String, generation: Long, resultDigest: String, exitStatus: Int, sessionId: String?): CodingAttemptResult {
         require(SHA256_HEX.matches(resultDigest)) { "result digest must be a SHA-256 hex digest" }
         require(sessionId == null || SESSION_ID.matches(sessionId)) { "session identifier has an invalid form" }
-        return finishUpdate(attemptId, generation) { now ->
+        require(AGENT_ID.matches(owner)) { "agent identifier has an invalid form" }
+        return finishUpdate(attemptId, owner, generation, AUDIT_RESULT_RECEIVED, null) { now ->
             execUpdate(
                 """
                 UPDATE coding_attempts
                    SET state = 'RESULT_RECEIVED', result_digest = ?, exit_status = ?, session_id = ?,
                        version = version + 1, updated_at = ?
-                 WHERE attempt_id = ? AND lease_generation = ? AND state IN ('CLAIMED', 'RUNNING') AND lease_expires_at > ${DbTime.NOW}
+                 WHERE attempt_id = ? AND claimed_by = ? AND lease_generation = ? AND state IN ('CLAIMED', 'RUNNING') AND lease_expires_at > ${DbTime.NOW}
                 """.trimIndent(),
-                resultDigest, exitStatus, sessionId, now, attemptId, generation,
+                resultDigest, exitStatus, sessionId, now, attemptId, owner, generation,
             )
+        }
+    }
+
+    /**
+     * Writes the audit event for a result that was refused before anything was stored. [reasons] are fixed reason names. The attempt
+     * is not changed. Nothing is written when [owner] does not hold the attempt.
+     */
+    fun recordResultRejected(attemptId: String, owner: String, reasons: String) {
+        require(AGENT_ID.matches(owner)) { "agent identifier has an invalid form" }
+        transaction(database) {
+            val row = getIn(this, attemptId) ?: return@transaction
+            if (row.claimedBy != owner) return@transaction
+            val runId = lockRunOf(attemptId) ?: return@transaction
+            auditIn(this, runId, owner, AUDIT_RESULT_REJECTED, attemptId, reasons.take(MAX_PAYLOAD_CHARS))
         }
     }
 
@@ -304,19 +329,31 @@ class CodingAttemptRepository(
      * Terminal failure: CLAIMED or RUNNING -> FAILED (or CANCELLED when the holder acknowledges a cancel request). [errorCode] is a
      * fixed code such as TIMEOUT or CLI_NONZERO. Only the current generation may do this.
      */
-    fun fail(attemptId: String, generation: Long, errorCode: String, state: CodingAttemptState = CodingAttemptState.FAILED): CodingAttemptResult {
+    fun fail(
+        attemptId: String,
+        owner: String,
+        generation: Long,
+        errorCode: String,
+        state: CodingAttemptState = CodingAttemptState.FAILED,
+    ): CodingAttemptResult {
         require(state == CodingAttemptState.FAILED || state == CodingAttemptState.CANCELLED) { "fail takes FAILED or CANCELLED" }
         require(ERROR_CODE.matches(errorCode)) { "error code must be a fixed upper-case code" }
-        return finishUpdate(attemptId, generation) { now ->
+        require(AGENT_ID.matches(owner)) { "agent identifier has an invalid form" }
+        return finishUpdate(attemptId, owner, generation, AUDIT_FAILED, errorCode) { now ->
             execUpdate(
                 """
                 UPDATE coding_attempts
                    SET state = ?, error_code = ?, version = version + 1, updated_at = ?
-                 WHERE attempt_id = ? AND lease_generation = ? AND state IN ('CLAIMED', 'RUNNING') AND lease_expires_at > ${DbTime.NOW}
+                 WHERE attempt_id = ? AND claimed_by = ? AND lease_generation = ? AND state IN ('CLAIMED', 'RUNNING') AND lease_expires_at > ${DbTime.NOW}
                 """.trimIndent(),
-                state.name, errorCode, now, attemptId, generation,
+                state.name, errorCode, now, attemptId, owner, generation,
             )
         }
+    }
+
+    /** The owner of the attempt and its state, for the agent status call. Null when the attempt does not exist. */
+    fun get(attemptId: String, owner: String): CodingAttempt? = transaction(database) {
+        getIn(this, attemptId)?.takeIf { it.claimedBy == owner }
     }
 
     /**
@@ -371,28 +408,62 @@ class CodingAttemptRepository(
             .map { CodingEvent(it[CodingEventsTable.seq], it[CodingEventsTable.type], it[CodingEventsTable.payloadJson]) }
     }
 
-    private fun finishUpdate(attemptId: String, generation: Long, cas: Transaction.(LocalDateTime) -> Int): CodingAttemptResult =
+    private fun finishUpdate(
+        attemptId: String,
+        owner: String,
+        generation: Long,
+        auditAction: String,
+        auditPayload: String?,
+        cas: Transaction.(LocalDateTime) -> Int,
+    ): CodingAttemptResult =
         transaction(database) {
             val now = utcNow(clock)
+            val runId = lockRunOf(attemptId) ?: return@transaction CodingAttemptResult.Refused(CodingRefusal.NOT_FOUND)
             val updated = cas(now)
-            if (updated != 1) return@transaction CodingAttemptResult.Refused(classify(this, attemptId, claiming = false, generation = generation))
+            if (updated != 1) return@transaction CodingAttemptResult.Refused(classify(this, attemptId, claiming = false, generation = generation, owner = owner))
             val row = getIn(this, attemptId) ?: error("coding attempt vanished after finish")
             appendEvent(this, attemptId, row.state.name, now)
+            auditIn(this, runId, owner, auditAction, attemptId, auditPayload)
             CodingAttemptResult.Ok(row)
         }
+
+    /**
+     * Locks the Run row of [attemptId] (FOR UPDATE, the same lock enqueue takes) and returns its id, or null when there is no such
+     * attempt. Taken before the attempt's CAS, so the audit sequence of a Run is serialized.
+     */
+    private fun Transaction.lockRunOf(attemptId: String): String? {
+        val runId = execQuery("SELECT run_id FROM coding_attempts WHERE attempt_id = ?", attemptId) { it.getString(1) }.singleOrNull()
+            ?: return null
+        DevelopmentRunsTable.selectAll()
+            .where { DevelopmentRunsTable.runId eq runId }
+            .forUpdate()
+            .firstOrNull()
+            ?: return null
+        return runId
+    }
+
+    private fun auditIn(tx: Transaction, runId: String, actor: String, action: String, attemptId: String, payload: String?) {
+        audit?.append(
+            tx,
+            RunId(runId),
+            AuditEntry(actor = actor, action = action, result = "OK", resource = "coding_attempt:$attemptId", payload = payload),
+        )
+    }
 
     /**
      * Why a conditional UPDATE matched nothing. Read after the failed CAS, so the reason is advisory: a concurrent change can
      * make it differ from the state the CAS saw, but the refused call still changed nothing.
      */
-    private fun classify(tx: Transaction, attemptId: String, claiming: Boolean, generation: Long? = null): CodingRefusal {
+    private fun classify(tx: Transaction, attemptId: String, claiming: Boolean, generation: Long? = null, owner: String? = null): CodingRefusal {
         val row = tx.execQuery(
-            "SELECT state, lease_generation, lease_expires_at > ${DbTime.NOW}, queued_expires_at > ${DbTime.NOW} " +
+            "SELECT state, lease_generation, lease_expires_at > ${DbTime.NOW}, queued_expires_at > ${DbTime.NOW}, claimed_by " +
                 "FROM coding_attempts WHERE attempt_id = ?",
             attemptId,
         ) { rs ->
-            Liveness(rs.getString(1), rs.getLong(2), rs.getBoolean(3), rs.getBoolean(4))
+            Liveness(rs.getString(1), rs.getLong(2), rs.getBoolean(3), rs.getBoolean(4), rs.getString(5))
         }.singleOrNull() ?: return CodingRefusal.NOT_FOUND
+        // Another agent's attempt is reported as missing, the same as an attempt that does not exist.
+        if (owner != null && row.claimedBy != owner) return CodingRefusal.NOT_FOUND
         if (claiming) {
             return when {
                 row.state != "QUEUED" -> CodingRefusal.NOT_QUEUED
@@ -408,7 +479,7 @@ class CodingAttemptRepository(
         }
     }
 
-    private data class Liveness(val state: String, val generation: Long, val leaseLive: Boolean, val queueLive: Boolean)
+    private data class Liveness(val state: String, val generation: Long, val leaseLive: Boolean, val queueLive: Boolean, val claimedBy: String?)
 
     private fun activeIn(tx: Transaction, runId: String): CodingAttempt? = with(tx) {
         CodingAttemptsTable.selectAll()
@@ -468,6 +539,10 @@ class CodingAttemptRepository(
         private val AGENT_ID = Regex("^[A-Za-z0-9._:-]{1,64}$")
         private val SESSION_ID = Regex("^[A-Za-z0-9_-]{1,128}$")
         private val ERROR_CODE = Regex("^[A-Z][A-Z_]{0,63}$")
+        const val AUDIT_CLAIMED = "CODING_CLAIMED"
+        const val AUDIT_RESULT_RECEIVED = "CODING_RESULT_RECEIVED"
+        const val AUDIT_RESULT_REJECTED = "CODING_RESULT_REJECTED"
+        const val AUDIT_FAILED = "CODING_FAILED"
     }
 }
 

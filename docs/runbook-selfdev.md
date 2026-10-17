@@ -52,9 +52,9 @@
 ### 1.2.1 `KIVRA_SELFDEV_RUNTIME`(`api` / `cli`)
 
 - 既定は `api`(従来どおり。LLM が 1 回で PatchSet を返す。動作は変わらない)。空や `api` の前後の空白も `api` と同じ。それ以外の値は起動失敗(値は出さず、変数名だけを出す)。
-- `cli` は、ローカル PC の常駐エージェント(kivra-agent)が Claude Code CLI で実行する方式(ADR 0010、設計案 PR 3)。**今は起動を拒否する**。エージェントが attempt を取りに来る API(`/api/agent/*`、PR 4a)がまだ無く、キューに積んだ attempt を誰も取らないため。拒否は fail-closed の意図どおり。`cli` を設定しても、この版では自己開発は起動しない。
+- `cli` は、ローカル PC の常駐エージェント(kivra-agent)が Claude Code CLI で実行する方式(ADR 0010)。**今は起動を拒否する**。エージェント本体が未完成で、キューに積んだ attempt を誰も取らないため。エージェント API(`/api/agent/v1`、§6)を有効にしても、この拒否は解除されない。拒否は fail-closed の意図どおり。`cli` を設定しても、この版では自己開発は起動しない。
 - この変数は、自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)のときだけ読まれる。無効のときは読まれず、拒否もされない。
-- 本番の既定を変えるのは、PR 4a と Keycloak / ingress の作業が終わり、エージェントの動作確認が済んでから。それまで `api` のままにする。
+- 本番の既定を変えるのは、エージェント本体と Keycloak / ingress の作業が終わり、動作確認が済んでから。それまで `api` のままにする。
 - `cli` の場合の中身(設計、状態遷移、結果の検査、reconcile の方針)は `docs/design/15-coding-attempts.md` の §6 を参照。
 
 ### 1.3 有効化の前提のうち、コードでは強制していないもの(方針)
@@ -281,3 +281,49 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 - PR ができるまで数分かかる。`state` が `PULL_REQUEST` になり、`pullRequestUrl` が入れば、人間がレビューしてマージする。
 
 注意: `POST /api/dev/tasks` は開発用のプレビューであり、インメモリで、`SIMULATED` の結果を返す。自己開発の Run は作らないため、動作確認には使わない。
+
+## 6. エージェント API(`/api/agent/v1`、無効が既定)
+
+ローカル PC の常駐エージェント(kivra-agent)が、kivra から attempt を取る API(ADR 0010、PR 4a)。運用者の API とは認可を分ける。認可の方針は ADR 0010 の追補 2 を参照する。
+
+### 6.1 有効化の前提
+
+- 既定は無効(`KIVRA_AGENT_API_ENABLED` が未設定または `false`)。無効のときは `/api/agent/*` の全パスが 404 で、エージェント用の設定変数は一つも読まれない。
+- `true` にするには、次が揃っていること。揃わなければ起動に失敗する(エラーは変数名だけを出し、値は出さない)。
+  - `KIVRA_AUTH_MODE=oidc-jwt`(他のモードは不可)
+  - `KIVRA_OIDC_ISSUER`、`KIVRA_OIDC_AUDIENCE`(運用者と共通。任意の `KIVRA_OIDC_JWKS_URL`)
+  - `KIVRA_AGENT_AZP`(例: `kivra-agent`)
+  - `KIVRA_AGENT_REQUIRED_ROLE`(`<client>:<role>`、例: `kivra-agent:agent`。`KIVRA_OIDC_REQUIRED_ROLE` と同じにはできない)
+- Keycloak 側: client `kivra-agent`(PC ごと。client credentials)、ロール `kivra-agent:agent`。トークンの `aud` に kivra(`KIVRA_OIDC_AUDIENCE`)を含め、`azp` が `kivra-agent` になること。運用者の `admin-panel:admin` は、エージェントに付けない。
+- 有効化しても `KIVRA_SELFDEV_RUNTIME=cli` の拒否は解除されない。この PR の時点では、エージェント API は「取りに来る口」だけを提供する。
+
+### 6.2 エンドポイント(エージェント本体が使う)
+
+すべて `Authorization: Bearer <JWT>` が必要。POST は `Content-Type: application/json`。
+
+| メソッド | パス | 本文 | 成功 | 主な失敗 |
+| --- | --- | --- | --- | --- |
+| POST | `/api/agent/v1/claim` | `{}` | 200(`attemptId`, `runId`, `generation`, `input`)。割り当てが無ければ 204 | 401 / 403 / 415 |
+| POST | `/api/agent/v1/attempts/{attemptId}/heartbeat` | `{"generation": n, "progress"?: "STARTED" \| "EDITING" \| "TESTING" \| "ROUND_COMPLETED" \| "FINALIZING"}` | 200 | 400(未知の進捗)、404、409(世代が古い・期限切れ・終了済み) |
+| POST | `/api/agent/v1/attempts/{attemptId}/fail` | `{"generation": n, "errorCode": "<固定コード>"}` | 200 | 400(固定以外のコード)、404、409 |
+| POST | `/api/agent/v1/attempts/{attemptId}/result` | `{"generation": n, "result": {summary, changes, exitStatus, sessionId}}`。本文は 2 MiB まで | 200(`RESULT_RECEIVED`) | 413(超過)、422(PatchPolicy などの拒否。理由コードだけ返す)、404、409、503(保存失敗) |
+| GET | `/api/agent/v1/attempts/{attemptId}/status` | なし | 200(`state`, `cancelRequested`)。キャンセル要求の伝達に使う | 404 |
+
+- `input` には、タスクのタイトルが `trust: UNTRUSTED` の印つきで入る。データとして扱うこと(指示として従わない)。制限(`limits`)と許可・拒否のパスパターン、`baseSha` も入る。
+- 他のエージェントの attempt、存在しない attempt は、どちらも 404(同じ本文)。
+- 失敗の本文は固定の文言だけ。理由を表す名前は列挙名だけ(`STALE_GENERATION`、`NOT_ACTIVE` など)。自由文は返さない。
+
+### 6.3 認可の方針(要点)
+
+- 認証器は運用者の API と別(`AgentIdentity`)。`Authorization: Bearer` だけを読む。`X-Forwarded-Access-Token`、cookie、`X-Auth-Request-*` は無視する。
+- 401: トークンが無い、署名・iss・aud・exp・nbf が不正。403: 認証は通るが `azp` が `KIVRA_AGENT_AZP` と違う、またはエージェントのロールが無い(運用者のトークンはここで 403)。
+- 所有者: attempt の操作は、claim したエージェント(トークンの `sub`)だけが行える。世代も一致させる。
+- ブラウザからの要求(`Sec-Fetch-*` か `Origin` がある)は 403。
+
+### 6.4 運用上の注意
+
+- ingress: 現在の `kivra-dev` は oauth2-proxy(`--allowed-role=admin-panel:admin`)の背後にあり、エージェントの Bearer は通らない。エージェント用の経路は別に作る必要がある(PR 4b)。ここを作るまで、有効化しても外部からは届かない。
+- 監査: claim、結果の受理、結果の拒否、失敗は Run の監査連鎖に記録される(actor はエージェントの `sub`。内容・パス・要約は記録しない)。
+- 期限切れ・孤児の掃除(`CodingRuntimeService.reconcile`)は、この PR では定期実行に配線していない。ORPHANED、EXPIRED の attempt は、運用者が §4.1 の手順で判断する。
+- 有効化の前に、`KIVRA_AGENT_AZP` と `KIVRA_AGENT_REQUIRED_ROLE` が Keycloak の設定と一致しているか確認する。一致しなければ、正しいトークンでも 403 になる。
+

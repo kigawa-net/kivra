@@ -30,7 +30,7 @@ class CodingAttemptServiceQueriesTest {
         val runId = db.newRun()
         val first = db.enqueued(runId)
         val claimed = assertIs<CodingAttemptResult.Ok>(db.repo().claim(first.attemptId, "agent-1", leaseTtl)).attempt
-        assertIs<CodingAttemptResult.Ok>(db.repo().fail(first.attemptId, claimed.leaseGeneration, "CLI_NONZERO"))
+        assertIs<CodingAttemptResult.Ok>(db.repo().fail(first.attemptId, "agent-1", claimed.leaseGeneration, "CLI_NONZERO"))
 
         val settled = assertIs<EnqueueResult.Settled>(db.repo().enqueue(runId, baseSha, queueTtl, allowAfterSettled = false))
         assertEquals(first.attemptId, settled.latest.attemptId)
@@ -92,7 +92,7 @@ class CodingAttemptServiceQueriesTest {
         val claimed = assertIs<CodingAttemptResult.Ok>(db.repo().claim(attempt.attemptId, "agent-1", leaseTtl)).attempt
         repeat(CodingAttemptRepository.MAX_PROGRESS_EVENTS.toInt() + 5) {
             assertIs<CodingAttemptResult.Ok>(
-                db.repo().heartbeat(attempt.attemptId, claimed.leaseGeneration, leaseTtl, progressPayload = "{\"phase\":\"TESTING\"}"),
+                db.repo().heartbeat(attempt.attemptId, "agent-1", claimed.leaseGeneration, leaseTtl, progressPayload = "{\"phase\":\"TESTING\"}"),
             )
         }
         assertEquals(
@@ -101,7 +101,7 @@ class CodingAttemptServiceQueriesTest {
         )
         // A plain heartbeat writes no event.
         val before = db.repo().events(attempt.attemptId).size
-        assertIs<CodingAttemptResult.Ok>(db.repo().heartbeat(attempt.attemptId, claimed.leaseGeneration, leaseTtl))
+        assertIs<CodingAttemptResult.Ok>(db.repo().heartbeat(attempt.attemptId, "agent-1", claimed.leaseGeneration, leaseTtl))
         assertEquals(before, db.repo().events(attempt.attemptId).size)
     }
 }

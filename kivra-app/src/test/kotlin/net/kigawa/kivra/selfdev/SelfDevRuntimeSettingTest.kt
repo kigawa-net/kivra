@@ -34,7 +34,7 @@ class SelfDevRuntimeSettingTest {
     fun `cli is refused at startup, with a message that names the variable and not the value`() {
         val error = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_RUNTIME" to "cli")) }
         assertTrue("KIVRA_SELFDEV_RUNTIME" in error.message!!, error.message)
-        assertTrue("PR 4a" in error.message!!, error.message)
+        assertTrue("ADR 0010" in error.message!!, error.message)
     }
 
     @Test

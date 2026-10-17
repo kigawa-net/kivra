@@ -104,7 +104,7 @@ class CodingRuntimeServiceTest {
         assertEquals(1, db.count("coding_attempts", "run_id = '$runId'"))
 
         val input = h.claimedInput()
-        assertIs<CodingAttemptResult.Ok>(h.service.fail(first.attemptId, input.leaseGeneration, CodingErrorCode.CLI_NONZERO))
+        assertIs<CodingAttemptResult.Ok>(h.service.fail(first.attemptId, "agent-1", input.leaseGeneration, CodingErrorCode.CLI_NONZERO))
         assertEquals(first.attemptId, assertIs<CodingEnqueueOutcome.Settled>(h.service.enqueue(runId, baseSha)).latest.attemptId)
         assertEquals(1, db.count("coding_attempts", "run_id = '$runId'"))
     }
@@ -212,19 +212,19 @@ class CodingRuntimeServiceTest {
         val input = h.claimedInput()
         val stale = input.leaseGeneration - 1
 
-        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), h.service.heartbeat(attempt.attemptId, stale))
+        assertEquals(CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION), h.service.heartbeat(attempt.attemptId, "agent-1", stale))
         assertEquals(
             CodingSubmitOutcome.Refused(CodingRefusal.STALE_GENERATION),
-            h.service.submitResult(attempt.attemptId, stale, goodResult()),
+            h.service.submitResult(attempt.attemptId, "agent-1", stale, goodResult()),
         )
         assertEquals(
             CodingAttemptResult.Refused(CodingRefusal.STALE_GENERATION),
-            h.service.fail(attempt.attemptId, stale, CodingErrorCode.TIMEOUT),
+            h.service.fail(attempt.attemptId, "agent-1", stale, CodingErrorCode.TIMEOUT),
         )
         assertEquals(CodingAttemptState.CLAIMED, h.state(attempt.attemptId))
         assertEquals(0, h.store.saves)
 
-        assertIs<CodingAttemptResult.Ok>(h.service.heartbeat(attempt.attemptId, input.leaseGeneration, ProgressPhase.EDITING))
+        assertIs<CodingAttemptResult.Ok>(h.service.heartbeat(attempt.attemptId, "agent-1", input.leaseGeneration, ProgressPhase.EDITING))
         assertTrue("PROGRESS" in h.repo.events(attempt.attemptId).map { it.type })
         assertEquals("{\"phase\":\"EDITING\"}", h.repo.events(attempt.attemptId).single { it.type == "PROGRESS" }.payloadJson)
     }
@@ -238,7 +238,7 @@ class CodingRuntimeServiceTest {
         val input = h.claimedInput()
         val result = goodResult()
 
-        val accepted = assertIs<CodingSubmitOutcome.Accepted>(h.service.submitResult(attempt.attemptId, input.leaseGeneration, result))
+        val accepted = assertIs<CodingSubmitOutcome.Accepted>(h.service.submitResult(attempt.attemptId, "agent-1", input.leaseGeneration, result))
         assertEquals(CodingResultValidator.digestOf(result), accepted.digest)
         val row = h.repo.get(attempt.attemptId)!!
         assertEquals(CodingAttemptState.RESULT_RECEIVED, row.state)
@@ -254,7 +254,7 @@ class CodingRuntimeServiceTest {
         val h = Harness(db)
         val attempt = h.queued(h.run())
         val input = h.claimedInput()
-        assertIs<CodingSubmitOutcome.Accepted>(h.service.submitResult(attempt.attemptId, input.leaseGeneration, goodResult()))
+        assertIs<CodingSubmitOutcome.Accepted>(h.service.submitResult(attempt.attemptId, "agent-1", input.leaseGeneration, goodResult()))
         // Another body under a different digest (for example from a stale holder) must not replace the accepted one.
         h.store.save(attempt.attemptId, "f".repeat(64), PatchSet(emptyList(), "other"))
         val row = h.repo.get(attempt.attemptId)!!
@@ -288,7 +288,7 @@ class CodingRuntimeServiceTest {
             Case("empty summary", goodResult(summary = " "), CodingRejectReason.POLICY_REJECTED, RejectReason.SUMMARY_EMPTY),
         )
         for (case in cases) {
-            val outcome = h.service.submitResult(attempt.attemptId, input.leaseGeneration, case.result)
+            val outcome = h.service.submitResult(attempt.attemptId, "agent-1", input.leaseGeneration, case.result)
             val rejected = assertIs<CodingSubmitOutcome.Rejected>(outcome, case.name)
             assertTrue(case.reason in rejected.reasons, "${case.name}: ${rejected.reasons}")
             if (case.policy != null) assertTrue(case.policy in rejected.policyReasons, "${case.name}: ${rejected.policyReasons}")
@@ -304,11 +304,11 @@ class CodingRuntimeServiceTest {
         val attempt = h.queued(h.run())
         val input = h.claimedInput()
         h.store.failNext = true
-        assertEquals(CodingSubmitOutcome.StoreFailed, h.service.submitResult(attempt.attemptId, input.leaseGeneration, goodResult()))
+        assertEquals(CodingSubmitOutcome.StoreFailed, h.service.submitResult(attempt.attemptId, "agent-1", input.leaseGeneration, goodResult()))
         assertEquals(CodingAttemptState.CLAIMED, h.state(attempt.attemptId))
 
         h.store.failNext = false
-        assertIs<CodingSubmitOutcome.Accepted>(h.service.submitResult(attempt.attemptId, input.leaseGeneration, goodResult()))
+        assertIs<CodingSubmitOutcome.Accepted>(h.service.submitResult(attempt.attemptId, "agent-1", input.leaseGeneration, goodResult()))
         assertEquals(CodingAttemptState.RESULT_RECEIVED, h.state(attempt.attemptId))
     }
 
@@ -320,7 +320,7 @@ class CodingRuntimeServiceTest {
         db.exec("UPDATE coding_attempts SET lease_expires_at = TIMESTAMPADD(SECOND, -10, NOW(6)) WHERE attempt_id = ?", attempt.attemptId)
         assertEquals(
             CodingSubmitOutcome.Refused(CodingRefusal.LEASE_EXPIRED),
-            h.service.submitResult(attempt.attemptId, input.leaseGeneration, goodResult()),
+            h.service.submitResult(attempt.attemptId, "agent-1", input.leaseGeneration, goodResult()),
         )
         // The body is written before the transition (so an accepted result is never lost if the store fails afterwards). A refused
         // completion can therefore leave an unreferenced body: it is never returned, because only a RESULT_RECEIVED row names a digest.
@@ -338,13 +338,13 @@ class CodingRuntimeServiceTest {
         val h = Harness(db)
         val first = h.queued(h.run())
         val input = h.claimedInput()
-        assertIs<CodingAttemptResult.Ok>(h.service.fail(first.attemptId, input.leaseGeneration, CodingErrorCode.TIMEOUT))
+        assertIs<CodingAttemptResult.Ok>(h.service.fail(first.attemptId, "agent-1", input.leaseGeneration, CodingErrorCode.TIMEOUT))
         assertEquals(CodingAttemptState.FAILED, h.state(first.attemptId))
         assertEquals("TIMEOUT", h.repo.get(first.attemptId)!!.errorCode)
 
         val second = h.queued(h.run())
         val second0 = h.claimedInput()
-        assertIs<CodingAttemptResult.Ok>(h.service.fail(second.attemptId, second0.leaseGeneration, CodingErrorCode.CANCELLED))
+        assertIs<CodingAttemptResult.Ok>(h.service.fail(second.attemptId, "agent-1", second0.leaseGeneration, CodingErrorCode.CANCELLED))
         assertEquals(CodingAttemptState.CANCELLED, h.state(second.attemptId))
     }
 
@@ -429,7 +429,7 @@ class CodingRuntimeServiceTest {
             val rejected = h.queued(rejectedRun)
             val rejectedInput = h.claimedInput()
             h.service.submitResult(
-                rejected.attemptId, rejectedInput.leaseGeneration,
+                rejected.attemptId, "agent-1", rejectedInput.leaseGeneration,
                 goodResult(listOf(CodingChange(PATH, ChangeKind.WRITE, CONTENT)), summary = SUMMARY),
             )
 
@@ -437,9 +437,9 @@ class CodingRuntimeServiceTest {
             val storeRun = h.run()
             val stored = h.queued(storeRun)
             val storedInput = h.claimedInput()
-            h.service.submitResult(stored.attemptId, storedInput.leaseGeneration, goodResult(summary = SUMMARY))
+            h.service.submitResult(stored.attemptId, "agent-1", storedInput.leaseGeneration, goodResult(summary = SUMMARY))
             h.store.failNext = false
-            h.service.submitResult(stored.attemptId, storedInput.leaseGeneration, goodResult(listOf(CodingChange("docs/a.md", ChangeKind.WRITE, CONTENT)), summary = SUMMARY))
+            h.service.submitResult(stored.attemptId, "agent-1", storedInput.leaseGeneration, goodResult(listOf(CodingChange("docs/a.md", ChangeKind.WRITE, CONTENT)), summary = SUMMARY))
 
             val text = appender.list.joinToString("\n") { it.formattedMessage }
             assertTrue(appender.list.isNotEmpty(), "the rejection and the store failure must be logged")

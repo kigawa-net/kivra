@@ -139,3 +139,17 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
    - **期限切れの扱い**: 期限を過ぎた QUEUED は EXPIRED、lease の切れた CLAIMED / RUNNING は ORPHANED とし、Run の次の進行で UNKNOWN にする(理由 `CODING_QUEUE_EXPIRED` / `CODING_ORPHANED`)。定期の reconcile は未配線である。
    - **失敗時の Run の状態**: 表は runbook の `docs/runbook-selfdev.md` §6.9 に置く(attempt の状態ごとに、Run の状態と理由コードを書く)。
    - **未了**: エージェント本体の配備、k8s の設定、既定値の変更(別 PR)。`coding_results` の保持期間と掃除(§6.5.3)。reconcile の定期実行の配線。
+
+4. **CLI の費用を月次の予算 ledger に計上する(Issue #230、2026-10-18)。** ADR 0010 の決定 9 の「kivra は usage を集計して記録する」を、次の形で実装する。
+   - **報告**: エージェントは `POST .../result` と `POST .../fail` の本文に、任意のフィールド `usage` を付ける(数値と固定名だけ。応答本文・ツールの入力は含まない)。形は `totalCostUsd`(10 進の文字列、0〜100、小数 6 桁まで)、`model`(`^[a-z0-9][a-z0-9.-]{0,63}$`)、`numTurns`(0〜1000)、`inputTokens`、`outputTokens`、`cacheCreationTokens`、`cacheReadTokens`(各 0〜10^10)の 7 項目だけ。
+   - **不正な usage は 400 にしない**: 形が合わなければ usage だけを無視し、「報告なし」と同じ扱いにする。結果または fail は受理する。警告ログには attempt の ID と固定の理由(`USAGE_INVALID`)だけを出す。`usage` の無い従来の呼び出しも受理する。
+   - **計上の単位**: `(attempt, lease generation)` ごとに 1 回。台帳の予算キー `coding:<attemptId>:<generation>` を、報告と見積もりの両方が共有するため、先に計上された方だけが有効になる。二重の報告は二重計上にならない。`coding_attempt_usage`(V16)は、その計上の内容(`REPORTED` または `ESTIMATED_RESERVE`、数値と model)を記録する。
+   - **円換算**: API 経路と同じ `CostConverter`(`KIVRA_FX_USD_JPY`、`KIVRA_FX_AS_OF`、失効 7 日、為替の余裕 10%、税 10%)を使う。為替が失効していれば換算できず、金額 0 の UNPRICED として計上し、以後の予約は UNKNOWN_COST で止まる。`model` が価格表(`KIVRA_SELFDEV_MODEL_REGISTRY_PATH` の registry)に無ければ、換算した額を計上したうえで UNPRICED にする。
+   - **報告が欠けた attempt**: 次のいずれかで終わったものは、1 attempt の予約額(`KIVRA_AGENT_ATTEMPT_RESERVE_USD`、既定 0.50 USD)を `ESTIMATED_RESERVE` として計上し、UNPRICED にする(安全側。費用が不明なら、使った前提)。(a) usage の無い fail、(b) ORPHANED、(c) EXPIRED(一度も claim されていない QUEUED を含む)、(d) usage の無い結果の受理。(d) は本文の決定ではなく、この追補での判断である。結果に費用が無い場合も、CLI は動いた可能性があるため、予約を計上する。
+   - **入場制御**: attempt を claim する前に、月次の予算に 1 attempt の予約額(USD × FX × 余裕 × 税)が収まるかを `BudgetPort.admission` と同じ規則で確かめる。収まらなければ、キューに attempt があっても claim させず、Run は待ちのまま残る(NoAssignment と同じ応答)。UNPRICED が 1 件でも残っている間は、既存の予算ゲートの規則により止まる(運用者の acknowledge で解除)。理由コードはログに出し、Goal や応答本文は出さない。
+   - **非同期の限界**: 入場の確認と claim は別の操作であり、同時に複数のエージェントが claim すると、予約額の数件分だけ予算を超えうる。1 台の PC と 1 つのワークスペースを前提とする。
+   - **報告の書き込みが失敗したとき**: 台帳に書けなければ、結果と fail は受理せず、503 を返す。attempt は変えないため、エージェントは送り直せる。台帳の書き込みに成功した後で attempt の遷移が拒否されても、費用は実在するため残す。
+   - **期限切れの一括処理の失敗**: ORPHANED / EXPIRED の遷移は済んでいるが台帳への計上が失敗した場合は、警告ログ(ID のみ)を出し、再試行はしない。定期の reconcile が配線されていないため、この欠損は運用者が確認する(runbook §6.13)。既知の制限。
+   - **担保するテスト**: `CodingCostLedgerTest`(正常な報告、二重の報告、usage の無い fail と結果、ORPHANED と EXPIRED、入場制御、為替の失効、未知の model と acknowledge、台帳の失敗、ログの衛生、usage の形)、`AgentApiRoutesTest` の usage の追加分(正常、不正の無視、usage の省略、503)。
+   - **変異テスト(2026-10-18)**: 入場制御を外すと `CodingCostLedgerTest` の 4 件が落ちる。二重報告の鍵を呼び出しごとに変えて二重計上にすると、2 件が落ちる。
+   - **未了**: 運用画面での API 経路と CLI 経路の区別(UI PR5)、定期の reconcile の配線、`coding_attempt_usage` の保持期間。

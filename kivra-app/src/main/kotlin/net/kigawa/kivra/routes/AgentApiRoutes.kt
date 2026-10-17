@@ -16,10 +16,13 @@ import java.nio.charset.CharacterCodingException
 import kotlinx.serialization.Serializable
 import kotlinx.io.readByteArray
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import net.kigawa.kivra.auth.AgentAuth
 import net.kigawa.kivra.auth.AgentIdentity
 import net.kigawa.kivra.coding.AgentAttemptStatus
+import net.kigawa.kivra.coding.CliUsageParser
 import net.kigawa.kivra.coding.CodingClaimOutcome
+import net.kigawa.kivra.coding.CodingCostUnavailableException
 import net.kigawa.kivra.coding.CodingErrorCode
 import net.kigawa.kivra.coding.CodingInput
 import net.kigawa.kivra.coding.CodingResult
@@ -66,11 +69,12 @@ private class AgentEmptyBody
 @Serializable
 private data class AgentHeartbeatRequest(val generation: Long, val progress: String? = null)
 
+/** [usage] is optional and read leniently (see [CliUsageParser]): an invalid usage is ignored, never a 400. */
 @Serializable
-private data class AgentResultRequest(val generation: Long, val result: CodingResult)
+private data class AgentResultRequest(val generation: Long, val result: CodingResult, val usage: JsonElement? = null)
 
 @Serializable
-private data class AgentFailRequest(val generation: Long, val errorCode: String)
+private data class AgentFailRequest(val generation: Long, val errorCode: String, val usage: JsonElement? = null)
 
 @Serializable
 data class AgentClaimResponse(val attemptId: String, val runId: String, val generation: Long, val input: AgentInputResponse)
@@ -147,7 +151,13 @@ internal fun Route.configureAgentApiRoutes(deps: AgentApiDeps) {
         val request = decodeOrNull<AgentFailRequest>(body) ?: return@post call.respondInvalidBody()
         // Only the fixed codes are accepted. A free-text reason is refused as an invalid body.
         val code = CodingErrorCode.entries.firstOrNull { it.name == request.errorCode } ?: return@post call.respondInvalidBody()
-        when (val result = deps.coding.fail(attemptId, agentId, request.generation, code)) {
+        val usage = CliUsageParser.parse(attemptId, request.usage)
+        val result = try {
+            deps.coding.fail(attemptId, agentId, request.generation, code, usage)
+        } catch (_: CodingCostUnavailableException) {
+            return@post call.respond(HttpStatusCode.ServiceUnavailable, AgentError("unavailable"))
+        }
+        when (result) {
             is CodingAttemptResult.Ok -> call.respond(AgentAttemptStateResponse(attemptId, result.attempt.state.name))
             is CodingAttemptResult.Refused -> call.respondRefused(result.reason)
         }
@@ -160,7 +170,8 @@ internal fun Route.configureAgentApiRoutes(deps: AgentApiDeps) {
         if (!call.requireJsonBody()) return@post
         val body = call.readBody(MAX_RESULT_BODY_BYTES) ?: return@post
         val request = decodeOrNull<AgentResultRequest>(body) ?: return@post call.respondInvalidBody()
-        when (val outcome = deps.coding.submitResult(attemptId, agentId, request.generation, request.result)) {
+        val usage = CliUsageParser.parse(attemptId, request.usage)
+        when (val outcome = deps.coding.submitResult(attemptId, agentId, request.generation, request.result, usage)) {
             is CodingSubmitOutcome.Accepted -> call.respond(AgentAttemptStateResponse(attemptId, "RESULT_RECEIVED"))
             is CodingSubmitOutcome.Rejected -> call.respond(
                 HttpStatusCode.UnprocessableEntity,

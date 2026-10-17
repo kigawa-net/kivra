@@ -816,3 +816,40 @@ sudo runuser -u kivra-agent -- env XDG_RUNTIME_DIR=/run/user/1001 journalctl --u
 - client secret のモード(c.3)。
 - `KIVRA_AGENT_KIVRA_URL` の既定 `https://kivra-dev.kigawa.net`(dev の公開 URL。本番の値は決めていない)。
 - `install.sh` の docker イメージのビルド(images 段階。ネットワークを使う。ルートレス docker の接続も含む)。
+
+### 6.12 失敗した attempt の出力の保持(デバッグ用。既定は無効)
+
+**目的**: 実機の Run が `EMPTY_PATCH` などで失敗したとき、CLI が何を読み、何を答えたかを確かめる。作業ディレクトリは従来どおり削除するので、差分の確認は `stream.jsonl` で行う。
+
+**共有しないこと**: 保存されるファイルには、タスク文(title)、CLI の応答本文(モデルの発言とツールの結果)、リポジトリの内容が含まれる。秘密が混ざることもありうる。Issue、PR、チャット、ログの収集に貼らない。調べ終えたら削除する。
+
+**有効化**: `/etc/kivra-agent/agent.env` に `KIVRA_AGENT_DEBUG_KEEP=1` を書き、kivra-agent を再起動する(再起動は §6.11 の `systemctl --user restart kivra-agent.service`)。
+- 読まれるのは `KIVRA_AGENT_EXECUTOR=real` のときだけ。stub では無視される。
+- 値は `1`(有効)、`0` または未設定(無効)。それ以外の値は起動を拒否する(exit 2。メッセージは変数名だけ)。
+
+**保存先**: `/var/lib/kivra-agent/work/debug/<runId>-<attemptId>/`(`KIVRA_AGENT_WORK_DIR` の下の `debug/`)。
+- `stream.jsonl`: CLI の stdout(stream-json)全体。8 MiB で先頭から切る。ただし実行の出力上限(claim の `maxOutputBytes` と 1 MiB の小さいほう)を超えた実行では、その上限で既に切れている。
+- `task.json`: CLI に渡った `.kivra/task.json`。渡った title が分かる。
+- `outcome.txt`: `code=<失敗コード>`。差分が拒否されたときは `reasons=<理由>` も付く(例: `code=CLI_NONZERO` と `reasons=EMPTY_PATCH`)。`code=EXCEPTION` は、結果が返る前に例外や中断(キャンセル、リースの喪失など)で終わったこと。
+
+**保存する対象**: 失敗したすべての attempt(`CLI_NONZERO`、`BAD_OUTPUT`、`EMPTY_PATCH` を含む)。結果が kivra に受理された成功では何も保存しない。
+
+**保持期間と件数**: 起動時と各 attempt の終了時に、24 時間より古いエントリを削除する。残すのは新しい順に最大 20 件。
+
+**権限**: `debug/` とエントリは 0700、ファイルは 0600。所有者は kivra-agent。
+
+**ログ**: 保存したこと(`debug output kept: runId=... attemptId=...`)と、削除の件数だけを出す。title、応答本文、パスは出ない。
+
+**確認**(ファイルの中身を全部表示しない):
+```bash
+# 件数と更新時刻(エントリの名前は runId と attemptId)
+sudo runuser -u kivra-agent -- ls -la /var/lib/kivra-agent/work/debug/
+# 保存の記録(ID だけ)
+sudo runuser -u kivra-agent -- env XDG_RUNTIME_DIR=/run/user/1001 journalctl --user-unit=kivra-agent.service | grep 'debug output'
+# 結果コードと拒否理由
+sudo runuser -u kivra-agent -- cat /var/lib/kivra-agent/work/debug/<runId>-<attemptId>/outcome.txt
+# モデルが呼んだツールの名前と回数(入力の中身は出さない)
+sudo runuser -u kivra-agent -- grep -o '"name":"[A-Za-z_]*"' /var/lib/kivra-agent/work/debug/<runId>-<attemptId>/stream.jsonl | sort | uniq -c
+```
+
+**無効化**: `agent.env` の行を消すか `0` にして再起動する。無効にしても既存のエントリは消えない(消すのは有効なときの起動時と attempt 終了時の削除だけ)。すぐ消すなら、kivra-agent の所有者で `rm -rf /var/lib/kivra-agent/work/debug` を実行する。

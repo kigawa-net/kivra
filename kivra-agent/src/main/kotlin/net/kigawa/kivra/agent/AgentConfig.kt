@@ -142,7 +142,18 @@ class AgentConfig private constructor(
                 repo = repo,
                 model = model,
                 budgetUsd = budgetUsd,
+                debugKeep = debugKeep(env),
             )
+        }
+
+        /**
+         * Read only for `KIVRA_AGENT_EXECUTOR=real`. `1` keeps the debug output of a failed attempt, `0` or unset does not. Any other value
+         * refuses the start (see `AttemptDebugKeep`).
+         */
+        private fun debugKeep(env: Map<String, String>): Boolean = when (optional(env, AttemptDebugKeep.ENV_DEBUG_KEEP)) {
+            null, "0" -> false
+            "1" -> true
+            else -> throw ConfigException("${AttemptDebugKeep.ENV_DEBUG_KEEP} must be 1 or 0")
         }
 
         /**

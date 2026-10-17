@@ -8,6 +8,10 @@ import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
+import java.nio.file.attribute.PosixFilePermissions
+import java.time.Duration
+import java.time.Instant
 import java.util.Collections
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -125,7 +129,7 @@ private class World(
     )
     val stopFile: Path = root.resolve(AgentConfig.DEFAULT_STOP_FILE_NAME)
 
-    fun executor(maxOutput: Long = 1_048_576): RealAttemptExecutor = RealAttemptExecutor(
+    fun executor(debugKeep: Boolean = false): RealAttemptExecutor = RealAttemptExecutor(
         client = client,
         workRoot = root,
         stopFile = stopFile,
@@ -137,6 +141,7 @@ private class World(
             proxyUrl = PROXY,
             gitBinary = GIT_BIN,
             repo = LocalPath(repo.repo),
+            debugKeep = debugKeep,
         ),
         launcher = docker,
         pollMillis = 20,
@@ -390,6 +395,94 @@ class RealAttemptExecutorTest {
             logger.detachAppender(appender)
             logger.level = previousLevel
         }
+    }
+
+    private fun debugEntries(world: World): List<String> {
+        val debug = world.root.resolve("debug")
+        if (!Files.isDirectory(debug)) return emptyList()
+        return Files.list(debug).use { s -> s.map { it.fileName.toString() }.toList() }
+    }
+
+    @Test
+    fun debugKeepIsOffByDefault() = runBlocking {
+        val world = World(docker = ScriptedDocker(output = { lines(resultLine("Nothing to do.")) }))
+        world.executor().execute(world.attempt())
+
+        assertEquals(emptyList(), debugEntries(world))
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun debugKeepStoresTheStreamTheTaskAndTheOutcomeOfAnEmptyPatch() = runBlocking {
+        val world = World(docker = ScriptedDocker(output = { lines(resultLine("Nothing to do.")) }))
+        val outcome = world.executor(debugKeep = true).execute(world.attempt())
+
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.CLI_NONZERO), outcome)
+        val dir = world.root.resolve("debug").resolve("$RUN-$ATTEMPT")
+        assertEquals("code=CLI_NONZERO\nreasons=EMPTY_PATCH\n", Files.readString(dir.resolve("outcome.txt")))
+        assertTrue(Files.readString(dir.resolve("stream.jsonl")).contains("Nothing to do."))
+        assertTrue(Files.readString(dir.resolve("task.json")).contains(TITLE), "the task file shows the title that was passed")
+        assertEquals("rwx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(dir)))
+        for (name in listOf("outcome.txt", "stream.jsonl", "task.json")) {
+            assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(dir.resolve(name))), name)
+        }
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun debugKeepStoresAFailureWithoutAStreamWithoutReasons() = runBlocking {
+        val world = World(docker = ScriptedDocker(output = { "" }, exitCode = 1))
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.CLI_NONZERO), world.executor(debugKeep = true).execute(world.attempt()))
+
+        val dir = world.root.resolve("debug").resolve("$RUN-$ATTEMPT")
+        assertEquals("code=CLI_NONZERO\n", Files.readString(dir.resolve("outcome.txt")))
+        assertEquals("", Files.readString(dir.resolve("stream.jsonl")))
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun debugKeepStoresNothingForASuccess() = runBlocking {
+        val world = World(docker = ScriptedDocker(
+            output = { lines(resultLine("Changed a.")) },
+            onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") },
+        ))
+        assertEquals(AttemptOutcome.ResultSubmitted, world.executor(debugKeep = true).execute(world.attempt()))
+
+        assertEquals(emptyList(), debugEntries(world))
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun debugKeepLogsOnlyIdsAndFacts() = runBlocking {
+        val logger = LoggerFactory.getLogger("net.kigawa.kivra.agent") as Logger
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        val previousLevel = logger.level
+        logger.level = Level.DEBUG
+        logger.addAppender(appender)
+        try {
+            val world = World(docker = ScriptedDocker(output = { lines(resultLine("Nothing to do.")) }))
+            world.executor(debugKeep = true).execute(world.attempt())
+
+            val text = appender.list.joinToString("\n") { it.formattedMessage }
+            assertTrue(text.contains("debug output kept: runId=$RUN attemptId=$ATTEMPT"), "the keep is logged with its ids")
+            for (forbidden in listOf(TITLE, "Nothing to do.", "kivra-agent/", "tok-", "ghp_", "/tmp", world.root.toString())) {
+                assertFalse(text.contains(forbidden), "log must not contain: $forbidden")
+            }
+        } finally {
+            logger.detachAppender(appender)
+            logger.level = previousLevel
+        }
+    }
+
+    @Test
+    fun startupPrunesExpiredDebugEntries() {
+        val world = World(docker = ScriptedDocker())
+        val stale = Files.createDirectories(world.root.resolve("debug").resolve("stale-entry"))
+        Files.setLastModifiedTime(stale, FileTime.from(Instant.now().minus(Duration.ofHours(48))))
+
+        world.executor(debugKeep = true)
+
+        assertFalse(Files.exists(stale), "an entry older than 24 hours is removed when the executor starts")
     }
 
     @Test

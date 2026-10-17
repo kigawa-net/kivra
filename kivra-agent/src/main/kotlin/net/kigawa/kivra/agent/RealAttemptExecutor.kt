@@ -22,6 +22,7 @@ import net.kigawa.kivra.agent.docker.DockerRunSpec
 import net.kigawa.kivra.agent.docker.DockerRunner
 import net.kigawa.kivra.agent.docker.DockerSettings
 import net.kigawa.kivra.agent.docker.ProcessDockerLauncher
+import net.kigawa.kivra.agent.docker.TaskFile
 import net.kigawa.kivra.agent.workdir.AgentResult
 import net.kigawa.kivra.agent.workdir.CollectOutcome
 import net.kigawa.kivra.agent.workdir.DiffCollector
@@ -54,6 +55,8 @@ class RealExecutorSettings(
     val model: String = CliCommand.DEFAULT_MODEL,
     /** The `--max-budget-usd` of the CLI (`KIVRA_AGENT_MAX_BUDGET_USD`), two decimals. */
     val budgetUsd: String = CliCommand.DEFAULT_BUDGET_USD,
+    /** Keeps the debug output of a failed attempt (`KIVRA_AGENT_DEBUG_KEEP=1`). Off by default. See [AttemptDebugKeep]. */
+    val debugKeep: Boolean = false,
 ) {
     override fun toString(): String = "RealExecutorSettings(***)"
 }
@@ -95,89 +98,123 @@ class RealAttemptExecutor(
     private val mirror = PublicGitMirror(settings.gitBinary, workRoot.resolve(MIRROR_DIR_NAME))
     private val preparer = WorkDirPreparer(workRoot)
     private val collector = DiffCollector(workRoot)
+    private val debugKeep: AttemptDebugKeep? = if (settings.debugKeep) AttemptDebugKeep(workRoot).also { it.prune() } else null
 
     override suspend fun execute(attempt: ClaimedAttempt): AttemptOutcome {
-        val job = currentCoroutineContext().job
-        var prepared: PreparedWorkDir? = null
+        val state = AttemptState()
+        var outcome: AttemptOutcome? = null
         try {
-            // The blocking work runs to its end even when the coroutine is cancelled: the container is stopped by the cancel check
-            // below, and the work directory is removed afterwards. Nothing is left running on a cancel.
-            val run = withContext(Dispatchers.IO + NonCancellable) {
-                mirror.sync(settings.repo)
-                val work = preparer.prepare(
-                    attempt.runId,
-                    attempt.attemptId,
-                    mirror.openArchive(attempt.baseSha),
-                    TaskInput(title = attempt.task.value, body = "", truncated = attempt.task.truncated),
-                )
-                prepared = work
-                val spec = DockerRunSpec(
-                    runId = attempt.runId,
-                    attemptId = attempt.attemptId,
-                    image = settings.image,
-                    workDir = work.runDir,
-                    network = settings.network,
-                    proxyUrl = settings.proxyUrl,
-                    timeout = Duration.ofSeconds(attempt.limits.maxRuntimeSeconds),
-                    maxTurns = attempt.limits.maxTurns,
-                    model = settings.model,
-                    budgetUsd = settings.budgetUsd,
-                )
-                val runner = DockerRunner(
-                    dockerSettings,
-                    launcher = launcher,
-                    pollMillis = pollMillis,
-                    outputLimitBytes = minOf(attempt.limits.maxOutputBytes, DockerRunner.DEFAULT_OUTPUT_LIMIT_BYTES.toLong()).toInt(),
-                )
-                runner.cleanupOrphans(attempt.runId)
-                val result = runner.run(spec) { !job.isActive || Files.exists(stopFile) }
-                val report = StreamJsonParser().parse(result.stdout)
-                RunState(result, report, CliOutcomeClassifier.classify(result, report))
-            }
-            // Counts, enums and numbers only (see CliResultLog). The result text, the tool input and the paths are never logged.
-            logger.info(
-                "cli run ended: runId={} attemptId={} outcome={} {}",
-                attempt.runId,
-                attempt.attemptId,
-                run.outcome,
-                CliResultLog.describe(run.report.result),
-            )
-            if (run.outcome != AgentRunOutcome.SUCCEEDED) {
-                return AttemptOutcome.Failed(run.outcome.errorCode ?: AgentErrorCode.NEEDS_HUMAN)
-            }
-
-            val work = checkNotNull(prepared) { "the work directory is missing after a run" }
-            val collected = withContext(Dispatchers.IO + NonCancellable) {
-                collector.collect(
-                    runDir = work.runDir,
-                    manifestPath = work.manifest,
-                    summary = run.report.result?.resultText.orEmpty(),
-                    exitStatus = checkNotNull(run.result.exitCode),
-                    sessionId = run.report.result?.sessionId,
-                )
-            }
-            return when (collected) {
-                is CollectOutcome.Rejected -> {
-                    val code = rejectionCode(collected.reasons)
-                    logger.warn(
-                        "change set rejected: runId={} attemptId={} reasons={} code={} numTurns={} permissionDenials={}",
-                        attempt.runId,
-                        attempt.attemptId,
-                        collected.reasons.joinToString(",") { it.name },
-                        code,
-                        run.report.result?.numTurns,
-                        run.report.result?.permissionDenials,
-                    )
-                    AttemptOutcome.Failed(code)
-                }
-                is CollectOutcome.Accepted -> submit(attempt, collected.result)
-            }
+            val result = attemptOnce(attempt, state)
+            outcome = result
+            return result
         } finally {
-            prepared?.let { work ->
+            // The debug output is taken before the work directory is removed. Nothing is kept for a success (outcome == ResultSubmitted),
+            // and a thrown exception or a cancel leaves outcome null, which is kept as EXCEPTION.
+            debugKeep?.let { keep ->
+                if (outcome !is AttemptOutcome.ResultSubmitted) {
+                    withContext(Dispatchers.IO + NonCancellable) {
+                        keep.keep(
+                            runId = attempt.runId,
+                            attemptId = attempt.attemptId,
+                            outcome = outcomeText(outcome, state.reasons),
+                            stdout = state.run?.result?.stdout,
+                            taskFile = state.prepared?.runDir?.resolve(TaskFile.RELATIVE_PATH),
+                        )
+                    }
+                }
+            }
+            state.prepared?.let { work ->
                 val clean = withContext(Dispatchers.IO + NonCancellable) { RunDirCleanup.delete(work.runDir, work.manifest) }
                 if (!clean) logger.warn("work directory was not fully removed: runId={} attemptId={}", attempt.runId, attempt.attemptId)
             }
+            debugKeep?.let { keep -> withContext(Dispatchers.IO + NonCancellable) { keep.prune() } }
         }
+    }
+
+    private suspend fun attemptOnce(attempt: ClaimedAttempt, state: AttemptState): AttemptOutcome {
+        val job = currentCoroutineContext().job
+        // The blocking work runs to its end even when the coroutine is cancelled: the container is stopped by the cancel check
+        // below, and the work directory is removed afterwards. Nothing is left running on a cancel.
+        val run = withContext(Dispatchers.IO + NonCancellable) {
+            mirror.sync(settings.repo)
+            val work = preparer.prepare(
+                attempt.runId,
+                attempt.attemptId,
+                mirror.openArchive(attempt.baseSha),
+                TaskInput(title = attempt.task.value, body = "", truncated = attempt.task.truncated),
+            )
+            state.prepared = work
+            val spec = DockerRunSpec(
+                runId = attempt.runId,
+                attemptId = attempt.attemptId,
+                image = settings.image,
+                workDir = work.runDir,
+                network = settings.network,
+                proxyUrl = settings.proxyUrl,
+                timeout = Duration.ofSeconds(attempt.limits.maxRuntimeSeconds),
+                maxTurns = attempt.limits.maxTurns,
+                model = settings.model,
+                budgetUsd = settings.budgetUsd,
+            )
+            val runner = DockerRunner(
+                dockerSettings,
+                launcher = launcher,
+                pollMillis = pollMillis,
+                outputLimitBytes = minOf(attempt.limits.maxOutputBytes, DockerRunner.DEFAULT_OUTPUT_LIMIT_BYTES.toLong()).toInt(),
+            )
+            runner.cleanupOrphans(attempt.runId)
+            val result = runner.run(spec) { !job.isActive || Files.exists(stopFile) }
+            val report = StreamJsonParser().parse(result.stdout)
+            RunState(result, report, CliOutcomeClassifier.classify(result, report))
+        }
+        state.run = run
+        // Counts, enums and numbers only (see CliResultLog). The result text, the tool input and the paths are never logged.
+        logger.info(
+            "cli run ended: runId={} attemptId={} outcome={} {}",
+            attempt.runId,
+            attempt.attemptId,
+            run.outcome,
+            CliResultLog.describe(run.report.result),
+        )
+        if (run.outcome != AgentRunOutcome.SUCCEEDED) {
+            return AttemptOutcome.Failed(run.outcome.errorCode ?: AgentErrorCode.NEEDS_HUMAN)
+        }
+
+        val work = checkNotNull(state.prepared) { "the work directory is missing after a run" }
+        val collected = withContext(Dispatchers.IO + NonCancellable) {
+            collector.collect(
+                runDir = work.runDir,
+                manifestPath = work.manifest,
+                summary = run.report.result?.resultText.orEmpty(),
+                exitStatus = checkNotNull(run.result.exitCode),
+                sessionId = run.report.result?.sessionId,
+            )
+        }
+        return when (collected) {
+            is CollectOutcome.Rejected -> {
+                state.reasons = collected.reasons
+                val code = rejectionCode(collected.reasons)
+                logger.warn(
+                    "change set rejected: runId={} attemptId={} reasons={} code={} numTurns={} permissionDenials={}",
+                    attempt.runId,
+                    attempt.attemptId,
+                    collected.reasons.joinToString(",") { it.name },
+                    code,
+                    run.report.result?.numTurns,
+                    run.report.result?.permissionDenials,
+                )
+                AttemptOutcome.Failed(code)
+            }
+            is CollectOutcome.Accepted -> submit(attempt, collected.result)
+        }
+    }
+
+    /** The debug outcome: the failure code and, for a refused change set, the reasons. Codes only. EXCEPTION means no result came back. */
+    private fun outcomeText(outcome: AttemptOutcome?, reasons: List<DiffRejectReason>): String {
+        val code = (outcome as? AttemptOutcome.Failed)?.code?.name ?: "EXCEPTION"
+        val lines = mutableListOf("code=$code")
+        if (reasons.isNotEmpty()) lines += "reasons=" + reasons.joinToString(",") { it.name }
+        return lines.joinToString("\n", postfix = "\n")
     }
 
     /**
@@ -201,6 +238,13 @@ class RealAttemptExecutor(
     }
 
     private class RunState(val result: DockerRunResult, val report: StreamReport, val outcome: AgentRunOutcome)
+
+    /** What one attempt has produced so far, for the debug output. Written by [attemptOnce], read by [execute]. */
+    private class AttemptState {
+        var prepared: PreparedWorkDir? = null
+        var run: RunState? = null
+        var reasons: List<DiffRejectReason> = emptyList()
+    }
 
     companion object {
         /** The host-side mirror lives in the work root. A run directory name starts with an id character, so it cannot clash. */

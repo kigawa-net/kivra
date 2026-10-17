@@ -167,6 +167,27 @@ class AgentConfigTest {
     }
 
     @Test
+    fun debugKeepIsOffByDefaultAndOnlyOneEnablesIt() {
+        assertFalse(AgentConfig.fromEnv(realEnv()).realExecutor!!.debugKeep)
+        assertFalse(AgentConfig.fromEnv(realEnv(AttemptDebugKeep.ENV_DEBUG_KEEP to "0")).realExecutor!!.debugKeep)
+        assertTrue(AgentConfig.fromEnv(realEnv(AttemptDebugKeep.ENV_DEBUG_KEEP to "1")).realExecutor!!.debugKeep)
+    }
+
+    @Test
+    fun debugKeepRejectsAnyOtherValueByNameOnly() {
+        for (value in listOf("yes", "true", "2", "on", " 11 ")) {
+            val e = assertFailsWith<ConfigException> { AgentConfig.fromEnv(realEnv(AttemptDebugKeep.ENV_DEBUG_KEEP to value)) }
+            assertEquals("KIVRA_AGENT_DEBUG_KEEP must be 1 or 0", e.message, value)
+        }
+    }
+
+    @Test
+    fun debugKeepIsIgnoredWhenTheStubIsUsed() {
+        // Read only for KIVRA_AGENT_EXECUTOR=real, so even an invalid value does not stop the stub.
+        assertEquals(null, AgentConfig.fromEnv(env(AttemptDebugKeep.ENV_DEBUG_KEEP to "yes")).realExecutor)
+    }
+
+    @Test
     fun realExecutorRequiresItsSettings() {
         val base = arrayOf(
             AgentConfig.ENV_EXECUTOR to "real",

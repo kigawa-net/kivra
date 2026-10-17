@@ -1,6 +1,7 @@
 package net.kigawa.kivra.agent.docker
 
 import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -76,5 +77,29 @@ class TaskFileTest {
         Files.createSymbolicLink(dir.resolve("task.json"), target)
         assertFailsWith<DockerSpecException> { TaskFile.write(fixture.workDir, TEST_RUN_ID, TEST_ATTEMPT_ID, "t", "b", false) }
         assertEquals("{}", Files.readString(target))
+    }
+
+    @Test
+    fun modesAreSetExplicitlyWhenTheDirectoryAndFileAlreadyHaveOwnerOnlyModes() {
+        // What a umask of 0077 (systemd UMask=0077) leaves behind: owner-only directory and file. The container uid must still read them.
+        val dir = Files.createDirectories(fixture.workDir.resolve(".kivra"))
+        Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"))
+        val stale = dir.resolve("task.json")
+        Files.writeString(stale, "{}")
+        Files.setPosixFilePermissions(stale, PosixFilePermissions.fromString("rw-------"))
+
+        val path = TaskFile.write(fixture.workDir, TEST_RUN_ID, TEST_ATTEMPT_ID, "t", "b", false)
+
+        assertEquals(PosixFilePermissions.fromString("rwxrwxrwx"), Files.getPosixFilePermissions(dir))
+        assertEquals(PosixFilePermissions.fromString("rw-r--r--"), Files.getPosixFilePermissions(path))
+    }
+
+    @Test
+    fun modesAreSetWhenTheDirectoryIsCreatedByTheWrite() {
+        // The JVM umask applies to what this call creates, so the result must not depend on it.
+        val path = TaskFile.write(fixture.workDir, TEST_RUN_ID, TEST_ATTEMPT_ID, "t", "b", false)
+
+        assertEquals(PosixFilePermissions.fromString("rwxrwxrwx"), Files.getPosixFilePermissions(path.parent))
+        assertEquals(PosixFilePermissions.fromString("rw-r--r--"), Files.getPosixFilePermissions(path))
     }
 }

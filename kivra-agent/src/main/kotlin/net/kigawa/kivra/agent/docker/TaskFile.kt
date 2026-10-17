@@ -1,9 +1,11 @@
 package net.kigawa.kivra.agent.docker
 
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -28,6 +30,8 @@ object TaskFile {
     const val TRUST = "UNTRUSTED"
     const val MAX_TITLE_CHARS = 2000
     const val MAX_BODY_BYTES = 64 * 1024
+    private const val DIRECTORY_MODE = "rwxrwxrwx"
+    private const val FILE_MODE = "rw-r--r--"
 
     /** Writes the task file and returns its path. Refuses symbolic links at the directory and the file. */
     fun write(workDir: Path, runId: String, attemptId: String, title: String, body: String, truncated: Boolean): Path {
@@ -43,11 +47,31 @@ object TaskFile {
             throw DockerSpecException("task directory is not a directory")
         }
         if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(dir)
+        // The container runs as another uid (runbook 6.8), so the modes are set explicitly. A umask (systemd UMask=0077) must not decide them.
+        requirePosix(workDir)
+        setMode(dir, DIRECTORY_MODE)
         val file = dir.resolve(FILE_NAME)
         if (Files.isSymbolicLink(file)) throw DockerSpecException("task file must not be a symbolic link")
 
         Files.writeString(file, document(runId, attemptId, title, body, truncated).toString(), StandardCharsets.UTF_8)
+        setMode(file, FILE_MODE)
         return file
+    }
+
+    private fun requirePosix(workDir: Path) {
+        if ("posix" !in workDir.fileSystem.supportedFileAttributeViews()) {
+            throw DockerSpecException("the file system does not support POSIX permissions")
+        }
+    }
+
+    private fun setMode(path: Path, mode: String) {
+        try {
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString(mode))
+        } catch (e: IOException) {
+            throw DockerSpecException("task file permissions cannot be set")
+        } catch (e: UnsupportedOperationException) {
+            throw DockerSpecException("the file system does not support POSIX permissions")
+        }
     }
 
     /** The JSON object that [write] stores. */

@@ -468,6 +468,8 @@ claude -p <固定 prompt> --output-format stream-json --verbose --permission-mod
 - 未確認 (a): `/etc/subuid` の実際の範囲と、コンテナ内の 10001 がどの uid に写るか。`verify/run-all.sh` の隔離検査で、作業ディレクトリに uid 10001 が書けることを確かめる。
 - 未確認 (b): コンテナの umask で作られたサブディレクトリ(既定 0755、所有者はサブ uid)の中身は、ホストから削除できない可能性がある。`RunDirCleanup.delete` は、消せなかったものがあれば `false` を返す。その場合は手で消す必要がある。
 - 代替案として、root で chown するヘルパーを 1 回走らせる方法があるが、コンテナを root で動かすことになり隔離の不変条件に反するので採らない。
+- **umask の落とし穴(実機で判明)**: `kivra-agent.service` は systemd の `UMask=0077` で動く。`Files.createDirectory` や `Files.writeString` だけで作ったものは、権限が umask で決まり、`.kivra/` は 0700、`task.json` は 0600 になる。コンテナの uid 10001 はホストの `kivra-agent` と別 uid なので読めず、CLI は `EACCES: permission denied, open '/work/.kivra/task.json'` で失敗し、変更なし(EMPTY_PATCH)になった。対策として、`TaskFile.write` は `.kivra/` を 0777、`task.json` を 0644 に `Files.setPosixFilePermissions` で明示的に設定する(既存のものも設定し直す)。作業ディレクトリ、展開ファイル、マニフェストは `WorkDirPreparer` が明示的に設定しているため、この問題はない。POSIX でないファイルシステムでは、設定できない旨のエラーで拒否する。
+- 新しくファイルやディレクトリを作って、コンテナが読み書きするものは、必ず権限を明示的に設定する。umask に頼らない。テストは `TaskFileTest` と `WorkDirPreparerTest` の「コンテナ uid が到達できること」の検査で守る(other の r/rx、書き込みが要るディレクトリは other の w)。
 
 **展開の上限(`ExtractLimits`。既定値)**
 

@@ -3,6 +3,7 @@ package net.kigawa.kivra.agent.workdir
 import java.io.ByteArrayInputStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermission
 import java.nio.file.attribute.PosixFilePermissions
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -62,6 +63,24 @@ class WorkDirPreparerTest {
         assertTrue(manifest.getValue("bin/run.sh").executable)
         assertFalse(manifest.getValue("README.md").executable)
         assertEquals(6L, manifest.getValue("README.md").size)
+    }
+
+    @Test
+    fun taskDirectoryAndFileAreReachableByTheContainerUid() {
+        // The container uid is not the host owner, so it reads through the "other" bits (runbook 6.8).
+        val src = makeRepo(files = mapOf("README.md" to "hello\n"))
+        val root = newWorkRoot()
+        val prepared = archiveOf(src, Files.createTempDirectory("kivra-mirror")) { stream ->
+            WorkDirPreparer(root).prepare(TEST_RUN, TEST_ATTEMPT, stream, task)
+        }
+        val dir = prepared.runDir.resolve(".kivra")
+        val file = dir.resolve("task.json")
+        val dirOther = Files.getPosixFilePermissions(dir)
+        val fileOther = Files.getPosixFilePermissions(file)
+        assertTrue(dirOther.containsAll(setOf(PosixFilePermission.OTHERS_READ, PosixFilePermission.OTHERS_EXECUTE)))
+        assertTrue(dirOther.contains(PosixFilePermission.OTHERS_WRITE))
+        assertTrue(fileOther.contains(PosixFilePermission.OTHERS_READ))
+        assertEquals(PosixFilePermissions.fromString("rw-r--r--"), fileOther)
     }
 
     @Test

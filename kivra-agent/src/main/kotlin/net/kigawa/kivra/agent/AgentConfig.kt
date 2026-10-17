@@ -1,10 +1,13 @@
 package net.kigawa.kivra.agent
 
+import java.math.BigDecimal
 import java.net.URI
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
 import java.time.Duration
+import net.kigawa.kivra.agent.docker.CliCommand
 import net.kigawa.kivra.agent.docker.DockerPatterns
+import net.kigawa.kivra.agent.docker.DockerSettings
 import net.kigawa.kivra.agent.workdir.RepoSource
 
 /**
@@ -67,6 +70,8 @@ class AgentConfig private constructor(
         const val ENV_DOCKER_PROXY_URL = "KIVRA_AGENT_DOCKER_PROXY_URL"
         const val ENV_GIT_BIN = "KIVRA_AGENT_GIT_BIN"
         const val ENV_REPO = "KIVRA_AGENT_REPO"
+        const val ENV_MODEL = "KIVRA_AGENT_MODEL"
+        const val ENV_MAX_BUDGET_USD = "KIVRA_AGENT_MAX_BUDGET_USD"
 
         const val MAX_CONCURRENT = 1
         const val DEFAULT_STOP_FILE_NAME = "STOP"
@@ -80,6 +85,7 @@ class AgentConfig private constructor(
 
         private val LOCAL_HOSTS = setOf("localhost", "127.0.0.1")
         private val CLIENT_ID = Regex("^[A-Za-z0-9._-]{1,128}$")
+        private val BUDGET_INPUT = Regex("[0-9]{1,2}(?:\\.[0-9]{1,2})?")
 
         fun fromEnv(env: Map<String, String>): AgentConfig {
             val kivraUrl = httpsUrl(env, ENV_KIVRA_URL)
@@ -115,6 +121,9 @@ class AgentConfig private constructor(
         private fun realExecutorSettings(env: Map<String, String>): RealExecutorSettings {
             val proxyUrl = required(env, ENV_DOCKER_PROXY_URL)
             if (!DockerPatterns.PROXY_URL.matches(proxyUrl)) throw ConfigException("$ENV_DOCKER_PROXY_URL must be http://host:port")
+            val model = optional(env, ENV_MODEL) ?: CliCommand.DEFAULT_MODEL
+            if (!DockerPatterns.MODEL.matches(model)) throw ConfigException("$ENV_MODEL must be a model id (letters, digits, dots, hyphens)")
+            val budgetUsd = budgetUsd(env)
             val repoName = required(env, ENV_REPO)
             val parts = repoName.split('/')
             val repo = try {
@@ -131,7 +140,22 @@ class AgentConfig private constructor(
                 proxyUrl = proxyUrl,
                 gitBinary = absolutePath(env, ENV_GIT_BIN),
                 repo = repo,
+                model = model,
+                budgetUsd = budgetUsd,
             )
+        }
+
+        /**
+         * The cost limit of one attempt, in dollars. It is written with exactly two decimals (`0.50`), so an input of `0.5` is accepted
+         * and written as `0.50`. The range is 0.01 to 20.00.
+         */
+        private fun budgetUsd(env: Map<String, String>): String {
+            val value = optional(env, ENV_MAX_BUDGET_USD) ?: return CliCommand.DEFAULT_BUDGET_USD
+            val amount = if (BUDGET_INPUT.matches(value)) BigDecimal(value) else null
+            if (amount == null || amount < BigDecimal("0.01") || amount > BigDecimal("20.00")) {
+                throw ConfigException("$ENV_MAX_BUDGET_USD must be a dollar amount from 0.01 to 20.00 with at most two decimals")
+            }
+            return amount.setScale(2).toPlainString()
         }
 
         private fun optional(env: Map<String, String>, name: String): String? = env[name]?.trim()?.takeIf { it.isNotEmpty() }

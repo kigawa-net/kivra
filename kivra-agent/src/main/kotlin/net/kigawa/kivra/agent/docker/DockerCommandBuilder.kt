@@ -13,6 +13,7 @@ class DockerCommandBuilder(private val settings: DockerSettings) {
     fun build(spec: DockerRunSpec): List<String> {
         if (spec.image !in settings.allowedImages) throw DockerSpecException("image is not allowed")
         if (spec.network !in settings.allowedNetworks) throw DockerSpecException("network is not allowed")
+        if (spec.model !in settings.allowedModels) throw DockerSpecException("model is not allowed")
         val workDir = WorkDirPolicy.validate(spec.workDir, settings.workRoot)
         val proxy = spec.proxyUrl
         return listOf(
@@ -42,6 +43,6 @@ class DockerCommandBuilder(private val settings: DockerSettings) {
             "--env=NO_PROXY=${DockerConstants.NO_PROXY}",
             "--env=JAVA_TOOL_OPTIONS=${ProxyEnv.javaToolOptions(proxy)}",
             spec.image,
-        ) + CliCommand.argv(spec.maxTurns)
+        ) + CliCommand.argv(spec.maxTurns, spec.model, spec.budgetUsd)
     }
 }

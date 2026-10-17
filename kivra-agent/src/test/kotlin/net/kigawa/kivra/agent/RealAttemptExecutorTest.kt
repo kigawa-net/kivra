@@ -381,6 +381,8 @@ class RealAttemptExecutorTest {
 
             val text = appender.list.joinToString("\n") { it.formattedMessage }
             assertTrue(text.isNotEmpty(), "the executor logs its outcome")
+            assertTrue(text.contains("numTurns=3"), "the log carries the turn count")
+            assertTrue(text.contains("permissionDenials="), "the log carries the denial count field")
             for (forbidden in listOf(TITLE, SUMMARY, CONTENT, CHANGED, "kivra-agent/", "tok-", "ghp_", "/tmp", world.root.toString())) {
                 assertFalse(text.contains(forbidden), "log must not contain: $forbidden")
             }

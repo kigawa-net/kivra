@@ -44,8 +44,9 @@ class DockerArgsRejectedException(val rule: GuardRule) : IllegalArgumentExceptio
  * 7. Cross checks: the memory-swap equals the memory; the container name starts with the run label; the proxy URLs agree, and
  *    `JAVA_TOOL_OPTIONS` equals the form built from the proxy.
  * 8. Image: one of the configured images.
- * 9. Command: exactly [CliCommand.argv] with an in-range `--max-turns`. Checked by [checkCommand]: the program, the prompt position
- *    (must be the fixed prompt, so no task text), shell syntax in any other token, and any extra or changed argument are refused.
+ * 9. Command: exactly [CliCommand.argv] with an in-range `--max-turns`, a `--model` in the allowed models, and a `--max-budget-usd` in
+ *    range. Checked by [checkCommand]: the program, the prompt position (must be the fixed prompt, so no task text), shell syntax in
+ *    any other token, a flag that is repeated, and any extra or changed argument are refused.
  */
 class DockerArgsGuard(private val settings: DockerSettings) {
 
@@ -100,15 +101,31 @@ class DockerArgsGuard(private val settings: DockerSettings) {
                 reject(GuardRule.COMMAND_SHELL_SYNTAX)
             }
         }
+        // A value flag may appear once. A repeat would also change the length, but it is named here for the reason.
+        for (flag in CliCommand.VALUE_FLAGS) {
+            if (tokens.count { it == flag } != 1) reject(GuardRule.COMMAND_UNKNOWN_ARGUMENT)
+        }
         val template = CliCommand.argv(CliCommand.DEFAULT_MAX_TURNS)
         if (tokens.size != template.size) reject(GuardRule.COMMAND_UNKNOWN_ARGUMENT)
         for (i in tokens.indices) {
-            if (i == CliCommand.MAX_TURNS_INDEX) {
-                val turns = tokens[i].toIntOrNull()
-                if (turns == null || tokens[i] != turns.toString() || turns !in 1..CliCommand.MAX_MAX_TURNS) {
-                    reject(GuardRule.COMMAND_NOT_ALLOWED)
+            when (i) {
+                CliCommand.MAX_TURNS_INDEX -> {
+                    val turns = tokens[i].toIntOrNull()
+                    if (turns == null || tokens[i] != turns.toString() || turns !in 1..CliCommand.MAX_MAX_TURNS) {
+                        reject(GuardRule.COMMAND_NOT_ALLOWED)
+                    }
+                    continue
                 }
-                continue
+                CliCommand.MODEL_INDEX -> {
+                    if (tokens[i] !in settings.allowedModels || !DockerPatterns.MODEL.matches(tokens[i])) {
+                        reject(GuardRule.COMMAND_NOT_ALLOWED)
+                    }
+                    continue
+                }
+                CliCommand.BUDGET_INDEX -> {
+                    if (!DockerPatterns.isBudgetInRange(tokens[i])) reject(GuardRule.COMMAND_NOT_ALLOWED)
+                    continue
+                }
             }
             if (tokens[i] == template[i]) continue
             reject(

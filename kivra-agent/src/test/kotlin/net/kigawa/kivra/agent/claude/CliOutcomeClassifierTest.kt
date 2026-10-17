@@ -48,6 +48,21 @@ class CliOutcomeClassifierTest {
     }
 
     @Test
+    fun aBudgetStopIsBudgetExceededAndMapsToCliNonzero() {
+        val budgetStop = StreamReport(
+            CliResult("error_max_budget_usd", true, null, 4, null, CliUsage(1, 1, null, null, 0.5)),
+            // An earlier retried rate limit must not win over the budget stop.
+            setOf(ApiErrorKind.RATE_LIMIT),
+            3,
+            0,
+            0,
+            false,
+        )
+        assertEquals(AgentRunOutcome.BUDGET_EXCEEDED, CliOutcomeClassifier.classify(run(DockerRunOutcome.EXITED, 1), budgetStop))
+        assertEquals(AgentErrorCode.CLI_NONZERO, AgentRunOutcome.BUDGET_EXCEEDED.errorCode)
+    }
+
+    @Test
     fun everyOutcomeMapsToAKivraErrorCodeOrNone() {
         val expected = mapOf(
             AgentRunOutcome.SUCCEEDED to null,
@@ -55,6 +70,7 @@ class CliOutcomeClassifierTest {
             AgentRunOutcome.CANCELLED to AgentErrorCode.CANCELLED,
             AgentRunOutcome.OUTPUT_LIMIT to AgentErrorCode.OUTPUT_LIMIT,
             AgentRunOutcome.AUTH_FAILED to AgentErrorCode.AUTH_REQUIRED,
+            AgentRunOutcome.BUDGET_EXCEEDED to AgentErrorCode.CLI_NONZERO,
             AgentRunOutcome.RATE_LIMITED to AgentErrorCode.RATE_LIMITED,
             AgentRunOutcome.OVERLOADED to AgentErrorCode.RATE_LIMITED,
             AgentRunOutcome.CLI_FAILED to AgentErrorCode.CLI_NONZERO,

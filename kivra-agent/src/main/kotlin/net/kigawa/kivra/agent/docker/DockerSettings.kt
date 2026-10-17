@@ -79,6 +79,21 @@ internal object DockerPatterns {
 
     /** Networks that are never accepted by name: host and container namespaces, none, and the default bridge. */
     val RESERVED_NETWORKS = setOf("host", "none", "bridge", "default")
+
+    /** The model id: lowercase letters, digits, dots and hyphens (runbook 6.10b). */
+    val MODEL = Regex("[a-z0-9][a-z0-9.-]{0,63}")
+
+    /** A dollar amount with exactly two decimals, for example `0.50`. Range is checked by [isBudgetInRange]. */
+    val BUDGET = Regex("(?:0|[1-9][0-9]?)\\.[0-9]{2}")
+
+    /** True for a [BUDGET] string between 0.01 and 20.00 inclusive. */
+    fun isBudgetInRange(value: String): Boolean {
+        if (!BUDGET.matches(value)) return false
+        val cents = value.replace(".", "").toInt()
+        return cents in 1..MAX_BUDGET_CENTS
+    }
+
+    const val MAX_BUDGET_CENTS = 2000
 }
 
 /**
@@ -92,6 +107,7 @@ internal object DockerPatterns {
  * - [allowedNetworks]: internal networks (`docker network create --internal`). The operator creates them; this code does not
  *   check the `--internal` flag at run time.
  * - [allowedImages]: the image names that may run.
+ * - [allowedModels]: the model ids that a run may pass to `--model`. The guard refuses any other value.
  */
 class DockerSettings(
     val dockerBinary: Path,
@@ -99,10 +115,12 @@ class DockerSettings(
     workRoot: Path,
     allowedNetworks: Set<String>,
     allowedImages: Set<String>,
+    allowedModels: Set<String> = setOf(CliCommand.DEFAULT_MODEL),
 ) {
     val workRoot: Path = checkWorkRoot(workRoot)
     val allowedNetworks: Set<String> = checkNetworks(allowedNetworks)
     val allowedImages: Set<String> = checkImages(allowedImages)
+    val allowedModels: Set<String> = checkModels(allowedModels)
 
     init {
         if (!dockerBinary.isAbsolute) throw DockerSpecException("dockerBinary must be an absolute path")
@@ -142,6 +160,14 @@ class DockerSettings(
                 }
             }
             return networks.toSet()
+        }
+
+        fun checkModels(models: Set<String>): Set<String> {
+            if (models.isEmpty()) throw DockerSpecException("allowedModels must not be empty")
+            for (model in models) {
+                if (!DockerPatterns.MODEL.matches(model)) throw DockerSpecException("allowedModels contains an invalid model")
+            }
+            return models.toSet()
         }
 
         fun checkImages(images: Set<String>): Set<String> {

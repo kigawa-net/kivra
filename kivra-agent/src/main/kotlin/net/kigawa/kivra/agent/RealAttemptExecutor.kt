@@ -12,8 +12,10 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import net.kigawa.kivra.agent.claude.AgentRunOutcome
 import net.kigawa.kivra.agent.claude.CliOutcomeClassifier
+import net.kigawa.kivra.agent.claude.CliResultLog
 import net.kigawa.kivra.agent.claude.StreamJsonParser
 import net.kigawa.kivra.agent.claude.StreamReport
+import net.kigawa.kivra.agent.docker.CliCommand
 import net.kigawa.kivra.agent.docker.DockerLauncher
 import net.kigawa.kivra.agent.docker.DockerRunResult
 import net.kigawa.kivra.agent.docker.DockerRunSpec
@@ -48,6 +50,10 @@ class RealExecutorSettings(
     val gitBinary: Path,
     /** The repository the base commit is read from. The config only builds a public GitHub source; tests use a local one. */
     val repo: RepoSource,
+    /** The `--model` of the CLI (`KIVRA_AGENT_MODEL`). The default is Haiku 5.5, the only model kivra's policy allows. */
+    val model: String = CliCommand.DEFAULT_MODEL,
+    /** The `--max-budget-usd` of the CLI (`KIVRA_AGENT_MAX_BUDGET_USD`), two decimals. */
+    val budgetUsd: String = CliCommand.DEFAULT_BUDGET_USD,
 ) {
     override fun toString(): String = "RealExecutorSettings(***)"
 }
@@ -84,6 +90,7 @@ class RealAttemptExecutor(
         workRoot = workRoot,
         allowedNetworks = setOf(settings.network),
         allowedImages = setOf(settings.image),
+        allowedModels = setOf(settings.model),
     )
     private val mirror = PublicGitMirror(settings.gitBinary, workRoot.resolve(MIRROR_DIR_NAME))
     private val preparer = WorkDirPreparer(workRoot)
@@ -113,6 +120,8 @@ class RealAttemptExecutor(
                     proxyUrl = settings.proxyUrl,
                     timeout = Duration.ofSeconds(attempt.limits.maxRuntimeSeconds),
                     maxTurns = attempt.limits.maxTurns,
+                    model = settings.model,
+                    budgetUsd = settings.budgetUsd,
                 )
                 val runner = DockerRunner(
                     dockerSettings,
@@ -125,8 +134,15 @@ class RealAttemptExecutor(
                 val report = StreamJsonParser().parse(result.stdout)
                 RunState(result, report, CliOutcomeClassifier.classify(result, report))
             }
+            // Counts, enums and numbers only (see CliResultLog). The result text, the tool input and the paths are never logged.
+            logger.info(
+                "cli run ended: runId={} attemptId={} outcome={} {}",
+                attempt.runId,
+                attempt.attemptId,
+                run.outcome,
+                CliResultLog.describe(run.report.result),
+            )
             if (run.outcome != AgentRunOutcome.SUCCEEDED) {
-                logger.info("cli run ended: runId={} attemptId={} outcome={}", attempt.runId, attempt.attemptId, run.outcome)
                 return AttemptOutcome.Failed(run.outcome.errorCode ?: AgentErrorCode.NEEDS_HUMAN)
             }
 
@@ -144,11 +160,13 @@ class RealAttemptExecutor(
                 is CollectOutcome.Rejected -> {
                     val code = rejectionCode(collected.reasons)
                     logger.warn(
-                        "change set rejected: runId={} attemptId={} reasons={} code={}",
+                        "change set rejected: runId={} attemptId={} reasons={} code={} numTurns={} permissionDenials={}",
                         attempt.runId,
                         attempt.attemptId,
                         collected.reasons.joinToString(",") { it.name },
                         code,
+                        run.report.result?.numTurns,
+                        run.report.result?.permissionDenials,
                     )
                     AttemptOutcome.Failed(code)
                 }

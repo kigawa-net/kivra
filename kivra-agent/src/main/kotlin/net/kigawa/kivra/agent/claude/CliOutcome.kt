@@ -14,6 +14,12 @@ enum class AgentRunOutcome(val errorCode: AgentErrorCode?) {
     CANCELLED(AgentErrorCode.CANCELLED),
     OUTPUT_LIMIT(AgentErrorCode.OUTPUT_LIMIT),
     AUTH_FAILED(AgentErrorCode.AUTH_REQUIRED),
+
+    /**
+     * The CLI stopped at `--max-budget-usd` (result subtype `error_max_budget_usd`). kivra has no code for it, so it is reported as
+     * CLI_NONZERO. The separate outcome only makes the log say why.
+     */
+    BUDGET_EXCEEDED(AgentErrorCode.CLI_NONZERO),
     RATE_LIMITED(AgentErrorCode.RATE_LIMITED),
 
     /** Overloaded is transient, like a rate limit. kivra has no separate code for it, so it is reported as RATE_LIMITED. */
@@ -30,7 +36,9 @@ enum class AgentRunOutcome(val errorCode: AgentErrorCode?) {
  * 3. No `result` event: an API error category decides (authentication, rate limit, overloaded). Otherwise a non-zero exit is
  *    CLI_FAILED, and a zero exit with an incomplete stream (the output was cut) is MALFORMED_OUTPUT.
  * 4. Any invalid line in a stream that has a result: MALFORMED_OUTPUT.
- * 5. An error result (`is_error`, or a subtype other than `success`): an API error category decides, else CLI_FAILED.
+ * 5. A budget stop (subtype `error_max_budget_usd`): BUDGET_EXCEEDED. It comes before the API error check, so an earlier retried rate
+ *    limit cannot turn it into RATE_LIMITED.
+ * 5b. An error result (`is_error`, or a subtype other than `success`): an API error category decides, else CLI_FAILED.
  * 6. A non-zero or unknown exit code: CLI_FAILED.
  * 7. Otherwise SUCCEEDED.
  *
@@ -52,6 +60,7 @@ object CliOutcomeClassifier {
             return apiFailure ?: if (run.exitCode == 0) AgentRunOutcome.MALFORMED_OUTPUT else AgentRunOutcome.CLI_FAILED
         }
         if (report.invalidLines > 0) return AgentRunOutcome.MALFORMED_OUTPUT
+        if (result.subtype == BUDGET_SUBTYPE) return AgentRunOutcome.BUDGET_EXCEEDED
         if (result.isError || result.subtype != SUCCESS_SUBTYPE) return apiFailure ?: AgentRunOutcome.CLI_FAILED
         if (run.exitCode != 0) return AgentRunOutcome.CLI_FAILED
         return AgentRunOutcome.SUCCEEDED
@@ -66,4 +75,5 @@ object CliOutcomeClassifier {
     }
 
     private const val SUCCESS_SUBTYPE = "success"
+    private const val BUDGET_SUBTYPE = "error_max_budget_usd"
 }

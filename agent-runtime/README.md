@@ -196,5 +196,6 @@ verify/live-smoke.sh
 - `install/uninstall.sh`: 取り除く(`--purge` でデータと設定も消す)。
 - `install/units/`: `kivra-agent-network`、`kivra-agent-proxy`、`kivra-agent` の user unit。
 - `install/preflight.sh`: `kivra-agent.service` の `ExecStartPre`。client secret のモードと、real のときの docker・proxy・ネットワークを確かめる。
+- ルートレス docker は起動後に作られた `/etc/kivra-agent` を見えない(secret が空のディレクトリになる)。`install.sh` は必要なとき docker.service を再起動し、preflight と `status` は見え方を検査する。詳細は runbook §6.11 の c の補足。
 
 実行器は既定で stub(`KIVRA_AGENT_EXECUTOR=stub`)のまま。`real` への切り替えは、runbook §6.11 の順序 ⑤ で行う。

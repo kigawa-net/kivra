@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # kivra-agent の運用。root で実行する: sudo kivra-agentctl <command>
-#   status   状態を表示する(3 ユニット、STOP の有無、docker への接続、直近のログ 10 行)。秘密は出さない
+#   status   状態を表示する(3 ユニット、STOP の有無、docker への接続、secret のデーモンからの見え方、直近のログ 10 行)。秘密は出さない
 #   start    ユニットを有効化して開始する(再起動後も上がる。linger が前提)
 #   disable  ユニットを止めて無効化する(proxy と実行中の work 用容器も消える)
 #   stop     キルスイッチ: STOP ファイルを作る。claim が止まり、実行中の attempt は CANCELLED で報告される。プロセスは残る
@@ -29,6 +29,13 @@ case "$cmd" in
     if [ -e "$STOP_FILE" ]; then echo "STOP: あり(claim 停止中。解除は kivra-agentctl resume)"; else echo "STOP: なし"; fi
     if run_as_agent env DOCKER_HOST="$DOCKER_HOST_VALUE" docker info >/dev/null 2>&1; then
       echo "docker: 接続 OK(ルートレス)"
+      case "$(run_as_agent env DOCKER_HOST="$DOCKER_HOST_VALUE" bash -c '. "$1"; secret_view "$2"' _ \
+          "$PREFIX/agent-runtime/install/lib.sh" "$ETC_DIR/client-secret")" in
+        file) echo "client secret: デーモンからファイルとして見える(OK)" ;;
+        dir) echo "client secret: デーモンからはディレクトリに見える。rootless docker を再起動してください(runbook §6.11 c の補足)" ;;
+        nohost) echo "client secret: ホストに無い、またはファイルではない" ;;
+        *) echo "client secret: デーモンから確認できません(イメージ kivra-agent-runtime:local の有無を確認)" ;;
+      esac
     else
       echo "docker: 接続できません"
     fi

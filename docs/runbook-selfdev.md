@@ -687,6 +687,21 @@ sudo bash ~/.cache/kivra-agent-dist/agent-runtime/install/install.sh --dist ~/.c
    - `install-kivra-agent-secret.sh` は 0640 で配置するため、再実行すると元に戻る。直すなら、そのスクリプトの `chmod 0640` と `chown root:kivra-agent` を変更する。
    `install.sh` と `preflight.sh` はこの状態を検出する(中身は読まない)。
 
+**c の補足. 落とし穴: デーモンから `/etc/kivra-agent` が見えない**
+
+ルートレス docker は起動時に `/etc` を隔離された名前空間へ写す(RootlessKit のコピーアップ)。デーモンの起動後に作られた `/etc/kivra-agent/` はデーモンから見えない。その状態で `docker run -v /etc/kivra-agent/client-secret:/run/secrets/...` を実行すると、Docker は存在しないパスに空のディレクトリを作ってマウントする。中身の無いディレクトリを WIF プロキシが読み、`stage=secret_unreadable` で認可に失敗する。
+
+- 診断(secret の中身は読まない。ディレクトリの有無だけを見る):
+  - `kivra-agent` の docker で、マウント先を `ls -ln` する。`total 0` だけが出れば空のディレクトリである(ファイルなら `-rw-------` の行が出る)。
+  - `wc` で読むと `wc: Is a directory` になる。
+  - `sudo kivra-agentctl status` の `client secret:` の行が `ディレクトリに見える` なら同じ状態である。
+- 復旧: `kivra-agent` の docker.service を再起動する(デーモンが `/etc` を写し直す)。
+  ```bash
+  sudo runuser -u kivra-agent -- env XDG_RUNTIME_DIR=/run/user/1001 systemctl --user restart docker.service
+  ```
+  実行中の container(proxy を含む)は止まる。ユニットは自動では上がらないので、必要なら `sudo kivra-agentctl start`。
+- 自動化: `install.sh` は、この実行で `/etc/kivra-agent` を新しく作った場合、または secret がディレクトリに見える場合に docker.service を再起動し、そう表示する(`--skip-images` と `DESTDIR` のドライランでは再起動しない)。`preflight.sh`(real のとき)は、secret がディレクトリに見えると起動を止める。`kivra-agentctl status` は見え方を表示する。
+
 **d. 検証(有効化の順序 ②、③。`kivra-agent` ユーザーの docker で行う)**
 
 ```bash

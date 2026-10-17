@@ -88,6 +88,9 @@ own "$AGENT_USER:$AGENT_USER" "$DESTDIR$STATE_DIR/work"
 chmod 0700 "$DESTDIR$STATE_DIR/work"
 
 # 4. 設定(秘密を含まない)。既存の値は上書きしない。
+# ルートレス docker は起動時に /etc を写す。この実行で /etc/kivra-agent を新しく作ったなら、デーモンはそれを見えない。
+etc_new=0
+[ -d "$DESTDIR$ETC_DIR" ] || etc_new=1
 echo "== config: $DESTDIR$ETC_DIR"
 mkdir -p "$DESTDIR$ETC_DIR"
 own root:"$AGENT_USER" "$DESTDIR$ETC_DIR"
@@ -168,6 +171,28 @@ if [ "$SKIP_IMAGES" = 0 ] && ! is_dry; then
   run_as_agent env DOCKER_HOST="$DOCKER_HOST_VALUE" docker build -q -t kivra-agent-proxy:local "$PREFIX/agent-runtime/proxy" >/dev/null
   run_as_agent env DOCKER_HOST="$DOCKER_HOST_VALUE" docker build -q -t kivra-agent-runtime:local "$PREFIX/agent-runtime/image" >/dev/null
   echo "built kivra-agent-proxy:local, kivra-agent-runtime:local"
+
+  # デーモンの /etc の写しに /etc/kivra-agent が無いと、secret は空のディレクトリとしてマウントされる。
+  # この実行で /etc/kivra-agent を作った場合、または secret がディレクトリに見える場合は docker.service を再起動する。
+  need_restart=0
+  if [ "$etc_new" = 1 ]; then
+    need_restart=1
+  elif [ "$(run_as_agent env DOCKER_HOST="$DOCKER_HOST_VALUE" bash -c '. "$1"; secret_view "$2"' _ \
+      "$PREFIX/agent-runtime/install/lib.sh" "$ETC_DIR/client-secret")" = dir ]; then
+    need_restart=1
+  fi
+  if [ "$need_restart" = 1 ]; then
+    echo "rootless docker を再起動します(kivra-agent の docker.service。デーモンに $ETC_DIR を見えるようにするため。実行中の container は止まります)"
+    run_as_agent systemctl --user restart docker.service \
+      || die "docker.service の再起動に失敗しました(kivra-agent ユーザーで systemctl --user status docker.service を確認)"
+    for _ in $(seq 1 30); do
+      run_as_agent env DOCKER_HOST="$DOCKER_HOST_VALUE" docker info >/dev/null 2>&1 && break
+      sleep 1
+    done
+    run_as_agent env DOCKER_HOST="$DOCKER_HOST_VALUE" docker info >/dev/null 2>&1 \
+      || die "再起動後も kivra-agent のルートレス docker に接続できません(${DOCKER_HOST_VALUE})"
+    echo "rootless docker を再起動しました"
+  fi
 fi
 
 echo

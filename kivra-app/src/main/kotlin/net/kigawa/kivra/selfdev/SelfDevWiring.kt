@@ -53,6 +53,9 @@ private const val DEVELOPER_MAX_OUTPUT_TOKENS = 8_000
  * It also installs the production merge Authority ([GitHubPrMergeAuthority], expecting the configured bot user id as the PR author)
  * into [prMergeAuthority]. This happens before the caller starts the worker, so no merged run is advanced without it.
  *
+ * [coding] is the change-set source of the CLI runtime (ADR 0010). It is required when the runtime is `cli` (the runner refuses it otherwise)
+ * and unused for `api`. The caller builds it from the agent API's coding service.
+ *
  * The developer's data class is INTERNAL: repository content goes to the model, so the provider must have a CONFIRMED data-handling
  * status in the registry before the feature is enabled (see docs/provider-compatibility-matrix.md).
  */
@@ -65,6 +68,7 @@ internal fun buildSelfDev(
     tenantId: String,
     identity: TaskApiIdentity,
     prMergeAuthority: DeferredPrMergeAuthority,
+    coding: CodingPatchSource? = null,
 ): SelfDevParts {
     val config = checkNotNull(settings.config) { "self-development settings are not enabled" }
     val auth = checkNotNull(settings.githubAuth) { "self-development GitHub authentication is missing" }
@@ -136,6 +140,7 @@ internal fun buildSelfDev(
         github = github,
         repoReader = reader,
         taskTexts = DbTaskTextSource,
+        coding = coding,
     )
     val worker = SelfDevWorker(
         activeRunIds = { runs.activeSelfDevRunIds() },

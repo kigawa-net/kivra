@@ -42,7 +42,7 @@
 | `KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS` | `7` | PR が開いたまま、最終更新からこの日数を過ぎると Run を中止する |
 | `KIVRA_SELFDEV_ADVANCE_INTERVAL_SECONDS` | `30`(最小 10) | ワーカーの周期 |
 | `KIVRA_SELFDEV_MAX_ACTIVE_RUNS` | `1` | 同時に進行する自己開発 Run の上限 |
-| `KIVRA_SELFDEV_RUNTIME` | `api` | コーディングの実行方式。`api` は従来の 1 回の LLM 呼び出し。`cli` はローカル PC のエージェント方式(ADR 0010)。**`cli` は起動時に拒否される**(下記) |
+| `KIVRA_SELFDEV_RUNTIME` | `api` | コーディングの実行方式。`api` は従来の 1 回の LLM 呼び出し。`cli` はローカル PC のエージェント方式(ADR 0010)。**`cli` は `KIVRA_AGENT_API_ENABLED=true` のときだけ許可し、それ以外は起動時に拒否される**(§1.2.1、§6.9) |
 | `KIVRA_FX_MARGIN_RATIO` | `0.10` | 為替の余裕 |
 | `KIVRA_FX_MAX_AGE_DAYS` | `7` | レートの最大の古さ |
 | `KIVRA_BUDGET_TENANT_ID` | `default` | 予算のテナント |
@@ -52,7 +52,7 @@
 ### 1.2.1 `KIVRA_SELFDEV_RUNTIME`(`api` / `cli`)
 
 - 既定は `api`(従来どおり。LLM が 1 回で PatchSet を返す。動作は変わらない)。空や `api` の前後の空白も `api` と同じ。それ以外の値は起動失敗(値は出さず、変数名だけを出す)。
-- `cli` は、ローカル PC の常駐エージェント(kivra-agent)が Claude Code CLI で実行する方式(ADR 0010)。**今は起動を拒否する**。エージェント本体が未完成で、キューに積んだ attempt を誰も取らないため。エージェント API(`/api/agent/v1`、§6)を有効にしても、この拒否は解除されない。拒否は fail-closed の意図どおり。`cli` を設定しても、この版では自己開発は起動しない。
+- `cli` は、ローカル PC の常駐エージェント(kivra-agent)が Claude Code CLI で実行する方式(ADR 0010)。**`KIVRA_AGENT_API_ENABLED=true` のときだけ起動を許可する**。それ以外の `cli` の起動は、変数名と ADR 0010 を含む理由で拒否する(値は出さない)。エージェント API が無効のままでは、キューに積んだ attempt を誰も取らないため、拒否は fail-closed の意図どおり。許可されるのは起動の条件だけで、既定の `api` と、エージェント API の既定(無効)は変えていない。結果の流れと失敗時の Run の状態は §6.9 を参照。
 - この変数は、自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)のときだけ読まれる。無効のときは読まれず、拒否もされない。
 - 本番の既定を変えるのは、エージェント本体と Keycloak / ingress の作業が終わり、動作確認が済んでから。それまで `api` のままにする。
 - `cli` の場合の中身(設計、状態遷移、結果の検査、reconcile の方針)は `docs/design/15-coding-attempts.md` の §6 を参照。
@@ -295,7 +295,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
   - `KIVRA_AGENT_AZP`(例: `kivra-agent`)
   - `KIVRA_AGENT_REQUIRED_ROLE`(`<client>:<role>`、例: `kivra-agent:agent`。`KIVRA_OIDC_REQUIRED_ROLE` と同じにはできない)
 - Keycloak 側: client `kivra-agent`(PC ごと。client credentials)、ロール `kivra-agent:agent`。トークンの `aud` に kivra(`KIVRA_OIDC_AUDIENCE`)を含め、`azp` が `kivra-agent` になること。運用者の `admin-panel:admin` は、エージェントに付けない。
-- 有効化しても `KIVRA_SELFDEV_RUNTIME=cli` の拒否は解除されない。この PR の時点では、エージェント API は「取りに来る口」だけを提供する。
+- `KIVRA_SELFDEV_RUNTIME=cli` は、この変数が `true` のときだけ起動を許可される(§6.9)。エージェント API を有効にすると、自己開発の `cli` 経路が結線された状態で起動する。本番の既定は変えていない。
 
 ### 6.2 エンドポイント(エージェント本体が使う)
 
@@ -541,3 +541,47 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 - 収集は、CLI コンテナが停止した後に行う前提。停止前に収集すると、書き込み中のファイルを読むことになる(PR 9 で順序を守る)。
 - 展開と収集の時間、大きなリポジトリでの上限の妥当性は未計測。
 - §6.7 の未確認の「`.kivra/` の書き込み権限と、task ファイルの差分からの除外」は、この PR で規則を決めた(上の所有権の節と差分の節)。実機での確認は残る。
+
+### 6.9 `cli` の結線(PR 9): 起動の条件、結果の流れ、失敗時の Run の状態
+
+コード: `kivra-app/.../selfdev/SelfDevSettings.kt`(起動の条件)、`selfdev/CodingPatchSource.kt`(attempt → Run の対応)、`selfdev/SelfDevRunner.kt`(`proposeFromAgent`)、`coding/CodingRuntimeService.kt`(結果の受理)。設計は `docs/design/15-coding-attempts.md` の §6、決定は ADR 0010 の追補 3。
+
+**起動の条件**
+- `KIVRA_SELFDEV_RUNTIME=cli` は、`KIVRA_AGENT_API_ENABLED=true` のときだけ起動できる。未設定、`false`、その他の値では起動に失敗する(変数名と ADR 0010 だけを出し、値は出さない)。
+- `true` のときは §6.1 の検査がすべて通る必要がある。通らなければ起動に失敗する。
+- 既定の `api`、エージェント API の既定(無効)、k8s の設定は、この PR で変えていない。`cli` を本番で使うのは別 PR で、エージェント本体の配備と動作確認の後。
+
+**結果の流れ(DEVELOPING と PATCH_READY の Run)**
+1. Run が DEVELOPING になり、最初の進行で attempt を QUEUED に積む(同じ Run には、非終端の attempt を 1 つだけ作る)。待つ間、Run は `AWAITING_CODING_AGENT` で止まる。モデルは呼ばない。
+2. エージェントが claim する。kivra は、heartbeat と result を、claim で得た世代(lease generation)と所有者(検証済みトークンの `sub`)で受け付ける。
+3. 結果の受理(`submitResult`)は、次の順で検査する。どこで落ちても何も保存せず、attempt は CLAIMED のまま(エージェントは直して送り直せる)。
+   1. 世代と状態(CLAIMED か RUNNING)
+   2. 件数(上限は PatchPolicy の `maxFiles`)
+   3. 形: symlink、submodule、実行ビット、バイナリ、WRITE に内容が無い、DELETE に内容がある、終了コードの範囲、session id の形式
+   4. PatchPolicy: 拒否パス、サイズ、秘密らしい内容、要約、**空の変更(`EMPTY_PATCH`)**
+4. 通った結果は `coding_results` に保存し、attempt を RESULT_RECEIVED にする(保存のあとに CAS で遷移する)。
+5. Run 側の runner は、base コミットのスナップショットで PatchPolicy を再検査する(存在しない削除対象、大きな縮小)。通ったら PATCH_READY に進み、既存の経路で `kivra/run-<runId>` に commit し、PR を作る。以降は API 方式と同じで、マージは merge Authority が検証する。
+6. CLI 経路は UNSEEN_OVERWRITE を適用しない(ADR 0010 追補 1)。最終の関門は 3 と 5 の PatchPolicy である。
+
+**失敗時の Run の状態**
+
+| attempt の状態 / 出来事 | Run の状態 | 理由コード | 備考 |
+| --- | --- | --- | --- |
+| 結果の受理で拒否(形、PatchPolicy、`EMPTY_PATCH` を含む) | DEVELOPING のまま | (なし。監査に拒否の理由コードだけ) | attempt は CLAIMED のまま。送り直せる |
+| 結果の保存が失敗 | DEVELOPING のまま | (なし) | attempt は変わらない。送り直せる |
+| RESULT_RECEIVED で runner の PatchPolicy が拒否 | FAILED | `POLICY_REJECTED` | 再試行しない |
+| FAILED: `AUTH_REQUIRED`、`NEEDS_HUMAN` | UNKNOWN | `CODING_<code>` | 運用者が §4.1 で解放する |
+| FAILED: `TIMEOUT`、`OUTPUT_LIMIT`、`CLI_NONZERO`、`BAD_OUTPUT`、`RATE_LIMITED` | FAILED | `CODING_<code>` | 自動の再試行は無い |
+| CANCELLED(エージェントの取消、または Run の取消要求) | CANCELLED | `CODING_CANCELLED` | |
+| ORPHANED(lease が切れた) | UNKNOWN | `CODING_ORPHANED` | 古いエージェントが動いているかもしれないため、新しい attempt は作らない |
+| EXPIRED(QUEUED のまま 24 時間を過ぎた) | UNKNOWN | `CODING_QUEUE_EXPIRED` | 同上 |
+| PATCH_READY の再開で結果が読めない | UNKNOWN | `CODING_RESULT_MISSING` | 再提案しない |
+| PATCH_READY の再開で attempt が無い | UNKNOWN | `CODING_NO_ATTEMPT` | |
+
+- ORPHANED と EXPIRED は、attempt の期限を runner が次に進むときに印を付け(`CodingRuntimeService.expireOverdue`)、Run は同じ進行の中で UNKNOWN になる。定期の reconcile(期限切れの一括処理と、Run の保留)は、まだどこからも呼ばれていない。
+- `EMPTY_PATCH`(変更がない結果)は、受理の段階で拒否する。Run には進めない。エージェントが変更を送らないまま lease が切れれば ORPHANED になり、UNKNOWN で運用者が判断する。「直す必要がなかった」を正常な結果として扱う経路は、この PR では作らない(ADR 0010 追補 3)。
+
+**この PR で確かめたこと(fake の coding service と DB を使う。実際の agent と GitHub は使わない)**
+- `SelfDevCodingEndToEndTest`: 正常系(結果 → PR)、PatchPolicy の拒否と送り直し、`EMPTY_PATCH`、EXPIRED、ORPHANED、agent の失敗コード 8 種すべて。
+- `SelfDevRuntimeSettingTest`: `cli` は `KIVRA_AGENT_API_ENABLED` が未設定・`false` のとき拒否、`true` のとき許可。
+- `SelfDevCodingRuntimeTest`: runner の CLI 経路(PatchPolicy の基底スナップショット付きの再検査を含む)と、api 方式の回帰。

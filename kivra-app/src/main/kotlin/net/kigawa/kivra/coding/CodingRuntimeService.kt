@@ -232,6 +232,14 @@ class CodingRuntimeService(
         return report
     }
 
+    /**
+     * Marks the overdue attempts EXPIRED (QUEUED past its queue time) or ORPHANED (lease ran out). The first half of [reconcile]. It holds
+     * no Run: the caller holds the Run's lease, and the Run's own advance moves it to UNKNOWN with the reason its attempt now carries.
+     */
+    fun expireOverdue() {
+        attempts.expire(config.reconcileLimit)
+    }
+
     /** The newest attempt of [runId], active or terminal. */
     fun latest(runId: String): CodingAttempt? = attempts.latestAttempt(runId)
 

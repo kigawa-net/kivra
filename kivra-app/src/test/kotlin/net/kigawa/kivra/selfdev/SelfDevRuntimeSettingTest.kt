@@ -6,7 +6,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** `KIVRA_SELFDEV_RUNTIME` (ADR 0010): `api` by default, `cli` refused until the agent API is wired. */
+/** `KIVRA_SELFDEV_RUNTIME` (ADR 0010): `api` by default; `cli` only with `KIVRA_AGENT_API_ENABLED=true`. */
 class SelfDevRuntimeSettingTest {
     private fun enabledEnv(vararg overrides: Pair<String, String?>): Map<String, String> {
         val base = mutableMapOf(
@@ -31,10 +31,27 @@ class SelfDevRuntimeSettingTest {
     }
 
     @Test
-    fun `cli is refused at startup, with a message that names the variable and not the value`() {
-        val error = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_RUNTIME" to "cli")) }
-        assertTrue("KIVRA_SELFDEV_RUNTIME" in error.message!!, error.message)
-        assertTrue("ADR 0010" in error.message!!, error.message)
+    fun `cli is refused at startup while the agent API is off, with a message that names the variables and not the values`() {
+        for (agentApi in listOf(null, "", "false")) {
+            val error = assertFailsWith<IllegalStateException> {
+                SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_RUNTIME" to "cli", "KIVRA_AGENT_API_ENABLED" to agentApi))
+            }
+            assertTrue("KIVRA_SELFDEV_RUNTIME" in error.message!!, error.message)
+            assertTrue("KIVRA_AGENT_API_ENABLED=true" in error.message!!, error.message)
+            assertTrue("ADR 0010" in error.message!!, error.message)
+        }
+    }
+
+    @Test
+    fun `cli is allowed only when the agent API is switched on`() {
+        val settings = SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_RUNTIME" to "cli", "KIVRA_AGENT_API_ENABLED" to "true"))
+        assertEquals(SelfDevRuntime.CLI, settings.config!!.runtime)
+        assertEquals(SelfDevRuntime.CLI, SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_RUNTIME" to " cli ", "KIVRA_AGENT_API_ENABLED" to " true ")).config!!.runtime)
+    }
+
+    @Test
+    fun `the agent API switch alone does not change the runtime, which stays api`() {
+        assertEquals(SelfDevRuntime.API, SelfDevSettings.fromEnv(enabledEnv("KIVRA_AGENT_API_ENABLED" to "true")).config!!.runtime)
     }
 
     @Test

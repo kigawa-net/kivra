@@ -77,7 +77,9 @@ import org.slf4j.LoggerFactory
  * CLI runtime (ADR 0010, `KIVRA_SELFDEV_RUNTIME=cli`): the DEVELOPING step takes its change set from a coding attempt instead of the
  * model ([CodingPatchSource]). A pending attempt waits ([WaitReason.AWAITING_CODING_AGENT]). A ready one goes through the same PatchPolicy
  * (here with the base snapshot), PATCH_READY and the commit path. The "not stored" limit above is the API path's; a CLI resume reads the
- * stored result. The CLI path is not wired in production yet (SelfDevSettings refuses it).
+ * stored result. Before it reads the attempt, it marks overdue attempts EXPIRED or ORPHANED ([CodingPatchSource.settleExpired]); the Run then
+ * moves to UNKNOWN in this same advance, under its lease. The CLI path is enabled only with the agent API (`KIVRA_AGENT_API_ENABLED=true`,
+ * see SelfDevSettings).
  *
  * Logging and results: the only log line is the WARN for a rejected patch, with its fixed reason names and a count. Results and reason
  * codes never contain task text, model output, patch content, tokens or paths. Errors from the store and the lease are mapped to
@@ -224,6 +226,7 @@ class SelfDevRunner(
      */
     private suspend fun proposeFromAgent(lease: Lease, run: DevelopmentRun, base: BranchInfo): Step<PatchSet> {
         val source = checkNotNull(coding) { "the CLI runtime has no coding patch source" }
+        source.settleExpired()
         val entries = when (val r = repoReader.listFiles(config.repo, base.headSha)) {
             is GitHubResult.Success -> r.value
             else -> return Step.Done(Failed(FailureCode.GITHUB_READ_FAILED))

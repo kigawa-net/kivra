@@ -447,3 +447,97 @@ claude -p <固定 prompt> --output-format stream-json --verbose --permission-mod
 - `result` の `subtype` が成功のとき `success` であること。`api_retry` の `error` の分類名(`authentication_failed` など)の全部。
 - `stream-json` の `usage` の全フィールド。Write のツール入力が stdout に入るため、1 MiB の出力上限が小さすぎないか(ADR 0010 の出力量の上限は未決)。
 - `.kivra/` の書き込み権限(uid 10001)と、task ファイルを PR 8 の差分から外す処理。
+
+### 6.8 作業ディレクトリと差分(PatchSet)の生成(PR 8)
+
+コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/workdir/`(`WorkDirPreparer.kt`、`PublicGitMirror.kt`、`TarReader.kt`、`DiffCollector.kt`、`ChangeRules.kt`、`WorkDirTypes.kt`)。試験は一時ディレクトリのローカル git リポジトリと、テストで組み立てた tar で行う。実 GitHub、実 docker、ネットワークは使わない。結果を kivra へ送るのは PR 9。
+
+**作業ディレクトリの作り方(`WorkDirPreparer.prepare`)**
+1. 基底コミットは、ホスト側の bare mirror(`PublicGitMirror`)から取る。取得元は公開 GitHub の https だけ(`RepoSource.PublicGithub`、URL は検証済みの owner と repo から組み立てる)。資格情報、トークン、credential helper は使わない。git は空の環境変数で動き、グローバル・システムの設定を読まない(`GIT_CONFIG_GLOBAL=/dev/null`、`GIT_CONFIG_NOSYSTEM=1`、`GIT_TERMINAL_PROMPT=0`)。`protocol.allow=never` の後に https だけ許可する。
+2. `git archive --format=tar <base commit>` の出力を、ホストが 1 エントリずつ読む(`TarReader`)。受け付けるのは ustar と pax の拡張ヘッダー(`x`、`g`)だけ。checksum を検査する。
+3. `<WorkRoot>/<runId>-<attemptId>` を作る。同じ名前が既にあれば拒否する(再利用しない)。展開先は host 側でだけ書き、git は作業ディレクトリに対して実行しない。
+4. `.kivra/task.json` を `TaskFile.write` で書く(契約は §6.7)。
+5. 基底マニフェスト `<WorkRoot>/<runId>-<attemptId>.base` を書く(マウントされない場所。モード 0600)。各基底ファイルの SHA-256、サイズ、実行ビットを 1 行ずつ持つ。差分はこれと比べる。
+6. どこかで失敗したら、作業ディレクトリとマニフェストを削除してから例外を投げる。
+- **ロック**: 呼び出し側が `WorkDirLock`(WorkRoot 上)を保持していること。`Main` は起動中ずっと保持しているため、準備と収集の中では取り直さない(取り直すと `AlreadyRunningException`)。
+- **WorkRoot**: グループとその他に権限が無いこと(モード 0700 相当)。違えば `WORKROOT_INVALID` で拒否する。`WorkDirPolicy.validate` で、作業ディレクトリが WorkRoot の直下の実ディレクトリであることを確かめる。
+
+**所有権と権限(未確認。実機のルートレス docker で確かめる)**
+- コンテナは uid 10001 で動く。ルートレス docker では、コンテナの uid 10001 はホストの `kivra-agent`(uid 1001)ではなく、そのサブ uid(`/etc/subuid` の範囲の中。既定の割り当てなら 110000 付近)に写る。ホストの `kivra-agent` はそのサブ uid へ chown できない。
+- 採った方式: 作業ディレクトリと、その中のディレクトリ(`.kivra/` を含む)は 0777。展開したファイルは 0666(実行ビットがあるものは 0777)。ファイルの所有者はホストの uid なので、コンテナからは「その他」として見える。そこで「その他」の書き込みを許す。外からの到達は WorkRoot の 0700 で防ぐ。
+- 未確認 (a): `/etc/subuid` の実際の範囲と、コンテナ内の 10001 がどの uid に写るか。`verify/run-all.sh` の隔離検査で、作業ディレクトリに uid 10001 が書けることを確かめる。
+- 未確認 (b): コンテナの umask で作られたサブディレクトリ(既定 0755、所有者はサブ uid)の中身は、ホストから削除できない可能性がある。`RunDirCleanup.delete` は、消せなかったものがあれば `false` を返す。その場合は手で消す必要がある。
+- 代替案として、root で chown するヘルパーを 1 回走らせる方法があるが、コンテナを root で動かすことになり隔離の不変条件に反するので採らない。
+
+**展開の上限(`ExtractLimits`。既定値)**
+
+| 項目 | 既定値 | 超えたときの理由コード |
+| --- | --- | --- |
+| エントリ数 | 20,000 | `ARCHIVE_TOO_MANY_ENTRIES` |
+| 1 ファイル | 10 MiB | `ARCHIVE_FILE_TOO_LARGE` |
+| 合計(展開後) | 256 MiB | `ARCHIVE_TOO_LARGE` |
+| パス長 | 4096 文字 | `ARCHIVE_PATH` |
+
+これは基底の展開を守るための上限であり、PatchPolicy の上限ではない(変更は `DiffLimits` で別に検査する)。
+
+**archive の拒否規則**
+
+| 項目 | 理由コード |
+| --- | --- |
+| symlink(型 `2`)、hardlink(`1`)、デバイス、FIFO、GNU 長名(`L`/`K`)、その他の型 | `ARCHIVE_ENTRY_TYPE` |
+| 絶対パス、`..`、`.`、空の区切り、`\`、制御文字、U+FFFD | `ARCHIVE_PATH` |
+| トップレベルが `.kivra` | `ARCHIVE_RESERVED_PATH` |
+| 同じパス、または大文字小文字と NFC だけ違う重複 | `ARCHIVE_DUPLICATE` |
+| 親がファイル | `ARCHIVE_PATH` |
+| checksum 不一致、base-256 の数値、pax の不正 | `ARCHIVE_INVALID` |
+| データの途中で終わる | `ARCHIVE_TRUNCATED` |
+| git が失敗した(存在しないコミットを含む) | `GIT_FAILED` |
+
+git が失敗したときは、ストリームの終わりを `GIT_FAILED` として報告する(短い archive と区別する)。
+
+**差分の生成(`DiffCollector.collect`)**
+- 基底マニフェストと作業ディレクトリを比べる。git は使わない。作業ディレクトリは `Files.walkFileTree` で、symlink をたどらずに歩く。
+- `.kivra/` はトップレベルだけ除外する。その中には入らず、読まない(`.kivra` が symlink でもたどらない)。
+- 変更の対象は、内容の sha256 かサイズが基底と違うファイルと、新規ファイル。基底にあって見えなくなったファイルは削除(`DELETE`)。
+- 拒否は全体(fail-closed)。理由コードの一覧だけを返す。パス、ファイル名、内容、秘密らしい文字列は、結果にも例外にも `toString` にも出さない。
+- 結果は `AgentResult`(`summary`、`changes`、`exitStatus`、`sessionId`)。kivra の `CodingResult` と同じ項目で、PR 9 でそのまま対応づける。
+
+**差分の規則(`DiffRejectReason`)**
+
+| 規則 | 理由コード |
+| --- | --- |
+| symlink(新規、または基底の置き換え) | `SYMLINK` |
+| hardlink(リンク数が 2 以上) | `HARDLINK` |
+| symlink・hardlink・デバイス・FIFO・ソケット以外の特殊ファイル | `SPECIAL_FILE` |
+| 実行ビットが基底と違う(新規の実行ファイルを含む) | `EXECUTABLE_BIT` |
+| NUL を含む | `BINARY_FILE` |
+| UTF-8 として不正 | `INVALID_UTF8` |
+| 1 行が 10,000 文字を超える | `LINE_TOO_LONG` |
+| 秘密らしい文字列(PatchPolicy と同じ形) | `SECRET_LIKE_CONTENT` |
+| 1 ファイルが 200 KiB を超える、または読めない大きさ | `FILE_TOO_LARGE` |
+| 書き込みの合計が 1 MiB を超える | `TOTAL_TOO_LARGE` |
+| 変更数(削除を含む)が 20 を超える | `TOO_MANY_CHANGES` |
+| 削除数が 5 を超える | `TOO_MANY_DELETES` |
+| 変更がない | `EMPTY_PATCH` |
+| 走査のエントリ数が 20,000 を超える | `TOO_MANY_ENTRIES` |
+| パスの形: 空、200 文字超、U+FFFD、制御文字、`\`、`:`、先頭 `/`、末尾 `/`、空の区切り、`.`/`..`、`~` で始まる区切り、NFC でない | `PATH_EMPTY` `PATH_TOO_LONG` `PATH_NOT_UTF8` `PATH_CONTROL_CHARACTER` `PATH_BACKSLASH` `PATH_COLON` `PATH_ABSOLUTE` `PATH_TRAILING_SLASH` `PATH_EMPTY_SEGMENT` `PATH_DOT_SEGMENT` `PATH_TILDE` `PATH_NOT_NFC` |
+| 拒否パス(PatchPolicy の denylist。`.github/`、`gradle/`、`**/Dockerfile*`、`**/.git*`、`**/.env*`、`docs/adr/`、`kivra-policy/` など) | `PATH_DENIED` |
+| 許可パス以外(allowlist は `kivra-*/src/**`、`docs/**`、`README.md`) | `PATH_NOT_ALLOWED` |
+| 大文字小文字だけ違う変更の衝突 | `CASE_COLLISION` |
+| 要約が空、4,000 文字超、秘密らしい、UTF-8 として不正 | `SUMMARY_EMPTY` `SUMMARY_TOO_LONG` `SECRET_LIKE_CONTENT` `INVALID_UTF8` |
+| CLI の終了コードが 0 以外 | `CLI_EXIT_NONZERO` |
+| session id が形式に合わない | `RESULT_FIELD_INVALID` |
+| マニフェストが壊れている | `MANIFEST_INVALID` |
+| 作業ディレクトリが WorkRoot の直下でない | `RUN_DIR_INVALID` |
+| 読めない、走査に失敗した | `READ_FAILED` `WALK_FAILED` |
+
+**上限と規則の出どころ**: 上の数値と規則は kivra-core の `PatchPolicyDefaults` / `PatchPolicyConfig` の既定値と同じ。kivra-agent は kivra-core に依存しないため、`ChangeRules` にコピーしている。どちらかを変えたら、もう一方も手で変える(`ChangeRules` は kivra-core の `PatchSupport` の `pathShapeReason`、`globToRegex`、`longestLineChars` と同じ式)。エージェントは、サーバーの PatchPolicy より厳しい側に倒す。NFC の要求と、基底の大文字小文字の衝突の拒否は、サーバーにはない追加の規則。
+
+**未解決(PR 8 の範囲外、または PR 9 で決める)**
+- ADR 0010 の未決の上限値と食い違い: `PatchPolicyConfig.maxFiles = 20` と `DeveloperConstraints.maxFiles = 10`。この PR は 20(PatchPolicy 側)を採った。
+- `EMPTY_PATCH`: 変更なしの結果を拒否する。CLI が「直す必要がなかった」と答えた場合の扱いは PR 9 で決める。
+- `git archive` は `.gitattributes` の `export-ignore` と `export-subst` を反映する。基底と差分は同じ展開物から作るので整合するが、`export-ignore` のファイルは作業ディレクトリに無い。
+- 公開リポジトリだけを想定している。private リポジトリは資格情報を使わない方針のため取得できない。
+- 収集は、CLI コンテナが停止した後に行う前提。停止前に収集すると、書き込み中のファイルを読むことになる(PR 9 で順序を守る)。
+- 展開と収集の時間、大きなリポジトリでの上限の妥当性は未計測。
+- §6.7 の未確認の「`.kivra/` の書き込み権限と、task ファイルの差分からの除外」は、この PR で規則を決めた(上の所有権の節と差分の節)。実機での確認は残る。

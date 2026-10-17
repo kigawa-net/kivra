@@ -73,9 +73,8 @@ class DbCodingRunPort(
  * Where an accepted change set is kept until the runner commits it. Keyed by (attempt, digest): a result that was refused, or a stale
  * one, can leave a row under another digest, and [load] never returns it for the row that was accepted.
  *
- * No production implementation exists yet (ADR 0010 / design section 2.6). V14 has no table for the change set (only `result_digest`),
- * so the decision of where to keep it is open. Until it is made, the self-development runner refuses the CLI runtime at startup
- * (see SelfDevSettings), and nothing calls [save] in production.
+ * The MariaDB / H2 implementation is `DbCodingResultStore` (V15 `coding_results`). Its wiring into the runtime is PR 4a, so until
+ * then the self-development runner still refuses the CLI runtime at startup (see SelfDevSettings) and nothing calls [save] in production.
  */
 interface CodingResultStore {
     /** Stores [patch] for ([attemptId], [digest]). Repeating the same pair is allowed. Throws when the write fails. */

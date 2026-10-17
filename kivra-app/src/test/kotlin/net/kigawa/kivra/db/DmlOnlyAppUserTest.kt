@@ -9,6 +9,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import net.kigawa.kivra.config.DatabaseConfig
 import net.kigawa.kivra.core.ProviderCapability
@@ -114,5 +115,16 @@ class DmlOnlyAppUserTest {
         val usage = store.usage("tenant-dml")
         assertEquals(0, BigDecimal("400").compareTo(usage.committed))
         assertEquals(0, usage.reserved.signum())
+
+        // Coding result body (V15): INSERT and SELECT on coding_results, plus the attempt row it references.
+        val enqueued = CodingAttemptRepository(database, clock).enqueue(run.runId.value, "a".repeat(40), Duration.ofHours(1))
+        val attempt = assertIs<EnqueueResult.Enqueued>(enqueued).attempt
+        val patch = net.kigawa.kivra.core.patch.PatchSet(
+            files = listOf(net.kigawa.kivra.core.patch.Write("docs/dml.md", "dml")),
+            summary = "dml result",
+        )
+        val digest = "d".repeat(64)
+        DbCodingResultStore(database, clock).save(attempt.attemptId, digest, patch)
+        assertEquals(patch, DbCodingResultStore(database, clock).load(attempt.attemptId, digest))
     }
 }

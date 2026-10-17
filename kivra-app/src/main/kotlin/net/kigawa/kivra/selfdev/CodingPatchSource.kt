@@ -23,6 +23,12 @@ sealed interface CodingProposal {
 /** Supplies change sets for the CLI runtime. The runner depends on this port, not on the coding service. */
 fun interface CodingPatchSource {
     fun proposal(run: DevelopmentRun, baseSha: String): CodingProposal
+
+    /**
+     * Marks attempts whose queue or lease ran out as EXPIRED or ORPHANED (ADR 0010, design 15 section 6.7). The runner calls it before it
+     * reads the attempt, so the Run moves to UNKNOWN in its own (lease-holding) advance instead of waiting forever.
+     */
+    fun settleExpired() {}
 }
 
 /**
@@ -34,6 +40,10 @@ fun interface CodingPatchSource {
  * A PATCH_READY Run (the resume after a crash) never goes back to queueing: it only reads the stored result, and any failure is UNKNOWN.
  */
 class CodingAttemptPatchSource(private val service: CodingRuntimeService) : CodingPatchSource {
+
+    override fun settleExpired() {
+        service.expireOverdue()
+    }
 
     override fun proposal(run: DevelopmentRun, baseSha: String): CodingProposal {
         val resuming = run.state == DevelopmentRunState.PATCH_READY

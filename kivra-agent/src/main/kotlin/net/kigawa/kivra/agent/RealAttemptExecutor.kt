@@ -53,7 +53,7 @@ class RealExecutorSettings(
 }
 
 /**
- * The real attempt executor (ADR 0010, runbook 6.5 and 6.9). For one claimed attempt it:
+ * The real attempt executor (ADR 0010, runbook 6.5 and 6.10). For one claimed attempt it:
  *
  * 1. reads the public base commit into a host-side mirror and extracts it into a new work directory ([WorkDirPreparer]);
  * 2. runs the CLI in one container ([DockerRunner]). The container is stopped on the time limit, on a cancel request from kivra

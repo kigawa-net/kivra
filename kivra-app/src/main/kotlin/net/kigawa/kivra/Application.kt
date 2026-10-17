@@ -43,6 +43,7 @@ import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.configureSelfDevRoutes
+import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
 import net.kigawa.kivra.selfdev.SelfDevSettings
 import net.kigawa.kivra.selfdev.buildSelfDev
@@ -72,26 +73,30 @@ internal fun Application.appModule(env: Map<String, String>) {
     )
     val budgetConfig = BudgetConfig.from(environment.config)
     val budgetStore = DbBudgetStore(database, budgetConfig.tenantId, budgetConfig.tenantLimit())
+    // Built only when the agent API is enabled. Nothing about the coding runtime is created otherwise. It is shared by the agent API
+    // routes and, with KIVRA_SELFDEV_RUNTIME=cli, by the self-development runner (ADR 0010).
+    val codingService = agentApiSettings.auth?.let {
+        CodingRuntimeService(
+            attempts = CodingAttemptRepository(database, audit = audit),
+            runs = DbCodingRunPort(runs, SqlLeaseStore(database)),
+            results = DbCodingResultStore(database),
+            tasks = CodingTaskSource { run -> run.taskTitle },
+        )
+    }
     // Built only when self-development is enabled: this is where the GitHub and model clients and their secrets come into play.
     val selfDevParts = if (selfDevSettings.enabled) {
         buildSelfDev(
             selfDevSettings, env, database, runs, budgetStore, budgetConfig.tenantId,
             requireNotNull(taskApiIdentity) { "self-development requires KIVRA_AUTH_MODE=oidc-jwt" },
             deferredPrMerge,
+            coding = codingService?.let { CodingAttemptPatchSource(it) },
         )
     } else {
         null
     }
     selfDevParts?.worker?.start(this)
-    // Built only when the agent API is enabled. Nothing about the coding runtime is created otherwise.
     val agentParts = agentApiSettings.auth?.let { auth ->
-        val service = CodingRuntimeService(
-            attempts = CodingAttemptRepository(database, audit = audit),
-            runs = DbCodingRunPort(runs, SqlLeaseStore(database)),
-            results = DbCodingResultStore(database),
-            tasks = CodingTaskSource { run -> run.taskTitle },
-        )
-        AgentApiDeps(service, AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)))
+        AgentApiDeps(checkNotNull(codingService), AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)))
     }
 
     install(ContentNegotiation) { json() }

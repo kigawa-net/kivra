@@ -47,7 +47,7 @@ class AgentConfig private constructor(
 
     override fun toString(): String = "AgentConfig(***)"
 
-    /** The executor of an attempt. REAL is enabled only by `KIVRA_AGENT_EXECUTOR=real` (see the runbook, section 6.9). */
+    /** The executor of an attempt. REAL is enabled only by `KIVRA_AGENT_EXECUTOR=real` (see the runbook, section 6.10). */
     enum class ExecutorMode { STUB, REAL }
 
     companion object {

@@ -14,7 +14,7 @@ import net.kigawa.kivra.db.ExpireResult
 import org.slf4j.LoggerFactory
 
 /** What one pass of [CodingReconcileWorker] did. Counts only. */
-data class CodingWorkerPass(val queuedExpired: Int, val orphaned: Int, val resultsPurged: Int)
+data class CodingWorkerPass(val queuedExpired: Int, val orphaned: Int, val resultsPurged: Int, val monitorEventsPurged: Int = 0)
 
 /**
  * The periodic work of the coding runtime (ADR 0010 addendum 6, Issue #231). Started only when the agent API is on. One [tick] does two
@@ -25,6 +25,8 @@ data class CodingWorkerPass(val queuedExpired: Int, val orphaned: Int, val resul
  *    lease, on its next advance. So a Run is never moved here, and the worker needs no lease.
  * 2. Deletes the stored change sets older than [retention] that nothing can read any more, at most [purgeLimit] rows per tick
  *    ([CodingResultPurge]). The attempt and usage rows stay.
+ * 3. Deletes the run-execution monitor events of attempts that ended more than [monitorRetention] ago (ADR 0012 section 3), at most
+ *    [monitorPurgeAttempts] attempts per tick ([CodingMonitorPurge]). Active attempts keep their events.
  *
  * Running more than one instance is safe: each attempt moves once (the CAS in the repository), and each reserve is booked once under
  * its key `coding:<attemptId>:<generation>`, so a second pass books nothing new.
@@ -38,22 +40,28 @@ class CodingReconcileWorker(
     private val retention: Duration,
     private val clock: Clock = Clock.systemUTC(),
     private val purgeLimit: Int = DEFAULT_PURGE_LIMIT,
+    private val monitorPurge: CodingMonitorPurge = CodingMonitorPurge { _, _ -> 0 },
+    private val monitorRetention: Duration = Duration.ofDays(DEFAULT_MONITOR_RETENTION_DAYS),
+    private val monitorPurgeAttempts: Int = DEFAULT_MONITOR_PURGE_ATTEMPTS,
 ) {
     init {
         require(!interval.isNegative && !interval.isZero) { "interval must be positive" }
         require(!retention.isNegative && !retention.isZero) { "retention must be positive" }
         require(purgeLimit > 0) { "purgeLimit must be positive" }
+        require(!monitorRetention.isNegative && !monitorRetention.isZero) { "monitorRetention must be positive" }
+        require(monitorPurgeAttempts > 0) { "monitorPurgeAttempts must be positive" }
     }
 
     /** One pass. Never throws (except cancellation): a failing step is logged with a fixed code and the other step still runs. */
     fun tick(): CodingWorkerPass {
         val settled = settle()
         val purged = purgeOld()
-        val pass = CodingWorkerPass(settled.expiredQueued.size, settled.orphaned.size, purged)
-        if (pass.queuedExpired + pass.orphaned + pass.resultsPurged > 0) {
+        val monitorPurged = purgeMonitor()
+        val pass = CodingWorkerPass(settled.expiredQueued.size, settled.orphaned.size, purged, monitorPurged)
+        if (pass.queuedExpired + pass.orphaned + pass.resultsPurged + pass.monitorEventsPurged > 0) {
             logger.info(
-                "coding reconcile pass: queuedExpired={} orphaned={} resultsPurged={}",
-                pass.queuedExpired, pass.orphaned, pass.resultsPurged,
+                "coding reconcile pass: queuedExpired={} orphaned={} resultsPurged={} monitorEventsPurged={}",
+                pass.queuedExpired, pass.orphaned, pass.resultsPurged, pass.monitorEventsPurged,
             )
         }
         return pass
@@ -77,7 +85,18 @@ class CodingReconcileWorker(
         0
     }
 
+    private fun purgeMonitor(): Int = try {
+        monitorPurge.purgeBefore(monitorCutoff(), monitorPurgeAttempts)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        logger.warn("coding reconcile failed: step=MONITOR_PURGE exception={}", e.javaClass.simpleName)
+        0
+    }
+
     private fun cutoff(): LocalDateTime = LocalDateTime.ofInstant(clock.instant().minus(retention), ZoneOffset.UTC)
+
+    private fun monitorCutoff(): LocalDateTime = LocalDateTime.ofInstant(clock.instant().minus(monitorRetention), ZoneOffset.UTC)
 
     /** Starts the loop in [scope]: a pass, then one every [interval]. It stops when the scope is cancelled (application stop). */
     fun start(scope: CoroutineScope): Job = scope.launch {
@@ -93,5 +112,9 @@ class CodingReconcileWorker(
 
         /** Rows one pass may delete. A backlog is cleared over several passes, so one pass stays short. */
         const val DEFAULT_PURGE_LIMIT = 200
+
+        /** Attempts whose monitor events one pass may delete (ADR 0012 section 3). */
+        const val DEFAULT_MONITOR_PURGE_ATTEMPTS = 200
+        const val DEFAULT_MONITOR_RETENTION_DAYS = 30L
     }
 }

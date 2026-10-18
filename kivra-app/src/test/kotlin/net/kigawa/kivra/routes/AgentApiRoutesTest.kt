@@ -50,6 +50,7 @@ import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.db.CodingAttempt
 import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingAttemptState
+import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.DbCodingResultStore
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.db.execQuery
@@ -109,7 +110,7 @@ class AgentApiRoutesTest {
         application {
             install(ContentNegotiation) { json() }
             routing {
-                configureAgentApiRoutes(AgentApiDeps(env.service, env.agents))
+                configureAgentApiRoutes(AgentApiDeps(env.service, env.agents, CodingMonitorEventRepository(env.db.database)))
                 configureTaskApiRoutes(env.db.runs, env.operators)
                 configureSelfDevRoutes(SelfDevRouteDeps(env.db.runs, env.operators, RepoRef("kigawa-net", "kivra"), 1, FakeGitHub()))
                 configureSelfDevAdminRoutes(env.db.runs, env.operators)

@@ -16,6 +16,7 @@ import net.kigawa.kivra.coding.buildCodingCostLedger
 import net.kigawa.kivra.coding.CodingTaskSource
 import net.kigawa.kivra.coding.DbCodingRunPort
 import net.kigawa.kivra.db.CodingAttemptRepository
+import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.DbCodingResultStore
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.config.BudgetConfig
@@ -104,6 +105,8 @@ internal fun Application.appModule(env: Map<String, String>) {
             ),
         )
     }
+    // The run-execution monitor's event log (ADR 0012). Built only with the agent API, like the coding runtime.
+    val codingMonitor = codingService?.let { CodingMonitorEventRepository(database) }
     // Built only when self-development is enabled: this is where the GitHub and model clients and their secrets come into play.
     val selfDevParts = if (selfDevSettings.enabled) {
         buildSelfDev(
@@ -154,10 +157,18 @@ internal fun Application.appModule(env: Map<String, String>) {
     }
     // The coding reconcile and the retention of stored change sets (ADR 0010 addendum 6). Only when the agent API is on.
     codingService?.let {
-        CodingReconcileWorker(it, codingResults, agentApiSettings.reconcileInterval, agentApiSettings.resultRetention).start(this)
+        CodingReconcileWorker(
+            it, codingResults, agentApiSettings.reconcileInterval, agentApiSettings.resultRetention,
+            monitorPurge = checkNotNull(codingMonitor),
+            monitorRetention = agentApiSettings.monitorRetention,
+        ).start(this)
     }
     val agentParts = agentApiSettings.auth?.let { auth ->
-        AgentApiDeps(checkNotNull(codingService), AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)))
+        AgentApiDeps(
+            checkNotNull(codingService),
+            AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)),
+            checkNotNull(codingMonitor),
+        )
     }
 
     install(ContentNegotiation) { json() }

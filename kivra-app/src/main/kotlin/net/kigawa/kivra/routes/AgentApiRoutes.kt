@@ -17,6 +17,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.io.readByteArray
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.coroutines.CancellationException
 import net.kigawa.kivra.auth.AgentAuth
 import net.kigawa.kivra.auth.AgentIdentity
 import net.kigawa.kivra.coding.AgentAttemptStatus
@@ -27,10 +28,14 @@ import net.kigawa.kivra.coding.CodingErrorCode
 import net.kigawa.kivra.coding.CodingInput
 import net.kigawa.kivra.coding.CodingResult
 import net.kigawa.kivra.coding.CodingRuntimeService
+import net.kigawa.kivra.coding.MonitorBatch
+import net.kigawa.kivra.coding.MonitorRateLimiter
 import net.kigawa.kivra.coding.CodingSubmitOutcome
 import net.kigawa.kivra.coding.ProgressPhase
 import net.kigawa.kivra.db.CodingAttemptResult
+import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.CodingRefusal
+import net.kigawa.kivra.db.MonitorAppendResult
 
 /**
  * The agent API (`/api/agent/v1`, PR 4a, ADR 0010 addendum). Registered only when `KIVRA_AGENT_API_ENABLED=true` (see
@@ -50,6 +55,9 @@ import net.kigawa.kivra.db.CodingRefusal
 internal class AgentApiDeps(
     val coding: CodingRuntimeService,
     val identity: AgentIdentity,
+    /** The run-execution monitor's event log (ADR 0012). Best effort: it never changes an attempt or a heartbeat. */
+    val monitor: CodingMonitorEventRepository,
+    val monitorLimiter: MonitorRateLimiter = MonitorRateLimiter(),
 )
 
 @Serializable
@@ -111,6 +119,14 @@ data class AgentLimitsResponse(
     val maxDeletes: Int,
 )
 
+/** The monitor's answer: the last seq stored for the generation, and whether the attempt has reached its cap. */
+@Serializable
+data class AgentMonitorAcceptedResponse(val attemptId: String, val lastAcceptedSeq: Int, val truncated: Boolean)
+
+/** A refused batch: the fixed reason (SEQ_GAP or SEQ_CONFLICT) and the seq the agent must continue after. */
+@Serializable
+data class AgentMonitorSeqConflict(val error: String, val reason: String, val lastAcceptedSeq: Int)
+
 @Serializable
 data class AgentAttemptStateResponse(val attemptId: String, val state: String)
 
@@ -119,6 +135,7 @@ data class AgentStatusResponse(val attemptId: String, val state: String, val can
 
 private const val MAX_RESULT_BODY_BYTES = 2L * 1024 * 1024
 private const val MAX_SMALL_BODY_BYTES = 16L * 1024
+private const val MAX_MONITOR_BODY_BYTES = 8L * 1024
 private val ATTEMPT_ID_SHAPE = Regex("[0-9A-Z]{26}")
 private val agentJson = Json { ignoreUnknownKeys = false }
 
@@ -192,6 +209,40 @@ internal fun Route.configureAgentApiRoutes(deps: AgentApiDeps) {
             )
             is CodingSubmitOutcome.Refused -> call.respondRefused(outcome.reason)
             CodingSubmitOutcome.StoreFailed -> call.respond(HttpStatusCode.ServiceUnavailable, AgentError("unavailable"))
+        }
+    }
+
+    post("/api/agent/v1/attempts/{attemptId}/events") {
+        val agentId = deps.authenticate(call) ?: return@post
+        val attemptId = call.attemptIdOrNotFound() ?: return@post
+        if (!call.refuseBrowserRequest()) return@post
+        if (!deps.monitorLimiter.allow(attemptId)) {
+            call.response.headers.append(HttpHeaders.RetryAfter, "1")
+            return@post call.respond(HttpStatusCode.TooManyRequests, AgentError("rate limited"))
+        }
+        if (!call.requireJsonBody()) return@post
+        val body = call.readBody(MAX_MONITOR_BODY_BYTES) ?: return@post
+        // The whole batch is refused on any unknown field, free string, wrong type or value outside its fixed list. Nothing is stored then.
+        val batch = MonitorBatch.parseOrNull(body) ?: return@post call.respondInvalidBody()
+        val outcome = try {
+            deps.monitor.append(attemptId, agentId, batch.generation, batch.events)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // The exception is not logged: its message could carry the request.
+            return@post call.respond(HttpStatusCode.ServiceUnavailable, AgentError("unavailable"))
+        }
+        when (outcome) {
+            is MonitorAppendResult.Accepted -> call.respond(AgentMonitorAcceptedResponse(attemptId, outcome.lastAcceptedSeq, outcome.truncated))
+            is MonitorAppendResult.Refused -> call.respondRefused(outcome.reason)
+            is MonitorAppendResult.Gap -> call.respond(
+                HttpStatusCode.Conflict,
+                AgentMonitorSeqConflict("conflict", "SEQ_GAP", outcome.lastAcceptedSeq),
+            )
+            is MonitorAppendResult.Conflict -> call.respond(
+                HttpStatusCode.Conflict,
+                AgentMonitorSeqConflict("conflict", "SEQ_CONFLICT", outcome.lastAcceptedSeq),
+            )
         }
     }
 

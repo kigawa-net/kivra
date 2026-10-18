@@ -93,3 +93,12 @@ fun interface CodingResultPurge {
      */
     fun purgeBefore(before: LocalDateTime, limit: Int): Int
 }
+
+/** Deletes the run-execution monitor events that the retention allows to go (ADR 0012 section 3). The attempt rows stay. */
+fun interface CodingMonitorPurge {
+    /**
+     * Deletes the events of at most [maxAttempts] attempts that are not active, whose Run is terminal, and whose last change is before
+     * [before]. Returns the number of event rows deleted.
+     */
+    fun purgeBefore(before: LocalDateTime, maxAttempts: Int): Int
+}

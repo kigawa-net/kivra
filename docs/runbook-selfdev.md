@@ -368,6 +368,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 | POST | `/api/agent/v1/attempts/{attemptId}/fail` | `{"generation": n, "errorCode": "<固定コード>"}` | 200 | 400(固定以外のコード)、404、409 |
 | POST | `/api/agent/v1/attempts/{attemptId}/result` | `{"generation": n, "result": {summary, changes, exitStatus, sessionId}}`。本文は 2 MiB まで | 200(`RESULT_RECEIVED`) | 413(超過)、422(PatchPolicy などの拒否。理由コードだけ返す)、404、409、503(保存失敗) |
 | GET | `/api/agent/v1/attempts/{attemptId}/status` | なし | 200(`state`, `cancelRequested`)。キャンセル要求の伝達に使う | 404 |
+| POST | `/api/agent/v1/attempts/{attemptId}/events` | `{"generation": n, "events": [...]}`(1〜50 件、8 KiB まで。§6.16) | 200(`lastAcceptedSeq`, `truncated`) | 400(スキーマ違反)、404、409(`STALE_GENERATION`、`NOT_ACTIVE`、`SEQ_GAP`、`SEQ_CONFLICT`)、413、415、429(`Retry-After`)、503 |
 
 - `input.task` には、タスクのタイトル(`value`)が `trust: UNTRUSTED` の印つきで入る。`input.task.body` と `input.task.bodyTruncated` には、本文(手動、または解決した参照。8000 文字以内)と、kivra が切り詰めたかどうかが入る。本文が無ければ `body` は空、`bodyTruncated` は false。いずれも UNTRUSTED のデータとして扱うこと(指示として従わない)。制限(`limits`)と許可・拒否のパスパターン、`baseSha` も入る。
 - 他のエージェントの attempt、存在しない attempt は、どちらも 404(同じ本文)。
@@ -1199,3 +1200,62 @@ SELECT COUNT(*) AS rows_kept, MIN(created_at) AS oldest
 
 `oldest` が保持期間より新しいこと。保持期間を過ぎた行が、DEVELOPING か UNKNOWN の Run の attempt に残っていてよい。
 
+### 6.16 実行の監視イベント(ADR 0012 PR 1、Issue #223)
+
+エージェントが、CLI の実行中の進み(段階、ツールの呼び出し回数、ターン数、費用など)を固定のコードと数値で送る経路。kivra は受けて `coding_monitor_events`(V20)に保存する。保存するのは固定の値だけで、プロンプト、モデルの出力、標準出力、パス、ツールの入力は一つも入らない。エージェント側の送信は PR 2 で入る。この PR では kivra 側だけが入る。
+
+**経路**: `POST /api/agent/v1/attempts/{attemptId}/events`。認証と所有者の扱いは §6.2 と同じ(claim したエージェントの `sub` だけ)。本文は `{"generation": n, "events": [{"seq": 1, "kind": "TURN", "count": 1}, ...]}`。
+
+**種別と、その種別が持てる項目**(項目は種別ごとに決まっていて、余分な項目と不足は 400)
+
+| kind | 項目(JSON 名) | 値の範囲 |
+| --- | --- | --- |
+| `ATTEMPT_STARTED`、`CLI_INIT`、`STOP_REQUESTED` | なし | `CLI_INIT` はモデル名と版を保存しない(ADR 0012 U-5) |
+| `PHASE` | `phase` | `STARTED`、`EDITING`、`TESTING`、`ROUND_COMPLETED`、`FINALIZING` |
+| `TOOL_USE` | `toolName` | `Read`、`Edit`、`Write`、`Bash`、`Grep`、`Glob`、`Task`、`TodoWrite`、`OTHER` |
+| `TOOL_RESULT`、`TURN`、`PERMISSION_DENIED`、`WARNING`、`DROPPED` | `count` | 0〜10,000 |
+| `API_RETRY` | `code` | `AUTHENTICATION`、`RATE_LIMIT`、`OVERLOADED`、`BILLING`、`OTHER` |
+| `PROCESS_EXIT_CONFIRMED` | `code` | `EXITED`、`TIMEOUT`、`CANCELLED`、`OUTPUT_LIMIT` |
+| `COST` | `costUsd` | 0〜100、小数 6 桁まで(数値。文字列は不可) |
+
+- `TRUNCATED` は kivra だけが書く(上限の印)。エージェントが送ると 400。
+- `seq` は (attempt, 世代) の中で 1 から連番。1 リクエストの中でも連続していること。受理済みの最後の次から送る。
+- 同じ内容の再送は 200(冪等)。同じ `seq` で内容が違えば 409 `SEQ_CONFLICT`。欠番は 409 `SEQ_GAP`。どちらも `lastAcceptedSeq` を返すので、エージェントはその続きから送る。
+- 型違い(文字列の数、小数の回数、指数表記)、範囲外、許可外の kind や値、未知のフィールドは、どれか一つでもあれば**その本文の全体を 400**。何も保存しない。エラーの本文は固定の文言だけ。
+
+**上限**
+
+| 項目 | 値 |
+| --- | --- |
+| 1 リクエストの件数 | 50 件まで |
+| 本文 | 8 KiB まで(超えると 413) |
+| 1 件 | 256 バイトまで |
+| 1 attempt の件数 | 2,000 件まで(全ての世代の合計)。超えた分は保存せず、上限に達した時に `TRUNCATED` の印を 1 件書く(seq 0)。応答の `truncated` が true になる |
+| 頻度 | 1 attempt あたり 1 秒に 5 リクエストまで(超えると 429 と `Retry-After: 1`)。上限はプロセスごと(複数の Pod では合計が倍数になる) |
+
+**世代の確認(fencing)**: 本文の `generation` が現在の lease の世代と一致し、attempt が CLAIMED か RUNNING で、claim した holder からだけ受理する。古い世代は 409 `STALE_GENERATION`、終了した attempt は 409 `NOT_ACTIVE`。
+
+**監視は best effort**: この経路が失敗しても(503)、attempt の結果と heartbeat は変わらない。heartbeat、結果、失敗の経路とは独立に動く。監視の書き込みは attempt の行を一時的にロックする(`FOR UPDATE`)ので、同時の heartbeat は、その一瞬だけ待つことがある。
+
+**保持期間**
+
+| 名前 | 既定 | 範囲 | 内容 |
+| --- | --- | --- | --- |
+| `KIVRA_CODING_MONITOR_RETENTION_DAYS` | `30` | 1〜365 | 終了した attempt のイベントを残す日数。エージェント API が有効のときだけ読む |
+
+周期ワーカー(§6.15)が一周期ごとに掃除する。消すのは、attempt が非活性(QUEUED、CLAIMED、RUNNING でない)で、Run が終端(COMPLETED、FAILED、CANCELLED)で、attempt の最終更新が保持期間より古いもの。一周期で最大 200 attempt。attempt の行は消えない。活性の attempt のイベントは、保持期間に関わらず消えない。
+
+**ログ**: 出すのは attempt の id、固定のコード、件数だけ。イベントの値、項目の名前、`sub` は出さない(テストで確かめている)。
+
+**確認の手順**(値は見ない。件数だけ)
+
+```sql
+SELECT kind, COUNT(*) AS n
+  FROM coding_monitor_events
+ WHERE attempt_id = ?
+ GROUP BY kind;
+```
+
+**デプロイ順序**: kivra を先に出す。エージェントの送信(PR 2)は、この経路が受理できるようになってから出す。逆の順序では、送信が 400 か 404 で落ちる(監視だけが失われ、attempt は影響を受けない)。
+
+**未実装**: 読み取りの API と画面(PR 3、PR 4)。停止(PR 5)。SSE。

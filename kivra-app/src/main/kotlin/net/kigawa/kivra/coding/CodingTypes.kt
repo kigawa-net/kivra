@@ -81,6 +81,24 @@ enum class CodingErrorCode(val state: CodingAttemptState) {
     BAD_OUTPUT(CodingAttemptState.FAILED),
     NEEDS_HUMAN(CodingAttemptState.FAILED),
     CANCELLED(CodingAttemptState.CANCELLED),
+
+    /** The CLI changed nothing. Its own code, so an operator can tell it from a CLI crash (ADR 0010 addendum 5). */
+    EMPTY_PATCH(CodingAttemptState.FAILED),
+
+    /** One attempt hit its cost cap (`error_max_budget_usd`). Its own code, not CLI_NONZERO (ADR 0010 addendum 5). */
+    BUDGET_EXCEEDED(CodingAttemptState.FAILED),
+
+    /** The model was overloaded. Its own code, not RATE_LIMITED (ADR 0010 addendum 5). */
+    OVERLOADED(CodingAttemptState.FAILED),
+    ;
+
+    companion object {
+        /**
+         * The code named on the wire, or null when it is not one of the fixed codes (the route answers 400 then). A code is accepted under
+         * its own name only; nothing maps one name onto another code.
+         */
+        fun fromWire(name: String): CodingErrorCode? = entries.firstOrNull { it.name == name }
+    }
 }
 
 /** Whether a change writes a file or deletes it. */

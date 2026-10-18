@@ -165,3 +165,24 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
 7. **デプロイ順序: エージェントを先に、kivra を後に。** claim の `body` を読まない古いエージェントは、本文を無視するだけで、従来どおり動く。反対に、kivra が `body` を返した後に古いエージェントが claim を受けても、未知のフィールドで失敗しないことを、エージェント側の変更で確かめる(パースは未知のフィールドと欠落に寛容にする)。よって、(a) エージェント(`kivra-agent`)の新版を先に配り、`.kivra/task.json` の `body` に渡す、(b) その後で kivra を出す。kivra を先に出すと、body を持つ Run の本文が古いエージェントで捨てられる。
 8. **担保するテスト。** `GitHubIssueReadTest`(GET のみ、リダイレクトを辿らない、5xx の再試行、サイズ上限、PR の判定、番号の不一致)、`TaskReferenceTest`(三つの形、対象外のリポジトリ、PR、クローズ済み、404、403、大きな本文の切り詰め、手動の本文との結合、冪等、ほかの Run への影響、claim の本文、ログの衛生、一度だけの保存)、`SelfDevRoutesTest`(body の受理と 400、同じ key で body が違えば 409、title だけの従来の投入)、`AgentApiRoutesTest`(claim の body と bodyTruncated)、`MigrationChainTest`(V17)。
    - **変異テスト(2026-10-18)**: 対象リポジトリの検査を外すと `TaskReferenceTest` の 2 件が落ちる。Issue の本文をログに出すと、ログの衛生のテストが落ちる。
+
+## 追補 6(2026-10-18、Issue #231: 残件の判断)
+
+1. **定期の reconcile は、印付けと費用の計上だけを行い、Run は動かさない。** 期限切れの attempt(QUEUED は EXPIRED、lease が切れた CLAIMED / RUNNING は ORPHANED)の印付けと予約の計上を、`CodingReconcileWorker`(周期ワーカー)が行う。`CodingRuntimeService.expireOverdue()` を呼ぶ。Run を UNKNOWN にする遷移は、runner が Run の lease を持ったまま次の進行で行う(`CodingPatchSource.settleExpired` の後の `proposal` が ORPHANED / EXPIRED を UNKNOWN に写す)。
+   - 理由: `reconcile()` の保留(`holdForOperator`)は Run の lease を取りに行く。runner が lease を持っている間は SKIPPED になり、持っていなければ動く。どちらの結果も、Run の状態を runner の進行と無関係に動かす経路になる。Run の遷移は runner の lease の下だけに置く、という従来の分担を保つ。
+   - 周期ワーカーは lease を取らない。二重の起動でも安全: attempt の遷移は CAS で一回だけ、予約は `coding:<attemptId>:<世代>` の鍵で一回だけ計上される(#230。`CodingReconcileWorkerTest` で確認)。
+   - `reconcile()`(保留を含む)は、この決定の後もどこからも呼ばれない。
+   - 周期ワーカーは、selfdev が無効でも動く。その場合は印と計上だけが進み、Run は動かない(既存の DEVELOPING のまま)。Run の UNKNOWN 化は、selfdev の runner が動いたときに行われる。
+2. **`coding_results` の保持期間は 30 日(設定可)。削除は行ごと行い、本文列の NULL 化はしない。** 周期ワーカーが、作成から `KIVRA_CODING_RESULT_RETENTION_DAYS`(既定 30、1〜365)を過ぎた行を、一回の周期で最大 200 行まで削除する。削除するのは次の両方を満たすものだけ。
+   - attempt が非活性(QUEUED、CLAIMED、RUNNING ではない)。
+   - Run が終端である、または行が attempt の受理された結果ではない(保存のあとに `complete` が拒否された行)。
+   - 理由: RESULT_RECEIVED の結果は、Run が PATCH_READY の再開で読む。Run が DEVELOPING や UNKNOWN の間は、読まれる可能性があるので残す。行ごと消すと、読めない結果は `loadResult` で null になり、既存の経路(`CODING_RESULT_MISSING`)に乗る。
+   - attempt と `coding_attempt_usage` の行は残す(監査と費用の記録)。
+3. **専用のエラーコード: `EMPTY_PATCH`、`BUDGET_EXCEEDED`、`OVERLOADED`。** `fail` の `errorCode` として受理し、それぞれ FAILED の attempt と、Run の理由 `CODING_EMPTY_PATCH`、`CODING_BUDGET_EXCEEDED`、`CODING_OVERLOADED` にする(`CODING_<code>` の既存の規則)。名前はそのまま使い、別の名前へ写さない(`CodingErrorCode.fromWire`)。未知のコードは従来どおり 400。
+   - エージェントは、「変更なし」を `EMPTY_PATCH`、予算の停止を `BUDGET_EXCEEDED`、過負荷を `OVERLOADED` で報告する(追補 3 の「エージェント側でどのコードで報告するかは、エージェント本体の PR で決める」への答え)。
+   - **デプロイ順序: kivra を先、エージェントを後。** 新しいコードを送るエージェントは、kivra がそれを受理してからでなければ 400 を受ける。
+   - UI の説明は、`resources/ui/app.js` の理由の対応表に 3 行を足すだけにした(サーバーの応答の形は変えない)。
+4. **`maxFiles` は統一しない。** PatchPolicy の 20 は CLI 経路と runner の検査で、`CodingLimits.maxChangedFiles` としてエージェントにも渡る。DeveloperConstraints の 10 は API 経路(`LlmDeveloper`)の 1 回の提案の制約で、プロンプトに書き、その提案の PatchPolicy にも使う。二つは別の経路の別の制約であり、統一すると API 経路の振る舞いが変わる。どちらかの経路を退役させるときに、一つの値に寄せる。
+5. **未了(この追補の範囲外)**: 予約の計上の失敗は再試行しない(追補 4 の既知の制限のまま。定期ワーカーは ORPHANED / EXPIRED の遷移を一度しか行わないため、計上の欠損は runbook §6.13 の手順で確認する)。`coding_attempt_usage` の保持期間。claim の `allowedPathPatterns` の差分検査への受け渡し(エージェント側)。claim の `maxOutputBytes`(#231 の残りの項目)。
+6. **担保するテスト**: `CodingReconcileWorkerTest`(印付けと Run が動かないこと、二重の処理と複数の周期での一回だけの計上、失敗した掃除が印付けを止めないこと、期限、終端の Run の結果だけを消すこと、active の結果を消さないこと、受理されなかった行、件数の上限、ログの衛生)、`AgentApiWiringTest`(周期ワーカーは agent API が有効のときだけ起動)、`AgentApiSettingsTest`(間隔と保持の既定と範囲)、`AgentApiRoutesTest`(三つのコードの受理と保存されたコード名)、`SelfDevCodingEndToEndTest`(三つのコードの Run の状態と理由)、`UiRoutesTest`(対応表の三行)。
+   - **変異テスト(2026-10-18)**: 削除の条件から「attempt が非活性」を外すと `CodingReconcileWorkerTest` の 1 件が落ちる。`fromWire` で `EMPTY_PATCH` を `CLI_NONZERO` に写すと `AgentApiRoutesTest` の 1 件が落ちる。

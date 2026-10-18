@@ -184,6 +184,14 @@ class UiRoutesTest {
     }
 
     @Test
+    fun `the three coding codes a run can end with have their own explanation`() {
+        // The explanation lines of Issue #231 item 4. reasonText still shows the code after the text.
+        assertContains(appJs, "CODING_EMPTY_PATCH: '変更が無く終了しました'")
+        assertContains(appJs, "CODING_BUDGET_EXCEEDED: '1 attempt の費用上限に達しました'")
+        assertContains(appJs, "CODING_OVERLOADED: 'モデルが混雑していました'")
+    }
+
+    @Test
     fun `the site root redirects to the ui with a fixed relative location`() = testApplication {
         application { routing { configureUiRoutes() } }
         val noFollow = createClient { followRedirects = false }

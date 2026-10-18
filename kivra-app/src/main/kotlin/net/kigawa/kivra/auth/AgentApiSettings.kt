@@ -1,6 +1,7 @@
 package net.kigawa.kivra.auth
 
 import java.math.BigDecimal
+import java.time.Duration
 
 /**
  * `KIVRA_AGENT_API_ENABLED`: whether the agent API routes are registered at all (ADR 0010 addendum, PR 4a). Off by default.
@@ -22,13 +23,27 @@ class AgentApiSettings private constructor(
      * usage report, and one reserve must fit in the monthly budget before a claim. Read only when the agent API is on.
      */
     val attemptReserveUsd: BigDecimal = DEFAULT_RESERVE_USD,
+    /**
+     * The period of the coding reconcile worker (`KIVRA_CODING_RECONCILE_INTERVAL_SECONDS`, 10 to 3600, default 60). Read only when the agent
+     * API is on. See [net.kigawa.kivra.coding.CodingReconcileWorker].
+     */
+    val reconcileInterval: Duration = DEFAULT_RECONCILE_INTERVAL,
+    /**
+     * How long a stored change set is kept after it was written (`KIVRA_CODING_RESULT_RETENTION_DAYS`, 1 to 365, default 30). Only sets that
+     * nothing can read any more are deleted. Read only when the agent API is on.
+     */
+    val resultRetention: Duration = DEFAULT_RESULT_RETENTION,
 ) {
     val enabled: Boolean get() = auth != null
 
     companion object {
         const val ENV_ENABLED = "KIVRA_AGENT_API_ENABLED"
         const val ENV_RESERVE_USD = "KIVRA_AGENT_ATTEMPT_RESERVE_USD"
+        const val ENV_RECONCILE_INTERVAL_SECONDS = "KIVRA_CODING_RECONCILE_INTERVAL_SECONDS"
+        const val ENV_RESULT_RETENTION_DAYS = "KIVRA_CODING_RESULT_RETENTION_DAYS"
         val DEFAULT_RESERVE_USD: BigDecimal = BigDecimal("0.50")
+        val DEFAULT_RECONCILE_INTERVAL: Duration = Duration.ofSeconds(60)
+        val DEFAULT_RESULT_RETENTION: Duration = Duration.ofDays(30)
         private val MAX_RESERVE_USD = BigDecimal("100")
 
         private val DISABLED = AgentApiSettings(auth = null)
@@ -37,7 +52,12 @@ class AgentApiSettings private constructor(
             val raw = env[ENV_ENABLED]?.trim()?.takeIf { it.isNotEmpty() } ?: return DISABLED
             return when (raw) {
                 "false" -> DISABLED
-                "true" -> AgentApiSettings(authConfig(env), reserveUsd(env))
+                "true" -> AgentApiSettings(
+                    auth = authConfig(env),
+                    attemptReserveUsd = reserveUsd(env),
+                    reconcileInterval = reconcileInterval(env),
+                    resultRetention = resultRetention(env),
+                )
                 else -> throw IllegalStateException("$ENV_ENABLED must be true or false")
             }
         }
@@ -76,6 +96,25 @@ class AgentApiSettings private constructor(
             require(value.signum() > 0 && value <= MAX_RESERVE_USD && value.stripTrailingZeros().scale() <= 6) {
                 "$ENV_RESERVE_USD must be above 0 and at most 100, with at most 6 decimals"
             }
+            return value
+        }
+
+        /** A whole number of seconds from 10 to 3600. Errors name the variable only. */
+        private fun reconcileInterval(env: Map<String, String>): Duration {
+            val seconds = wholeNumber(env, ENV_RECONCILE_INTERVAL_SECONDS, 10L..3600L) ?: return DEFAULT_RECONCILE_INTERVAL
+            return Duration.ofSeconds(seconds)
+        }
+
+        /** Whole days from 1 to 365. Errors name the variable only. */
+        private fun resultRetention(env: Map<String, String>): Duration {
+            val days = wholeNumber(env, ENV_RESULT_RETENTION_DAYS, 1L..365L) ?: return DEFAULT_RESULT_RETENTION
+            return Duration.ofDays(days)
+        }
+
+        private fun wholeNumber(env: Map<String, String>, name: String, range: LongRange): Long? {
+            val raw = env[name]?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val value = raw.toLongOrNull()?.takeIf { it in range }
+                ?: throw IllegalStateException("$name must be a whole number from ${range.first} to ${range.last}")
             return value
         }
 

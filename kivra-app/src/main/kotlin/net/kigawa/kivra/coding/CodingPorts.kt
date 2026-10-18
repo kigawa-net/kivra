@@ -1,6 +1,7 @@
 package net.kigawa.kivra.coding
 
 import java.time.Duration
+import java.time.LocalDateTime
 import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.LeaseLostException
@@ -82,4 +83,13 @@ interface CodingResultStore {
 
     /** The change set stored for ([attemptId], [digest]), or null. */
     fun load(attemptId: String, digest: String): PatchSet?
+}
+
+/** Deletes the stored change sets that the retention allows to go (design 15 section 6.5.3, ADR 0010 addendum 6). */
+fun interface CodingResultPurge {
+    /**
+     * Deletes at most [limit] stored change sets created before [before] that nothing can read any more: the attempt is not active, and
+     * either the Run is terminal or the row is not the attempt's accepted result. Returns the number deleted. The attempt and usage rows stay.
+     */
+    fun purgeBefore(before: LocalDateTime, limit: Int): Int
 }

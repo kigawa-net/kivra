@@ -159,7 +159,7 @@ internal fun Route.configureAgentApiRoutes(deps: AgentApiDeps) {
         val body = call.readBody(MAX_SMALL_BODY_BYTES) ?: return@post
         val request = decodeOrNull<AgentFailRequest>(body) ?: return@post call.respondInvalidBody()
         // Only the fixed codes are accepted. A free-text reason is refused as an invalid body.
-        val code = CodingErrorCode.entries.firstOrNull { it.name == request.errorCode } ?: return@post call.respondInvalidBody()
+        val code = CodingErrorCode.fromWire(request.errorCode) ?: return@post call.respondInvalidBody()
         val usage = CliUsageParser.parse(attemptId, request.usage)
         val result = try {
             deps.coding.fail(attemptId, agentId, request.generation, code, usage)

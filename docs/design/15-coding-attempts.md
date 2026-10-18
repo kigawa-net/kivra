@@ -163,11 +163,11 @@
 - **世代(fencing)**: store は世代を検査しない。`CodingRuntimeService.submitResult` が保存の前に世代と状態を検査し、保存の後に `complete` の CAS が世代を検査する。CLAIMED / RUNNING の間は世代が変わらない(世代を上げるのは claim だけで、claim は QUEUED からしか取れない)ので、古い保持者の保存は終端になった attempt の行にしか残らず、その行は参照されない。
 - **digest の検査(未決)**: 設計どおり「保存時に attempt の `result_digest` と一致することを検査する」は、現在の順序(保存 → `complete` で `result_digest` を書く)では成り立たない。保存の時点で attempt の `result_digest` はまだ NULL である。この PR では保存時の検査を入れていない。読み出し時は、`load` が digest で行を選び、`loadResult` が attempt の `result_digest` を渡すので、一致しない本体は返らない。保存時に検査するには、順序を変えるか(RESULT_RECEIVED の前に digest を別の列に書く等)、保存の時点の検査を別の方法にするかの決定が要る。
 
-#### 6.5.3 保持期間(未対応)
+#### 6.5.3 保持期間(実装済み、Issue #231、ADR 0010 追補 6)
 
-- この PR には削除の仕組みが無い。`coding_results` の行は消えない。
-- 方針の案: Run が終端になった後、一定期間(例: 30 日)で本体を削除する。`complete` されず参照されない本体(保存後に拒否された結果)の掃除も同じ仕組みで行う。
-- 削除は別の運用 PR で、人の確認を経て行う。この PR で削除の機能は作らない。
+- 周期ワーカー `CodingReconcileWorker` が、作成から `KIVRA_CODING_RESULT_RETENTION_DAYS`(既定 30 日)を過ぎた行を、一周期で最大 200 行まで行ごと削除する。
+- 削除の条件: attempt が非活性(QUEUED、CLAIMED、RUNNING でない)かつ、Run が終端であるか、行が attempt の受理された結果でない(保存のあとに `complete` が拒否された行)。
+- attempt と `coding_attempt_usage` は残す。本文列の NULL 化はしない。
 
 ### 6.6 attempt の結果と Run の扱い
 
@@ -189,6 +189,7 @@ Run は DEVELOPING のまま attempt で進行を表す(設計案 §2.5)。attem
 
 - `expire`: QUEUED で期限切れなら EXPIRED。CLAIMED か RUNNING で lease 切れなら ORPHANED。
 - ORPHANED または EXPIRED の attempt で、Run がまだ DEVELOPING のものは、Run を UNKNOWN にする(運用者の判断。解放は ADR 0009 の手順)。
+- 実装(追補 6、Issue #231): 周期ワーカーは `expireOverdue`(印と計上)だけを呼ぶ。Run の UNKNOWN 化は、runner が Run の lease の下で次に進むときに行う。保留(`reconcile()`)は、lease の衝突のため周期的には呼ばない。
 - **設計案 §2.7 からの変更**: 設計案は「ORPHANED の後は次の claim を待つ(attempt_no + 1)」としていた。この PR では採らない。古いエージェントが CLI をまだ動かしているかもしれず、新しい attempt は二重の実行と二重の費用になる。二重実行の恐れがあるときは UNKNOWN に倒す、という方針による。
 - 冪等。Run がすでに動いたもの、他の attempt が active なものには触らない。
 
@@ -205,5 +206,4 @@ Run は DEVELOPING のまま attempt で進行を表す(設計案 §2.5)。attem
 
 ### 6.10 未実装(後続の PR)
 
-- エージェント本体(PR 5〜8)の配備。reconcile の定期実行の配線。(`cli` の起動の条件は PR 9 で定めた。)
-- エージェント本体(PR 5〜8)。結果本体の保存(§6.5)。`RATE_LIMITED` の待機と再試行。
+- エージェント本体(PR 5〜8)の配備。`RATE_LIMITED` の待機と再試行。(`cli` の起動の条件は PR 9 で定めた。reconcile の定期実行は Issue #231 で配線した。)

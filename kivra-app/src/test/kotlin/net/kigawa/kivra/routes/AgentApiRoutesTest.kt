@@ -442,6 +442,24 @@ class AgentApiRoutesTest {
     }
 
     @Test
+    fun `fail accepts EMPTY_PATCH, BUDGET_EXCEEDED and OVERLOADED under their own names, and stores that name as the attempt's code`() =
+        TestDb().use { db ->
+            testApplication {
+                val env = Env(db)
+                setUp(env)
+                for (code in listOf("EMPTY_PATCH", "BUDGET_EXCEEDED", "OVERLOADED")) {
+                    env.enqueue(env.newRun())
+                    val (attemptId, generation) = claimAs(agentA)
+                    val response = post(failPath(attemptId), """{"generation":$generation,"errorCode":"$code"}""")
+                    assertEquals(HttpStatusCode.OK, response.status, code)
+                    assertEquals("FAILED", parse(response.bodyAsText())["state"]!!.jsonPrimitive.content, code)
+                    // The stored code is the name the agent sent (the Run reason is CODING_<code> from it), never CLI_NONZERO or RATE_LIMITED.
+                    assertEquals(code, CodingAttemptRepository(db.database).get(attemptId)!!.errorCode, code)
+                }
+            }
+        }
+
+    @Test
     fun `a result the PatchPolicy refuses is 422 with fixed reason names, and nothing of its content comes back`() = TestDb().use { db ->
         testApplication {
             val env = Env(db)

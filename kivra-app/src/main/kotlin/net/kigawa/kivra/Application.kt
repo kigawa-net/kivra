@@ -9,6 +9,7 @@ import net.kigawa.kivra.auth.AgentApiSettings
 import net.kigawa.kivra.auth.AgentIdentity
 import net.kigawa.kivra.auth.RefreshingJwkProvider
 import net.kigawa.kivra.auth.resolveTaskApiIdentity
+import net.kigawa.kivra.coding.CodingReconcileWorker
 import net.kigawa.kivra.coding.CodingRuntimeService
 import net.kigawa.kivra.coding.buildCodingCostLedger
 import net.kigawa.kivra.coding.CodingTaskSource
@@ -81,11 +82,12 @@ internal fun Application.appModule(env: Map<String, String>) {
     val budgetStore = DbBudgetStore(database, budgetConfig.tenantId, budgetConfig.tenantLimit())
     // Built only when the agent API is enabled. Nothing about the coding runtime is created otherwise. It is shared by the agent API
     // routes and, with KIVRA_SELFDEV_RUNTIME=cli, by the self-development runner (ADR 0010).
+    val codingResults = DbCodingResultStore(database)
     val codingService = agentApiSettings.auth?.let {
         CodingRuntimeService(
             attempts = CodingAttemptRepository(database, audit = audit),
             runs = DbCodingRunPort(runs, SqlLeaseStore(database)),
-            results = DbCodingResultStore(database),
+            results = codingResults,
             tasks = CodingTaskSource { run -> run.taskTitle },
             cost = buildCodingCostLedger(
                 env, agentApiSettings.attemptReserveUsd, budgetStore, budgetConfig.tenantId, database,
@@ -118,6 +120,10 @@ internal fun Application.appModule(env: Map<String, String>) {
                 autopilotBudgetAllows(usage.committed, usage.reserved, budgetConfig.monthlyLimitJpy, share)
             },
         ).start(this)
+    }
+    // The coding reconcile and the retention of stored change sets (ADR 0010 addendum 6). Only when the agent API is on.
+    codingService?.let {
+        CodingReconcileWorker(it, codingResults, agentApiSettings.reconcileInterval, agentApiSettings.resultRetention).start(this)
     }
     val agentParts = agentApiSettings.auth?.let { auth ->
         AgentApiDeps(checkNotNull(codingService), AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)))

@@ -120,7 +120,7 @@ internal object ChangeRules {
     }
 
     /** Copy of kivra-core globToRegex: a double-star segment with a slash matches zero or more directories, a bare double-star anything. */
-    private fun globToRegex(glob: String, ignoreCase: Boolean): Regex {
+    internal fun globToRegex(glob: String, ignoreCase: Boolean): Regex {
         val sb = StringBuilder()
         var i = 0
         while (i < glob.length) {

@@ -576,7 +576,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 | 書き込みの合計が 1 MiB を超える | `TOTAL_TOO_LARGE` |
 | 変更数(削除を含む)が 20 を超える | `TOO_MANY_CHANGES` |
 | 削除数が 5 を超える | `TOO_MANY_DELETES` |
-| 変更がない | `EMPTY_PATCH` |
+| 変更がない | `EMPTY_PATCH`(従来は `CLI_NONZERO` に写す。§6.10d) |
 | 走査のエントリ数が 20,000 を超える | `TOO_MANY_ENTRIES` |
 | パスの形: 空、200 文字超、U+FFFD、制御文字、`\`、`:`、先頭 `/`、末尾 `/`、空の区切り、`.`/`..`、`~` で始まる区切り、NFC でない | `PATH_EMPTY` `PATH_TOO_LONG` `PATH_NOT_UTF8` `PATH_CONTROL_CHARACTER` `PATH_BACKSLASH` `PATH_COLON` `PATH_ABSOLUTE` `PATH_TRAILING_SLASH` `PATH_EMPTY_SEGMENT` `PATH_DOT_SEGMENT` `PATH_TILDE` `PATH_NOT_NFC` |
 | 拒否パス(PatchPolicy の denylist。`.github/`、`gradle/`、`**/Dockerfile*`、`**/.git*`、`**/.env*`、`docs/adr/`、`kivra-policy/` など) | `PATH_DENIED` |
@@ -685,7 +685,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 | 準備(git、展開)、docker の引数の検査、その他の例外、kivra の 5xx や通信の失敗 | `NEEDS_HUMAN`(運用者が判断する。自動の再試行はしない) |
 
 **判断(この PR で決めた)**:
-- `EMPTY_PATCH`(CLI は終わったが変更が無い)は成功にしない。`CLI_NONZERO` で fail する。`NEEDS_HUMAN` は「ホスト側の異常」を表すために残し、CLI の判断には使わない。kivra が `CLI_NONZERO` を受けてどう扱うかは PR 9b で決める。
+- `EMPTY_PATCH`(CLI は終わったが変更が無い)は成功にしない。`CLI_NONZERO` で fail する(`KIVRA_AGENT_NEW_ERROR_CODES=1` のときは `EMPTY_PATCH`。§6.10d)。`NEEDS_HUMAN` は「ホスト側の異常」を表すために残し、CLI の判断には使わない。kivra が `CLI_NONZERO` を受けてどう扱うかは PR 9b で決める。
 - 結果の送信は、heartbeat で世代を確かめてから行う。世代が古いとき(409)は結果を捨て、fail も送らない。kivra 側で別のエージェントが取っているため、fail を送ると別の attempt を汚すおそれがあるからである。
 
 **`KIVRA_AGENT_EXECUTOR=real` の設定**(`real` のときだけ読む。値は起動時に検査し、エラーは変数名だけを出す):
@@ -702,6 +702,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 | `KIVRA_AGENT_REPO` | real で必須 | `owner/repo`(公開 GitHub。資格情報は使わない) |
 | `KIVRA_AGENT_MODEL` | 任意 | CLI の `--model`。既定 `claude-haiku-5-5`。形式は `^[a-z0-9][a-z0-9.-]{0,63}$` |
 | `KIVRA_AGENT_MAX_BUDGET_USD` | 任意 | CLI の `--max-budget-usd`(1 アテンプトの費用上限、ドル)。既定 `0.50`。0.01 から 20.00、小数 2 桁まで(`0.5` は `0.50` に直す) |
+| `KIVRA_AGENT_NEW_ERROR_CODES` | 任意 | `1` で `EMPTY_PATCH`、`BUDGET_EXCEEDED`、`OVERLOADED` を送る。既定 `0`(従来のコード)。kivra の対応版を先にデプロイしてから `1` にする(§6.10d) |
 
 起動時に `DockerSettings` と作業ルートの検査が通らなければ、終了コード 2 で止まる(アテンプトは claim しない)。モデルと費用上限の値が不正なときも、同じく終了コード 2 で、変数名だけを出す。
 
@@ -714,7 +715,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 - イメージが固定している CLI 2.1.301 では、この項目を確かめていない(未確認)。実機の 1 回目で `--max-budget-usd` がエラーになれば、CLI が引数を拒否して exit に失敗する。その場合は `KIVRA_AGENT_MAX_BUDGET_USD` を使わず、イメージの CLI を上げて確かめる。
 - 費用上限で止まったときの stream-json の `result.subtype` は、`error_max_budget_usd` と想定している。**実機ではまだ見ていない(未確認)**。ただし、`error_` で始まる subtype は、既存の規則で `CLI_FAILED`(報告は `CLI_NONZERO`)になる。subtype が `error_max_budget_usd` と一致したときだけ、ログ用の `BUDGET_EXCEEDED` になる。報告のコードは変わらない。
 
-**分類(判断)**: kivra の `AgentErrorCode` に費用上限の専用コードは無い。そこで `BUDGET_EXCEEDED` は `CLI_NONZERO` に写す。kivra 側のコード表を変えないため。API の再試行で出た rate limit より優先する(予算で止まったのに `RATE_LIMITED` と誤分類しないため)。
+**分類(判断)**: kivra の `AgentErrorCode` に費用上限の専用コードは無い。そこで `BUDGET_EXCEEDED` は `CLI_NONZERO` に写す(既定)。kivra 側のコード表を変えないため。Issue #231 で、`KIVRA_AGENT_NEW_ERROR_CODES=1` のとき専用の `BUDGET_EXCEEDED` を送る(§6.10d)。API の再試行で出た rate limit より優先する(予算で止まったのに `RATE_LIMITED` と誤分類しないため)。
 
 **ガード**: `DockerArgsGuard` は `--model` の値が設定の許可リスト(`allowedModels`、既定は Haiku 5.5 だけ)にあるか、`--max-budget-usd` が 0.01 から 20.00 の 2 桁形式か検査する。どちらも、同じフラグの重複を拒否する。拒否の理由は `COMMAND_NOT_ALLOWED`(値)か `COMMAND_UNKNOWN_ARGUMENT`(重複)。
 
@@ -740,7 +741,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 
 
 **未解決(この PR の範囲外)**:
-- claim が渡す `allowedPathPatterns` と `deniedPathPatterns` は、差分の検査に使っていない。差分は kivra-core の既定値の写し(§6.8)で検査する。これは厳しい側なので、サーバーの設定が広い場合でも危険な結果が通ることはない(サーバーが 422 で拒否し、`BAD_OUTPUT` になる)。サーバー側の設定と揃えるかは PR 9b までに決める。
+- claim のパターンは差分の検査に使う(Issue #231、§6.10d)。組み込みの規則とサーバーの規則の両方を満たすことが要件である。
 - 出力上限は、claim の `maxOutputBytes` を 1 MiB の上限まで縮めるだけに使う。
 - タスク文は title と、Run に保存された本文(claim の `input.task.body`、§5.1)。
 - 実際の docker、`claude` CLI、`/etc/subuid` の所有権、作業ディレクトリの削除は、この PR では実機で確かめていない(§6.6、§6.7、§6.8 の未確認事項)。
@@ -782,6 +783,35 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 
 **Console の上限との関係(#230)**: 共有ワークスペースの Console 側の支出上限は、kivra の月次予算(1 万円)より大きいこと。kivra の予算ゲート(claim の制限と予約)は kivra-app 側の #230 の PR で行い、このエージェント側では扱わない。
 - **未解決**: `error_max_budget_usd` の subtype と、Haiku 5.5 での 1 アテンプトの費用は、実機ではまだ確かめていない(§6.10b)。
+
+### 6.10d パターンの扱いと専用のエラーコード(Issue #231)
+
+コード: `kivra-agent/.../workdir/PathRules.kt`(claim のパターン)、`DiffCollector`(検査の入口)、`Model.kt`(`AgentErrorCode`)、`claude/CliOutcome.kt`(`AgentRunOutcome.errorCode(newErrorCodes)`)、`AgentConfig.kt`(`KIVRA_AGENT_NEW_ERROR_CODES`)。
+
+**claim のパターン(`allowedPathPatterns` / `deniedPathPatterns`)は差分の検査に使う**。変更されたパス(追加、変更、削除)は、次の両方を満たさなければならない。どちらか一方でも満たさなければ、その変更集合は拒否する(`PATH_NOT_ALLOWED` または `PATH_DENIED`。理由コードだけで、パスは出さない)。
+1. 組み込みの規則(`ChangeRules`、kivra-core の既定値の写し)。組み込みの拒否リストは、サーバーが何を送っても常に効く。
+2. claim のパターン(`PathRules`)。サーバーの許可リストにないパスは拒否し、サーバーの拒否リストに一致するパスは拒否する。
+
+- 照合は kivra-core の PatchPolicy と同じ解釈にする(`PatchSupport.globToRegex` の写し)。許可は大文字小文字を区別し、拒否は区別しない。`*` は 1 階層、`?` は 1 文字、`**/` は 0 個以上のディレクトリ、末尾の `**` は何にでも一致する。先頭の `/` は文字どおりに扱うので、リポジトリ相対のパスには一致しない(サーバーと同じ)。拒否は許可より優先する。
+- 許可リストが空のときは、サーバー側の許可は無い(組み込みの許可だけ)。拒否リストが空のときは、サーバー側の拒否は無い。両方空のときは従来どおり組み込みの規則だけになる。
+- 基底にあって消えたファイル(削除)も、同じ規則で検査する。
+- **不正なパターン**(1 つの一覧が 100 件を超える、空の要素、200 文字を超える、制御文字を含む)のときは、CLI を起動せず `fail(NEEDS_HUMAN)` で返す。ログには件数と固定の理由だけを出し、パターンの値は出さない(`claim path patterns refused`)。
+- 上限(`PathRules.MAX_PATTERNS`、`MAX_PATTERN_CHARS`)は kivra-core の既定値(許可 3 件、拒否 20 件、パス 200 文字)より広く取っている。上限を変えるときは、この節と両方のテストを一緒に変える。
+
+**専用のエラーコード**: 次の 3 つは、既定では従来のコードで送る(kivra が新しいコードを受理できるようになるまでの互換のため)。`KIVRA_AGENT_NEW_ERROR_CODES=1` のときだけ専用のコードを送る。
+
+| 分類 / 状況 | 既定(従来のコード) | `KIVRA_AGENT_NEW_ERROR_CODES=1` |
+| --- | --- | --- |
+| 変更が無い(`EMPTY_PATCH`) | `CLI_NONZERO` | `EMPTY_PATCH` |
+| 費用上限で停止(`BUDGET_EXCEEDED`) | `CLI_NONZERO` | `BUDGET_EXCEEDED` |
+| 過負荷(`OVERLOADED`) | `RATE_LIMITED` | `OVERLOADED` |
+
+それ以外の分類(`TIMEOUT`、`CANCELLED`、`OUTPUT_LIMIT`、`AUTH_FAILED`、`RATE_LIMITED`、`CLI_FAILED`、`MALFORMED_OUTPUT`、差分の拒否、422、準備の例外)は、どちらの設定でも同じコードを送る。
+
+- 設定 `KIVRA_AGENT_NEW_ERROR_CODES` は `real` のときだけ読む。`1` と `0`(または未設定)以外の値は起動を拒否する(変数名だけを出す)。
+- **デプロイ順序**: (1) kivra の対応版(`AgentErrorCode` に `EMPTY_PATCH`、`BUDGET_EXCEEDED`、`OVERLOADED` を受理する版)を先にデプロイする。(2) そのあとで、エージェントを動かす PC の `/etc/kivra-agent/agent.env` に `KIVRA_AGENT_NEW_ERROR_CODES=1` を書き、ユニットを再起動する(§6.11 の `systemctl --user restart kivra-agent.service`)。kivra の対応版より先に `1` にすると、新しいコードが拒否されて `fail` が届かない。
+- 戻し方: 行を消すか `0` にして、ユニットを再起動する。kivra 側のコードは削除しない(旧いエージェントが従来のコードを送り続けるため)。
+- `install.sh` の雛形には `#KIVRA_AGENT_NEW_ERROR_CODES=1` の行を入れてある(既定では無効)。
 
 ### 6.11 ローカル PC へのインストールと常駐(PR 10)
 

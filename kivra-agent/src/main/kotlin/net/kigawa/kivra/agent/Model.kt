@@ -48,5 +48,20 @@ enum class ProgressPhase { STARTED, EDITING, TESTING, ROUND_COMPLETED, FINALIZIN
 /**
  * Error codes this agent may report with `fail`. Mirrors the server's CodingErrorCode in kivra-app. The server refuses any other
  * name, so a free-text reason can never reach kivra.
+ *
+ * [EMPTY_PATCH], [BUDGET_EXCEEDED] and [OVERLOADED] are new (Issue #231). They are sent only when `KIVRA_AGENT_NEW_ERROR_CODES=1`
+ * (see [net.kigawa.kivra.agent.claude.AgentRunOutcome.errorCode]). kivra must accept them before that is switched on.
  */
-enum class AgentErrorCode { AUTH_REQUIRED, RATE_LIMITED, TIMEOUT, OUTPUT_LIMIT, CLI_NONZERO, BAD_OUTPUT, NEEDS_HUMAN, CANCELLED }
+enum class AgentErrorCode {
+    AUTH_REQUIRED,
+    RATE_LIMITED,
+    TIMEOUT,
+    OUTPUT_LIMIT,
+    CLI_NONZERO,
+    BAD_OUTPUT,
+    NEEDS_HUMAN,
+    CANCELLED,
+    EMPTY_PATCH,
+    BUDGET_EXCEEDED,
+    OVERLOADED,
+}

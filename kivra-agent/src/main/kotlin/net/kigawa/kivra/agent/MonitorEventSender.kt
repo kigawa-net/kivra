@@ -31,28 +31,31 @@ internal object MonitorWire {
     const val MAX_EVENTS_PER_REQUEST = 50
     const val MAX_BODY_BYTES = 8 * 1024
 
+    /**
+     * The wire form of one event. Field names and values are kivra's (`MonitorEventSchema`): each kind carries exactly the fields listed
+     * in [KIND_FIELDS], and no other. Kinds kivra writes itself (TRUNCATED) are never sent.
+     */
     fun event(seq: Long, event: MonitorEvent): JsonObject = buildJsonObject {
         put("seq", seq)
         when (event) {
             MonitorEvent.AttemptStarted -> put("kind", "ATTEMPT_STARTED")
-            is MonitorEvent.CliInit -> {
-                put("kind", "CLI_INIT")
-                event.model?.let { put("model", it.value) }
-                event.cliVersion?.let { put("cliVersion", it.value) }
-            }
+            MonitorEvent.CliInit -> put("kind", "CLI_INIT")
             is MonitorEvent.Phase -> {
                 put("kind", "PHASE")
                 put("phase", event.phase.name)
             }
             is MonitorEvent.ToolUse -> {
                 put("kind", "TOOL_USE")
-                put("toolName", event.tool.name)
+                put("toolName", event.tool.wire)
             }
-            is MonitorEvent.ToolResult -> {
+            MonitorEvent.ToolError -> {
                 put("kind", "TOOL_RESULT")
-                put("code", if (event.isError) "ERROR" else "OK")
+                put("count", 1)
             }
-            MonitorEvent.Turn -> put("kind", "TURN")
+            MonitorEvent.Turn -> {
+                put("kind", "TURN")
+                put("count", 1)
+            }
             is MonitorEvent.PermissionDenied -> {
                 put("kind", "PERMISSION_DENIED")
                 put("count", event.count)
@@ -71,16 +74,33 @@ internal object MonitorWire {
                 put("code", event.outcome.name)
             }
             is MonitorEvent.Warning -> {
+                // kivra's WARNING carries a count of warnings; the kind of warning is not sent.
                 put("kind", "WARNING")
-                put("code", event.code.name)
+                put("count", 1)
             }
             is MonitorEvent.Dropped -> {
                 put("kind", "DROPPED")
                 put("count", event.count)
             }
-            MonitorEvent.Truncated -> put("kind", "TRUNCATED")
         }
     }
+
+    /** The kinds kivra accepts, and the fields each one carries (kivra's `MonitorKind.fields`). Pinned by a test. */
+    val KIND_FIELDS: Map<String, Set<String>> = mapOf(
+        "ATTEMPT_STARTED" to emptySet(),
+        "CLI_INIT" to emptySet(),
+        "PHASE" to setOf("phase"),
+        "TOOL_USE" to setOf("toolName"),
+        "TOOL_RESULT" to setOf("count"),
+        "TURN" to setOf("count"),
+        "PERMISSION_DENIED" to setOf("count"),
+        "API_RETRY" to setOf("code"),
+        "COST" to setOf("costUsd"),
+        "STOP_REQUESTED" to emptySet(),
+        "PROCESS_EXIT_CONFIRMED" to setOf("code"),
+        "WARNING" to setOf("count"),
+        "DROPPED" to setOf("count"),
+    )
 
     fun body(generation: Long, events: List<JsonObject>): String = buildJsonObject {
         put("generation", generation)
@@ -133,8 +153,10 @@ class MonitorEventSender(
     // Guarded by lock.
     private val queue = ArrayDeque<MonitorEvent>()
     private var dropped = 0
+    /** Events accepted into the queue, ever. Together with [markersIssued] it counts the seqs this attempt has used or will use. */
     private var queuedTotal = 0
-    private var truncatedQueued = false
+    /** DROPPED markers put into a batch. Each one takes a seq. */
+    private var markersIssued = 0
     private var closed = false
     private var abandoned = false
     private var nextSeq = 1L
@@ -151,18 +173,14 @@ class MonitorEventSender(
     /** Queues [event]. Never blocks and never throws. Dropped when the queue is full, the sender has stopped or the attempt is capped. */
     fun enqueue(event: MonitorEvent) {
         synchronized(lock) {
-            if (closed || abandoned || truncatedQueued) return
-            if (queuedTotal >= maxEvents - 1) {
-                truncatedQueued = true
-                queuedTotal++
-                queue.addLast(MonitorEvent.Truncated)
-            } else if (queue.size >= queueCapacity) {
+            if (closed || abandoned) return
+            // One seq stays free for the last DROPPED summary, so the attempt never goes past maxEvents (kivra's cap).
+            if (queuedTotal + markersIssued >= maxEvents - 1 || queue.size >= queueCapacity) {
                 dropped++
                 return
-            } else {
-                queue.addLast(event)
-                queuedTotal++
             }
+            queue.addLast(event)
+            queuedTotal++
         }
         wake.trySend(Unit)
     }
@@ -300,11 +318,14 @@ class MonitorEventSender(
             items += Item(seq, json, size)
             return true
         }
-        if (dropped > 0) {
-            add(MonitorEvent.Dropped(minOf(dropped, MonitorEvent.MAX_COUNT)))
-            dropped = 0
-        }
         while (queue.isNotEmpty() && add(queue.first())) queue.removeFirst()
+        // The DROPPED summary goes after the queued events. A mid-run summary keeps the last seq free, so the final one always fits.
+        if (dropped > 0 && (closed || queuedTotal + markersIssued < maxEvents - 1)) {
+            if (add(MonitorEvent.Dropped(minOf(dropped, MonitorEvent.MAX_COUNT)))) {
+                markersIssued++
+                dropped = 0
+            }
+        }
         if (items.isEmpty()) return null
         nextSeq += items.size
         return items
@@ -341,7 +362,7 @@ class MonitorEventSender(
     }
 
     companion object {
-        /** The most events one attempt sends, including TRUNCATED (ADR 0012 U-10). */
+        /** The most seqs one attempt uses, events and DROPPED summaries together. kivra's own cap is the same (ADR 0012 U-10). */
         const val MAX_EVENTS = 2_000
 
         /** The most events the queue holds before it drops (ADR 0012 U-10). */

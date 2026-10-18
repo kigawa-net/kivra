@@ -7,18 +7,19 @@ import net.kigawa.kivra.agent.docker.DockerRunOutcome
 
 /**
  * The tools the monitor names (ADR 0012 §1). The CLI's tool name is matched against this list; any other name, including an MCP
- * name, is [OTHER]. The tool's input is never read.
+ * name, is [OTHER]. The tool's input is never read. [wire] is the value kivra accepts (its `TOOL_NAMES`), which is the CLI's own
+ * spelling, not the enum name.
  */
-enum class MonitorTool {
-    READ,
-    EDIT,
-    WRITE,
-    BASH,
-    GREP,
-    GLOB,
-    TASK,
-    TODO_WRITE,
-    OTHER,
+enum class MonitorTool(val wire: String) {
+    READ("Read"),
+    EDIT("Edit"),
+    WRITE("Write"),
+    BASH("Bash"),
+    GREP("Grep"),
+    GLOB("Glob"),
+    TASK("Task"),
+    TODO_WRITE("TodoWrite"),
+    OTHER("OTHER"),
     ;
 
     companion object {
@@ -36,51 +37,30 @@ enum class MonitorTool {
     }
 }
 
-/** A warning the monitor records by a fixed code. The count of warnings is the only thing kept. */
+/**
+ * A warning of the agent's own reading (an oversized line, or too many blocks in one message). Kept inside the agent only: the wire
+ * carries a count of warnings, not the kind (kivra's WARNING has a count field only).
+ */
 enum class MonitorWarning { OVERSIZED_LINE, BLOCK_LIMIT }
 
 /**
- * A model id from the CLI's init event, kept only when it has the allowed shape (ADR 0012 U-5). [toString] shows no value.
- */
-class ModelId private constructor(val value: String) {
-    override fun toString(): String = "ModelId(***)"
-
-    companion object {
-        private val PATTERN = Regex("^[a-z0-9][a-z0-9.-]{0,63}$")
-
-        fun of(raw: String?): ModelId? = raw?.takeIf { PATTERN.matches(it) }?.let { ModelId(it) }
-    }
-}
-
-/** The CLI version from the init event, kept only as `major.minor.patch` digits. [toString] shows no value. */
-class CliVersion private constructor(val value: String) {
-    override fun toString(): String = "CliVersion(***)"
-
-    companion object {
-        private val PATTERN = Regex("^[0-9]+\\.[0-9]+\\.[0-9]+$")
-        private const val MAX_LENGTH = 32
-
-        fun of(raw: String?): CliVersion? =
-            raw?.takeIf { it.length <= MAX_LENGTH && PATTERN.matches(it) }?.let { CliVersion(it) }
-    }
-}
-
-/**
- * One event of the run monitor (ADR 0012 §1). Every field is a fixed code, an enum, a number or a time-free shape: there is no free
- * text, so a value that comes from the CLI can only reach the wire as one of these. The wire form is in `MonitorWire`.
+ * One event of the run monitor (ADR 0012 §1). Every field is a fixed code, an enum or a number. There is no free text, and no value from
+ * the CLI reaches an event except as one of these. The wire form is in `MonitorWire`, and matches kivra's `MonitorEventSchema`.
  */
 sealed interface MonitorEvent {
     /** The CLI is about to start (the agent's own event). */
     data object AttemptStarted : MonitorEvent
 
-    data class CliInit(val model: ModelId?, val cliVersion: CliVersion?) : MonitorEvent
+    /** The CLI's init. Nothing from it is kept: kivra stores no model id or version yet (ADR 0012 U-5). */
+    data object CliInit : MonitorEvent
 
     /** A phase from the agent's own progress (the agent reports FINALIZING before the result). */
     data class Phase(val phase: ProgressPhase) : MonitorEvent
 
     data class ToolUse(val tool: MonitorTool) : MonitorEvent
 
-    data class ToolResult(val isError: Boolean) : MonitorEvent
+    /** One tool result that was an error. Successful results are not recorded. */
+    data object ToolError : MonitorEvent
 
     /** One assistant message. */
     data object Turn : MonitorEvent
@@ -100,11 +80,8 @@ sealed interface MonitorEvent {
 
     data class Warning(val code: MonitorWarning) : MonitorEvent
 
-    /** The number of events the sender could not queue since the last one (0 to [MAX_COUNT]). */
+    /** The number of events the agent could not send since the last one (0 to [MAX_COUNT]). */
     data class Dropped(val count: Int) : MonitorEvent
-
-    /** The per-attempt limit was reached; no later event is recorded. */
-    data object Truncated : MonitorEvent
 
     companion object {
         const val MAX_COUNT = 10_000

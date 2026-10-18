@@ -61,39 +61,24 @@ class MonitorEventExtractorTest {
     }
 
     @Test
-    fun userToolResultGivesOnlyTheErrorFlag() {
+    fun userToolResultGivesAToolErrorOnlyWhenItIsAnError() {
         val line = """{"type":"user","message":{"content":[""" +
             """{"type":"tool_result","tool_use_id":"t1","content":"$bearer $path $secretToken","is_error":true},""" +
             """{"type":"tool_result","tool_use_id":"t2","content":"ok $prompt"}]}}"""
-        assertEquals(listOf(MonitorEvent.ToolResult(isError = true), MonitorEvent.ToolResult(isError = false)), extract(line))
+        assertEquals(listOf(MonitorEvent.ToolError), extract(line))
     }
 
     @Test
-    fun initGivesTheModelAndTheCliVersionWhenTheyHaveTheAllowedShape() {
+    fun initGivesACliInitWithNothingFromTheLine() {
         val line = """{"type":"system","subtype":"init","cwd":"$path","model":"claude-haiku-5-5","claude_code_version":"2.1.3",""" +
             """"tools":["Read"],"session_id":"$secretToken"}"""
-        val event = extract(line).single() as MonitorEvent.CliInit
-        assertEquals("claude-haiku-5-5", event.model?.value)
-        assertEquals("2.1.3", event.cliVersion?.value)
+        assertEquals(listOf(MonitorEvent.CliInit), extract(line))
     }
 
     @Test
-    fun initKeepsNoModelOrVersionThatDoesNotHaveTheAllowedShape() {
-        val line = """{"type":"system","subtype":"init","model":"$prompt","claude_code_version":"2.1.3-$secretToken"}"""
-        assertEquals(emptyList(), extract(line))
-    }
-
-    @Test
-    fun initWithOnlyAnAllowedVersionGivesThatVersion() {
-        val event = extract("""{"type":"system","subtype":"init","model":"$prompt","claude_code_version":"2.1.3"}""").single()
-        event as MonitorEvent.CliInit
-        assertEquals(null, event.model)
-        assertEquals("2.1.3", event.cliVersion?.value)
-    }
-
-    @Test
-    fun initWithNothingUsableGivesNoEvent() {
-        assertEquals(emptyList(), extract("""{"type":"system","subtype":"init","tools":["Read"]}"""))
+    fun initWithAnyValueStillGivesOnlyTheFixedCliInit() {
+        assertEquals(listOf(MonitorEvent.CliInit), extract("""{"type":"system","subtype":"init","model":"$prompt"}"""))
+        assertEquals(listOf(MonitorEvent.CliInit), extract("""{"type":"system","subtype":"init","tools":["Read"]}"""))
     }
 
     @Test
@@ -198,17 +183,5 @@ class MonitorEventExtractorTest {
                 assertTrue(!rendered.contains(value, ignoreCase = true), "value '$value' reached the monitor event for line: $line")
             }
         }
-    }
-
-    @Test
-    fun theEventTypesHoldNoFreeText() {
-        // The fixed types carry enums and numbers only. A value of a text type would be a compile-time error, so this test only checks
-        // that a model name or a version with text in it is refused (see the shape rules above).
-        assertEquals(null, ModelId.of("Claude Haiku"))
-        assertEquals(null, ModelId.of("UPPER-CASE"))
-        assertEquals(null, ModelId.of("a".repeat(65)))
-        assertEquals(null, CliVersion.of("1.2"))
-        assertEquals(null, CliVersion.of("1.2.3.4"))
-        assertEquals(null, CliVersion.of("1.2.3" + "0".repeat(40)))
     }
 }

@@ -775,8 +775,8 @@ class RealAttemptExecutorMonitorTest {
         for (kind in listOf("ATTEMPT_STARTED", "CLI_INIT", "TOOL_USE", "TURN", "PROCESS_EXIT_CONFIRMED")) {
             assertTrue(bodies.contains(""""kind":"$kind""""), kind)
         }
-        assertTrue(bodies.contains(""""model":"claude-haiku-5-5""""))
-        assertTrue(bodies.contains(""""toolName":"EDIT""""))
+        assertFalse(bodies.contains("claude-haiku"), "the model id is not sent (kivra stores none yet)")
+        assertTrue(bodies.contains(""""toolName":"Edit""""))
         for (secret in listOf(CONTENT, TITLE, SUMMARY, "kivra-agent/src/Main.kt", "file_path", "new_string")) {
             assertFalse(bodies.contains(secret), "the events must not carry '$secret'")
         }

@@ -14,8 +14,6 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
-import net.kigawa.kivra.agent.claude.CliVersion
-import net.kigawa.kivra.agent.claude.ModelId
 import net.kigawa.kivra.agent.claude.MonitorEvent
 import net.kigawa.kivra.agent.claude.MonitorTool
 import net.kigawa.kivra.agent.claude.MonitorWarning
@@ -79,7 +77,7 @@ class MonitorEventSenderTest {
         val transport = ScriptedTransport()
         val sender = sender(transport)
         backgroundScope.launch { sender.runLoop() }
-        repeat(50) { sender.enqueue(MonitorEvent.CliInit(ModelId.of("a".repeat(64)), CliVersion.of("999.999.999"))) }
+        repeat(50) { sender.enqueue(MonitorEvent.ToolUse(MonitorTool.TODO_WRITE)) }
         sender.finish()
 
         assertEquals((1L..50L).toList(), transport.bodies.flatMap { seqsOf(it) })
@@ -90,10 +88,10 @@ class MonitorEventSenderTest {
     fun eachEventIsAtMost256BytesAtItsLargestValues() {
         val largest = listOf(
             MonitorEvent.AttemptStarted,
-            MonitorEvent.CliInit(ModelId.of("a".repeat(64)), CliVersion.of("999.999.999")),
+            MonitorEvent.CliInit,
             MonitorEvent.Phase(net.kigawa.kivra.agent.ProgressPhase.ROUND_COMPLETED),
             MonitorEvent.ToolUse(MonitorTool.TODO_WRITE),
-            MonitorEvent.ToolResult(isError = true),
+            MonitorEvent.ToolError,
             MonitorEvent.Turn,
             MonitorEvent.PermissionDenied(MonitorEvent.MAX_COUNT),
             MonitorEvent.ApiRetry(net.kigawa.kivra.agent.claude.ApiErrorKind.AUTHENTICATION),
@@ -102,7 +100,6 @@ class MonitorEventSenderTest {
             MonitorEvent.ProcessExitConfirmed(DockerRunOutcome.OUTPUT_LIMIT),
             MonitorEvent.Warning(MonitorWarning.BLOCK_LIMIT),
             MonitorEvent.Dropped(MonitorEvent.MAX_COUNT),
-            MonitorEvent.Truncated,
         )
         for (event in largest) {
             val size = MonitorWire.event(2_000L, event).toString().length
@@ -119,15 +116,19 @@ class MonitorEventSenderTest {
         backgroundScope.launch { sender.runLoop() }
         sender.finish()
 
-        val first = transport.bodies.first()
-        assertEquals("DROPPED", kindsOf(first).first())
-        val marker = Json.parseToJsonElement(first).jsonObject["events"]!!.jsonArray.first().jsonObject
-        assertEquals(100L, marker["count"]!!.jsonPrimitive.long)
-        assertEquals(500, transport.bodies.sumOf { seqsOf(it).size } - 1)
+        // The 500 queued events are sent, then one DROPPED summary of the 100 that did not fit.
+        val all = transport.bodies.flatMap { body ->
+            Json.parseToJsonElement(body).jsonObject["events"]!!.jsonArray.map { it.jsonObject }
+        }
+        val summaries = all.filter { it["kind"]!!.jsonPrimitive.content == "DROPPED" }
+        assertEquals(1, summaries.size)
+        assertEquals(100L, summaries.single()["count"]!!.jsonPrimitive.long)
+        assertEquals(500, all.count { it["kind"]!!.jsonPrimitive.content == "TURN" })
+        assertEquals((1L..501L).toList(), all.map { it["seq"]!!.jsonPrimitive.long })
     }
 
     @Test
-    fun theAttemptIsCappedAtMaxEventsWithTruncatedAsTheLastOne() = runTest {
+    fun theAttemptIsCappedAtMaxEventsWithADroppedSummaryAsTheLastOne() = runTest {
         val transport = ScriptedTransport()
         val sender = sender(transport, maxEvents = 20, queueCapacity = 10_000)
         backgroundScope.launch { sender.runLoop() }
@@ -135,8 +136,11 @@ class MonitorEventSenderTest {
         sender.finish()
 
         val seqs = transport.bodies.flatMap { seqsOf(it) }
+        // 19 events fit, seq 20 is the DROPPED summary of the other 31 (kivra's cap is 20 seqs in this test).
         assertEquals((1L..20L).toList(), seqs)
-        assertEquals("TRUNCATED", transport.bodies.flatMap { kindsOf(it) }.last())
+        assertEquals("DROPPED", transport.bodies.flatMap { kindsOf(it) }.last())
+        val summary = Json.parseToJsonElement(transport.bodies.last()).jsonObject["events"]!!.jsonArray.last().jsonObject
+        assertEquals(31L, summary["count"]!!.jsonPrimitive.long)
     }
 
     @Test

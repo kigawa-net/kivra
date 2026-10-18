@@ -68,8 +68,9 @@ function makeDom() {
     createElement: (t) => new El(t),
     createTextNode: (t) => new TextNode(t),
     getElementById: byId,
-    addEventListener: (type, fn) => { documentListeners[type] = fn; },
+    addEventListener: (type, fn) => { (documentListeners[type] = documentListeners[type] || []).push(fn); },
   };
+  const fireDocument = (type) => (documentListeners[type] || []).forEach((fn) => fn({}));
   const hashListeners = [];
   const window = {
     location: { hash: '' },
@@ -77,16 +78,59 @@ function makeDom() {
     scrollTo() {},
     addEventListener: (type, fn) => { if (type === 'hashchange') hashListeners.push(fn); },
   };
-  return { ids, byId, document, window, hashListeners };
+  return { ids, byId, document, window, hashListeners, fireDocument };
 }
 
 /**
  * Loads app.js into a fresh context. `respond(path, init)` returns { status, data } (or a promise of it), or throws to
  * simulate a network failure. Every request is recorded in `calls` as { path, method, body }.
  */
-function load(respond, { hash = '' } = {}) {
+/**
+ * A fake clock for setTimeout / clearTimeout and Date.now(). Timers run only when `advance(ms)` moves time past them.
+ * Nothing real waits, so the tests are fast and the node process ends when they do.
+ */
+function makeClock(start = Date.parse('2026-10-19T00:00:00Z')) {
+  const clock = { now: start, timers: [], nextId: 1 };
+  clock.setTimeout = (fn, ms) => {
+    const t = { id: clock.nextId++, at: clock.now + (ms || 0), fn };
+    clock.timers.push(t);
+    return t.id;
+  };
+  clock.clearTimeout = (id) => { clock.timers = clock.timers.filter((t) => t.id !== id); };
+  clock.advance = async (ms) => {
+    const end = clock.now + ms;
+    for (;;) {
+      const due = clock.timers.filter((t) => t.at <= end).sort((a, b) => a.at - b.at || a.id - b.id)[0];
+      if (!due) break;
+      clock.now = Math.max(clock.now, due.at);
+      clock.timers = clock.timers.filter((t) => t !== due);
+      due.fn();
+      await flush();
+    }
+    clock.now = end;
+    await flush();
+  };
+  return clock;
+}
+
+function fakeDateFor(clock) {
+  return class FakeDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) super(clock.now);
+      else super(...args);
+    }
+    static now() { return clock.now; }
+  };
+}
+
+/**
+ * Loads app.js into a fresh context. `opts.eventSource` is an optional EventSource constructor (absent: no SSE).
+ */
+function load(respond, { hash = '', eventSource } = {}) {
   const dom = makeDom();
   dom.window.location.hash = hash;
+  const clock = makeClock();
+  if (eventSource) dom.window.EventSource = eventSource;
   const calls = [];
   const ctx = {
     document: dom.document,
@@ -94,6 +138,9 @@ function load(respond, { hash = '' } = {}) {
     console,
     setInterval: () => 1,
     clearInterval() {},
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    Date: fakeDateFor(clock),
   };
   ctx.fetch = async (p, init) => {
     calls.push({ path: p, method: init.method, body: init.body === undefined ? undefined : JSON.parse(init.body), headers: init.headers });
@@ -110,7 +157,7 @@ function load(respond, { hash = '' } = {}) {
   };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(APP_JS, 'utf8'), ctx, { filename: 'app.js' });
-  return { ...dom, calls };
+  return { ...dom, calls, clock };
 }
 
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
@@ -1010,4 +1057,410 @@ test('the back button returns to the edit step without sending', async () => {
   dom.byId('budget-back').fire('click');
   assert.equal(dom.byId('budget-dialog-edit').hidden, false);
   assert.equal(dom.calls.filter((c) => c.path === '/api/admin/budget/acknowledge').length, 0);
+});
+
+// ---- Execution (ADR 0012 PR 4): "実行の経過" in the detail of a self-development run ----------------------------
+
+const ATT = '01ATTEMPTAAAAAAAAAAAAAAAAAAA';
+const EXEC_PATH = '/api/admin/runs/' + SELF_RUN_ID + '/execution';
+const STREAM_PATH = EXEC_PATH + '/stream';
+
+/** A snapshot as the server answers it (fields as in RunExecutionRoutes / MonitorExecutionView). Times are the fake clock. */
+function snapshot(over = {}) {
+  return {
+    runId: SELF_RUN_ID,
+    runState: 'DEVELOPING',
+    snapshotAt: '2026-10-19T00:00:00Z',
+    revision: { attemptVersion: 3, eventCount: 10 },
+    freshness: 'LIVE',
+    lastReceivedAt: '2026-10-19T00:00:00Z',
+    attempts: [{ attemptId: ATT, attemptNo: 1, state: 'RUNNING', leaseGeneration: 2, lastReceivedAt: '2026-10-19T00:00:00Z' }],
+    stop: { stage: 'NONE', runCancelRequested: false, agentAcknowledged: false, processExitConfirmed: false },
+    tools: { total: 12, byName: { Read: 5, Edit: 2, Bash: 3, OTHER: 1 }, errors: 1 },
+    turns: 4,
+    permissionDenied: 0,
+    warnings: 2,
+    dropped: 0,
+    truncated: false,
+    lastPhase: 'EDITING',
+    testingReported: false,
+    apiRetries: {},
+    cost: { confirmedUsd: '0.000000', estimatedUsd: '0.120000', confirmedBasis: 'REPORTED_USAGE', estimatedBasis: 'RESERVE_ESTIMATE' },
+    ...over,
+  };
+}
+
+/**
+ * Opens the detail of a self-development run. `exec` is a function returning the response of the execution snapshot
+ * (default: 200 with snapshot()). Everything else answers as in `defaults(true)`.
+ */
+async function openExec(run, exec, opts = {}) {
+  const dom = load((p) => {
+    if (p === '/api/runs/' + encodeURIComponent(run.runId)) return { status: 200, data: run };
+    if (p === EXEC_PATH) return exec ? exec() : { status: 200, data: snapshot() };
+    return defaults(true)(p);
+  }, { hash: '#/runs/' + run.runId, eventSource: opts.eventSource });
+  dom.window.location.hash = '#/runs/' + run.runId;
+  dom.hashListeners.forEach((fn) => fn());
+  await flush();
+  return dom;
+}
+
+function execSection(dom) {
+  let found = null;
+  dom.byId('detail-body').walk((n) => { if (n.className === 'exec-section') found = n; });
+  return found;
+}
+
+function execCalls(dom) { return dom.calls.filter((c) => c.path === EXEC_PATH); }
+
+/** The text of the dd that follows the dt with this text (the detail is a dl of dt/dd pairs). */
+function valueAfter(section, label) {
+  let out = null;
+  section.walk((n) => {
+    if (n.tagName !== 'DL') return;
+    n.children.forEach((c, i) => {
+      if (c.tagName === 'DT' && c.textContent === label && n.children[i + 1]) out = n.children[i + 1].textContent;
+    });
+  });
+  assert.notEqual(out, null, 'no value for ' + label);
+  return out;
+}
+
+/** A stub EventSource: records the instances and lets the test fire open, messages and errors. */
+function makeEventSource(instances) {
+  return class StubEventSource {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 0;
+      this.closed = false;
+      this.onopen = null;
+      this.onerror = null;
+      this.listeners = {};
+      instances.push(this);
+    }
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
+    emit(type, data) { (this.listeners[type] || []).forEach((fn) => fn({ data: JSON.stringify(data || {}) })); }
+    open() { this.readyState = 1; if (this.onopen) this.onopen({}); }
+    fail() { this.readyState = 0; if (this.onerror) this.onerror({}); }
+    close() { this.closed = true; this.readyState = 2; }
+  };
+}
+
+test('a simulation run has no execution section and makes no execution request', async () => {
+  const sim = { runId: SIM_RUN_ID, taskId: 'api:1', title: 'sim', state: 'CREATED', mode: 'SIMULATED', executed: false, events: [] };
+  const dom = await openDetail(sim);
+  assert.equal(execSection(dom), null);
+  assert.equal(execCalls(dom).length, 0);
+});
+
+test('an API-path run (404 on the execution view) hides the section, and the watch does not poll again', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({ status: 404, data: { error: 'run not found' } }));
+  assert.equal(execSection(dom).hidden, true);
+  assert.equal(execCalls(dom).length, 1);
+  await dom.clock.advance(60000);
+  assert.equal(execCalls(dom).length, 1, 'no further request after the 404');
+});
+
+test('a 200 with no attempt is not a CLI run: hidden, and not polled', async () => {
+  const dom = await openExec(selfRun('CREATED'), () => ({ status: 200, data: snapshot({ attempts: [] }) }));
+  assert.equal(execSection(dom).hidden, true);
+  await dom.clock.advance(60000);
+  assert.equal(execCalls(dom).length, 1);
+});
+
+test('a 403 (not the creator, not an operator) hides the section', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({ status: 403, data: { error: 'forbidden' } }));
+  assert.equal(execSection(dom).hidden, true);
+});
+
+test('the section shows the attempt, the turn count, the tool counts and the warnings as numbers and fixed labels', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'));
+  const sec = execSection(dom);
+  assert.equal(sec.hidden, false);
+  const text = sec.textContent;
+  assert.match(text, /試行 #1：稼働中（CLI）（世代 2）/);
+  assert.equal(valueAfter(sec, 'ターン'), 'ターン 4');
+  assert.equal(valueAfter(sec, 'ツール呼び出し（合計）'), '12 回');
+  assert.equal(valueAfter(sec, 'ツール結果の失敗'), '1 件');
+  assert.equal(valueAfter(sec, '読み取り（Read）'), '5 回');
+  assert.equal(valueAfter(sec, '編集（Edit）'), '2 回');
+  assert.equal(valueAfter(sec, 'その他'), '1 回');
+  assert.match(text, /警告: 2 件/);
+  assert.match(text, /最後の段階（エージェントの報告）/);
+  assert.equal(valueAfter(sec, '最後の段階（エージェントの報告）'), '編集中');
+  // The count is a number of calls, never a percentage: an active attempt shows an indeterminate bar with words.
+  assert.doesNotMatch(text, /%/);
+  assert.match(text, /不確定/);
+  const bars = []; sec.walk((n) => { if (n.tagName === 'PROGRESS') bars.push(n); });
+  assert.equal(bars.length, 1);
+  assert.equal(bars[0].attrs.value, undefined, 'no value: indeterminate');
+});
+
+test('no bar once every attempt is over; the body of the section is a polite live region', async () => {
+  const dom = await openExec(selfRun('FAILED'), () => ({ status: 200, data: snapshot({ runState: 'FAILED', attempts: [{ attemptId: ATT, attemptNo: 1, state: 'FAILED', leaseGeneration: 2, lastReceivedAt: null }] }) }));
+  const sec = execSection(dom);
+  const bars = []; sec.walk((n) => { if (n.tagName === 'PROGRESS') bars.push(n); });
+  assert.equal(bars.length, 0);
+  let live = null;
+  sec.walk((n) => { if (n.attrs['aria-live'] !== undefined) live = n.attrs['aria-live']; });
+  assert.equal(live, 'polite');
+});
+
+test('the confirmed cost and the estimate are labelled apart, and the estimate says 推定', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({ status: 200, data: snapshot({ cost: { confirmedUsd: '0.250000', estimatedUsd: '1.500000' } }) }));
+  const sec = execSection(dom);
+  assert.equal(valueAfter(sec, '確定（CLI の報告。終了後に確定します）'), 'USD 0.250000');
+  const est = valueAfter(sec, '推定（予約からの見積り。確定ではありません）');
+  assert.equal(est, 'USD 1.500000（推定）');
+  // The estimate is never shown under the confirmed label.
+  assert.notEqual(valueAfter(sec, '確定（CLI の報告。終了後に確定します）'), est);
+});
+
+test('a malformed money value is shown as unknown, never as a number', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({ status: 200, data: snapshot({ cost: { confirmedUsd: '1e9', estimatedUsd: null } }) }));
+  const sec = execSection(dom);
+  assert.equal(valueAfter(sec, '確定（CLI の報告。終了後に確定します）'), '不明');
+  assert.equal(valueAfter(sec, '推定（予約からの見積り。確定ではありません）'), '不明（推定）');
+});
+
+test('STALE is shown in words with the minutes since the last receipt, in the warning style', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({ status: 200, data: snapshot({ freshness: 'STALE', lastReceivedAt: '2026-10-18T23:53:00Z' }) }));
+  const sec = execSection(dom);
+  const stale = []; sec.walk((n) => { if (n.className === 'exec-stale') stale.push(n); });
+  assert.equal(stale.length, 1);
+  assert.equal(stale[0].textContent, '最終の受信から 7 分経過。表示は古い可能性があります');
+  assert.equal(stale[0].attrs.role, 'status');
+});
+
+test('STALE with nothing ever received says so in words', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({ status: 200, data: snapshot({ freshness: 'STALE', lastReceivedAt: null, attempts: [{ attemptId: ATT, attemptNo: 1, state: 'CLAIMED', leaseGeneration: 1, lastReceivedAt: null }] }) }));
+  assert.match(execSection(dom).textContent, /受信の記録がありません。表示は古い可能性があります/);
+});
+
+test('LIVE shows no stale sentence', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'));
+  const sec = execSection(dom);
+  const stale = []; sec.walk((n) => { if (n.className === 'exec-stale') stale.push(n); });
+  assert.equal(stale.length, 0);
+  assert.doesNotMatch(sec.textContent, /古い可能性/);
+  assert.match(sec.textContent, /鮮度: LIVE/);
+});
+
+test('a non-terminal run is read every 5 seconds; a terminal run is read once and not again', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'));
+  assert.equal(execCalls(dom).length, 1);
+  await dom.clock.advance(5000);
+  assert.equal(execCalls(dom).length, 2);
+  await dom.clock.advance(5000);
+  assert.equal(execCalls(dom).length, 3);
+
+  const done = await openExec(selfRun('COMPLETED'), () => ({ status: 200, data: snapshot({ runState: 'COMPLETED' }) }));
+  assert.equal(execCalls(done).length, 1);
+  await done.clock.advance(60000);
+  assert.equal(execCalls(done).length, 1, 'terminal: no polling');
+});
+
+test('leaving the detail stops the watch at once', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'));
+  assert.equal(execCalls(dom).length, 1);
+  dom.window.location.hash = '#/';
+  dom.hashListeners.forEach((fn) => fn());
+  await flush();
+  await dom.clock.advance(60000);
+  assert.equal(execCalls(dom).length, 1, 'no request after leaving the detail');
+});
+
+test('a hidden tab reads every 30 seconds, and a shown tab reads at once', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'));
+  dom.document.hidden = true;
+  dom.fireDocument('visibilitychange');
+  await dom.clock.advance(5000);
+  assert.equal(execCalls(dom).length, 1, 'no read at the visible interval while hidden');
+  await dom.clock.advance(25000);
+  assert.equal(execCalls(dom).length, 2, 'read at 30 seconds');
+  dom.document.hidden = false;
+  dom.fireDocument('visibilitychange');
+  await flush();
+  assert.equal(execCalls(dom).length, 3, 'shown again: read at once');
+});
+
+test('consecutive failures back off (10, 20, 40, 60, 60 seconds); the last shown state stays, with fixed words', async () => {
+  const times = [];
+  let failing = false;
+  let dom;
+  // The first read happens while the page loads (the clock has not moved yet); later reads use the fake clock.
+  dom = await openExec(selfRun('DEVELOPING'), () => {
+    times.push(dom ? dom.clock.now : Date.parse('2026-10-19T00:00:00Z'));
+    return failing ? { status: 500, data: { error: 'LEAK' } } : { status: 200, data: snapshot() };
+  });
+  failing = true;
+  await dom.clock.advance(5000 + 10000 + 20000 + 40000 + 60000 + 60000);
+  const gaps = times.slice(1).map((t, i) => t - times[i]);
+  // Each failure doubles the wait (from the normal interval), capped at 60 seconds.
+  assert.deepEqual(gaps, [5000, 10000, 20000, 40000, 60000, 60000]);
+  const sec = execSection(dom);
+  assert.match(sec.textContent, /監視の情報を取得できませんでした/);
+  assert.match(sec.textContent, /Run の状態ではありません/);
+  assert.match(sec.textContent, /ターン 4/, 'the last snapshot is still shown');
+  assert.doesNotMatch(sec.textContent, /LEAK/);
+  assert.doesNotMatch(sec.textContent, /正常|解消/);
+
+  failing = false;
+  await dom.clock.advance(60000);
+  assert.doesNotMatch(sec.textContent, /監視の情報を取得できませんでした/, 'a good answer clears the failure');
+  const before = execCalls(dom).length;
+  await dom.clock.advance(5000);
+  assert.equal(execCalls(dom).length, before + 1, 'back to the normal interval');
+});
+
+test('a network failure before any answer shows the section with the fixed message, and the watch tries again', async () => {
+  let fail = true;
+  const dom = await openExec(selfRun('DEVELOPING'), () => {
+    if (fail) throw new Error('network down');
+    return { status: 200, data: snapshot() };
+  });
+  const sec = execSection(dom);
+  assert.equal(sec.hidden, false);
+  assert.match(sec.textContent, /監視の情報を取得できませんでした/);
+  fail = false;
+  await dom.clock.advance(10000);
+  assert.match(execSection(dom).textContent, /ターン 4/);
+});
+
+test('a malformed answer is a failure with the fixed message, not a blank or a crash', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({ status: 200, data: { attempts: 'x' } }));
+  assert.equal(execSection(dom).hidden, false);
+  assert.match(execSection(dom).textContent, /監視の情報を取得できませんでした/);
+});
+
+test('an older snapshot (by revision) never replaces the one shown', async () => {
+  let n = 0;
+  const dom = await openExec(selfRun('DEVELOPING'), () => {
+    n += 1;
+    if (n === 1) return { status: 200, data: snapshot({ turns: 9, revision: { attemptVersion: 5, eventCount: 10 } }) };
+    return { status: 200, data: snapshot({ turns: 2, revision: { attemptVersion: 4, eventCount: 10 } }) };
+  });
+  assert.equal(valueAfter(execSection(dom), 'ターン'), 'ターン 9');
+  await dom.clock.advance(5000);
+  assert.equal(execCalls(dom).length, 2);
+  assert.equal(valueAfter(execSection(dom), 'ターン'), 'ターン 9', 'the older answer is ignored');
+});
+
+test('a stop requested is shown as waiting for the agent, never as stopped', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({
+    status: 200,
+    data: snapshot({ stop: { stage: 'REQUESTED', runCancelRequested: true, agentAcknowledged: false, processExitConfirmed: false } }),
+  }));
+  const sec = execSection(dom);
+  assert.equal(valueAfter(sec, '段階'), '停止要求あり（エージェントの確認待ち）');
+  assert.equal(valueAfter(sec, '停止要求'), 'あり');
+  assert.doesNotMatch(sec.textContent, /停止済み|停止しました/);
+});
+
+test('XSS: attempt states, tool names and retry kinds from the server are text only; unknown tools count as OTHER', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({
+    status: 200,
+    data: snapshot({
+      attempts: [{ attemptId: ATT, attemptNo: 1, state: EVIL, leaseGeneration: 1, lastReceivedAt: null }],
+      tools: { total: 3, byName: { [EVIL]: 3 }, errors: 0 },
+      apiRetries: { [EVIL]: 1 },
+      lastPhase: EVIL,
+    }),
+  }));
+  const sec = execSection(dom);
+  sec.walk((n) => {
+    assert.ok(!['IMG', 'SCRIPT', 'B', 'A'].includes(n.tagName), 'no markup element from server data: ' + n.tagName);
+  });
+  assert.ok(sec.textContent.includes(EVIL), 'the unknown state is shown as literal text');
+  assert.equal(valueAfter(sec, 'その他'), '3 回');
+  assert.equal(valueAfter(sec, '最後の段階（エージェントの報告）'), '不明な値（' + EVIL + '）');
+});
+
+test('a malformed attempt number or count is shown as unknown', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({
+    status: 200,
+    data: snapshot({ turns: -1, tools: { total: 1.5, byName: {}, errors: 'x' } }),
+  }));
+  const sec = execSection(dom);
+  assert.equal(valueAfter(sec, 'ターン'), 'ターン 不明');
+  assert.equal(valueAfter(sec, 'ツール呼び出し（合計）'), '不明 回');
+  assert.equal(valueAfter(sec, 'ツール結果の失敗'), '不明 件');
+});
+
+test('the stream is started only after the first answer with an attempt, and a stream message reads the snapshot soon', async () => {
+  const instances = [];
+  const dom = await openExec(selfRun('DEVELOPING'), null, { eventSource: makeEventSource(instances) });
+  assert.equal(instances.length, 1);
+  assert.equal(instances[0].url, STREAM_PATH);
+  instances[0].open();
+  assert.match(execSection(dom).textContent, /取得方法: 常時接続（SSE）/);
+  const before = execCalls(dom).length;
+  instances[0].emit('monitor', { attemptId: ATT, seq: 1 });
+  await dom.clock.advance(500);
+  assert.equal(execCalls(dom).length, before + 1, 'read soon after a message');
+});
+
+test('a stream that fails three times falls back to the REST poll, which keeps running', async () => {
+  const instances = [];
+  const dom = await openExec(selfRun('DEVELOPING'), null, { eventSource: makeEventSource(instances) });
+  const es = instances[0];
+  for (let i = 0; i < 3; i++) es.fail();
+  assert.equal(es.closed, true, 'the stream is closed after repeated failures');
+  assert.match(execSection(dom).textContent, /常時接続は使えなかったため、定期取得に切り替えました/);
+  const before = execCalls(dom).length;
+  await dom.clock.advance(5000);
+  assert.equal(execCalls(dom).length, before + 1, 'polling continues every 5 seconds');
+  assert.equal(instances.length, 1, 'no new stream after the fallback');
+});
+
+test('a stream that closes at once (readyState CLOSED) falls back to the REST poll without waiting for three errors', async () => {
+  const instances = [];
+  const dom = await openExec(selfRun('DEVELOPING'), null, { eventSource: makeEventSource(instances) });
+  // The browser gives up: readyState CLOSED with the error event.
+  instances[0].readyState = 2;
+  instances[0].onerror({});
+  assert.equal(instances[0].closed, true);
+  const before = execCalls(dom).length;
+  await dom.clock.advance(5000);
+  assert.equal(execCalls(dom).length, before + 1);
+});
+
+test('without EventSource the page polls and shows the poll method', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'));
+  assert.match(execSection(dom).textContent, /取得方法: 定期取得（5 秒ごと）/);
+  await dom.clock.advance(5000);
+  assert.equal(execCalls(dom).length, 2);
+});
+
+test('a resync reads the snapshot again and opens a new stream; a second resync stops using the stream', async () => {
+  const instances = [];
+  const dom = await openExec(selfRun('DEVELOPING'), null, { eventSource: makeEventSource(instances) });
+  instances[0].emit('resync', { action: 'refetch_snapshot' });
+  assert.equal(instances[0].closed, true);
+  await dom.clock.advance(500);
+  assert.equal(instances.length, 2, 'a new stream after the snapshot');
+  assert.equal(execCalls(dom).length, 2, 'the snapshot was read again');
+  instances[1].open();
+  instances[1].emit('resync', {});
+  await dom.clock.advance(500);
+  assert.equal(instances.length, 2, 'after the second resync: no third stream');
+  assert.match(execSection(dom).textContent, /常時接続は使えなかったため、定期取得に切り替えました/);
+});
+
+test('leaving the detail closes the stream', async () => {
+  const instances = [];
+  const dom = await openExec(selfRun('DEVELOPING'), null, { eventSource: makeEventSource(instances) });
+  dom.window.location.hash = '#/';
+  dom.hashListeners.forEach((fn) => fn());
+  await flush();
+  assert.equal(instances[0].closed, true);
+});
+
+test('a terminal run closes the stream and stops', async () => {
+  const instances = [];
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({ status: 200, data: snapshot({ runState: 'COMPLETED' }) }), { eventSource: makeEventSource(instances) });
+  assert.equal(instances.length, 0, 'no stream for a terminal run');
+  await dom.clock.advance(60000);
+  assert.equal(execCalls(dom).length, 1);
 });

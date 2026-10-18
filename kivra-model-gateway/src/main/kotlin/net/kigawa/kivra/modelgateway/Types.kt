@@ -66,6 +66,8 @@ data class Requirements(
     val allowedProviders: Set<String>? = null,
     val deniedProviders: Set<String> = emptySet(),
     val locality: Locality = Locality.ANY,
+    /** When set, only these model ids (`ModelEntry.id`) may be routed to. Null allows any model. A hard filter, never relaxed. */
+    val allowedModelIds: Set<String>? = null,
 )
 
 /** Soft preference only. Never relaxes a hard constraint. */

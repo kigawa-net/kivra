@@ -147,11 +147,12 @@ Goal(`selfdev_goals.state`):
 | (なし) → `GOAL_SUBMITTED` | `POST /api/selfdev/goals` | 有効、(同じ key なら Replayed) | — |
 | `GOAL_SUBMITTED` → `PLANNING` | ワーカーが claim | 有効、全体一時停止でない、予算の予約が取れる、`version` が一致 | — |
 | `PLANNING` → `PLAN_PROPOSED` | Planner の出力が検証を通る | `version` と `claim_token` が一致(fenced)。Plan とタスクを同じ transaction で書く | — |
-| `PLANNING` → `BLOCKED` | 検証失敗が 2 回続く、または予算不足 | 同上 | `PLAN_INVALID` / `PLAN_BUDGET_HOLD`(§2.8) |
+| `PLANNING` → `BLOCKED` | 検証失敗が 2 回続く、または予算不足、または呼び出しの失敗 | 同上 | `PLAN_INVALID` / `PLAN_BUDGET_HOLD` / `PLAN_CALL_FAILED`(§2.8) |
 | `PLANNING` → `GOAL_SUBMITTED` | claim の期限切れ(ワーカーの停止など) | `claimed_until` を過ぎた | `CLAIM_EXPIRED` |
 | `PLAN_PROPOSED` → `TASKS_QUEUED` | 運用者が 1 件目を承認 | 承認はタスク単位 | — |
 | `PLAN_PROPOSED` → `GOAL_SUBMITTED` | 運用者の再計画(Planner が claim し直す。§2.8) | `revision` < 3 | `REPLAN_REQUESTED` |
 | `TASKS_QUEUED` → `RUNNING` | 最初のタスクの投入 | §5.1 のガードを通る | — |
+| `BLOCKED`(計画段階の理由) → `GOAL_SUBMITTED` | 運用者の再計画(U-16) | 計画段階の理由だけ(§2.8) | `REPLAN_REQUESTED` |
 | `RUNNING` / `TASKS_QUEUED` → `BLOCKED` | ガードで止まる | §5.2 | §5.2 の理由 |
 | `BLOCKED` → `RUNNING` / `TASKS_QUEUED` | ガードが解消 | 自動で解消するもの(滞留、日次上限、月次予算の次の期間)。手動のもの(サーキットブレーカー、範囲外の変更)は運用者の再開が要る | `GUARD_CLEARED` / `OPERATOR_RESUMED` |
 | `RUNNING` → `DONE` | 全タスクが `COMPLETED` | — | `ALL_TASKS_COMPLETED` |
@@ -196,10 +197,16 @@ PR A(V18、リポジトリ層、状態機械)で、本節の判断をした。�
 - **番号**: 初版の V16 は使用済み(`coding_attempt_usage`)のため、V18 とする。V17 は `task_body_and_reference`(#229)。
 - **`selfdev_goals` に `resume_state` と `resume_reason` を足す**: §2.5 の「PAUSED は前の状態に戻す」を実現するには、一時停止の直前の状態を保存する必要がある。PAUSED の間だけ値を持つ。
 - **再計画の遷移は `PLAN_PROPOSED → GOAL_SUBMITTED`**: §2.5 の `PLANNING` に戻すと、claim の無い `PLANNING` が生じる。`PLANNING` は「claim されている間」だけの状態とし、Planner が `GOAL_SUBMITTED` を claim して `PLANNING` に入る。
-- **計画段階の `BLOCKED` の理由は `PLAN_INVALID` / `PLAN_BUDGET_HOLD`**: §2.5 の `BUDGET_HOLD` は、計画段階とディスパッチ段階の両方で使われていた。両方に同じ理由を使うと、計画段階で止まった Goal が、ディスパッチの自動解消(`GUARD_CLEARED`)で `RUNNING` へ進んでしまう。そのため計画段階は別の理由にした。この結果、計画段階で `BLOCKED` になった Goal は `STOPPED` 以外へ進めない(未決の点 U-16)。
+- **計画段階の `BLOCKED` の理由は `PLAN_INVALID` / `PLAN_BUDGET_HOLD` / `PLAN_CALL_FAILED`**: §2.5 の `BUDGET_HOLD` は、計画段階とディスパッチ段階の両方で使われていた。両方に同じ理由を使うと、計画段階で止まった Goal が、ディスパッチの自動解消(`GUARD_CLEARED`)で `RUNNING` へ進んでしまう。そのため計画段階は別の理由にした。`PLAN_CALL_FAILED` は PR B で足した(モデル呼び出しの失敗のうち、予算以外のもの。自動では再試行しない)。計画段階で `BLOCKED` になった Goal は、ディスパッチの解消では進めず、運用者の再計画(`BLOCKED → GOAL_SUBMITTED`、`REPLAN_REQUESTED`)だけで `GOAL_SUBMITTED` に戻る(U-16 の決定)。
 - **タスクの終端は `COMPLETED` と `SKIPPED`**: §2.5 は Goal の終端だけを定めている。タスクでは、`COMPLETED` は PR のマージ済み、`SKIPPED` は運用者の判断で、どちらも再投入させない。`FAILED` / `CANCELLED` は、運用者の再投入(§5.4)で `QUEUED` に戻る。
 - **依存の検査は repository の CAS の中で行う**: `QUEUED → SUBMITTING` の時点で、依存先の全てが `COMPLETED` であることを確かめる(§5.1)。Dispatcher を書く前に、この条件が破られないようにするため。
-- **`REJECTED` の Plan は PR A では書かない**: 状態と遷移(`null → REJECTED` は `PLAN_INVALID`)は表にあるが、書く経路は PR B(Planner)で入る。REJECTED の行が `revision` を消費するかどうかは、PR B で決める(消費させる案が、回数の上限 3 と整合する)。
+- **`REJECTED` の Plan は書かない(PR B)**: 検証に失敗した出力は行にせず、監査(件数とダイジェストのログ)に残すだけにする。`revision` は、計画が `PLAN_PROPOSED` として保存されたときだけ増える。したがって再試行は `revision` を消費せず、上限 3 は保存された Plan の数に対する上限になる。
+- **オートパイロットの承認(PR B)**: `AUTO` のとき、§6.1 段階 2 の条件を満たすタスクだけ `QUEUED` で保存する(`docs/**`、`kivra-*/src/test/**`、`README.md` のみ、見積り `S`、3 件以下、denylist なし)。それ以外と denylist のタスクは `PENDING_APPROVAL`。`requires_approval` は、denylist に触れるか、段階 2 の条件を満たさないとき `true`。`requires_approval` はモデルの出力から読まず、計算で決める。**Goal は `PLAN_PROPOSED` のまま**にする。段階 2 は計画の承認を要する(§6.1)ため、`PLAN_PROPOSED → TASKS_QUEUED` は運用者の承認でだけ行う(PR C/D)。
+- **モデルの固定(PR B)**: `Requirements.allowedModelIds`(既定 null)を gateway に足し、ルーティングで一致しないモデルを `MODEL_NOT_ALLOWED` として除外する。Planner は `claude-haiku-5-5` だけを許す。起動時に、そのモデルが registry にあり `ACTIVE` であることを検査する。
+- **denylist の追加(PR B)**: Planner の検査だけ、`PatchPolicy` の既定 denylist に `**/db/migration/**`、`**/auth/**`、`.kivra/**` を足す(§4 の一覧のうち、既定に無いもの。U-6 の確定までの暫定)。PatchPolicy 本体の既定は変えない。
+- **循環の検査**: 依存は「必ず前のタスクだけを指す」規則で検査する。この規則は循環を作れないため、別のトポロジカル順序の検査は置かない(§3 の検査 3 は、この規則に含まれる)。
+- **Planner の入力(PR B で未実装)**: §3 の「対象リポジトリのファイルの一覧(パスだけ)」は PR B では渡さない。Goal の `title` と `body` だけを渡す。そのため、モデルが出すパスは推測になり、allowlist で拒否されることがある。ファイル一覧は後続の PR で足す(未決の点 U-17)。
+- **監査の行(PR B で未実装)**: `audit_events` は Run 単位の `AuditRepository` の形のため、Goal の遷移は行に書かない。遷移は `state_reason` と、Planner のログ(ID と固定の理由コードだけ)に残る。Goal 単位の監査は後続の PR で決める(U-18)。
 - **control 行は migration で 1 行入れる**: 行の無い状態を作らないため。`control_id = 1` の CHECK で 2 行目を拒否する。
 - **日次カウンタは UTC の日付**: §U-3 の暫定どおり。`runs_today` と `day_utc` は、1 つの UPDATE の中で日付の変わり目を判定する。
 - **連続失敗の計数は全体で 1 本**: §U-5 の暫定どおり。`breaker_open` は、計数が上限に達した UPDATE の中で立つ。成功は計数を 0 にするが、開いたブレーカーは閉じない(運用者の再開だけが閉じる、§5.4)。
@@ -379,7 +386,9 @@ PR A(V18、リポジトリ層、状態機械)で、本節の判断をした。�
 - **U-13 Planner の再計画と検証の回数**: 再計画は 3 回まで、検証の再試行は 1 回(暫定)。
 - **U-14 Goal の本文の上限**: 8000 文字(暫定)。#229 の依頼文の本文の上限と揃える。
 - **U-15 対象リポジトリの変更**: 段階 1 では画面から変えない(暫定)。複数リポジトリを扱う要件が出たら、別の ADR で扱う。
-- **U-16 計画段階で止まった Goal の回復**: §2.8 の判断により、計画段階の `BLOCKED` は `STOPPED` 以外へ進めない。運用者が計画をやり直す経路(`GOAL_SUBMITTED` へ戻す、または中止のみ)を、PR B(Planner)で決める。
+- **U-16 計画段階で止まった Goal の回復**: 決定済み(PR B)。計画段階の `BLOCKED` は、運用者の再計画(`BLOCKED → GOAL_SUBMITTED`、`REPLAN_REQUESTED`)でだけ `GOAL_SUBMITTED` に戻る。ディスパッチの解消では進めない。UI と HTTP の入口は PR D。
+- **U-17 Planner へのファイル一覧**: §3 の入力のうち、対象リポジトリのパス一覧を渡すかどうか。PR B では渡さない(Goal だけを渡す)。渡すなら、パスだけで内容は渡さない、の方針を維持する。
+- **U-18 Goal 単位の監査**: `audit_events` は Run 単位のため、Goal と Plan の遷移の監査の置き場所を決める。PR B では、遷移は行の `state_reason` とログに残るだけ。
 
 ## 見直しの条件
 

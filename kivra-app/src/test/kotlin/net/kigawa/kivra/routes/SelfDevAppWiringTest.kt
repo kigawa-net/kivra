@@ -52,6 +52,29 @@ class SelfDevAppWiringTest {
     }
 
     @Test
+    fun `with the autopilot off, no autopilot variable beyond its switch is read, and no planner route exists`() = testApplication {
+        environment { config = h2Config() }
+        application {
+            // The planner's knobs are set but the switch is off: TrapEnv fails the test if any of them is read.
+            appModule(
+                TrapEnv(
+                    mapOf(
+                        "KIVRA_AUTH_MODE" to "none",
+                        "KIVRA_RUNTIME_ENV" to "development",
+                        AutopilotSettings.ENV_ENABLED to "false",
+                        AutopilotSettings.ENV_APPROVAL to "auto",
+                        AutopilotSettings.ENV_PLAN_INTERVAL_SECONDS to "5",
+                    ),
+                ),
+            )
+        }
+        // Goal routes are not part of PR B (PR D); nothing is registered for them.
+        assertEquals(HttpStatusCode.NotFound, client.post("/api/selfdev/goals").status)
+        assertEquals(HttpStatusCode.NotFound, client.get("/api/selfdev/goals").status)
+        assertEquals(HttpStatusCode.OK, client.get("/health").status)
+    }
+
+    @Test
     fun `enabling without oidc-jwt fails the startup, and the message names no value`() {
         val e = assertFailsWith<IllegalStateException> {
             testApplication {

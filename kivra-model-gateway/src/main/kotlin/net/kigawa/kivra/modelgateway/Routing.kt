@@ -13,7 +13,7 @@ import java.util.UUID
  */
 enum class ExclusionReason {
     SECRET_DATA, TRUST_ZONE_DENIED, DATA_HANDLING_UNCONFIRMED, LOCALITY,
-    CAPABILITY_MISSING, CONTEXT_TOO_SMALL, PROVIDER_NOT_ALLOWED, LIFECYCLE,
+    CAPABILITY_MISSING, CONTEXT_TOO_SMALL, PROVIDER_NOT_ALLOWED, MODEL_NOT_ALLOWED, LIFECYCLE,
     /** The cost cannot be established (unpriced model, currency/unit mismatch, or unpriced usage recorded). */
     UNKNOWN_COST,
     BUDGET_POLICY_MISSING, BUDGET, UNHEALTHY, QUALITY_BELOW_MIN,
@@ -140,6 +140,8 @@ class RoutingEngine(
         // 4. Allow / deny lists, lifecycle, adapter wired.
         val allowed = req.requirements.allowedProviders
         if (p.id in req.requirements.deniedProviders || (allowed != null && p.id !in allowed)) return ExclusionReason.PROVIDER_NOT_ALLOWED
+        val allowedModels = req.requirements.allowedModelIds
+        if (allowedModels != null && m.id !in allowedModels) return ExclusionReason.MODEL_NOT_ALLOWED
         if (!p.enabled || p.id !in availableProviders || m.lifecycle != Lifecycle.ACTIVE || (m.retireAt != null && !m.retireAt.isAfter(today)))
             return ExclusionReason.LIFECYCLE
         // 5. Budget. The cost must be known in the budget's currency and unit: an unknown cost is never treated as zero.

@@ -99,11 +99,13 @@ internal fun Application.appModule(env: Map<String, String>) {
             requireNotNull(taskApiIdentity) { "self-development requires KIVRA_AUTH_MODE=oidc-jwt" },
             deferredPrMerge,
             coding = codingService?.let { CodingAttemptPatchSource(it) },
+            autopilot = autopilotSettings,
         )
     } else {
         null
     }
     selfDevParts?.worker?.start(this)
+    selfDevParts?.planWorker?.start(this)
     // Built only when the autopilot is enabled (ADR 0011 section 5). Its monthly-budget check reads the same store as the coding ledger.
     autopilotSettings.config?.let { autopilot ->
         AutopilotDispatcher(

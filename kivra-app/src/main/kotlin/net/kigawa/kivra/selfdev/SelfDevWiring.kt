@@ -3,9 +3,11 @@ package net.kigawa.kivra.selfdev
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import java.io.File
+import java.time.Duration
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.DbRequestLedger
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.SelfDevGoalRepository
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.developer.DeveloperConfig
 import net.kigawa.kivra.developer.LlmDeveloper
@@ -28,6 +30,7 @@ import net.kigawa.kivra.modelgateway.Capability
 import net.kigawa.kivra.modelgateway.CostConverter
 import net.kigawa.kivra.modelgateway.CredentialBinding
 import net.kigawa.kivra.modelgateway.DataClass
+import net.kigawa.kivra.modelgateway.Lifecycle
 import net.kigawa.kivra.modelgateway.ModelGateway
 import net.kigawa.kivra.modelgateway.ModelRegistry
 import net.kigawa.kivra.modelgateway.RegistryLoader
@@ -37,7 +40,12 @@ import net.kigawa.kivra.routes.SelfDevRouteDeps
 import org.jetbrains.exposed.sql.Database
 
 /** The self-development components built by [buildSelfDev]. Built only when [SelfDevSettings.enabled] is true. */
-internal class SelfDevParts(val worker: SelfDevWorker, val routes: SelfDevRouteDeps)
+internal class SelfDevParts(
+    val worker: SelfDevWorker,
+    val routes: SelfDevRouteDeps,
+    /** The autopilot Planner's loop. Non-null only when [AutopilotSettings.enabled] (ADR 0011). */
+    val planWorker: PlannerWorker? = null,
+)
 
 /** The principal the developer's model calls are made under. Not a user identity. */
 internal const val SELF_DEV_PRINCIPAL = "selfdev-runner"
@@ -69,6 +77,7 @@ internal fun buildSelfDev(
     identity: TaskApiIdentity,
     prMergeAuthority: DeferredPrMergeAuthority,
     coding: CodingPatchSource? = null,
+    autopilot: AutopilotSettings = AutopilotSettings.disabled(),
 ): SelfDevParts {
     val config = checkNotNull(settings.config) { "self-development settings are not enabled" }
     val auth = checkNotNull(settings.githubAuth) { "self-development GitHub authentication is missing" }
@@ -148,10 +157,37 @@ internal fun buildSelfDev(
         advance = { runId -> runner.advance(runId) },
         interval = settings.advanceInterval,
     )
+    // Built only when the autopilot is enabled. Nothing about planning exists otherwise (ADR 0011, PR B).
+    val planWorker = autopilot.config?.takeIf { autopilot.enabled }?.let { autopilotConfig ->
+        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevGoalRepository(database), tenantId)
+    }
     return SelfDevParts(
         worker = worker,
         routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github),
+        planWorker = planWorker,
     )
+}
+
+/**
+ * The Planner, pinned to [PLANNER_MODEL_ID]. Startup fails when that model is not in the registry or not active, so the feature never runs
+ * on an unlisted model. The budget is the tenant's (the same scope as the developer). The worker starts only if the caller starts it.
+ */
+private fun buildPlanWorker(
+    config: AutopilotConfig,
+    registry: ModelRegistry,
+    gateway: ModelGateway,
+    goals: SelfDevGoalRepository,
+    tenantId: String,
+): PlannerWorker {
+    check(registry.models.any { it.id == PLANNER_MODEL_ID && it.lifecycle == Lifecycle.ACTIVE }) {
+        "the autopilot planner model is not an active model in the registry"
+    }
+    val planner = AutopilotPlanner(
+        goals = goals,
+        gateway = gateway,
+        config = PlannerConfig(budgetScopes = listOf(tenantId), autopilot = config),
+    )
+    return PlannerWorker(goals, planner, Duration.ofSeconds(config.planIntervalSeconds))
 }
 
 /** Loads the model registry. The failure message carries no path and no file content. */

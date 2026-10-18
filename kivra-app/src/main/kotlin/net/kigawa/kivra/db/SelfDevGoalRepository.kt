@@ -207,6 +207,30 @@ class SelfDevGoalRepository(
         }
     }
 
+    /** Goals waiting for a Planner claim, oldest first. A read only: the claim itself is [claim]. */
+    fun submittedGoalIds(limit: Int): List<String> = transaction(database) {
+        execQuery(
+            "SELECT goal_id FROM selfdev_goals WHERE state = 'GOAL_SUBMITTED' ORDER BY created_at, goal_id LIMIT ?",
+            limit,
+        ) { it.getString(1) }
+    }
+
+    /** Goals whose Planner claim has expired on the DB clock. A read only: the reset is [expireClaim]. */
+    fun expiredClaimGoalIds(limit: Int): List<String> = transaction(database) {
+        execQuery(
+            "SELECT goal_id FROM selfdev_goals WHERE state = 'PLANNING' AND claimed_until <= ${DbTime.NOW} " +
+                "ORDER BY claimed_until, goal_id LIMIT ?",
+            limit,
+        ) { it.getString(1) }
+    }
+
+    /**
+     * U-16: an operator returns a planning-stage BLOCKED goal (PLAN_INVALID, PLAN_BUDGET_HOLD or PLAN_CALL_FAILED) to
+     * GOAL_SUBMITTED, so the Planner makes a new Plan. Fenced by [expectedVersion]. The state machine refuses any other block.
+     */
+    fun recoverBlockedPlan(goalId: String, expectedVersion: Long): Transition<SelfDevGoal> =
+        transition(goalId, expectedVersion, GoalState.GOAL_SUBMITTED, AutopilotReason.REPLAN_REQUESTED)
+
     /** PLANNING -> GOAL_SUBMITTED (CLAIM_EXPIRED) once the claim's deadline has passed on the DB clock. Returns false if not expired. */
     fun expireClaim(goalId: String): Boolean = transaction(database) {
         val current = getIn(goalId) ?: return@transaction false

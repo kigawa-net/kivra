@@ -21,10 +21,11 @@ class AutopilotStatesTest {
         put(null to GoalState.GOAL_SUBMITTED, none)
         put(GoalState.GOAL_SUBMITTED to GoalState.PLANNING, none)
         put(GoalState.PLANNING to GoalState.PLAN_PROPOSED, none)
-        put(GoalState.PLANNING to GoalState.BLOCKED, setOf(AutopilotReason.PLAN_INVALID, AutopilotReason.PLAN_BUDGET_HOLD))
+        put(GoalState.PLANNING to GoalState.BLOCKED, setOf(AutopilotReason.PLAN_INVALID, AutopilotReason.PLAN_BUDGET_HOLD, AutopilotReason.PLAN_CALL_FAILED))
         put(GoalState.PLANNING to GoalState.GOAL_SUBMITTED, setOf(AutopilotReason.CLAIM_EXPIRED))
         put(GoalState.PLAN_PROPOSED to GoalState.TASKS_QUEUED, none)
         put(GoalState.PLAN_PROPOSED to GoalState.GOAL_SUBMITTED, setOf(AutopilotReason.REPLAN_REQUESTED))
+        put(GoalState.BLOCKED to GoalState.GOAL_SUBMITTED, setOf(AutopilotReason.REPLAN_REQUESTED))
         put(GoalState.TASKS_QUEUED to GoalState.RUNNING, none)
         put(GoalState.RUNNING to GoalState.BLOCKED, dispatchBlocks)
         put(GoalState.TASKS_QUEUED to GoalState.BLOCKED, dispatchBlocks)
@@ -70,7 +71,12 @@ class AutopilotStatesTest {
     )
 
     /** A context in which every guard holds for [to] (a permissive setup, so the matrix checks the table alone). */
-    private fun permissive(to: GoalState) = GoalContext(revision = 0, blockedReason = AutopilotReason.PENDING_PR_LIMIT, resumeState = to)
+    private fun permissive(to: GoalState) = GoalContext(
+        revision = 0,
+        // A planning block is the only block that can return to GOAL_SUBMITTED; a dispatch block is the one that clears to dispatch.
+        blockedReason = if (to == GoalState.GOAL_SUBMITTED) AutopilotReason.PLAN_INVALID else AutopilotReason.PENDING_PR_LIMIT,
+        resumeState = to,
+    )
 
     @Test
     fun `every goal pair and every reason code is decided exactly as the ADR table says`() {
@@ -204,6 +210,23 @@ class AutopilotStatesTest {
             TransitionDecision.Refused(TransitionRefusal.GUARD_FAILED),
             blocked(null, GoalState.TASKS_QUEUED, AutopilotReason.OPERATOR_RESUMED),
         )
+        // U-16: a planning-stage block returns to GOAL_SUBMITTED by the operator's replan, and only from a planning reason.
+        assertEquals(
+            TransitionDecision.Allowed,
+            blocked(AutopilotReason.PLAN_INVALID, GoalState.GOAL_SUBMITTED, AutopilotReason.REPLAN_REQUESTED),
+        )
+        assertEquals(
+            TransitionDecision.Allowed,
+            blocked(AutopilotReason.PLAN_CALL_FAILED, GoalState.GOAL_SUBMITTED, AutopilotReason.REPLAN_REQUESTED),
+        )
+        assertEquals(
+            TransitionDecision.Refused(TransitionRefusal.GUARD_FAILED),
+            blocked(AutopilotReason.DAILY_RUN_CAP, GoalState.GOAL_SUBMITTED, AutopilotReason.REPLAN_REQUESTED),
+        )
+        assertEquals(
+            TransitionDecision.Refused(TransitionRefusal.GUARD_FAILED),
+            blocked(AutopilotReason.CIRCUIT_OPEN, GoalState.GOAL_SUBMITTED, AutopilotReason.REPLAN_REQUESTED),
+        )
         // Pausing a blocked goal and stopping it are not guarded by the block reason.
         assertEquals(TransitionDecision.Allowed, blocked(null, GoalState.PAUSED, AutopilotReason.OPERATOR_PAUSED))
         assertEquals(TransitionDecision.Allowed, blocked(AutopilotReason.PLAN_INVALID, GoalState.STOPPED, AutopilotReason.OPERATOR_STOPPED))
@@ -213,6 +236,7 @@ class AutopilotStatesTest {
     fun `the dispatch block reasons and the automatic ones are the ADR sets`() {
         assertEquals(dispatchBlocks, DISPATCH_BLOCK_REASONS)
         assertEquals(setOf(AutopilotReason.PENDING_PR_LIMIT, AutopilotReason.DAILY_RUN_CAP, AutopilotReason.BUDGET_HOLD), AUTO_CLEARABLE_REASONS)
+        assertEquals(setOf(AutopilotReason.PLAN_INVALID, AutopilotReason.PLAN_BUDGET_HOLD, AutopilotReason.PLAN_CALL_FAILED), PLAN_BLOCK_REASONS)
         assertEquals(3, MAX_REVISIONS)
     }
 }

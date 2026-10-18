@@ -6,17 +6,21 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.core.autopilot.AutopilotReason
+import net.kigawa.kivra.core.autopilot.GoalContext
 import net.kigawa.kivra.core.autopilot.GoalState
 import net.kigawa.kivra.core.autopilot.PlanState
 import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.core.autopilot.TransitionDecision
 import net.kigawa.kivra.core.autopilot.TransitionRefusal
+import net.kigawa.kivra.core.autopilot.checkGoalTransition
 import net.kigawa.kivra.core.autopilot.checkTaskTransition
 import org.jetbrains.exposed.sql.Database
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.or
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.javatime.datetime
 import org.jetbrains.exposed.sql.selectAll
@@ -154,6 +158,59 @@ class SelfDevPlanRepository(
         reason: AutopilotReason?,
         runId: String? = null,
     ): Transition<SelfDevPlanTask> = transaction(database) { transitionTaskIn(planId, ordinal, expectedVersion, to, reason, runId) }
+
+    /**
+     * The task that the autopilot put on [runId] without an operator's approval (ADR 0011 section 6.2): `approved_by` is null, the task is
+     * not denylisted, and it is either SUBMITTED, or already moved back by an earlier scope check (PENDING_APPROVAL with
+     * AUTO_SCOPE_EXCEEDED, not yet approved again). Null for every other Run. An operator-approved task is never returned.
+     */
+    fun autoTaskOfRun(runId: String): SelfDevPlanTask? = transaction(database) { autoTaskOfRunIn(runId) }
+
+    /**
+     * Moves the auto-approved task of [runId] from SUBMITTED to PENDING_APPROVAL with AUTO_SCOPE_EXCEEDED, and a RUNNING or TASKS_QUEUED
+     * goal to BLOCKED with the same reason, in one transaction. The goal row is locked first, as the dispatcher's submission does. Returns
+     * true when the task is in that state afterwards (including when an earlier call already moved it), false when there is no such task
+     * or it changed under this call. The Run itself is not written: the caller ends it.
+     */
+    fun settleAutoScopeExceeded(runId: String): Boolean = transaction(database) {
+        val task = autoTaskOfRunIn(runId) ?: return@transaction false
+        if (task.state == TaskState.PENDING_APPROVAL) return@transaction true
+        val goalId = SelfDevPlansTable.selectAll().where { SelfDevPlansTable.planId eq task.planId }
+            .firstOrNull()?.get(SelfDevPlansTable.goalId) ?: return@transaction false
+        val goalRow = SelfDevGoalsTable.selectAll().where { SelfDevGoalsTable.goalId eq goalId }
+            .forUpdate()
+            .firstOrNull() ?: return@transaction false
+        val goalState = GoalState.valueOf(goalRow[SelfDevGoalsTable.state])
+        val moved = transitionTaskIn(task.planId, task.ordinal, task.version, TaskState.PENDING_APPROVAL, AutopilotReason.AUTO_SCOPE_EXCEEDED, null)
+        if (moved !is Transition.Moved) return@transaction false
+        if (goalState == GoalState.RUNNING || goalState == GoalState.TASKS_QUEUED) {
+            val decision = checkGoalTransition(goalState, GoalState.BLOCKED, AutopilotReason.AUTO_SCOPE_EXCEEDED, GoalContext())
+            if (decision is TransitionDecision.Refused) return@transaction false
+            val changed = execUpdate(
+                """
+                UPDATE selfdev_goals
+                   SET state = ?, state_reason = ?, version = version + 1, updated_at = ?
+                 WHERE goal_id = ? AND version = ? AND state = ?
+                """.trimIndent(),
+                GoalState.BLOCKED.name, AutopilotReason.AUTO_SCOPE_EXCEEDED.name, utcNow(clock),
+                goalId, goalRow[SelfDevGoalsTable.version], goalState.name,
+            )
+            if (changed != 1) return@transaction false
+        }
+        true
+    }
+
+    private fun Transaction.autoTaskOfRunIn(runId: String): SelfDevPlanTask? {
+        val submitted = SelfDevPlanTasksTable.state eq TaskState.SUBMITTED.name
+        val settled = (SelfDevPlanTasksTable.state eq TaskState.PENDING_APPROVAL.name) and
+            (SelfDevPlanTasksTable.stateReason eq AutopilotReason.AUTO_SCOPE_EXCEEDED.name)
+        return SelfDevPlanTasksTable.selectAll().where {
+            (SelfDevPlanTasksTable.runId eq runId) and
+                SelfDevPlanTasksTable.approvedBy.isNull() and
+                (SelfDevPlanTasksTable.requiresApproval eq false) and
+                (submitted or settled)
+        }.firstOrNull()?.toTask()
+    }
 
     /**
      * QUEUED -> SUBMITTING for a task of [goalId]. The goal row is locked (the operator's stop takes the same lock), and the goal must

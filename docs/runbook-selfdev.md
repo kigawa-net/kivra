@@ -1105,7 +1105,7 @@ Keycloak の client の Regenerate は旧 secret を**即座に失効**させる
 
 ## 7. 自己開発オートパイロット(ADR 0011、Issue #233)
 
-状態: **基盤(PR A、#243)、Planner(PR B、#244)、Dispatcher(PR C、#245)、UI と HTTP(PR D、#250)、E2E と有効化の手順(PR E)を実装済み**。段階 2 の差分の再検査(ADR 0011 §6.2)は未実装。
+状態: **基盤(PR A、#243)、Planner(PR B、#244)、Dispatcher(PR C、#245)、UI と HTTP(PR D、#250)、E2E と有効化の手順(PR E)を実装済み**。段階 2 の差分の再検査(ADR 0011 §6.2、§2.8d。PR F)を実装済み(§7.4b)。
 `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` のときだけ動く。既定(無効)では何も起きない。
 Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_PROPOSED` に進める。承認された Plan のタスクは、Dispatcher が §5 のガードを確かめたうえで投入する。
 dev での有効化の手順は §7.5。
@@ -1180,6 +1180,28 @@ dev での有効化の手順は §7.5。
 ログは、操作の ID と固定の理由コード、操作した運用者の短いダイジェスト(SHA-256 の先頭 12 文字)だけを出す。本文、理由、運用者の ID は出ない。
 
 **やってはいけないこと**: 作成済みの PR を、この画面の操作で閉じる、またはマージすることを期待しない。マージは人が行う(ADR 0008、ADR 0009)。
+
+### 7.4b 段階 2 の差分の再検査と `AUTO_SCOPE_EXCEEDED`(PR F)
+
+`approval = auto` のとき、承認なしで投入されたタスク(`approved_by` が無いタスク)は、コミットの前に、**実際の差分**で再検査される。
+範囲は段階 2 と同じ(`docs/**`、`kivra-*/src/test/**`、`README.md` だけ。denylist に触れない)。加えて、変更パスは 3 件以下、変更行は 200 行以下である。
+範囲の外なら、PR は作られず、Run は `POLICY_REJECTED` で終わり、タスクは承認待ち(`PENDING_APPROVAL`、理由 `AUTO_SCOPE_EXCEEDED`)に戻り、Goal は `BLOCKED`(`AUTO_SCOPE_EXCEEDED`)になる。
+
+**運用者の見方**:
+- 画面で Goal の理由が「変更範囲が計画を超えました（運用者の確認が必要）」(`AUTO_SCOPE_EXCEEDED`)なら、この再検査で止まっている。
+- 失敗としては数えない。サーキットブレーカーは動かない。
+- ログには `autopilot scope exceeded: runId=... code=AUTO_SCOPE_EXCEEDED paths=<件数> lines=<行数>` が出る。パスと内容は出ない。差分の中身は、ログからは分からない。
+- 範囲外の差分は、kivra に保存されない(作業ブランチも作られない)。内容を確かめられるのは、coding attempt の出力の保持(§6.12。既定は無効)が有効なときだけである。
+
+**再承認の手順**:
+1. 原因を確かめる。計画(Plan)の対象パスと、Run の失敗の理由(`POLICY_REJECTED`)を見る。このタスクの変更が正当なら、範囲を広げる別の Goal を出すか、手で PR を作る方が安全である(自動の範囲は広げない)。
+2. 承認し直す: 詳細の該当タスクで「承認」(`POST /api/selfdev/tasks/{planId}-{番号}/approve`)。承認すると、タスクは新しい投入キーで `QUEUED` になり、Goal は `BLOCKED` から `RUNNING`(または `TASKS_QUEUED`)へ戻る。次の tick で投入される(新しい Run)。
+3. 承認したタスクは、再検査の対象外になる。差分が範囲外でも、承認者の判断でコミットされる。承認の前に、計画の内容を確かめる。
+4. 見送るなら「見送り」(`reject`)。タスクは `SKIPPED` になり、Goal の残りは進む。
+
+**注意**:
+- 承認し直す前に、同じ原因が直っているか確かめる。再承認で同じ差分が出ると、承認済みのため再検査されず、そのままコミットされうる。
+- 範囲外の判定は、PatchPolicy より後に行う。PatchPolicy が直接拒否するパス(`.github/**` など)は、再検査の前に `POLICY_REJECTED` で止まり、失敗として数えられる(安全側の動き)。
 
 ### 7.5 dev でオートパイロットを有効化する手順(PR E)
 

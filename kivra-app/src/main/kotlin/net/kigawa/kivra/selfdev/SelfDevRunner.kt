@@ -106,6 +106,11 @@ class SelfDevRunner(
      * run, before any attempt is queued; a failure ends the run with TASK_REFERENCE_UNRESOLVED.
      */
     private val references: TaskReferenceResolvers = TaskReferenceResolvers(emptyList()),
+    /**
+     * Re-checks the change set of an auto-approved task before it is committed (ADR 0011 section 6.2). Used on the CLI path only, which is
+     * the only one the autopilot runs on. Null (the default) checks nothing.
+     */
+    private val autoScope: AutoScopeGuard? = null,
 ) {
     init {
         require(config.runtime == SelfDevRuntime.API || coding != null) { "the CLI runtime needs a coding patch source" }
@@ -276,15 +281,27 @@ class SelfDevRunner(
             is GitHubResult.Success -> r.value
             else -> return Step.Done(Failed(FailureCode.GITHUB_READ_FAILED))
         }
+        val sizes = entries.associate { it.path to it.sizeBytes }
         val snapshot = SelfDevSnapshot(
-            sizes = entries.associate { it.path to it.sizeBytes },
+            sizes = sizes,
             inContext = entries.mapTo(HashSet()) { it.path },
         )
         return when (val proposal = source.proposal(run, base.headSha)) {
             is CodingProposal.Pending -> Step.Done(Waiting(WaitReason.AWAITING_CODING_AGENT))
             is CodingProposal.Failed -> Step.Done(persistAdvance(lease, run, proposal.to, proposal.reasonCode))
             is CodingProposal.Ready -> when (val verdict = policy.validate(proposal.patch, snapshot)) {
-                is PatchVerdict.Accepted -> Step.Go(verdict.patch)
+                is PatchVerdict.Accepted -> {
+                    // ADR 0011 section 6.2: the actual diff of an auto-approved task is checked again before anything is committed. An
+                    // out-of-scope change ends the run as a policy rejection, and the task waits for the operator (not counted as a failure).
+                    val guard = autoScope
+                    val scope = guard?.check(run.runId, verdict.patch) { sizes[it] }
+                    if (guard != null && scope is AutoScopeVerdict.OutOfScope) {
+                        guard.settle(run.runId)
+                        Step.Done(persistAdvance(lease, run, DevelopmentRunState.FAILED, POLICY_REJECTED))
+                    } else {
+                        Step.Go(verdict.patch)
+                    }
+                }
                 is PatchVerdict.Rejected -> {
                     logPatchRejected(run.runId.value, verdict.reasons)
                     Step.Done(persistAdvance(lease, run, DevelopmentRunState.FAILED, POLICY_REJECTED))

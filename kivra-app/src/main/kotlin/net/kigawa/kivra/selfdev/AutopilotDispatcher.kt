@@ -222,7 +222,10 @@ class AutopilotDispatcher(
         val tasks = plans.tasksOf(plan.planId)
         if (config.approval != AutopilotApproval.AUTO) return tasks
         for (task in tasks) {
-            if (task.state != TaskState.PENDING_APPROVAL || !isAutoEligible(task)) continue
+            // A task that the scope re-check sent back (AUTO_SCOPE_EXCEEDED) waits for the operator: its planned paths still look eligible.
+            if (task.state != TaskState.PENDING_APPROVAL || task.stateReason == AutopilotReason.AUTO_SCOPE_EXCEEDED || !isAutoEligible(task)) {
+                continue
+            }
             if (transitionTask(task, TaskState.QUEUED, AutopilotReason.AUTO_APPROVED) != null) {
                 logger.info(
                     "autopilot dispatch: auto-approved ordinal={} planId={} approval={} code={}",
@@ -263,13 +266,18 @@ class AutopilotDispatcher(
     /**
      * Moves a BLOCKED goal back when its reason clears. An auto-clearable reason clears by itself (GUARD_CLEARED). CIRCUIT_OPEN is
      * cleared by the operator's reset (ADR 0011 section 5.4): the reset is the only thing that closes the breaker, so this is reached only
-     * with the breaker closed (the caller checks [globalBlock] first), and the move records OPERATOR_RESUMED. The move is a CAS on the
-     * goal's version, so two dispatchers resume it once. Every other reason (planning blocks, and the goal's own state) stays put.
+     * with the breaker closed (the caller checks [globalBlock] first), and the move records OPERATOR_RESUMED. A scope block is cleared by
+     * the operator's re-approval of its task. The move is a CAS on the goal's version, so two dispatchers resume it once. Every other
+     * reason (planning blocks, and the goal's own state) stays put.
      */
     private fun resumeBlocked(goal: SelfDevGoal, tasks: List<SelfDevPlanTask>): Boolean {
         val reason = when (goal.stateReason) {
             in AUTO_CLEARABLE_REASONS -> AutopilotReason.GUARD_CLEARED
             AutopilotReason.CIRCUIT_OPEN -> AutopilotReason.OPERATOR_RESUMED
+            // A scope block (ADR 0011 section 6.2) clears when the operator approves the task again: that approval is queued with an
+            // operator on it. Until then the goal stays blocked.
+            AutopilotReason.AUTO_SCOPE_EXCEEDED ->
+                if (tasks.any { it.state == TaskState.QUEUED && it.approvedBy != null }) AutopilotReason.OPERATOR_RESUMED else return false
             else -> return false
         }
         val started = tasks.any { it.state != TaskState.PENDING_APPROVAL && it.state != TaskState.QUEUED }

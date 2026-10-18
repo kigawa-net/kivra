@@ -85,14 +85,17 @@ class SelfDevOperatorRepository(
             val decision = checkTaskTransition(task.state, TaskState.QUEUED, AutopilotReason.OPERATOR_APPROVED)
             if (decision is TransitionDecision.Refused) return@transaction Transition.Refused(decision.reason)
             val now = utcNow(clock)
+            // A task whose Run already ended (for example a scope re-check, ADR 0011 section 6.2) gets a new idempotency key on approval.
+            // The old key names the old Run, and the Run store would replay it, so the approved task would fail at once.
+            val key = if (task.runId == null) task.idempotencyKey else "ap:$planId:$ordinal:a${task.attempts}"
             val changed = execUpdate(
                 """
                 UPDATE selfdev_plan_tasks
                    SET state = 'QUEUED', state_reason = 'OPERATOR_APPROVED', approved_by = ?, approved_at = ?,
-                       version = version + 1, updated_at = ?
+                       idempotency_key = ?, version = version + 1, updated_at = ?
                  WHERE plan_id = ? AND ordinal = ? AND version = ? AND state = 'PENDING_APPROVAL'
                 """.trimIndent(),
-                approver, now, now, planId, ordinal, expectedVersion,
+                approver, now, key, now, planId, ordinal, expectedVersion,
             )
             if (changed != 1) return@transaction Transition.StaleVersion
             Transition.Moved(taskOf(planId, ordinal) ?: error("task vanished after approval"))

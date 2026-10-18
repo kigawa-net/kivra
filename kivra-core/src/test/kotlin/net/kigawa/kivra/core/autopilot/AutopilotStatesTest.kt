@@ -68,6 +68,7 @@ class AutopilotStatesTest {
         (TaskState.SUBMITTED to TaskState.FAILED) to
             setOf(AutopilotReason.RUN_FAILED, AutopilotReason.POLICY_REJECTED, AutopilotReason.PR_ABANDONED),
         (TaskState.SUBMITTED to TaskState.CANCELLED) to setOf(AutopilotReason.RUN_RELEASED),
+        (TaskState.SUBMITTED to TaskState.PENDING_APPROVAL) to setOf(AutopilotReason.AUTO_SCOPE_EXCEEDED),
         (TaskState.FAILED to TaskState.QUEUED) to setOf(AutopilotReason.OPERATOR_REQUEUED),
         (TaskState.FAILED to TaskState.SKIPPED) to setOf(AutopilotReason.OPERATOR_SKIPPED),
         (TaskState.CANCELLED to TaskState.QUEUED) to setOf(AutopilotReason.OPERATOR_REQUEUED),

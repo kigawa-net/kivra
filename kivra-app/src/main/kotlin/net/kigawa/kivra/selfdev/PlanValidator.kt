@@ -104,6 +104,12 @@ object PlanValidator {
     )
 
     /**
+     * True when [path] is in the stage-2 scope (ADR 0011 sections 4 and 6.1): allowed by the narrow allowlist and not denylisted. The
+     * re-check of the actual change set (section 6.2) uses this same rule, so the plan and the diff are judged alike.
+     */
+    internal fun isAutoScopePath(path: String): Boolean = autoPolicy.allowsPath(path)
+
+    /**
      * Parses and checks the model's [text]. Returns [PlanCheck.Valid] with the tasks to store, or the first reason it fails.
      * The dependency rule (`dependsOn` names only earlier tasks) also rules out cycles, so no separate cycle check is needed.
      */

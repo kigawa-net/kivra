@@ -153,3 +153,15 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
    - **担保するテスト**: `CodingCostLedgerTest`(正常な報告、二重の報告、usage の無い fail と結果、ORPHANED と EXPIRED、入場制御、為替の失効、未知の model と acknowledge、台帳の失敗、ログの衛生、usage の形)、`AgentApiRoutesTest` の usage の追加分(正常、不正の無視、usage の省略、503)。
    - **変異テスト(2026-10-18)**: 入場制御を外すと `CodingCostLedgerTest` の 4 件が落ちる。二重報告の鍵を呼び出しごとに変えて二重計上にすると、2 件が落ちる。
    - **未了**: 運用画面での API 経路と CLI 経路の区別(UI PR5)、定期の reconcile の配線、`coding_attempt_usage` の保持期間。
+
+## 追補 5(2026-10-18、Issue #229 の追補: 依頼文の本文と参照の解決)
+
+1. **依頼文に本文を持たせ、参照(Issue の URL など)は kivra が解決する。** 依頼文は title(200 文字)だけでは足りず、またエージェントのコンテナは GitHub を読めない(外部通信は許可リストの Gradle と Maven だけ)。そこで、投入 API と UI に任意の `body`(0〜8000 文字)を足す。title が Issue の参照(`https://github.com/<owner>/<repo>/issues/<n>`、`#<n>`、`<owner>/<repo>#<n>` の全体一致)のときは、kivra が対象リポジトリ(`KIVRA_SELFDEV_TARGET_REPO`)の Issue を読んで本文にする。読み取りは GitHub App の読み取りで、コメント、ラベル、作者は読まない。
+2. **保存の形(V17)。** `development_runs` に `task_body`(TEXT、NULL)と `task_source`(`owner/repo#n`、NULL)を足す。expand-only で、既存の行は NULL(title だけの従来の投入)。解決は Run が DEVELOPING に入り attempt を作る前に一度だけ行い、保存済みなら再度読まない。
+3. **失敗の扱い。** 参照が使えないとき(対象外のリポジトリ、PR、クローズ済み、404、403、5xx と通信の失敗の再試行の後、大きすぎる応答)は Run を FAILED(理由 `TASK_REFERENCE_UNRESOLVED`、監査の行に固定のサブ理由)にする。attempt は作らない。ほかの Run は止めない。
+4. **信頼の境界。** Issue の本文は外部から書ける。claim の `body` は UNTRUSTED のまま。PatchPolicy が最終ゲートで、ここは緩めない。本文、Issue の title と本文、手動の本文は、ログにも監査にも出さない。出してよいのは Run ID、固定コード、文字数、`owner/repo#n` だけ。
+5. **claim の契約。** claim の応答の `task` に `body`(文字列、無ければ空)と `bodyTruncated`(bool)を足す。既存のフィールド(`origin`、`value`、`trust`、`truncated`)は変えない。切り詰めの印は、本文の末尾の固定の文字列で表す(別の列を増やさないため)。
+6. **冪等。** 投入の冪等性は、title に加えて body も比べる。同じ key で body が違えば 409。body が無い再送は、元の投入(body 無し)と同じ。
+7. **デプロイ順序: エージェントを先に、kivra を後に。** claim の `body` を読まない古いエージェントは、本文を無視するだけで、従来どおり動く。反対に、kivra が `body` を返した後に古いエージェントが claim を受けても、未知のフィールドで失敗しないことを、エージェント側の変更で確かめる(パースは未知のフィールドと欠落に寛容にする)。よって、(a) エージェント(`kivra-agent`)の新版を先に配り、`.kivra/task.json` の `body` に渡す、(b) その後で kivra を出す。kivra を先に出すと、body を持つ Run の本文が古いエージェントで捨てられる。
+8. **担保するテスト。** `GitHubIssueReadTest`(GET のみ、リダイレクトを辿らない、5xx の再試行、サイズ上限、PR の判定、番号の不一致)、`TaskReferenceTest`(三つの形、対象外のリポジトリ、PR、クローズ済み、404、403、大きな本文の切り詰め、手動の本文との結合、冪等、ほかの Run への影響、claim の本文、ログの衛生、一度だけの保存)、`SelfDevRoutesTest`(body の受理と 400、同じ key で body が違えば 409、title だけの従来の投入)、`AgentApiRoutesTest`(claim の body と bodyTruncated)、`MigrationChainTest`(V17)。
+   - **変異テスト(2026-10-18)**: 対象リポジトリの検査を外すと `TaskReferenceTest` の 2 件が落ちる。Issue の本文をログに出すと、ログの衛生のテストが落ちる。

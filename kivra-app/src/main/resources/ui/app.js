@@ -9,7 +9,10 @@
   var REFRESH_MS = 30000;
   var TICK_MS = 1000;
   var MAX_TITLE = 200;
+  var MAX_BODY = 8000;
   var CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+  // The body may have line breaks and tabs; every other control character is refused (as in the title).
+  var BODY_CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
   var PR_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[0-9]+$/;
 
   var MESSAGES = {
@@ -67,6 +70,15 @@
     PR_AMBIGUOUS: 'PR が一つに決まらない（GitHub 側の確認が必要）',
     GITHUB_UNKNOWN_OUTCOME: 'GitHub の結果が不明',
     POLICY_REJECTED: '変更がポリシーに通らなかった',
+    TASK_REFERENCE_UNRESOLVED: '依頼文の参照（Issue）を解決できなかった',
+    TASK_REFERENCE_REPO_NOT_ALLOWED: '参照先が対象のリポジトリではない',
+    TASK_REFERENCE_PULL_REQUEST: '参照先が Issue ではなく PR',
+    TASK_REFERENCE_CLOSED: '参照先の Issue はクローズ済み',
+    TASK_REFERENCE_NOT_FOUND: '参照先の Issue が見つからない',
+    TASK_REFERENCE_FORBIDDEN: '参照先の Issue を読めない（権限）',
+    TASK_REFERENCE_UNAVAILABLE: '参照先の Issue を取得できなかった（一時的な失敗）',
+    TASK_REFERENCE_RESPONSE_TOO_LARGE: '参照先の Issue が大きすぎる',
+    TASK_REFERENCE_NO_ROOM_FOR_REFERENCE: '手動の本文が長く、参照の本文を入れる余地がない',
     COMMIT_NOT_APPLIED_TWICE: 'コミットが二度とも反映されなかった（GitHub 側の確認が必要）',
     BRANCH_ADVANCED_BEFORE_COMMIT: 'コミットの前にブランチが進んでいた',
     DEVELOPER_OUTCOME_UNKNOWN: 'モデル呼び出しの結果が不明',
@@ -326,6 +338,14 @@
     $('kind-self').disabled = blocked || !selfDevAvailable();
     $('kind-self').checked = state.kind === SELF_DEV_KIND;
     $('kind-sim').checked = state.kind === SIMULATED_KIND;
+    // The body field belongs to the self-development kind only: the simulated Task API takes no body.
+    $('body-block').hidden = state.kind !== SELF_DEV_KIND;
+    $('body').disabled = blocked;
+  }
+
+  function updateBodyCounter() {
+    var n = Array.from($('body').value).length;
+    $('body-count').textContent = n + ' / ' + MAX_BODY;
   }
 
   function renderKindNote() {
@@ -386,8 +406,8 @@
    * The key stays the same while the kind and the title stay the same, so a retry after a network failure is the same
    * submission. A change of either one makes a new key (the server would refuse the old key with 409 anyway).
    */
-  function keyForSubmission(kind, title) {
-    var sig = kind + '\n' + title;
+  function keyForSubmission(kind, title, body) {
+    var sig = kind + '\n' + title + '\n' + body;
     if (state.keyFor !== sig) {
       if (state.keyFor !== null) state.idempotencyKey = newKey();
       state.keyFor = sig;
@@ -413,7 +433,14 @@
       showResult(MESSAGES.invalid, 'error');
       return;
     }
-    var body = { title: title, idempotencyKey: keyForSubmission(kind, title) };
+    // The body is sent only for the self-development kind, and only when it is not blank.
+    var text = kind === SELF_DEV_KIND ? $('body').value.trim() : '';
+    if (Array.from(text).length > MAX_BODY || BODY_CONTROL_CHARS.test(text)) {
+      showResult(MESSAGES.badRequest, 'error');
+      return;
+    }
+    var body = { title: title, idempotencyKey: keyForSubmission(kind, title, text) };
+    if (text !== '') body.body = text;
     state.submitting = true;
     updateSubmitEnabled();
     showResult('送信中です…', '');
@@ -433,7 +460,9 @@
       // A new key only after success. (Same key + same content is a replay that returns the same Run.)
       newSubmitKey();
       $('title').value = '';
+      $('body').value = '';
       updateCounter();
+      updateBodyCounter();
       var kindLabel = kind === SELF_DEV_KIND ? '自己開発' : 'シミュレーション';
       var stateText = '状態: ' + stateInfo(r.data.state).label + '（' + kindLabel + '）';
       if (r.status === 202) {
@@ -664,6 +693,8 @@
       ['理由', reason === '' ? 'なし' : reason],
       ['PR', prNode(run)]
     ];
+    // The reference a self-development task was resolved from (owner/repo#n). Shown as text, like the title.
+    if (str(run.taskSource) !== '') rows.push(['解決元（参照）', str(run.taskSource)]);
     if (all) rows.push(['作成者', str(run.createdBy)]);
     rows = rows.concat([
       ['Run ID', str(run.runId)],
@@ -892,6 +923,7 @@
   function init() {
     $('submit-form').addEventListener('submit', onSubmit);
     $('title').addEventListener('input', updateCounter);
+    $('body').addEventListener('input', updateBodyCounter);
     $('refresh-btn').addEventListener('click', function () {
       refreshRuns();
       checkHealth();

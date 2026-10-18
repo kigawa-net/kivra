@@ -3,6 +3,7 @@ package net.kigawa.kivra.selfdev
 import java.security.MessageDigest
 import java.time.Clock
 import java.time.Duration
+import net.kigawa.kivra.coding.TaskBodyText
 import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.InvalidTransitionException
 import net.kigawa.kivra.core.Lease
@@ -100,6 +101,11 @@ class SelfDevRunner(
      * CLI without it, so a missing wiring cannot fall back to anything else.
      */
     private val coding: CodingPatchSource? = null,
+    /**
+     * Resolves a task title that is a reference (Issue #229, addendum). Empty by default: then every title is used as it is. Runs once per
+     * run, before any attempt is queued; a failure ends the run with TASK_REFERENCE_UNRESOLVED.
+     */
+    private val references: TaskReferenceResolvers = TaskReferenceResolvers(emptyList()),
 ) {
     init {
         require(config.runtime == SelfDevRuntime.API || coding != null) { "the CLI runtime needs a coding patch source" }
@@ -187,8 +193,13 @@ class SelfDevRunner(
      * where a refusal or unknown outcome becomes UNKNOWN instead of FAILED: the run had already promised a proposal.
      */
     private suspend fun propose(lease: Lease, run: DevelopmentRun, base: BranchInfo, resuming: Boolean): Step<PatchSet> {
-        if (config.runtime == SelfDevRuntime.CLI) return proposeFromAgent(lease, run, base)
-        val task = taskTexts.taskText(run) ?: return Step.Done(Failed(FailureCode.TASK_TEXT_UNAVAILABLE))
+        // Before any attempt is queued (or any Developer call): the reference is resolved once and stored with the run.
+        val current = when (val resolved = resolveTaskReference(lease, run)) {
+            is Step.Go -> resolved.value
+            is Step.Done -> return Step.Done(resolved.result)
+        }
+        if (config.runtime == SelfDevRuntime.CLI) return proposeFromAgent(lease, current, base)
+        val task = taskTexts.taskText(current) ?: return Step.Done(Failed(FailureCode.TASK_TEXT_UNAVAILABLE))
         val view = when (val s = loadView(base.headSha, TitlePaths.extract("${task.title}\n${task.description}"))) {
             is Step.Go -> s.value
             is Step.Done -> return s
@@ -216,6 +227,40 @@ class SelfDevRunner(
 
             is DeveloperResult.Unknown ->
                 Step.Done(persistAdvance(lease, run, DevelopmentRunState.UNKNOWN, "$DEVELOPER_PREFIX${result.reason.name}"))
+        }
+    }
+
+    /**
+     * Resolves the task title when it is a reference, and stores the body and the source with the run (V17). Returns [Step.Go] with the
+     * run to use next (the same run when nothing was resolved, the stored one after a save), or [Step.Done] when the run failed here. A run
+     * that already has a source is never resolved again. Logs the run id, a fixed code, a count and `owner/repo#n` only, never the title or
+     * the body.
+     */
+    private suspend fun resolveTaskReference(lease: Lease, run: DevelopmentRun): Step<DevelopmentRun> {
+        if (run.taskSource != null) return Step.Go(run)
+        val title = run.taskTitle?.takeIf { it.isNotBlank() } ?: return Step.Go(run)
+        // The read can take a while (bounded retries, timeouts): keep the lease alive first, as before a GitHub write.
+        renewOrThrow(lease)
+        return when (val result = references.resolve(title)) {
+            is TaskReferenceResult.NotApplicable -> Step.Go(run)
+            is TaskReferenceResult.Failed -> {
+                logger.warn("task reference unresolved: runId={} code={}", run.runId.value, result.code.code)
+                Step.Done(persistAdvance(lease, run, DevelopmentRunState.FAILED, TASK_REFERENCE_UNRESOLVED, auditReasonCode = result.code.code))
+            }
+            is TaskReferenceResult.Resolved -> {
+                val body = TaskBodyText.compose(run.taskBody, result.text)
+                if (body == null) {
+                    val code = TaskReferenceFailure.NO_ROOM_FOR_REFERENCE.code
+                    logger.warn("task reference unresolved: runId={} code={}", run.runId.value, code)
+                    return Step.Done(persistAdvance(lease, run, DevelopmentRunState.FAILED, TASK_REFERENCE_UNRESOLVED, auditReasonCode = code))
+                }
+                val saved = runs.saveTaskReference(lease, currentVersion(lease), body, result.source)
+                logger.info(
+                    "task reference resolved: runId={} source={} chars={} truncated={}",
+                    run.runId.value, result.source, TaskBodyText.codePoints(body), TaskBodyText.isTruncated(body),
+                )
+                Step.Go(saved)
+            }
         }
     }
 
@@ -428,8 +473,14 @@ class SelfDevRunner(
     }
 
     /** Writes a fenced transition from [from] to [to] and reports it. [reasonCode] is a fixed code, never free text. */
-    private fun persistAdvance(lease: Lease, run: DevelopmentRun, to: DevelopmentRunState, reasonCode: String?): Advanced {
-        transitionTo(lease, run.state, to, reasonCode)
+    private fun persistAdvance(
+        lease: Lease,
+        run: DevelopmentRun,
+        to: DevelopmentRunState,
+        reasonCode: String?,
+        auditReasonCode: String? = reasonCode,
+    ): Advanced {
+        transitionTo(lease, run.state, to, reasonCode, auditReasonCode)
         return Advanced(run.state, to, reasonCode)
     }
 
@@ -437,8 +488,13 @@ class SelfDevRunner(
      * The fenced transition. The version is read here, not taken from an earlier read: lease acquire and renewal both bump it, so an
      * earlier read goes stale within the same call. [from] is still checked under the row lock (expectedFrom).
      */
-    private fun transitionTo(lease: Lease, from: DevelopmentRunState, to: DevelopmentRunState, reasonCode: String?): DevelopmentRun =
-        runs.transition(lease, currentVersion(lease), to, from, reasonCode)
+    private fun transitionTo(
+        lease: Lease,
+        from: DevelopmentRunState,
+        to: DevelopmentRunState,
+        reasonCode: String?,
+        auditReasonCode: String? = reasonCode,
+    ): DevelopmentRun = runs.transition(lease, currentVersion(lease), to, from, reasonCode, auditReasonCode)
 
     private fun currentVersion(lease: Lease): Long =
         checkNotNull(runs.find(lease.runId)) { "run vanished while its lease was held" }.version
@@ -467,6 +523,9 @@ class SelfDevRunner(
         const val CANCEL_REQUESTED = "CANCEL_REQUESTED"
         const val PR_MERGED = "PR_MERGED"
         const val MAX_BODY_CHARS = 4_000
+
+        /** The run's state reason when its task reference cannot be used (Issue #229 addendum). The sub reason is the audit code. */
+        const val TASK_REFERENCE_UNRESOLVED = "TASK_REFERENCE_UNRESOLVED"
 
         /** Recorded in the binding. Not checked against any provider fact yet (ADR 0011 / #49, #50 own the real policy revision). */
         const val POLICY_REVISION = "patchpolicy-v1"

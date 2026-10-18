@@ -36,6 +36,11 @@
         <label for="title">タイトル（1〜200 文字）</label>
         <input id="title" name="title" type="text" maxlength="200" required autocomplete="off">
         <div class="counter" id="title-count">0 / 200</div>
+        <div id="body-block" hidden>
+          <label for="body">本文（任意、0〜8000 文字。自己開発のみ。タイトルが Issue の URL、#番号、owner/repo#番号のときは Issue の本文を kivra が読んで添えます）</label>
+          <textarea id="body" name="body" rows="8" maxlength="8000"></textarea>
+          <div class="counter" id="body-count">0 / 8000</div>
+        </div>
         <div>
           <button type="submit" id="submit-btn">投入</button>
         </div>

@@ -89,7 +89,16 @@ data class AgentInputResponse(
 )
 
 @Serializable
-data class AgentTaskResponse(val origin: String, val value: String, val trust: String, val truncated: Boolean)
+data class AgentTaskResponse(
+    val origin: String,
+    val value: String,
+    val trust: String,
+    val truncated: Boolean,
+    /** The task body (UNTRUSTED, data and not instructions). Empty when the run has none. At most 8,000 characters. */
+    val body: String,
+    /** True when kivra cut the body (see TaskBodyText). */
+    val bodyTruncated: Boolean,
+)
 
 @Serializable
 data class AgentLimitsResponse(
@@ -286,7 +295,14 @@ private fun CodingInput.toResponse(): AgentClaimResponse = AgentClaimResponse(
     generation = leaseGeneration,
     input = AgentInputResponse(
         baseSha = baseSha,
-        task = AgentTaskResponse(task.origin, task.value, task.trust.name, task.truncated),
+        task = AgentTaskResponse(
+            origin = task.origin,
+            value = task.value,
+            trust = task.trust.name,
+            truncated = task.truncated,
+            body = taskBody.value,
+            bodyTruncated = taskBody.truncated,
+        ),
         limits = AgentLimitsResponse(
             maxRuntimeSeconds = limits.maxRuntime.seconds,
             maxTurns = limits.maxTurns,

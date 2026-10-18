@@ -18,7 +18,7 @@ import io.ktor.server.routing.get
  * Scripts and styles come from separate files, so the CSP needs no hashes and no inline code.
  */
 internal const val UI_CONTENT_SECURITY_POLICY =
-    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; " +
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; " +
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 private val HTML_TYPE = ContentType.parse("text/html; charset=utf-8")

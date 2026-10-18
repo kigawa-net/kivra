@@ -8,10 +8,13 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class McpSettingsTest {
-    /** Fails if any MCP variable other than the switch is read. Used for the off case. */
+    /**
+     * Fails if any MCP variable other than the switch is read. Used for the off case. The write switch is the one exception: it is read
+     * while the endpoint is off only to refuse `true` (ADR 0013 section 5).
+     */
     private class TrapEnv(private val base: Map<String, String>) : Map<String, String> by base {
         override fun get(key: String): String? {
-            if ((key.startsWith("KIVRA_MCP_") || key == McpSettings.ENV_AGENT_ROLE) && key != McpSettings.ENV_ENABLED) {
+            if ((key.startsWith("KIVRA_MCP_") || key == McpSettings.ENV_AGENT_ROLE) && key != McpSettings.ENV_ENABLED && key != McpSettings.ENV_WRITE_ENABLED) {
                 throw AssertionError("an MCP variable was read while the endpoint is off")
             }
             return base[key]
@@ -109,5 +112,32 @@ class McpSettingsTest {
         }
         assertFalse(error.message.orEmpty().contains(secret))
         assertTrue(error.message.orEmpty().contains(McpSettings.ENV_RATE_PER_MINUTE))
+    }
+
+    @Test
+    fun `the write switch is off by default, and true is accepted only with the endpoint on`() {
+        assertFalse(McpSettings.fromEnv(enabledEnv).writeEnabled)
+        assertFalse(McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_WRITE_ENABLED to "false")).writeEnabled)
+        assertFalse(McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_WRITE_ENABLED to "")).writeEnabled)
+        assertTrue(McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_WRITE_ENABLED to "true")).writeEnabled)
+        // Off: true is refused, and the message names the variable only.
+        val error = assertFailsWith<IllegalStateException> { McpSettings.fromEnv(mapOf(McpSettings.ENV_WRITE_ENABLED to "true")) }
+        assertTrue(error.message.orEmpty().contains(McpSettings.ENV_WRITE_ENABLED))
+        assertFalse(McpSettings.fromEnv(mapOf(McpSettings.ENV_WRITE_ENABLED to "false")).enabled)
+    }
+
+    @Test
+    fun `an unknown write switch value is refused by name, and the write rate defaults to 5 and is 1 to 6000`() {
+        val bad = assertFailsWith<IllegalStateException> { McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_WRITE_ENABLED to "yes")) }
+        assertTrue(bad.message.orEmpty().contains(McpSettings.ENV_WRITE_ENABLED))
+        assertEquals(5, McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_WRITE_ENABLED to "true")).writeRatePerMinute)
+        assertEquals(7, McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_WRITE_ENABLED to "true") + (McpSettings.ENV_WRITE_RATE_PER_MINUTE to "7")).writeRatePerMinute)
+        for (rate in listOf("0", "6001", "x")) {
+            assertFailsWith<Exception> {
+                McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_WRITE_ENABLED to "true") + (McpSettings.ENV_WRITE_RATE_PER_MINUTE to rate))
+            }
+        }
+        // The write rate is read only when the write tool is on.
+        McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_WRITE_RATE_PER_MINUTE to "0"))
     }
 }

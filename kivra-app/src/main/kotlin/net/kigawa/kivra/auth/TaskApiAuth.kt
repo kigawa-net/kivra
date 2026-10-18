@@ -50,6 +50,20 @@ private fun requireDevelopment(env: Map<String, String>, mode: String) {
 }
 
 /**
+ * The operator verifier of the autopilot routes (ADR 0011 section 1): the Task API's own checks in `oidc-jwt` mode, plus the refusal
+ * of [agentRole]. Null in the header modes, where the autopilot is not offered.
+ */
+fun resolveOperatorVerifier(
+    env: Map<String, String>,
+    agentRole: RequiredRole?,
+    jwkProvider: JwkProvider? = null,
+): OidcJwtVerifier? {
+    if (resolveTaskApiAuthMode(env) != TaskApiAuthMode.OIDC_JWT) return null
+    val config = OidcJwtConfig.fromEnv(env)
+    return OidcJwtVerifier(config, jwkProvider ?: RefreshingJwkProvider(config.jwksUrl), agentRole)
+}
+
+/**
  * Maps a request's headers to the caller's principal. Null means unauthenticated (-> 401). Implementations must not put
  * the reason for a failure into the response.
  */

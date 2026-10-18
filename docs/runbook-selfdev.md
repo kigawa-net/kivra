@@ -239,6 +239,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
   - 送信中はボタンを無効化する。結果: 202「受け付けました」(Run ID つき)、200「既に受け付け済み」、409「同じキーで別の内容」(キーを作り直す。内容を確かめてから投入し直す)、429「自己開発の Run が上限に達している」、400・401・415・その他は固定の文言。応答の本文は画面に出さない。
 - **解放(詳細の「運用者の解放…」「解放（束縛なし）…」)**: 対象は、自己開発の Run で状態が `UNKNOWN` のもの(§4.1)、または `PULL_REQUEST` で束縛が無いもの(§4.1b)。ボタンは理由(1〜500 文字、必須、空白だけは不可)を入力する確認の画面(ダイアログ)を開く。理由を入れて「解放する」を押すと、`/release` か `/release-unbound-pr` を呼ぶ。成功すると詳細を読み直す。PR は閉じず、マージもしない(GitHub には書き込まない)。
   - 応答: 200「解放しました（CANCELLED）」、409「解放できる状態ではない（状態が既に変わっている）」、404「見つからない」、401 はセッション切れの案内、400・415・その他は固定の文言。
+- **開発目標(Goal)の欄**: オートパイロット(ADR 0011)が有効のときだけ出る。Goal の入力、計画の承認、タスクの承認と見送り、中止、再計画、全体の一時停止とブレーカーの再開。手順は §7.4。
 - **上部の注意書き**: `GET /api/selfdev/status` の `enabled` で出し分ける。有効なら「自己開発の Run は GitHub に PR を作成します(実際に実行されます)」、無効なら「自己開発は無効です」。状態を取れなければ「設定を取得できていません」と出す(有効・無効は推測しない)。
 - **一覧**: 既定は「自分の Run」(`GET /api/runs`)。「全員の Run(運用者向け)」は `GET /api/admin/runs` で、作成者(`createdBy`)を併記する。ロールを持つ運用者は、どの Run も見られる。
 - **種別バッジ**: `シミュレーション`(SIMULATED。AI や GitHub は呼ばれない)、`自己開発(PR を作成)`(SELF_DEV。GitHub に PR を作る)。想定外の値は「不明な種別」と値そのものを出す。
@@ -1086,9 +1087,10 @@ Keycloak の client の Regenerate は旧 secret を**即座に失効**させる
 
 ## 7. 自己開発オートパイロット(ADR 0011、Issue #233)
 
-状態: **基盤(PR A)と Planner(PR B)を実装済み**。Dispatcher、UI、HTTP は後続の PR で入る。
-Planner は `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` のときだけ動く。既定(無効)では何も起きない。Goal の受付(HTTP)は PR D まで無い。
-Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_PROPOSED` に進める。タスクは投入されない(投入は PR C)。
+状態: **基盤(PR A)、Planner(PR B)、UI と HTTP(PR D)を実装済み**。Dispatcher(PR C)は後続の PR で入る。
+`KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` のときだけ動く。既定(無効)では何も起きない。
+Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_PROPOSED` に進める。承認された Plan のタスクは、PR C の Dispatcher が投入するまで投入されない。
+運用手順は §7.4(Goal の入力、承認、中止、再計画、一時停止、ブレーカーの再開)。
 
 ### 7.1 設定項目
 
@@ -1101,6 +1103,7 @@ Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY` | `5` | 1 日(UTC)に投入する Run の数。1〜100(この範囲も PR A で決めた値) |
 | `KIVRA_SELFDEV_AUTOPILOT_BUDGET_SHARE_PERCENT` | `50` | 月次予算のうち、オートパイロットに割り当てる割合(%)。1〜100 |
 | `KIVRA_SELFDEV_AUTOPILOT_PLAN_INTERVAL_SECONDS` | `30` | Planner が計画待ちの Goal を探す間隔(秒)。5〜3600 |
+| `KIVRA_AGENT_REQUIRED_ROLE` | (なし) | `<client>:<role>`(例 `kivra-agent:agent`)。**オートパイロットが有効のときは必須**(PR D)。このロールを持つトークンは、運用者の API で 403 になる。オートパイロットが無効のときは読まれない |
 
 数値が範囲外、または `APPROVAL` が `required` / `auto` 以外のときは、起動に失敗する。失敗のメッセージは変数の名前だけを示し、値は出さない。
 値は秘密ではない。
@@ -1109,6 +1112,7 @@ Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_
 
 - `KIVRA_SELFDEV_AUTOPILOT_ENABLED` が未設定、空、または `false` のとき、ほかのオートパイロットの変数は読まれない。
 - 何も配線されず、`selfdev_autopilot_control` の行は読まれない。DB のテーブルは V18 で作られるが、使われない(既存の挙動は変わらない)。
+- 運用者の API(`/api/selfdev/goals`、`/api/selfdev/autopilot` など)は、Task API と同じ OIDC 認証(`KIVRA_AUTH_MODE=oidc-jwt`)のときだけ登録される。無効のときは、認証の後で 503 を返す(認証前には状態を漏らさない)。画面の自律運転の欄は、503 のとき隠れる。
 
 ### 7.2b Planner(PR B)
 
@@ -1117,8 +1121,41 @@ Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_
 - 出力は JSON 1 個だけ。未知のキー、型違い、件数・長さの超過、依存の誤り、allowlist 外のパスは拒否する。拒否は 1 回だけ再試行する。
 - denylist のパス(`.github/**`、`**/db/migration/**`、`docs/adr/**` など)に触れるタスクは、`auto` でも承認待ちになる。モデルは `requiresApproval` を出せない。
 - 予算が足りない、または UNKNOWN_COST のとき、Goal は `BLOCKED(PLAN_BUDGET_HOLD)`。モデル呼び出しの失敗は `BLOCKED(PLAN_CALL_FAILED)`。検証の失敗は `BLOCKED(PLAN_INVALID)`。
-- `BLOCKED` の計画段階の Goal は、自動では再試行しない。運用者が再計画する(`BLOCKED → GOAL_SUBMITTED`、理由 `REPLAN_REQUESTED`)。この操作の入口は PR D まで無い。
+- `BLOCKED` の計画段階の Goal は、自動では再試行しない。運用者が再計画する(`BLOCKED → GOAL_SUBMITTED`、理由 `REPLAN_REQUESTED`)。入口は §7.4 の「再計画」(PR D)。
 - ログには Goal の本文、計画、パス、モデルの出力、例外の文を出さない。ID と固定の理由コード、件数、費用、出力のダイジェストの先頭 12 文字だけを出す。
+
+### 7.4 運用手順(PR D: 画面と HTTP)
+
+画面は `/ui` の「開発目標(Goal)」の欄。オートパイロットが無効のとき、この欄と「Goal の一覧と承認」の欄は出ない。
+
+**Goal の入力**: 目的(1〜200 文字、必須)と、背景・制約・受け入れ条件(0〜8000 文字、任意)を入れて「Goal を送る」。対象リポジトリは設定のもの(`KIVRA_SELFDEV_TARGET_REPO`)で、画面からは変えられない。
+同じ内容の再送は同じ Goal として扱われ、二重には作られない。受け付けられた Goal は `計画待ち` になり、Planner が計画を作る。
+
+- HTTP: `POST /api/selfdev/goals`(`{"title", "body"?, "idempotencyKey"}`。ほかの項目は 400)。202 は新規、200 は既に受け付け済み、409 は同じ投入キーで別の内容。
+- 本文は、一覧には出ない。詳細(`GET /api/selfdev/goals/{id}`)でだけ見える。
+
+**計画の承認**: `計画の承認待ち` の Goal の詳細で、Plan(計画)と各タスクを確かめ、「この Plan を承認」を押す(`POST .../approve-plan`、`{"version": n}`)。
+承認すると、Goal は `承認済み` になる。計画の承認は、個々のタスクの承認を代わりに行わない(`requiresApproval` のタスクは、タスクごとの承認が要る)。`auto` のときは、段階 2 の条件に当たる低リスクのタスクだけが、計画の承認の後に投入の対象になる。
+
+**タスクの承認と見送り**: 各タスクは、既定では運用者が 1 件ずつ承認する。承認(`POST /api/selfdev/tasks/{planId}-{番号}/approve`)すると `承認済み（投入を待っています）`、見送り(`.../reject`)すると `見送り`。
+**変更範囲に承認が必要なパス(denylist。例: `.github/**`、`**/db/migration/**`)のタスクは、この承認でしか投入されない**(計画の承認では投入されない)。
+承認は、承認者(運用者)と時刻を保存する(`approved_by`、`approved_at`)。承認は、Plan の承認の後にだけできる。
+
+**中止**: 詳細の「中止…」で理由(1〜500 文字、必須)を入れる(`POST .../stop`、`{"version": n, "reason": "..."}`)。
+未投入のタスクは `見送り` になり、Goal は `中止` で終わる。**投入済みの Run と、作成済みの PR には触らない**(PR は閉じず、マージもしない。PR の扱いは人が決める)。理由は、今は保存もログにも出さない(ADR 0011 U-18)。
+
+**再計画**: Goal が `停止中` で、理由が計画段階(`PLAN_INVALID` / `PLAN_BUDGET_HOLD` / `PLAN_CALL_FAILED`)のときだけ、「再計画する」が出る(`POST .../replan`)。Planner が新しい計画を作る。計画の回数の上限は 3 回。
+ディスパッチ段階の停止(予算、日次上限、ブレーカーなど)は、この操作では再開しない。
+
+**全体の一時停止と再開**: 「自律運転を一時停止」(`POST /api/selfdev/autopilot/pause`)で、新しい投入と計画の作成を止める。実行中の Run は止めない。「再開」で戻す。
+
+**サーキットブレーカーの再開**: 連続して失敗すると、自律運転は止まり、画面に「サーキットブレーカーを手動で再開」が出る(`POST /api/selfdev/autopilot/reset-breaker`)。
+押す前に、失敗の原因(UNKNOWN の Run、PR_ABANDONED、POLICY_REJECTED など)を §4 で確かめる。原因が直っていないまま再開すると、また同じ数の失敗で止まる。
+
+**見るもの**: `GET /api/selfdev/autopilot`(稼働中か一時停止か、ブレーカー、今日の Run 数、対象リポジトリ、承認の方式)。
+ログは、操作の ID と固定の理由コード、操作した運用者の短いダイジェスト(SHA-256 の先頭 12 文字)だけを出す。本文、理由、運用者の ID は出ない。
+
+**やってはいけないこと**: 作成済みの PR を、この画面の操作で閉じる、またはマージすることを期待しない。マージは人が行う(ADR 0008、ADR 0009)。
 
 ### 7.3 状態遷移
 

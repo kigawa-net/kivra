@@ -49,6 +49,44 @@
       <p id="submit-result" class="result" role="status"></p>
     </section>
 
+    <!-- Autopilot (ADR 0011). Hidden unless GET /api/selfdev/autopilot answers 200 with the autopilot enabled. -->
+    <section class="card" id="goal-section" aria-labelledby="h-goal" hidden>
+      <h2 id="h-goal">開発目標（Goal）</h2>
+      <p class="meta" role="note">kivra が Goal から開発計画（Plan）を作り、承認した分だけ Run として投入します。PR のマージは人が行います。対象リポジトリ: <span id="goal-repo">-</span>（画面からは変えられません）。</p>
+      <form id="goal-form">
+        <label for="goal-title">目的（1〜200 文字）</label>
+        <input id="goal-title" name="goal-title" type="text" maxlength="200" required autocomplete="off">
+        <div class="counter" id="goal-title-count">0 / 200</div>
+        <label for="goal-body">背景・制約・受け入れ条件（任意、0〜8000 文字）</label>
+        <textarea id="goal-body" name="goal-body" rows="6" maxlength="8000"></textarea>
+        <div class="counter" id="goal-count">0 / 8000</div>
+        <div>
+          <button type="submit" id="goal-submit">Goal を送る</button>
+        </div>
+      </form>
+      <p id="goal-result" class="result" role="status"></p>
+    </section>
+
+    <section class="card" id="plans-section" aria-labelledby="h-plans" hidden>
+      <div class="card-head">
+        <h2 id="h-plans">Goal の一覧と承認</h2>
+        <button type="button" id="plans-refresh" class="secondary">今すぐ更新</button>
+      </div>
+      <div class="autopilot-control" aria-live="polite">
+        <p class="meta" id="autopilot-status" role="status">自律運転の状態を取得しています…</p>
+        <div class="detail-actions">
+          <button type="button" id="autopilot-toggle" class="secondary">自律運転を一時停止</button>
+        </div>
+        <p class="meta error" id="breaker-status" hidden></p>
+        <div class="detail-actions" id="breaker-block" hidden>
+          <button type="button" id="breaker-reset" class="secondary">サーキットブレーカーを手動で再開</button>
+        </div>
+      </div>
+      <p id="plans-msg" class="result" role="status"></p>
+      <p id="plans-status" class="meta" role="status">未取得</p>
+      <ul id="plans-list" class="run-list" aria-label="Goal の一覧"></ul>
+    </section>
+
     <section class="card" aria-labelledby="h-runs">
       <div class="card-head">
         <h2 id="h-runs">Run の一覧</h2>
@@ -85,6 +123,21 @@
     <div class="dialog-actions">
       <button type="button" class="secondary" id="release-cancel" autofocus>キャンセル</button>
       <button type="button" id="release-submit" disabled>解放する</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="stop-dialog" aria-labelledby="stop-title">
+  <div class="release-body">
+    <h2 id="stop-title">Goal の中止</h2>
+    <p id="stop-explain"></p>
+    <label for="stop-reason">理由（必須、1〜500 文字）</label>
+    <input id="stop-reason" type="text" autocomplete="off">
+    <div class="counter" id="stop-count">0 / 500</div>
+    <p class="error" id="stop-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="stop-cancel" autofocus>キャンセル</button>
+      <button type="button" id="stop-submit" disabled>中止する</button>
     </div>
   </div>
 </dialog>

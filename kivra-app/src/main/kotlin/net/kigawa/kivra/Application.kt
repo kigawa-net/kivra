@@ -8,6 +8,7 @@ import io.ktor.server.routing.routing
 import net.kigawa.kivra.auth.AgentApiSettings
 import net.kigawa.kivra.auth.AgentIdentity
 import net.kigawa.kivra.auth.RefreshingJwkProvider
+import net.kigawa.kivra.auth.resolveOperatorVerifier
 import net.kigawa.kivra.auth.resolveTaskApiIdentity
 import net.kigawa.kivra.coding.CodingReconcileWorker
 import net.kigawa.kivra.coding.CodingRuntimeService
@@ -22,6 +23,10 @@ import net.kigawa.kivra.config.KivraConfig
 import net.kigawa.kivra.db.DbBudgetStore
 import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
+import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevOperatorRepository
+import net.kigawa.kivra.db.SelfDevPlanRepository
 import net.kigawa.kivra.db.NoPrMergeAuthority
 import net.kigawa.kivra.db.OutboxRepository
 import net.kigawa.kivra.db.connectDatabase
@@ -45,7 +50,10 @@ import net.kigawa.kivra.routes.configureOperationApiRoutes
 import net.kigawa.kivra.routes.readOnlyOperationJournal
 import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
+import net.kigawa.kivra.routes.SelfDevGoalRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
+import net.kigawa.kivra.routes.configureSelfDevGoalRoutes
+import net.kigawa.kivra.routes.requiredAgentRole
 import net.kigawa.kivra.routes.configureSelfDevRoutes
 import net.kigawa.kivra.selfdev.AutopilotDispatcher
 import net.kigawa.kivra.selfdev.AutopilotSettings
@@ -108,6 +116,23 @@ internal fun Application.appModule(env: Map<String, String>) {
     } else {
         null
     }
+    // The autopilot's operator API (ADR 0011 section 1). Registered with the Task API identity, so the OIDC operator role is required. Its
+    // agent-role setting is read only while the autopilot is enabled. Every goal endpoint answers 503 while it is disabled.
+    val goalRoutes = if (taskApiIdentity != null) {
+        resolveOperatorVerifier(env, if (autopilotSettings.enabled) requiredAgentRole(env) else null)?.let { verifier ->
+            SelfDevGoalRouteDeps(
+                operators = verifier,
+                autopilot = autopilotSettings,
+                targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
+                goals = SelfDevGoalRepository(database),
+                plans = SelfDevPlanRepository(database),
+                operations = SelfDevOperatorRepository(database),
+                control = SelfDevAutopilotControlRepository(database),
+            )
+        }
+    } else {
+        null
+    }
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)
     // The FX expiry warning (daily). FX is read only when a USD path is on (the agent API or self-development, which need the rate);
@@ -152,6 +177,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureBudgetAdminRoutes(budgetStore, taskApiIdentity, fx = fxSettings)
             configureSelfDevAdminRoutes(runs, taskApiIdentity)
             configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings)
+            if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
         }
         if (selfDevParts != null) configureSelfDevRoutes(selfDevParts.routes)
         if (agentParts != null) configureAgentApiRoutes(agentParts)

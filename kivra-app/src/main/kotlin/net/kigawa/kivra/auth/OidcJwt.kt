@@ -80,18 +80,29 @@ internal fun oidcOwnerKey(issuer: String, subject: String?): String? {
 class OidcJwtVerifier(
     private val config: OidcJwtConfig,
     private val jwks: JwkProvider,
-) {
+    /**
+     * A role that marks the token as an agent. A token that verifies as an operator but also carries this role is
+     * [OperatorAuth.AgentRefused] (ADR 0011 section 1). Null (the default) keeps the Task API's behaviour unchanged.
+     */
+    private val agentRole: RequiredRole? = null,
+) : OperatorAuthenticator {
     private val logger = LoggerFactory.getLogger(OidcJwtVerifier::class.java)
 
     fun asIdentity(): TaskApiIdentity = TaskApiIdentity { headers -> principal(headers) }
 
-    suspend fun principal(headers: Headers): String? {
+    suspend fun principal(headers: Headers): String? = (authenticate(headers) as? OperatorAuth.Authenticated)?.principal
+
+    /**
+     * Authenticates an operator request. Same checks as [principal]; the result also tells an agent token apart
+     * ([OperatorAuth.AgentRefused], only when this verifier was built with an [agentRole]).
+     */
+    override suspend fun authenticate(headers: Headers): OperatorAuth {
         val token = bearerToken(headers)
         if (token == null) {
             // Why there is no usable token. Fixed names only, rate limited like every other rejection. This is the case
             // where a logged-in browser's request reaches kivra without the access token (a proxy that does not forward it).
             logRejection(missingTokenReason(headers))
-            return null
+            return OperatorAuth.Unauthenticated
         }
         // JWKS may be fetched over the network, so keep the blocking work off the Netty event loop.
         return withContext(Dispatchers.IO) {
@@ -99,7 +110,7 @@ class OidcJwtVerifier(
                 verify(token)
             } catch (e: Exception) {
                 logRejection((e as? JwksLookupException)?.reasonCode ?: e.javaClass.simpleName)
-                null
+                OperatorAuth.Unauthenticated
             }
         }
     }
@@ -126,12 +137,12 @@ class OidcJwtVerifier(
 
     private val lastRejectionLog = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
-    private fun reject(reason: String): String? {
+    private fun reject(reason: String): OperatorAuth {
         logRejection(reason)
-        return null
+        return OperatorAuth.Unauthenticated
     }
 
-    private fun verify(token: String): String? {
+    private fun verify(token: String): OperatorAuth {
         val decoded = JWT.decode(token)
         if (decoded.algorithm != "RS256") return reject("AlgorithmNotRs256")
         val key = jwks.get(decoded.keyId).publicKey as? RSAPublicKey ?: return reject("SigningKeyNotRsa")
@@ -142,17 +153,25 @@ class OidcJwtVerifier(
             .build()
             .verify(token)
         if (verified.expiresAt == null) return reject("MissingExp")
-        if (!hasRole(verified.getClaim("resource_access").asMap())) return reject("RequiredRoleMissing")
+        val resourceAccess = verified.getClaim("resource_access").asMap()
+        // An agent token is refused (403) before the operator role is looked at, so a token with only the agent role is refused too.
+        // An agent is never an operator, even when the token carries the operator role as well (ADR 0011 section 1).
+        if (agentRole != null && hasRole(resourceAccess, agentRole)) {
+            logRejection("AgentRoleRefused")
+            return OperatorAuth.AgentRefused
+        }
+        if (!hasRole(resourceAccess, RequiredRole(config.requiredClient, config.requiredRole))) return reject("RequiredRoleMissing")
 
         val subject = verified.subject
         if (subject == null) return reject("MissingSubject")
-        return oidcOwnerKey(config.issuer, subject) ?: reject("InvalidSubject")
+        val principal = oidcOwnerKey(config.issuer, subject) ?: return reject("InvalidSubject")
+        return OperatorAuth.Authenticated(principal)
     }
 
-    private fun hasRole(resourceAccess: Map<String, Any?>?): Boolean {
-        val client = resourceAccess?.get(config.requiredClient) as? Map<*, *> ?: return false
+    private fun hasRole(resourceAccess: Map<String, Any?>?, role: RequiredRole): Boolean {
+        val client = resourceAccess?.get(role.client) as? Map<*, *> ?: return false
         val roles = client["roles"] as? List<*> ?: return false
-        return config.requiredRole in roles
+        return role.role in roles
     }
 
     companion object {

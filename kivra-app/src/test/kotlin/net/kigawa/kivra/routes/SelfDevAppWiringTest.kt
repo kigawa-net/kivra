@@ -75,6 +75,30 @@ class SelfDevAppWiringTest {
     }
 
     @Test
+    fun `in oidc-jwt mode with the autopilot off, the goal routes are registered and need a token, and the Task API is unchanged`() = testApplication {
+        environment { config = h2Config() }
+        application {
+            appModule(
+                TrapEnv(
+                    mapOf(
+                        "KIVRA_AUTH_MODE" to "oidc-jwt",
+                        "KIVRA_OIDC_ISSUER" to "https://user.kigawa.net/realms/kigawa-net",
+                        "KIVRA_OIDC_AUDIENCE" to "kivra-dev",
+                        "KIVRA_OIDC_REQUIRED_ROLE" to "admin-panel:admin",
+                    ),
+                ),
+            )
+        }
+        // Registered (not 404) and authenticated first: a caller without a token learns nothing about the autopilot's state.
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/selfdev/autopilot").status)
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/selfdev/goals").status)
+        assertEquals(HttpStatusCode.Unauthorized, client.post("/api/selfdev/goals").status)
+        // Self-development is off, so its routes are not registered, as before.
+        assertEquals(HttpStatusCode.NotFound, client.post("/api/selfdev/tasks").status)
+        assertEquals(HttpStatusCode.OK, client.get("/health").status)
+    }
+
+    @Test
     fun `enabling without oidc-jwt fails the startup, and the message names no value`() {
         val e = assertFailsWith<IllegalStateException> {
             testApplication {

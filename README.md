@@ -349,4 +349,3 @@ Run の `task_id` は `api:<runId>`（fusha-task のタスクとは紐づかな�
     保存済みの head と現在の head を比べれば末尾切り詰めを検知できる。
   - 運用で必要な前提: 運用 DB ロールに `audit_events` の UPDATE / DELETE を付与しない（マイグレーションでは強制していない）。
     強い監査保証を Admission 条件にするには、外部アンカーの実装と権限分離が前提になる。
-> kivra issue-ref test

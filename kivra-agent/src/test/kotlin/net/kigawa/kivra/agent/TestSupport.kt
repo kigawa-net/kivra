@@ -52,7 +52,7 @@ internal class Recorded(
 )
 
 /** A canned reply. */
-internal class Canned(val status: Int, val body: String = "", val location: String? = null)
+internal class Canned(val status: Int, val body: String = "", val location: String? = null, val retryAfter: String? = null)
 
 /** A token source that hands out tok-1, tok-2, ... and counts invalidations. */
 internal class FixedTokens : TokenSource {
@@ -88,7 +88,14 @@ internal fun fakeKivraHttp(
             )
             synchronized(recorded) { recorded += rec }
             val canned = handler(rec)
-            val headers = if (canned.location != null) headersOf(HttpHeaders.Location, canned.location) else JSON_HEADERS
+            val headers = when {
+                canned.location != null -> headersOf(HttpHeaders.Location, canned.location)
+                canned.retryAfter != null -> io.ktor.http.Headers.build {
+                    append(HttpHeaders.ContentType, "application/json")
+                    append(HttpHeaders.RetryAfter, canned.retryAfter)
+                }
+                else -> JSON_HEADERS
+            }
             respond(content = canned.body, status = HttpStatusCode.fromValue(canned.status), headers = headers)
         }
     }

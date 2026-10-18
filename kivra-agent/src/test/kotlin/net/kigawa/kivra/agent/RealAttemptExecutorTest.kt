@@ -137,7 +137,7 @@ private class World(
     )
     val stopFile: Path = root.resolve(AgentConfig.DEFAULT_STOP_FILE_NAME)
 
-    fun executor(debugKeep: Boolean = false, newErrorCodes: Boolean = false): RealAttemptExecutor = RealAttemptExecutor(
+    fun executor(debugKeep: Boolean = false, newErrorCodes: Boolean = false, monitorEvents: Boolean = false): RealAttemptExecutor = RealAttemptExecutor(
         client = client,
         workRoot = root,
         stopFile = stopFile,
@@ -151,6 +151,7 @@ private class World(
             repo = LocalPath(repo.repo),
             debugKeep = debugKeep,
             newErrorCodes = newErrorCodes,
+            monitorEvents = monitorEvents,
         ),
         launcher = docker,
         pollMillis = 20,
@@ -735,5 +736,96 @@ class RealAttemptExecutorTest {
         val doc = Json.parseToJsonElement(Files.readString(world.root.resolve("debug").resolve("$RUN-$ATTEMPT").resolve("task.json"))).jsonObject
         assertEquals("", doc["body"]!!.jsonPrimitive.content)
         assertEquals(false, doc["truncated"]!!.jsonPrimitive.booleanOrNull)
+    }
+}
+
+/** The monitor (ADR 0012): the events go out before the result or the fail, carry no content, and never change the outcome. */
+class RealAttemptExecutorMonitorTest {
+    private val stream = lines(
+        """{"type":"system","subtype":"init","model":"claude-haiku-5-5","claude_code_version":"2.1.3","tools":["Read"]}""",
+        """{"type":"assistant","message":{"content":[{"type":"text","text":"$CONTENT"},""" +
+            """{"type":"tool_use","name":"Edit","input":{"file_path":"kivra-agent/src/Main.kt","new_string":"$TITLE"}}]}}""",
+        """{"type":"user","message":{"content":[{"type":"tool_result","content":"$SUMMARY","is_error":false}]}}""",
+        resultLine("Changed a."),
+    )
+
+    private val acceptEvents: (Recorded) -> Canned = { rec ->
+        if (rec.path.endsWith("/events")) Canned(200, "{}") else World.defaultReply(rec)
+    }
+
+    private fun changedWorld(handler: (Recorded) -> Canned = acceptEvents) = World(
+        docker = ScriptedDocker(
+            output = { stream },
+            onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") },
+        ),
+        handler = handler,
+    )
+
+    @Test
+    fun theEventsGoBeforeTheResultAndCarryNoContent() = runBlocking {
+        val world = changedWorld()
+        val outcome = world.executor(monitorEvents = true).execute(world.attempt())
+
+        assertEquals(AttemptOutcome.ResultSubmitted, outcome)
+        val lastEvents = world.recorded.indexOfLast { it.path.endsWith("/events") }
+        val result = world.recorded.indexOfFirst { it.path.endsWith("/result") }
+        assertTrue(lastEvents in 0 until result, "the events must be sent before the result")
+
+        val bodies = world.recorded.filter { it.path.endsWith("/events") }.joinToString("\n") { it.body }
+        for (kind in listOf("ATTEMPT_STARTED", "CLI_INIT", "TOOL_USE", "TURN", "PROCESS_EXIT_CONFIRMED")) {
+            assertTrue(bodies.contains(""""kind":"$kind""""), kind)
+        }
+        assertFalse(bodies.contains("claude-haiku"), "the model id is not sent (kivra stores none yet)")
+        assertTrue(bodies.contains(""""toolName":"Edit""""))
+        for (secret in listOf(CONTENT, TITLE, SUMMARY, "kivra-agent/src/Main.kt", "file_path", "new_string")) {
+            assertFalse(bodies.contains(secret), "the events must not carry '$secret'")
+        }
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun withTheMonitorOffNoEventIsSentAtAll() = runBlocking {
+        val world = changedWorld()
+        val outcome = world.executor(monitorEvents = false).execute(world.attempt())
+
+        assertEquals(AttemptOutcome.ResultSubmitted, outcome)
+        assertEquals(0, world.paths("/events"))
+        assertEquals(1, world.paths("/result"))
+    }
+
+    @Test
+    fun aRefusedEventsCallDoesNotChangeTheResult() = runBlocking {
+        val world = changedWorld(handler = { rec ->
+            if (rec.path.endsWith("/events")) Canned(500, "{}") else World.defaultReply(rec)
+        })
+        val outcome = world.executor(monitorEvents = true).execute(world.attempt())
+
+        assertEquals(AttemptOutcome.ResultSubmitted, outcome)
+        assertEquals(1, world.paths("/result"))
+        assertEquals(0, world.paths("/fail"))
+    }
+
+    @Test
+    fun aFailureSendsItsEventsBeforeTheFail() = runBlocking {
+        val world = World(
+            docker = ScriptedDocker(output = { stream.lines().take(1).joinToString("\n") }, exitCode = 1),
+            handler = acceptEvents,
+        )
+        val outcome = world.executor(monitorEvents = true).execute(world.attempt())
+
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.CLI_NONZERO), outcome)
+        // The loop sends the fail after execute returns, so the events must already be out when it does (flushed in execute).
+        assertTrue(world.paths("/events") >= 1, "the events must be sent before execute returns")
+        assertEquals(0, world.paths("/fail"), "the executor does not send the fail itself")
+        assertTrue(world.recorded.filter { it.path.endsWith("/events") }.joinToString { it.body }.contains("PROCESS_EXIT_CONFIRMED"))
+    }
+
+    companion object {
+        private const val CONTENT = "CONTENTSECRET fun a() = 2"
+        private const val TITLE = "TASKSECRET-title-text"
+        private const val SUMMARY = "SUMMARYSECRET done"
+        private fun lines(vararg items: String): String = items.joinToString("\n", postfix = "\n")
+        private fun resultLine(summary: String): String =
+            """{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"$summary","session_id":"sess-42"}"""
     }
 }

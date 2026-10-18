@@ -187,6 +187,26 @@ class AgentConfigTest {
     }
 
     @Test
+    fun monitorEventsIsOffByDefaultAndOnlyOneEnablesIt() {
+        assertFalse(AgentConfig.fromEnv(realEnv()).realExecutor!!.monitorEvents)
+        assertFalse(AgentConfig.fromEnv(realEnv(AgentConfig.ENV_MONITOR_EVENTS to "0")).realExecutor!!.monitorEvents)
+        assertTrue(AgentConfig.fromEnv(realEnv(AgentConfig.ENV_MONITOR_EVENTS to "1")).realExecutor!!.monitorEvents)
+    }
+
+    @Test
+    fun monitorEventsRejectsAnyOtherValueByNameOnly() {
+        for (value in listOf("yes", "true", "2", "on", " 11 ")) {
+            val e = assertFailsWith<ConfigException> { AgentConfig.fromEnv(realEnv(AgentConfig.ENV_MONITOR_EVENTS to value)) }
+            assertEquals("KIVRA_AGENT_MONITOR_EVENTS must be 1 or 0", e.message, value)
+        }
+    }
+
+    @Test
+    fun monitorEventsIsIgnoredWhenTheStubIsUsed() {
+        assertEquals(null, AgentConfig.fromEnv(env(AgentConfig.ENV_MONITOR_EVENTS to "yes")).realExecutor)
+    }
+
+    @Test
     fun debugKeepIsOffByDefaultAndOnlyOneEnablesIt() {
         assertFalse(AgentConfig.fromEnv(realEnv()).realExecutor!!.debugKeep)
         assertFalse(AgentConfig.fromEnv(realEnv(AttemptDebugKeep.ENV_DEBUG_KEEP to "0")).realExecutor!!.debugKeep)

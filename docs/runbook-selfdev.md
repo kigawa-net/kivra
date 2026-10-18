@@ -722,6 +722,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 | `KIVRA_AGENT_MODEL` | 任意 | CLI の `--model`。既定 `claude-haiku-5-5`。形式は `^[a-z0-9][a-z0-9.-]{0,63}$` |
 | `KIVRA_AGENT_MAX_BUDGET_USD` | 任意 | CLI の `--max-budget-usd`(1 アテンプトの費用上限、ドル)。既定 `0.50`。0.01 から 20.00、小数 2 桁まで(`0.5` は `0.50` に直す) |
 | `KIVRA_AGENT_NEW_ERROR_CODES` | 任意 | `1` で `EMPTY_PATCH`、`BUDGET_EXCEEDED`、`OVERLOADED` を送る。既定 `0`(従来のコード)。kivra の対応版を先にデプロイしてから `1` にする(§6.10d) |
+| `KIVRA_AGENT_MONITOR_EVENTS` | 任意 | `1` で実行の経過(監視イベント)を kivra へ送る。既定 `0`(送らない)。kivra の対応版を先にデプロイしてから `1` にする(§6.16) |
 
 起動時に `DockerSettings` と作業ルートの検査が通らなければ、終了コード 2 で止まる(アテンプトは claim しない)。モデルと費用上限の値が不正なときも、同じく終了コード 2 で、変数名だけを出す。
 
@@ -1295,6 +1296,50 @@ SELECT COUNT(*) AS rows_kept, MIN(created_at) AS oldest
 ```
 
 `oldest` が保持期間より新しいこと。保持期間を過ぎた行が、DEVELOPING か UNKNOWN の Run の attempt に残っていてよい。
+
+### 6.16 実行の経過の送信(ADR 0012 PR 2、既定は無効)
+
+コード: `kivra-agent/.../claude/MonitorEvent.kt`(型)、`claude/MonitorEventExtractor.kt`(stream-json の 1 行を固定の型に写す純粋な関数)、`MonitorEventSender.kt`(有界の待ち行列、バッチ、seq、再送、`MonitorSession`)、`docker/DockerRunner.kt`(`onStdoutLine`、stdout の逐次読み)、`KivraAgentClient.postEvents`(`POST /api/agent/v1/attempts/{attemptId}/events`)。
+
+**何を送るか**: 固定のコードと数値だけ。ツールの入力・出力、本文、パス、プロンプト、モデルの出力、モデル id と CLI の版は送らない。ツール名は kivra の `TOOL_NAMES` のいずれか(`Read`、`Edit`、`Write`、`Bash`、`Grep`、`Glob`、`Task`、`TodoWrite`、`OTHER`)。それ以外の名前は `OTHER`。
+
+**kind と項目の対応**(kivra の `MonitorEventSchema` の `MonitorKind` と同じ。ゴールデンテスト `MonitorWireGoldenTest` が固定している。各イベントは `seq` と `kind` のほかに、下の項目だけを持つ。256 バイト以下):
+
+| kind | 項目 | 送るとき |
+| --- | --- | --- |
+| `ATTEMPT_STARTED` | なし | CLI を起動した時 |
+| `CLI_INIT` | なし | CLI の init の行(中身は送らない) |
+| `PHASE` | `phase`(`STARTED`、`EDITING`、`TESTING`、`ROUND_COMPLETED`、`FINALIZING`) | 結果の送信の直前の `FINALIZING` の 1 件 |
+| `TOOL_USE` | `toolName`(上の一覧) | assistant の `tool_use` ブロックごと |
+| `TOOL_RESULT` | `count`(常に 1) | `is_error` が真の `tool_result` だけ。成功は送らない |
+| `TURN` | `count`(常に 1) | assistant のメッセージごと |
+| `PERMISSION_DENIED` | `count`(0 から 10,000) | 最後の結果の `permission_denials` の件数 |
+| `API_RETRY` | `code`(`AUTHENTICATION`、`RATE_LIMIT`、`OVERLOADED`、`BILLING`、`OTHER`) | `api_retry` の行 |
+| `COST` | `costUsd`(0 から 100、小数 6 桁まで) | 最後の結果の `total_cost_usd` |
+| `STOP_REQUESTED` | なし | この PR では送らない(停止の表示は PR 5) |
+| `PROCESS_EXIT_CONFIRMED` | `code`(`EXITED`、`TIMEOUT`、`CANCELLED`、`OUTPUT_LIMIT`) | コンテナの終了を確認した時 |
+| `WARNING` | `count`(件数) | エージェントが読めなかった行(長すぎる行、ブロックが多すぎる行)の件数。種別は送らない |
+| `DROPPED` | `count`(0 から 10,000) | 送れなかったイベントの件数(待ち行列が満杯、上限到達) |
+| `TRUNCATED` | (送らない) | kivra が上限に達した時に自分で書く。エージェントは送らない |
+
+**送り方**: 1 リクエストは最大 50 件、本文 8 KiB 以下。`seq` は `(attempt, generation)` ごとに 1 から連番で、送るイベントと `DROPPED` の 1 件ごとに 1 つ使う。上限は attempt あたり 2,000 seq(kivra の上限と同じ)。エージェントは 1,999 件まで送り、残りを最後の `DROPPED` 1 件にまとめる(最後の seq を空けておく)。待ち行列は最大 500 件で、超えた分は捨てて `DROPPED` の件数に数える。送信は 1 秒に 5 リクエストまで(間隔 200 ms)。
+
+- 200: 受理。409 で `lastAcceptedSeq` があれば、その続きから同じ seq で送り直す。`lastAcceptedSeq` が無い 409(世代が古い)は、送信を止める。
+- 429: `Retry-After` を守って同じバッチを送り直す。400: そのバッチを捨てて、seq は使い直す(WARNING を 1 件)。401・403・404 は送信を止める。5xx・通信の失敗・時間切れは、同じバッチを 3 回まで送り直し、その後止める。
+- 結果(`result`)や失敗(`fail`)の前に、残りを最大 3 秒待って送り切る。間に合わなければ残りは捨てる。終わった後は送らない。
+
+**監視は best effort**: 送信の失敗は attempt の結果を変えない。CLI の実行と kill も止めない(stdout の行の読み取りは別スレッドの有界キューで行い、リスナーの例外や停止は CLI に伝わらない)。ログには ID、件数、固定コードだけを出す。
+
+**有効化**: 既定は無効で、無効のとき従来とまったく同じ動きをし、何も送らない。有効にするのは次の順序で行う。
+1. kivra の対応版(`POST .../events` を受理する版)を dev に反映する。
+2. エージェントを動かす PC の `/etc/kivra-agent/agent.env` に `KIVRA_AGENT_MONITOR_EVENTS=1` を書く(`install.sh` の雛形には `#KIVRA_AGENT_MONITOR_EVENTS=1` がある)。
+3. `systemctl --user restart kivra-agent.service` で再起動する。
+
+kivra が未対応のまま `1` にすると、`events` が 404 になり、送信は止まる(結果と fail は影響を受けない)。この場合も Run の結果は変わらないが、経過は残らない。
+
+**戻し方**: `agent.env` の行を消すか `0` にして、ユニットを再起動する。kivra 側の受理の処理は消さない(古いエージェントが送り続けるかもしれないため)。
+
+**未確認(実機で確かめる)**: stream-json の実行中の `assistant`・`user`・`system`(init)の形式は、この repo の fixture で読んだ仮定であり、実 CLI の出力では未確認。CLI の版を固定した fixture で確かめるまで、形式が違えば何も記録されない(安全側)。
 
 ### 6.17 実行の監視イベント(ADR 0012 PR 1、Issue #223)
 

@@ -73,6 +73,7 @@ class AgentConfig private constructor(
         const val ENV_MODEL = "KIVRA_AGENT_MODEL"
         const val ENV_MAX_BUDGET_USD = "KIVRA_AGENT_MAX_BUDGET_USD"
         const val ENV_NEW_ERROR_CODES = "KIVRA_AGENT_NEW_ERROR_CODES"
+        const val ENV_MONITOR_EVENTS = "KIVRA_AGENT_MONITOR_EVENTS"
 
         const val MAX_CONCURRENT = 1
         const val DEFAULT_STOP_FILE_NAME = "STOP"
@@ -145,7 +146,18 @@ class AgentConfig private constructor(
                 budgetUsd = budgetUsd,
                 debugKeep = debugKeep(env),
                 newErrorCodes = newErrorCodes(env),
+                monitorEvents = monitorEvents(env),
             )
+        }
+
+        /**
+         * Read only for `KIVRA_AGENT_EXECUTOR=real`. `1` sends the run's monitor events to kivra (ADR 0012). `0` or unset sends none, and
+         * the attempt runs as before. Any other value refuses the start. Turn `1` on only after the kivra that accepts the events is deployed.
+         */
+        private fun monitorEvents(env: Map<String, String>): Boolean = when (optional(env, ENV_MONITOR_EVENTS)) {
+            null, "0" -> false
+            "1" -> true
+            else -> throw ConfigException("$ENV_MONITOR_EVENTS must be 1 or 0")
         }
 
         /**

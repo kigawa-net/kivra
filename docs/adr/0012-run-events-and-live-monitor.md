@@ -237,7 +237,7 @@ PR の分割:
   - `POST /api/agent/v1/attempts/{attemptId}/events`(`AgentIdentity`、既存の agent API と同じ認可と CSRF/Origin の扱い)。スキーマは `MonitorEventSchema` で厳格に検査する。
   - 保持期間の設定 `KIVRA_CODING_MONITOR_RETENTION_DAYS`(既定 30、1〜365)。`CodingReconcileWorker` の周期で掃除する。
   - 運用の手順と上限は `docs/runbook-selfdev.md` §6.17。
-  - agent 側(抽出、送信、DROPPED の計上)は PR 2。読み取りの API は PR 3、画面は PR 4、停止は PR 5。
+  - agent 側(抽出、送信、DROPPED の計上)は PR 2(#258、main に取り込み済み)。読み取りの API は PR 3、画面は PR 4、停止は PR 5。
 - **PR 1 で決まった未決の点**(暫定の既定値を採用し、実装で確定した):
   - **U-1(保存先)**: 新しい表 V20 を採用。`coding_events` は変えていない。
   - **U-2(保持と上限)**: 30 日と、1 attempt あたり 2,000 件を採用。上限の印は、件数の上限に達した時に seq 0 の `TRUNCATED` として 1 件書く(seq 0 は kivra 専用。agent の seq は 1 から)。`TRUNCATED` は agent が送れない(400)。保持の掃除は、attempt の最終更新が保持期間より古く、attempt が非活性で、Run が終端のものに限る。

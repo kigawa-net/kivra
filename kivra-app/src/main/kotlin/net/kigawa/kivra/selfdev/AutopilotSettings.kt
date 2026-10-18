@@ -20,6 +20,8 @@ data class AutopilotConfig(
     val maxConsecutiveFailures: Int,
     val maxRunsPerDay: Int,
     val budgetSharePercent: Int,
+    /** How often the Planner worker looks for goals to plan (seconds). Never a secret. */
+    val planIntervalSeconds: Long = AutopilotSettings.DEFAULT_PLAN_INTERVAL_SECONDS,
 ) {
     /** True when the task waits for the operator. A denylisted task waits under every [approval], including AUTO. */
     fun requiresApproval(denylisted: Boolean): Boolean = denylisted || approval == AutopilotApproval.REQUIRED
@@ -52,12 +54,14 @@ class AutopilotSettings private constructor(
         const val ENV_MAX_CONSECUTIVE_FAILURES = "KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES"
         const val ENV_MAX_RUNS_PER_DAY = "KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY"
         const val ENV_BUDGET_SHARE_PERCENT = "KIVRA_SELFDEV_AUTOPILOT_BUDGET_SHARE_PERCENT"
+        const val ENV_PLAN_INTERVAL_SECONDS = "KIVRA_SELFDEV_AUTOPILOT_PLAN_INTERVAL_SECONDS"
 
         const val DEFAULT_APPROVAL = "required"
         const val DEFAULT_MAX_PENDING_PRS = 3
         const val DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
         const val DEFAULT_MAX_RUNS_PER_DAY = 5
         const val DEFAULT_BUDGET_SHARE_PERCENT = 50
+        const val DEFAULT_PLAN_INTERVAL_SECONDS = 30L
 
         const val MIN_MAX_PENDING_PRS = 1
         const val MAX_MAX_PENDING_PRS = 20
@@ -67,6 +71,8 @@ class AutopilotSettings private constructor(
         const val MAX_MAX_RUNS_PER_DAY = 100
         const val MIN_BUDGET_SHARE_PERCENT = 1
         const val MAX_BUDGET_SHARE_PERCENT = 100
+        const val MIN_PLAN_INTERVAL_SECONDS = 5L
+        const val MAX_PLAN_INTERVAL_SECONDS = 3600L
 
         /** The settings when the autopilot is off. Reads nothing but [ENV_ENABLED]. */
         fun disabled(): AutopilotSettings = AutopilotSettings(enabled = false, config = null)
@@ -104,8 +110,20 @@ class AutopilotSettings private constructor(
                         env, ENV_BUDGET_SHARE_PERCENT, DEFAULT_BUDGET_SHARE_PERCENT,
                         MIN_BUDGET_SHARE_PERCENT, MAX_BUDGET_SHARE_PERCENT,
                     ),
+                    planIntervalSeconds = boundedLong(
+                        env, ENV_PLAN_INTERVAL_SECONDS, DEFAULT_PLAN_INTERVAL_SECONDS,
+                        MIN_PLAN_INTERVAL_SECONDS, MAX_PLAN_INTERVAL_SECONDS,
+                    ),
                 ),
             )
+        }
+
+        /** A long in [min, max]; unset or blank means [default]. The message names the variable only. */
+        private fun boundedLong(env: Map<String, String>, name: String, default: Long, min: Long, max: Long): Long {
+            val raw = env[name]?.trim()?.takeIf { it.isNotEmpty() } ?: return default
+            val value = raw.toLongOrNull()
+            check(value != null && value in min..max) { "$name must be an integer from $min to $max" }
+            return value
         }
 
         /** An integer in [min, max]; unset or blank means [default]. The message names the variable only. */

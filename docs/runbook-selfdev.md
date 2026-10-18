@@ -996,10 +996,11 @@ CLI 経路の費用は、kivra の月次の予算(`KIVRA_BUDGET_MONTHLY_LIMIT_JP
 - 運用画面で API 経路と CLI 経路を区別して表示する作業(UI PR5)は、この PR に含まれない。
 
 
-## 7. 自己開発オートパイロット(基盤、ADR 0011、Issue #233 の PR A)
+## 7. 自己開発オートパイロット(ADR 0011、Issue #233)
 
-状態: **基盤のみ実装済み**。Goal の受付、Planner、Dispatcher、UI、HTTP は後続の PR で入る。この PR を有効にしても、挙動は変わらない。
-環境変数は読まれるが、Goal は受け付けず、Planner と Dispatcher は動かず、リポジトリも作られない(`AutopilotSettings` の検証のみ)。
+状態: **基盤(PR A)と Planner(PR B)を実装済み**。Dispatcher、UI、HTTP は後続の PR で入る。
+Planner は `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` のときだけ動く。既定(無効)では何も起きない。Goal の受付(HTTP)は PR D まで無い。
+Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_PROPOSED` に進める。タスクは投入されない(投入は PR C)。
 
 ### 7.1 設定項目
 
@@ -1011,6 +1012,7 @@ CLI 経路の費用は、kivra の月次の予算(`KIVRA_BUDGET_MONTHLY_LIMIT_JP
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES` | `3` | 連続失敗でサーキットブレーカーを開く数。1〜20(この範囲は PR A で決めた値。ADR に範囲の記載は無い) |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY` | `5` | 1 日(UTC)に投入する Run の数。1〜100(この範囲も PR A で決めた値) |
 | `KIVRA_SELFDEV_AUTOPILOT_BUDGET_SHARE_PERCENT` | `50` | 月次予算のうち、オートパイロットに割り当てる割合(%)。1〜100 |
+| `KIVRA_SELFDEV_AUTOPILOT_PLAN_INTERVAL_SECONDS` | `30` | Planner が計画待ちの Goal を探す間隔(秒)。5〜3600 |
 
 数値が範囲外、または `APPROVAL` が `required` / `auto` 以外のときは、起動に失敗する。失敗のメッセージは変数の名前だけを示し、値は出さない。
 値は秘密ではない。
@@ -1019,6 +1021,16 @@ CLI 経路の費用は、kivra の月次の予算(`KIVRA_BUDGET_MONTHLY_LIMIT_JP
 
 - `KIVRA_SELFDEV_AUTOPILOT_ENABLED` が未設定、空、または `false` のとき、ほかのオートパイロットの変数は読まれない。
 - 何も配線されず、`selfdev_autopilot_control` の行は読まれない。DB のテーブルは V18 で作られるが、使われない(既存の挙動は変わらない)。
+
+### 7.2b Planner(PR B)
+
+- 対象は `GOAL_SUBMITTED` の Goal。claim は DB の時刻で行い、同時に 1 つの Planner だけが取る。claim の期限は 600 秒。切れた claim は次の周期で `GOAL_SUBMITTED` に戻る(`CLAIM_EXPIRED`)。
+- モデルは `claude-haiku-5-5` に固定する。起動時に registry にそのモデルが `ACTIVE` で無ければ、起動に失敗する。ツールは渡さない。思考は無効。
+- 出力は JSON 1 個だけ。未知のキー、型違い、件数・長さの超過、依存の誤り、allowlist 外のパスは拒否する。拒否は 1 回だけ再試行する。
+- denylist のパス(`.github/**`、`**/db/migration/**`、`docs/adr/**` など)に触れるタスクは、`auto` でも承認待ちになる。モデルは `requiresApproval` を出せない。
+- 予算が足りない、または UNKNOWN_COST のとき、Goal は `BLOCKED(PLAN_BUDGET_HOLD)`。モデル呼び出しの失敗は `BLOCKED(PLAN_CALL_FAILED)`。検証の失敗は `BLOCKED(PLAN_INVALID)`。
+- `BLOCKED` の計画段階の Goal は、自動では再試行しない。運用者が再計画する(`BLOCKED → GOAL_SUBMITTED`、理由 `REPLAN_REQUESTED`)。この操作の入口は PR D まで無い。
+- ログには Goal の本文、計画、パス、モデルの出力、例外の文を出さない。ID と固定の理由コード、件数、費用、出力のダイジェストの先頭 12 文字だけを出す。
 
 ### 7.3 状態遷移
 

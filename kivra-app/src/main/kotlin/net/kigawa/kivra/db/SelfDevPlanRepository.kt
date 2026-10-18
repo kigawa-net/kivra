@@ -96,7 +96,11 @@ data class SelfDevPlanTask(
     val updatedAt: LocalDateTime,
 )
 
-/** A task of a Plan before it is stored. [dependsOn] holds ordinals (1-based) that must each be smaller than the task's own ordinal. */
+/**
+ * A task of a Plan before it is stored. [dependsOn] holds ordinals (1-based) that must each be smaller than the task's own ordinal.
+ * [initialState] is PENDING_APPROVAL, or QUEUED for a task the autopilot approval setting lets through (ADR 0011 section 6.1). A task
+ * with [requiresApproval] is never QUEUED.
+ */
 data class NewTask(
     val title: String,
     val body: String?,
@@ -104,6 +108,7 @@ data class NewTask(
     val sizeEstimate: String,
     val dependsOn: List<Int>,
     val requiresApproval: Boolean,
+    val initialState: TaskState = TaskState.PENDING_APPROVAL,
 )
 
 class SelfDevPlanRepository(
@@ -165,7 +170,7 @@ class SelfDevPlanRepository(
     }
 
     /**
-     * Inserts a Plan and its tasks inside the caller's transaction. Every task starts PENDING_APPROVAL. The values are validated here,
+     * Inserts a Plan and its tasks inside the caller's transaction. Each task starts in its [NewTask.initialState]. The values are validated here,
      * not trusted from the caller: the Planner's output is checked before this point, and this is the last check before storage.
      */
     internal fun insertPlan(
@@ -203,6 +208,12 @@ class SelfDevPlanRepository(
             require(task.targetPaths.size <= 10 && task.targetPaths.all { it.isNotEmpty() }) { "a task has at most 10 non-empty target paths" }
             require(task.sizeEstimate in SIZES) { "size estimate must be S, M or L" }
             require(task.dependsOn.all { it in 1 until ordinal }) { "a dependency must be an earlier ordinal" }
+            require(task.initialState == TaskState.PENDING_APPROVAL || task.initialState == TaskState.QUEUED) {
+                "a new task starts PENDING_APPROVAL or QUEUED"
+            }
+            require(task.initialState == TaskState.PENDING_APPROVAL || !task.requiresApproval) {
+                "a task that requires approval starts PENDING_APPROVAL"
+            }
             SelfDevPlanTasksTable.insert {
                 it[SelfDevPlanTasksTable.planId] = planId
                 it[SelfDevPlanTasksTable.ordinal] = ordinal
@@ -212,7 +223,7 @@ class SelfDevPlanRepository(
                 it[SelfDevPlanTasksTable.sizeEstimate] = task.sizeEstimate
                 it[SelfDevPlanTasksTable.dependsOn] = JSON.encodeToString(ListSerializer(Int.serializer()), task.dependsOn)
                 it[SelfDevPlanTasksTable.requiresApproval] = task.requiresApproval
-                it[SelfDevPlanTasksTable.state] = TaskState.PENDING_APPROVAL.name
+                it[SelfDevPlanTasksTable.state] = task.initialState.name
                 it[SelfDevPlanTasksTable.idempotencyKey] = "ap:$planId:$ordinal"
                 it[SelfDevPlanTasksTable.attempts] = 0
                 it[SelfDevPlanTasksTable.version] = 0
@@ -222,7 +233,7 @@ class SelfDevPlanRepository(
             stored += SelfDevPlanTask(
                 planId = planId, ordinal = ordinal, title = task.title, body = body, targetPaths = task.targetPaths,
                 sizeEstimate = task.sizeEstimate, dependsOn = task.dependsOn, requiresApproval = task.requiresApproval,
-                state = TaskState.PENDING_APPROVAL, stateReason = null, idempotencyKey = "ap:$planId:$ordinal", runId = null,
+                state = task.initialState, stateReason = null, idempotencyKey = "ap:$planId:$ordinal", runId = null,
                 attempts = 0, version = 0, createdAt = now, updatedAt = now,
             )
         }

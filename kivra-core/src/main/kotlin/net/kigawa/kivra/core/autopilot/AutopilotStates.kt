@@ -44,7 +44,7 @@ enum class TaskState : StateMachine<TaskState> {
  * dispatch (see the note in the ADR).
  */
 enum class AutopilotReason {
-    PLAN_INVALID, PLAN_BUDGET_HOLD, CLAIM_EXPIRED, REPLAN_REQUESTED,
+    PLAN_INVALID, PLAN_BUDGET_HOLD, PLAN_CALL_FAILED, CLAIM_EXPIRED, REPLAN_REQUESTED,
     PENDING_PR_LIMIT, DAILY_RUN_CAP, BUDGET_HOLD, CIRCUIT_OPEN, AUTO_SCOPE_EXCEEDED,
     GUARD_CLEARED, OPERATOR_PAUSED, OPERATOR_RESUMED, OPERATOR_STOPPED, ALL_TASKS_COMPLETED,
     OPERATOR_APPROVED, OPERATOR_SKIPPED, OPERATOR_REQUEUED, GOAL_STOPPED,
@@ -95,6 +95,16 @@ val AUTO_CLEARABLE_REASONS: Set<AutopilotReason> = setOf(
     AutopilotReason.BUDGET_HOLD,
 )
 
+/**
+ * The planning-stage blocks (ADR 0011 section 2.8, U-16). Only an operator moves a goal out of them, back to GOAL_SUBMITTED, so a
+ * block that the Planner made is never cleared by a dispatch guard.
+ */
+val PLAN_BLOCK_REASONS: Set<AutopilotReason> = setOf(
+    AutopilotReason.PLAN_INVALID,
+    AutopilotReason.PLAN_BUDGET_HOLD,
+    AutopilotReason.PLAN_CALL_FAILED,
+)
+
 /** One allowed edge. [from] is null for the creation edge. [reasons] holds null when the edge takes no reason. */
 private class Edge<S>(val from: S?, val to: S, val reasons: Set<AutopilotReason?>)
 
@@ -105,10 +115,11 @@ private val GOAL_EDGES: List<Edge<GoalState>> = buildList {
     edge(null, GoalState.GOAL_SUBMITTED, NO_REASON)
     edge(GoalState.GOAL_SUBMITTED, GoalState.PLANNING, NO_REASON)
     edge(GoalState.PLANNING, GoalState.PLAN_PROPOSED, NO_REASON)
-    edge(GoalState.PLANNING, GoalState.BLOCKED, setOf(AutopilotReason.PLAN_INVALID, AutopilotReason.PLAN_BUDGET_HOLD))
+    edge(GoalState.PLANNING, GoalState.BLOCKED, PLAN_BLOCK_REASONS)
     edge(GoalState.PLANNING, GoalState.GOAL_SUBMITTED, setOf(AutopilotReason.CLAIM_EXPIRED))
     edge(GoalState.PLAN_PROPOSED, GoalState.TASKS_QUEUED, NO_REASON)
     edge(GoalState.PLAN_PROPOSED, GoalState.GOAL_SUBMITTED, setOf(AutopilotReason.REPLAN_REQUESTED))
+    edge(GoalState.BLOCKED, GoalState.GOAL_SUBMITTED, setOf(AutopilotReason.REPLAN_REQUESTED))
     edge(GoalState.TASKS_QUEUED, GoalState.RUNNING, NO_REASON)
     edge(GoalState.RUNNING, GoalState.BLOCKED, DISPATCH_BLOCK_REASONS)
     edge(GoalState.TASKS_QUEUED, GoalState.BLOCKED, DISPATCH_BLOCK_REASONS)
@@ -165,6 +176,7 @@ fun checkGoalTransition(from: GoalState?, to: GoalState, reason: AutopilotReason
     val guardHolds = when {
         from == GoalState.PLAN_PROPOSED && to == GoalState.GOAL_SUBMITTED -> context.revision < MAX_REVISIONS
         from == GoalState.PAUSED -> context.resumeState == to
+        from == GoalState.BLOCKED && to == GoalState.GOAL_SUBMITTED -> context.blockedReason in PLAN_BLOCK_REASONS
         from == GoalState.BLOCKED && to != GoalState.PAUSED && to != GoalState.STOPPED -> {
             val blocked = context.blockedReason
             blocked in DISPATCH_BLOCK_REASONS && (reason != AutopilotReason.GUARD_CLEARED || blocked in AUTO_CLEARABLE_REASONS)

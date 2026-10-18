@@ -193,6 +193,12 @@ class PatchPolicy(private val config: PatchPolicyConfig = PatchPolicyConfig()) {
         return allowed.any { it.matches(key) } && denied.none { it.matches(key) }
     }
 
+    /** True when [path] has a valid repository-relative shape (the same check as a write). Used by the autopilot Planner (ADR 0011 section 3). */
+    fun hasValidPathShape(path: String): Boolean = pathShapeReason(path, config.maxPathChars) == null
+
+    /** True when [path] matches a denylist pattern. The shape is not checked here. Used by the autopilot Planner (ADR 0011 section 4). */
+    fun deniesPath(path: String): Boolean = denied.any { it.matches(nfc(path)) }
+
     private fun checkPath(path: String, reasons: MutableSet<RejectReason>) {
         val shape = pathShapeReason(path, config.maxPathChars)
         if (shape != null) {

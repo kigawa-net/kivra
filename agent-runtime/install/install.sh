@@ -145,7 +145,7 @@ if [ -e "$DESTDIR$ETC_DIR/client-secret" ]; then
   if [ $((8#$mode & 077)) -ne 0 ]; then
     echo "警告: $ETC_DIR/client-secret のモードが $mode です。kivra-agent の JVM は、グループ・その他が読めるファイルを拒否します。" >&2
     echo "      次を実行してください: sudo chown $AGENT_USER:$AGENT_USER $ETC_DIR/client-secret && sudo chmod 0600 $ETC_DIR/client-secret" >&2
-    echo "      (install-kivra-agent-secret.sh を再実行すると 0640 に戻るので、そのスクリプトも直すこと)" >&2
+    echo "      (配置は install-client-secret.sh で行う。0600 で置く。runbook §6.14)" >&2
   else
     echo "client secret のモード: $mode(OK)"
   fi

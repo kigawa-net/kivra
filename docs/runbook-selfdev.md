@@ -815,7 +815,7 @@ sudo bash ~/.cache/kivra-agent-dist/agent-runtime/install/install.sh --dist ~/.c
 2. `/etc/kivra-agent/agent.env` の `KIVRA_AGENT_CLIENT_ID`(この PC の Keycloak client。例: `kivra-agent-<device>`)。空だと起動は終了コード 2 で止まる。
 3. **client secret のモード(注意)**: kivra-agent の JVM は、グループまたはその他が読めるファイルを拒否する(`StartupChecks.checkSecretFile`)。現在の `root:kivra-agent 0640` のままでは起動に失敗する。次のどちらかで直す。
    - `sudo chown kivra-agent:kivra-agent /etc/kivra-agent/client-secret && sudo chmod 0600 /etc/kivra-agent/client-secret`(推奨。proxy コンテナも、所有者の kivra-agent としてこのファイルを読める)
-   - `install-kivra-agent-secret.sh` は 0640 で配置するため、再実行すると元に戻る。直すなら、そのスクリプトの `chmod 0640` と `chown root:kivra-agent` を変更する。
+   - 運用者の手元の旧 `install-kivra-agent-secret.sh`(リポジトリ外)は 0640 で配置するため、再実行すると元に戻る。配置は `agent-runtime/install/install-client-secret.sh` を使う(§6.14。0600 で置く)。
    `install.sh` と `preflight.sh` はこの状態を検出する(中身は読まない)。
 
 **c の補足. 落とし穴: デーモンから `/etc/kivra-agent` が見えない**
@@ -995,6 +995,52 @@ CLI 経路の費用は、kivra の月次の予算(`KIVRA_BUDGET_MONTHLY_LIMIT_JP
 - 為替が失効していた間に報告された費用は金額 0 で計上される。この予約には実額を入れられない(上記の確認手順 3)。
 - 運用画面で API 経路と CLI 経路を区別して表示する作業(UI PR5)は、この PR に含まれない。
 
+
+### 6.14 client secret の配置とローテーション(Issue #232)
+
+資材: `agent-runtime/install/install-client-secret.sh`。取得は通常ユーザー、配置は root が行う。値は標準入力のパイプだけで渡し、引数や環境変数には載せない。
+配置先は `/etc/kivra-agent/client-secret`(`kivra-agent:kivra-agent 0600`)。JVM の起動検査はグループとその他が読めるファイルを拒否し、プロキシ(コンテナ内の root = ホストの kivra-agent)は所有者として読む。
+
+**a. 配置(初回と再配置の共通)**
+
+```bash
+# 値の取得: 秘密ではない secret の ID を調べてから、値をパイプで渡す(値は画面に出ない)
+SECRET_ID="$(bws secret list 3f39dcb2-4e04-4c80-bcc4-b3e100e4e27a | jq -r '.[] | select(.key=="kivra-agent-keycloak-client-secret") | .id')"
+bws secret get "$SECRET_ID" | jq -j .value | sudo bash /opt/kivra-agent/agent-runtime/install/install-client-secret.sh
+```
+
+- 空の値、`null`(jq が値を取れなかった)は拒否し、既存のファイルは変えない。配置は一時ファイルから `mv` で行う(原子的)。
+- 表示するのはモード、所有者、バイト数だけ。値と長さのほかは出さない。
+- 配置後、rootless docker のデーモンから secret がファイルとして見えるかを確かめる。ディレクトリに見えた場合は、kivra-agent の `docker.service` を再起動する(install.sh と同じ条件。実行中の container は止まる)。
+- 冪等。何度実行してもよい。`--dry-run` と `DESTDIR` は、テスト用の一時ディレクトリへの配置(root・chown・docker を行わない)。
+- `/etc/kivra-agent` は `root:kivra-agent 0750` に直す。
+
+**b. ローテーション(client secret の再生成)**
+
+Keycloak の client の Regenerate は旧 secret を**即座に失効**させる。猶予は無い。手順は次の順に行い、失敗したら下の「失敗時」に従う。
+
+0. 停止: `sudo kivra-agentctl stop`(claim を止める。実行中の attempt は CANCELLED で報告される)。
+1. 再生成: Keycloak 管理画面で該当 client(`KIVRA_AGENT_CLIENT_ID`)の Credentials から新しい secret を生成する。ここから旧 secret は使えない。
+2. Bitwarden 更新: Bitwarden Secrets Manager の `infra` プロジェクト(ID `3f39dcb2-4e04-4c80-bcc4-b3e100e4e27a`)のキー `kivra-agent-keycloak-client-secret` を新しい値にする。Web 画面で行い、値をコマンド引数、シェル履歴、チャットに残さない。
+3. 配置: 上の a の手順。
+4. 再起動(proxy を先に。JVM は起動時に secret を読むため、kivra-agent の再起動が必要。proxy は毎回ファイルを読み直す):
+   ```bash
+   sudo runuser -u kivra-agent -- env XDG_RUNTIME_DIR=/run/user/1001 systemctl --user restart kivra-agent-proxy.service kivra-agent.service
+   ```
+5. 確認:
+   - `sudo kivra-agentctl status` で、3 ユニットが active、client secret がファイルとして見える、直近のログにエラーが無いこと。
+   - `sudo -u kivra-agent env DOCKER_HOST=unix:///run/user/1001/docker.sock bash /opt/kivra-agent/agent-runtime/verify/live-smoke.sh`(実 API を 1 回呼ぶ。`PASS` が 4 行、`FAIL` が出ないこと)。
+   - ログ: `sudo kivra-agentctl status` の直近ログに、認証(トークン取得)の失敗が無いこと。
+6. 再開: `sudo kivra-agentctl resume`(STOP を消す)。
+7. 旧 secret の失効の確認: 1 で Regenerate した時点で失効している。Keycloak の Credentials 画面に出ている値が新しいものだけであることを確かめる。旧値を手元に残さない(クリップボード、端末のスクロールバック、Bitwarden の旧版の履歴を確かめる)。
+
+**失敗時**
+
+- 手順 3 の配置が失敗(空の値、`null`、所有者やモードの不一致): 既存のファイルは変わらない。Keycloak 側は既に再生成済みなので、Bitwarden の値を直して 3 から再実行する。
+- 手順 4 の後に JVM が起動しない(`invalid_client` などの認証エラー): Bitwarden の値と Keycloak の値が一致するかを、値を表示せずに確かめる(再生成の直後の取り違えが多い)。合わなければ 2 から直す。`sudo kivra-agentctl stop` で claim を止めたままにする。
+- 配置後、デーモンからディレクトリに見える: install-client-secret.sh が docker.service を再起動する。それでも直らない場合は §6.11 c の補足。
+- **旧値には戻せない**: Keycloak の再生成で旧値は失効する。ロールバックは「新しい値を Keycloak から正として、Bitwarden の値に合わせて配置し直す」ことである。Bitwarden の値を古い版に戻しても、Keycloak 側は戻らない。
+- 止める: `sudo kivra-agentctl disable`(3 ユニットを停止して無効化)。secret のファイルは残る。消すなら `sudo rm /etc/kivra-agent/client-secret`(消した状態では起動できない)。
 
 ## 7. 自己開発オートパイロット(ADR 0011、Issue #233)
 

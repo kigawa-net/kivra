@@ -46,10 +46,12 @@ import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.configureSelfDevRoutes
+import net.kigawa.kivra.selfdev.AutopilotDispatcher
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
 import net.kigawa.kivra.selfdev.SelfDevSettings
+import net.kigawa.kivra.selfdev.autopilotBudgetAllows
 import net.kigawa.kivra.selfdev.buildSelfDev
 
 fun Application.module() = appModule(System.getenv())
@@ -110,6 +112,19 @@ internal fun Application.appModule(env: Map<String, String>) {
     // otherwise nothing is read and nothing is started.
     val fxSettings = if (agentApiSettings.auth != null || selfDevSettings.enabled) fxSettingsForWarning(env) else null
     fxSettings?.let { FxExpiryWatcher(it).start(this) }
+    // Built only when the autopilot is enabled (ADR 0011 section 5). Its monthly-budget check reads the same store as the coding ledger.
+    autopilotSettings.config?.let { autopilot ->
+        AutopilotDispatcher(
+            database = database,
+            runs = runs,
+            config = autopilot,
+            maxActiveSelfDev = selfDevSettings.maxActiveRuns,
+            budgetAllows = { share ->
+                val usage = budgetStore.usage(budgetConfig.tenantId)
+                autopilotBudgetAllows(usage.committed, usage.reserved, budgetConfig.monthlyLimitJpy, share)
+            },
+        ).start(this)
+    }
     val agentParts = agentApiSettings.auth?.let { auth ->
         AgentApiDeps(checkNotNull(codingService), AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)))
     }

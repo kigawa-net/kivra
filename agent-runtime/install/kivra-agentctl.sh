@@ -10,9 +10,9 @@ here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 . "$here/lib.sh"
 [ "$(id -u)" -eq 0 ] || die "sudo で実行してください"
 
-WORK_DIR="$(sed -n 's/^KIVRA_AGENT_WORK_DIR=//p' "$ETC_DIR/agent.env" 2>/dev/null | tail -1)"
+WORK_DIR="$(sed -n 's/^KIVRA_AGENT_WORK_DIR=//p' "$ETC_DIR/agent.env" 2>/dev/null | tail -1 || true)"
 WORK_DIR="${WORK_DIR:-$STATE_DIR/work}"
-STOP_FILE="$(sed -n 's/^KIVRA_AGENT_STOP_FILE=//p' "$ETC_DIR/agent.env" 2>/dev/null | tail -1)"
+STOP_FILE="$(sed -n 's/^KIVRA_AGENT_STOP_FILE=//p' "$ETC_DIR/agent.env" 2>/dev/null | tail -1 || true)"
 STOP_FILE="${STOP_FILE:-$WORK_DIR/STOP}"
 UID_AGENT="$(agent_uid)"
 DOCKER_HOST_VALUE="unix:///run/user/${UID_AGENT}/docker.sock"
@@ -38,6 +38,24 @@ case "$cmd" in
       esac
     else
       echo "docker: 接続できません"
+    fi
+    # debug 保存(runbook §6.12)。件数と最古の日時だけを出す。中身は読まず、名前も出さない。
+    debug_keep="$(sed -n 's/^KIVRA_AGENT_DEBUG_KEEP=//p' "$ETC_DIR/agent.env" 2>/dev/null | tail -1 || true)"
+    case "$debug_keep" in
+      1) echo "debug 保存(KIVRA_AGENT_DEBUG_KEEP): 有効" ;;
+      ""|0) echo "debug 保存(KIVRA_AGENT_DEBUG_KEEP): 無効" ;;
+      *) echo "debug 保存(KIVRA_AGENT_DEBUG_KEEP): 不正な値(kivra-agent は起動を拒否します。agent.env を直してください)" ;;
+    esac
+    DEBUG_DIR="$WORK_DIR/debug"
+    if [ -d "$DEBUG_DIR" ]; then
+      debug_count="$(find "$DEBUG_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+      debug_oldest="$(find "$DEBUG_DIR" -mindepth 1 -maxdepth 1 -printf '%TY-%Tm-%Td %TH:%TM\n' 2>/dev/null | sort | head -n 1 || true)"
+      echo "debug 保存ディレクトリ: ${debug_count} 件(最も古い更新: ${debug_oldest:-なし})"
+    else
+      echo "debug 保存ディレクトリ: なし"
+    fi
+    if [ "$debug_keep" = 1 ]; then
+      echo "注意: debug 保存は有効です。保存分はタスク文とリポジトリ内容を含むので共有しないこと"
     fi
     echo "--- 直近のログ(kivra-agent.service、10 行)"
     run_as_agent journalctl --user -u kivra-agent.service -n 10 --no-pager -o short-iso 2>/dev/null || echo "(ログを読めません)"

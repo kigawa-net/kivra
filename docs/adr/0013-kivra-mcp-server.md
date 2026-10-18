@@ -47,7 +47,7 @@ MCP サーバーは **Control Plane のアダプター**とする。新しい Ru
 
 | ツール | 種別 | 必要なスコープ | 入力 | 備考 |
 |---|---|---|---|---|
-| `kivra_run_list` | 読み取り | `kivra.runs.read` | `limit`(1〜100、既定 20)、`cursor`(任意) | 自分の Run だけ。`cursor` は新しい(現行の `listTasks` は件数の固定だけで、cursor が無い。PR 1 で足す) |
+| `kivra_run_list` | 読み取り | `kivra.runs.read` | `limit`(1〜50、既定 20。実装で 100 から 50 に変更)、`cursor`(任意) | 自分の Run だけ。`cursor` は新しい(現行の `listTasks` は件数の固定だけで、cursor が無い。PR 1 で足す) |
 | `kivra_run_get` | 読み取り | `kivra.runs.read` | `run_id`(26 文字の ULID 形) | 他人の Run は 404 |
 | `kivra_selfdev_start` | **書き込み** | `kivra.selfdev.start` | `title`(1〜200 文字、必須)、`body`(0〜8,000 文字、任意)、`idempotency_key`(1〜128 文字、**必須**) | 既定で無効(§5)。`title` に Issue の参照を置ける(#229) |
 | `kivra_run_stop` | 書き込み | `kivra.selfdev.stop` | `run_id` | PR 5 まで**存在しない**(tools/list に出さない)。停止の安全な意味が検証されるまで無効 |
@@ -140,7 +140,7 @@ MCP サーバーは **Control Plane のアダプター**とする。新しい Ru
 
 - **PR 1**: kivra の `/mcp` の骨格。OIDC の検証(MCP の audience、スコープの検査、所有者の規則)、Host と Origin の検査、`initialize`、`tools/list`、`tools/call`、読み取りの 2 ツール(`kivra_run_list`、`kivra_run_get`)、テスト(認証の失敗、audience の不一致、スコープ不足、クロスオーナーの 404、Origin の拒否、通知の 202、GET の 405)。
 - **PR 2**: `kigawa01/k8s-system` の Keycloak。MCP 用の client scope、audience mapper(`https://kivra-dev.kigawa.net/mcp`)、public client(PKCE S256、固定の redirect)、`kivra.runs.read` / `kivra.selfdev.start` / `kivra.selfdev.stop` のスコープ。スコープとロールの対応を検証する。
-- **PR 3**: `kigawa-net/kigawa-net-k8s`(`kivra/dev/`)の ingress(`/mcp` を oauth2-proxy の外へ)と env(`KIVRA_MCP_ENABLED`、`KIVRA_MCP_WRITE_ENABLED=false`、`KIVRA_MCP_ALLOWED_HOSTS`、`KIVRA_MCP_OIDC_AUDIENCE`)。パスの優先順位を dev で確かめる。
+- **PR 3**: `kigawa-net/kigawa-net-k8s`(`kivra/dev/`)の ingress(`/mcp` を oauth2-proxy の外へ)と env(`KIVRA_MCP_ENABLED`、`KIVRA_MCP_WRITE_ENABLED=false`、`KIVRA_MCP_ALLOWED_HOSTS`、`KIVRA_MCP_AUDIENCE`)。パスの優先順位を dev で確かめる。
 - **PR 4**: `kivra_selfdev_start`(書き込み、既定 off)。`idempotency_key` の検査、レート制限、既存の投入の経路の呼び出し、テスト(同じ key の再送で 1 件だけできる、キルスイッチ、書き込みが無効、同時 Run の上限)。
 - **PR 5**: `kivra_run_stop` と `kivra_run_execution`。停止は ADR 0012 §6 の既存の取消し要求を使い、停止の安全な意味(CLAIMED と RUNNING の扱い)を先に検証する。経過は ADR 0012 PR 3 の読み取り API の後。
 - **段階的な有効化**: (1) dev で読み取りだけ(PR 1〜3 の後)、(2) dev で書き込みを有効化(PR 4 と #174、#220、#157、#71 の後)、(3) 本番の既定は、この ADR の承認の後、別に決める。
@@ -155,8 +155,8 @@ MCP サーバーは **Control Plane のアダプター**とする。新しい Ru
 - **U-4 停止ツールの有無**: PR 5 で作る(既定)か、作らないか。停止の安全な意味が検証されるまで、tools/list に出さない。
 - **U-5 ホストの分け方**: 同じホストの `/mcp`(既定。`kivra-agent-ingress` と同じ作法)か、別のホスト名。HAProxy のパスの優先順位は PR 3 で確認する。
 - **U-6 MCP の audience の値**: `https://kivra-dev.kigawa.net/mcp`(既定。例として #181 に書かれた値)。本番の値は、本番の入口を決めるときに決める。
-- **U-7 レート制限の値**: 1 分に 5 件(暫定)。
-- **U-8 対応する protocolVersion の一覧**: PR 1 で MCP 仕様を確認して決める。
+- **U-7 レート制限の値**: 1 分に 5 件(暫定。実装では既定 60 件に変更。「実装状況」の決定を参照)。
+- **U-8 対応する protocolVersion の一覧**: 決定済み(「実装状況」の決定を参照)。
 - **U-9 ChatGPT 系のリモート MCP クライアント**: この ADR の範囲外(既定)。対応するなら、登録方式と redirect を別に確認する。
 - **U-10 トークンの失効**: Keycloak の側での失効の手順(既定: 運用者がユーザーを無効にする)。kivra 側の失効リストは作らない。
 - **U-11 投入の時点の予算の検査**: 投入の経路は予算を検査しない(確認済み)。MCP の投入だけに投入時の予算の検査を足すか(既定: 足さない。既存の実行段階の判定に任せる)。足すなら、既存の経路との差を別の PR で決める。
@@ -186,3 +186,56 @@ MCP サーバーは **Control Plane のアダプター**とする。新しい Ru
 - HAProxy の ingress でパスの優先順位が使えないと確かめられたとき(U-5 を見直す)。
 - MCP の仕様の新しい版で、ステートレスの扱いや認可の規則が変わったとき(§2 と §4)。
 - #174、#220、#157、#71 のどれかの前提が変わり、書き込みの条件(§5)が増減するとき。
+
+## 実装状況
+
+確認時点は 2026-10-18。PR の状態は `gh pr view` で確認した。PR 1 は main にマージ済み(main b2697a4)。PR 2 と PR 3 は作成済みで未マージ。ADR のステータスは「提案(Proposed)」のままで、承認の有無は確認していない。
+
+| 段階 | PR | 状態 | 範囲 |
+|---|---|---|---|
+| PR 1 | kigawa-net/kivra#263 | マージ済み(2026-10-18、main b2697a4) | kivra の `/mcp` の骨格、OIDC の検証、読み取りの 2 ツール |
+| PR 2 | kigawa01/k8s-system#280 | 作成済み・未マージ | Keycloak の public client `kivra-mcp`、スコープ、audience mapper |
+| PR 3 | kigawa-net/kigawa-net-k8s#369 | 作成済み・未マージ | `/mcp` と `/.well-known/oauth-protected-resource` を oauth2-proxy の外へ出す ingress |
+
+### PR 1(kivra#263)の範囲
+
+- `POST /mcp`(ステートレスの JSON-RPC 2.0。`Mcp-Session-Id` は発行しない)。`initialize`、`ping`、`tools/list`、`tools/call` を実装する。`GET /mcp` は 405。
+- `/.well-known/oauth-protected-resource`(RFC 9728)。
+- `McpJwtVerifier`: RS256、JWKS の署名、`iss`、`aud`(MCP の値)、`exp`、`nbf`、必須のロール、`scope` クレーム。
+- Host と Origin の許可リスト。Host が一致しなければ 403。Origin があれば一致が必要。Origin が無いリクエストは通す。
+- レート制限(主体ごと。超過は 429)。
+- 読み取りの 2 ツール: `kivra_run_list`、`kivra_run_get`。自分の Run だけを返す。他人の Run と存在しない Run は同じ NOT_FOUND。
+- `KIVRA_MCP_ENABLED` が未設定、`false`、空のときは、他の MCP の env を読まず、`/mcp` と `/.well-known/oauth-protected-resource` を登録しない(404)。
+
+### PR 2(k8s-system#280)の範囲
+
+- `kigawa-net` realm に public client `kivra-mcp` を作る。PKCE(S256)必須。implicit、direct access grant、service account は無効。redirect URI は `http://localhost:8765/callback` と claude.ai の callback だけ(ワイルドカード無し)。
+- client scope: `kivra.runs.read`(default)、`kivra.selfdev.start`(optional)、`kivra.selfdev.stop`(optional)。optional のスコープは、クライアントが scope パラメータで要求したときだけ発行される。
+- audience mapper: access token の `aud` に `https://kivra-dev.kigawa.net/mcp` を入れる。
+- **Keycloak 側では、admin-panel:admin を持つユーザーだけにスコープを発行することはできない。** client scope の role mapping は token の中のロールを絞るだけで、スコープの発行は絞れないため。kivra 側が `resource_access.admin-panel.roles` を検査して判定する(既存の `OperatorAuth` と同じ)。この判定は PR 1 の検査が前提になる。
+
+### PR 3(kigawa-net-k8s#369)の範囲
+
+- `/mcp` と `/.well-known/oauth-protected-resource` だけを、oauth2-proxy を通さず `kivra-svc` へ渡す ingress(`kivra-mcp-ingress`、HAProxy)。他のパスは従来どおり `kivra-ingress`(oauth2-proxy の背後)。
+- この PR では env を追加しない。`KIVRA_MCP_ENABLED` は未設定のままで、MCP は無効。有効化は別の PR で行う。
+- HAProxy で `/mcp` の経路が `kivra-ingress`(`path: /`)より優先されることは、マニフェストだけでは確認できていない(**未確認**)。マージ後に dev で確かめる。404 なら kivra に届いている。302 なら oauth2-proxy に届いている。
+
+### 決定(実装で確定した点)
+
+- **protocolVersion(U-8)**: 対応する版は `2025-06-18` と `2025-03-26`。要求された版がこの一覧に無いときは `2025-06-18` を返す(クライアントが続けるかを判断する)。最新の仕様 `2026-07-28` は未対応で、`server/discover` と `_meta` による別の交渉の扱いは後続で判断が要る。実際の MCP クライアントが対応している版は**未確認**。
+- **レート制限(U-7)**: 既定は主体ごとに 1 分 60 件(`KIVRA_MCP_RATE_PER_MINUTE`、1〜6000)。本文の暫定値 5 件は採らない。
+- **`kivra_run_list` の `limit`**: 1〜50(既定 20)。§3 の 100 は実装で 50 に変えた。
+- **Bearer の読み取り元**: `Authorization` ヘッダーだけ。REST の `X-Forwarded-Access-Token` へのフォールバックは使わない。
+- **X-Forwarded-Proto**: 信用しない。実装はこのヘッダーを読まない(コードに参照が無く、Forwarded ヘッダーのプラグインも入れていない)。
+- **スコープ不足**: HTTP 403 と `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`。JSON-RPC の本文も返す。
+- **`KIVRA_AGENT_REQUIRED_ROLE`**: 任意。設定すると、`<client>:<role>` の形のロールを持つ token は 403 になる。エージェントの token は audience の検査で先に 401 になるので、これは多層防御。
+- **env 名**: MCP の audience は `KIVRA_MCP_AUDIENCE`。ADR の §10 にあった `KIVRA_MCP_OIDC_AUDIENCE` は誤りで、実装の名前に合わせて直した。
+
+### 未実装・残件
+
+- PR 4: 書き込みツール `kivra_selfdev_start`(既定で無効)。
+- PR 5: `kivra_run_stop` と `kivra_run_execution`。
+- 実際の MCP クライアント(Claude Code、OpenCode など)からの接続の確認。**未確認**。
+- 最新の仕様 `2026-07-28` への対応。**未対応**。
+- 有効化の PR(`KIVRA_MCP_ENABLED` などの env を dev に入れる PR)。未作成。
+- HAProxy のパス優先順位の確認(PR 3 のマージ後に dev で curl)。**未確認**。

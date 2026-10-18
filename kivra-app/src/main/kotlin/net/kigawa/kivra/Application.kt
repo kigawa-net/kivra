@@ -44,6 +44,7 @@ import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.configureSelfDevRoutes
+import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
 import net.kigawa.kivra.selfdev.SelfDevSettings
@@ -59,6 +60,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     val agentApiSettings = AgentApiSettings.fromEnv(env)
     // Fail-closed: when self-development is off, no self-development variable beyond the switch is read (ADR 0008 part 7).
     val selfDevSettings = SelfDevSettings.fromEnv(env)
+    // Fail-closed: when the autopilot is off, nothing beyond its switch is read and nothing is wired (ADR 0011). PR A validates only.
+    AutopilotSettings.fromEnv(env, selfDevSettings)
     val config = KivraConfig.from(environment.config)
     val dataSource = createDataSource(config.database)
     migrateDatabase(config.database, dataSource)

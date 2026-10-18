@@ -9,16 +9,21 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import net.kigawa.kivra.appModule
+import net.kigawa.kivra.selfdev.AutopilotSettings
 
 /**
  * The production wiring with self-development off (the default): no self-development route, and no self-development secret or
  * FX variable is read. Any such read fails the test (see [TrapEnv]).
  */
 class SelfDevAppWiringTest {
-    /** Fails if a self-development variable (other than the switch) or an FX variable is read. */
+    /**
+     * Fails if a self-development variable or an FX variable is read. The two switches are the exception: the self-development
+     * switch and the autopilot switch (ADR 0011) are read while off, and no other autopilot variable is.
+     */
     private class TrapEnv(private val base: Map<String, String>) : Map<String, String> by base {
         override fun get(key: String): String? {
-            if ((key.startsWith("KIVRA_SELFDEV_") && key != "KIVRA_SELFDEV_ENABLED") || key.startsWith("KIVRA_FX_")) {
+            val switch = key == "KIVRA_SELFDEV_ENABLED" || key == AutopilotSettings.ENV_ENABLED
+            if ((key.startsWith("KIVRA_SELFDEV_") && !switch) || key.startsWith("KIVRA_FX_")) {
                 throw AssertionError("a self-development variable was read while the feature is off")
             }
             return base[key]

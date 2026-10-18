@@ -995,3 +995,38 @@ CLI 経路の費用は、kivra の月次の予算(`KIVRA_BUDGET_MONTHLY_LIMIT_JP
 - 為替が失効していた間に報告された費用は金額 0 で計上される。この予約には実額を入れられない(上記の確認手順 3)。
 - 運用画面で API 経路と CLI 経路を区別して表示する作業(UI PR5)は、この PR に含まれない。
 
+
+## 7. 自己開発オートパイロット(基盤、ADR 0011、Issue #233 の PR A)
+
+状態: **基盤のみ実装済み**。Goal の受付、Planner、Dispatcher、UI、HTTP は後続の PR で入る。この PR を有効にしても、挙動は変わらない。
+環境変数は読まれるが、Goal は受け付けず、Planner と Dispatcher は動かず、リポジトリも作られない(`AutopilotSettings` の検証のみ)。
+
+### 7.1 設定項目
+
+| 名前 | 既定 | 内容 |
+|---|---|---|
+| `KIVRA_SELFDEV_AUTOPILOT_ENABLED` | `false` | `true` と `false` 以外は起動に失敗する。`true` は、自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)で、`KIVRA_SELFDEV_RUNTIME=cli` のときだけ許す |
+| `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` | `required` | `required` は全タスクを運用者が承認する。`auto` は段階 2 の規則に当たるタスクを承認なしで投入する(後続の PR)。値は `required` / `auto` のどちらか。**denylist のパスのタスクは、`auto` でも必ず承認が要る**(ADR 0011 §4) |
+| `KIVRA_SELFDEV_AUTOPILOT_MAX_PENDING_PRS` | `3` | マージ待ちの自己開発 PR の上限。1〜20 |
+| `KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES` | `3` | 連続失敗でサーキットブレーカーを開く数。1〜20(この範囲は PR A で決めた値。ADR に範囲の記載は無い) |
+| `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY` | `5` | 1 日(UTC)に投入する Run の数。1〜100(この範囲も PR A で決めた値) |
+| `KIVRA_SELFDEV_AUTOPILOT_BUDGET_SHARE_PERCENT` | `50` | 月次予算のうち、オートパイロットに割り当てる割合(%)。1〜100 |
+
+数値が範囲外、または `APPROVAL` が `required` / `auto` 以外のときは、起動に失敗する。失敗のメッセージは変数の名前だけを示し、値は出さない。
+値は秘密ではない。
+
+### 7.2 無効時の挙動(既定)
+
+- `KIVRA_SELFDEV_AUTOPILOT_ENABLED` が未設定、空、または `false` のとき、ほかのオートパイロットの変数は読まれない。
+- 何も配線されず、`selfdev_autopilot_control` の行は読まれない。DB のテーブルは V18 で作られるが、使われない(既存の挙動は変わらない)。
+
+### 7.3 状態遷移
+
+Goal、Plan、タスクの状態と遷移表は、ADR 0011 の §2.5 が正本である。コードの表は `kivra-core/src/main/kotlin/net/kigawa/kivra/core/autopilot/AutopilotStates.kt` にあり、
+全組み合わせ(許可と拒否)を `AutopilotStatesTest` が確かめる。表に無い遷移は拒否され、終端の状態(Goal の `DONE` / `STOPPED`、タスクの `COMPLETED` / `SKIPPED`)からは動かない。
+
+ADR から変えた点(PR A での判断、ADR §2.8 に記録):
+
+- 再計画は `PLAN_PROPOSED → GOAL_SUBMITTED` である(ADR の `PLANNING` ではない)。`PLANNING` は claim されている間だけの状態にするため。
+- 一時停止からの再開先は、一時停止の直前の状態を `selfdev_goals.resume_state` に保存して決める。
+- 計画段階の `BLOCKED` の理由は `PLAN_INVALID` / `PLAN_BUDGET_HOLD` である。ディスパッチ段階の `BUDGET_HOLD` とは分ける。計画段階で止まった Goal は、今の表では `STOPPED` 以外へ進めない(未決の点 U-16)。

@@ -237,7 +237,7 @@ PR の分割:
   - `POST /api/agent/v1/attempts/{attemptId}/events`(`AgentIdentity`、既存の agent API と同じ認可と CSRF/Origin の扱い)。スキーマは `MonitorEventSchema` で厳格に検査する。
   - 保持期間の設定 `KIVRA_CODING_MONITOR_RETENTION_DAYS`(既定 30、1〜365)。`CodingReconcileWorker` の周期で掃除する。
   - 運用の手順と上限は `docs/runbook-selfdev.md` §6.17。
-  - agent 側(抽出、送信、DROPPED の計上)は PR 2(#258、main に取り込み済み)。読み取りの API は PR 3、画面は PR 4、停止は PR 5。
+  - agent 側(抽出、送信、DROPPED の計上)は PR 2(#258、main に取り込み済み)。読み取りの API と SSE は PR 3(この PR)、画面は PR 4、停止は PR 5。
 - **PR 1 で決まった未決の点**(暫定の既定値を採用し、実装で確定した):
   - **U-1(保存先)**: 新しい表 V20 を採用。`coding_events` は変えていない。
   - **U-2(保持と上限)**: 30 日と、1 attempt あたり 2,000 件を採用。上限の印は、件数の上限に達した時に seq 0 の `TRUNCATED` として 1 件書く(seq 0 は kivra 専用。agent の seq は 1 から)。`TRUNCATED` は agent が送れない(400)。保持の掃除は、attempt の最終更新が保持期間より古く、attempt が非活性で、Run が終端のものに限る。
@@ -249,5 +249,18 @@ PR の分割:
   - 読み取りの位置は (世代, seq) の組で指定する(§4 の `afterSeq` の表記は、世代を含めた組として扱う)。
   - JSON の重複キーは、最後の値が使われる(この kotlinx のバージョンには拒否のスイッチが無い)。使われた値は全て検査するので、重複で自由な文字列は通らない。
   - 保持の掃除は、attempt の最終更新時刻で判定する(イベントの受信時刻ではない)。終了した attempt は、以後イベントを受けないため、これで足りる。
-- **未決のまま残る点**: U-3(停止の権限)、U-4(閲覧の権限)、U-5(モデル名の表示)、U-6(実行中の費用)、U-7(SSE)、U-8(API の置き場所)、U-9(段階の表示)、U-12(停止の確認待ち)、U-13(SSE の接続上限)、U-14(heartbeat の PROGRESS の扱い)、U-16(文言)。
+- **PR 3(読み取りの API と SSE、kivra 側)**: 実装(ブランチ `feat/monitor-read-sse`、Refs #223 #224)。運用の手順と上限は `docs/runbook-selfdev.md` §6.19。
+  - REST: `GET /api/admin/runs/{runId}/execution`(スナップショット)、`GET /api/admin/runs/{runId}/execution/events`(差分。カーソルは `(afterGeneration, afterSeq)`)。SSE: `GET /api/admin/runs/{runId}/execution/stream`。
+  - SSE は採用した。依存は `io.ktor:ktor-server-sse-jvm:3.1.3`(`gradle/libs.versions.toml` に 1 行。Ktor 本体と同じ版で、`./gradlew :kivra-app:dependencies` で解決を確認)。新しい Gradle モジュールは作っていない。
+  - 鮮度の閾値は lease TTL の 2 倍(既定 4 分、コードの定数)。`stop.stage` は、取消し要求、エージェントの停止の報告、コンテナの終了の報告、Run の取消しから決める。
+  - 認可は §4 のとおり: エージェント 403(運用者のロールを併せ持っても)、運用者か作成者本人なら読める、それ以外は 404、認証なし 401。接続時と各回の読みの前に検査する。
+  - 未確認: oauth2-proxy と ingress を通した SSE の実動作(バッファリング、トークン更新、タイムアウト)、ブラウザの `EventSource` の Cookie 経由の認証。runbook §6.19 の未確認の節にまとめた。
+- **PR 3 で決まった未決の点**:
+  - **U-4(閲覧の権限)**: 新しい経路は作成者本人か運用者(`admin-panel:admin`)。既存の `/api/admin/runs` と `/api/admin/runs/{id}` は変えていない(他人の Run も返す)。既存の挙動を変える判断は別の PR で行う。
+  - **U-7(SSE)**: SSE を採用し、REST の差分でも読める。UI は REST のポーリングでも足りる。
+  - **U-8(API のパス)**: `/api/admin` のまま(#85 の決定まで)。
+  - **U-12(停止の確認待ち)**: 閾値 5 分は決定。判定と表示は PR 5 で入れる。要求の時刻は現在のスキーマに無いので、PR 5 で持つ。PR 3 では判定を返さない。
+  - **U-13(SSE の接続上限)**: 利用者あたり 5、プロセス全体 50(超えると 429)。プロセスごとなので、Pod 数で全体が増える。
+  - **SSE の認可の検査**: 同じトークンを再検証する。ロールの剥奪は、そのトークンが期限切れになるまで接続に反映されない(ADR §7 の「接続中に権限を失ったら切る」は、期限切れまでの遅れを含む)。
+- **未決のまま残る点**: U-3(停止の権限)、U-5(モデル名の表示)、U-6(実行中の費用)、U-9(段階の表示)、U-12(確認待ちの判定。閾値は決定済み)、U-14(heartbeat の PROGRESS の扱い)、U-16(文言)。
 - 本 ADR は、PR #252(このファイルの元のブランチ)とは別に、この PR で複製している。#252 をマージするときは、この「実装状況」の節の内容を保つこと。

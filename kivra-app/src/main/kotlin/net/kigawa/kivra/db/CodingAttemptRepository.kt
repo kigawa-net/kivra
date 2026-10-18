@@ -400,6 +400,14 @@ class CodingAttemptRepository(
 
     fun get(attemptId: String): CodingAttempt? = transaction(database) { getIn(this, attemptId) }
 
+    /** Every attempt of [runId], oldest first (attempt_no). Read-only; for the run execution view (ADR 0012 section 4). */
+    fun listOfRun(runId: String): List<CodingAttempt> = transaction(database) {
+        CodingAttemptsTable.selectAll()
+            .where { CodingAttemptsTable.runId eq runId }
+            .orderBy(CodingAttemptsTable.attemptNo to SortOrder.ASC)
+            .map { it.toAttempt() }
+    }
+
     /** Event sequence of one attempt, oldest first. */
     fun events(attemptId: String): List<CodingEvent> = transaction(database) {
         CodingEventsTable.selectAll()

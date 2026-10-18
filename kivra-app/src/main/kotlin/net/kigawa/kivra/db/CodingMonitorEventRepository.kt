@@ -140,6 +140,28 @@ class CodingMonitorEventRepository(
     }
 
     /**
+     * Every stored event of [attemptId], oldest first. At most the cap plus the TRUNCATED mark, so this is bounded. Read-only. Used by the
+     * run execution snapshot (ADR 0012 section 4), which needs the whole attempt for its counts.
+     */
+    fun all(attemptId: String): List<StoredMonitorEvent> = transaction(database) {
+        CodingMonitorEventsTable.selectAll()
+            .where { CodingMonitorEventsTable.attemptId eq attemptId }
+            .orderBy(CodingMonitorEventsTable.leaseGeneration to SortOrder.ASC, CodingMonitorEventsTable.seq to SortOrder.ASC)
+            .map { it.toStored() }
+    }
+
+    /** True when the row (attempt, generation, seq) is still stored. A stream cursor whose row is gone was purged (ADR 0012 section 4, resync). */
+    fun exists(attemptId: String, generation: Long, seq: Int): Boolean = transaction(database) {
+        CodingMonitorEventsTable.selectAll()
+            .where {
+                (CodingMonitorEventsTable.attemptId eq attemptId) and
+                    (CodingMonitorEventsTable.leaseGeneration eq generation) and
+                    (CodingMonitorEventsTable.seq eq seq)
+            }
+            .count() > 0
+    }
+
+    /**
      * Deletes the events of at most [maxAttempts] attempts that are no longer active and whose Run is terminal, and whose last change
      * ([CodingAttemptsTable] updated_at) is before [before]. Active attempts and non-terminal Runs keep their events. The attempt rows stay.
      * Returns the number of event rows deleted.

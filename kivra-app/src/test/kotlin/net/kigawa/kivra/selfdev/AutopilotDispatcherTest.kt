@@ -30,6 +30,7 @@ import net.kigawa.kivra.db.NewTask
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevGoal
 import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevPlanRepository
 import net.kigawa.kivra.db.SelfDevPlanTask
 import net.kigawa.kivra.db.SubmitResult
@@ -397,7 +398,9 @@ class AutopilotDispatcherTest {
         env.tick()
         assertEquals(1, env.control.read().consecutiveFailures)
         assertEquals(1, db.count("development_runs"))
-        assertEquals(GoalState.RUNNING, env.goal(goalId).state)
+        // Every task has ended and not all completed: the goal is finished (STOPPED), so the operator sees it as ended.
+        assertEquals(GoalState.STOPPED, env.goal(goalId).state)
+        assertEquals(AutopilotReason.TASKS_INCOMPLETE, env.goal(goalId).stateReason)
     }
 
     @Test
@@ -507,6 +510,125 @@ class AutopilotDispatcherTest {
     }
 
     @Test
+    fun `a goal paused just before its next task is submitted gets no Run, and the refusal is logged by code only`() = TestDb().use { db ->
+        val env = Env(db)
+        val (goalId, planId) = env.plannedGoal("pause-race", listOf(task("first"), task("second", dependsOn = listOf(1))), approve = listOf(1, 2))
+        env.tick()
+        db.setRunState(env.task(planId, 1).runId!!, DevelopmentRunState.COMPLETED)
+        val runsBefore = db.count("development_runs")
+        var fired = false
+        // The pause lands after the goal was read and before the submission: the budget check runs in that window.
+        val logs = captureLogs {
+            env.tickWithHook {
+                if (!fired) {
+                    fired = true
+                    db.setGoalState(goalId, "PAUSED", resume = "RUNNING")
+                }
+            }
+        }
+        assertTrue(fired, "the pause landed inside the tick")
+        assertEquals(runsBefore, db.count("development_runs"))
+        assertEquals(TaskState.QUEUED, env.task(planId, 2).state)
+        assertEquals(GoalState.PAUSED, env.goal(goalId).state)
+        assertTrue(logs.any { it.contains("code=GOAL_NOT_DISPATCHABLE") && it.contains(goalId) }, "the refusal is logged with its code")
+        logs.forEach { assertFalse(it.contains(MARKER), "a log line carries no goal, task, or path text: $it") }
+    }
+
+    @Test
+    fun `a goal stopped just before its next task is submitted gets no Run`() = TestDb().use { db ->
+        val env = Env(db)
+        val (goalId, planId) = env.plannedGoal("stop-race", listOf(task("first"), task("second", dependsOn = listOf(1))), approve = listOf(1, 2))
+        env.tick()
+        db.setRunState(env.task(planId, 1).runId!!, DevelopmentRunState.COMPLETED)
+        val runsBefore = db.count("development_runs")
+        var stop: Transition<SelfDevGoal>? = null
+        var fired = false
+        env.tickWithHook {
+            if (!fired) {
+                fired = true
+                stop = SelfDevOperatorRepository(db.database, env.clock).stopGoal(goalId, env.goal(goalId).version)
+            }
+        }
+        assertIs<Transition.Moved<SelfDevGoal>>(stop, "the stop landed inside the tick")
+        assertEquals(runsBefore, db.count("development_runs"))
+        assertEquals(GoalState.STOPPED, env.goal(goalId).state)
+        assertEquals(TaskState.SKIPPED, env.task(planId, 2).state)
+    }
+
+    @Test
+    fun `a stopped goal and a paused goal submit nothing`() = TestDb().use { db ->
+        val env = Env(db)
+        val operator = SelfDevOperatorRepository(db.database, env.clock)
+        val (stopped, _) = env.plannedGoal("stopped", listOf(task("a")), approve = listOf(1))
+        assertIs<Transition.Moved<SelfDevGoal>>(operator.stopGoal(stopped, env.goal(stopped).version))
+        val (paused, _) = env.plannedGoal("paused", listOf(task("b")), approve = listOf(1))
+        db.setGoalState(paused, "PAUSED", resume = "TASKS_QUEUED")
+        env.tick()
+        assertEquals(0, db.count("development_runs"))
+        assertEquals(GoalState.PAUSED, env.goal(paused).state)
+    }
+
+    @Test
+    fun `a task the operator approved runs as that operator, not as the goal's creator`() = TestDb().use { db ->
+        val env = Env(db)
+        val operator = SelfDevOperatorRepository(db.database, env.clock)
+        val (goalId, planId) = env.plannedGoal("owner-task", listOf(task("a")), approve = emptyList(), createdBy = "author", queue = false)
+        env.movedGoal(operator.approvePlan(goalId, env.goal(goalId).version, "plan-approver"))
+        env.movedTask(operator.approveTask(planId, 1, env.task(planId, 1).version, "task-approver"))
+        env.tick()
+        assertEquals(TaskState.SUBMITTED, env.task(planId, 1).state)
+        assertEquals("task-approver", db.runs.get(RunId(env.task(planId, 1).runId!!))!!.principal)
+    }
+
+    @Test
+    fun `an auto-approved task of an operator-approved Plan runs as the operator who approved the Plan`() = TestDb().use { db ->
+        val env = Env(db, cfg = config(approval = AutopilotApproval.AUTO))
+        val operator = SelfDevOperatorRepository(db.database, env.clock)
+        val (goalId, planId) = env.plannedGoal("owner-plan", listOf(task("a")), approve = emptyList(), createdBy = "author", queue = false)
+        env.movedGoal(operator.approvePlan(goalId, env.goal(goalId).version, "plan-approver"))
+        env.tick()
+        assertEquals(TaskState.SUBMITTED, env.task(planId, 1).state)
+        assertNull(env.task(planId, 1).approvedBy, "the task itself was not approved by an operator")
+        assertEquals("plan-approver", db.runs.get(RunId(env.task(planId, 1).runId!!))!!.principal)
+    }
+
+    @Test
+    fun `an auto-approved task of a goal nobody approved runs as the goal's creator`() = TestDb().use { db ->
+        val env = Env(db, cfg = config(approval = AutopilotApproval.AUTO))
+        val (_, planId) = env.plannedGoal("owner-auto", listOf(task("a")), approve = emptyList(), createdBy = "author")
+        env.tick()
+        assertEquals(TaskState.SUBMITTED, env.task(planId, 1).state)
+        assertNull(env.task(planId, 1).approvedBy)
+        assertEquals("author", db.runs.get(RunId(env.task(planId, 1).runId!!))!!.principal)
+    }
+
+    @Test
+    fun `a goal whose tasks all ended with a failure is STOPPED with TASKS_INCOMPLETE, and no further Run is made`() = TestDb().use { db ->
+        val env = Env(db)
+        val (goalId, planId) = env.plannedGoal("term-fail", listOf(task("a"), task("b", dependsOn = listOf(1))), approve = listOf(1, 2))
+        env.tick()
+        db.setRunState(env.task(planId, 1).runId!!, DevelopmentRunState.FAILED, "RUN_FAILED")
+        env.tick()
+        assertEquals(TaskState.FAILED, env.task(planId, 1).state)
+        assertEquals(TaskState.SKIPPED, env.task(planId, 2).state)
+        val goal = env.goal(goalId)
+        assertEquals(GoalState.STOPPED, goal.state)
+        assertEquals(AutopilotReason.TASKS_INCOMPLETE, goal.stateReason)
+        assertEquals(1, db.count("development_runs"))
+    }
+
+    @Test
+    fun `a goal whose tasks all completed is DONE`() = TestDb().use { db ->
+        val env = Env(db)
+        val (goalId, planId) = env.plannedGoal("term-done", listOf(task("a")), approve = listOf(1))
+        env.tick()
+        db.setRunState(env.task(planId, 1).runId!!, DevelopmentRunState.COMPLETED)
+        env.tick()
+        assertEquals(GoalState.DONE, env.goal(goalId).state)
+        assertEquals(AutopilotReason.ALL_TASKS_COMPLETED, env.goal(goalId).stateReason)
+    }
+
+    @Test
     fun `the logs carry ids and fixed codes only, never goal, task, or path text`() = TestDb().use { db ->
         val env = Env(db, cfg = config(maxRunsPerDay = 1))
         val logs = captureLogs {
@@ -542,6 +664,14 @@ class AutopilotDispatcherTest {
         db.insertRunRow("selfdev:done-${Ulid.generate()}", DevelopmentRunState.COMPLETED)
         db.insertRunRow("api:pr-${Ulid.generate()}", DevelopmentRunState.PULL_REQUEST)
         assertEquals(2L, db.runs.countSelfDevInState(DevelopmentRunState.PULL_REQUEST))
+    }
+
+    /** One dispatcher tick whose budget check runs [hook] first: the hook is the place where a stop or a pause lands in the window. */
+    private fun Env.tickWithHook(hook: () -> Unit) =
+        AutopilotDispatcher(db.database, db.runs, cfg, 10, { _ -> hook(); budgetOpen }, clock).tick()
+
+    private fun TestDb.setGoalState(goalId: String, state: String, resume: String? = null) = transaction(database) {
+        execUpdate("UPDATE selfdev_goals SET state = ?, resume_state = ?, version = version + 1 WHERE goal_id = ?", state, resume, goalId)
     }
 
     private fun task(

@@ -8,7 +8,8 @@
 
 ## 0. 現状(最初に読む)
 
-- 計画の自動作成と投入(オートパイロット)の設計は [ADR 0011](adr/0011-selfdev-autopilot.md)。未実装。運用手順は実装 PR で足す。
+- 計画の自動作成と投入(オートパイロット)は [ADR 0011](adr/0011-selfdev-autopilot.md)(Proposed)。基盤、Planner、Dispatcher、UI と HTTP(PR A〜D)は main に実装済みで、既定では無効。運用手順は §7。E2E は PR E で追加(テストは `AutopilotE2ETest` / `AutopilotE2EAbnormalTest`)。dev での有効化は未実施(§7.5)。
+- CLI 実行のイベント記録と Run ライブモニターの設計は [ADR 0012](adr/0012-run-events-and-live-monitor.md)。未実装(提案)。運用手順は実装 PR で足す。
 - 自己開発は既定で無効。`KIVRA_SELFDEV_ENABLED` が正確に `true` のときだけ有効になる。無効のときは、自己開発の他の環境変数を一切読まず、ワーカーも `/api/selfdev/*` も登録しない(`selfdev/SelfDevSettings.kt`、`Application.kt`)。
 - 有効化すると、`SelfDevWorker` が起動し、`POST /api/selfdev/tasks`、`GET /api/selfdev/runs`、`GET /api/selfdev/runs/{id}` が登録される(`routes/SelfDevRoutes.kt`)。
 - 本番で動かすには、ブランチ保護、GitHub 認証(App 推奨。PAT は代替)、Anthropic 認証(WIF 推奨。静的キーは代替)、モデル registry、為替の設定が必要。§1 を参照する。
@@ -232,13 +233,17 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 
 ### 4.7 Web 画面(`/ui`)で Run を見る
 
-`KIVRA_AUTH_MODE` が設定されているときに `https://<kivra-host>/ui` で開ける。認証は API と同じで、画面自体には秘密を含まない。この画面からできるのは、Run の一覧と詳細の確認、Task の投入(種別の選択を含む)、自己開発の Run の解放である。予算の操作は、画面からはまだできない(API を使う。PR5 は別 PR)。
+`KIVRA_AUTH_MODE` が設定されているときに `https://<kivra-host>/ui` で開ける。認証は API と同じで、画面自体には秘密を含まない。この画面からできるのは、Run の一覧と詳細の確認、Task の投入(種別の選択を含む)、自己開発の Run の解放、予算の確認と未確定の予約の解除(運用者向け。下の「予算」)である。
 
 - **投入(種別の選択)**: 投入フォームの「種別」で、シミュレーション(`POST /api/tasks`)か自己開発(`POST /api/selfdev/tasks`、GitHub に PR を作る)を選ぶ。自己開発は、`GET /api/selfdev/status` の `enabled` が `true` のときだけ選べる。無効のとき、または状態を取れないときは選べない。
   - 冪等キーは画面が作る。種別を切り替えたとき、またはタイトルを変えて送るときは、キーを作り直す。送信が成功するまでは、同じ内容の再送は同じキーになる(ネットワーク失敗のあとに押し直しても二重にはならない)。
   - 送信中はボタンを無効化する。結果: 202「受け付けました」(Run ID つき)、200「既に受け付け済み」、409「同じキーで別の内容」(キーを作り直す。内容を確かめてから投入し直す)、429「自己開発の Run が上限に達している」、400・401・415・その他は固定の文言。応答の本文は画面に出さない。
 - **解放(詳細の「運用者の解放…」「解放（束縛なし）…」)**: 対象は、自己開発の Run で状態が `UNKNOWN` のもの(§4.1)、または `PULL_REQUEST` で束縛が無いもの(§4.1b)。ボタンは理由(1〜500 文字、必須、空白だけは不可)を入力する確認の画面(ダイアログ)を開く。理由を入れて「解放する」を押すと、`/release` か `/release-unbound-pr` を呼ぶ。成功すると詳細を読み直す。PR は閉じず、マージもしない(GitHub には書き込まない)。
   - 応答: 200「解放しました（CANCELLED）」、409「解放できる状態ではない（状態が既に変わっている）」、404「見つからない」、401 はセッション切れの案内、400・415・その他は固定の文言。
+- **予算(運用者向け、「予算（運用者向け）」の欄)**: `GET /api/admin/budget/status` が 200 を返すユーザーにだけ出る(運用者でない、または予算の API が無効なら出ない。401・403・404 では、セッション切れにもしない)。内容と見方は §6.13 の「運用者の確認手順(画面)」を参照する。
+  - 月の使用額(確定 + 予約中)の棒と、上限、残り。上限を超えたときは文字でも出す。経路別の内訳(API 経路 / CLI 経路)。
+  - 為替: `GET /api/admin/budget/fx`。残り 2 日以下は黄色の注意、失効は赤のエラーで、どちらも文字で「失効」「残り N 日」と書く。
+  - 未確定の予約の一覧(UNPRICED と期限切れの LAPSED)。予約キーは短く表示する(CLI は attempt ID と世代)。「解除…」は二段階: 入力の画面、次に確認の画面、そのあと「解除する」。実額は任意(空欄は実額不明)。`POST /api/admin/budget/acknowledge` と同じ。拒否の理由は固定の文言で出す(実額が計上額の 100 倍を超える、単位が合わない、など)。
 - **開発目標(Goal)の欄**: オートパイロット(ADR 0011)が有効のときだけ出る。Goal の入力、計画の承認、タスクの承認と見送り、中止、再計画、全体の一時停止とブレーカーの再開。手順は §7.4。
 - **上部の注意書き**: `GET /api/selfdev/status` の `enabled` で出し分ける。有効なら「自己開発の Run は GitHub に PR を作成します(実際に実行されます)」、無効なら「自己開発は無効です」。状態を取れなければ「設定を取得できていません」と出す(有効・無効は推測しない)。
 - **一覧**: 既定は「自分の Run」(`GET /api/runs`)。「全員の Run(運用者向け)」は `GET /api/admin/runs` で、作成者(`createdBy`)を併記する。ロールを持つ運用者は、どの Run も見られる。
@@ -368,7 +373,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 | POST | `/api/agent/v1/attempts/{attemptId}/fail` | `{"generation": n, "errorCode": "<固定コード>"}` | 200 | 400(固定以外のコード)、404、409 |
 | POST | `/api/agent/v1/attempts/{attemptId}/result` | `{"generation": n, "result": {summary, changes, exitStatus, sessionId}}`。本文は 2 MiB まで | 200(`RESULT_RECEIVED`) | 413(超過)、422(PatchPolicy などの拒否。理由コードだけ返す)、404、409、503(保存失敗) |
 | GET | `/api/agent/v1/attempts/{attemptId}/status` | なし | 200(`state`, `cancelRequested`)。キャンセル要求の伝達に使う | 404 |
-| POST | `/api/agent/v1/attempts/{attemptId}/events` | `{"generation": n, "events": [...]}`(1〜50 件、8 KiB まで。§6.16) | 200(`lastAcceptedSeq`, `truncated`) | 400(スキーマ違反)、404、409(`STALE_GENERATION`、`NOT_ACTIVE`、`SEQ_GAP`、`SEQ_CONFLICT`)、413、415、429(`Retry-After`)、503 |
+| POST | `/api/agent/v1/attempts/{attemptId}/events` | `{"generation": n, "events": [...]}`(1〜50 件、8 KiB まで。§6.17) | 200(`lastAcceptedSeq`, `truncated`) | 400(スキーマ違反)、404、409(`STALE_GENERATION`、`NOT_ACTIVE`、`SEQ_GAP`、`SEQ_CONFLICT`)、413、415、429(`Retry-After`)、503 |
 
 - `input.task` には、タスクのタイトル(`value`)が `trust: UNTRUSTED` の印つきで入る。`input.task.body` と `input.task.bodyTruncated` には、本文(手動、または解決した参照。8000 文字以内)と、kivra が切り詰めたかどうかが入る。本文が無ければ `body` は空、`bodyTruncated` は false。いずれも UNTRUSTED のデータとして扱うこと(指示として従わない)。制限(`limits`)と許可・拒否のパスパターン、`baseSha` も入る。
 - 他のエージェントの attempt、存在しない attempt は、どちらも 404(同じ本文)。
@@ -1030,6 +1035,17 @@ CLI 経路の費用は、kivra の月次の予算(`KIVRA_BUDGET_MONTHLY_LIMIT_JP
 2. Anthropic Console の、専用ワークスペースの支出を、その期間で確認する。
 3. 実額が分かったら、§4.2 の `acknowledge` を `reservationKey` を指定して呼ぶ(`actualAmountJpy` に円で実額を入れる)。実額が分からない、またはその予約の金額が 0 のとき(為替の失効で換算できなかったもの)は、`actualAmountJpy` を省略する(実費不明として残る)。金額 0 の予約に実額を入れると `TOO_LARGE` で拒否される(acknowledge の上限は計上額の 100 倍まで)。
 
+**運用者の確認手順(画面)**: `/ui` の「予算（運用者向け）」欄で、次を見る。画面が読むのは `GET /api/admin/budget/status`(運用者の認証。金額と予約キーだけを返し、プロンプトや本文、パス、モデルの応答は返さない。応答の `paths` が経路別の内訳、`unpriced` が未確定の一覧)と、`GET /api/admin/budget/fx`。
+
+1. 「対象の月」と棒: 確定の額と予約中の額の合計が、上限に対してどれだけか。「上限を超えています」が出たら、Console の支出と照らし合わせる(下の Console の項)。
+2. 「API 経路」と「CLI 経路」: CLI は `coding:` の予約の合計。どちらが増えたかで、原因が API か CLI かを分ける。
+3. 為替: 「残り N 日」が 2 日以下なら黄色、「失効」なら赤。失効中は CLI の claim が止まり、報告は金額 0 の未確定になる(§4.8 で更新する)。
+4. 未確定の予約: 件数と、一覧の各行(CLI の attempt と世代、金額、理由)。理由は「費用が確定しない」(予約額のまま計上)か「期限切れ」(保守的に計上)。
+5. 解除: 実額が分かったら「解除…」を押し、入力(実額は任意、根拠と理由は必須)、確認、「解除する」の順に進む。実額が 0 なら「請求が無いことを確認した」の意味になる。実額を入れると、計上額が実額に変わり、未確定の件数が 1 減る。解除は監査ログ(`budget_acknowledgements`)に残り、取り消せない。
+6. 一覧が 100 件を超えるときは、一覧の下に注記が出る。残りは上の SQL で確認する。
+
+画面は読み取りと、上の解除だけを行う。Console の支出の確認、為替の更新、attempt の調査は、この画面の外で行う。
+
 **Console 側の上限と kivra の上限の関係**: 共有ワークスペースの支出上限(Console)は、kivra の月次の上限より大きくする。kivra の上限は計上の範囲で止める。Console は、kivra の計上が漏れた場合の最終防壁になる。
 
 **既知の制限(この PR)**
@@ -1037,7 +1053,7 @@ CLI 経路の費用は、kivra の月次の予算(`KIVRA_BUDGET_MONTHLY_LIMIT_JP
 - 入場の確認と claim は別の操作である。同時に複数のエージェントが claim すると、予約額の数件分だけ超えうる(1 台の PC を前提とする)。
 - ORPHANED / EXPIRED の遷移は済んでいるが、その計上が失敗した場合は、警告ログ(`coding reserve not booked`)が出るだけで、再試行しない。周期ワーカー(§6.15)は遷移を一度しか行わないので、この欠損は再試行されない。このログが出たら、該当の attempt を §4.2 の手順で確認する。
 - 為替が失効していた間に報告された費用は金額 0 で計上される。この予約には実額を入れられない(上記の確認手順 3)。
-- 運用画面で API 経路と CLI 経路を区別して表示する作業(UI PR5)は、この PR に含まれない。
+- 運用画面で API 経路と CLI 経路を区別して表示する作業(UI PR5)は、`/ui` の「予算（運用者向け）」欄に入った(§4.7)。
 
 
 ### 6.14 client secret の配置とローテーション(Issue #232)
@@ -1088,9 +1104,10 @@ Keycloak の client の Regenerate は旧 secret を**即座に失効**させる
 
 ## 7. 自己開発オートパイロット(ADR 0011、Issue #233)
 
-状態: **基盤(PR A)、Planner(PR B)、UI と HTTP(PR D)を実装済み**。Dispatcher(PR C)は後続の PR で入る。
+状態: **基盤(PR A、#243)、Planner(PR B、#244)、Dispatcher(PR C、#245)、UI と HTTP(PR D、#250)、E2E と有効化の手順(PR E)を実装済み**。段階 2 の差分の再検査(ADR 0011 §6.2)は未実装。
 `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` のときだけ動く。既定(無効)では何も起きない。
-Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_PROPOSED` に進める。承認された Plan のタスクは、PR C の Dispatcher が投入するまで投入されない。
+Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_PROPOSED` に進める。承認された Plan のタスクは、Dispatcher が §5 のガードを確かめたうえで投入する。
+dev での有効化の手順は §7.5。
 運用手順は §7.4(Goal の入力、承認、中止、再計画、一時停止、ブレーカーの再開)。
 
 ### 7.1 設定項目
@@ -1098,7 +1115,7 @@ Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_
 | 名前 | 既定 | 内容 |
 |---|---|---|
 | `KIVRA_SELFDEV_AUTOPILOT_ENABLED` | `false` | `true` と `false` 以外は起動に失敗する。`true` は、自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)で、`KIVRA_SELFDEV_RUNTIME=cli` のときだけ許す |
-| `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` | `required` | `required` は全タスクを運用者が承認する。`auto` は段階 2 の規則に当たるタスクを承認なしで投入する(後続の PR)。値は `required` / `auto` のどちらか。**denylist のパスのタスクは、`auto` でも必ず承認が要る**(ADR 0011 §4) |
+| `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` | `required` | `required` は全タスクを運用者が承認する。`auto` は段階 2 の規則に当たるタスクを承認なしで投入する(実際の差分の再検査は未実装。ADR 0011 §6.2)。値は `required` / `auto` のどちらか。**denylist のパスのタスクは、`auto` でも必ず承認が要る**(ADR 0011 §4) |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_PENDING_PRS` | `3` | マージ待ちの自己開発 PR の上限。1〜20 |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES` | `3` | 連続失敗でサーキットブレーカーを開く数。1〜20(この範囲は PR A で決めた値。ADR に範囲の記載は無い) |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY` | `5` | 1 日(UTC)に投入する Run の数。1〜100(この範囲も PR A で決めた値) |
@@ -1145,6 +1162,11 @@ Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_
 **中止**: 詳細の「中止…」で理由(1〜500 文字、必須)を入れる(`POST .../stop`、`{"version": n, "reason": "..."}`)。
 未投入のタスクは `見送り` になり、Goal は `中止` で終わる。**投入済みの Run と、作成済みの PR には触らない**(PR は閉じず、マージもしない。PR の扱いは人が決める)。理由は、今は保存もログにも出さない(ADR 0011 U-18)。
 
+**タスクの失敗で止まった Goal**: 投入したタスクが失敗(`FAILED`)し、残りが見送り(`SKIPPED`)になって、全タスクが終わると、Dispatcher が Goal を `中止` にする(理由は「タスクが完了せずに終わった」。ADR 0011 §2.8)。
+手で止めたのではないので、「中止」の表示を見たら、まず詳細のタスクの状態と、§4.5 の失敗の原因を確かめる。全タスクが `COMPLETED` で終わったときは `完了` になる。
+次のタスクは投入されない。やり直すときは、新しい Goal を出す(`FAILED` のタスクを戻す HTTP の操作は無い)。
+投入の主体は、タスクを承認した運用者。承認が無い自動承認のタスクは、Goal を作った人の名で投入される(`approved_by` が無いとき)。
+
 **再計画**: Goal が `停止中` で、理由が計画段階(`PLAN_INVALID` / `PLAN_BUDGET_HOLD` / `PLAN_CALL_FAILED`)のときだけ、「再計画する」が出る(`POST .../replan`)。Planner が新しい計画を作る。計画の回数の上限は 3 回。
 ディスパッチ段階の停止(予算、日次上限、ブレーカーなど)は、この操作では再開しない。
 
@@ -1158,6 +1180,79 @@ Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_
 
 **やってはいけないこと**: 作成済みの PR を、この画面の操作で閉じる、またはマージすることを期待しない。マージは人が行う(ADR 0008、ADR 0009)。
 
+### 7.5 dev でオートパイロットを有効化する手順(PR E)
+
+対象は dev だけである。段階 1(`APPROVAL=required`、全タスクを運用者が承認)で始める。段階 2 と 3 は、ADR 0011 §6.3 の昇格条件を満たしてから、別の判断で行う。
+**k8s の変更は、この節の手順には含まない。** env の変更は別の PR で行い、ArgoCD で反映する。ここに書く値は秘密ではない。API キー、鍵の内容、トークンは書かず、扱わない。
+
+#### 7.5.1 前提(すべて満たす)
+
+| 項目 | 必要な値 | 欠けたときの結果 |
+|---|---|---|
+| 自己開発 | `KIVRA_SELFDEV_ENABLED=true`、`KIVRA_SELFDEV_RUNTIME=cli`、`KIVRA_AGENT_API_ENABLED=true`(§1.2.1、§6.9) | オートパイロットの起動が失敗する |
+| 認証 | `KIVRA_AUTH_MODE=oidc-jwt`、運用者のロール `admin-panel:admin`(§1.1) | 起動が失敗する |
+| エージェントの拒否 | `KIVRA_AGENT_REQUIRED_ROLE=<client>:<role>`(例: `kivra-agent:agent`)。エージェントのクライアントは、運用者のロールを持たせない | 起動が失敗する。ロールが無いと、エージェントのトークンが運用者の API に入れてしまう |
+| モデル | `KIVRA_SELFDEV_MODEL_REGISTRY_PATH` の registry に `claude-haiku-5-5` があり、`ACTIVE` であること。Anthropic の認証は §1.1 の設定を使う | registry の読み込みか、モデルの確認で起動が失敗する |
+| GitHub | §1.1 の GitHub 認証と `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` | 起動が失敗する(既存の自己開発と同じ) |
+| 為替 | §1.1 の `KIVRA_FX_USD_JPY`、`KIVRA_FX_AS_OF` | 起動が失敗する(既存の自己開発と同じ) |
+| 費用の計上 | CLI 経路の費用が予算 ledger に計上されること(#230、§6.13)。**起動時の検査は無い**(ADR 0011 §5.3 の検査は未実装)。有効化の前に、§6.13 の方法で計上を確かめる | 計上されない費用の上で自動投入が動く |
+
+#### 7.5.2 k8s の env(dev、別 PR で設定する値)
+
+| 名前 | 値 | 備考 |
+|---|---|---|
+| `KIVRA_SELFDEV_AUTOPILOT_ENABLED` | `true` | 有効化のスイッチ。これだけが既定(無効)を変える |
+| `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` | `required` | 段階 1。全タスクに運用者の承認が要る |
+| `KIVRA_SELFDEV_AUTOPILOT_MAX_PENDING_PRS` | `3` | 既定。マージ待ちの PR の上限(ただし下の注を読む) |
+| `KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES` | `3` | 既定。連続失敗でブレーカーが開く |
+| `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY` | `5` | 既定。UTC の日付 |
+| `KIVRA_SELFDEV_AUTOPILOT_BUDGET_SHARE_PERCENT` | `50` | 既定。月次予算のうち、オートパイロットの割合 |
+| `KIVRA_SELFDEV_AUTOPILOT_PLAN_INTERVAL_SECONDS` | `30` | 既定。計画と投入の周期 |
+| `KIVRA_SELFDEV_MAX_ACTIVE_RUNS` | `1` | 既定。同時に進行する自己開発 Run の上限 |
+
+**注**: 開いている PR の Run も「進行中」として同時 Run の上限に数えられる(`activeSelfDevRunIds` は PULL_REQUEST を含む)。そのため既定の `MAX_ACTIVE_RUNS=1` では、マージ待ちの PR は常に 1 件までで、`MAX_PENDING_PRS=3` の判定には届かない。PR の上限を効かせるには、同時 Run の上限を上げる必要がある(ADR 0011 §5.2 の「上げない」との関係は未決)。
+
+#### 7.5.3 有効化の順序
+
+1. §7.5.1 の前提を確かめる。特に、エージェントのロールと、モデルの registry。
+2. §7.5.2 の env を入れた k8s の PR を出し、レビューしてマージする(ArgoCD が反映する)。
+3. 反映後、`GET /api/selfdev/autopilot` が 200 で `enabled: true` を返すことを確かめる(無効なら 503)。画面の「開発目標（Goal）」の欄が出ることでも確かめられる。
+4. 下の「有効化後の最初の確認」を、Goal 1 件で行う。
+
+#### 7.5.4 有効化後の最初の確認(画面)
+
+1. `/ui` を運用者で開く。「開発目標（Goal）」の欄が出ていること。
+2. 目的(1 行)を入れる。小さな docs の変更で足りる(例: `docs/ の用語の表記を揃える`)。背景は任意。「Goal を送る」。Goal は「計画待ち」になる。
+3. 30 秒の周期の後、Goal が「計画の承認待ち」になる。Plan の要約と各タスク(対象パス、サイズ、依存、承認が要るもの)を読む。`docs/`、`kivra-*/src/test/`、`README.md` 以外のパスがあれば、承認しない。
+4. 「この Plan を承認」を押し、次に、承認するタスクを 1 件ずつ承認する(段階 1 は全件)。
+5. 次の周期で、最初のタスクが投入される(Run ができる)。同時に進むのは 1 件だけ。Run は既存の経路で PR まで進む。
+6. PR ができたら、人がレビューしてマージする。kivra はマージしない。マージされると、Run は COMPLETED になり、次のタスクが投入される。
+
+**合格の基準**: 最初のタスクの PR ができ、人がマージした後、タスクが COMPLETED になり、次のタスクが 1 件だけ投入される。Goal は、全タスクが COMPLETED になると DONE になる。
+Run が FAILED、UNKNOWN、POLICY_REJECTED になったら、§4.1、§4.3、§4.5 で原因を見る。自動では再投入されない(§5.4)。
+
+#### 7.5.5 止め方
+
+| 止め方 | 操作 | 止まるもの | 止まらないもの |
+|---|---|---|---|
+| 全体の一時停止 | 画面の「自律運転を一時停止」(`POST /api/selfdev/autopilot/pause`) | 新しい計画と、新しい投入 | 進行中の Run(PR まで進む) |
+| 有効化の停止 | k8s の `KIVRA_SELFDEV_AUTOPILOT_ENABLED` を `false` にする、または外す(別 PR) | 計画と投入。`/api/selfdev/goals*` は 503 になる | 進行中の Run。自己開発が有効なら、既存のワーカーが進める |
+| 自己開発の停止 | `KIVRA_SELFDEV_ENABLED=false`(§4.4) | Run の進行と、すべての投入 | 作成済みの PR(kivra は閉じない) |
+
+#### 7.5.6 ロールバック
+
+- 設定を戻す(`KIVRA_SELFDEV_AUTOPILOT_ENABLED=false`)。コードの変更は要らない。
+- DB の行は消さない。V18 と V19 は expand のみで、既存の表は変わらない。Goal の本文は DB に残る(U-9 は未決で、削除の手段は無い)。消す必要がある場合は、別の判断として行う。
+- 残った Goal は、状態のまま残る。中止が必要なら、運用者が画面の「中止」で `STOPPED` にする(未投入のタスクは `SKIPPED`)。
+- 投入済みの PR は閉じない、マージしない(kivra は PR に触れない)。
+
+#### 7.5.7 有効化の前に知っておく制約
+
+- 起動時に、CLI 経路の費用の計上を検査しない(ADR 0011 §5.3)。
+- 既定の同時 Run 上限(1)では、マージ待ちの PR の上限(3)は効かない(§7.5.2 の注)。
+- 失敗したタスクは自動では再投入されず、Goal は `RUNNING` のまま残る(ADR に、失敗による Goal の終端は無い)。残りは運用者が Goal を中止して終える。
+- **既知の不具合**: サーキットブレーカーが開いた後、運用者が再開(`POST /api/selfdev/autopilot/reset-breaker`)しても、そのとき `BLOCKED`(`CIRCUIT_OPEN`)になっていた Goal は投入されない。回避は、その Goal を中止して、新しい Goal を入れること。修正は別の PR で行う(テストは `AutopilotE2EAbnormalTest` の (b))。
+
 ### 7.3 状態遷移
 
 Goal、Plan、タスクの状態と遷移表は、ADR 0011 の §2.5 が正本である。コードの表は `kivra-core/src/main/kotlin/net/kigawa/kivra/core/autopilot/AutopilotStates.kt` にあり、
@@ -1168,6 +1263,7 @@ ADR から変えた点(PR A での判断、ADR §2.8 に記録):
 - 再計画は `PLAN_PROPOSED → GOAL_SUBMITTED` である(ADR の `PLANNING` ではない)。`PLANNING` は claim されている間だけの状態にするため。
 - 一時停止からの再開先は、一時停止の直前の状態を `selfdev_goals.resume_state` に保存して決める。
 - 計画段階の `BLOCKED` の理由は `PLAN_INVALID` / `PLAN_BUDGET_HOLD` である。ディスパッチ段階の `BUDGET_HOLD` とは分ける。計画段階で止まった Goal は、今の表では `STOPPED` 以外へ進めない(未決の点 U-16)。
+- 全タスクが終わって全部は完了しなかった Goal は `STOPPED`(理由 `TASKS_INCOMPLETE`)になる(PR E。ADR §2.8b)。`STOPPED` / `DONE` の終端からは動かない。投入の直前に、Goal が `TASKS_QUEUED` / `RUNNING` でなければ投入しない(`GOAL_NOT_DISPATCHABLE`)。
 
 ### 6.15 周期ワーカーと結果の保持(Issue #231、ADR 0010 追補 6)
 
@@ -1200,7 +1296,7 @@ SELECT COUNT(*) AS rows_kept, MIN(created_at) AS oldest
 
 `oldest` が保持期間より新しいこと。保持期間を過ぎた行が、DEVELOPING か UNKNOWN の Run の attempt に残っていてよい。
 
-### 6.16 実行の監視イベント(ADR 0012 PR 1、Issue #223)
+### 6.17 実行の監視イベント(ADR 0012 PR 1、Issue #223)
 
 エージェントが、CLI の実行中の進み(段階、ツールの呼び出し回数、ターン数、費用など)を固定のコードと数値で送る経路。kivra は受けて `coding_monitor_events`(V20)に保存する。保存するのは固定の値だけで、プロンプト、モデルの出力、標準出力、パス、ツールの入力は一つも入らない。エージェント側の送信は PR 2 で入る。この PR では kivra 側だけが入る。
 

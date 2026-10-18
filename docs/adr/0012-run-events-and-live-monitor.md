@@ -1,6 +1,6 @@
 # ADR 0012: Run の実行イベントを記録し、運用者が読み取り専用で追える Run ライブモニターを作る(停止は既存の取消し要求を使う)
 
-- ステータス: 提案(Proposed)。PR 1(§8)の実装済み。残りの PR は承認の後に進める
+- ステータス: 提案(Proposed)。ユーザーの承認待ち。承認まで実装は始めない
 - 日付: 2026-10-18
 - 関連: Issue #223(Self-dev Observability: Run Journal)、#224(Run ライブモニター UI)、#220(ClaudeCodeCliRuntime)、#76 / #79 / #85(Workspace UI と BFF)、#225 / #226(Self-healing)、#231(残件。エラーコード)、#157、#174、#181。ADR 0001(Run の正本)、ADR 0009(運用者の操作)、ADR 0010(CLI 経路の実行基盤)、ADR 0011(監査とログの衛生)。設計 `docs/design/15-coding-attempts.md`(`coding_attempts` / `coding_events`)
 
@@ -236,7 +236,7 @@ PR の分割:
   - V20 `coding_monitor_events`(expand のみ)、`CodingMonitorEventRepository`(追記、読み取り、保持の削除)。
   - `POST /api/agent/v1/attempts/{attemptId}/events`(`AgentIdentity`、既存の agent API と同じ認可と CSRF/Origin の扱い)。スキーマは `MonitorEventSchema` で厳格に検査する。
   - 保持期間の設定 `KIVRA_CODING_MONITOR_RETENTION_DAYS`(既定 30、1〜365)。`CodingReconcileWorker` の周期で掃除する。
-  - 運用の手順と上限は `docs/runbook-selfdev.md` §6.16。
+  - 運用の手順と上限は `docs/runbook-selfdev.md` §6.17。
   - agent 側(抽出、送信、DROPPED の計上)は PR 2。読み取りの API は PR 3、画面は PR 4、停止は PR 5。
 - **PR 1 で決まった未決の点**(暫定の既定値を採用し、実装で確定した):
   - **U-1(保存先)**: 新しい表 V20 を採用。`coding_events` は変えていない。

@@ -1,6 +1,6 @@
 # ADR 0011: 自己開発オートパイロットは、運用者の Goal から Plan を作り、承認と予算の範囲で Run に投入する
 
-- ステータス: 提案(Proposed)。ユーザーの承認待ち。承認まで実装は始めない
+- ステータス: 提案(Proposed)。PR A〜D(基盤、Planner、Dispatcher、UI と HTTP)は main に実装済みだが、段階 1 の dev での有効化と E2E が未実施のため、Proposed のまま(「実装状況」を参照)
 - 日付: 2026-10-18
 - 関連: Issue #233(本 ADR の設計案の正本)、#229(依頼文の本文 body)、#230(CLI 経路の費用の予算 ledger 計上)、#231(ローカルエージェントの結線の残件。reconcile の配線)、#222(E2E fixture)、#187(ローカルエージェント)、#56(Self-Development Integration Runner)、#112(Task API)。ADR 0001(Run の正本)、ADR 0003(予算と UNKNOWN_COST)、ADR 0004(予算の正本は BudgetPort)、ADR 0005(結果の分類と UNKNOWN)、ADR 0008(PR 作成までの自己開発ループ、マージは人間)、ADR 0009(運用者による UNKNOWN と PULL_REQUEST の解放)、ADR 0010(CLI 経路の実行基盤)
 
@@ -138,7 +138,7 @@ Goal(`selfdev_goals.state`):
 | `BLOCKED` | ガードで止まっている(`state_reason` に理由。§5.2) |
 | `PAUSED` | 運用者が Goal を一時停止した |
 | `DONE` | 全タスクが `COMPLETED`(PR がマージされた)。終端 |
-| `STOPPED` | 運用者が中止した。終端 |
+| `STOPPED` | 運用者が中止した。または、全タスクが終わったが全部は `COMPLETED` でなかった(§2.8b)。終端 |
 
 遷移表(Goal):
 
@@ -158,6 +158,7 @@ Goal(`selfdev_goals.state`):
 | `RUNNING` → `DONE` | 全タスクが `COMPLETED` | — | `ALL_TASKS_COMPLETED` |
 | `TASKS_QUEUED` / `RUNNING` / `BLOCKED` ⇄ `PAUSED` | 運用者の一時停止と再開 | 再開は前の状態に戻す | `OPERATOR_PAUSED` / `OPERATOR_RESUMED` |
 | 有効な状態 → `STOPPED` | 運用者の中止 | 理由 1〜500 文字(監査のみ) | `OPERATOR_STOPPED` |
+| `RUNNING` / `TASKS_QUEUED` / `BLOCKED` → `STOPPED` | 全タスクが終端(`COMPLETED` / `FAILED` / `SKIPPED`)で、全部は `COMPLETED` でない(Dispatcher。§2.8b) | — | `TASKS_INCOMPLETE` |
 
 `DONE` と `STOPPED` は終端である。`PLANNING` の claim が切れたときの `GOAL_SUBMITTED` への戻しは、revision を増やさない。
 
@@ -210,6 +211,17 @@ PR A(V18、リポジトリ層、状態機械)で、本節の判断をした。�
 - **control 行は migration で 1 行入れる**: 行の無い状態を作らないため。`control_id = 1` の CHECK で 2 行目を拒否する。
 - **日次カウンタは UTC の日付**: §U-3 の暫定どおり。`runs_today` と `day_utc` は、1 つの UPDATE の中で日付の変わり目を判定する。
 - **連続失敗の計数は全体で 1 本**: §U-5 の暫定どおり。`breaker_open` は、計数が上限に達した UPDATE の中で立つ。成功は計数を 0 にするが、開いたブレーカーは閉じない(運用者の再開だけが閉じる、§5.4)。
+
+#### 2.8b 実装時(PR E: Dispatcher の追加検査)の判断
+
+PR E で、§2.9 の PR C への申し送り(1)〜(3)を実装した。V19 の後の追加で、マイグレーションは足さない。
+
+- **投入の直前の Goal の検査**: `QUEUED → SUBMITTING` の CAS と同じトランザクションで、Goal の行をロック(`SELECT ... FOR UPDATE`。中止と一時停止も同じ行を更新する)して読み直す。Goal が `TASKS_QUEUED` / `RUNNING` でなければ投入しない(`GOAL_NOT_DISPATCHABLE`、ログには ID と理由コードだけ)。`SUBMITTING` のまま残ったタスクを再開するときも、同じ検査を行う(ロックは短い。その後に Run を作るまでの間は、§5.4 の「投入中のものには触れない」と同じ扱い)。
+- **中止と投入の競合**: 中止は、未投入のタスク(`QUEUED`)の版を進めるので、Dispatcher の CAS が失敗する。Goal の検査は、一時停止のように、タスクの版を進めない操作への防御である。
+- **投入の主体**: §2.6 の順序(タスク、Goal の承認者、Goal の作成者)。段階 2 の自動承認のタスクは、運用者が計画を承認していればその承認者、していなければ Goal の作成者の名で投入される。
+- **全タスクが終端になった Goal**: `RUNNING` / `TASKS_QUEUED` / `BLOCKED` から、全タスクが `COMPLETED` / `FAILED` / `SKIPPED` になったとき、全部が `COMPLETED` なら `DONE`(`RUNNING` のみ、従来どおり)、そうでなければ `STOPPED` に `TASKS_INCOMPLETE` の理由で進める。`STOPPED` の辺の理由に `TASKS_INCOMPLETE` を足した(表と網羅テストを更新)。`FAILED` と `CANCELLED` は、§2.8 のとおり運用者が再投入できる状態だが、Goal を終わらせる判定では終端として数える(再投入の HTTP 操作は無く、Goal が `STOPPED` になった後に自動で投入されることは無い)。
+- **終端化のしかた**: `STOPPED` を「中止」として使うのは、既存の状態の中で表すため(マイグレーションは足さない。`state_reason` は `VARCHAR(64)` で、新しい理由を足すのは Kotlin の列挙だけ)。
+- **残る点(未決)**: 中止された Goal の `SUBMITTING` のタスクは、そのまま残る(§5.4)。運用者が見て判断する。
 
 #### 2.9 実装時(PR D: UI と HTTP)の判断
 
@@ -265,6 +277,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 - 投入の順序: `QUEUED` → `SUBMITTING`(CAS。`version` で取る)→ `submitTask`(`idempotencyKey = ap:{plan_id}:{ordinal}`、`selfDev = true`、主体は承認者)→ `SUBMITTED`(`run_id` を書く)。
 - `submitTask` が `ActiveSelfDevLimitException` を投げたら、タスクは `QUEUED` に戻す。失敗としては数えない(サーキットブレーカーに入れない)。
 - 同時に投入するのは、1 Goal につき 1 件だけ(段階 1 と 2)。段階 3 でも、同じ Goal のタスクは直列にする。
+- 投入の主体(Run の owner、PR E で確定): タスクの `approved_by`、無ければ Goal の `approved_by`(計画の承認者)、どちらも無ければ Goal の作成者(`created_by`)。`autopilot` という主体は作らない(§2.6)。自動承認である事実は、`AUTO_APPROVED` の状態遷移で表す。
 
 #### 5.2 ガード(投入の前に毎回確認する)
 
@@ -278,6 +291,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 | 月次の予算 | §5.3 | 次の月の期間 | `BUDGET_HOLD`(自動で解消) |
 | サーキットブレーカー | 全体で、**連続 3 件**の失敗(`FAILED`、Run の `UNKNOWN`、`PR_ABANDONED`)。成功(`COMPLETED`)で 0 に戻る | 運用者の再開(計数を 0 に戻す) | `CIRCUIT_OPEN`(手動) |
 | 範囲外の変更 | 段階 2 の自動の対象が、実際の差分で範囲を超えた(§6.2) | 運用者が確認して再開 | `AUTO_SCOPE_EXCEEDED`(手動) |
+| 投入の前の Goal の状態 | Goal が `TASKS_QUEUED` / `RUNNING` でない(`STOPPED`、`PAUSED` など)。投入の直前に Goal の行をロックして読み直す(§2.8b、PR E) | 状態は変えず、投入しない | `GOAL_NOT_DISPATCHABLE`(ログのみ) |
 | 承認 | `requires_approval` かつ未承認 | 運用者の承認 | 状態は `PENDING_APPROVAL` のまま |
 
 「状態は変えず、待つ」の欄は、Goal を `BLOCKED` にしない。一時的な混雑で状態が揺れないようにするためである。
@@ -371,6 +385,28 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 
 有効化は、段階 1 を既定 off のまま、運用者が設定で有効にする。段階 2 と 3 は、昇格条件(§6.3)を満たした後に、別の PR で設定を変える。
 
+## 実装状況
+
+2026-10-18 時点。PR A〜D は main に入っている。既定は無効(`KIVRA_SELFDEV_AUTOPILOT_ENABLED` が `false`)である。
+
+| 範囲 | PR(main) | 内容 |
+|---|---|---|
+| 本 ADR の起草 | #234 | Proposed として起草 |
+| PR A: 基盤 | #243 | V18(4 表。`selfdev_autopilot_control` の 1 行を含む)、リポジトリ層、状態機械(`kivra-core` の `AutopilotStates`) |
+| PR B: Planner | #244 | §3 の検証、モデルの固定(`claude-haiku-5-5`)、予算の予約、計画段階の `BLOCKED`、段階 2 の判定(計画側の見積り) |
+| PR C: Dispatcher | #245 | §5 の投入の規則とガード(マージ待ち PR の上限、日次の上限、ブレーカー、予算、依存)、Run からの状態の射影 |
+| PR D: UI と HTTP | #250 | V19(`approved_by`、`approved_at`)、Goal フォーム、計画の承認、タスクの承認と見送り、中止、計画段階の再計画、全体の一時停止と再開、ブレーカーの再開、無効時の 503 |
+
+**未実装(この ADR の範囲のうち、まだ無いもの)**
+
+- **段階 2 の差分の再検査(§6.2)**: `AUTO_SCOPE_EXCEEDED` の理由コードは定義されているが、それを発生させる経路は無い。段階 2 の自動の投入は、計画側の見積りだけで判定している。
+- **Goal 本文の削除(U-9)**: 保存期間と削除の手段は未実装。
+- **Goal 単位の監査(U-18)**: 構造化ログだけで、監査の表は無い。
+- **Goal 単位の一時停止と再開(§1.2 の `.../pause`、`.../resume`)**: 全体の一時停止と再開だけ。また、`PLAN_PROPOSED` からの再計画は HTTP に出していない(計画段階の `BLOCKED` からの再計画だけ)。
+- **Planner へのファイル一覧(U-17)**: PR B では渡していない。
+- **dev での有効化と E2E(§9 の 7)**: 未実施。段階 1 の有効化は、#222 の前提と E2E の後に行う。
+- **前提の #222(E2E の fixture)**: main に該当する PR が見当たらない(`git log origin/main` と `gh pr list` で確認)。§9 の前提のうち、#230(#236、#237、#242)、#229(#238、#239)、#231(#247、#248)は満たされている。
+
 ## 検討した代替案
 
 - **A. GitHub Issue のラベルを入力にする**: 外部から書き込める経路が増え、インジェクションの入口になる。運用者の画面にも入力が無い。採らない。
@@ -395,23 +431,27 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 以下は、ユーザーの確認が要るものである。各項目の暫定の既定値を括弧で示す。異論があれば、実装前に変更する。
 
 - **U-1 承認の単位**: タスクごとに承認するか(暫定: タスクごと)。Plan 単位にすると、段階 1 の手間が減るが、denylist のタスクを別に扱う必要がある。
+  - 決定: 計画の承認を Goal 単位で 1 回行い、その後にタスクごとの承認を行う。denylist のタスクは計画の承認では投入されず、タスクごとの承認でだけ投入される(PR #250、§2.9)。
 - **U-2 月次の割当て**: オートパイロットに割り当てる割合(暫定: 50%、約 5,000 円)。#230 の完了後に実測して決める。
 - **U-3 1 日の Run 数の上限と日付の境界**: 暫定 5 件、UTC の日付。JST の日付に揃えるかは要確認。
 - **U-4 マージ待ち PR の上限**: 暫定 3 件(#233 と同じ)。
 - **U-5 サーキットブレーカーの数え方**: 暫定は全体で連続 3 件。Goal ごとにするか、全体にするか。失敗の種類に `PR_ABANDONED` を含めるか。
 - **U-6 denylist の一覧**: §4 の暫定の一覧で確定してよいか。特に `kivra-*/src/main/**` を自動の対象に含めてよいか。
 - **U-7 依存の条件**: 依存先は「マージされたら」(暫定)。投入の基点が `main` であり、マージ前の PR に依存する後続の Run は依存先の変更を見られないため、「PR 作成で足りる」案は採らない。この点を確認する。
+  - 決定: 依存先の全てが `COMPLETED`(Run が完了し、PR がマージされた)のときだけ投入する(PR #245、§2.8、`AutopilotDispatcher`)。
 - **U-8 段階の昇格条件の数値**: §6.3 の 10 件、70%、30 件、4 週間は暫定。
 - **U-9 Goal 本文の保持と削除**: 保存期間、削除の手段(運用者による削除を設けるか)、閲覧できる主体(投入者と運用者だけ)。
 - **U-10 手動の投入との共存**: 既存の `/api/selfdev/tasks` と同じ同時 Run 上限を共有する(暫定)。手動の投入を優先させるかは要確認。
 - **U-11 全体の一時停止の保存先**: 単一行のテーブル(§2.4、暫定)か、環境変数だけにするか。環境変数だけでは運用中に止められない。
 - **U-12 Goal の受付の無効時の応答**: 無効時は 503 で受け付けない(暫定)。受け付けて `AUTOPILOT_DISABLED` で止める案もある。
+  - 決定: 503 を採用する。認証(401、エージェントは 403)の後に 503 を返す(PR #250、§2.9)。
 - **U-13 Planner の再計画と検証の回数**: 再計画は 3 回まで、検証の再試行は 1 回(暫定)。
 - **U-14 Goal の本文の上限**: 8000 文字(暫定)。#229 の依頼文の本文の上限と揃える。
 - **U-15 対象リポジトリの変更**: 段階 1 では画面から変えない(暫定)。複数リポジトリを扱う要件が出たら、別の ADR で扱う。
 - **U-16 計画段階で止まった Goal の回復**: 決定済み(PR B)。計画段階の `BLOCKED` は、運用者の再計画(`BLOCKED → GOAL_SUBMITTED`、`REPLAN_REQUESTED`)でだけ `GOAL_SUBMITTED` に戻る。ディスパッチの解消では進めない。UI と HTTP の入口は PR D。
 - **U-17 Planner へのファイル一覧**: §3 の入力のうち、対象リポジトリのパス一覧を渡すかどうか。PR B では渡さない(Goal だけを渡す)。渡すなら、パスだけで内容は渡さない、の方針を維持する。
 - **U-18 Goal 単位の監査**: `audit_events` は Run 単位のため、Goal と Plan の遷移の監査の置き場所を決める。PR B では、遷移は行の `state_reason` とログに残るだけ。
+  - 決定(暫定の実装): 運用者の操作は構造化ログ(`net.kigawa.kivra.selfdev.autopilot.operator`)で残す(PR #250、§2.9)。Goal 単位の監査の表は未決のまま。
 
 ## 見直しの条件
 

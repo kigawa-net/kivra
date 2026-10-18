@@ -155,7 +155,7 @@ class MonitorEventSchemaTest {
     fun `the fixed lists match the agent's own codes`() {
         assertEquals(ProgressPhase.entries.map { it.name }.toSet(), MonitorEventSchema.PHASES)
         // ApiErrorKind and DockerRunOutcome live in kivra-agent, which kivra-app does not depend on. These are copies. A change to
-        // either side must change this list with it (see docs/runbook-selfdev.md section 6.16).
+        // either side must change this list with it (see docs/runbook-selfdev.md section 6.17).
         assertEquals(setOf("AUTHENTICATION", "RATE_LIMIT", "OVERLOADED", "BILLING", "OTHER"), MonitorEventSchema.API_ERROR_KINDS)
         assertEquals(setOf("EXITED", "TIMEOUT", "CANCELLED", "OUTPUT_LIMIT"), MonitorEventSchema.DOCKER_RUN_OUTCOMES)
     }

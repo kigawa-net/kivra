@@ -185,7 +185,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentity)
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()
-            configureBudgetAdminRoutes(budgetStore, taskApiIdentity, fx = fxSettings)
+            configureBudgetAdminRoutes(budgetStore, taskApiIdentity, fx = fxSettings, operatorView = budgetStore)
             configureSelfDevAdminRoutes(runs, taskApiIdentity)
             configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings)
             if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)

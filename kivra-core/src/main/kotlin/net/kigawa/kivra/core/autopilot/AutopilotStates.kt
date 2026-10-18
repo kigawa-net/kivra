@@ -49,6 +49,8 @@ enum class AutopilotReason {
     GUARD_CLEARED, OPERATOR_PAUSED, OPERATOR_RESUMED, OPERATOR_STOPPED, ALL_TASKS_COMPLETED,
     OPERATOR_APPROVED, AUTO_APPROVED, OPERATOR_SKIPPED, OPERATOR_REQUEUED, GOAL_STOPPED,
     ACTIVE_RUN_LIMIT, PR_MERGED, RUN_FAILED, POLICY_REJECTED, PR_ABANDONED, RUN_RELEASED,
+    /** Every task ended (COMPLETED, FAILED or SKIPPED) and not all of them COMPLETED: the goal stops by the dispatcher (ADR 0011 section 2.8b). */
+    TASKS_INCOMPLETE,
 }
 
 /** Why a transition is refused. Fixed codes. */
@@ -134,7 +136,17 @@ private val GOAL_EDGES: List<Edge<GoalState>> = buildList {
         GoalState.GOAL_SUBMITTED, GoalState.PLANNING, GoalState.PLAN_PROPOSED, GoalState.TASKS_QUEUED,
         GoalState.RUNNING, GoalState.BLOCKED, GoalState.PAUSED,
     )
-    for (from in active) edge(from, GoalState.STOPPED, setOf(AutopilotReason.OPERATOR_STOPPED))
+    // A goal whose tasks all ended without all of them COMPLETED stops by the dispatcher (ADR 0011 section 2.8b). One edge per pair:
+    // checkEdge reads the first edge that matches, so the reasons of the two cases are listed together.
+    val dispatchEnds = setOf(GoalState.TASKS_QUEUED, GoalState.RUNNING, GoalState.BLOCKED)
+    for (from in active) {
+        val reasons = if (from in dispatchEnds) {
+            setOf(AutopilotReason.OPERATOR_STOPPED, AutopilotReason.TASKS_INCOMPLETE)
+        } else {
+            setOf(AutopilotReason.OPERATOR_STOPPED)
+        }
+        edge(from, GoalState.STOPPED, reasons)
+    }
 }
 
 private val PLAN_EDGES: List<Edge<PlanState>> = listOf(

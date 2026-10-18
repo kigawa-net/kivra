@@ -80,7 +80,7 @@ class AutopilotE2EAbnormalTest {
     // (b) ---------------------------------------------------------------------------------------------------------------------------
 
     @Test
-    fun `b a failed first task skips the rest of its plan, three failures in a row open the breaker, and the reset does not resume the held goal (known defect, pinned)`() =
+    fun `b a failed first task skips the rest of its plan, three failures in a row open the breaker, and the operator's reset resumes the held goal`() =
         TestDb().use { db ->
             val plans = ArrayDeque<String>()
             plans.addLast(planJson(PlanTask("A1", "Do A1.", listOf(docsA)), PlanTask("A2", "Do A2.", listOf(docsB), dependsOn = listOf(1))))
@@ -133,12 +133,15 @@ class AutopilotE2EAbnormalTest {
                 assertFalse(world.control.read().breakerOpen)
                 assertEquals(0, world.control.read().consecutiveFailures)
 
-                // DEFECT (ADR 0011 section 5.4 expects the held goal to be dispatched after the reset). The dispatcher resumes a BLOCKED goal
-                // only for AUTO_CLEARABLE_REASONS, and the reset route only clears the counter. The assertions below pin the defect; when it
-                // is fixed, they flip to: runCount 4 and goal D RUNNING.
+                // ADR 0011 section 5.4: after the reset, the goal held by CIRCUIT_OPEN goes back to RUNNING and its task is submitted.
                 world.tick()
-                assertEquals(3, world.runCount())
-                assertEquals(GoalState.BLOCKED, world.goal(d).state)
+                assertEquals(4, world.runCount())
+                assertEquals(GoalState.RUNNING, world.goal(d).state)
+                assertEquals(TaskState.SUBMITTED, world.task(d, 1).state)
+
+                // A second tick submits nothing more: the goal's one task has its Run.
+                world.tick()
+                assertEquals(4, world.runCount())
             }
         }
 

@@ -160,6 +160,10 @@ internal fun e2eSettings(config: AutopilotConfig?): AutopilotSettings = if (conf
             AutopilotSettings.ENV_MAX_PENDING_PRS to config.maxPendingPrs.toString(),
             AutopilotSettings.ENV_MAX_CONSECUTIVE_FAILURES to config.maxConsecutiveFailures.toString(),
             AutopilotSettings.ENV_MAX_RUNS_PER_DAY to config.maxRunsPerDay.toString(),
+            "KIVRA_AGENT_API_ENABLED" to "true",
+            "KIVRA_FX_USD_JPY" to "150",
+            "KIVRA_FX_AS_OF" to "2026-10-18",
+            "KIVRA_SELFDEV_MODEL_REGISTRY_PATH" to "/nonexistent/registry.json",
         ),
         E2E_SELF_DEV,
     )

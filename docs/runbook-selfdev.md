@@ -1208,7 +1208,7 @@ dev での有効化の手順は §7.5。
 | `KIVRA_SELFDEV_AUTOPILOT_PLAN_INTERVAL_SECONDS` | `30` | 既定。計画と投入の周期 |
 | `KIVRA_SELFDEV_MAX_ACTIVE_RUNS` | `1` | 既定。同時に進行する自己開発 Run の上限 |
 
-**注**: 開いている PR の Run も「進行中」として同時 Run の上限に数えられる(`activeSelfDevRunIds` は PULL_REQUEST を含む)。そのため既定の `MAX_ACTIVE_RUNS=1` では、マージ待ちの PR は常に 1 件までで、`MAX_PENDING_PRS=3` の判定には届かない。PR の上限を効かせるには、同時 Run の上限を上げる必要がある(ADR 0011 §5.2 の「上げない」との関係は未決)。
+**注**: 開いている PR の Run も「進行中」として同時 Run の上限に数えられる(`activeSelfDevRunIds` は PULL_REQUEST を含む)。そのため既定の `MAX_ACTIVE_RUNS=1` では、マージ待ちの PR は常に 1 件までで、`MAX_PENDING_PRS=3` の判定には届かない。**PR の上限は、同時 Run の上限で先に制限される。** PR の上限を効かせるには、同時 Run の上限を上げる必要がある(ADR 0011 §5.2 の「上げない」との関係は未決)。コードは変えていない。`maxPendingPrs` が `maxActiveRuns` より大きいと、起動ログに WARN が 1 行出る。有効な値は起動時に `autopilot limits: maxActiveRuns=... maxPendingPrs=...` の INFO で出る(数値のみ)。
 
 #### 7.5.3 有効化の順序
 
@@ -1246,10 +1246,10 @@ Run が FAILED、UNKNOWN、POLICY_REJECTED になったら、§4.1、§4.3、§4
 
 #### 7.5.7 有効化の前に知っておく制約
 
-- 起動時に、CLI 経路の費用の計上を検査しない(ADR 0011 §5.3)。
+- 起動時に、CLI 経路の費用の計上を検査する(ADR 0011 §5.3)。`KIVRA_AGENT_API_ENABLED=true`、`KIVRA_FX_USD_JPY` と `KIVRA_FX_AS_OF`、`KIVRA_SELFDEV_MODEL_REGISTRY_PATH` のどれかが無ければ、起動を拒否する(拒否の理由には変数名だけが出る)。FX の期限切れは起動を拒否しない。期限切れの間は USD の呼び出しが止まり、既存の失効の警告(`fx rate expired`、ERROR)が出る。
 - 既定の同時 Run 上限(1)では、マージ待ちの PR の上限(3)は効かない(§7.5.2 の注)。
 - 失敗したタスクは自動では再投入されず、Goal は `RUNNING` のまま残る(ADR に、失敗による Goal の終端は無い)。残りは運用者が Goal を中止して終える。
-- **既知の不具合**: サーキットブレーカーが開いた後、運用者が再開(`POST /api/selfdev/autopilot/reset-breaker`)しても、そのとき `BLOCKED`(`CIRCUIT_OPEN`)になっていた Goal は投入されない。回避は、その Goal を中止して、新しい Goal を入れること。修正は別の PR で行う(テストは `AutopilotE2EAbnormalTest` の (b))。
+- サーキットブレーカーが開いて `BLOCKED`(`CIRCUIT_OPEN`)になった Goal は、運用者の再開(`POST /api/selfdev/autopilot/reset-breaker`)の後、次の周期(既定 30 秒)で `RUNNING` に戻り、残りのタスクが投入される。他の理由(計画段階の `PLAN_INVALID` など)で `BLOCKED` の Goal は、この再開では戻らない。
 
 ### 7.3 状態遷移
 

@@ -283,19 +283,111 @@ class AutopilotDispatcherTest {
         assertEquals(TaskState.SUBMITTED, env.task(fourthPlan, 1).state)
     }
 
-    @Test
-    fun `a manual resume is needed even when the cause is gone, so a CIRCUIT_OPEN goal does not restart by itself`() = TestDb().use { db ->
-        val env = Env(db)
-        val failing = (1..3).map { env.plannedGoal("auto-$it", listOf(task("t$it")), approve = listOf(1)) }
+    /** Opens the breaker with three failed Runs (three one-task goals), and returns the Env. The breaker is open when this returns. */
+    private fun openBreaker(db: TestDb, cfg: AutopilotConfig = config(maxRunsPerDay = 10)): Env {
+        val env = Env(db, cfg)
+        val failing = (1..3).map { env.plannedGoal("breaker-src-$it", listOf(task("t$it")), approve = listOf(1)) }
         env.tick()
         failing.forEach { (_, planId) -> db.setRunState(env.task(planId, 1).runId!!, DevelopmentRunState.FAILED, "RUN_FAILED") }
         env.tick()
-        val (goalId, planId) = env.plannedGoal("blocked", listOf(task("t")), approve = listOf(1))
+        assertTrue(env.control.read().breakerOpen)
+        return env
+    }
+
+    @Test
+    fun `the operator's reset resumes a CIRCUIT_OPEN goal and submits its task once, and nothing restarts without the reset`() = TestDb().use { db ->
+        val env = openBreaker(db)
+        val (goalId, planId) = env.plannedGoal("held", listOf(task("held")), approve = listOf(1))
+        env.tick()
+        assertEquals(GoalState.BLOCKED, env.goal(goalId).state)
+        assertEquals(AutopilotReason.CIRCUIT_OPEN, env.goal(goalId).stateReason)
+        assertEquals(3, db.count("development_runs"))
+
+        // Without the reset, the held goal stays BLOCKED however many ticks run.
+        env.tick()
+        env.tick()
+        assertEquals(GoalState.BLOCKED, env.goal(goalId).state)
+        assertEquals(3, db.count("development_runs"))
+
+        env.control.resetBreaker()
+        env.tick()
+        assertEquals(GoalState.RUNNING, env.goal(goalId).state)
+        assertEquals(TaskState.SUBMITTED, env.task(planId, 1).state)
+        assertEquals(4, db.count("development_runs"))
+
+        // A later tick does not submit it again: the task has its one Run.
+        env.tick()
+        assertEquals(4, db.count("development_runs"))
+    }
+
+    @Test
+    fun `two dispatchers ticking at once after the reset submit the held task once`() = TestDb().use { db ->
+        val env = openBreaker(db)
+        val (goalId, planId) = env.plannedGoal("held-twice", listOf(task("held")), approve = listOf(1))
+        env.tick()
+        env.control.resetBreaker()
+
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val gate = java.util.concurrent.CountDownLatch(1)
+            val ticks = (1..2).map { Callable { gate.await(); repeat(3) { env.tick() } } }
+            val futures = ticks.map { pool.submit(it) }
+            gate.countDown()
+            futures.forEach { it.get() }
+        } finally {
+            pool.shutdown()
+        }
+        assertEquals(GoalState.RUNNING, env.goal(goalId).state)
+        assertEquals(TaskState.SUBMITTED, env.task(planId, 1).state)
+        assertEquals(4, db.count("development_runs"))
+    }
+
+    @Test
+    fun `the reset resumes only CIRCUIT_OPEN, and a planning block or another dispatch block stays BLOCKED`() = TestDb().use { db ->
+        val env = openBreaker(db)
+        val (planBlocked, planBlockedPlan) = env.plannedGoal("plan-blocked", listOf(task("p")), approve = listOf(1))
+        val (scopeHeld, scopeHeldPlan) = env.plannedGoal("scope-held", listOf(task("s")), approve = listOf(1))
+        db.forceBlocked(planBlocked, AutopilotReason.PLAN_INVALID)
+        db.forceBlocked(scopeHeld, AutopilotReason.AUTO_SCOPE_EXCEEDED)
+
+        env.control.resetBreaker()
+        env.tick()
+        env.tick()
+        assertEquals(GoalState.BLOCKED, env.goal(planBlocked).state)
+        assertEquals(AutopilotReason.PLAN_INVALID, env.goal(planBlocked).stateReason)
+        assertEquals(TaskState.QUEUED, env.task(planBlockedPlan, 1).state)
+        assertEquals(GoalState.BLOCKED, env.goal(scopeHeld).state)
+        assertEquals(AutopilotReason.AUTO_SCOPE_EXCEEDED, env.goal(scopeHeld).stateReason)
+        assertEquals(TaskState.QUEUED, env.task(scopeHeldPlan, 1).state)
+        assertEquals(3, db.count("development_runs"))
+    }
+
+    @Test
+    fun `a goal resumed after the reset opens the breaker again when its Runs keep failing`() = TestDb().use { db ->
+        val env = openBreaker(db)
+        val (goalId, planId) = env.plannedGoal("held-again", listOf(task("held")), approve = listOf(1))
         env.tick()
         env.control.resetBreaker()
         env.tick()
-        assertEquals(GoalState.BLOCKED, env.goal(goalId).state)
-        assertEquals(TaskState.QUEUED, env.task(planId, 1).state)
+        assertEquals(TaskState.SUBMITTED, env.task(planId, 1).state)
+
+        db.setRunState(env.task(planId, 1).runId!!, DevelopmentRunState.FAILED, "RUN_FAILED")
+        env.tick()
+        assertEquals(1, env.control.read().consecutiveFailures)
+
+        val more = (1..2).map { env.plannedGoal("again-$it", listOf(task("a$it")), approve = listOf(1)) }
+        env.tick()
+        more.forEach { (_, p) -> db.setRunState(env.task(p, 1).runId!!, DevelopmentRunState.FAILED, "RUN_FAILED") }
+        env.tick()
+        assertTrue(env.control.read().breakerOpen)
+        assertEquals(3, env.control.read().consecutiveFailures)
+
+        val (late, latePlan) = env.plannedGoal("late", listOf(task("late")), approve = listOf(1))
+        env.tick()
+        assertEquals(GoalState.BLOCKED, env.goal(late).state)
+        assertEquals(AutopilotReason.CIRCUIT_OPEN, env.goal(late).stateReason)
+        assertEquals(TaskState.QUEUED, env.task(latePlan, 1).state)
+        assertEquals(6, db.count("development_runs"))
     }
 
     @Test
@@ -682,6 +774,14 @@ class AutopilotDispatcherTest {
         requiresApproval: Boolean = false,
         body: String? = "$MARKER-task-body",
     ) = NewTask(title, body, paths, size, dependsOn, requiresApproval)
+
+    /** Puts a goal into BLOCKED with [reason] directly, for a block the dispatcher does not make itself (a planning block, a manual one). */
+    private fun TestDb.forceBlocked(goalId: String, reason: AutopilotReason) = transaction(database) {
+        execUpdate(
+            "UPDATE selfdev_goals SET state = 'BLOCKED', state_reason = ?, version = version + 1 WHERE goal_id = ?",
+            reason.name, goalId,
+        )
+    }
 
     private fun TestDb.setRunState(runId: String, state: DevelopmentRunState, reason: String? = null) = transaction(database) {
         execUpdate("UPDATE development_runs SET state = ?, state_reason = ?, version = version + 1 WHERE run_id = ?", state.name, reason, runId)

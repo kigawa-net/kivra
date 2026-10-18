@@ -1,10 +1,15 @@
 package net.kigawa.kivra.selfdev
 
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.slf4j.LoggerFactory
 
 class AutopilotSettingsTest {
 
@@ -25,9 +30,17 @@ class AutopilotSettingsTest {
         if (runtime == "cli") put("KIVRA_AGENT_API_ENABLED", "true")
     }
 
+    /** The switch, plus the CLI cost ledger's settings, which the autopilot needs (ADR 0011 section 5.3). [pairs] override them. */
     private fun autopilotEnv(vararg pairs: Pair<String, String>): Map<String, String> = mapOf(
         "KIVRA_SELFDEV_AUTOPILOT_ENABLED" to "true",
-    ) + pairs
+    ) + costLedgerEnv() + pairs
+
+    private fun costLedgerEnv(): Map<String, String> = mapOf(
+        "KIVRA_AGENT_API_ENABLED" to "true",
+        "KIVRA_FX_USD_JPY" to "150",
+        "KIVRA_FX_AS_OF" to "2026-10-18",
+        "KIVRA_SELFDEV_MODEL_REGISTRY_PATH" to "/nonexistent/registry.json",
+    )
 
     @Test
     fun `off by default, and off when the switch is false or blank, with no other variable read`() {
@@ -141,5 +154,90 @@ class AutopilotSettingsTest {
     @Test
     fun `the settings never print their values`() {
         assertEquals("AutopilotSettings(enabled=false)", AutopilotSettings.disabled().toString())
+    }
+
+    // ---- the CLI cost ledger (ADR 0011 section 5.3) ---------------------------------------------------------------------------
+
+    @Test
+    fun `enabling without the cost ledger is refused, and the message names each missing variable but no value`() {
+        val settingsVars = listOf(
+            "KIVRA_AGENT_API_ENABLED", "KIVRA_FX_USD_JPY", "KIVRA_FX_AS_OF", "KIVRA_SELFDEV_MODEL_REGISTRY_PATH",
+        )
+        for (name in settingsVars) {
+            val env = autopilotEnv().filterKeys { it != name }
+            val refused = assertFailsWith<IllegalStateException>(name) { AutopilotSettings.fromEnv(env, cliSelfDev) }
+            assertTrue(refused.message!!.contains(name), refused.message)
+            assertFalse(refused.message!!.contains("150"), refused.message)
+            assertFalse(refused.message!!.contains("2026-10-18"), refused.message)
+            assertFalse(refused.message!!.contains("/nonexistent"), refused.message)
+        }
+        // Every missing one is named together, so the operator fixes them in one go.
+        val none = assertFailsWith<IllegalStateException> {
+            AutopilotSettings.fromEnv(mapOf(AutopilotSettings.ENV_ENABLED to "true"), cliSelfDev)
+        }
+        for (name in settingsVars) assertTrue(none.message!!.contains(name), none.message)
+    }
+
+    @Test
+    fun `agent API off or set to a value other than true is refused as a missing cost ledger`() {
+        for (value in listOf("false", "TRUE", "yes")) {
+            val env = autopilotEnv("KIVRA_AGENT_API_ENABLED" to value)
+            val refused = assertFailsWith<IllegalStateException>(value) { AutopilotSettings.fromEnv(env, cliSelfDev) }
+            assertTrue(refused.message!!.contains("KIVRA_AGENT_API_ENABLED=true"), refused.message)
+            assertFalse(refused.message!!.contains(value), refused.message)
+        }
+    }
+
+    @Test
+    fun `an expired FX rate is not refused at startup`() {
+        val settings = AutopilotSettings.fromEnv(autopilotEnv("KIVRA_FX_AS_OF" to "2000-01-01"), cliSelfDev)
+        assertTrue(settings.enabled)
+    }
+
+    @Test
+    fun `the limits are logged once as numbers, and a PR limit that fits under the concurrent limit gives no WARN`() {
+        val events = logEvents { AutopilotSettings.fromEnv(autopilotEnv(), cliSelfDev) }
+        val info = events.single { it.level == Level.INFO && it.formattedMessage.startsWith("autopilot limits:") }
+        assertEquals(
+            "autopilot limits: maxActiveRuns=1 maxPendingPrs=3 maxConsecutiveFailures=3 maxRunsPerDay=5 budgetSharePercent=50",
+            info.formattedMessage,
+        )
+        assertEquals(1, events.count { it.level == Level.WARN }, "the default PR limit (3) is above the default Run limit (1)")
+
+        val fits = logEvents {
+            AutopilotSettings.fromEnv(autopilotEnv(AutopilotSettings.ENV_MAX_PENDING_PRS to "1"), cliSelfDev)
+        }
+        assertEquals(0, fits.count { it.level == Level.WARN })
+    }
+
+    @Test
+    fun `a WARN when the pending PR limit is above the concurrent Run limit, and not when it is at or below it`() {
+        // The default concurrent limit is 1, so the default PR limit of 3 can never be reached.
+        val warned = logEvents { AutopilotSettings.fromEnv(autopilotEnv(), cliSelfDev) }.filter { it.level == Level.WARN }
+        assertEquals(1, warned.size)
+        assertTrue(warned.single().formattedMessage.contains("maxPendingPrs=3"), warned.single().formattedMessage)
+        assertTrue(warned.single().formattedMessage.contains("maxActiveRuns=1"), warned.single().formattedMessage)
+
+        val raised = SelfDevSettings.fromEnv(selfDevEnv(runtime = "cli") + ("KIVRA_SELFDEV_MAX_ACTIVE_RUNS" to "3"))
+        val equal = logEvents { AutopilotSettings.fromEnv(autopilotEnv(), raised) }
+        assertEquals(0, equal.count { it.level == Level.WARN }, "maxPendingPrs=3 equals maxActiveRuns=3: no WARN")
+        val above = logEvents { AutopilotSettings.fromEnv(autopilotEnv(AutopilotSettings.ENV_MAX_PENDING_PRS to "4"), raised) }
+        assertEquals(1, above.count { it.level == Level.WARN })
+    }
+
+    /** Every event of the autopilot settings logger while [block] runs. */
+    private fun logEvents(block: () -> Unit): List<ILoggingEvent> {
+        val logger = LoggerFactory.getLogger(AutopilotSettings::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        val previous = logger.level
+        logger.level = Level.TRACE
+        logger.addAppender(appender)
+        try {
+            block()
+        } finally {
+            logger.detachAppender(appender)
+            logger.level = previous
+        }
+        return appender.list
     }
 }

@@ -260,12 +260,21 @@ class AutopilotDispatcher(
 
     private fun activeRunsLimitReached(): Boolean = runs.activeSelfDevRunIds(maxActiveSelfDev).size >= maxActiveSelfDev
 
-    /** Moves a BLOCKED goal back when its reason is auto-clearable and the guards hold (GUARD_CLEARED). Manual blocks wait for the operator. */
+    /**
+     * Moves a BLOCKED goal back when its reason clears. An auto-clearable reason clears by itself (GUARD_CLEARED). CIRCUIT_OPEN is
+     * cleared by the operator's reset (ADR 0011 section 5.4): the reset is the only thing that closes the breaker, so this is reached only
+     * with the breaker closed (the caller checks [globalBlock] first), and the move records OPERATOR_RESUMED. The move is a CAS on the
+     * goal's version, so two dispatchers resume it once. Every other reason (planning blocks, and the goal's own state) stays put.
+     */
     private fun resumeBlocked(goal: SelfDevGoal, tasks: List<SelfDevPlanTask>): Boolean {
-        if (goal.stateReason !in AUTO_CLEARABLE_REASONS) return false
+        val reason = when (goal.stateReason) {
+            in AUTO_CLEARABLE_REASONS -> AutopilotReason.GUARD_CLEARED
+            AutopilotReason.CIRCUIT_OPEN -> AutopilotReason.OPERATOR_RESUMED
+            else -> return false
+        }
         val started = tasks.any { it.state != TaskState.PENDING_APPROVAL && it.state != TaskState.QUEUED }
         val target = if (started) GoalState.RUNNING else GoalState.TASKS_QUEUED
-        return transitionGoal(goal, target, AutopilotReason.GUARD_CLEARED) != null
+        return transitionGoal(goal, target, reason) != null
     }
 
     /**

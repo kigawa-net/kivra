@@ -16,6 +16,7 @@ import net.kigawa.kivra.modelgateway.BudgetPort
 import net.kigawa.kivra.modelgateway.ReserveResult
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.slf4j.LoggerFactory
 
 /** A store over [db] with the production limits (hard 10,000 JPY, soft 80%) and a run limit of [runHard] (null: none). */
 internal fun newDbStore(
@@ -146,6 +147,73 @@ class DbBudgetStoreTest {
             store.reserve("p1", listOf(t), jpy("1"))
             assertEquals(1, db.count("budget_periods", "scope_id = '$t' AND period = '2026-10'"))
             assertNull(store.admission(listOf(t), jpy("1")))
+        }
+    }
+
+    @Test
+    fun `reserving in a month whose period row exists logs no warning, because no insert is attempted`() {
+        TestDb().use { db ->
+            val store = newDbStore(db, MutableClock())
+            store.reserve("first", listOf(t), jpy("1")) // creates the row
+            val (_, warnings) = collectWarnings {
+                assertEquals(ReserveResult.Reserved, store.reserve("second", listOf(t), jpy("1")))
+                assertEquals(ReserveResult.Reserved, store.reserve("third", listOf(t), jpy("1")))
+            }
+            assertEquals(emptyList(), warnings, "an existing period row must not produce a duplicate-key warning")
+        }
+    }
+
+    @Test
+    fun `two replicas creating the same missing month row at once both succeed, and the row is created once`() {
+        repeat(5) { round ->
+            TestDb().use { db ->
+                val first = db.replicaDataSource()
+                val second = db.replicaDataSource()
+                try {
+                    val stores = listOf(newDbStore(db, MutableClock(), database = connectDatabase(first)), newDbStore(db, MutableClock(), database = connectDatabase(second)))
+                    val barrier = java.util.concurrent.CyclicBarrier(stores.size)
+                    val results = java.util.concurrent.CopyOnWriteArrayList<ReserveResult>()
+                    val errors = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
+                    val threads = stores.mapIndexed { i, store ->
+                        Thread {
+                            try {
+                                barrier.await()
+                                results.add(store.reserve("race-$round-$i", listOf(t), jpy("1")))
+                            } catch (e: Throwable) {
+                                errors.add(e)
+                            }
+                        }
+                    }
+                    threads.forEach { it.start() }
+                    threads.forEach { it.join(30_000) }
+                    assertTrue(errors.isEmpty(), "no thread may fail: $errors")
+                    assertEquals(stores.size, results.size)
+                    assertTrue(results.all { it == ReserveResult.Reserved }, "every reserve succeeds: $results")
+                    assertEquals(1, db.count("budget_periods", "scope_id = '$t' AND period = '2026-10'"))
+                } finally {
+                    closeDataSource(first)
+                    closeDataSource(second)
+                }
+            }
+        }
+    }
+
+    /**
+     * Captures WARN and above from the Exposed transaction logger (its name is "Exposed": the retry warning
+     * "Transaction attempt #n failed" is logged there) and from the application loggers. Not root.
+     */
+    private fun <T> collectWarnings(block: () -> T): Pair<T, List<String>> {
+        val events = java.util.concurrent.CopyOnWriteArrayList<ch.qos.logback.classic.spi.ILoggingEvent>()
+        val loggers = listOf("Exposed", "net.kigawa").map { LoggerFactory.getLogger(it) as ch.qos.logback.classic.Logger }
+        val appender = object : ch.qos.logback.core.AppenderBase<ch.qos.logback.classic.spi.ILoggingEvent>() {
+            override fun append(event: ch.qos.logback.classic.spi.ILoggingEvent) {
+                if (event.level.isGreaterOrEqual(ch.qos.logback.classic.Level.WARN)) events.add(event)
+            }
+        }.also { a -> a.start(); loggers.forEach { it.addAppender(a) } }
+        try {
+            return block() to events.map { it.formattedMessage }
+        } finally {
+            loggers.forEach { it.detachAppender(appender) }
         }
     }
 

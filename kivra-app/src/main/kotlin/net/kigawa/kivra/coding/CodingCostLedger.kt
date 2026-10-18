@@ -11,6 +11,7 @@ import net.kigawa.kivra.config.BudgetConfig
 import net.kigawa.kivra.db.CodingAttemptUsageRepository
 import net.kigawa.kivra.db.CodingUsageRow
 import net.kigawa.kivra.db.DbBudgetStore
+import net.kigawa.kivra.db.SpendOutcome
 import net.kigawa.kivra.db.SpendResult
 import net.kigawa.kivra.modelgateway.BudgetAmount
 import net.kigawa.kivra.modelgateway.BudgetDenial
@@ -177,13 +178,18 @@ class DbCodingCostLedger(
      * already booked, so it always matches the charge it describes.
      */
     private fun post(attemptId: String, leaseGeneration: Long, amount: BigDecimal, unpriced: Boolean, row: CodingUsageRow): Boolean {
-        return when (budget.recordSpend(reservationKey(attemptId, leaseGeneration), yen(amount), unpriced)) {
+        val outcome = budget.recordSpend(reservationKey(attemptId, leaseGeneration), yen(amount), unpriced)
+        return when (outcome.result) {
             SpendResult.FAILURE -> {
                 logger.error("coding cost not recorded: attemptId={} code=LEDGER_UNAVAILABLE", attemptId)
                 false
             }
-            SpendResult.ALREADY_RECORDED -> true
+            SpendResult.ALREADY_RECORDED -> {
+                logger.debug("coding cost already recorded: attemptId={} generation={}", attemptId, leaseGeneration)
+                true
+            }
             SpendResult.RECORDED -> {
+                logCostRecorded(attemptId, leaseGeneration, row, unpriced, outcome)
                 try {
                     usage.insert(row)
                 } catch (_: Exception) {
@@ -193,6 +199,15 @@ class DbCodingCostLedger(
                 true
             }
         }
+    }
+
+    /** One INFO line per booked cost. Identifiers, fixed words and numbers only (no model name, text or path). */
+    private fun logCostRecorded(attemptId: String, leaseGeneration: Long, row: CodingUsageRow, unpriced: Boolean, outcome: SpendOutcome) {
+        val month = outcome.monthCommittedMicroYen?.let { " monthCommittedMicroYen=$it" }.orEmpty()
+        logger.info(
+            "coding cost recorded: attemptId={} generation={} source={} unpriced={} costUsd={} amountMicroYen={} month={}{}",
+            attemptId, leaseGeneration, row.source, unpriced, row.costUsd.toPlainString(), outcome.amountMicroYen, outcome.period, month,
+        )
     }
 
     private fun yen(amount: BigDecimal): BudgetAmount = BudgetAmount(amount, JPY, Cost.UNIT_CURRENCY_UNITS)

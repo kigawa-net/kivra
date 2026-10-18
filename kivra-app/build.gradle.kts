@@ -24,6 +24,8 @@ dependencies {
 
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)
+    // Run execution monitor stream (ADR 0012 PR 3). Only the SSE plugin is added; no new Gradle module.
+    implementation(libs.ktor.server.sse)
     implementation(libs.ktor.server.content.negotiation)
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.ktor.client.core)

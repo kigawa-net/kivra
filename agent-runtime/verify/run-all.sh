@@ -61,5 +61,6 @@ sleep 2
 "$here/test-egress.sh" || FAILED=1
 "$here/test-proxy-e2e.sh" || FAILED=1
 "$here/test-isolation.sh" || FAILED=1
+"$here/test-taskfile-perms.sh" || FAILED=1
 
 if [ "${FAILED:-0}" = 0 ]; then echo "ALL CHECKS PASSED"; else echo "SOME CHECKS FAILED" >&2; exit 1; fi

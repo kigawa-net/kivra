@@ -189,11 +189,11 @@ MCP サーバーは **Control Plane のアダプター**とする。新しい Ru
 
 ## 実装状況
 
-確認時点は 2026-10-18。PR の状態は `gh pr view` で確認した。マージされるまでは「作成済み・未マージ」として扱う。ADR のステータスは「提案(Proposed)」のままで、承認の有無は確認していない。
+確認時点は 2026-10-18。PR の状態は `gh pr view` で確認した。PR 1 は main にマージ済み(main b2697a4)。PR 2 と PR 3 は作成済みで未マージ。ADR のステータスは「提案(Proposed)」のままで、承認の有無は確認していない。
 
 | 段階 | PR | 状態 | 範囲 |
 |---|---|---|---|
-| PR 1 | kigawa-net/kivra#263 | 作成済み・未マージ | kivra の `/mcp` の骨格、OIDC の検証、読み取りの 2 ツール |
+| PR 1 | kigawa-net/kivra#263 | マージ済み(2026-10-18、main b2697a4) | kivra の `/mcp` の骨格、OIDC の検証、読み取りの 2 ツール |
 | PR 2 | kigawa01/k8s-system#280 | 作成済み・未マージ | Keycloak の public client `kivra-mcp`、スコープ、audience mapper |
 | PR 3 | kigawa-net/kigawa-net-k8s#369 | 作成済み・未マージ | `/mcp` と `/.well-known/oauth-protected-resource` を oauth2-proxy の外へ出す ingress |
 

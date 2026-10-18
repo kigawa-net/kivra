@@ -1,7 +1,7 @@
 # ADR 0010: 自己開発のコード編集を、ユーザーのローカル PC の常駐エージェントと使い捨てコンテナの Claude Code CLI で行う
 
-- ステータス: 提案(Proposed)。ユーザーの承認待ち。承認まで実装は始めない
-- 日付: 2026-10-17
+- ステータス: 承認(Accepted)。承認日は 2026-10-18。根拠は dev での E2E(Run 01M5569F5PBC7T9HJPB7S17A82 → PR #228、Run 01M56QJR26F6YZ6KRA3PZ8FX80 → PR #241)
+- 日付: 2026-10-17(起草)、2026-10-18(承認)
 - 関連: Issue #187(Use existing logged-in Claude Code CLI as coding runtime)、#157、#56、#181、#174、#71、#112、#184、#188。ADR 0008(一部改定)、ADR 0009、ADR 0001(Run の正本)
 
 ## 背景
@@ -95,11 +95,11 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
 
 ## 未決の点
 
-- **プロキシによる認証付与の実機での成立(A3 相当)**: コンテナ内の `claude` が、認証情報を持たずに `ANTHROPIC_BASE_URL` のプロキシを経由して起動し、応答を得られるか。WIF の交換をプロキシで行えるか。PR 0 の試作で検証中。成り立たない場合は、本 ADR の認証の決定を改める。
+- **プロキシによる認証付与の実機での成立(A3 相当)**: 解決済み(2026-10-18)。dev の E2E(PR #228、PR #241)で、コンテナ内の `claude` が認証情報を持たずに `ANTHROPIC_BASE_URL` のプロキシを経由して応答を得て、WIF の交換もプロキシで行われた。試作は PR #194。
 - **Anthropic Console の設定**: 発行者(Keycloak)、ルール、サービスアカウント、ワークスペースの設定は、ユーザーが実施する。
 - **プロキシの許可ドメインの確定**: Gradle と Maven の取得先の正確な一覧。PR 0 で確認する。
 - **Run の上限値**: 1 Run の時間(例: 30 分)、ラウンド数、出力量、差分の件数とサイズ。
-- **PatchPolicy の上限の食い違い**: `PatchPolicyConfig.maxFiles = 20` と、`DeveloperConstraints.maxFiles` の既定 10 を、PR 9(kivra 側の result 受付)で統一する。確定する実装課題として記載する。
+- **PatchPolicy の上限の食い違い**: 統一しないと決定(追補 6 の 4、2026-10-18)。`PatchPolicyConfig.maxFiles = 20` は CLI 経路と runner の検査で、`DeveloperConstraints.maxFiles` の 10 は API 経路の制約である。どちらかの経路を退役させるときに一つの値に寄せる。
 - **実行イメージの詳細**: claude CLI のインストール方法とバージョンの固定、JDK と Gradle のバージョン、配布先(Harbor か GitHub Release)。PR 10 で決める。
 - **既存の問題**: `/api/agent/*` を含む Task API がヘッダーを信頼する問題(NetworkPolicy が効かないため、クラスタ内の Pod が偽ヘッダーで操作できる)は別 Issue で扱い、本 ADR の対象外とする。
 - **未確認の事実**: `--max-turns` の有無、`claude auth status` の出力、利用上限の挙動、oauth2-proxy の JWT Bearer 用のフラグ。
@@ -112,7 +112,45 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
 
 ## 実装状況
 
-- 未着手。本 ADR の承認後、設計案 `design-coding-runtime.md` の §9 の順で、小さな PR に分けて進める。
+2026-10-18 時点。本 ADR の実装は main に入っており、dev で E2E が通っている。PR 番号は `git log origin/main` と `gh pr list --state merged` で確認した。
+
+| 項目 | PR(main) | 状態 |
+|---|---|---|
+| 本 ADR の起草 | #190 | 完了 |
+| PR 0: 実行イメージと WIF 認証付与プロキシの試作 | #194 | 完了(E2E で動作を確認) |
+| `coding_attempts` / `coding_events`(V14)とリポジトリ層 | #199 | 完了 |
+| `CodingRuntimeService`(割り当て、lease、結果の検査、reconcile) | #202 | 完了 |
+| `coding_results`(V15)と保存層 | #204 | 完了 |
+| `/api/agent/v1/*` の分離認可(PR 4a、既定は無効) | #206 | 完了 |
+| kivra-agent の骨組み、claim、heartbeat、停止 | #207 | 完了 |
+| docker の実行引数と隔離の不変条件(PR 6) | #208 | 完了 |
+| CLI の command 許可リスト、task ファイル、stream-json の解析(PR 7) | #209 | 完了 |
+| 作業ディレクトリの展開と差分(PatchSet)の生成(PR 8) | #210 | 完了 |
+| `cli` の結線と起動の条件(PR 9) | #211 | 完了 |
+| 実行器 `RealAttemptExecutor`(PR 9a。既定は stub) | #212 | 完了 |
+| ローカル PC への配置と `systemd --user` 常駐(PR 10) | #213 | 完了 |
+| 実機で見つかった問題の修正(プロキシのログ、rootless docker の検出、ユニットの硬化、`--model` と `--max-budget-usd`、デバッグ保持、task ファイルの権限) | #214、#215、#216、#217、#218、#219、#221、#227 | 完了 |
+| 為替(USD→JPY)の週次自動更新、失効の警告(費用の換算) | #235、#249 | 完了 |
+| CLI の費用の報告(`usage`)、予算 ledger への計上(追補 4、#230) | #236、#237、#242 | 完了 |
+| 依頼文の本文と参照の解決(追補 5、#229) | #238、#239 | 完了 |
+| client secret の配置とローテーション(#232) | #246 | 完了 |
+| claim のパターンの差分検査への受け渡し、専用のエラーコード(追補 6、#231) | #247 | 完了 |
+| 周期の reconcile、結果の保持と掃除、専用のエラーコード(追補 6、#231) | #248 | 完了 |
+| E2E 1 件目: Run 01M5569F5PBC7T9HJPB7S17A82 → PR | #228 | 完了(dev) |
+| E2E 2 件目: Run 01M56QJR26F6YZ6KRA3PZ8FX80 → PR | #241 | 完了(dev) |
+
+### 残件
+
+次は未了か、実機でまだ確認していない項目である。ADR の決定は変えない。
+
+1. **`--max-budget-usd` の実機の有効性**: 確認したのはローカルの `claude --help`(CLI 2.1.302)だけである。イメージが固定している CLI 2.1.301 では未確認(runbook §6.10b)。
+2. **`error_max_budget_usd` の subtype 名**: 費用上限で止まったときの実際の subtype は未確認(runbook §6.10b)。
+3. **Haiku 5.5 の 1 attempt の実費の分布**: 予約額 `KIVRA_AGENT_ATTEMPT_RESERVE_USD`(既定 0.50 USD)が妥当かは、実費を集めてから判断する(追補 4、runbook §6.13)。
+4. **複数のエージェント台での claim と予算の競合**: 入場の確認と claim が別の操作のため、複数台では予約額の数件分だけ予算を超えうる(追補 4「非同期の限界」)。現在は 1 台の PC と 1 つのワークスペースを前提とする。
+5. **kivra-agent の複数台対応**: 未着手。
+6. **UI の API 経路と CLI 経路の区別**(追補 4 の未了。UI PR5)。
+7. **保持と定期処理の残り**: `coding_attempt_usage` の保持期間(追補 4、6)、予約の計上に失敗した場合の再試行なし(追補 4 の既知の制限。runbook §6.13 で運用者が確認する)。
+8. **未確認の事実**(上の「未決の点」の末尾の項目): `--max-turns` の有無、`claude auth status` の出力、利用上限の挙動、oauth2-proxy の JWT Bearer 用のフラグ。
 
 ## 追補(2026-10-17)
 

@@ -304,6 +304,50 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 
 **k8s の他の PR との関係**: cd.yml の deploy PR も同じファイルを更新するが、触る行が違うので通常は競合しない。競合したら、この節の式で値を直し直す。
 
+### 4.9 自己開発 PR のブランチを main に追従させる(Issue #276、既定は無効)
+
+**実装済み(既定は無効)。** kivra の Run に束縛された、人のレビュー待ちの自己開発 PR が `main` より behind で、コンフリクトが無いとき、`PUT /pulls/{n}/update-branch`(`expected_head_sha` つき)でブランチを更新する。更新後の head は、kivra が検証してから Run に保存した head を更新する。検証が通らないときは、Run をそのまま人に残す。失敗にはしない。
+
+**有効化**
+- `KIVRA_SELFDEV_PR_REBASE_ENABLED=true`(既定は `false`。`true` と `false` と空以外は起動失敗)。自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)のときだけ読まれる。
+- 環境変数は起動時に一度だけ読まれるため、変更には再起動が要る。
+- 有効化の前に、「App の権限」(下記)を確認する。
+
+**止め方**
+- `KIVRA_SELFDEV_PR_REBASE_ENABLED` を `false` にして再起動する。無効のときは、この機能の経路は一切動かない(GitHub への追加の呼び出しも、監査行も無い)。
+
+**再束縛の条件**(すべて満たしたときだけ、Run に保存した head を新しい head に更新する)
+- (a) 新しい head がマージコミットで、親が「旧 head」と「main の先頭」の 2 つだけ。
+- (b) PR 自身の差分が、更新の前後で同一。差分は、旧 head と main の merge-base からの差分と、main から新しい head までの差分で、ファイルの一覧、モード、内容のハッシュ(git の blob id)で比べる。
+- ポリシー(PatchPolicy)は再実行しない。差分が同一なら、ポリシーの結果も同じだからである。
+- 上限: 1 つの PR につき、更新の要求は 1 時間に 1 回、合計 3 回まで。
+
+**監査ログ**(`audit_events`、Run の ID で引く)
+- `PR_REBASE_ATTEMPTED`: 更新の要求の前に書く。要求の回数は、この行の数で数える(要求が失敗しても数える)。
+- `PR_REBASE_HELD`: 要求のあとに人に残った。理由コードを持つ。
+- `PR_REBASE_REBOUND`: 再束縛した。payload は `{"from": 旧 head の先頭 12 文字, "to": 新 head の先頭 12 文字, "reasonCode": "PR_REBASE_VERIFIED"}`。
+- 題名、本文、パス、ファイルの内容は、監査にも、ログにも出さない。
+
+**人に残るケース**(Run は PULL_REQUEST のまま。`Waiting` の理由コードに出る)
+
+| 理由コード | 意味 | 対応 |
+|---|---|---|
+| (コードなし) | コンフリクト(`mergeable_state` が `dirty`)、状態が不明、作者が bot でない、または behind でない | 人がレビューする。kivra は触らない |
+| `GITHUB_CONFLICT` | 更新の要求が拒否された(head が動いた、またはコンフリクト) | 人がレビューする |
+| `GITHUB_PERMISSION` | App に権限が無い(403)。**有効化の前の確認事項**(下記) | App の権限を確認する |
+| `PR_REBASE_NOT_OBSERVED` | 要求は通ったが、新しい head が見えなかった | 後から届いた更新は、次の周期で検証されて再束縛される。届かなければ人が確認する |
+| `PR_REBASE_UPDATE_UNKNOWN` | 要求の応答が不明(再送はしない) | `NOT_OBSERVED` と同じ扱い |
+| `PR_REBASE_PARENTS_MISMATCH` | 新しい head の親が「旧 head と main の先頭」にならない(人の push の可能性を含む) | 人が確認する |
+| `PR_REBASE_DIFF_CHANGED` | PR の差分が変わった(改ざんの可能性を含む)。再束縛しない | 人が差分を確認する |
+| `PR_REBASE_VERIFY_FAILED` | 読み取りに失敗した、またはツリーが切り詰められた | 次の周期で再試行される。続くなら人が確認する |
+| `PR_REBASE_REBIND_FAILED` | 再束縛の DB 書き込みに失敗した(旧 head のまま。同じ transaction で巻き戻る) | DB とログを確認する |
+| `PR_REBASE_LIMIT_TOTAL` | 合計 3 回を使い切った | 人が PR を確認する |
+
+**確認事項(未確認): App の権限**
+- kivra の GitHub App のトークンは、`contents:write` と `pull_requests:write` を要求する(`kivra-github` の `GitHubAppTokenMinter`)。
+- この実装では、`update-branch` に必要な権限と、App の実際の付与(GitHub 上の設定)は確認していない。有効化の前に、dev で `PUT /pulls/{n}/update-branch` が 403 にならないことを確認する。403 のときは `GITHUB_PERMISSION` で人に残り、その試行も上限に数えられる。
+- 権限の追加は共有基盤の変更であり、リポジトリ管理者の承認が要る。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

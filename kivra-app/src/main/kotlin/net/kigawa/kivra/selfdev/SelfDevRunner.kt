@@ -111,6 +111,11 @@ class SelfDevRunner(
      * the only one the autopilot runs on. Null (the default) checks nothing.
      */
     private val autoScope: AutoScopeGuard? = null,
+    /**
+     * Keeps a waiting pull request on top of the base (issue #276). Null (the default, and the production value while
+     * `KIVRA_SELFDEV_PR_REBASE_ENABLED` is off) means the waiting step does exactly what it did before.
+     */
+    private val prRebaser: PrBranchRebaser? = null,
 ) {
     init {
         require(config.runtime == SelfDevRuntime.API || coding != null) { "the CLI runtime needs a coding patch source" }
@@ -426,7 +431,13 @@ class SelfDevRunner(
             val closed = runs.closeAbandonedPullRequest(lease, currentVersion(lease))
             return Advanced(run.state, closed.state, PR_ABANDONED)
         }
-        return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
+        val rebaser = prRebaser ?: return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
+        val binding = runs.loadBinding(run.runId) ?: return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
+        return when (val o = rebaser.look(lease, run, binding, pullRequest, { renewOrThrow(lease) }, { currentVersion(lease) })) {
+            PrBranchRebaser.Outcome.NoAction -> Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
+            is PrBranchRebaser.Outcome.Held -> Waiting(WaitReason.AWAITING_HUMAN_REVIEW, o.code)
+            PrBranchRebaser.Outcome.Rebound -> Waiting(WaitReason.AWAITING_HUMAN_REVIEW, REBASE_REBOUND)
+        }
     }
 
     /**
@@ -539,6 +550,9 @@ class SelfDevRunner(
         const val PR_ABANDONED = "PR_ABANDONED"
         const val CANCEL_REQUESTED = "CANCEL_REQUESTED"
         const val PR_MERGED = "PR_MERGED"
+
+        /** The waiting reason code after a verified head was recorded (issue #276). */
+        const val REBASE_REBOUND = "PR_REBASE_VERIFIED"
         const val MAX_BODY_CHARS = 4_000
 
         /** The run's state reason when its task reference cannot be used (Issue #229 addendum). The sub reason is the audit code. */

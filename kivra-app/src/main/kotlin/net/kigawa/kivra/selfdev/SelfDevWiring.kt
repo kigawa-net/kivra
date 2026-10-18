@@ -142,6 +142,19 @@ internal fun buildSelfDev(
             maxOutputTokens = DEVELOPER_MAX_OUTPUT_TOKENS,
         ),
     )
+    // Off unless KIVRA_SELFDEV_PR_REBASE_ENABLED=true (issue #276). When off, the runner gets no rebaser and makes no extra call.
+    val prRebaser = if (settings.prRebaseEnabled) {
+        PrBranchRebaser(
+            repo = config.repo,
+            baseBranch = config.baseBranch,
+            botUserId = botUserId.reveal().toLong(),
+            port = github,
+            github = github,
+            runs = DbDevelopmentRunStore(runs),
+        )
+    } else {
+        null
+    }
     val runner = SelfDevRunner(
         config = config,
         runs = DbDevelopmentRunStore(runs),
@@ -153,6 +166,7 @@ internal fun buildSelfDev(
         coding = coding,
         references = TaskReferenceResolvers(listOf(GitHubIssueResolver(github, config.repo))),
         autoScope = PlanTaskAutoScopeGuard(SelfDevPlanRepository(database)),
+        prRebaser = prRebaser,
     )
     val worker = SelfDevWorker(
         activeRunIds = { runs.activeSelfDevRunIds() },

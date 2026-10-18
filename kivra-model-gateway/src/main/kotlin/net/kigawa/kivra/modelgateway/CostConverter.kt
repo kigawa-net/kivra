@@ -33,7 +33,26 @@ data class FxConfig(
         if (maxAgeDays < 1) throw FxConfigException("$ENV_MAX_AGE_DAYS must be a positive integer")
     }
 
+    /**
+     * When the rate expires: [fxAsOf] plus [maxAgeDays] (the same rule as [CostConverter.toYen]: a rate is refused after that instant).
+     * Null when the rate or the as-of is not configured (USD is not used). [FxExpiry.daysLeft] is the number of whole days left,
+     * rounded up, so it is 0 or less once the rate has expired. Exactly at the expiry instant it is 0 and still not expired.
+     */
+    fun expiry(clock: Clock): FxExpiry? {
+        if (usdJpyRate == null || fxAsOf == null) return null
+        val now = clock.instant()
+        val expiresAt = fxAsOf.plus(Duration.ofDays(maxAgeDays))
+        val secondsLeft = Duration.between(now, expiresAt).seconds
+        return FxExpiry(
+            asOf = fxAsOf,
+            expiresAt = expiresAt,
+            daysLeft = Math.floorDiv(secondsLeft + SECONDS_PER_DAY - 1, SECONDS_PER_DAY),
+            expired = now.isAfter(expiresAt),
+        )
+    }
+
     companion object {
+        private const val SECONDS_PER_DAY = 86_400L
         const val ENV_USD_JPY = "KIVRA_FX_USD_JPY"
         const val ENV_AS_OF = "KIVRA_FX_AS_OF"
         const val ENV_FX_MARGIN = "KIVRA_FX_MARGIN_RATIO"

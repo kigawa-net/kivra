@@ -4,8 +4,10 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
+import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import java.math.BigDecimal
+import java.time.Clock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.auth.TaskApiIdentity
@@ -13,6 +15,7 @@ import net.kigawa.kivra.modelgateway.AcknowledgeResult
 import net.kigawa.kivra.modelgateway.AcknowledgeUnpriced
 import net.kigawa.kivra.modelgateway.BudgetAmount
 import net.kigawa.kivra.modelgateway.BudgetPort
+import net.kigawa.kivra.modelgateway.FxConfig
 
 /**
  * Body of `POST /api/admin/budget/acknowledge`. Unknown fields are ignored, so an `operatorId` sent by a caller has no effect:
@@ -32,6 +35,13 @@ data class AcknowledgeBudgetRequest(
 @Serializable
 data class AcknowledgeBudgetResponse(val status: String, val reservationKey: String)
 
+/** The FX rate's expiry for operators. `fx` is null when the rate is not configured (USD is not used). Carries no secret. */
+@Serializable
+data class BudgetFxResponse(val fx: FxExpiryBody?)
+
+@Serializable
+data class FxExpiryBody(val asOf: String, val daysLeft: Long, val expired: Boolean)
+
 @Serializable
 private data class BudgetAdminError(val error: String)
 
@@ -47,8 +57,23 @@ private val budgetAdminJson = Json { ignoreUnknownKeys = true }
  * already acknowledged, 400 invalid input (fixed text), 401 unauthenticated, 404 no such reservation in that scope and period,
  * 409 the reservation is not unpriced, 503 the store could not decide.
  */
-internal fun Route.configureBudgetAdminRoutes(budget: BudgetPort, identity: TaskApiIdentity?) {
+internal fun Route.configureBudgetAdminRoutes(
+    budget: BudgetPort,
+    identity: TaskApiIdentity?,
+    fx: FxConfig? = null,
+    clock: Clock = Clock.systemUTC(),
+) {
     if (identity == null) return
+    // Read-only: the FX expiry state (for the operator's check before a rate lapses). Same authentication as the POST below.
+    get("/api/admin/budget/fx") {
+        if (identity.principal(call.request.headers) == null) {
+            call.respond(HttpStatusCode.Unauthorized, BudgetAdminError("unauthorized"))
+            return@get
+        }
+        val expiry = fx?.expiry(clock)
+        val body = expiry?.let { FxExpiryBody(it.asOfDate.toString(), it.daysLeft, it.expired) }
+        call.respond(HttpStatusCode.OK, BudgetFxResponse(body))
+    }
     post("/api/admin/budget/acknowledge") {
         val operatorId = identity.principal(call.request.headers)
         if (operatorId == null) {

@@ -59,9 +59,9 @@
 
 すべての書き込みは、`requireJsonSameOrigin` と、既存の運用者の認可を通す。理由や本文は、ログと outbox に出さない(§7)。
 
-### 2. データモデル(V16)
+### 2. データモデル(V18)
 
-V16 は、次の 4 つのテーブルを追加する(既存のテーブルは変えない。expand のみ)。`development_runs` は変えない(ADR 0001 の Run の正本のまま)。
+V18 は、次の 4 つのテーブルを追加する(既存のテーブルは変えない。expand のみ)。V16 は本 ADR の初版の番号だが、実装時点で `coding_attempt_usage`(V16)に使われていたため、V18 に読み替えた(§2.8)。`development_runs` は変えない(ADR 0001 の Run の正本のまま)。
 
 #### 2.1 `selfdev_goals`
 
@@ -147,10 +147,10 @@ Goal(`selfdev_goals.state`):
 | (なし) → `GOAL_SUBMITTED` | `POST /api/selfdev/goals` | 有効、(同じ key なら Replayed) | — |
 | `GOAL_SUBMITTED` → `PLANNING` | ワーカーが claim | 有効、全体一時停止でない、予算の予約が取れる、`version` が一致 | — |
 | `PLANNING` → `PLAN_PROPOSED` | Planner の出力が検証を通る | `version` と `claim_token` が一致(fenced)。Plan とタスクを同じ transaction で書く | — |
-| `PLANNING` → `BLOCKED` | 検証失敗が 2 回続く、または予算不足 | 同上 | `PLAN_INVALID` / `BUDGET_HOLD` |
+| `PLANNING` → `BLOCKED` | 検証失敗が 2 回続く、または予算不足 | 同上 | `PLAN_INVALID` / `PLAN_BUDGET_HOLD`(§2.8) |
 | `PLANNING` → `GOAL_SUBMITTED` | claim の期限切れ(ワーカーの停止など) | `claimed_until` を過ぎた | `CLAIM_EXPIRED` |
 | `PLAN_PROPOSED` → `TASKS_QUEUED` | 運用者が 1 件目を承認 | 承認はタスク単位 | — |
-| `PLAN_PROPOSED` → `PLANNING` | 運用者の再計画 | `revision` < 3 | `REPLAN_REQUESTED` |
+| `PLAN_PROPOSED` → `GOAL_SUBMITTED` | 運用者の再計画(Planner が claim し直す。§2.8) | `revision` < 3 | `REPLAN_REQUESTED` |
 | `TASKS_QUEUED` → `RUNNING` | 最初のタスクの投入 | §5.1 のガードを通る | — |
 | `RUNNING` / `TASKS_QUEUED` → `BLOCKED` | ガードで止まる | §5.2 | §5.2 の理由 |
 | `BLOCKED` → `RUNNING` / `TASKS_QUEUED` | ガードが解消 | 自動で解消するもの(滞留、日次上限、月次予算の次の期間)。手動のもの(サーキットブレーカー、範囲外の変更)は運用者の再開が要る | `GUARD_CLEARED` / `OPERATOR_RESUMED` |
@@ -188,6 +188,21 @@ Run の状態機械(`DevelopmentRunState`)は変えない。
 
 - **Planner は fencing が要る。** 外部のモデル呼び出しは長く、その間に claim が切れて別のワーカーが同じ Goal を取ることがある。出力を書くときは、`version` と `claim_token` が一致したときだけ書く。一致しなければ捨て、監査に残す(`PLAN_DISCARDED_STALE`)。lease の既存の仕組み(`LeaseStore`、`Lease.generation`)は Run 向けで、Goal には使わず、同じ考え方を `claim_token` と `version` で実現する。
 - **Dispatcher は lease が要らない。** 投入は DB の中だけで完結し、外部の呼び出しを含まない。二重投入は `idempotencyKey` の一意制約と、`QUEUED → SUBMITTING` の CAS で防ぐ。`SUBMITTING` のまま止まった行は、次の tick が同じ key で再投入して直す。
+
+#### 2.8 実装時(PR A)の判断
+
+PR A(V18、リポジトリ層、状態機械)で、本節の判断をした。いずれも ADR の本文と食い違う点、または本文に無い点であり、ここで記録する。
+
+- **番号**: 初版の V16 は使用済み(`coding_attempt_usage`)のため、V18 とする。V17 は `task_body_and_reference`(#229)。
+- **`selfdev_goals` に `resume_state` と `resume_reason` を足す**: §2.5 の「PAUSED は前の状態に戻す」を実現するには、一時停止の直前の状態を保存する必要がある。PAUSED の間だけ値を持つ。
+- **再計画の遷移は `PLAN_PROPOSED → GOAL_SUBMITTED`**: §2.5 の `PLANNING` に戻すと、claim の無い `PLANNING` が生じる。`PLANNING` は「claim されている間」だけの状態とし、Planner が `GOAL_SUBMITTED` を claim して `PLANNING` に入る。
+- **計画段階の `BLOCKED` の理由は `PLAN_INVALID` / `PLAN_BUDGET_HOLD`**: §2.5 の `BUDGET_HOLD` は、計画段階とディスパッチ段階の両方で使われていた。両方に同じ理由を使うと、計画段階で止まった Goal が、ディスパッチの自動解消(`GUARD_CLEARED`)で `RUNNING` へ進んでしまう。そのため計画段階は別の理由にした。この結果、計画段階で `BLOCKED` になった Goal は `STOPPED` 以外へ進めない(未決の点 U-16)。
+- **タスクの終端は `COMPLETED` と `SKIPPED`**: §2.5 は Goal の終端だけを定めている。タスクでは、`COMPLETED` は PR のマージ済み、`SKIPPED` は運用者の判断で、どちらも再投入させない。`FAILED` / `CANCELLED` は、運用者の再投入(§5.4)で `QUEUED` に戻る。
+- **依存の検査は repository の CAS の中で行う**: `QUEUED → SUBMITTING` の時点で、依存先の全てが `COMPLETED` であることを確かめる(§5.1)。Dispatcher を書く前に、この条件が破られないようにするため。
+- **`REJECTED` の Plan は PR A では書かない**: 状態と遷移(`null → REJECTED` は `PLAN_INVALID`)は表にあるが、書く経路は PR B(Planner)で入る。REJECTED の行が `revision` を消費するかどうかは、PR B で決める(消費させる案が、回数の上限 3 と整合する)。
+- **control 行は migration で 1 行入れる**: 行の無い状態を作らないため。`control_id = 1` の CHECK で 2 行目を拒否する。
+- **日次カウンタは UTC の日付**: §U-3 の暫定どおり。`runs_today` と `day_utc` は、1 つの UPDATE の中で日付の変わり目を判定する。
+- **連続失敗の計数は全体で 1 本**: §U-5 の暫定どおり。`breaker_open` は、計数が上限に達した UPDATE の中で立つ。成功は計数を 0 にするが、開いたブレーカーは閉じない(運用者の再開だけが閉じる、§5.4)。
 
 ### 3. Planner(計画の作成)
 
@@ -317,7 +332,7 @@ Run の状態機械(`DevelopmentRunState`)は変えない。
 前提: **#230**(CLI 経路の費用の計上)、**#229**(依頼文の本文)が満たされるまで、段階 1 も有効化しない。#231(reconcile の配線)と #222(E2E)は、段階 1 の有効化の前に必要とする。
 
 1. **本 ADR と runbook の入口**(この PR)。
-2. **V16 とリポジトリ層、状態機械**: 4 テーブル、遷移表の純粋関数(kivra-core)と、その単体テスト。
+2. **V18 とリポジトリ層、状態機械**: 4 テーブル、遷移表の純粋関数(kivra-core)と、その単体テスト。
 3. **Planner**: ModelGateway の経由、予算の予約、スキーマ、検証(§3)。fake モデルによるテスト。
 4. **Dispatcher**: 投入の規則、CAS と idempotency、ガード(§5)、サーキットブレーカー、再開の操作。
 5. **UI と HTTP**: Goal フォーム、Plan の一覧、承認、一時停止、中止(§1)。
@@ -342,7 +357,7 @@ Run の状態機械(`DevelopmentRunState`)は変えない。
 - 費用は、月次の割当て、日次の上限、再計画の上限、サーキットブレーカーで抑える。ただし CLI 経路の費用は #230 が計上するまで、割当てを正確に測れない。
 - 計画の正しさは保証しない。検証はスキーマ、範囲、依存の形を確かめるだけであり、タスクの中身が正しいかは CI と PR のレビューが確かめる。
 - 段階 1 では、運用者の承認が必要なため、速度は上がりにくい。段階 2 の判定は、計画の見積りに頼るため、§6.2 の差分の再検査が要る。
-- V16 は 4 つのテーブルを増やす。既存のテーブルと Run の状態機械は変えない。
+- V18 は 4 つのテーブルを増やす。既存のテーブルと Run の状態機械は変えない。
 - Goal の本文は DB に保存されるため、運用者の入力を消す手段が必要になる(未決の点 U-9)。
 
 ## 未決の点
@@ -364,6 +379,7 @@ Run の状態機械(`DevelopmentRunState`)は変えない。
 - **U-13 Planner の再計画と検証の回数**: 再計画は 3 回まで、検証の再試行は 1 回(暫定)。
 - **U-14 Goal の本文の上限**: 8000 文字(暫定)。#229 の依頼文の本文の上限と揃える。
 - **U-15 対象リポジトリの変更**: 段階 1 では画面から変えない(暫定)。複数リポジトリを扱う要件が出たら、別の ADR で扱う。
+- **U-16 計画段階で止まった Goal の回復**: §2.8 の判断により、計画段階の `BLOCKED` は `STOPPED` 以外へ進めない。運用者が計画をやり直す経路(`GOAL_SUBMITTED` へ戻す、または中止のみ)を、PR B(Planner)で決める。
 
 ## 見直しの条件
 

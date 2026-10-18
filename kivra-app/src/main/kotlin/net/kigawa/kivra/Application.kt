@@ -145,7 +145,10 @@ internal fun Application.appModule(env: Map<String, String>) {
     } else {
         null
     }
-    val mcpDeps = buildMcpRouteDeps(mcpSettings, env, runs, selfDevSettings.config?.repo)
+    val mcpDeps = buildMcpRouteDeps(
+        mcpSettings, env, runs, selfDevSettings.config?.repo,
+        selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns,
+    )
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)
     // The FX expiry warning (daily). FX is read only when a USD path is on (the agent API or self-development, which need the rate);

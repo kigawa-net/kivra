@@ -124,10 +124,11 @@ internal fun Route.configureMcpRoutes(deps: McpRouteDeps) {
             else -> Unit
         }
         val dispatch = deps.dispatcher.dispatch(element, caller)
-        logger.info(mcpAuditLine(dispatch.method, dispatch.tool, caller.principal, dispatch.outcome))
+        logger.info(mcpAuditLine(dispatch.method, dispatch.tool, caller.principal, dispatch.outcome, dispatch.runId))
         val response = dispatch.response
         when {
             response == null -> call.respond(HttpStatusCode.Accepted)
+            dispatch.rateLimited -> call.respondJsonRpc(HttpStatusCode.TooManyRequests, response)
             dispatch.requiredScope != null -> {
                 call.challenge(metadataUrl, error = "insufficient_scope", scope = dispatch.requiredScope)
                 call.respondJsonRpc(HttpStatusCode.Forbidden, response)

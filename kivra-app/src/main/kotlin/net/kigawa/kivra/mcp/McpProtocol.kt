@@ -39,15 +39,25 @@ class InvalidParamsException(message: String) : RuntimeException(message)
 /** The authenticated caller of one request: its owner key and the scopes its token carries. */
 class McpCaller(val principal: String, val scopes: Set<String>)
 
-/** A tool's answer. [code] is a fixed outcome name for the audit line (for example `OK` or `NOT_FOUND`). */
-class ToolOutcome(val isError: Boolean, val text: String, val structured: JsonObject, val code: String)
+/**
+ * A tool's answer. [code] is a fixed outcome name for the audit line (for example `OK` or `NOT_FOUND`). [runId] is set only when the
+ * answer names a run, and goes to the audit line (never a title or body).
+ */
+class ToolOutcome(val isError: Boolean, val text: String, val structured: JsonObject, val code: String, val runId: String? = null)
 
-/** One MCP tool. Read-only in PR 1. The scope is checked by the dispatcher before the handler runs. */
+/**
+ * One MCP tool. The scope is checked by the dispatcher before the handler runs.
+ * - [write]: the tool changes state. Its calls count against the write rate limit of the dispatcher.
+ * - [listed]: false keeps the tool out of `tools/list` while a call still reaches the handler (used for the self-development kill switch,
+ *   whose refusal has a fixed reason). A tool that is not registered at all answers `unknown tool` instead.
+ */
 class McpTool(
     val name: String,
     val description: String,
     val inputSchema: JsonObject,
     val scope: String,
+    val write: Boolean = false,
+    val listed: Boolean = true,
     val handler: suspend (McpCaller, JsonObject) -> ToolOutcome,
 )
 
@@ -61,6 +71,10 @@ class McpDispatch(
     val tool: String?,
     val outcome: String,
     val requiredScope: String? = null,
+    /** Set when the write rate limit refused the call: the route answers 429 (the body is still JSON-RPC). */
+    val rateLimited: Boolean = false,
+    /** The run the call named, for the audit line only. */
+    val runId: String? = null,
 )
 
 internal fun rpcResult(id: JsonElement, result: JsonElement): JsonObject = buildJsonObject {
@@ -84,7 +98,7 @@ internal fun rpcError(id: JsonElement?, code: Int, message: String): JsonObject 
  * Methods: `initialize` (version negotiation), `ping`, `tools/list` (only the tools the caller holds the scope for), `tools/call`.
  * A message without `id`, or one whose method starts with `notifications/`, gets no response. An unknown method is -32601.
  */
-class McpDispatcher(private val tools: List<McpTool>) {
+class McpDispatcher(private val tools: List<McpTool>, private val writeRateLimiter: McpRateLimiter? = null) {
     private val logger = LoggerFactory.getLogger(McpDispatcher::class.java)
 
     suspend fun dispatch(message: JsonObject, caller: McpCaller): McpDispatch {
@@ -125,7 +139,7 @@ class McpDispatcher(private val tools: List<McpTool>) {
             "tools/list" -> McpDispatch(
                 rpcResult(id, buildJsonObject {
                     putJsonArray("tools") {
-                        tools.filter { it.scope in caller.scopes }.forEach { tool ->
+                        tools.filter { it.listed && it.scope in caller.scopes }.forEach { tool ->
                             add(buildJsonObject {
                                 put("name", tool.name)
                                 put("description", tool.description)
@@ -171,6 +185,11 @@ class McpDispatcher(private val tools: List<McpTool>) {
             is JsonObject -> raw
             else -> throw InvalidParamsException("arguments must be an object")
         }
+        if (tool.write && writeRateLimiter != null && !writeRateLimiter.allow(caller.principal)) {
+            return McpDispatch(
+                rpcError(id, RpcCode.RATE_LIMITED, "rate limit exceeded"), "tools/call", tool.name, "rate_limited", rateLimited = true,
+            )
+        }
         val outcome = try {
             tool.handler(caller, arguments)
         } catch (e: InvalidParamsException) {
@@ -191,7 +210,7 @@ class McpDispatcher(private val tools: List<McpTool>) {
             put("structuredContent", outcome.structured)
             put("isError", outcome.isError)
         }
-        return McpDispatch(rpcResult(id, result), "tools/call", tool.name, outcome.code)
+        return McpDispatch(rpcResult(id, result), "tools/call", tool.name, outcome.code, runId = outcome.runId)
     }
 
     private fun isValidId(el: JsonElement): Boolean {
@@ -203,8 +222,9 @@ class McpDispatcher(private val tools: List<McpTool>) {
 }
 
 /** The fixed fields of one request, for the audit line. Never an argument value, a run body or a token. */
-internal fun mcpAuditLine(method: String, tool: String?, principal: String, outcome: String): String =
-    "mcp.call method=${method.take(64)} tool=${tool ?: "-"} principal=${principalHash(principal)} outcome=$outcome"
+internal fun mcpAuditLine(method: String, tool: String?, principal: String, outcome: String, runId: String? = null): String =
+    "mcp.call via=mcp method=${method.take(64)} tool=${tool ?: "-"} principal=${principalHash(principal)} outcome=$outcome" +
+        (runId?.let { " run_id=$it" } ?: "")
 
 /** The first 12 hex characters of SHA-256 over the owner key. Stable for a caller, not reversible to the identity. */
 internal fun principalHash(principal: String): String =

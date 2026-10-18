@@ -1493,7 +1493,7 @@ SELECT kind, COUNT(*) AS n
 
 これらが動かない場合の代替: 画面は REST のポーリング(スナップショットを数秒ごと、差分は `events` のカーソル)で足りる。SSE は必要にならない限り使わなくてよい。
 
-## 8. MCP エンドポイント(`/mcp`、ADR 0013、Issue #181、PR 1: 読み取りのみ)
+## 8. MCP エンドポイント(`/mcp`、ADR 0013、Issue #181、PR 1: 読み取り、PR 4: 書き込み `kivra_selfdev_start`)
 
 既定は無効。`KIVRA_MCP_ENABLED` が未設定、`false`、空のとき、MCP の変数は他に一つも読まれず、`/mcp` と `/.well-known/oauth-protected-resource` は登録されない(404)。
 
@@ -1507,6 +1507,8 @@ SELECT kind, COUNT(*) AS n
 - `KIVRA_MCP_ALLOWED_ORIGINS`(任意)。カンマ区切りの `Origin`(例 `https://kivra-dev.kigawa.net`)。`Origin` ヘッダーが付いたリクエストは、一覧に一致する必要がある。`Origin` が無いリクエスト(非ブラウザのクライアント)は通す。
 - `KIVRA_MCP_RATE_PER_MINUTE`(任意、既定 60、1〜6000)。主体(所有者のキー)ごとに、1 分あたりの上限。超えると 429。
 - `KIVRA_AGENT_REQUIRED_ROLE`(任意)。設定されていれば、そのロールを持つトークンは 403(エージェントは MCP の呼び出し元ではない)。`aud` の検査で、エージェントのトークンは既に 401 になる。これは多層防御。
+- `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
+- `KIVRA_MCP_WRITE_RATE_PER_MINUTE`(任意、既定 5、1〜6000)。書き込みの呼び出しの、主体ごとの 1 分あたりの上限。読み取りの上限(`KIVRA_MCP_RATE_PER_MINUTE`)とは別。超えると 429。書き込みが無効のときは読まれない。
 
 不正な値は起動を止める。エラーには変数の名前だけが出て、値は出ない。
 
@@ -1539,11 +1541,58 @@ SELECT kind, COUNT(*) AS n
 
 - 入力は厳格(未知の項目、型違い、範囲外は JSON-RPC の -32602)。
 - 題名(title)、本文、パッチ、トークン、ログは返さない。
-- 書き込みのツール(`kivra_selfdev_start`、`kivra_run_stop`)は、この PR では `tools/list` に出ず、呼べば -32602(未知のツール)。
+- 書き込みのツール `kivra_selfdev_start` は §8.7 のとおり。`KIVRA_MCP_WRITE_ENABLED` が `false` のときは `tools/list` に出ず、呼べば -32602(未知のツール)。`kivra_run_stop` は、まだ存在しない(PR 5)。
 
 ### 8.5 ログと監査
 
-1 リクエストにつき 1 行。メソッド名、ツール名、主体のハッシュ(SHA-256 の先頭 12 文字)、結果コードだけ。引数の値、Run の本文、トークン、主体の生の値は出さない。
+1 リクエストにつき 1 行。`via=mcp`、メソッド名、ツール名、主体のハッシュ(SHA-256 の先頭 12 文字)、結果コード、書き込みの場合は `run_id`。引数の値(題名、本文、`idempotency_key`)、トークン、主体の生の値は出さない。書き込みが投入されたときは、別に `mcp.selfdev_start via=mcp kind=SELF_DEV run_id=... replayed=...` の 1 行が出る。
+
+### 8.7 書き込み(`kivra_selfdev_start`、PR 4、既定は無効)
+
+#### 有効化の前提と順序
+
+書き込みは、次の順で有効にする。途中で読み取りの確認が取れなければ、先へ進まない。
+
+1. **読み取りだけを dev で確かめる**: `KIVRA_MCP_ENABLED=true` の状態で、`tools/list` に `kivra_run_list` と `kivra_run_get` が出て、`kivra_selfdev_start` が出ないことを確かめる(`KIVRA_MCP_WRITE_ENABLED` が未設定か `false`)。
+2. **キルスイッチが有効であること**: `KIVRA_SELFDEV_ENABLED=true`。off のとき、書き込みは `tools/list` に出ず、呼べば固定の理由 `KILL_SWITCH_OFF` で拒否される(§8.7 の応答)。
+3. **書き込みを有効にする**: `KIVRA_MCP_WRITE_ENABLED=true`(dev だけ。本番の既定は `false` のまま)。`KIVRA_MCP_WRITE_RATE_PER_MINUTE` は既定の 5 のまま始める。
+4. **確認**: `tools/list` に `kivra_selfdev_start` が出る(書き込みのスコープ `kivra.selfdev.start` を持つトークンだけ)。小さな依頼を一件だけ投入し、同じ `idempotency_key` で再送して `replayed: true` の同じ `run_id` が返ることを確かめる。
+
+`KIVRA_MCP_WRITE_ENABLED=true` は `KIVRA_MCP_ENABLED=true` なしでは起動を止める。
+
+#### スキーマ
+
+| 項目 | 必須 | 規則 |
+|---|---|---|
+| `title` | はい | 1〜200 文字、制御文字なし。Issue の参照(`https://github.com/<owner>/<repo>/issues/<n>`、`#<n>`、`<owner>/<repo>#<n>`)も可。参照は既存の経路で解決される(§5.1) |
+| `body` | いいえ | 0〜8000 文字。改行とタブは可、ほかの制御文字は不可。空白だけは body 無しと同じ |
+| `idempotency_key` | はい | クライアントが生成する。1〜128 文字、制御文字なし |
+
+- 余分な項目(`repo`、`command`、`env`、`token`、`branch` など)は -32602。認証情報、環境変数、任意のコマンド、リポジトリは受け取らない。
+- 型違い、範囲外、制御文字は -32602。Run は作られない。
+- 本文は UNTRUSTED のデータとして扱われる。題名に「指示を無視して」と書いても、通常の依頼として投入されるだけである。
+
+#### スコープ
+
+- 必要なスコープは `kivra.selfdev.start`。無い場合は HTTP 403 と `WWW-Authenticate: Bearer error="insufficient_scope", scope="kivra.selfdev.start"`。読み取りのスコープ(`kivra.runs.read`)だけでは呼べない。
+- 所有者は `iss` と `sub` から作るキー。同じ `idempotency_key` でも、主体が違えば別の Run になる。他人の Run を再送で取ることはできない。
+
+#### 応答(`structuredContent`)
+
+- 成功: `{"run_id": "...", "state": "CREATED", "stage": "...(あれば)", "replayed": false, "reason_code": "...(あれば)"}`。`replayed: true` は同じ key と同じ内容の再送。
+- 拒否(`isError: true`、`structuredContent.error.code` に固定の値):
+  - `KILL_SWITCH_OFF`: `KIVRA_SELFDEV_ENABLED=false`。
+  - `CONCURRENCY_LIMIT`: 同時に進む自己開発 Run が上限(`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`)に達した。
+  - `IDEMPOTENCY_CONFLICT`: 同じ key で内容が違う。既存の Run の ID は返さない。
+- 書き込みの呼び出しが上限を超えると、HTTP 429 と JSON-RPC の `-32029`(`RATE_LIMITED`)。
+- 状態は実際の値をそのまま返す(`UNKNOWN`、`WAITING` など)。「PR ができた」とは言わない。PR は `kivra_run_get` で確かめる。
+
+#### 止め方
+
+- 書き込みだけを止める: `KIVRA_MCP_WRITE_ENABLED=false`(または未設定)にして再起動。ツールは `tools/list` から消え、呼べば未知のツールになる。読み取りは続く。
+- 自己開発を全体で止める: `KIVRA_SELFDEV_ENABLED=false`(キルスイッチ、§4.4)。書き込みは `KILL_SWITCH_OFF` で拒否される。
+- MCP を全体で止める: `KIVRA_MCP_ENABLED=false`。`/mcp` は 404 になる。
+- クライアントの切断は Run をキャンセルしない。投入された Run は、切断と無関係に続く。応答が失われたら、同じ `idempotency_key` で再送すれば同じ Run が返る。
 
 ### 8.6 接続(PR 2 と PR 3 の後)
 

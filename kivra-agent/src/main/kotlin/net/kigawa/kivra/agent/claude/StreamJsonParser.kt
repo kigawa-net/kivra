@@ -20,6 +20,16 @@ import org.slf4j.LoggerFactory
 /** The kind of an API error that the CLI reported in a `system` event with subtype `api_retry`. Only these kinds are kept. */
 enum class ApiErrorKind { AUTHENTICATION, RATE_LIMIT, OVERLOADED, BILLING, OTHER }
 
+/** The API error kind of a `system` `api_retry` category. Null for no category; an unknown category is [ApiErrorKind.OTHER]. */
+internal fun apiErrorKindOf(category: String?): ApiErrorKind? = when (category) {
+    "authentication_failed" -> ApiErrorKind.AUTHENTICATION
+    "rate_limit" -> ApiErrorKind.RATE_LIMIT
+    "overloaded" -> ApiErrorKind.OVERLOADED
+    "billing_error" -> ApiErrorKind.BILLING
+    null -> null
+    else -> ApiErrorKind.OTHER
+}
+
 /** Token counts and cost as the CLI reports them. The cost is the CLI's own estimate, not the bill. Nothing here is a credential. */
 class CliUsage(
     val inputTokens: Long?,
@@ -130,7 +140,7 @@ class StreamJsonParser(
                     events++
                     when (str(obj, "type")) {
                         "result" -> result = toResult(obj)
-                        "system" -> if (str(obj, "subtype") == "api_retry") apiErrorKind(str(obj, "error"))?.let { apiErrors += it }
+                        "system" -> if (str(obj, "subtype") == "api_retry") apiErrorKindOf(str(obj, "error"))?.let { apiErrors += it }
                     }
                 }
             }
@@ -215,15 +225,6 @@ class StreamJsonParser(
     private fun Double?.orZero(): Double = this ?: 0.0
 
     private fun tokens(obj: JsonObject?, key: String): Long? = long(obj, key)?.takeIf { it in 0..MAX_TOKENS }
-
-    private fun apiErrorKind(category: String?): ApiErrorKind? = when (category) {
-        "authentication_failed" -> ApiErrorKind.AUTHENTICATION
-        "rate_limit" -> ApiErrorKind.RATE_LIMIT
-        "overloaded" -> ApiErrorKind.OVERLOADED
-        "billing_error" -> ApiErrorKind.BILLING
-        null -> null
-        else -> ApiErrorKind.OTHER
-    }
 
     private fun str(obj: JsonObject?, key: String): String? = (obj?.get(key) as? JsonPrimitive)?.contentOrNull
 

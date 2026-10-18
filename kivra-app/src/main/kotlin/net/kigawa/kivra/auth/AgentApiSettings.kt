@@ -33,6 +33,11 @@ class AgentApiSettings private constructor(
      * nothing can read any more are deleted. Read only when the agent API is on.
      */
     val resultRetention: Duration = DEFAULT_RESULT_RETENTION,
+    /**
+     * How long the run-execution monitor's events are kept after the attempt ended (`KIVRA_CODING_MONITOR_RETENTION_DAYS`, 1 to 365, default
+     * 30). Only events of attempts that are not active, whose Run is terminal, are deleted. Read only when the agent API is on.
+     */
+    val monitorRetention: Duration = DEFAULT_MONITOR_RETENTION,
 ) {
     val enabled: Boolean get() = auth != null
 
@@ -41,9 +46,11 @@ class AgentApiSettings private constructor(
         const val ENV_RESERVE_USD = "KIVRA_AGENT_ATTEMPT_RESERVE_USD"
         const val ENV_RECONCILE_INTERVAL_SECONDS = "KIVRA_CODING_RECONCILE_INTERVAL_SECONDS"
         const val ENV_RESULT_RETENTION_DAYS = "KIVRA_CODING_RESULT_RETENTION_DAYS"
+        const val ENV_MONITOR_RETENTION_DAYS = "KIVRA_CODING_MONITOR_RETENTION_DAYS"
         val DEFAULT_RESERVE_USD: BigDecimal = BigDecimal("0.50")
         val DEFAULT_RECONCILE_INTERVAL: Duration = Duration.ofSeconds(60)
         val DEFAULT_RESULT_RETENTION: Duration = Duration.ofDays(30)
+        val DEFAULT_MONITOR_RETENTION: Duration = Duration.ofDays(30)
         private val MAX_RESERVE_USD = BigDecimal("100")
 
         private val DISABLED = AgentApiSettings(auth = null)
@@ -57,6 +64,7 @@ class AgentApiSettings private constructor(
                     attemptReserveUsd = reserveUsd(env),
                     reconcileInterval = reconcileInterval(env),
                     resultRetention = resultRetention(env),
+                    monitorRetention = monitorRetention(env),
                 )
                 else -> throw IllegalStateException("$ENV_ENABLED must be true or false")
             }
@@ -108,6 +116,12 @@ class AgentApiSettings private constructor(
         /** Whole days from 1 to 365. Errors name the variable only. */
         private fun resultRetention(env: Map<String, String>): Duration {
             val days = wholeNumber(env, ENV_RESULT_RETENTION_DAYS, 1L..365L) ?: return DEFAULT_RESULT_RETENTION
+            return Duration.ofDays(days)
+        }
+
+        /** Whole days from 1 to 365. Errors name the variable only. */
+        private fun monitorRetention(env: Map<String, String>): Duration {
+            val days = wholeNumber(env, ENV_MONITOR_RETENTION_DAYS, 1L..365L) ?: return DEFAULT_MONITOR_RETENTION
             return Duration.ofDays(days)
         }
 

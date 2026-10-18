@@ -315,4 +315,29 @@ class CodingReconcileWorkerTest {
             assertFalse(all.contains(marker), "a log line must not carry the marker")
         }
     }
+
+    /**
+     * ADR 0012 section 3: each pass also asks the monitor purge for the events older than the monitor retention, at most 200 attempts, and
+     * the number it deleted is in the pass.
+     */
+    @Test
+    fun `each pass purges the monitor events older than the monitor retention, at most 200 attempts`() = TestDb().use { db ->
+        val h = Harness(db)
+        val calls = mutableListOf<Pair<LocalDateTime, Int>>()
+        val worker = CodingReconcileWorker(
+            h.service,
+            h.results,
+            Duration.ofSeconds(60),
+            Duration.ofDays(RETENTION_DAYS),
+            Clock.systemUTC(),
+            monitorPurge = { before, maxAttempts -> calls += before to maxAttempts; 7 },
+            monitorRetention = Duration.ofDays(2),
+        )
+        val pass = worker.tick()
+        assertEquals(7, pass.monitorEventsPurged)
+        val (before, maxAttempts) = calls.single()
+        assertEquals(200, maxAttempts)
+        val expected = LocalDateTime.now(java.time.ZoneOffset.UTC).minusDays(2)
+        assertTrue(Duration.between(before, expected).abs() < Duration.ofMinutes(1), "the cut-off is now minus the monitor retention")
+    }
 }

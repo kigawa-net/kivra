@@ -232,4 +232,22 @@ PR の分割:
 
 ## 実装状況
 
-未実装。本 ADR は提案である。承認の後に §8 の PR 1 から進める。
+- **PR 1(記録の API と表、kivra 側)**: 実装済み(ブランチ `feat/monitor-events-api`、Refs #223 #224)。
+  - V20 `coding_monitor_events`(expand のみ)、`CodingMonitorEventRepository`(追記、読み取り、保持の削除)。
+  - `POST /api/agent/v1/attempts/{attemptId}/events`(`AgentIdentity`、既存の agent API と同じ認可と CSRF/Origin の扱い)。スキーマは `MonitorEventSchema` で厳格に検査する。
+  - 保持期間の設定 `KIVRA_CODING_MONITOR_RETENTION_DAYS`(既定 30、1〜365)。`CodingReconcileWorker` の周期で掃除する。
+  - 運用の手順と上限は `docs/runbook-selfdev.md` §6.17。
+  - agent 側(抽出、送信、DROPPED の計上)は PR 2(#258、main に取り込み済み)。読み取りの API は PR 3、画面は PR 4、停止は PR 5。
+- **PR 1 で決まった未決の点**(暫定の既定値を採用し、実装で確定した):
+  - **U-1(保存先)**: 新しい表 V20 を採用。`coding_events` は変えていない。
+  - **U-2(保持と上限)**: 30 日と、1 attempt あたり 2,000 件を採用。上限の印は、件数の上限に達した時に seq 0 の `TRUNCATED` として 1 件書く(seq 0 は kivra 専用。agent の seq は 1 から)。`TRUNCATED` は agent が送れない(400)。保持の掃除は、attempt の最終更新が保持期間より古く、attempt が非活性で、Run が終端のものに限る。
+  - **U-10(送信の上限)**: 1 リクエスト 50 件、本文 8 KiB、1 件 256 バイト、1 attempt あたり毎秒 5 リクエスト(429 と `Retry-After: 1`)を採用。毎秒の上限は**プロセスごと**(複数 Pod では合計が倍数になる)。待ち行列 500 件は agent 側(PR 2)。
+  - **U-11(監視の失敗で CLI を止めるか)**: kivra 側は確定。監視の失敗は 503 だけを返し、attempt の結果と heartbeat は変えない(テストで確かめている)。CLI を止めるかどうかは agent 側(PR 2)で決める。
+  - **U-15(時刻)**: サーバの受信時刻(`received_at`)だけを保存。agent の時刻は保存しない。
+- **PR 1 で追加で決めたこと**(ADR 本文には無い):
+  - `CLI_INIT` は項目を持たない。モデル名と版は、保存先の列が無いため今は保存しない(U-5 は未決のまま)。
+  - 読み取りの位置は (世代, seq) の組で指定する(§4 の `afterSeq` の表記は、世代を含めた組として扱う)。
+  - JSON の重複キーは、最後の値が使われる(この kotlinx のバージョンには拒否のスイッチが無い)。使われた値は全て検査するので、重複で自由な文字列は通らない。
+  - 保持の掃除は、attempt の最終更新時刻で判定する(イベントの受信時刻ではない)。終了した attempt は、以後イベントを受けないため、これで足りる。
+- **未決のまま残る点**: U-3(停止の権限)、U-4(閲覧の権限)、U-5(モデル名の表示)、U-6(実行中の費用)、U-7(SSE)、U-8(API の置き場所)、U-9(段階の表示)、U-12(停止の確認待ち)、U-13(SSE の接続上限)、U-14(heartbeat の PROGRESS の扱い)、U-16(文言)。
+- 本 ADR は、PR #252(このファイルの元のブランチ)とは別に、この PR で複製している。#252 をマージするときは、この「実装状況」の節の内容を保つこと。

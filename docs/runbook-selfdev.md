@@ -8,7 +8,7 @@
 
 ## 0. 現状(最初に読む)
 
-- 計画の自動作成と投入(オートパイロット)は [ADR 0011](adr/0011-selfdev-autopilot.md)(Proposed)。基盤、Planner、Dispatcher、UI と HTTP(PR A〜D)は main に実装済みで、既定では無効。運用手順は §7。段階 1 の dev での有効化と E2E は未実施。
+- 計画の自動作成と投入(オートパイロット)は [ADR 0011](adr/0011-selfdev-autopilot.md)(Proposed)。基盤、Planner、Dispatcher、UI と HTTP(PR A〜D)は main に実装済みで、既定では無効。運用手順は §7。E2E は PR E で追加(テストは `AutopilotE2ETest` / `AutopilotE2EAbnormalTest`)。dev での有効化は未実施(§7.5)。
 - 自己開発は既定で無効。`KIVRA_SELFDEV_ENABLED` が正確に `true` のときだけ有効になる。無効のときは、自己開発の他の環境変数を一切読まず、ワーカーも `/api/selfdev/*` も登録しない(`selfdev/SelfDevSettings.kt`、`Application.kt`)。
 - 有効化すると、`SelfDevWorker` が起動し、`POST /api/selfdev/tasks`、`GET /api/selfdev/runs`、`GET /api/selfdev/runs/{id}` が登録される(`routes/SelfDevRoutes.kt`)。
 - 本番で動かすには、ブランチ保護、GitHub 認証(App 推奨。PAT は代替)、Anthropic 認証(WIF 推奨。静的キーは代替)、モデル registry、為替の設定が必要。§1 を参照する。
@@ -1087,9 +1087,10 @@ Keycloak の client の Regenerate は旧 secret を**即座に失効**させる
 
 ## 7. 自己開発オートパイロット(ADR 0011、Issue #233)
 
-状態: **基盤(PR A、#243)、Planner(PR B、#244)、Dispatcher(PR C、#245)、UI と HTTP(PR D、#250)を実装済み**。段階 2 の差分の再検査(ADR 0011 §6.2)は未実装。
+状態: **基盤(PR A、#243)、Planner(PR B、#244)、Dispatcher(PR C、#245)、UI と HTTP(PR D、#250)、E2E と有効化の手順(PR E)を実装済み**。段階 2 の差分の再検査(ADR 0011 §6.2)は未実装。
 `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` のときだけ動く。既定(無効)では何も起きない。
 Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_PROPOSED` に進める。承認された Plan のタスクは、Dispatcher が §5 のガードを確かめたうえで投入する。
+dev での有効化の手順は §7.5。
 運用手順は §7.4(Goal の入力、承認、中止、再計画、一時停止、ブレーカーの再開)。
 
 ### 7.1 設定項目
@@ -1156,6 +1157,79 @@ Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_
 ログは、操作の ID と固定の理由コード、操作した運用者の短いダイジェスト(SHA-256 の先頭 12 文字)だけを出す。本文、理由、運用者の ID は出ない。
 
 **やってはいけないこと**: 作成済みの PR を、この画面の操作で閉じる、またはマージすることを期待しない。マージは人が行う(ADR 0008、ADR 0009)。
+
+### 7.5 dev でオートパイロットを有効化する手順(PR E)
+
+対象は dev だけである。段階 1(`APPROVAL=required`、全タスクを運用者が承認)で始める。段階 2 と 3 は、ADR 0011 §6.3 の昇格条件を満たしてから、別の判断で行う。
+**k8s の変更は、この節の手順には含まない。** env の変更は別の PR で行い、ArgoCD で反映する。ここに書く値は秘密ではない。API キー、鍵の内容、トークンは書かず、扱わない。
+
+#### 7.5.1 前提(すべて満たす)
+
+| 項目 | 必要な値 | 欠けたときの結果 |
+|---|---|---|
+| 自己開発 | `KIVRA_SELFDEV_ENABLED=true`、`KIVRA_SELFDEV_RUNTIME=cli`、`KIVRA_AGENT_API_ENABLED=true`(§1.2.1、§6.9) | オートパイロットの起動が失敗する |
+| 認証 | `KIVRA_AUTH_MODE=oidc-jwt`、運用者のロール `admin-panel:admin`(§1.1) | 起動が失敗する |
+| エージェントの拒否 | `KIVRA_AGENT_REQUIRED_ROLE=<client>:<role>`(例: `kivra-agent:agent`)。エージェントのクライアントは、運用者のロールを持たせない | 起動が失敗する。ロールが無いと、エージェントのトークンが運用者の API に入れてしまう |
+| モデル | `KIVRA_SELFDEV_MODEL_REGISTRY_PATH` の registry に `claude-haiku-5-5` があり、`ACTIVE` であること。Anthropic の認証は §1.1 の設定を使う | registry の読み込みか、モデルの確認で起動が失敗する |
+| GitHub | §1.1 の GitHub 認証と `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` | 起動が失敗する(既存の自己開発と同じ) |
+| 為替 | §1.1 の `KIVRA_FX_USD_JPY`、`KIVRA_FX_AS_OF` | 起動が失敗する(既存の自己開発と同じ) |
+| 費用の計上 | CLI 経路の費用が予算 ledger に計上されること(#230、§6.13)。**起動時の検査は無い**(ADR 0011 §5.3 の検査は未実装)。有効化の前に、§6.13 の方法で計上を確かめる | 計上されない費用の上で自動投入が動く |
+
+#### 7.5.2 k8s の env(dev、別 PR で設定する値)
+
+| 名前 | 値 | 備考 |
+|---|---|---|
+| `KIVRA_SELFDEV_AUTOPILOT_ENABLED` | `true` | 有効化のスイッチ。これだけが既定(無効)を変える |
+| `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` | `required` | 段階 1。全タスクに運用者の承認が要る |
+| `KIVRA_SELFDEV_AUTOPILOT_MAX_PENDING_PRS` | `3` | 既定。マージ待ちの PR の上限(ただし下の注を読む) |
+| `KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES` | `3` | 既定。連続失敗でブレーカーが開く |
+| `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY` | `5` | 既定。UTC の日付 |
+| `KIVRA_SELFDEV_AUTOPILOT_BUDGET_SHARE_PERCENT` | `50` | 既定。月次予算のうち、オートパイロットの割合 |
+| `KIVRA_SELFDEV_AUTOPILOT_PLAN_INTERVAL_SECONDS` | `30` | 既定。計画と投入の周期 |
+| `KIVRA_SELFDEV_MAX_ACTIVE_RUNS` | `1` | 既定。同時に進行する自己開発 Run の上限 |
+
+**注**: 開いている PR の Run も「進行中」として同時 Run の上限に数えられる(`activeSelfDevRunIds` は PULL_REQUEST を含む)。そのため既定の `MAX_ACTIVE_RUNS=1` では、マージ待ちの PR は常に 1 件までで、`MAX_PENDING_PRS=3` の判定には届かない。PR の上限を効かせるには、同時 Run の上限を上げる必要がある(ADR 0011 §5.2 の「上げない」との関係は未決)。
+
+#### 7.5.3 有効化の順序
+
+1. §7.5.1 の前提を確かめる。特に、エージェントのロールと、モデルの registry。
+2. §7.5.2 の env を入れた k8s の PR を出し、レビューしてマージする(ArgoCD が反映する)。
+3. 反映後、`GET /api/selfdev/autopilot` が 200 で `enabled: true` を返すことを確かめる(無効なら 503)。画面の「開発目標（Goal）」の欄が出ることでも確かめられる。
+4. 下の「有効化後の最初の確認」を、Goal 1 件で行う。
+
+#### 7.5.4 有効化後の最初の確認(画面)
+
+1. `/ui` を運用者で開く。「開発目標（Goal）」の欄が出ていること。
+2. 目的(1 行)を入れる。小さな docs の変更で足りる(例: `docs/ の用語の表記を揃える`)。背景は任意。「Goal を送る」。Goal は「計画待ち」になる。
+3. 30 秒の周期の後、Goal が「計画の承認待ち」になる。Plan の要約と各タスク(対象パス、サイズ、依存、承認が要るもの)を読む。`docs/`、`kivra-*/src/test/`、`README.md` 以外のパスがあれば、承認しない。
+4. 「この Plan を承認」を押し、次に、承認するタスクを 1 件ずつ承認する(段階 1 は全件)。
+5. 次の周期で、最初のタスクが投入される(Run ができる)。同時に進むのは 1 件だけ。Run は既存の経路で PR まで進む。
+6. PR ができたら、人がレビューしてマージする。kivra はマージしない。マージされると、Run は COMPLETED になり、次のタスクが投入される。
+
+**合格の基準**: 最初のタスクの PR ができ、人がマージした後、タスクが COMPLETED になり、次のタスクが 1 件だけ投入される。Goal は、全タスクが COMPLETED になると DONE になる。
+Run が FAILED、UNKNOWN、POLICY_REJECTED になったら、§4.1、§4.3、§4.5 で原因を見る。自動では再投入されない(§5.4)。
+
+#### 7.5.5 止め方
+
+| 止め方 | 操作 | 止まるもの | 止まらないもの |
+|---|---|---|---|
+| 全体の一時停止 | 画面の「自律運転を一時停止」(`POST /api/selfdev/autopilot/pause`) | 新しい計画と、新しい投入 | 進行中の Run(PR まで進む) |
+| 有効化の停止 | k8s の `KIVRA_SELFDEV_AUTOPILOT_ENABLED` を `false` にする、または外す(別 PR) | 計画と投入。`/api/selfdev/goals*` は 503 になる | 進行中の Run。自己開発が有効なら、既存のワーカーが進める |
+| 自己開発の停止 | `KIVRA_SELFDEV_ENABLED=false`(§4.4) | Run の進行と、すべての投入 | 作成済みの PR(kivra は閉じない) |
+
+#### 7.5.6 ロールバック
+
+- 設定を戻す(`KIVRA_SELFDEV_AUTOPILOT_ENABLED=false`)。コードの変更は要らない。
+- DB の行は消さない。V18 と V19 は expand のみで、既存の表は変わらない。Goal の本文は DB に残る(U-9 は未決で、削除の手段は無い)。消す必要がある場合は、別の判断として行う。
+- 残った Goal は、状態のまま残る。中止が必要なら、運用者が画面の「中止」で `STOPPED` にする(未投入のタスクは `SKIPPED`)。
+- 投入済みの PR は閉じない、マージしない(kivra は PR に触れない)。
+
+#### 7.5.7 有効化の前に知っておく制約
+
+- 起動時に、CLI 経路の費用の計上を検査しない(ADR 0011 §5.3)。
+- 既定の同時 Run 上限(1)では、マージ待ちの PR の上限(3)は効かない(§7.5.2 の注)。
+- 失敗したタスクは自動では再投入されず、Goal は `RUNNING` のまま残る(ADR に、失敗による Goal の終端は無い)。残りは運用者が Goal を中止して終える。
+- **既知の不具合**: サーキットブレーカーが開いた後、運用者が再開(`POST /api/selfdev/autopilot/reset-breaker`)しても、そのとき `BLOCKED`(`CIRCUIT_OPEN`)になっていた Goal は投入されない。回避は、その Goal を中止して、新しい Goal を入れること。修正は別の PR で行う(テストは `AutopilotE2EAbnormalTest` の (b))。
 
 ### 7.3 状態遷移
 

@@ -29,6 +29,8 @@ import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.or
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.count
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -63,6 +65,8 @@ data class DevelopmentRun(
     val taskBody: String? = null,
     /** The reference the body was resolved from, `owner/repo#n` (V17). Null when nothing was resolved. */
     val taskSource: String? = null,
+    /** The stage the run is in (`current_stage`), null when none. Read-only here. */
+    val currentStage: String? = null,
 )
 
 /** Result of [DevelopmentRunRepository.submitTask]. */
@@ -316,6 +320,28 @@ class DevelopmentRunRepository(
                     null -> byPrincipal
                     true -> byPrincipal and (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%")
                     false -> byPrincipal and (DevelopmentRunsTable.taskId notLike "$SELF_DEV_TASK_PREFIX%")
+                }
+            }
+            .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
+            .limit(limit)
+            .mapNotNull { it.toDevelopmentRunOrNull() }
+    }
+
+    /**
+     * One page of [principal]'s self-development runs, newest first, after [after] (the last run of the previous page, which the caller
+     * has already checked to be owned by [principal]). Keyset paging on (createdAt, runId), so a run is never skipped or repeated.
+     */
+    fun listSelfDevPage(principal: String, limit: Int, after: DevelopmentRun?): List<DevelopmentRun> = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where {
+                val owned = (DevelopmentRunsTable.principal eq principal) and (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%")
+                if (after == null) {
+                    owned
+                } else {
+                    owned and (
+                        (DevelopmentRunsTable.createdAt less after.createdAt) or
+                            ((DevelopmentRunsTable.createdAt eq after.createdAt) and (DevelopmentRunsTable.runId less after.runId.value))
+                        )
                 }
             }
             .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
@@ -877,6 +903,7 @@ class DevelopmentRunRepository(
         idempotencyKey = this[DevelopmentRunsTable.idempotencyKey],
         taskBody = this[DevelopmentRunsTable.taskBody],
         taskSource = this[DevelopmentRunsTable.taskSource],
+        currentStage = this[DevelopmentRunsTable.currentStage],
     )
 }
 

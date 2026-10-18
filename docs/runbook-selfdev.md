@@ -1401,3 +1401,63 @@ SELECT kind, COUNT(*) AS n
 **デプロイ順序**: kivra を先に出す。エージェントの送信(PR 2)は、この経路が受理できるようになってから出す。逆の順序では、送信が 400 か 404 で落ちる(監視だけが失われ、attempt は影響を受けない)。
 
 **未実装**: 読み取りの API と画面(PR 3、PR 4)。停止(PR 5)。SSE。
+
+## 8. MCP エンドポイント(`/mcp`、ADR 0013、Issue #181、PR 1: 読み取りのみ)
+
+既定は無効。`KIVRA_MCP_ENABLED` が未設定、`false`、空のとき、MCP の変数は他に一つも読まれず、`/mcp` と `/.well-known/oauth-protected-resource` は登録されない(404)。
+
+**未実装の前提**: MCP クライアントが OAuth でログインするための Keycloak の public client は PR 2(`kigawa01/k8s-system`)、`/mcp` を oauth2-proxy の外へ出す ingress は PR 3(`kigawa-net/kigawa-net-k8s`)。この PR だけでは、クライアントから接続できない。動作確認は、テストか、トークンを手で付けた直接の HTTP 呼び出しに限られる。
+
+### 8.1 有効化の前提(起動時に検査される)
+
+- `KIVRA_MCP_ENABLED=true` には `KIVRA_AUTH_MODE=oidc-jwt` が要る。`KIVRA_OIDC_*`(issuer、JWKS、`KIVRA_OIDC_AUDIENCE`、`KIVRA_OIDC_REQUIRED_ROLE`)は、REST と同じものを使う。
+- `KIVRA_MCP_AUDIENCE`(必須)。`https://<host>/mcp` の形(例 `https://kivra-dev.kigawa.net/mcp`)。MCP のアクセストークンの `aud` に、この値が含まれること。
+- `KIVRA_MCP_ALLOWED_HOSTS`(必須)。カンマ区切りの `Host`(例 `kivra-dev.kigawa.net`)。一致しなければ 403。
+- `KIVRA_MCP_ALLOWED_ORIGINS`(任意)。カンマ区切りの `Origin`(例 `https://kivra-dev.kigawa.net`)。`Origin` ヘッダーが付いたリクエストは、一覧に一致する必要がある。`Origin` が無いリクエスト(非ブラウザのクライアント)は通す。
+- `KIVRA_MCP_RATE_PER_MINUTE`(任意、既定 60、1〜6000)。主体(所有者のキー)ごとに、1 分あたりの上限。超えると 429。
+- `KIVRA_AGENT_REQUIRED_ROLE`(任意)。設定されていれば、そのロールを持つトークンは 403(エージェントは MCP の呼び出し元ではない)。`aud` の検査で、エージェントのトークンは既に 401 になる。これは多層防御。
+
+不正な値は起動を止める。エラーには変数の名前だけが出て、値は出ない。
+
+### 8.2 エンドポイント
+
+| パス | メソッド | 内容 |
+|---|---|---|
+| `/mcp` | POST | Streamable HTTP(ステートレス、JSON-RPC 2.0)。`initialize`、`ping`、`tools/list`、`tools/call` |
+| `/mcp` | GET | 405(サーバーからの push は持たない) |
+| `/.well-known/oauth-protected-resource` | GET | RFC 9728 の protected resource metadata。`resource` は `KIVRA_MCP_AUDIENCE`、`authorization_servers` は issuer |
+
+- 対応する protocolVersion: `2025-06-18`(最新)と `2025-03-26`。それ以外の版を要求されたときは、`2025-06-18` を返す(クライアントが判断する)。
+- 通知(`notifications/*`、`id` の無いメッセージ)は 202 で本文なし。バッチ(JSON 配列)は 400(2025-06-18 で削除された)。
+- 本文の上限は 64 KiB(超えると 413)。`Content-Type` は `application/json`(違えば 415)。`Accept` に `application/json` も `text/event-stream` も無ければ 406。`MCP-Protocol-Version` ヘッダーが対応外なら 400。
+
+### 8.3 認証と認可
+
+- Bearer トークンは `Authorization` ヘッダーだけから読む(`X-Forwarded-Access-Token` は使わない)。検証は、RS256、JWKS の署名、`iss`、`aud`(MCP の値)、`exp`、`nbf`、必要なクライアントロール(REST と同じ)。
+- 未認証は 401 と `WWW-Authenticate: Bearer resource_metadata="https://<host>/.well-known/oauth-protected-resource"`。本文は JSON-RPC のエラー。
+- エージェントのトークン(`kivra-agent` の audience)は 401。ロールを持つ場合は 403。
+- スコープは `scope` クレーム(空白区切り)。ツールごとに必要なスコープが違い、足りなければ 403 と `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`。
+- 所有者は `iss` と `sub` から作るキー(`email` は使わない)。他人の Run は、存在しない Run と同じく `NOT_FOUND`。
+
+### 8.4 ツール(PR 1 の範囲は読み取り 2 つだけ)
+
+| ツール | 必要なスコープ | 入力 | 出力(`structuredContent`) |
+|---|---|---|---|
+| `kivra_run_list` | `kivra.runs.read` | `limit`(1〜50、既定 20)、`cursor`(任意、前ページの `next_cursor`) | `runs`(`run_id`、`kind`、`state`、`stage`、`reason_code`、`pr_url`、`created_at`、`updated_at`)、`next_cursor` |
+| `kivra_run_get` | `kivra.runs.read` | `run_id`(26 文字) | 1 件の同じ項目。他人の Run や無い Run は `reason_code: NOT_FOUND`(`isError: true`) |
+
+- 入力は厳格(未知の項目、型違い、範囲外は JSON-RPC の -32602)。
+- 題名(title)、本文、パッチ、トークン、ログは返さない。
+- 書き込みのツール(`kivra_selfdev_start`、`kivra_run_stop`)は、この PR では `tools/list` に出ず、呼べば -32602(未知のツール)。
+
+### 8.5 ログと監査
+
+1 リクエストにつき 1 行。メソッド名、ツール名、主体のハッシュ(SHA-256 の先頭 12 文字)、結果コードだけ。引数の値、Run の本文、トークン、主体の生の値は出さない。
+
+### 8.6 接続(PR 2 と PR 3 の後)
+
+```
+claude mcp add --transport http kivra https://kivra-dev.kigawa.net/mcp
+```
+
+OAuth の登録方式(固定の public client、PKCE S256)は PR 2 で決める。それまでは、この行は使えない。

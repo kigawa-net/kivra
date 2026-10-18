@@ -1,6 +1,7 @@
 package net.kigawa.kivra.db
 
 import java.sql.DriverManager
+import java.sql.SQLNonTransientConnectionException
 import javax.sql.DataSource
 import net.kigawa.kivra.config.DatabaseConfig
 import org.jetbrains.exposed.sql.Database
@@ -115,6 +116,16 @@ class TestDb(
     }
 
     override fun close() {
+        // DB_CLOSE_DELAY=-1 keeps an in-memory H2 database alive until SHUTDOWN, even after its pool is closed. Without this, each
+        // of the suite's ~700 TestDb instances stays on the heap for the whole test JVM and the JVM runs out of heap.
+        if (schema == null) {
+            try {
+                dataSource.connection.use { it.createStatement().use { st -> st.execute("SHUTDOWN") } }
+            } catch (e: SQLNonTransientConnectionException) {
+                // SHUTDOWN closes the database under the connection that issued it, so H2 reports "database already closed" for
+                // that connection. The database is closed, which is the goal; any other failure still propagates.
+            }
+        }
         closeDataSource(dataSource)
         if (schema != null) {
             val server = System.getenv("KIVRA_TEST_MARIADB_URL") ?: "jdbc:mariadb://localhost:3306/"

@@ -8,6 +8,7 @@ import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.DbRequestLedger
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevPlanRepository
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.developer.DeveloperConfig
 import net.kigawa.kivra.developer.LlmDeveloper
@@ -151,6 +152,7 @@ internal fun buildSelfDev(
         taskTexts = DbTaskTextSource,
         coding = coding,
         references = TaskReferenceResolvers(listOf(GitHubIssueResolver(github, config.repo))),
+        autoScope = PlanTaskAutoScopeGuard(SelfDevPlanRepository(database)),
     )
     val worker = SelfDevWorker(
         activeRunIds = { runs.activeSelfDevRunIds() },

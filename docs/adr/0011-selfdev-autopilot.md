@@ -232,6 +232,24 @@ PR E の E2E で見つかった 2 件の修正。マイグレーションは足�
 - **起動時の検査(§5.3)**: `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` は、CLI 経路の費用の計上が有効なときだけ起動を許す。有効とは、`KIVRA_AGENT_API_ENABLED=true`、`KIVRA_FX_USD_JPY` と `KIVRA_FX_AS_OF` が設定されていること、`KIVRA_SELFDEV_MODEL_REGISTRY_PATH` が設定されていること。不足は、変数名を並べて拒否する(値は出さない)。FX の期限切れは拒否しない(既存の `FxExpiryWatcher` が警告する)。なお `SelfDevSettings` は、自己開発の有効化の時点で、この FX と registry を既に要求している。オートパイロットの検査は、その前提を自己完結させるための重ねである。
 - **起動ログ**: 有効な上限(`maxActiveRuns`、`maxPendingPrs`、`maxConsecutiveFailures`、`maxRunsPerDay`、`budgetSharePercent`)を、数値だけで INFO に 1 行出す。`maxPendingPrs` が `maxActiveRuns` より大きいときは、PR の上限が同時 Run の上限で先に制限される旨の WARN を 1 行出す(§2.8 の E2E の発見)。
 
+#### 2.8d 実装時(PR F: 段階 2 の差分の再検査)の判断
+
+§6.2 の再検査を実装した。マイグレーションは足さない。
+
+- **自動承認の印**: 段階 2 の自動承認のタスクは、`approved_by` が無い(計画の保存時に `QUEUED` で入るか、Dispatcher の `approveAuto` で `AUTO_APPROVED` の遷移をしたもの)。運用者の承認(`approveTask`)は必ず `approved_by` を入れる(V19)。そこで、「`run_id` があり、`approved_by` が無いタスク」を自動承認の Run とみなす。AUTO_APPROVED の履歴は、タスクの `state_reason` に残らない(投入の `QUEUED → SUBMITTING` が理由を null にする)ため、この判定は既存の列だけで行う。
+- **遷移**: タスクに `SUBMITTED → PENDING_APPROVAL`(理由 `AUTO_SCOPE_EXCEEDED`)の辺を 1 本足した(`AutopilotStates.kt`、網羅テストを更新)。Goal は既存の `RUNNING` / `TASKS_QUEUED → BLOCKED`(`AUTO_SCOPE_EXCEEDED`、`DISPATCH_BLOCK_REASONS` に既に含む)を使う。`FAILED` にはしない(計数されてしまうため)。
+- **順序(Run より先にタスクを動かす)**: 再検査の結果で、タスクと Goal を先に動かし、そのあと Run を `POLICY_REJECTED` で終える。逆の順序だと、Dispatcher が Run の結果を読んだときに、`POLICY_REJECTED` を失敗として数えてしまう。Run は正本のまま変えない(Run の状態は既存の遷移だけ)。タスクの状態は、再検査の判断を記録するためだけに、Run の終了の前に動く。この順序の残るリスクは後述。
+- **計数(§5.2)**: `AUTO_SCOPE_EXCEEDED` は、連続失敗に**数えない**。範囲の超過は、モデルや実行の失敗ではなく、運用者の承認を要する状態であるため。タスクは `SUBMITTED` を出るので、Dispatcher の Run 結果の同期は、この Run を読まない(`recordRunOutcome` は呼ばれない)。テストで確かめる。
+- **再承認と再開**: 運用者が、そのタスクを承認し直す(`PENDING_APPROVAL → QUEUED`、`OPERATOR_APPROVED`、`approved_by` を入れる)。承認されたタスクは再検査の対象外になる。Goal は、`approved_by` のある `QUEUED` のタスクがあるとき、`BLOCKED → RUNNING`(または `TASKS_QUEUED`)へ `OPERATOR_RESUMED` で戻る。他の運用者の操作は要らない。
+- **投入キーの取り替え**: Run の作成は `(principal, idempotency_key)` で同一性を判定し、同じ鍵には既存の Run を返す(Replayed)。範囲外で終わったタスクをそのまま再投入すると、失敗した Run が返って、タスクが即座に失敗になる。そこで、`run_id` を持つタスクを承認するとき、鍵を `ap:{plan_id}:{ordinal}:a{attempts}` に取り替える(`uk_selfdev_plan_tasks_idem` の一意性は保たれる)。`run_id` が無いタスクの承認は、従来の鍵のまま。FAILED のタスクを戻す操作(`OPERATOR_REQUEUED`)は HTTP に無いため、この修正の対象外だが、同じ取り替えが要る(将来の申し送り)。
+- **自動承認の再実行の防止**: 範囲外で戻されたタスクは、計画の見積り(docs、S)上は自動承認の条件に当たるままである。`approveAuto` は `AUTO_SCOPE_EXCEEDED` のタスクを飛ばす。飛ばさないと、戻したタスクが自動で承認され、同じ失敗を繰り返す。
+- **ログ**: 範囲外の判定は `code=AUTO_SCOPE_EXCEEDED paths=<件数> lines=<行数>`、結果の記録は ID と固定コードだけを出す。パス、内容、例外のメッセージは出さない(テストで、パスと内容のマーカーがログに出ないことを確かめる)。
+- **残るリスク(未決)**:
+  1. Run の終了の前に、タスクを動かしている。その間に worker が落ちると、Run は `DEVELOPING` のまま残る。再試行では、同じ差分で再び範囲外と判定され、記録は冪等である(テストで確かめる)。ただし、その間に運用者が承認すると、その Run は承認済みとして扱われ、差分がコミットされうる。承認は運用者の判断なので許容するが、Run と承認の順序を DB で閉じる仕組みは無い。
+  2. PatchPolicy が直接拒否する denylist のパス(例: `.github/**`、`kivra-*/src/main/resources/db/migration/**`)は、PatchPolicy の `POLICY_REJECTED` として扱われ、数える。再検査の範囲は PatchPolicy が受理したものだけである。コミットはされないため、安全側の動きである。
+  3. 行数は、書き込む内容の行数である。既存の長い内容を短く書き換える変更は、削除行を数えないため、行数の上限では止まらない。ファイル数と経路の規則は効く。差分の正確な行数には、基準のコミットの内容が要る(未決)。
+  4. 一時停止中、または中止された Goal の範囲外のタスクは、`BLOCKED` にならず `PENDING_APPROVAL` だけになる。Goal は動かないので、投入は起きない。
+
 #### 2.9 実装時(PR D: UI と HTTP)の判断
 
 PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と §4 の本文に沿い、食い違う点、または本文に無い点だけを記録する。
@@ -299,7 +317,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 | 1 日の Run 数 | `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY`(既定 **5**、UTC の日付) | 翌日 | `DAILY_RUN_CAP`(自動で解消) |
 | 月次の予算 | §5.3 | 次の月の期間 | `BUDGET_HOLD`(自動で解消) |
 | サーキットブレーカー | 全体で、**連続 3 件**の失敗(`FAILED`、Run の `UNKNOWN`、`PR_ABANDONED`)。成功(`COMPLETED`)で 0 に戻る | 運用者の再開(計数を 0 に戻す) | `CIRCUIT_OPEN`(手動) |
-| 範囲外の変更 | 段階 2 の自動の対象が、実際の差分で範囲を超えた(§6.2) | 運用者が確認して再開 | `AUTO_SCOPE_EXCEEDED`(手動) |
+| 範囲外の変更 | 段階 2 の自動の対象が、実際の差分で範囲を超えた(§6.2) | 運用者が、そのタスクを承認し直す(承認で Goal が再開する。§2.8d) | `AUTO_SCOPE_EXCEEDED`(手動) |
 | 投入の前の Goal の状態 | Goal が `TASKS_QUEUED` / `RUNNING` でない(`STOPPED`、`PAUSED` など)。投入の直前に Goal の行をロックして読み直す(§2.8b、PR E) | 状態は変えず、投入しない | `GOAL_NOT_DISPATCHABLE`(ログのみ) |
 | 承認 | `requires_approval` かつ未承認 | 運用者の承認 | 状態は `PENDING_APPROVAL` のまま |
 
@@ -314,7 +332,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 #### 5.4 再開の操作
 
 - **自動で解消するもの**(滞留、日次上限、予算の期間): 次の tick で再評価される。運用者の操作は要らない。
-- **手動のもの**(`CIRCUIT_OPEN`、`AUTO_SCOPE_EXCEEDED`): 運用者が理由を確認し、再開する。再開は連続失敗の計数を 0 に戻す(`CIRCUIT_OPEN` のとき)。原因が直っていないまま再開しても、再び 3 件で止まる。
+- **手動のもの**(`CIRCUIT_OPEN`、`AUTO_SCOPE_EXCEEDED`): 運用者が理由を確認し、再開する。再開は連続失敗の計数を 0 に戻す(`CIRCUIT_OPEN` のとき)。原因が直っていないまま再開しても、再び 3 件で止まる。`AUTO_SCOPE_EXCEEDED` の再開は、そのタスクを運用者が承認し直すこと(§2.8d)。承認すると、タスクは新しい投入キーで投入され、Goal は再開する。
 - **失敗したタスク**(`FAILED` / `CANCELLED`): 自動で再投入しない。運用者が `再投入`(`QUEUED` に戻す)か `SKIPPED` を選ぶ。自動の再投入は、同じ失敗の繰り返しを招くため採らない。
 - **UNKNOWN の Run**: ADR 0009 の運用者の解放(`release` または `release-unbound-pr`)を使う。解放後、タスクは `CANCELLED` になり、運用者が上の再投入を選ぶ。
 - **Goal の中止**: 残りのタスクを `SKIPPED` にし、既に作られた PR はそのまま残す。PR の扱い(閉じる、残す)は人が決める。kivra は PR を閉じず、マージもしない(ADR 0008、ADR 0009)。
@@ -335,6 +353,8 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 #### 6.2 段階 2 の検査(計画の自己申告を信頼しない)
 
 段階 2 の自動の判定は計画の見積りで行うが、**実際の差分**で再検査する。Run が `PULL_REQUEST` に入ったとき、変更されたパスが段階 2 の範囲を超えていたら、Goal を `BLOCKED(AUTO_SCOPE_EXCEEDED)` にし、運用者に知らせる。PR は残し、マージは人が判断する。PatchPolicy は従来どおり最終ゲートである。
+
+実装(PR F、§2.8d): 再検査は、CLI 経路で PatchPolicy が受理した後、コミットの前に行う。範囲外なら、コミットも PR 作成もしない。Run は既存の `POLICY_REJECTED` で終え、タスクは `PENDING_APPROVAL`(理由 `AUTO_SCOPE_EXCEEDED`)へ、Goal は `BLOCKED`(同じ理由)へ戻す。範囲の判定の条件は、§6.1 の段階 2 と同じ(docs、kivra テストソース、README だけ。denylist に触れない)に加え、変更パスが 3 件以下、変更行が 200 行以下である。運用者が承認したタスクは再検査の対象外である。
 
 #### 6.3 昇格条件(暫定)
 
@@ -396,7 +416,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 
 ## 実装状況
 
-2026-10-18 時点。PR A〜D は main に入っている。既定は無効(`KIVRA_SELFDEV_AUTOPILOT_ENABLED` が `false`)である。
+2026-10-18 時点。PR A〜D は main に入っている。PR F(段階 2 の差分の再検査、§2.8d)は本 PR で実装し、未マージである。既定は無効(`KIVRA_SELFDEV_AUTOPILOT_ENABLED` が `false`)である。
 
 | 範囲 | PR(main) | 内容 |
 |---|---|---|
@@ -408,7 +428,8 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 
 **未実装(この ADR の範囲のうち、まだ無いもの)**
 
-- **段階 2 の差分の再検査(§6.2)**: `AUTO_SCOPE_EXCEEDED` の理由コードは定義されているが、それを発生させる経路は無い。段階 2 の自動の投入は、計画側の見積りだけで判定している。
+- ~~段階 2 の差分の再検査(§6.2)~~: PR F で実装した(§2.8d)。CLI 経路で、コミットの前に実際の差分を再検査する。範囲外は `AUTO_SCOPE_EXCEEDED` で止まる。API 経路はオートパイロットの対象外(起動時に CLI を要求する)。
+- **再検査の限界(§2.8d)**: 変更行は、書き込む内容の行数と、削除するファイルのバイト数で数える。既存の内容のうち削除される行は、PatchSet が全文を持つため数えない。
 - **Goal 本文の削除(U-9)**: 保存期間と削除の手段は未実装。
 - **Goal 単位の監査(U-18)**: 構造化ログだけで、監査の表は無い。
 - **Goal 単位の一時停止と再開(§1.2 の `.../pause`、`.../resume`)**: 全体の一時停止と再開だけ。また、`PLAN_PROPOSED` からの再計画は HTTP に出していない(計画段階の `BLOCKED` からの再計画だけ)。

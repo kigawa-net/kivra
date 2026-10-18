@@ -171,6 +171,9 @@ private val TASK_EDGES: List<Edge<TaskState>> = listOf(
         setOf(AutopilotReason.RUN_FAILED, AutopilotReason.POLICY_REJECTED, AutopilotReason.PR_ABANDONED),
     ),
     Edge(TaskState.SUBMITTED, TaskState.CANCELLED, setOf(AutopilotReason.RUN_RELEASED)),
+    // ADR 0011 section 6.2: an auto-approved task whose change set is out of the stage-2 scope goes back to the operator. Its Run ends
+    // POLICY_REJECTED, and the task is not counted as a failure. The operator's approval then runs it again.
+    Edge(TaskState.SUBMITTED, TaskState.PENDING_APPROVAL, setOf(AutopilotReason.AUTO_SCOPE_EXCEEDED)),
     Edge(TaskState.FAILED, TaskState.QUEUED, setOf(AutopilotReason.OPERATOR_REQUEUED)),
     Edge(TaskState.FAILED, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED)),
     Edge(TaskState.CANCELLED, TaskState.QUEUED, setOf(AutopilotReason.OPERATOR_REQUEUED)),

@@ -8,7 +8,7 @@
 
 ## 0. 現状(最初に読む)
 
-- 計画の自動作成と投入(オートパイロット)の設計は [ADR 0011](adr/0011-selfdev-autopilot.md)。未実装。運用手順は実装 PR で足す。
+- 計画の自動作成と投入(オートパイロット)は [ADR 0011](adr/0011-selfdev-autopilot.md)(Proposed)。基盤、Planner、Dispatcher、UI と HTTP(PR A〜D)は main に実装済みで、既定では無効。運用手順は §7。段階 1 の dev での有効化と E2E は未実施。
 - 自己開発は既定で無効。`KIVRA_SELFDEV_ENABLED` が正確に `true` のときだけ有効になる。無効のときは、自己開発の他の環境変数を一切読まず、ワーカーも `/api/selfdev/*` も登録しない(`selfdev/SelfDevSettings.kt`、`Application.kt`)。
 - 有効化すると、`SelfDevWorker` が起動し、`POST /api/selfdev/tasks`、`GET /api/selfdev/runs`、`GET /api/selfdev/runs/{id}` が登録される(`routes/SelfDevRoutes.kt`)。
 - 本番で動かすには、ブランチ保護、GitHub 認証(App 推奨。PAT は代替)、Anthropic 認証(WIF 推奨。静的キーは代替)、モデル registry、為替の設定が必要。§1 を参照する。
@@ -1087,9 +1087,9 @@ Keycloak の client の Regenerate は旧 secret を**即座に失効**させる
 
 ## 7. 自己開発オートパイロット(ADR 0011、Issue #233)
 
-状態: **基盤(PR A)、Planner(PR B)、UI と HTTP(PR D)を実装済み**。Dispatcher(PR C)は後続の PR で入る。
+状態: **基盤(PR A、#243)、Planner(PR B、#244)、Dispatcher(PR C、#245)、UI と HTTP(PR D、#250)を実装済み**。段階 2 の差分の再検査(ADR 0011 §6.2)は未実装。
 `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` のときだけ動く。既定(無効)では何も起きない。
-Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_PROPOSED` に進める。承認された Plan のタスクは、PR C の Dispatcher が投入するまで投入されない。
+Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_PROPOSED` に進める。承認された Plan のタスクは、Dispatcher が §5 のガードを確かめたうえで投入する。
 運用手順は §7.4(Goal の入力、承認、中止、再計画、一時停止、ブレーカーの再開)。
 
 ### 7.1 設定項目
@@ -1097,7 +1097,7 @@ Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_
 | 名前 | 既定 | 内容 |
 |---|---|---|
 | `KIVRA_SELFDEV_AUTOPILOT_ENABLED` | `false` | `true` と `false` 以外は起動に失敗する。`true` は、自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)で、`KIVRA_SELFDEV_RUNTIME=cli` のときだけ許す |
-| `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` | `required` | `required` は全タスクを運用者が承認する。`auto` は段階 2 の規則に当たるタスクを承認なしで投入する(後続の PR)。値は `required` / `auto` のどちらか。**denylist のパスのタスクは、`auto` でも必ず承認が要る**(ADR 0011 §4) |
+| `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` | `required` | `required` は全タスクを運用者が承認する。`auto` は段階 2 の規則に当たるタスクを承認なしで投入する(実際の差分の再検査は未実装。ADR 0011 §6.2)。値は `required` / `auto` のどちらか。**denylist のパスのタスクは、`auto` でも必ず承認が要る**(ADR 0011 §4) |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_PENDING_PRS` | `3` | マージ待ちの自己開発 PR の上限。1〜20 |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES` | `3` | 連続失敗でサーキットブレーカーを開く数。1〜20(この範囲は PR A で決めた値。ADR に範囲の記載は無い) |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY` | `5` | 1 日(UTC)に投入する Run の数。1〜100(この範囲も PR A で決めた値) |

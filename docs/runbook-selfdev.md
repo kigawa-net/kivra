@@ -9,6 +9,7 @@
 ## 0. 現状(最初に読む)
 
 - 計画の自動作成と投入(オートパイロット)は [ADR 0011](adr/0011-selfdev-autopilot.md)(Proposed)。基盤、Planner、Dispatcher、UI と HTTP(PR A〜D)は main に実装済みで、既定では無効。運用手順は §7。E2E は PR E で追加(テストは `AutopilotE2ETest` / `AutopilotE2EAbnormalTest`)。dev での有効化は未実施(§7.5)。
+- CLI 実行のイベント記録と Run ライブモニターの設計は [ADR 0012](adr/0012-run-events-and-live-monitor.md)。未実装(提案)。運用手順は実装 PR で足す。
 - 自己開発は既定で無効。`KIVRA_SELFDEV_ENABLED` が正確に `true` のときだけ有効になる。無効のときは、自己開発の他の環境変数を一切読まず、ワーカーも `/api/selfdev/*` も登録しない(`selfdev/SelfDevSettings.kt`、`Application.kt`)。
 - 有効化すると、`SelfDevWorker` が起動し、`POST /api/selfdev/tasks`、`GET /api/selfdev/runs`、`GET /api/selfdev/runs/{id}` が登録される(`routes/SelfDevRoutes.kt`)。
 - 本番で動かすには、ブランチ保護、GitHub 認証(App 推奨。PAT は代替)、Anthropic 認証(WIF 推奨。静的キーは代替)、モデル registry、為替の設定が必要。§1 を参照する。

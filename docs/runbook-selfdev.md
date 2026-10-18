@@ -1424,6 +1424,68 @@ SELECT kind, COUNT(*) AS n
 
 **未実装**: 読み取りの API と画面(PR 3、PR 4)。停止(PR 5)。SSE。
 
+### 6.19 実行の経過の読み取り(ADR 0012 PR 3、Issue #223 / #224)
+
+運用者が、Run の実行の経過(attempt の状態、ツール呼び出しの件数、ターン数、費用の確定と推定、停止の段階、鮮度)を読むための API。読み取りだけで、Run も attempt も変えない。画面は PR 4、停止は PR 5。値は §6.17 の監視イベントから作る。
+
+**API**
+
+| メソッド・パス | 内容 |
+| --- | --- |
+| `GET /api/admin/runs/{runId}/execution` | スナップショット。`snapshotAt`(サーバの時刻)、`revision`(attempt の version の合計と保存済みイベント数)、`freshness`、`attempts`、`stop`、`tools`、`turns`、`permissionDenied`、`warnings`、`dropped`、`truncated`、`lastPhase`、`testingReported`、`apiRetries`、`cost` |
+| `GET /api/admin/runs/{runId}/execution/events?attemptId=&afterGeneration=&afterSeq=&limit=` | 差分。`limit` は 1〜200(既定 100)。カーソルは `(afterGeneration, afterSeq)` の組で、初回は省略(0 と -1)。応答の `nextAfterGeneration`、`nextAfterSeq` を次の要求にそのまま渡す。`hasMore` が true なら続きがある |
+| `GET /api/admin/runs/{runId}/execution/stream` | SSE(§6.19 の SSE の節) |
+
+**認可**(`/api/admin/runs` の既存の一覧は変えていない。新しい経路だけに下の規則を使う)
+
+| 呼び手 | 結果 |
+| --- | --- |
+| 認証なし | 401 |
+| エージェントのトークン(`kivra-agent:agent`。運用者のロールを併せ持っても) | 403。Run を読む前に返す |
+| 運用者(`admin-panel:admin`) | どの Run も読める |
+| 作成者本人(運用者のロールは無い) | 自分の Run だけ読める |
+| それ以外 | 404(Run が無いときと同じ。存在を漏らさない) |
+
+- `KIVRA_AUTH_MODE=oidc-jwt` の本番では、トークンは `Authorization: Bearer` か、oauth2-proxy の `X-Forwarded-Access-Token` から取る(§README の `oidc-jwt` の節と同じ)。開発の header モード(`oauth2-proxy` / `none`)では運用者の区別が無いので、作成者本人だけが読める。
+- 作成者本人の規則は、運用者のロールを持たない有効なトークンを 401 でなく 404 として扱うためにある。本番では、運用者以外の有効なトークンは Task API の他の経路でも 401 になる。
+
+**鮮度(`freshness`)**: 最後に受信したイベントからの経過が閾値未満なら `LIVE`、閾値以上か、受信が一度も無ければ `STALE`。閾値は lease TTL(既定 2 分)の 2 倍で、コードの定数(`DEFAULT_MONITOR_STALE_AFTER`)。設定の項目は無い。`STALE` は「監視が途切れている」の意味で、Run が止まったという意味ではない。
+
+**費用**: `confirmedUsd` は、使用量の台帳(`coding_attempt_usage`)の `REPORTED` 行の合計。CLI が結果で報告した値で、結果が届いた後にだけ入る。`estimatedUsd` は、台帳の `ESTIMATED_RESERVE` 行の合計に、まだ使用行の無い活性の attempt の予約額(`KIVRA_AGENT_ATTEMPT_RESERVE_USD`、既定 0.50 USD)を足したもの。推定は確定ではない。
+
+**停止の段階(`stop.stage`)**: `NONE` → `REQUESTED`(`cancel_requested` が立った)→ `STOPPING`(エージェントが停止要求を受けたと報告した)→ `EXIT_CONFIRMED`(エージェントがコンテナの終了を報告した)→ `CANCELLED`(Run が取消し済み)。段階は到達した最も先のもの。エージェントの報告は観測であり、検証された事実ではない。停止の要求の時刻は今のスキーマに無いので、「確認待ちが長い」(閾値 5 分、ADR 0012 U-12)の判定は PR 5 で入れる。
+
+**SSE**(`/execution/stream`)
+
+- 形式: 行ごとに `id: <attemptId>:<generation>:<seq>`、`event: monitor`、`data:` に 1 件の JSON。`: heartbeat` のコメント行を 15 秒ごとに送る(何も送らなかったときだけ)。
+- `Last-Event-ID` を受けたら、その位置の次から DB を読み直して送る(サーバのメモリには依存しない。再起動と複数の Pod でも同じ結果)。
+- 保持期間で消えた位置、または Run の中に無い位置を指定されたら、`event: resync`(`data: {"action":"refetch_snapshot"}`)を 1 件送って切断する。クライアントはスナップショットを取り直す。
+- `Last-Event-ID` の形式が違えば 400(接続は始まらない)。
+- DB は接続ごとに 2 秒間隔で読む(1 回に最大 200 件)。通知の仕組みは使わない。
+- 認可は接続の時と、各回の読みの前に検査する。権限が無くなれば切断する(ログの `reason=ACCESS_ENDED`)。注意: 検査は接続時のトークンを同じまま再検証する。ロールの剥奪は、そのトークンが期限切れになるまで接続に反映されない。
+- 同時接続の上限: 利用者あたり 5、プロセス全体で 50。超えると 429。上限はプロセスごとなので、Pod が増えると全体の上限も増える(ADR 0012 U-13)。
+
+**上限と既定値**
+
+| 名前・項目 | 値 |
+| --- | --- |
+| 読みの `limit` | 1〜200(既定 100) |
+| SSE の読みの間隔 | 2 秒(接続ごと) |
+| SSE の heartbeat | 15 秒(コメント行) |
+| SSE の同時接続 | 利用者あたり 5、全体 50(プロセスごと) |
+| 鮮度の閾値 | lease TTL の 2 倍(既定 4 分、コードの定数) |
+
+**ログ**: 出すのは、SSE の終了時の Run の id、送った件数、終了の固定コード(`CLIENT_CLOSED`、`ACCESS_ENDED`、`RESYNC`)だけ。利用者の `sub`、イベントの値、Run の題名や本文、パスは出さない(テストで確かめている)。読み取りは監査イベントを書かない(既存の `GET /api/admin/runs` と同じ)。
+
+**未確認(実環境で確かめる項目)**
+
+- oauth2-proxy が、SSE の応答を溜めずに流すか(バッファリングの無効化が要るか)。SSE の要求にも `X-Forwarded-Access-Token` が付くか、長い接続の途中でトークンが更新されるか。コードは、Task API と同じくこのヘッダーを読む。
+- ingress とプロキシの読み取りのタイムアウトと、長い接続の扱い。
+- ブラウザの `EventSource` が、同一オリジンの Cookie でプロキシを通るか(`EventSource` はヘッダーを付けられない)。
+- 実 CLI の出力を使った 1 Run の end-to-end(§6.17 の未確認と同じ)。
+
+これらが動かない場合の代替: 画面は REST のポーリング(スナップショットを数秒ごと、差分は `events` のカーソル)で足りる。SSE は必要にならない限り使わなくてよい。
+
 ## 8. MCP エンドポイント(`/mcp`、ADR 0013、Issue #181、PR 1: 読み取り、PR 4: 書き込み `kivra_selfdev_start`)
 
 既定は無効。`KIVRA_MCP_ENABLED` が未設定、`false`、空のとき、MCP の変数は他に一つも読まれず、`/mcp` と `/.well-known/oauth-protected-resource` は登録されない(404)。

@@ -61,6 +61,16 @@ internal fun oidcOwnerKey(issuer: String, subject: String?): String? {
 }
 
 /**
+ * What a verified request carries (see [OidcJwtVerifier.caller]). [Member] is any valid token with its owner key; [operator] tells whether it
+ * also has the required operator role. [AgentRefused] is a token with the agent role. [Unauthenticated] is everything else.
+ */
+sealed interface TaskCaller {
+    data class Member(val principal: String, val operator: Boolean) : TaskCaller
+    data object AgentRefused : TaskCaller
+    data object Unauthenticated : TaskCaller
+}
+
+/**
  * Verifies a Keycloak access token and returns its principal, or null (-> 401) for any failure. The failure reason is
  * logged by exception class only, and is never sent to the client.
  *
@@ -96,13 +106,29 @@ class OidcJwtVerifier(
      * Authenticates an operator request. Same checks as [principal]; the result also tells an agent token apart
      * ([OperatorAuth.AgentRefused], only when this verifier was built with an [agentRole]).
      */
-    override suspend fun authenticate(headers: Headers): OperatorAuth {
+    override suspend fun authenticate(headers: Headers): OperatorAuth = when (val caller = caller(headers)) {
+        is TaskCaller.Member ->
+            if (caller.operator) {
+                OperatorAuth.Authenticated(caller.principal)
+            } else {
+                logRejection("RequiredRoleMissing")
+                OperatorAuth.Unauthenticated
+            }
+        TaskCaller.AgentRefused -> OperatorAuth.AgentRefused
+        TaskCaller.Unauthenticated -> OperatorAuth.Unauthenticated
+    }
+
+    /**
+     * Identifies any valid caller, with or without the operator role (ADR 0012 section 4: a run's creator is not always an operator).
+     * The checks are the same as [authenticate]; only the role decision differs. A token that fails any check is [TaskCaller.Unauthenticated].
+     */
+    suspend fun caller(headers: Headers): TaskCaller {
         val token = bearerToken(headers)
         if (token == null) {
             // Why there is no usable token. Fixed names only, rate limited like every other rejection. This is the case
             // where a logged-in browser's request reaches kivra without the access token (a proxy that does not forward it).
             logRejection(missingTokenReason(headers))
-            return OperatorAuth.Unauthenticated
+            return TaskCaller.Unauthenticated
         }
         // JWKS may be fetched over the network, so keep the blocking work off the Netty event loop.
         return withContext(Dispatchers.IO) {
@@ -110,7 +136,7 @@ class OidcJwtVerifier(
                 verify(token)
             } catch (e: Exception) {
                 logRejection((e as? JwksLookupException)?.reasonCode ?: e.javaClass.simpleName)
-                OperatorAuth.Unauthenticated
+                TaskCaller.Unauthenticated
             }
         }
     }
@@ -137,12 +163,12 @@ class OidcJwtVerifier(
 
     private val lastRejectionLog = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
-    private fun reject(reason: String): OperatorAuth {
+    private fun reject(reason: String): TaskCaller {
         logRejection(reason)
-        return OperatorAuth.Unauthenticated
+        return TaskCaller.Unauthenticated
     }
 
-    private fun verify(token: String): OperatorAuth {
+    private fun verify(token: String): TaskCaller {
         val decoded = JWT.decode(token)
         if (decoded.algorithm != "RS256") return reject("AlgorithmNotRs256")
         val key = jwks.get(decoded.keyId).publicKey as? RSAPublicKey ?: return reject("SigningKeyNotRsa")
@@ -158,14 +184,14 @@ class OidcJwtVerifier(
         // An agent is never an operator, even when the token carries the operator role as well (ADR 0011 section 1).
         if (agentRole != null && hasRole(resourceAccess, agentRole)) {
             logRejection("AgentRoleRefused")
-            return OperatorAuth.AgentRefused
+            return TaskCaller.AgentRefused
         }
-        if (!hasRole(resourceAccess, RequiredRole(config.requiredClient, config.requiredRole))) return reject("RequiredRoleMissing")
+        val operator = hasRole(resourceAccess, RequiredRole(config.requiredClient, config.requiredRole))
 
         val subject = verified.subject
         if (subject == null) return reject("MissingSubject")
         val principal = oidcOwnerKey(config.issuer, subject) ?: return reject("InvalidSubject")
-        return OperatorAuth.Authenticated(principal)
+        return TaskCaller.Member(principal, operator)
     }
 
     private fun hasRole(resourceAccess: Map<String, Any?>?, role: RequiredRole): Boolean {

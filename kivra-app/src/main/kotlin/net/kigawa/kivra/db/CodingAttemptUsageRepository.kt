@@ -7,6 +7,7 @@ import java.time.LocalDateTime
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.datetime
@@ -99,6 +100,26 @@ class CodingAttemptUsageRepository(
                     cacheReadTokens = it[CodingAttemptUsageTable.cacheReadTokens],
                 )
             }
+    }
+
+    /**
+     * The cost fields of the usage rows of [attemptIds] (attempt, generation, cost, source). Read-only. The token and model fields are not
+     * read, since the run execution view needs only the money and its source (ADR 0012 section 4).
+     */
+    fun costRowsFor(attemptIds: List<String>): List<CodingUsageRow> {
+        if (attemptIds.isEmpty()) return emptyList()
+        return transaction(database) {
+            CodingAttemptUsageTable.selectAll()
+                .where { CodingAttemptUsageTable.attemptId inList attemptIds }
+                .map {
+                    CodingUsageRow(
+                        attemptId = it[CodingAttemptUsageTable.attemptId],
+                        leaseGeneration = it[CodingAttemptUsageTable.leaseGeneration],
+                        costUsd = it[CodingAttemptUsageTable.costUsd],
+                        source = it[CodingAttemptUsageTable.usageSource],
+                    )
+                }
+        }
     }
 
     private fun nowUtc(): LocalDateTime = utcNow(clock)

@@ -4,10 +4,12 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.sse.SSE
 import io.ktor.server.routing.routing
 import net.kigawa.kivra.auth.AgentApiSettings
 import net.kigawa.kivra.auth.AgentIdentity
 import net.kigawa.kivra.auth.RefreshingJwkProvider
+import net.kigawa.kivra.auth.RequiredRole
 import net.kigawa.kivra.auth.resolveOperatorVerifier
 import net.kigawa.kivra.auth.resolveTaskApiIdentity
 import net.kigawa.kivra.coding.CodingReconcileWorker
@@ -38,6 +40,8 @@ import net.kigawa.kivra.fx.fxSettingsForWarning
 import net.kigawa.kivra.observability.MetricsRegistry
 import net.kigawa.kivra.routes.AgentApiDeps
 import net.kigawa.kivra.routes.configureAgentApiRoutes
+import net.kigawa.kivra.routes.configureRunExecutionRoutes
+import net.kigawa.kivra.routes.runExecutionDeps
 import net.kigawa.kivra.routes.configureBudgetAdminRoutes
 import net.kigawa.kivra.routes.configureDevPreviewRoutes
 import net.kigawa.kivra.routes.configureDevTaskSubmitRoutes
@@ -180,7 +184,14 @@ internal fun Application.appModule(env: Map<String, String>) {
         )
     }
 
+    // The run execution read API (ADR 0012 PR 3): read only. Its operator check reuses the Task API's verifier, with the agent role refused.
+    val executionDeps = taskApiIdentity?.let {
+        val agentRole = agentApiSettings.auth?.let { auth -> RequiredRole(auth.requiredClient, auth.requiredRole) }
+        runExecutionDeps(runs, database, it, resolveOperatorVerifier(env, agentRole), agentApiSettings.attemptReserveUsd)
+    }
+
     install(ContentNegotiation) { json() }
+    install(SSE)
     val metrics = MetricsRegistry()
     routing {
         configureHealthRoutes()
@@ -198,6 +209,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureSelfDevAdminRoutes(runs, taskApiIdentity)
             configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings)
             if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
+            executionDeps?.let { configureRunExecutionRoutes(it) }
         }
         if (selfDevParts != null) configureSelfDevRoutes(selfDevParts.routes)
         registerMcpRoutes(mcpDeps)

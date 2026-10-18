@@ -66,6 +66,11 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
     /** Changes the author of an existing pull request, to simulate a PR opened by someone else. */
     fun setPullAuthor(number: Int, authorId: Long?) = replacePull(number) { it.copy(authorId = authorId) }
 
+    /** Moves a branch to [sha], as a push to the base branch would (issue #276 tests move `main`). */
+    fun moveBranch(name: String, sha: String) {
+        branches[name] = BranchInfo(repo, name, sha)
+    }
+
     /** Changes the head sha of an existing pull request, to simulate a push after the binding. */
     fun setPullHead(number: Int, headSha: String) = replacePull(number) { it.copy(headSha = headSha) }
 

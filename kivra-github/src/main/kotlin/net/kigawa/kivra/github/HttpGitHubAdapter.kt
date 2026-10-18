@@ -118,7 +118,7 @@ class HttpGitHubAdapter(
     private val tokens: TokenProvider,
     private val config: GitHubAdapterConfig = GitHubAdapterConfig(),
     private val backoff: suspend (attempt: Int) -> Unit = { delay(200L * (1L shl (it - 1))) },
-) : GitHubPort, GitHubIssueReader {
+) : GitHubPort, GitHubIssueReader, PrBranchPort {
     private val json = Json { ignoreUnknownKeys = true }
 
     private class Raw(val status: Int, val body: String, val headers: Map<String, String>)
@@ -826,10 +826,66 @@ class HttpGitHubAdapter(
             } else {
                 null
             }
-            entries += TreeEntry(path, type, mode, size)
+            entries += TreeEntry(path, type, mode, size, e.str("sha")?.takeIf { sha40.matches(it) })
         }
         return GitHubResult.Success(RepoTree(sha, entries, truncated = false))
     }
+
+    // ---- pull request branch update (issue #276, PrBranchPort) ----
+
+    override suspend fun getPrRebaseView(repo: RepoRef, number: Int): GitHubResult<PrRebaseView> {
+        val raw = when (val r = get("${repoPath(repo)}/pulls/$number")) {
+            is GitHubResult.Success -> r.value
+            is GitHubResult.Failure -> return r
+            is GitHubResult.Unknown -> return r
+        }
+        val o = parse(raw) as? JsonObject ?: return protocol("pr")
+        if (o.long("number")?.toInt() != number) return mismatch()
+        return parsePr(repo, o).map { PrRebaseView(it, o.str("mergeable_state")) }
+    }
+
+    override suspend fun updatePrBranch(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<Unit> {
+        if (!sha40.matches(expectedHeadSha)) return validation("expected_head_sha")
+        val body = buildJsonObject { put("expected_head_sha", expectedHeadSha) }
+        // Exactly one send. A 422 (head moved or merge conflict) is a CONFLICT, the same as a rejected ref update.
+        return when (val m = mutate(HttpMethod.Put, "updatePrBranch", "${repoPath(repo)}/pulls/$number/update-branch", body, unprocessableIsConflict = true)) {
+            is GitHubResult.Success -> GitHubResult.Success(Unit)
+            is GitHubResult.Failure -> m
+            is GitHubResult.Unknown -> m
+        }
+    }
+
+    override suspend fun getCommitParents(repo: RepoRef, sha: String): GitHubResult<List<String>> {
+        if (!sha40.matches(sha)) return validation("sha")
+        val raw = when (val g = get("${repoPath(repo)}/commits/$sha")) {
+            is GitHubResult.Success -> g.value
+            is GitHubResult.Failure -> return g
+            is GitHubResult.Unknown -> return g
+        }
+        val o = parse(raw) as? JsonObject ?: return protocol("commit")
+        if (o.str("sha") != sha) return mismatch()
+        val arr = o["parents"] as? JsonArray ?: return protocol("commit.parents")
+        val parents = ArrayList<String>(arr.size)
+        for (el in arr) {
+            parents += (el as? JsonObject)?.str("sha")?.takeIf { sha40.matches(it) } ?: return protocol("commit.parents[].sha")
+        }
+        return GitHubResult.Success(parents)
+    }
+
+    override suspend fun mergeBaseOf(repo: RepoRef, a: String, b: String): GitHubResult<String> {
+        if (!sha40.matches(a) || !sha40.matches(b)) return validation("sha")
+        val raw = when (val g = get("${repoPath(repo)}/compare/$a...$b")) {
+            is GitHubResult.Success -> g.value
+            is GitHubResult.Failure -> return g
+            is GitHubResult.Unknown -> return g
+        }
+        val o = parse(raw) as? JsonObject ?: return protocol("compare")
+        val base = o.str("merge_base_commit", "sha")?.takeIf { sha40.matches(it) } ?: return protocol("compare.merge_base_commit.sha")
+        return GitHubResult.Success(base)
+    }
+
+    override suspend fun listTreeAt(repo: RepoRef, commitSha: String): GitHubResult<RepoTree> =
+        if (!sha40.matches(commitSha)) validation("sha") else listTree(repo, commitSha)
 
     override suspend fun getIssue(repo: RepoRef, number: Long): GitHubResult<GitHubIssue> {
         if (number <= 0) return validation("issue number")

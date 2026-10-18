@@ -140,6 +140,18 @@ private val CODE_SHAPE = Regex("[A-Z][A-Z0-9_]{0,63}")
 /** Thrown when a self-development submission would exceed the active-run cap. Nothing is written. */
 class ActiveSelfDevLimitException : RuntimeException("active self-development run limit reached")
 
+/** Audit actions of the pull request branch update (issue #276). They carry fixed codes and the first 12 characters of a head only. */
+const val PR_REBASE_ATTEMPTED = "PR_REBASE_ATTEMPTED"
+const val PR_REBASE_REBOUND = "PR_REBASE_REBOUND"
+const val PR_REBASE_HELD = "PR_REBASE_HELD"
+
+/** How many characters of a commit id an audit payload keeps. */
+const val HEAD_PREFIX_CHARS = 12
+
+/** A payload with one commit id, shortened to [HEAD_PREFIX_CHARS]. */
+internal fun headPayload(key: String, headSha: String): String =
+    buildJsonObject { put(key, headSha.take(HEAD_PREFIX_CHARS)) }.toString()
+
 /** Task id prefixes. A self-development run has [SELF_DEV_TASK_PREFIX]; the Task API keeps [API_TASK_PREFIX]. */
 const val SELF_DEV_TASK_PREFIX = "selfdev:"
 const val API_TASK_PREFIX = "api:"
@@ -569,6 +581,100 @@ class DevelopmentRunRepository(
     }
 
     /** The binding the run currently records, or null when any binding column is missing (for example a row written before V7). */
+    /**
+     * Writes the audit row of a branch update attempt (issue #276) before the update is sent. Fenced by [lease]. The row is the only
+     * record that counts toward the update limit, so it is written first, in its own transaction. It carries the fixed action and the
+     * first 12 characters of the head only.
+     */
+    fun recordRebaseAttempt(lease: Lease, headSha: String, actor: String) {
+        transaction(database) {
+            requireLease(lease)
+            val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
+            audit.append(
+                this, lease.runId,
+                AuditEntry(
+                    actor = actor, action = PR_REBASE_ATTEMPTED, result = "OK", resource = "task:${row[DevelopmentRunsTable.taskId]}",
+                    traceId = row[DevelopmentRunsTable.traceId], payload = headPayload("head", headSha),
+                ),
+            )
+        }
+    }
+
+    /**
+     * Writes the audit row of a branch update that was not completed (issue #276): the run stays for a person. Fenced by [lease].
+     * [reasonCode] is a fixed code; the row carries the first 12 characters of [fromHead] and nothing else.
+     */
+    fun recordRebaseHold(lease: Lease, fromHead: String, reasonCode: String, actor: String) {
+        transaction(database) {
+            requireLease(lease)
+            val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
+            audit.append(
+                this, lease.runId,
+                AuditEntry(
+                    actor = actor, action = PR_REBASE_HELD, result = "HELD", resource = "task:${row[DevelopmentRunsTable.taskId]}",
+                    traceId = row[DevelopmentRunsTable.traceId],
+                    payload = buildJsonObject {
+                        put("from", fromHead.take(HEAD_PREFIX_CHARS))
+                        put("reasonCode", reasonCode)
+                    }.toString(),
+                ),
+            )
+        }
+    }
+
+    /**
+     * The branch update attempts of a run: (all attempts, attempts at or after [since]). Read from the audit rows written by
+     * [recordRebaseAttempt]. Read-only.
+     */
+    fun countRebaseAttempts(runId: RunId, since: java.time.Instant): Pair<Int, Int> = transaction(database) {
+        val times = AuditEventsTable.selectAll()
+            .where { (AuditEventsTable.runId eq runId.value) and (AuditEventsTable.action eq PR_REBASE_ATTEMPTED) }
+            .map { it[AuditEventsTable.occurredAt] }
+        val sinceLocal = LocalDateTime.ofInstant(since, ZoneOffset.UTC)
+        times.size to times.count { !it.isBefore(sinceLocal) }
+    }
+
+    /**
+     * Moves the run's recorded pull request head from [fromHead] to [toHead] and writes the audit row in the same transaction (issue
+     * #276). If either write fails, neither is kept, so the binding stays at [fromHead]. Fenced by [lease]; [fromHead] must still be the
+     * recorded head, and [reasonCode] is a fixed code. Never called for a head that the caller has not verified.
+     */
+    fun rebindPullRequestHead(lease: Lease, expectedVersion: Long, fromHead: String, toHead: String, reasonCode: String, actor: String) {
+        transaction(database) {
+            requireLease(lease)
+            val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
+            val from = storedStateOrRefuse(lease.runId.value, row[DevelopmentRunsTable.state])
+            if (row[DevelopmentRunsTable.version] != expectedVersion) {
+                throw VersionConflictException("run ${lease.runId} is at version ${row[DevelopmentRunsTable.version]}, expected $expectedVersion")
+            }
+            if (from != DevelopmentRunState.PULL_REQUEST) throw InvalidTransitionException("run ${lease.runId} is in $from, not PULL_REQUEST")
+            if (row[DevelopmentRunsTable.prHeadSha] != fromHead) throw LeaseLostException("recorded head changed for run ${lease.runId}")
+            val updated = execUpdate(
+                """
+                UPDATE development_runs
+                   SET pr_head_sha = ?, version = version + 1, updated_at = ?
+                 WHERE run_id = ? AND lease_generation = ? AND lease_owner = ? AND lease_expires_at > ${DbTime.NOW}
+                   AND hold_reason IS NULL AND version = ? AND state = ? AND pr_head_sha = ?
+                """.trimIndent(),
+                toHead, utcNow(clock),
+                lease.runId.value, lease.generation, lease.owner, expectedVersion, from.name, fromHead,
+            )
+            if (updated != 1) throw LeaseLostException("fenced head update rejected for run ${lease.runId}")
+            audit.append(
+                this, lease.runId,
+                AuditEntry(
+                    actor = actor, action = PR_REBASE_REBOUND, result = "OK", resource = "task:${row[DevelopmentRunsTable.taskId]}",
+                    traceId = row[DevelopmentRunsTable.traceId],
+                    payload = buildJsonObject {
+                        put("from", fromHead.take(HEAD_PREFIX_CHARS))
+                        put("to", toHead.take(HEAD_PREFIX_CHARS))
+                        put("reasonCode", reasonCode)
+                    }.toString(),
+                ),
+            )
+        }
+    }
+
     fun loadPullRequestBinding(runId: RunId): PullRequestBinding? = transaction(database) {
         val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.firstOrNull() ?: return@transaction null
         row.toPullRequestBindingOrNull()

@@ -1,8 +1,8 @@
-# ADR 0015: order を、Goal を周回させる長く生きる指示として定義し、終了は上位者の承認制にする(安全装置による一時停止は承認を待たない)
+# ADR 0015: order を、Goal を周回させる長く生きる指示として定義し、order は親子の木を成し、終了は親の承認制にする(安全装置による一時停止は承認を待たない)
 
-- ステータス: 提案(Proposed)。未決の点(U-1〜U-16)の決定を経てから、段階ごとの PR に分けて実装する。本 ADR は設計のみで、コード、設定、k8s、Keycloak は変えない
-- 日付: 2026-10-19
-- 関連: Issue #273(本 ADR の対象。要件と解釈)、#233(オートパイロット)、#229(依頼文の本文)、#230(CLI 経路の費用の計上)、#222(E2E fixture)、#231(reconcile の配線)、#181(MCP)。提案中の ADR 0014(低リスクの自動マージ。本 ADR はその内容に依存しない)。ADR 0001(Run の正本)、ADR 0003(予算と UNKNOWN_COST)、ADR 0004(予算の正本は BudgetPort)、ADR 0008(PR 作成までのループ)、ADR 0009(運用者による UNKNOWN の解放)、ADR 0010(CLI 経路)、ADR 0011(オートパイロット)、ADR 0012(実行イベントと停止)、ADR 0013(MCP)
+- ステータス: 提案(Proposed)。未決の点(U-2 以降)の決定を経てから、段階ごとの PR に分けて実装する。本 ADR は設計のみで、コード、設定、k8s、Keycloak は変えない
+- 日付: 2026-10-19(改訂: 上位者を order の木の親とし、頂点を人(kigawa)とする 2026-10-19 のユーザーの決定を反映)
+- 関連: Issue #273(本 ADR の対象。要件と解釈。決定は同 Issue のコメントに記録済み)、#233(オートパイロット)、#229、#230(CLI 経路の費用の計上)、#222(E2E fixture)、#231、#181(MCP)。提案中の ADR 0014(低リスクの自動マージ。本 ADR はその内容に依存しない)。ADR 0001、0003、0004、0008、0009、0010、0011、0012、0013
 
 ## 背景
 
@@ -11,11 +11,12 @@
 - 運用者が求めているのは(#273)、order を定義して継続的に開発すること、order がループすること、ループを止めるときは上位者の承認をもらうこと、の 3 点である。
 - 現在の止め方は、運用者 1 人で完結する。
   - `POST /api/selfdev/goals/{id}/stop` は、運用者の認証だけで受け付ける。理由は検査するが、保存しない(route のコメントによる)。
-  - `POST /api/selfdev/autopilot/pause` は承認を要さない。保存するのは `paused_by` と `paused_at` だけで、理由は保存しない(route は主体だけを `setPaused` に渡している)。
-- ループにすると、止め方が 2 種類必要になる。
-  - (a) 周を止めて、後で再開できる。安全装置の自動の停止と、運用者の一時停止がこれに当たる。
-  - (b) order を終わらせる。承認を要する。
-  この 2 つを 1 つの状態に混ぜると、安全装置が承認待ちになって暴走を止められないか、承認なしで order が終わるかのどちらかになる。本 ADR は両者を別の状態として定義する。
+  - `POST /api/selfdev/autopilot/pause` は承認を要さない。保存するのは `paused_by` と `paused_at` だけで、理由は保存しない。
+- ループにすると、止め方が 2 種類必要になる。(a) 周を止めて後で再開できる(安全装置の自動の停止、運用者の一時停止)、(b) order を終わらせる(承認を要する)。この 2 つを 1 つの状態に混ぜると、安全装置が承認待ちになって暴走を止められないか、承認なしで order が終わるかのどちらかになる。本 ADR は両者を別の状態として定義する。
+- ユーザーの決定(2026-10-19、#273 のコメントに記録):
+  - 最上位は kigawa(人)。
+  - order に親子構造を持たせ、親が上位になる。order の停止の承認は、その order の親が行う。最上位の order(親を持たない)の停止は、kigawa が承認する。
+  - これにより、上位者は固定のロールではなく、order の木の親である。頂点は kigawa である。運用者が 1 人でも成立する。
 
 ## 決定
 
@@ -25,14 +26,14 @@
 
 | 案 | 内容 | 評価 |
 |---|---|---|
-| A. Goal を拡張し、Goal の中で周回する | `selfdev_goals` に周回の列を足し、DONE の後に次の周を始める | 採らない。revision の上限(3)が 2 周目以降に当たる。DONE と STOPPED が「1 周の終わり」と「ループの終わり」を兼ねる。Dispatcher の終端判定(全タスクが終端なら DONE か STOPPED)を周回ごとに変える必要がある |
-| B. order を新設し、Goal を 1 周として order に属させる(推奨) | `selfdev_orders` を新設する。`selfdev_goals` に `order_id`(NULL 可)と `cycle_no` を足す。周回の管理と order の状態は order 側に置く | 推奨。Goal の状態機械、Planner(`AutopilotPlanner`)、Dispatcher(`AutopilotDispatcher`)、Run の投入(`submitTask`)、PR の経路は変えない。Goal の revision の上限は 1 周ごとに効く |
+| A. Goal を拡張し、Goal の中で周回する | `selfdev_goals` に周回の列を足し、DONE の後に次の周を始める | 採らない。revision の上限(3)が 2 周目以降に当たる。DONE と STOPPED が「1 周の終わり」と「ループの終わり」を兼ねる。Dispatcher の終端判定を周回ごとに変える必要がある |
+| B. order を新設し、Goal を 1 周として order に属させる(推奨) | `selfdev_orders` を新設する。`selfdev_goals` に `order_id`(NULL 可)と `cycle_no` を足す。周回の管理と order の状態は order 側に置く | 推奨。Goal の状態機械、Planner(`AutopilotPlanner`)、Dispatcher(`AutopilotDispatcher`)、Run の投入(`submitTask`)、PR の経路は変えない |
 | C. order が Plan を直接持つ(Goal を使わない) | Plan とタスクの表を order 用に複製する | 採らない。Planner と Dispatcher を複製することになり、既存のテストと CAS の仕組みが使えない |
 
 案 B を採る。V21(expand のみ。現在の最新は V20 であることを確認済み)で次を追加する。
 
 - 新しい表: `selfdev_orders`(§2.1)、`selfdev_order_stop_requests`(§4.2)、`selfdev_order_events`(§4.3。追記専用の監査)。
-- 既存の表への列の追加(NULL 可): `selfdev_goals.order_id`、`selfdev_goals.cycle_no`、`selfdev_plans.fingerprint`(§3.2 の重複の検出)。
+- 既存の表への列の追加(NULL 可): `selfdev_goals.order_id`、`selfdev_goals.cycle_no`、`selfdev_plans.fingerprint`(§3.2)。
 - 既存の状態機械(`GoalState`、`TaskState`、`DevelopmentRunState`)は変えない。
 
 ### 2. order の定義(データモデル)
@@ -42,13 +43,16 @@
 | 列 | 型(案) | 意味 |
 |---|---|---|
 | `order_id` | `CHAR(26)` PK | ULID |
+| `parent_order_id` | `CHAR(26)`、NULL 可 | 親の order。NULL はルート(最上位)。作成後は変えない(§2.7) |
+| `depth` | `INT` | ルートは 0。親の深さ + 1 |
 | `title` | `VARCHAR(200)` | 一覧での呼び名。ログには出さない |
-| `policy` | `TEXT`(上限 2,000 文字。値は実装で確定) | 方針の文。「何を良くし続けるか」。運用者の入力であり、UNTRUSTED のデータとして扱う(§8)。作成後は変えない(§2.6) |
-| `target_repo` | `VARCHAR(200)` | 作成時の `KIVRA_SELFDEV_TARGET_REPO` の値。画面から変えられない(ADR 0011 U-15 と同じ) |
-| `scope_profile` | `VARCHAR(32)`(固定の列挙) | 範囲の区分。例: `DOCS_AND_TESTS`(`docs/**`、`README.md`、`kivra-*/src/test/**`)、`ALLOWLIST_DEFAULT`(ADR 0011 §4 の allowlist)。自由記述のパスは入れない。どちらも既存の allowlist の部分集合であり、order で範囲を広げることはできない |
+| `policy` | `TEXT`(上限 2,000 文字。値は実装で確定) | 方針の文。運用者の入力であり、UNTRUSTED のデータとして扱う(§8)。作成後は変えない(§2.6) |
+| `target_repo` | `VARCHAR(200)` | 作成時の `KIVRA_SELFDEV_TARGET_REPO` の値。画面から変えられない |
+| `scope_profile` | `VARCHAR(32)`(固定の列挙) | 範囲の区分。例: `DOCS_AND_TESTS`、`ALLOWLIST_DEFAULT`。自由記述のパスは入れない。どちらも既存の allowlist の部分集合であり、子は親の範囲を超えられない |
 | `max_cycles` | `INT`(1〜10。既定 1) | 総周回数の上限 |
 | `cycle_min_interval_seconds` | `INT`(既定 3600) | 周の開始の最小間隔 |
-| `order_budget_jpy` | `DECIMAL(12,0)`(既定 5,000) | order の累計の費用の上限。ADR 0011 の月次割当(既定 50%)の範囲内に収まる値 |
+| `order_budget_jpy` | `DECIMAL(12,0)`(既定 5,000) | この order の累計の費用の上限(§2.7 の予算の入れ子) |
+| `allocated_jpy` | `DECIMAL(12,0)`(既定 0) | 子に割り当てた予算の合計(§2.7) |
 | `cycle_budget_jpy` | `DECIMAL(10,0)`(既定 1,000) | 1 周の費用の上限 |
 | `expires_at` | `DATETIME(6)` | 期限(作成から 14 日。U-12) |
 | `state` | `VARCHAR(24)` | §2.4 の状態 |
@@ -56,27 +60,25 @@
 | `cycles_started` | `INT` | 開始した周の数。`max_cycles` と比べる |
 | `current_goal_id` | `CHAR(26)`、NULL 可 | 今の周の Goal |
 | `consecutive_failed_cycles` | `INT` | order 単位で、連続して失敗した周の数 |
-| `spent_jpy` | `DECIMAL(12,0)` | 累計の費用。#230 で計上された数値だけを入れる。推測の値は入れない |
+| `spent_jpy` | `DECIMAL(12,0)` | この order と子孫の費用の累計(§2.7)。#230 で計上された数値だけを入れる |
+| `child_count` | `INT` | 子の数(上限との比較) |
 | `next_cycle_at` | `DATETIME(6)`、NULL 可 | 次の周を始めてよい時刻 |
-| `created_by` | `VARCHAR(255)` | 作成した運用者(owner key) |
-| `approved_by` | `VARCHAR(255)`、NULL 可 | 作成の承認者(U-10 で承認が要る場合のみ) |
-| `version` | `BIGINT` | 楽観的ロックと fencing |
+| `created_by` | `VARCHAR(255)` | 作成した主体(owner key)。人か order か(§4.3) |
+| `version` | `BIGINT` | 楽観的ロック |
 | `created_at` / `updated_at` | `DATETIME(6)` | |
-
-上位者は列として持たない。上位者は、Keycloak のロールの保持者である(§4.1)。order には指名しない。
 
 #### 2.2 含めない項目
 
-- 秘密と認証情報: GitHub App の秘密鍵、Anthropic の Workload Identity Federation の資格情報、Keycloak の client secret、OIDC と MCP のトークン、環境変数の値。order に書き込む経路を作らない。
-- Run の本文と題名、PR の本文、Planner の生の出力、Goal の本文の複製。order は Goal の本文を持たない。Goal は、order の方針の文から作られるとき(§3.1 ①)だけ、方針の文を入力として受け取る。
+- 秘密と認証情報: GitHub App の秘密鍵、Anthropic の Workload Identity Federation の資格情報、Keycloak の client secret、OIDC と MCP のトークン、環境変数の値。
+- Run の本文と題名、PR の本文、Planner の生の出力、Goal の本文の複製。
 - 運用者の生の ID(owner key)。ログと `selfdev_order_events` には、SHA-256 の先頭 12 文字だけを出す(ADR 0011 U-18 と同じ)。
 - 費用の推定値。費用は #230 で計上された数値だけを入れる。
 
 #### 2.3 機微な内容の扱い
 
 - 保存する: `title`、`policy`、Goal の本文、停止と一時停止の理由(1〜500 文字)。いずれも DB にだけ置く。
-- 出さない: アプリのログ、一覧 API、MCP の応答。一覧は `title` と `policy` を含めない。詳細は運用者にだけ返す(ADR 0011 §1.1 と同じ)。
-- 監査: `selfdev_order_events` の payload には、停止と一時停止の理由の本文を入れてよい(ADR 0011 §7.1 と同じ扱い。監査の payload にだけ入る)。`title` と `policy` は入れない。
+- 出さない: アプリのログ、一覧 API、MCP の応答。一覧は `title` と `policy` を含めない。詳細は運用者にだけ返す。
+- 監査: `selfdev_order_events` の payload には、停止と一時停止の理由の本文だけを入れてよい(ADR 0011 §7.1 と同じ扱い)。`title` と `policy` は入れない。
 - ログは、固定のコード、ID、ダイジェストの先頭だけを出す(ADR 0011 §7.2 と同じ)。
 
 #### 2.4 状態
@@ -87,35 +89,58 @@
 |---|---|---|
 | `ACTIVE` | 周回を続けてよい。ガード(§5.2)を通れば、次の周を始める | 否 |
 | `PAUSED` | 周を始めない。`state_reason` を持つ。再開できる | 否 |
-| `STOP_REQUESTED` | 停止を要求中。新しい周を始めない。上位者の承認を待つ | 否 |
-| `STOPPED` | order を終えた。停止の承認でだけ入る | 終端 |
+| `STOP_REQUESTED` | 停止を要求中。新しい周を始めない。承認を待つ | 否 |
+| `STOPPED` | order を終えた。停止の承認でだけ入る(親の停止に伴う場合を含む) | 終端 |
+
+有効な状態(effective state): ある order が周を始めてよいかは、自分の状態と、祖先の状態で決まる。自分か祖先のいずれかが `PAUSED` または `STOP_REQUESTED` なら、その order は周を始めない。子の行は書き換えない。祖先が再開されると、子は自分の状態に戻る。
 
 「完了」の状態は作らない。上限(周回数、期限、累計の費用)に達したときは `PAUSED` にする(§5.2 の 10)。order を終わらせるには、必ず停止の承認を経る。
 
-全体の一時停止(`selfdev_autopilot_control.paused`)は、order の状態を変えない。周を止める効果だけを持つ。全体で 1 つの値である。
+全体の一時停止(`selfdev_autopilot_control.paused`)は、どの order の状態も変えない。全体で 1 つの値であり、周を止める効果だけを持つ。
 
 #### 2.5 遷移表
 
 | # | 遷移 | 契機 | 主体 | ガード | 理由コード | 承認 |
 |---|---|---|---|---|---|---|
-| 1 | (なし) → `ACTIVE` | 作成(`POST /api/selfdev/orders`) | 運用者(`admin-panel:admin`) | オートパイロットが有効。`max_cycles` が 1 のとき、かつ既定を超える予算でないときは承認を要さない | — | 要否は U-10 |
-| 2 | `ACTIVE` → `PAUSED` | 安全装置の発動(§5.2) | 安全装置(system) | 該当する条件 | §5.2 の理由 | 不要 |
-| 3 | `ACTIVE` → `PAUSED` | 運用者の一時停止 | 運用者 | 理由 1〜500 文字(監査のみ) | `OPERATOR_PAUSED` | 不要 |
-| 4 | `PAUSED` → `ACTIVE` | 運用者の再開 | 運用者 | 運用者の再開で解消する理由だけ(§5.2)。自動で解消する理由は解消済みであること | `OPERATOR_RESUMED` | 不要 |
-| 5 | `PAUSED` → `ACTIVE` | 自動の解消 | system | 自動で解消する理由だけ(§5.2) | `GUARD_CLEARED` | 不要 |
-| 6 | `ACTIVE` / `PAUSED` → `STOP_REQUESTED` | 停止の要求(§4.2) | 運用者(HTTP)、MCP(スコープ `kivra.selfdev.stop`) | 未決の停止要求が無いこと。理由 1〜500 文字 | `STOP_REQUESTED` | 要求には不要 |
-| 7 | `STOP_REQUESTED` → `STOPPED` | 停止の承認(§4.2) | 上位者(要求者と別人) | 要求が未期限切れで未消費、かつ `order.version` が要求時と一致すること | `OPERATOR_STOPPED` | **必要** |
-| 8 | `STOP_REQUESTED` → `PAUSED` | 却下、取り消し、期限切れ | 上位者(却下)、要求者か上位者(取り消し)、system(期限切れ) | — | `STOP_NOT_APPROVED` | 不要 |
+| 1 | (なし) → `ACTIVE`(ルート) | 作成 | 人(運用者) | オートパイロットが有効。`max_cycles` が 1 で既定の予算内なら承認を要さない(U-10) | — | 要否は U-10 |
+| 2 | (なし) → `ACTIVE`(子) | 子の作成(§2.7) | 人(運用者) | 親が `ACTIVE` で有効(親の effective state も `ACTIVE`)。深さ、子の数、予算の上限を満たす(§2.7) | — | U-19 |
+| 3 | `ACTIVE` → `PAUSED` | 安全装置の発動(§5.2) | 安全装置(system) | 該当する条件 | §5.2 の理由 | 不要 |
+| 4 | `ACTIVE` → `PAUSED` | 運用者の一時停止 | 運用者 | 理由 1〜500 文字(監査のみ) | `OPERATOR_PAUSED` | 不要 |
+| 5 | `PAUSED` → `ACTIVE` | 運用者の再開 | 運用者 | 運用者の再開で解消する理由だけ(§5.2)。祖先が effective に止まっていないこと | `OPERATOR_RESUMED` | 不要 |
+| 6 | `PAUSED` → `ACTIVE` | 自動の解消 | system | 自動で解消する理由だけ(§5.2) | `GUARD_CLEARED` | 不要 |
+| 7 | `ACTIVE` / `PAUSED` → `STOP_REQUESTED` | 停止の要求(§4.2) | 人(運用者の HTTP、または MCP のスコープ `kivra.selfdev.stop` を持つ人のトークン) | その木に未決の停止要求が無いこと。理由 1〜500 文字。要求は order が要求者だと記録する | `STOP_REQUESTED` | 要求には不要 |
+| 8 | `STOP_REQUESTED` → `STOPPED` | 停止の決定(§4.2) | 子は直接の親の決定(親の決定が承認を兼ねる)。ルートは人(ルートの承認者) | 要求が未期限切れで未消費。`order.version` と、対象の部分木の版が要求時と一致する | `PARENT_STOPPED`(子)、`OPERATOR_STOPPED`(ルート)、`ANCESTOR_STOPPED`(子孫) | **必要**(子は親の決定、ルートは人) |
+| 9 | `STOP_REQUESTED` → `PAUSED` | 却下、取り消し、期限切れ | 承認者(却下)、要求者か承認者(取り消し)、system(期限切れ) | — | `STOP_NOT_APPROVED` | 不要 |
 
 制約:
 
-- `ACTIVE` と `PAUSED` から `STOPPED` へ直接入る辺は無い。
-- 遷移 8 の後は、自動で `ACTIVE` に戻さない。戻すには運用者の再開(遷移 4)が要る。承認が得られなかったことを、運用者が見て判断するためである。
-- 遷移 7 は、承認と消費を 1 つの transaction で行う(§4.2)。`APPROVED` という中間の状態は作らない。
+- `ACTIVE` と `PAUSED` から `STOPPED` へ直接入る辺は無い。停止は、必ず遷移 8 を経る。
+- 遷移 9 の後は、自動で `ACTIVE` に戻さない。戻すには運用者の再開(遷移 5)が要る。
+- 遷移 8 は、承認と消費を 1 つの transaction で行う(§4.2)。`APPROVED` という中間の状態は作らない。
 
-#### 2.6 上限と方針の変更
+#### 2.6 方針と上限の変更
 
-order の方針、範囲、上限は、作成後に変えない。承認の対象が途中で変わると(TOCTOU)、承認の意味が失われるためである。上限を上げたいときは、新しい order を作る(新しい order の作成は、U-10 の規則で承認が要る)。旧 order は、運用者が停止を要求して閉じる。承認つきの更新は採らない(U-11)。
+order の方針、範囲、上限、親は、作成後に変えない。承認の対象が途中で変わると(TOCTOU)、承認の意味が失われるためである。上限を上げたいときは、新しい order を作る(新しい order の作成は U-10 の規則で承認が要る)。承認つきの更新は採らない(U-11)。
+
+#### 2.7 order の木(親子構造)
+
+- **構造**: 各 order は親を 1 つ持つ(ルートを除く)。親は作成時に決まり、変えられない(付け替えは禁止。U-21)。循環は、親が作成時にだけ決まり、新しい行は自分の祖先にはなれないため、構造上起きない。
+- **ルートの印**: `parent_order_id IS NULL` の order がルート。ルートは木に 1 つだけ作られる。ルートの承認者は人(§4.1)。
+- **規則(提案の既定。U-20)**:
+  - 深さの上限: 2(ルート 0、子 1、孫 2)。作成時に、親の深さ + 1 が上限以下であることを確かめる。
+  - 子の数の上限: 1 つの親につき 5 件。木 1 本の全体は 15 件まで。
+  - 親は `ACTIVE`(effective state も `ACTIVE`)でなければ子を作れない。停止された親に子を作ると、孤児になるため。
+  - 子を作るのは人だけ(U-19)。計画の中で子の作成を提案することはあっても、作成するのは人である。AI の loop が子を増やすと、子の上限と承認の規則を、AI が迂回できてしまうため。
+- **予算の入れ子**:
+  - 子の `order_budget_jpy` は、親の未割当ての範囲内(`親の order_budget_jpy − 親の allocated_jpy`)に収める。作成の時に、親の行を `FOR UPDATE` で取り、`allocated_jpy` を増やす。
+  - 子の費用は、子と、その祖先の `spent_jpy` の全てに加算する(同じ transaction)。
+  - 周を始める前に、経路上の全ての order(自分とルートまで)で、残りの予算が次のタスクの上限以上であることを確かめる。どれか 1 つでも足りなければ、周を始めない(`ORDER_BUDGET` の理由で止まる。対象は足りない order)。
+  - 子の上限は、親の割当ての中で働く。親の上限は、ルートの上限(月次の割当ての範囲内)から出る。
+- **停止の伝播**:
+  - 祖先の `PAUSED` と `STOP_REQUESTED` は、子孫の周を止める(effective state。§2.4)。
+  - 子の `PAUSED` は、親に伝わらない。子の問題で親の周が止まることは無い(親の子の扱いは、§3.2 の仕組みで判断する)。
+  - 親の停止(遷移 8)は、子孫の全てを `STOPPED` にする(§4.2 の「部分木の停止」)。
+- **親が先に終わるとき**: 親が `STOPPED` になると、子孫も同じ transaction で `STOPPED`(`ANCESTOR_STOPPED`)になる。子が `ACTIVE` のまま残る孤児は作らない。加えて、tick の中で不変条件を検査し、`STOPPED` の祖先を持つ非終端の order があれば、ログに ID だけを出して、その order を `STOPPED` にする(安全側の修復)。
 
 ### 3. ループの設計
 
@@ -123,9 +148,9 @@ order の方針、範囲、上限は、作成後に変えない。承認の対�
 
 | step | 内容 | 既存の仕組み |
 |---|---|---|
-| ① 開始 | order が `ACTIVE`、全体の一時停止が無い、`current_goal_id` が無い、`next_cycle_at` を過ぎている、`cycles_started < max_cycles`、期限内、の全てを満たすとき、Goal を作る(`order_id`、`cycle_no = cycles_started + 1`)。同じ transaction で `cycles_started` と `next_cycle_at` を進める | `SelfDevGoalRepository` |
+| ① 開始 | order が有効に `ACTIVE`(自分と祖先)、全体の一時停止が無い、`current_goal_id` が無い、`next_cycle_at` を過ぎている、`cycles_started < max_cycles`、期限内、予算の検査(§2.7)を満たすとき、Goal を作る(`order_id`、`cycle_no = cycles_started + 1`)。同じ transaction で `cycles_started` と `next_cycle_at` を進める | `SelfDevGoalRepository` |
 | ② 計画 | Planner が Plan を作る。入力は、order の方針(区切りで囲んだデータ)と、前の周の固定コードと件数だけ。Run の本文、PR の本文、例外の文は渡さない | `AutopilotPlanner`、ADR 0011 §3 |
-| ③ 承認 | 段階 2 の自動承認(ADR 0011 §6.1)の条件を満たすタスクだけ、自動で投入の対象にする。`requires_approval` のタスクがある周は、運用者が承認するか見送るまで、次へ進まない(「保留の周」) | `AutopilotDispatcher.approveAuto`、ADR 0011 §6.1 |
+| ③ 承認 | 段階 2 の自動承認(ADR 0011 §6.1)の条件を満たすタスクだけ、自動で投入の対象にする。`requires_approval` のタスクがある周は、人が承認するか見送るまで、次へ進まない(「保留の周」) | `AutopilotDispatcher.approveAuto`、ADR 0011 §6.1 |
 | ④ 投入 | 既存の Dispatcher が、番号順に、1 件ずつ、依存先の全てが COMPLETED のタスクだけ投入する | ADR 0011 §5.1 |
 | ⑤ Run と PR | 既存の経路で Run と PR を作る。kivra は PR を閉じず、マージもしない | ADR 0008、ADR 0010 |
 | ⑥ マージの確認 | 周のタスクが全て COMPLETED(PR がマージされ、マージの検証を通った)になるまで、次の周を始めない | `GitHubPrMergeAuthority`、ADR 0008 |
@@ -134,53 +159,71 @@ order の方針、範囲、上限は、作成後に変えない。承認の対�
 
 #### 3.2 暴走を防ぐ仕組み
 
-数値は提案であり、既定値は U-6 と U-12 で確定する。
+数値は提案であり、既定値は U-6、U-12、U-20 で確定する。
 
 | 仕組み | 規則(提案) | 効果と既存との関係 |
 |---|---|---|
-| 周の間隔 | 周の開始は、前の開始から 60 分以上あける(`cycle_min_interval_seconds`) | 費用と PR の作成の速さを抑える。Dispatcher の tick とは別に、order の `next_cycle_at` を見る |
+| 周の間隔 | 周の開始は、前の開始から 60 分以上あける | 費用と PR の作成の速さを抑える。order の `next_cycle_at` を見る |
 | 1 日の周の数 | 1 order につき、UTC の 1 日に 3 周まで | 間隔の下限とは別に、1 日の上限を置く |
-| 1 日の Run 数 | 既存の `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY`(既定 5)をそのまま使う | order はこの値を上げられない |
-| 1 周の規模 | タスクは 8 件まで(ADR 0011 §3)。1 周の費用は `cycle_budget_jpy`(既定 1,000 円) | 投入の前に、残りの 1 周の予算が次のタスクの上限(ADR 0010 の `--max-budget-usd` の値)以上であることを確かめる |
-| 累計の上限 | `order_budget_jpy`(既定 5,000 円)。ADR 0011 の月次割当(既定 50%)の範囲内 | 両方を満たすときだけ投入する。既存の `autopilotBudgetAllows` は残す。予算の正本は ADR 0004 の BudgetPort のまま |
+| 1 日の Run 数 | 既存の `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY`(既定 5)をそのまま使う | 木全体で、この値を上げられない |
+| 1 周の規模 | タスクは 8 件まで(ADR 0011 §3)。1 周の費用は `cycle_budget_jpy`(既定 1,000 円) | 投入の前に、経路上の残り予算が次のタスクの上限(ADR 0010 の `--max-budget-usd` の値)以上であることを確かめる |
+| 累計の上限と入れ子 | `order_budget_jpy`(既定 5,000 円)。子は親の未割当ての範囲内(§2.7) | 両方を満たすときだけ投入する。既存の `autopilotBudgetAllows` は残す。予算の正本は ADR 0004 の BudgetPort のまま |
+| 木の大きさ | 深さ 2 まで、子 5 件まで、木全体 15 件まで(§2.7) | 木の成長を止める。作成は人だけ |
 | 総周回数 | `max_cycles`(既定 1、上限 10) | 到達で `PAUSED(LIMIT_REACHED)` |
 | 期限 | 作成から 14 日 | 到達で `PAUSED(EXPIRED)` |
-| 連続失敗 | order で 2 周続けて失敗(§3.1 ⑦)したら `PAUSED(CYCLE_FAILURES)` | 既存の全体のブレーカー(連続 3 件、`CIRCUIT_OPEN`)は残す。order の方が先に止まる |
-| 保留 PR の上限 | 既存の 3 件(全体)。order は増やさない | 上限に達したら待つ(状態は変えない)。72 時間続いたら `PAUSED(STALLED)` |
+| 連続失敗 | order で 2 周続けて失敗(§3.1 ⑦)したら `PAUSED(CYCLE_FAILURES)` | 既存の全体のブレーカー(連続 3 件、`CIRCUIT_OPEN`)は残す |
+| 保留 PR の上限 | 既存の 3 件(全体)。order は増やさない | 上限に達したら待つ。72 時間続いたら `PAUSED(STALLED)` |
 | 前の周の確認 | 次の周は、前の周のマージの確認(§3.1 ⑥)の後だけ | 成果を確かめないまま、周を増やさない |
 | 重複の検出 | 計画の fingerprint は、正規化した title の集合と `target_paths` の集合(ソート済み)の SHA-256。直近 5 周の fingerprint と一致したとき、または同じ `target_paths` の集合が 3 周続いたとき、`PAUSED(DUPLICATE_PLAN)` | 完全一致と、同じパス集合だけを検出する。言い換えによる意味の重複は検出できない(未確認: 意味の重複を機械的に判定する方法は無い) |
-| 同時の order | 1 件まで(U-7) | 既存の同時 Run の上限(既定 1)と合わせる |
+| 同時の周 | 木全体で同時に進む周は 1 つ(既存の同時 Run の上限と合わせる) | 木の中で周が競合しない |
 | 周ごとの監査 | `selfdev_order_events` に、開始、計画の検証、投入、評価を記録する(§4.3) | 件数、ID、コード、費用の数値だけ |
 
 ### 4. 停止の承認
 
-#### 4.1 誰が要求し、誰が承認するか
+#### 4.1 上位者の定義(U-1 の決定)
 
-- **要求できる者**: 運用者(`admin-panel:admin`)。MCP からは、スコープ `kivra.selfdev.stop` を持つトークンでも要求できる(U-9)。要求は新しい周を止めるだけなので、危険は小さい。
-- **承認できる者(上位者)**: 新しい Keycloak の client role(仮称 `kivra-selfdev:supervisor`、U-1)を持つ人間で、要求者と別人であること。
-- **既存のロールで表せるか**: 表せない。
-  - `admin-panel:admin` は運用者の要件であり、上位者とは区別できない。運用者が承認者にもなると、要求者と承認者が同じになる。
-  - `kivra-agent` のロールは、既存の `AgentRefused`(403)で、オペレーターの経路から拒否される。承認者にはしない。
-  - 新しいロールは、Keycloak の realm の設定の変更になる。これは kivra の PR だけでは完結せず、共有基盤(k8s-system 側の Keycloak の設定)の変更を伴う。また、現在の `OidcJwtVerifier` は 1 つの required role を検査する構造のため、承認の経路では追加のロール検査が要る。コードの変更は小さい。
-- **未確認**: Keycloak の realm に、`admin-panel:admin` 以外の運用者ロールがあるかどうか。運用者が同じ人の 2 つのアカウントでない別人かどうか。上位者を別人として置けるかは、利用者の組織の事実であり、本 ADR では判断できない(U-1)。
+- **決定**: 上位者は、固定のロールではなく、order の木の親である。
+  - 子の order の停止は、その親が決める。親の決定が上位者の判断であり、別の承認者は要らない(§4.2)。
+  - ルートの order の停止は、人(kigawa)だけが決める。
+- **根拠(ユーザーの決定、2026-10-19)**: 最上位は kigawa(人)である。order の親子が上位を表す。これにより、運用者が 1 人でも成立する。ロールの追加は不要である。
+- **kigawa をコードに固定しない**: 承認の権限は、設定の値(`KIVRA_SELFDEV_ROOT_APPROVER`。kigawa の owner key。`oidcOwnerKey(iss, sub)` の形式 `<長さ>:<iss>:<sub>`)と、認証された主体の一致で決める。設定は秘密ではないが、`sub` を含むため、ログには出さない(SHA-256 の先頭 12 文字だけ)。設定が無いときは、ルートの停止の承認を受け付けない(fail closed)。オートパイロットが有効なのに設定が無い場合は、起動を拒否する(ADR 0011 §2.8c の検査と同じ方式)。
+- **既存の仕組みで足りるか(事実)**: 足りる。
+  - 運用者の HTTP の認証は、既存の OIDC の必須ロール(`admin-panel:admin`)で行う。kigawa の token がこのロールを持つことは、既存の運用で前提にしている(未確認: 実際の realm の設定)。
+  - 主体は `oidcOwnerKey(iss, sub)` で決まる。承認の検査は、その値と設定の値の一致だけである。
+  - 新しい Keycloak の client role は要らない。
+- **人が承認する場合の規則**: 人による承認は、ルートの承認者(設定の主体)だけが行える。子の停止を人が決めるときは、親の名で決める形になる。ルート以外の人には、承認の権限を与えない。
 
-#### 4.2 承認の流れ
+#### 4.2 停止の決定と承認の流れ
 
-`selfdev_order_stop_requests` の状態: `PENDING`、`REJECTED`、`CANCELLED`、`EXPIRED`、`CONSUMED`(承認と消費を同時に行うので、`APPROVED` は作らない)。
+停止の経路は、対象が子かルートかで分ける。
 
-1. **要求**: `POST /api/selfdev/orders/{id}/stop-requests`(運用者)。要求の行を作り、order を `STOP_REQUESTED` にする。同じ order に未決の要求が 1 件でもあれば拒否する。`active_key` 列(`PENDING` のときだけ `order_id` を入れ、それ以外は NULL)に UNIQUE 制約を置いて、DB でも強制する。要求の行は、要求時の `order.version` と、要求の理由の SHA-256、要求者の owner key を持つ。
-2. **承認待ち**: 上位者は、承認一覧で、要求の理由、要求者の表示名、要求時の order の版、周の状況と、要求の digest を見る。
-3. **承認**: `POST /api/selfdev/stop-requests/{id}/approve`(上位者)。リクエストは digest を含む。サーバーは次を 1 つの transaction で行う。
-   - (a) `requireJsonSameOrigin`(CSRF)。
-   - (b) 上位者のロールがあり、要求者と別人であること(DB の CHECK と、アプリの検査の両方)。
-   - (c) order の行を `FOR UPDATE` で取り、`order.version` が要求時と一致すること。
-   - (d) 要求が `PENDING` で、期限内であること。
-   - (e) 送られた digest が、サーバーの計算した digest と一致すること。digest は `SHA-256` of canonical JSON `{"action":"ORDER_STOP","order_id","order_version","request_id","reason_sha256"}`。
-   
-   全部を満たしたら、要求を `CONSUMED` にし、order を `STOPPED`(`OPERATOR_STOPPED`)にする。周の未投入のタスクは `SKIPPED`(`GOAL_STOPPED`)にする。投入済みの Run と PR には触れない(ADR 0011 §5.4 と同じ)。
-4. **却下**: `POST /api/selfdev/stop-requests/{id}/reject`(上位者)。要求は `REJECTED`、order は `PAUSED(STOP_NOT_APPROVED)`。
-5. **取り消し**: `POST /api/selfdev/stop-requests/{id}/cancel`(要求者か上位者)。要求は `CANCELLED`、order は `PAUSED(STOP_NOT_APPROVED)`。
-6. **期限切れ**: 要求から 24 時間で `EXPIRED`(tick が判定する)。order は `PAUSED(STOP_NOT_APPROVED)`。
+- **(a) 子の停止: 親の決定が承認を兼ねる**
+  - 親が子 X を停止すると決めた時点で、停止は成立する。親は上位者であり、その決定が上位者の判断である。X の停止に、親とは別の承認者は要らない。
+  - 決定の主体(actor)は、次のどちらかで、`selfdev_order_stop_requests` の行に `decider_kind`(`HUMAN` か `ORDER`)と `decider_ref` を記録する。
+    - `HUMAN`: 人が親の名で決める。人は、ルートの承認者(kigawa。`KIVRA_SELFDEV_ROOT_APPROVER`)だけ。
+    - `ORDER`: 親 order の自動のループが決める。§4.4 の条件と理由コードを満たすときだけ。
+  - 人が要求から始める場合(任意): 人が子の停止を要求し(`PENDING`)、親が決める(`CONSUMED`)。親の決定が承認を兼ねるため、要求者と決定者が同じ主体になりうることを許す。
+  - 原則の扱い: 要求者と承認者を分ける原則は、ルートの停止(b)に適用する。子の停止には適用しない(親の決定が承認を兼ねるため)。
+  - 決定者の範囲(推奨): 決定できるのは、対象の直接の親だけ。人(ルートの承認者)は例外として、任意の子孫の停止を決められる。人の経路が増えるだけで、自動の経路は増えない。
+    - 理由: 祖先が直接の親を飛ばして子孫を決めると、決定の経路が 1 段増え、途中の親の判断が覆る。孫 G を止めるには、G の親 P を止める。部分木の伝播で G も止まる。
+  - 子が自分の停止を決めることはできない。X 自身、X の子孫、X の兄弟は、X の停止を決められない。決定者は、対象の直接の親(または人の場合はルートの承認者)でなければならない。
+- **(b) ルートの停止: 人(kigawa)だけ**
+  - ルートには親が無いので、決定は人(ルートの承認者)だけが行える。自動のループは、ルートの停止を決定も承認もできない。
+  - 要求者と承認者は、主体として別でなければならない。kigawa が要求して kigawa が承認することはできない。この条件を満たす要求者をどう用意するかは U-17 の未決の点である。
+- **(c) 手順**
+  1. 要求(任意。人だけ): `POST /api/selfdev/orders/{id}/stop-requests`。木に未決の要求は 1 件まで(`active_key` の UNIQUE)。対象は `STOP_REQUESTED` になる。要求の行は、要求時の部分木の版(各 order の `id` と `version` の組、ソート済み)、理由の SHA-256、要求者を持つ。
+  2. 決定(人): `POST /api/selfdev/stop-requests/{id}/approve`。1 つの transaction で次を検査する。
+     - `requireJsonSameOrigin`(CSRF)。同一オリジンのブラウザの経路だけ。
+     - 決定者が決定権を持つ(子は直接の親の名での決定、ルートは要求者と別の主体)。
+     - 対象の木の行(祖先を含む)を `FOR UPDATE` で取り、版が要求時と一致する。
+     - 要求が `PENDING` で期限内である。
+     - digest が一致する。digest は `SHA-256` of canonical JSON `{"action":"ORDER_STOP","target_order_id","subtree","request_id","reason_sha256"}`。
+
+     成立したら、要求を `CONSUMED`(承認と消費を同時に行う)、部分木を `STOPPED` にする(対象は子の場合 `PARENT_STOPPED`、ルートの場合 `OPERATOR_STOPPED`。子孫は `ANCESTOR_STOPPED`)。
+  3. 決定(自動): tick が §4.4 の条件を確かめ、満たしたときだけ、行を作り(要求なしでも行を作る。`CONSUMED`、`decider_kind = ORDER`)、部分木を `STOPPED` にする。HTTP の経路は無い。
+  4. 却下(人の決定者): `POST /api/selfdev/stop-requests/{id}/reject`。要求は `REJECTED`、対象は `PAUSED(STOP_NOT_APPROVED)`。自動の決定には却下は無い(条件を満たさなければ決めない)。
+  5. 取り消し: `POST /api/selfdev/stop-requests/{id}/cancel`(要求者か人の決定者)。`CANCELLED`、`PAUSED(STOP_NOT_APPROVED)`。
+  6. 期限切れ: 要求から 24 時間で `EXPIRED`(tick が判定する)。`PAUSED(STOP_NOT_APPROVED)`。
 
 承認の再利用(リプレイ)は、`CONSUMED` が 1 回しか作れないこと(条件付き UPDATE。ADR 0011 の `ApprovalRepository.consume` と同じ方式)で防ぐ。
 
@@ -188,17 +231,45 @@ order の方針、範囲、上限は、作成後に変えない。承認の対�
 
 `selfdev_order_events`(追記専用。アプリは UPDATE と DELETE をしない):
 
-- 列: `event_id`、`order_id`、`cycle_no`(NULL 可)、`kind`(`ORDER_CREATED`、`CYCLE_STARTED`、`PLAN_VALIDATED`、`TASKS_SUBMITTED`、`CYCLE_EVALUATED`、`PAUSED`、`RESUMED`、`STOP_REQUESTED`、`STOP_APPROVED`、`STOP_REJECTED`、`STOP_CANCELLED`、`STOP_EXPIRED`、`STOPPED`)、`from_state`、`to_state`、`reason_code`、`actor_digest`(要求者または操作者の owner key の SHA-256 の先頭 12 文字)、`approver_digest`(承認者)、`request_id`、`ids`(goal_id、plan_id、run_id の JSON。ID だけ)、`payload`(理由の本文だけ)、`occurred_at`。
+- 列: `event_id`、`order_id`、`cycle_no`(NULL 可)、`kind`(`ORDER_CREATED`、`CYCLE_STARTED`、`PLAN_VALIDATED`、`TASKS_SUBMITTED`、`CYCLE_EVALUATED`、`PAUSED`、`RESUMED`、`STOP_REQUESTED`、`STOP_APPROVED`、`STOP_REJECTED`、`STOP_CANCELLED`、`STOP_EXPIRED`、`STOPPED`)、`from_state`、`to_state`、`reason_code`、`actor_kind`(`HUMAN` か `ORDER`)、`actor_ref`(人の場合は owner key の SHA-256 の先頭 12 文字、order の場合は order_id)、`decider_kind`、`decider_ref`(決定の行のみ)、`request_id`、`ids`(goal_id、plan_id、run_id の JSON。ID だけ)、`payload`(理由の本文だけ)、`occurred_at`。
+- 決定が自動か人かは、`decider_kind` で区別する(`ORDER` は親の自動のループ、`HUMAN` は人)。自動の決定の理由コード(§4.4)は `reason_code` に入る。
 - ハッシュの連鎖を付けるかどうかは U-15。
-- 既存の `audit_events` は流用しない。`audit_events` は Run 単位の連鎖(`run_id` と `seq`)を検証する設計であり、order の遷移を混ぜると、その検証の意味が変わるおそれがある。混ぜない方が安全である(未確認: 混ぜた場合の既存の検証への影響は調べていない)。
+- 既存の `audit_events` は流用しない。`audit_events` は Run 単位の連鎖(`run_id` と `seq`)を検証する設計であり、order の遷移を混ぜると、その検証の意味が変わるおそれがある(未確認: 混ぜた場合の影響は調べていない)。
+
+#### 4.4 親の自動の決定(U-18 の決定)
+
+ユーザーの決定(2026-10-19): 親 order の自動のループが子を停止してよい。ただし、次を全て満たすときだけ。恣意的な停止を防ぐため、決定的な規則だけで書く。
+
+1. 決定者 P は X の直接の親で、P は有効に `ACTIVE`(P 自身が祖先により止まっていない。P は停止の対象でない)。
+2. 理由コードを 1 つ必須で記録する(固定の列挙。理由の本文は記録しない)。
+   - `CHILD_CYCLE_FAILURES`: X の `consecutive_failed_cycles` が 2 以上。
+   - `CHILD_BUDGET_EXHAUSTED`: X の `spent_jpy` が `order_budget_jpy` に達し、X の部分木に非終端の Run が無い。
+   - `CHILD_DUPLICATE_PLAN`: X が `DUPLICATE_PLAN` で `PAUSED` になり、同じ理由が 3 周続いた(§3.2 の重複の規則)。
+   - `CHILD_SCOPE_VIOLATION`: X の計画が、X の `scope_profile` の範囲外のパスを 2 周続けて出した(ADR 0011 の allowlist による `PLAN_INVALID`)。
+3. 理由コードに対応する事実が、記録されている(計数、予算の値、周の結果)。モデルの評価や、ループの判断は使わない。
+4. 頻度の上限: P が自動で決める子の停止は、1 日に 1 件まで。木 1 本で、1 日に 2 件まで。超えたら決めず、人に知らせる(人の判断に委ねる)。
+5. 対象は、P の直接の子だけ。P が孫以下を止めるのは、P の子を止める(部分木の伝播)ことを通じてだけ。
+6. 自動の決定は、ルートを対象にできない。自動のループは、ルートの停止を決定も承認もできない(ユーザーの決定)。
+
+推奨の理由: 理由コードが固定で、事実だけを条件にするため、AI の判断で止めない。頻度の上限は、誤判定や乗っ取られた親が子を一斉に止めることを抑える。停止は終端であり、誤った停止は人が新しい子を作って直す(§2.7 の作成は人だけ)。
+
+#### 4.5 停止の影響(子、孫、進行中の Run と PR)
+
+- **孫以下**: 子を停止すると、子孫は同じ transaction で `STOPPED`(`ANCESTOR_STOPPED`)になる。子孫ごとに別の決定を要求しない。孤児は作らない(§2.7)。
+- **未投入のタスク**: 既存の `stopGoal`(`SelfDevOperatorRepository`)と同じ扱い。Goal を `STOPPED` にし、未投入のタスクを `SKIPPED` にする(確認済み)。
+- **投入中のタスク(`SUBMITTING`)**: 既存の残件(ADR 0011 §2.8b の最後の項目)。停止された Goal の `SUBMITTING` は残る。人が判断する。
+- **進行中の Run(非終端)**: kivra は中止しない。既存の経路で完了するか、ADR 0009 の運用者の解放で閉じるまで待つ。Run の取消し API は未実装(ADR 0012 §6 は設計のみ。確認済み)。
+- **PR**: 作成済みの PR は残す。kivra は PR を閉じず、マージもしない(ADR 0008、ADR 0011 §5.4)。
+- **結果の同期**: 停止後も、`SUBMITTED` のタスクの結果は同期される(`AutopilotDispatcher.syncSubmittedOutcomes` は Goal の状態を見ない。確認済み)。その結果が連続失敗の計数に入るかどうかは、`recordOutcome` を精査していないため未確認(U-24)。
+- **新しい周**: 停止された木では、新しい周を始めない。
 
 ### 5. 安全装置との関係(最重要)
 
 #### 5.1 3 つの状態を区別する
 
-- **一時停止(`PAUSED`)**: 周を始めない。order は生きている。主体は運用者か安全装置である。承認は要らない。解除の方法は、理由ごとに §5.2 で決める。
-- **停止要求(`STOP_REQUESTED`)**: 周を始めない点は一時停止と同じ。ただし、解除できるのは、承認(`STOPPED`)か、却下、取り消し、期限切れ(`PAUSED`)だけである。
-- **停止(`STOPPED`)**: order を終える終端。上位者の承認でだけ入る。
+- **一時停止(`PAUSED`)**: 周を始めない。order は生きている。主体は人か安全装置である。承認は要らない。解除の方法は、理由ごとに §5.2 で決める。
+- **停止要求(`STOP_REQUESTED`)**: 周を始めない点は一時停止と同じ。解除できるのは、承認(`STOPPED`)か、却下、取り消し、期限切れ(`PAUSED`)だけである。
+- **停止(`STOPPED`)**: order を終える終端。承認でだけ入る。
 
 安全装置は、いつも一時停止を発動する。停止や承認を経由しない。承認制がかかるのは「終わらせる」だけであり、「止める」にはかからない。
 
@@ -206,38 +277,41 @@ order の方針、範囲、上限は、作成後に変えない。承認の対�
 
 | # | 安全装置 | 検出 | order への作用 | 理由コード | 解除 | 解除の主体 | 承認 |
 |---|---|---|---|---|---|---|---|
-| 1 | 全体の一時停止(緊急) | 運用者が `POST /api/selfdev/autopilot/pause` を呼ぶ | 全 order の周を止める。order の状態は変えない | `OPERATOR_PAUSED` | 全体の再開 | 運用者 | 不要 |
-| 2 | キルスイッチ(環境変数) | `KIVRA_SELFDEV_AUTOPILOT_ENABLED=false` または `KIVRA_SELFDEV_ENABLED=false` で再起動 | ワーカーが動かない。API は 503。order の状態は変えない | `AUTOPILOT_DISABLED` | 有効化して起動し、行 14 の後に再開 | 運用者 | 不要 |
-| 3 | 月次の割当ての枯渇 | `autopilotBudgetAllows` が偽 | 周を始めない。order を `PAUSED` にする | `BUDGET_HOLD` | 月が変わる、または割当てが戻る | system | 不要 |
-| 4 | order の累計の上限 | `spent_jpy` が `order_budget_jpy` に達する | 周を始めない | `ORDER_BUDGET` | 上限を上げるには新しい order を作る(U-11) | — | 新しい order の承認 |
-| 5 | 1 周の費用の上限 | 投入の前に、残りの 1 周の予算が次のタスクの上限に届かない | 次の投入を止める。order を `PAUSED` にする | `CYCLE_BUDGET` | 運用者の再開(原因の確認の後) | 運用者 | 不要 |
-| 6 | 連続失敗(order 単位) | `consecutive_failed_cycles` が 2 以上 | 周を始めない | `CYCLE_FAILURES` | 運用者の再開(原因の確認の後) | 運用者 | 不要 |
-| 7 | 連続失敗(全体、既存) | `breaker_open` | 周を始めない | `CIRCUIT_OPEN` | 既存の reset-breaker | 運用者 | 不要 |
-| 8 | UNKNOWN の Run、UNKNOWN_COST | 既存の状態 | 周を始めない | `UNKNOWN_RUN` | ADR 0009 の運用者の解放 | 運用者 | 不要 |
+| 1 | 全体の一時停止(緊急) | 人が `POST /api/selfdev/autopilot/pause` を呼ぶ | 全 order の周を止める。状態は変えない | `OPERATOR_PAUSED` | 全体の再開 | 人 | 不要 |
+| 2 | キルスイッチ(環境変数) | `KIVRA_SELFDEV_AUTOPILOT_ENABLED=false` または `KIVRA_SELFDEV_ENABLED=false` で再起動 | ワーカーが動かない。API は 503。状態は変えない | `AUTOPILOT_DISABLED` | 有効化して起動し、行 14 の後に再開 | 人 | 不要 |
+| 3 | 月次の割当ての枯渇 | `autopilotBudgetAllows` が偽 | 周を始めない。ルートを `PAUSED` にする | `BUDGET_HOLD` | 月が変わる、または割当てが戻る | system | 不要 |
+| 4 | 予算の上限(order、または祖先) | 経路上のいずれかの `spent_jpy` が上限に達する | 周を始めない。足りない order を `PAUSED` にする | `ORDER_BUDGET` | 上限を上げるには新しい order を作る(U-11) | — | 新しい order の承認 |
+| 5 | 1 周の費用の上限 | 投入の前に、経路上の残りが次のタスクの上限に届かない | 次の投入を止める | `CYCLE_BUDGET` | 人の再開(原因の確認の後) | 人 | 不要 |
+| 6 | 連続失敗(order 単位) | `consecutive_failed_cycles` が 2 以上 | 周を始めない | `CYCLE_FAILURES` | 人の再開(原因の確認の後) | 人 | 不要 |
+| 7 | 連続失敗(全体、既存) | `breaker_open` | 周を始めない | `CIRCUIT_OPEN` | 既存の reset-breaker | 人 | 不要 |
+| 8 | UNKNOWN の Run、UNKNOWN_COST | 既存の状態 | 周を始めない | `UNKNOWN_RUN` | ADR 0009 の運用者の解放 | 人 | 不要 |
 | 9 | FX の期限切れ | `KIVRA_FX_AS_OF` が古く、費用を換算できない | 周を始めない | `FX_EXPIRED` | 為替の更新(runbook §4.8) | system | 不要 |
-| 10 | 周数または期限の上限 | `cycles_started >= max_cycles`、または期限切れ | 周を始めない | `LIMIT_REACHED` / `EXPIRED` | 上限の変更は新しい order(U-11) | — | 新しい order の承認 |
-| 11 | 重複 | fingerprint の一致(§3.2) | 周を始めない | `DUPLICATE_PLAN` | 運用者の再開(原因の確認の後) | 運用者 | 不要 |
+| 10 | 周数または期限の上限 | `cycles_started >= max_cycles`、または期限切れ | 周を始めない | `LIMIT_REACHED` / `EXPIRED` | 新しい order(U-11) | — | 新しい order の承認 |
+| 11 | 重複 | fingerprint の一致(§3.2) | 周を始めない | `DUPLICATE_PLAN` | 人の再開(原因の確認の後) | 人 | 不要 |
 | 12 | 保留 PR の上限 | 既存の 3 件 | 待つ。状態は変えない | `PENDING_PR_LIMIT` | PR がマージまたは閉じられる | system | 不要 |
 | 13 | 滞留 | 行 12 が 72 時間続く | 周を始めない | `STALLED` | 保留 PR の解消(自動) | system | 不要 |
-| 14 | 有効化された後の起動 | 起動時に `ACTIVE` の order がある | 全 `ACTIVE` を `PAUSED` にする(U-14) | `STARTUP_HOLD` | 運用者の再開 | 運用者 | 不要 |
-| 15 | 停止要求の未承認 | 却下、取り消し、期限切れ | `PAUSED` に戻す | `STOP_NOT_APPROVED` | 運用者の再開 | 運用者 | 不要 |
+| 14 | 有効化された後の起動 | 起動時に `ACTIVE` の order がある | 全 `ACTIVE` を `PAUSED` にする(U-14) | `STARTUP_HOLD` | 人の再開 | 人 | 不要 |
+| 15 | 停止要求の未承認 | 却下、取り消し、期限切れ | `PAUSED` に戻す | `STOP_NOT_APPROVED` | 人の再開 | 人 | 不要 |
+| 16 | 祖先の一時停止 | 祖先が `PAUSED` または `STOP_REQUESTED` | 子孫の周を止める(子の状態は変えない) | `ANCESTOR_PAUSED` | 祖先の再開(自動で子に戻る) | 祖先の解除に従う | 不要 |
 
 補足:
 
-- 行 3 は、ADR 0011 では Goal の「待ち」(状態は変えない)として定めている。order では、周を止めるだけでなく order の状態を `PAUSED` にする。`ACTIVE` のまま待っていると、画面が「動いている」と表示し続けるためである。
+- 行 3 は、ADR 0011 では Goal の「待ち」として定めている。order では、周を止めるだけでなく、ルートの状態を `PAUSED` にする。`ACTIVE` のまま待っていると、画面が「動いている」と表示し続けるためである。
 - 行 4、10 の上限は、ゆるめる方向の変更であり、既存の order の変更では行わない。新しい order を承認つきで作る(§2.6)。
-- 解除の主体が system の行(3、9、12、13)だけが、運用者の操作なしに `ACTIVE` へ戻る。他の行は、運用者が原因を確認してから再開する。
+- 解除の主体が system の行(3、9、12、13)だけが、人の操作なしに `ACTIVE` へ戻る。他の行は、人が原因を確認してから再開する。
+- 行 16 の子の周は、祖先が再開されると、理由に関係なく自分の状態(`ACTIVE` か他の `PAUSED`)に従う。
 
 #### 5.3 緊急時の止め方
 
-- **緊急の一時停止(行 1)**: 運用者が即座に行う。承認は要らない。暴走のときに承認を待たせると、止まらなくなるためである。
+- **緊急の一時停止(行 1)**: 人が即座に行う。承認は要らない。暴走のときに承認を待たせると、止まらなくなるためである。全体の一時停止は、木の全体の周を止める。
 - **キルスイッチ(行 2、環境変数)**: 最後の手段(break-glass)として位置づける。再起動が要り、数分かかる。承認制の例外である。この経路は order を終わらせない。有効化し直したときは、行 14 により全 `ACTIVE` が `PAUSED` になる。
-- **終了(`STOPPED`)**: 緊急時も承認を要する。緊急の止め方は一時停止で足りるように設計する。終了を急ぐ必要があるときも、周は一時停止で止まっているので、承認が遅れても被害は増えない。
-- **上位者が応答しないとき**: 周は止まったままである。終了が遅れるだけであり、被害は増えない。一時停止と終了を分けたことの利点はここにある。
+- **終了(`STOPPED`)**: 緊急時も承認を要する。緊急の止め方は一時停止で足りるように設計する。周は一時停止で止まっているので、承認が遅れても被害は増えない。
+- **承認者が応答しないとき**: 周は止まったままである。終了が遅れるだけであり、被害は増えない。
+- **ルートの承認者が存在しないとき(設定が無い、または主体が一致しない)**: ルートの終了は、承認できない。ルートは一時停止のままになる。これは fail closed であり、安全側である。
 
 #### 5.4 停止要求中の扱い(U-4)
 
-- 推奨: 停止要求中は、新しい周を始めない。未投入のタスクも投入しない。投入の直前に order の状態を読み直す(ADR 0011 §2.8b の `GOAL_NOT_DISPATCHABLE` と同じ検査)。
+- 推奨: 停止要求中は、対象と子孫の周を始めない。未投入のタスクも投入しない。投入の直前に order の状態(effective state)を読み直す(ADR 0011 §2.8b の `GOAL_NOT_DISPATCHABLE` と同じ検査)。
 - 進行中の Run と PR は既存の経路で進む。kivra は止めない。Run を取り消す手段は、現在の実装では、ADR 0009 の運用者の解放(`POST /api/admin/selfdev/runs/{id}/release`)だけである。ADR 0012 §6 の取消し要求は設計のみで、実装されていない(確認済み)。
 - 理由: 承認を待つ間に新しい PR が増えると、承認の後に残る作業が増える。承認の期限(24 時間)の間は、周を始めないことが安全である。
 
@@ -245,23 +319,24 @@ order の方針、範囲、上限は、作成後に変えない。承認の対�
 
 | 操作 | 経路 | 認可 | 備考 |
 |---|---|---|---|
-| order の作成 | `POST /api/selfdev/orders` | 運用者(`admin-panel:admin`) | `requireJsonSameOrigin`。Idempotency-Key を必須にする。無効時は 503 |
-| 一覧 | `GET /api/selfdev/orders` | 運用者 | `title` と `policy` を含めない |
-| 詳細 | `GET /api/selfdev/orders/{id}` | 運用者 | `policy` を含む。状態、理由、周の数、費用 |
+| ルートの作成 | `POST /api/selfdev/orders` | 人(運用者の OIDC) | `requireJsonSameOrigin`。Idempotency-Key を必須にする。無効時は 503 |
+| 子の作成 | `POST /api/selfdev/orders/{id}/children` | 人(運用者の OIDC) | 親が `ACTIVE`。深さ、子の数、予算の入れ子の検査(§2.7)。AI の loop は呼ばない(U-19) |
+| 一覧 | `GET /api/selfdev/orders` | 運用者 | 木の形(親子の関係)を含む。`title` と `policy` は含めない |
+| 詳細 | `GET /api/selfdev/orders/{id}` | 運用者 | `policy` を含む。状態、有効な状態、理由、周の数、費用 |
 | 周の状況 | `GET /api/selfdev/orders/{id}/cycles` | 運用者 | 周番号、結果コード、件数、PR の数、費用の数値。本文は含めない |
-| 一時停止、再開 | `POST .../pause`、`POST .../resume` | 運用者 | 一時停止の理由は 1〜500 文字(監査のみ) |
-| 停止の要求 | `POST /api/selfdev/orders/{id}/stop-requests` | 運用者 | 理由を入力する |
-| 承認一覧 | `GET /api/selfdev/stop-requests?state=PENDING` | 上位者 | 理由と digest を表示する |
-| 承認、却下 | `POST /api/selfdev/stop-requests/{id}/approve`、`.../reject` | 上位者(要求者と別人) | ブラウザの UI からだけ。MCP には出さない |
-| 取り消し | `POST /api/selfdev/stop-requests/{id}/cancel` | 要求者か上位者 | |
+| 一時停止、再開 | `POST .../pause`、`POST .../resume` | 運用者 | 理由は 1〜500 文字(監査のみ)。祖先が止まっているときは再開できない |
+| 停止の要求 | `POST /api/selfdev/orders/{id}/stop-requests` | 運用者 | 理由を入力する。対象の部分木を表示する |
+| 承認一覧 | `GET /api/selfdev/stop-requests?state=PENDING` | 承認者が見られる要求 | 理由、対象の部分木、digest を表示する |
+| 承認、却下 | `POST /api/selfdev/stop-requests/{id}/approve`、`.../reject` | §4.2 の承認者 | 人による承認は、ブラウザの UI の経路だけ。MCP には出さない |
+| 取り消し | `POST /api/selfdev/stop-requests/{id}/cancel` | 要求者か承認者 | |
 
-画面: 既存の `/ui` の Goal の欄の隣に、order の欄を置く(ADR 0011 §1.1 と同じ作り)。一時停止の理由は、理由コードを固定の日本語の文言に変換して表示する。機械の文言や自由記述をそのまま出さない。承認一覧は、上位者にだけ表示する。
+画面: 既存の `/ui` の Goal の欄の隣に、order の木の欄を置く。木は親子の字下げで表示する。一時停止の理由は、理由コードを固定の日本語の文言に変換して表示する。機械の文言や自由記述をそのまま出さない。承認一覧は、承認者として登録された主体にだけ表示する。
 
 MCP(ADR 0013 の仕組みを使う):
 
 - 既存の読み取り(`kivra_run_list`、`kivra_run_get`、スコープ `kivra.runs.read`)に、order の読み取り(`kivra_order_list`、`kivra_order_get`。スコープは `kivra.runs.read` を流用する)を足す。
 - 停止の要求(`kivra_order_stop_request`、スコープ `kivra.selfdev.stop`)を足す。`kivra.selfdev.stop` は、既に `scopes_supported` に出ているが、それを使うツールはまだ無い(確認済み)。スコープの検査は、ツールごとに `McpRoutes` が行う(確認済み)。
-- 作成、再開、一時停止、承認は MCP に出さない(U-9)。承認を MCP に出すと、AI クライアントが承認者になりうる。
+- 作成、子の作成、再開、一時停止、承認は MCP に出さない(U-9)。承認を MCP に出すと、AI クライアントが承認者になりうる。
 
 ### 7. 段階的な導入
 
@@ -270,67 +345,87 @@ MCP(ADR 0013 の仕組みを使う):
 - ADR 0011 の段階 1 の dev での有効化と E2E(ADR 0011 §9 の 7)。
 - #230(CLI 経路の費用の計上)は完了している(ADR 0011 の実装状況による)。
 - #222(E2E fixture)は、ADR 0011 の実装状況では main に見当たらないとされている。本 ADR では再確認していない(未確認)。
-- 上位者のロールが Keycloak にある(U-1)。
+- ルートの承認者の設定(`KIVRA_SELFDEV_ROOT_APPROVER`)と、要求者として使う別の主体(U-17)を用意する。dev で検証するため、2 つの主体が要る。
 
-#### 段階 1(1 周の order と、停止の承認)
+#### 段階 1(ルートの order 1 件と、ルートの停止の承認)
 
-- 作るもの: `selfdev_orders`(`max_cycles` は 1 に固定)、一時停止と再開、停止の要求、上位者の承認、却下、取り消し、期限切れ、`selfdev_order_events`。周の自動の開始はまだ無い。1 周は運用者が作る。
+- 作るもの: ルートの `selfdev_orders`(`max_cycles` は 1 に固定、子は作れない)、一時停止と再開、停止の要求、ルートの承認者による承認、却下、取り消し、期限切れ、`selfdev_order_events`。周の自動の開始はまだ無い。1 周は人が作る。
 - 進む条件(dev。テストと手動の確認):
   - 要求者と同じ主体による承認が、100% 拒否される(同じ `sub` と同じ owner key の場合を含めてテストする)。
+  - ルートの承認者以外の主体による承認が、100% 拒否される。
   - 同じ承認を 2 回使う試みが、2 回目で拒否される。
   - 承認の期限切れで、order が `PAUSED(STOP_NOT_APPROVED)` になり、`ACTIVE` に自動で戻らない。
   - 停止の承認の後、投入済みの Run と PR に変更が無い。
 - ロールバック: 新しい order を作らない(`KIVRA_SELFDEV_AUTOPILOT_ENABLED=false`)。全体の一時停止を使う。行は消さない(V21 は expand のみ)。
 
-#### 段階 2(2〜3 周。マージの待ち、重複と失敗の検出)
+#### 段階 2(子の order。親の決定による子の停止)
 
-- 作るもの: 周の自動の開始(§3.1)、`max_cycles` は 3 まで、重複の検出、連続失敗の検出、周の間隔。
-- 進む条件: dev で 3 件以上の order、合計 10 周分を実行する。想定外の `PAUSED`(`DUPLICATE_PLAN`、`CYCLE_FAILURES`、`CYCLE_BUDGET`)が 0 件。order の費用の集計と #230 の実費の差が 10% 以内。`POLICY_REJECTED` を抜けて PR になったものが 0 件。
-- ロールバック: 環境変数 `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`(新規。既定 1)を 1 に戻す。周を開始するときに `min(max_cycles, cap)` で検査する。コードの変更は要らない。
+- 作るもの: 子の作成(§2.7)、親が承認する子の停止(§4.2)、祖先の一時停止の伝播(行 16)、部分木の停止、不変条件の検査(§2.7)。
+- 進む条件: dev で、深さ 2 までの木を 3 本以上作り、子の停止を、親の決定(自動と人)で、それぞれ 3 件以上完了させる。§4.4 の条件を満たさない自動の決定が 0 件。親の停止で、孤児が 0 件。
+- ロールバック: 子の作成を止める(`KIVRA_SELFDEV_ORDER_MAX_DEPTH=0`、新規。既定 0)。既存の子は、停止の承認で終わらせる。
 
-#### 段階 3(継続。最大 10 周)
+#### 段階 3(周の自動の開始、継続。最大 10 周)
 
-- 進む条件: 4 週間の運用で、承認なしの `STOPPED` が 0 件、累計の予算の超過が 0 件、停止の承認の全件が `selfdev_order_events` に残っている。マージされた PR の割合が 70% 以上(ADR 0011 §6.3 と同じ。U-8 で確定する)。
-- ロールバック: `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP=1`。実行中の order は、次の周を始める時点で `PAUSED(LIMIT_REACHED)` になり、止まる。
+- 進む条件: 段階 2 までの条件を満たした上で、ルートの order で 4 週間の運用。承認なしの `STOPPED` が 0 件、予算の超過が 0 件、停止の承認の全件が `selfdev_order_events` に残っている。マージされた PR の割合が 70% 以上(ADR 0011 §6.3 と同じ。U-8 で確定する)。
+- ロールバック: `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP=1`(新規。既定 1)。実行中の order は、次の周を始める時点で `PAUSED(LIMIT_REACHED)` になり、止まる。
 
 ### 8. 脅威の検討
 
 | 脅威 | 経路 | 対策 |
 |---|---|---|
-| 自己承認 | 運用者が上位者のロールも持つ。または同じ人が 2 つのアカウントを使う | 要求者と承認者を別の主体にする(DB の CHECK とアプリの検査)。上位者のロールは運用者とは別に付与する(U-1)。2 つのアカウントの対策は運用で行う(未確認: Keycloak のアカウントの実態) |
-| 承認のリプレイ | 同じ承認を繰り返す。古い承認を使う | 承認と消費を 1 つの transaction で行う。`CONSUMED` は 1 回だけ(条件付き UPDATE)。期限は 24 時間。承認は `request_id` と `order.version` に結ぶ |
-| 承認待ちの間の状態の変化(TOCTOU) | 要求から承認までの間に order が変わる | 方針と上限は作成後に変えない(§2.6)。承認の時に order の行を `FOR UPDATE` で取り、版が違えば拒否する。承認待ちの間は新しい周を始めない(§5.4) |
-| 承認の横取り(AI が承認する) | MCP のクライアントが承認の API を呼ぶ | 承認は MCP に出さない。承認の API は同一オリジンのブラウザの経路に限る。上位者のロールと `kivra-agent` のロールを併せ持つトークンは、既存の `AgentRefused` の規則で拒否する |
-| 要求の連打による承認の妨害 | 運用者が要求を繰り返す | 未決の要求は 1 件まで(`active_key` の UNIQUE)。要求の頻度に上限を置く(提案: 1 分に 5 件まで。投入の規則と同じ) |
-| 方針の文によるプロンプトインジェクション | 方針の文に「範囲を広げよ」などを書く | 方針は区切って渡すデータである。範囲は構造化された `scope_profile` で決まり、方針の文は範囲を変えられない。Planner はツールを持たない。PatchPolicy が最終ゲートである(ADR 0011 §8) |
-| 方針の文の長期の影響 | 同じ方針が毎周 Planner に渡る | 方針は作成時に固定し、周の間に変えられない。周ごとの計画は、重複の検出(§3.2)と範囲の検査(ADR 0011 §4)で抑える。方針の文は監査にもログにも入れない |
-| order の乗っ取り(他人の order の操作) | 別の運用者の order に停止や一時停止をかける | 操作は運用者のロールで行う。運用者が複数いる場合の閲覧と操作の範囲は U-12 で決める |
-| 権限の拡大 | MCP のスコープで、書き込みを増やす | MCP は、読み取りと停止の要求だけ。作成、再開、承認は出さない。新しいスコープは追加しない(`kivra.selfdev.stop` は既存) |
-| 停止要求を、安全装置の回避に使う | 停止の要求で、安全装置による一時停止を解く | 停止の要求は、一時停止を解除しない。却下、取り消し、期限切れは `PAUSED` に戻すだけである。安全装置の状態は、停止の要求の前後で変えない |
-| 期限切れの後の自動の再開 | 期限切れで `ACTIVE` に戻る | `PAUSED` に戻す(§2.5 の遷移 8)。再開は運用者が行う |
-| 上位者のアカウントの侵害 | 上位者のトークンで承認する | Keycloak で上位者に多要素認証を課す(未確認: 現在の realm の設定)。承認は同一オリジンのブラウザだけ。承認は監査に残る |
-| ログと監査への漏えい | 方針、理由、タイトルがログに出る | §2.3 の扱い。テストで、マーカー文字列がログに出ないことを確認する(ADR 0011 §2.8b と同じ方法) |
+| 自己承認 | 要求者と承認者が同じ主体になる(例: kigawa が子を要求し、kigawa が親の代行として決める) | 子の停止では、親の決定が承認を兼ねるため、要求者と決定者が同じ主体になることを許す(§4.2 (a))。ルートでは、要求者と承認者を主体の単位で別にし、DB の CHECK とアプリの検査で強制する。人の決定は、ルートの承認者だけが行える。ルートの要求者を別の主体にする方法は U-17 |
+| 承認のリプレイ | 同じ承認を繰り返す。古い承認を使う | 承認と消費を 1 つの transaction で行う。`CONSUMED` は 1 回だけ(条件付き UPDATE)。期限は 24 時間。承認は要求の id と、部分木の版(subtree)に結ぶ |
+| 承認待ちの間の状態の変化(TOCTOU) | 要求から承認までの間に、部分木のどれかが変わる | 方針、上限、親は作成後に変えない(§2.6、§2.7)。承認の時に、部分木の行を `FOR UPDATE` で取り、版が違えば拒否する。承認待ちの間は、対象の周を始めない(§5.4) |
+| 子孫の停止の決定の悪用(木の途中の乗っ取り) | 子の order が、親の決定を装って、子孫や兄弟を止める | 決定者は、対象の直接の親の主体か、人(ルートの承認者)だけ。子の主体は決定者にならない(§4.2)。決定の条件は、固定の理由コードと事実だけ(§4.4) |
+| 自動の決定の悪用(子の停止を量産する) | 人の要求を連打し、親の自動の決定で子を止める | 未決の要求は木に 1 件まで(`active_key`)。要求の頻度に上限を置く(提案: 1 分に 5 件まで)。自動の決定は、§4.4 の条件を満たすときだけ。頻度の上限(親 1 日 1 件、木 1 日 2 件) |
+| 循環 | 親子の関係が閉じる | 親は作成時に決まり、変えられない。新しい行は祖先になれない。作成の transaction で、親の深さを検査する |
+| 深い木や大きい木による暴走 | 子を増やして、周の数や費用を増やす | 深さ 2、子 5 件、木全体 15 件(§2.7)。子の作成は人だけ(U-19)。予算は入れ子で、子の合計は親の割当てを超えない |
+| 親子の付け替えによる承認のすり抜け | 停止を要求した後で、対象を別の親の下へ移す | 親の付け替えを禁止する(U-21)。digest に親の id を含める(部分木の版にも含まれる) |
+| 孤児の order | 親が停止し、子が `ACTIVE` のまま残る | 部分木の同時停止(§2.7)。停止された親の下に子を作れない。tick で不変条件を検査し、違反は安全側に停止する |
+| 承認者の不在による永久の停止不能 | ルートの承認者が応答しない、または主体が変わる | 周は一時停止のまま止まる(被害は増えない)。承認者の変更は設定の変更と再起動で行い、変更の記録を残す |
+| 方針の文によるプロンプトインジェクション | 方針の文に「範囲を広げよ」などを書く | 方針は区切って渡すデータである。範囲は構造化された `scope_profile` で決まり、子は親の範囲を超えられない。Planner はツールを持たない。PatchPolicy が最終ゲートである(ADR 0011 §8) |
+| 方針の文の長期の影響 | 同じ方針が毎周 Planner に渡る | 方針は作成時に固定し、周の間に変えられない。重複の検出(§3.2)と範囲の検査(ADR 0011 §4)で抑える。方針の文は監査にもログにも入れない |
+| 権限の拡大 | MCP のスコープで、書き込みを増やす | MCP は、読み取りと停止の要求だけ。作成、子の作成、再開、承認は出さない |
+| 停止要求を、安全装置の回避に使う | 停止の要求で、安全装置による一時停止を解く | 停止の要求は一時停止を解除しない。却下、取り消し、期限切れは `PAUSED` に戻すだけ |
+| 期限切れの後の自動の再開 | 期限切れで `ACTIVE` に戻る | `PAUSED` に戻す(§2.5 の遷移 9)。再開は人が行う |
+| 承認者のアカウントの侵害 | ルートの承認者の token で承認する | 承認は同一オリジンのブラウザだけ。Keycloak で多要素認証を課す(未確認: 現在の realm の設定)。承認は監査に残る |
+| ログと監査への漏えい | 方針、理由、タイトル、承認者の `sub` がログに出る | §2.3 と §4.1 の扱い。テストで、マーカー文字列がログに出ないことを確認する(ADR 0011 §2.8b と同じ方法) |
+| 親の乗っ取りによる子の一斉停止(可用性の攻撃) | 親の自動のループ、またはその実行環境が乗っ取られ、子を次々に止める | 親 order は独自の認証情報を持たず、自動の決定はワーカーの中だけで行う(外部の HTTP から自動の決定は呼べない)。理由コードは固定の 4 つだけ(§4.4)。自動の決定は、親 1 日 1 件、木 1 日 2 件まで。停止は終端なので、被害を取り消すには人が新しい子を作る。全ての決定を監査に残す。親の自動のループを止めるには、親を一時停止する(effective state で子の決定も止まる) |
+| 親の自動のループの暴走による子の連続停止 | 計数の不具合などで、正常な子が条件を満たしたと判定される | 条件は計数と予算の事実だけ(§4.4 の 3)。頻度の上限。木で 1 日 2 件を超えたら決めず人に知らせる。理由コードごとの条件をテストで固定する。誤判定の件数を見直しの条件に入れる(§13) |
+| 停止後に完了する Run の結果の扱い | 停止された子の Run が後から完了し、結果が連続失敗の計数や状態に反映される | 結果の同期は停止の状態を見ない(確認済み)。計数への影響は未確認(U-24)。実装の段階で、停止後の結果が計数を増やさないことを確かめる |
+| 決定者の偽装(子が親の名で決める) | 子の order が、親の決定を装って自分や兄弟を止める | 決定者は、対象の直接の親の主体か、人(ルートの承認者)だけ。子の主体は決定者にならない(§4.2) |
 
 ### 9. 未決の点
 
 以下は、ユーザーの判断が要る。各項目に推奨を 1 つ示す。
 
-- **U-1 上位者の定義**。推奨: 新しい Keycloak の client role(仮称 `kivra-selfdev:supervisor`)を作り、運用者(`admin-panel:admin`)とは別の人に付与する。承認は、このロールを持ち、要求者と別人のときだけ行える。代替: 既存の運用者の中から選ぶ(ロールの追加は無し)。ただし運用者が 1 人だけなら、上位者を置けず、停止の承認は実行できない。その場合は、本 ADR の前提を見直す。
-- **U-2 承認者と要求者を分けるか**。推奨: 分ける(DB と API で強制する)。分けないと承認が形式になる。
+- **U-1 上位者の定義(決定済み)**。決定: 上位者は order の木の親。頂点は kigawa(人)。根拠はユーザーの決定(2026-10-19)。上位者を表すロールは追加しない(§4.1)。
+- **U-2 承認者と要求者を分けるか(決定済み)**。決定: 分ける。主体の単位で判定し、要求者と承認者が同じ主体の場合は承認を拒否する(ユーザーの決定「自分の停止を自分で承認できない」)。
 - **U-3 承認の期限**。推奨: 24 時間。期限切れは `PAUSED` に戻す。
-- **U-4 停止要求中の扱い**。推奨: 新しい周を始めない。進行中の Run と PR は既存の経路で進める(§5.4)。
-- **U-5 承認の方式**。推奨: kivra の UI の承認一覧だけにする。通知の仕組みは既存に無い。メールや Slack などの別のチャネルは、新しい仕組みになる。
+- **U-4 停止要求中の扱い**。推奨: 対象と子孫の周を始めない。進行中の Run と PR は既存の経路で進める(§5.4)。
+- **U-5 承認の方式**。推奨: kivra の UI の承認一覧と、子の承認の自動経路。通知の仕組みは既存に無い。メールや Slack などは新しい仕組みになる。
 - **U-6 周の間隔と 1 日の周の数**。推奨: 間隔は 60 分、1 日は 3 周まで。
-- **U-7 同時の order の数**。推奨: 1 件まで。既存の同時 Run の上限(既定 1)と合わせる。
+- **U-7 同時に進む周の数**。推奨: 木全体で 1 つ。既存の同時 Run の上限(既定 1)と合わせる。
 - **U-8 段階 3 への昇格の数値**。推奨: ADR 0011 §6.3 と同じ(4 週間、70%)。
-- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけにする。作成、再開、一時停止、承認は HTTP と UI だけに置く。
-- **U-10 作成の承認**。推奨: `max_cycles` が 2 以上の order、または既定を超える予算(累計 5,000 円超、1 周 1,000 円超)の order は、上位者の承認を要する。`max_cycles` が 1 で既定内の order は承認を要しない。
+- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけ。作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置く。
+- **U-10 作成の承認**。推奨: ルートの order で `max_cycles` が 2 以上、または既定を超える予算(累計 5,000 円超、1 周 1,000 円超)の場合は、人(ルートの承認者)の承認を要する。`max_cycles` が 1 で既定内なら承認は要らない。
 - **U-11 上限の変更**。推奨: 作成後の変更は認めない。上限を上げるには、承認つきの新しい order を作る。承認つきの更新は採らない。
-- **U-12 既定の上限と閲覧の範囲**。推奨: 総周回 10、期限 14 日、累計 5,000 円、1 周 1,000 円。運用者が複数いる場合、一覧は全運用者に見せ、方針と理由は作成者と上位者にだけ表示する。
+- **U-12 既定の上限と閲覧の範囲**。推奨: 総周回 10、期限 14 日、累計 5,000 円、1 周 1,000 円。閲覧は、運用者の全員が一覧を見られ、方針と理由は木の関係者(作成者と承認者)にだけ表示する。
 - **U-13 上限到達の扱い**。推奨: `PAUSED(LIMIT_REACHED)` のままにし、終わらせるには停止の承認を経る。上限到達で自動的に `STOPPED` にする案は採らない。
-- **U-14 有効化された後の起動**。推奨: 全 `ACTIVE` を `PAUSED(STARTUP_HOLD)` にし、運用者が再開するまで周を始めない。
-- **U-15 監査の表**。推奨: `selfdev_order_events` を追記専用にし、ハッシュの連鎖は付けない。連鎖が要るなら、既存の `AuditRepository` の方式を真似る。
+- **U-14 有効化された後の起動**。推奨: 全 `ACTIVE` を `PAUSED(STARTUP_HOLD)` にし、人が再開するまで周を始めない。
+- **U-15 監査の表**。推奨: `selfdev_order_events` を追記専用にし、ハッシュの連鎖は付けない。
 - **U-16 滞留と重複の閾値**。推奨: 保留 PR の待機は 72 時間。重複は、直近 5 周の fingerprint の一致、または同じ `target_paths` の集合が 3 周続くとき。
+- **U-17 ルートの終了の要求者(新規)**。問題: 運用者が kigawa 1 人だけの場合、ルートの停止の要求者も承認者も kigawa になり、要求者と承認者は別という規則で、ルートは終了できない。推奨: 要求者として、kigawa 個人の token とは別の主体(専用の Keycloak の service account、または別の人の運用者アカウント)を使う。これは共有基盤(Keycloak)の変更を伴い、本 ADR では可否を確認していない(未確認)。代替: 終了は行わず、ルートは一時停止のままにする(安全側だが、終わらせる手段が無い)。
+- **U-18 親の自動の決定(決定済み)**。決定: 可。子の停止だけ。条件は §4.4(決定的な規則 4 つ、理由コードの固定の列挙、頻度の上限)。ルートの停止は、自動のループは対象にできず、人(kigawa)だけが決める(ユーザーの決定)。
+- **U-19 子の作成の主体**。推奨: 子の作成は人だけ。loop が計画の中で子を提案することは許すが、作成は人の操作にする。
+- **U-20 木の大きさの上限**。推奨: 深さ 2、子 5 件、木全体 15 件。
+- **U-21 親子の付け替え**。推奨: 禁止する。作成後に親を変えると、承認の対象が変わるため。
+- **U-22 承認者の設定の変更**。推奨: `KIVRA_SELFDEV_ROOT_APPROVER` の変更は、再起動で反映する。変更の記録は、運用の記録(runbook)に残す。
+- **U-23 親の決定に要求が要るか**。推奨: 要求を経なくてよい(自動も人も)。要求は、人が出す任意の手段として残す。
+- **U-24 停止後に完了した Run の計数**。推奨: 停止された木の結果は、連続失敗の計数に入れない。実装の段階で、`recordOutcome` の挙動を精査して確かめる(未確認)。
+- **U-25 人の決定者の範囲**。推奨: ルートの承認者(kigawa)は、どの親の名でも子を決めてよい(§4.2)。人が 1 人の運用では、これで子の停止の経路が残る。自動の経路には頻度の上限を置く。
+- **U-26 理由コードの列挙**。推奨: §4.4 の 4 つ。追加は ADR の改訂で行い、コードに自由に足さない。
+- **U-27 自動の決定の頻度**。推奨: 親は 1 日 1 件、木で 1 日 2 件。運用の結果で見直す(§13)。
 
 ADR 0011 の U-9(Goal の本文の保持と削除)は、本 ADR でも未決のまま残る。order の `policy` にも同じ問題がある。
 
@@ -339,37 +434,50 @@ ADR 0011 の U-9(Goal の本文の保持と削除)は、本 ADR でも未決の�
 - **A. 停止に承認を要さず、運用者が即座に停止できる**: 要件に反する。
 - **B. すべての停止(一時停止を含む)に承認を要求し、安全装置の発動も承認待ちにする**: 承認者が不在のとき、暴走を止められない。承認の期限が切れると、一時停止も解けなくなる。
 - **C. 安全装置の発動も承認制にする**: B と同じ理由で採らない。
-- **D. 上位者の承認を、既存の運用者ロール(`admin-panel:admin`)で代用する**: 要求者と承認者が同じになり、承認の意味が無くなる。
-- **E. 承認を既存の `approvals` 表(V3)と `ApprovalRepository` に流用する**: 表は `run_id` の外部キーを持つ。order は Run に紐づかず、周の前にも停止を要求できる必要がある。`requester_agent_id` は Agent の概念である。`ApprovalRepository` は、HTTP からも `HumanAssertionVerifier` の実装からも呼ばれていない(確認済み)。仕組み(四つの目の CHECK、単回の消費、期限)は真似るが、表は流用しない。
-- **F. Goal を延命して周を回す(案 A)**: revision の上限と終端の意味が衝突する。
-- **G. 周の評価を LLM に任せ、次の計画の可否を決める**: 自己評価がゲートになる。機械的な集計だけにする。
-- **H. 上限に達したら `STOPPED`(完了扱い)にする**: 終わらせるには承認が要るという要件に反する。
-- **I. 却下、取り消し、期限切れの後に自動で `ACTIVE` に戻す**: 停止を止めたという運用者の判断が、知らないうちに覆る。`PAUSED` に戻す。
-- **J. 方針と上限を、作成後に変更できるようにする**: 承認の対象が途中で変わる(TOCTOU)。新しい order を作る。
-- **K. 承認を MCP に出す**: AI クライアントが承認者になりうる。
+- **D. 上位者を、ロール(例: `kivra-selfdev:supervisor`)で表す**: 却下する。運用者が 1 人のとき、要求者と承認者が同じ主体になり、ロールを別の人に付けられないため成立しない。また、上位者が木の構造と無関係に決まり、子の停止を親が承認するという要件を表せない。上位者は木の親とし、ルートの承認者は設定の主体で表す(§4.1)。
+- **E. 既存の運用者ロール(`admin-panel:admin`)で上位者を代用する**: 要求者と承認者が区別できない。採らない。
+- **F. 承認を既存の `approvals` 表(V3)と `ApprovalRepository` に流用する**: 表は `run_id` の外部キーを持つ。order は Run に紐づかず、周の前にも停止を要求できる必要がある。`ApprovalRepository` は、HTTP からも `HumanAssertionVerifier` の実装からも呼ばれていない(確認済み)。仕組み(四つの目の CHECK、単回の消費、期限)は真似るが、表は流用しない。
+- **G. Goal を延命して周を回す(案 A)**: revision の上限と終端の意味が衝突する。
+- **H. 周の評価を LLM に任せ、次の計画の可否を決める**: 自己評価がゲートになる。機械的な集計だけにする。
+- **I. 上限に達したら `STOPPED`(完了扱い)にする**: 終わらせるには承認が要るという要件に反する。
+- **J. 却下、取り消し、期限切れの後に自動で `ACTIVE` に戻す**: 停止を止めたという判断が、知らないうちに覆る。`PAUSED` に戻す。
+- **K. 方針、上限、親を、作成後に変更できるようにする**: 承認の対象が途中で変わる(TOCTOU)。新しい order を作る。
+- **L. 承認を MCP に出す**: AI クライアントが承認者になりうる。
+- **M. 祖先が子孫の停止を、直接の親を介さずに承認する**: 承認の主体が、木の構造の外で決まる。直接の親、またはルートの人だけに限る(§4.2)。
+- **N. 子を個別に順に停止する(下から上へ、子ごとに承認)**: 承認が増え、途中で止まった木が残る。部分木を 1 回の承認で止める。
+- **O. AI の loop に子の作成を任せる**: 子の上限と承認の規則を迂回できる。人だけが作る(U-19)。
+- **P. 親の付け替えを許す**: 承認の対象が変わる。禁止する(U-21)。
+- **Q. 子の停止にも、親とは別の人の承認を常に要求する**: 却下。ユーザーの決定により、親が上位者であり、親の決定が承認を兼ねる。加えて、運用者が kigawa 1 人の場合、親とは別の承認者を置けず、子を止める経路が無くなる。
+- **R. 親の自動のループが、ルートを停止する**: 却下。ユーザーの決定により、最上位の停止は人だけ。AI が自分の木の頂点を止める権限を持つと、自律の暴走の歯止めがなくなる。
+- **S. 祖先が、直接の親を飛ばして子孫を停止する**: 却下(推奨)。決定の経路が 1 段増え、途中の親の判断が覆る。人だけは例外として、任意の子孫を決められる(§4.2)。
 
 ### 11. 結果
 
 - 運用者は、方針と上限を持つ order を作り、周を回せる。PR のマージは従来どおり人が行う。
-- 終了には上位者の承認が要るため、終わらせるまでの速さは落ちる。止めることは速いままである。
-- 安全装置は、承認を待たずに周を止める。終了だけが承認を要する。状態は 2 種類に分かれる。
-- 表と遷移が増える(新しい表 3 つ、列の追加 3 つ)。V21 は expand のみ。
+- 上位者は木の親で表すため、運用者が 1 人でも成立する。ロールの追加は要らない。
+- 終了には、子の場合は親の決定、ルートの場合は人の承認が要る。子の停止は親の決定だけで成立し、人の承認を待たない。止めることは速いままである。
+- 安全装置は、承認を待たずに周を止める。終了だけが承認を要する。
+- ルートの終了は、要求者を別の主体にできるまで成立しない(U-17)。それまでは、ルートは一時停止のまま残る。
+- 表と遷移が増える(新しい表 3 つ、列の追加 4 つ)。V21 は expand のみ。
 - order の上限の多くは、#230 の費用の数値に依存する。#230 の計上が実機で確かめられるまで、order の累計の上限は効かないものとして扱う。
-- 上位者のロールの追加は、共有基盤(Keycloak)の変更を伴う。
 
 ### 12. 確認できなかったこと(未確認)
 
-- Keycloak の realm にある運用者のロールの全体と、上位者として使える別の人間の有無。
-- 上位者への多要素認証の有無。
+- kigawa の token が、現在の realm で `admin-panel:admin` を持つこと(運用の前提。本 ADR では設定を確認していない)。
+- 要求者として使う別の主体(専用の service account、または別の運用者アカウント)を、Keycloak で作れるかどうか(U-17)。
+- 承認者への多要素認証の有無。
 - #222(E2E fixture)が main にあるか。ADR 0011 の実装状況の記述に従い、本 ADR では再確認していない。
 - 1 周の費用が #230 の計上でどれだけ正確か(実測は行っていない)。
 - 言い換えによる意味の重複を、機械的に検出する方法。
 - ADR 0014 の内容(提案中で main に無い。本 ADR は依存しない)。
+- 停止後に完了した Run の結果が、連続失敗の計数に入るか(`recordOutcome` の詳細を精査していない。U-24)。
 
 ### 13. 見直しの条件
 
-- 運用者が 1 人だけで、上位者を置けないと分かったとき。停止の承認の仕組みを見直す。
+- 要求者を別の主体にできず、ルートを終了できないことが、運用の上で困ると分かったとき(U-17)。
 - 承認なしで周が 1 件でも増えたとき、または承認なしの `STOPPED` が 1 件でもあったとき。
+- AI の loop が、ルートの停止に関わる承認を行ったとき(U-18 の規則に反する)。
 - order の費用の集計が、実費と 10% を超えて食い違うとき。
 - 同じ内容の計画が、重複の検出をすり抜けて 2 周以上続いたとき。
 - 安全装置による一時停止が、承認を待たされて効かなかったとき。
+- 自動の決定(§4.4)が 1 件でも誤りと判明したとき。理由コードの条件を見直す。

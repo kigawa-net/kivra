@@ -267,6 +267,7 @@ class SelfDevOperatorRepository(
         version = row[SelfDevGoalsTable.version],
         createdAt = row[SelfDevGoalsTable.createdAt],
         updatedAt = row[SelfDevGoalsTable.updatedAt],
+        approvedBy = row[SelfDevGoalsTable.approvedBy],
     )
 
     private fun taskOf(row: ResultRow) = SelfDevPlanTask(
@@ -286,6 +287,7 @@ class SelfDevOperatorRepository(
         version = row[SelfDevPlanTasksTable.version],
         createdAt = row[SelfDevPlanTasksTable.createdAt],
         updatedAt = row[SelfDevPlanTasksTable.updatedAt],
+        approvedBy = row[SelfDevPlanTasksTable.approvedBy],
     )
 
     private companion object {

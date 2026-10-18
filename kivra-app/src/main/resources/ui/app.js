@@ -938,7 +938,7 @@
     BLOCKED: { label: '停止中', desc: '止まっています。理由を確認してください' },
     PAUSED: { label: '一時停止中', desc: '運用者が一時停止しました' },
     DONE: { label: '完了', desc: '全タスクが完了しました' },
-    STOPPED: { label: '中止', desc: '運用者が中止しました' }
+    STOPPED: { label: '中止', desc: '中止で終わりました（運用者の中止、またはタスクが完了せずに終わった）' }
   };
 
   var TASK_STATES = {
@@ -969,7 +969,8 @@
     OPERATOR_APPROVED: '運用者が承認しました',
     OPERATOR_SKIPPED: '運用者が見送りました',
     GOAL_STOPPED: 'Goal の中止により見送りました',
-    ALL_TASKS_COMPLETED: 'すべてのタスクが完了しました'
+    ALL_TASKS_COMPLETED: 'すべてのタスクが完了しました',
+    TASKS_INCOMPLETE: 'タスクが終わりましたが、すべては完了しませんでした（PR とタスクを確認してください）'
   };
 
   var PLAN_BLOCK_CODES = ['PLAN_INVALID', 'PLAN_BUDGET_HOLD', 'PLAN_CALL_FAILED'];

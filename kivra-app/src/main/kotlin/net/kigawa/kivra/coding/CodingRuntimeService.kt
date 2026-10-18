@@ -57,7 +57,8 @@ data class CodingRuntimeConfig(
  *   the change set before it marks the attempt RESULT_RECEIVED.
  * - [reconcile] moves expired attempts on, and puts a Run whose attempt was orphaned or expired on hold as UNKNOWN for an operator.
  *   A new attempt is not queued for such a Run: the agent may still be running the old one, and a second run would double the cost and
- *   the side effects. The operator decides (ADR 0009 style release).
+ *   the side effects. The operator decides (ADR 0009 style release). It is not run by the periodic worker: the hold needs the Run lease,
+ *   which the runner holds (ADR 0010 addendum 6). The worker calls [expireOverdue] instead.
  *
  * Logs carry only identifiers, fixed codes and counts. Never a title, a path, a summary, a change or a secret.
  */
@@ -261,12 +262,12 @@ class CodingRuntimeService(
     }
 
     /**
-     * Marks the overdue attempts EXPIRED (QUEUED past its queue time) or ORPHANED (lease ran out). The first half of [reconcile]. It holds
-     * no Run: the caller holds the Run's lease, and the Run's own advance moves it to UNKNOWN with the reason its attempt now carries.
+     * Marks the overdue attempts EXPIRED (QUEUED past its queue time) or ORPHANED (lease ran out), and books their reserves. It holds no
+     * Run: the Run's own advance moves it to UNKNOWN with the reason its attempt now carries. Called by the runner (under the Run's
+     * lease) and by [net.kigawa.kivra.coding.CodingReconcileWorker] (no lease). Both are safe to repeat: each attempt moves once, and
+     * each reserve is booked once under its key.
      */
-    fun expireOverdue() {
-        expireAndBookEstimates()
-    }
+    fun expireOverdue(): ExpireResult = expireAndBookEstimates()
 
     /**
      * Expires the overdue attempts, then books the per-attempt reserve for each one: an EXPIRED attempt (generation 0, never claimed) and an

@@ -85,7 +85,10 @@
     DEVELOPER_TIMEOUT: 'モデル呼び出しの期限が過ぎた（結果が不明な可能性）',
     DEVELOPER_DUPLICATE_REQUEST: '同じ要求が処理中、または結果が不明',
     DEVELOPER_BUDGET: '予算の予約が拒否された、または単価が不明（モデルは呼ばれていない）',
-    DEVELOPER_POLICY_REJECTED: 'モデルの変更案がポリシーに通らなかった'
+    DEVELOPER_POLICY_REJECTED: 'モデルの変更案がポリシーに通らなかった',
+    CODING_EMPTY_PATCH: '変更が無く終了しました',
+    CODING_BUDGET_EXCEEDED: '1 attempt の費用上限に達しました',
+    CODING_OVERLOADED: 'モデルが混雑していました'
   };
 
   var ACTIONS = {

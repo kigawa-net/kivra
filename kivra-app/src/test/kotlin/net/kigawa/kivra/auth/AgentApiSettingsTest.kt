@@ -109,4 +109,39 @@ class AgentApiSettingsTest {
     fun `the disabled settings expose no auth config`() {
         assertNull(AgentApiSettings.fromEnv(emptyMap()).auth)
     }
+
+    @Test
+    fun `the reconcile interval and the result retention default to 60 seconds and 30 days, and take their bounds`() {
+        val defaults = AgentApiSettings.fromEnv(valid())
+        assertEquals(java.time.Duration.ofSeconds(60), defaults.reconcileInterval)
+        assertEquals(java.time.Duration.ofDays(30), defaults.resultRetention)
+
+        val bounds = AgentApiSettings.fromEnv(
+            valid("KIVRA_CODING_RECONCILE_INTERVAL_SECONDS" to "10", "KIVRA_CODING_RESULT_RETENTION_DAYS" to "365"),
+        )
+        assertEquals(java.time.Duration.ofSeconds(10), bounds.reconcileInterval)
+        assertEquals(java.time.Duration.ofDays(365), bounds.resultRetention)
+        val upper = AgentApiSettings.fromEnv(
+            valid("KIVRA_CODING_RECONCILE_INTERVAL_SECONDS" to "3600", "KIVRA_CODING_RESULT_RETENTION_DAYS" to "1"),
+        )
+        assertEquals(java.time.Duration.ofSeconds(3600), upper.reconcileInterval)
+        assertEquals(java.time.Duration.ofDays(1), upper.resultRetention)
+    }
+
+    @Test
+    fun `an out-of-range or non-integer interval or retention is a startup error that names only the variable`() {
+        val cases = listOf(
+            "KIVRA_CODING_RECONCILE_INTERVAL_SECONDS" to "9",
+            "KIVRA_CODING_RECONCILE_INTERVAL_SECONDS" to "3601",
+            "KIVRA_CODING_RECONCILE_INTERVAL_SECONDS" to "1.5",
+            "KIVRA_CODING_RESULT_RETENTION_DAYS" to "-7",
+            "KIVRA_CODING_RESULT_RETENTION_DAYS" to "366",
+            "KIVRA_CODING_RESULT_RETENTION_DAYS" to secret,
+        )
+        for ((name, value) in cases) {
+            val error = assertFailsWith<IllegalStateException> { AgentApiSettings.fromEnv(valid(name to value)) }
+            assertTrue(error.message!!.contains(name), name)
+            assertFalse(error.message!!.contains(value), "the value is never named: $name")
+        }
+    }
 }

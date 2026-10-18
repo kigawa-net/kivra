@@ -1,5 +1,8 @@
 package net.kigawa.kivra.routes
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.http.HttpStatusCode
@@ -10,7 +13,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.coroutines.delay
 import net.kigawa.kivra.appModule
+import org.slf4j.LoggerFactory
 
 /**
  * The production wiring of the agent API (PR 4a). Off by default: no `/api/agent` route and no agent variable is read. On: the routes
@@ -100,5 +105,38 @@ class AgentApiWiringTest {
         }
         assertTrue(e.message!!.contains("KIVRA_AUTH_MODE"))
         assertFalse(e.message!!.contains("none"))
+    }
+
+    @Test
+    fun `the coding reconcile worker starts only when the agent API is on`() {
+        val startedMarker = "coding reconcile worker started"
+        val root = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        root.addAppender(appender)
+        try {
+            testApplication {
+                environment { config = h2Config() }
+                application { appModule(TrapEnv(oidc)) }
+                assertEquals(HttpStatusCode.OK, client.get("/health").status)
+                delay(300)
+            }
+            assertFalse(appender.list.any { it.formattedMessage.contains(startedMarker) }, "no worker while the agent API is off")
+
+            appender.list.clear()
+            testApplication {
+                environment { config = h2Config() }
+                application { appModule(agentOn) }
+                assertEquals(HttpStatusCode.Unauthorized, client.post("/api/agent/v1/claim").status)
+                // The worker starts in the application scope; wait (bounded) for its start line.
+                var waited = 0
+                while (waited < 5_000 && appender.list.none { it.formattedMessage.contains(startedMarker) }) {
+                    delay(100)
+                    waited += 100
+                }
+            }
+            assertTrue(appender.list.any { it.formattedMessage.contains(startedMarker) }, "the worker starts with the agent API on")
+        } finally {
+            root.detachAppender(appender)
+        }
     }
 }

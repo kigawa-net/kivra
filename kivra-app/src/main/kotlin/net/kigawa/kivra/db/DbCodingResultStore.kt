@@ -2,11 +2,14 @@ package net.kigawa.kivra.db
 
 import java.nio.charset.StandardCharsets
 import java.time.Clock
+import java.time.LocalDateTime
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import net.kigawa.kivra.coding.CodingResultPurge
 import net.kigawa.kivra.coding.CodingResultStore
+import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.patch.Delete
 import net.kigawa.kivra.core.patch.FileChange
 import net.kigawa.kivra.core.patch.ParseResult
@@ -30,7 +33,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 class DbCodingResultStore(
     private val database: Database,
     private val clock: Clock = Clock.systemUTC(),
-) : CodingResultStore {
+) : CodingResultStore, CodingResultPurge {
 
     /**
      * Stores [patch] for [attemptId]. Idempotent: a second save with the same digest succeeds and changes nothing. A save with a
@@ -65,6 +68,37 @@ class DbCodingResultStore(
         return when (val parsed = PatchSetParser.parse(json)) {
             is ParseResult.Parsed -> parsed.patch
             is ParseResult.Invalid -> throw IllegalStateException("stored change set cannot be read: ${parsed.reason.name}")
+        }
+    }
+
+    /**
+     * Deletes up to [limit] rows created before [before] whose attempt is not active and whose Run is terminal, or whose row is not the
+     * attempt's accepted result (a save after a refused `complete`). The select and the delete run in one transaction. The rule holds
+     * because an attempt that is not active never becomes active again, and a terminal Run stays terminal. MariaDB has no DELETE ... LIMIT
+     * with a join, so the ids are selected first.
+     */
+    override fun purgeBefore(before: LocalDateTime, limit: Int): Int {
+        require(limit > 0) { "limit must be positive" }
+        val terminal = DevelopmentRunState.terminalNames.toList()
+        val terminalMarks = terminal.joinToString(",") { "?" }
+        return transaction(database) {
+            val ids = execQuery(
+                """SELECT r.attempt_id FROM coding_results r
+                   JOIN coding_attempts a ON a.attempt_id = r.attempt_id
+                   JOIN development_runs d ON d.run_id = a.run_id
+                   WHERE r.created_at < ?
+                     AND a.state NOT IN ('QUEUED', 'CLAIMED', 'RUNNING')
+                     AND (d.state IN ($terminalMarks) OR a.result_digest IS NULL OR a.result_digest <> r.result_digest)
+                   ORDER BY r.created_at
+                   LIMIT ?""",
+                *(listOf<Any?>(before) + terminal + listOf<Any?>(limit)).toTypedArray(),
+            ) { it.getString(1) }
+            if (ids.isEmpty()) {
+                0
+            } else {
+                val idMarks = ids.joinToString(",") { "?" }
+                execUpdate("DELETE FROM coding_results WHERE attempt_id IN ($idMarks)", *ids.toTypedArray())
+            }
         }
     }
 

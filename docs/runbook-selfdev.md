@@ -630,14 +630,15 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 | RESULT_RECEIVED で runner の PatchPolicy が拒否 | FAILED | `POLICY_REJECTED` | 再試行しない |
 | FAILED: `AUTH_REQUIRED`、`NEEDS_HUMAN` | UNKNOWN | `CODING_<code>` | 運用者が §4.1 で解放する |
 | FAILED: `TIMEOUT`、`OUTPUT_LIMIT`、`CLI_NONZERO`、`BAD_OUTPUT`、`RATE_LIMITED` | FAILED | `CODING_<code>` | 自動の再試行は無い |
+| FAILED: `EMPTY_PATCH`、`BUDGET_EXCEEDED`、`OVERLOADED` | FAILED | `CODING_EMPTY_PATCH`、`CODING_BUDGET_EXCEEDED`、`CODING_OVERLOADED` | 追補 6(#231)。UI の理由の説明つき |
 | CANCELLED(エージェントの取消、または Run の取消要求) | CANCELLED | `CODING_CANCELLED` | |
 | ORPHANED(lease が切れた) | UNKNOWN | `CODING_ORPHANED` | 古いエージェントが動いているかもしれないため、新しい attempt は作らない |
 | EXPIRED(QUEUED のまま 24 時間を過ぎた) | UNKNOWN | `CODING_QUEUE_EXPIRED` | 同上 |
 | PATCH_READY の再開で結果が読めない | UNKNOWN | `CODING_RESULT_MISSING` | 再提案しない |
 | PATCH_READY の再開で attempt が無い | UNKNOWN | `CODING_NO_ATTEMPT` | |
 
-- ORPHANED と EXPIRED は、attempt の期限を runner が次に進むときに印を付け(`CodingRuntimeService.expireOverdue`)、Run は同じ進行の中で UNKNOWN になる。定期の reconcile(期限切れの一括処理と、Run の保留)は、まだどこからも呼ばれていない。
-- `EMPTY_PATCH`(変更がない結果)は、受理の段階で拒否する。Run には進めない。エージェントが変更を送らないまま lease が切れれば ORPHANED になり、UNKNOWN で運用者が判断する。「直す必要がなかった」を正常な結果として扱う経路は、この PR では作らない(ADR 0010 追補 3)。
+- ORPHANED と EXPIRED は、attempt の期限を、周期ワーカー(§6.15)か runner が次に進むときに印を付け(`CodingRuntimeService.expireOverdue`)、Run は runner の次の進行の中で UNKNOWN になる。Run の保留(`reconcile()` の `holdForOperator`)は、どこからも呼ばれていない(追補 6)。
+- `EMPTY_PATCH`(変更がない結果)は、受理の段階で拒否する。エージェントが `fail` の `EMPTY_PATCH` で報告したものは、Run の理由 `CODING_EMPTY_PATCH` になる(追補 6)。Run には進めない。エージェントが変更を送らないまま lease が切れれば ORPHANED になり、UNKNOWN で運用者が判断する。「直す必要がなかった」を正常な結果として扱う経路は、この PR では作らない(ADR 0010 追補 3)。
 
 **この PR で確かめたこと(fake の coding service と DB を使う。実際の agent と GitHub は使わない)**
 - `SelfDevCodingEndToEndTest`: 正常系(結果 → PR)、PatchPolicy の拒否と送り直し、`EMPTY_PATCH`、EXPIRED、ORPHANED、agent の失敗コード 8 種すべて。
@@ -991,7 +992,7 @@ CLI 経路の費用は、kivra の月次の予算(`KIVRA_BUDGET_MONTHLY_LIMIT_JP
 **既知の制限(この PR)**
 
 - 入場の確認と claim は別の操作である。同時に複数のエージェントが claim すると、予約額の数件分だけ超えうる(1 台の PC を前提とする)。
-- ORPHANED / EXPIRED の遷移は済んでいるが、その計上が失敗した場合は、警告ログ(`coding reserve not booked`)が出るだけで、再試行しない。定期の reconcile は配線されていない。このログが出たら、該当の attempt を §4.2 の手順で確認する。
+- ORPHANED / EXPIRED の遷移は済んでいるが、その計上が失敗した場合は、警告ログ(`coding reserve not booked`)が出るだけで、再試行しない。周期ワーカー(§6.15)は遷移を一度しか行わないので、この欠損は再試行されない。このログが出たら、該当の attempt を §4.2 の手順で確認する。
 - 為替が失効していた間に報告された費用は金額 0 で計上される。この予約には実額を入れられない(上記の確認手順 3)。
 - 運用画面で API 経路と CLI 経路を区別して表示する作業(UI PR5)は、この PR に含まれない。
 
@@ -1088,3 +1089,35 @@ ADR から変えた点(PR A での判断、ADR §2.8 に記録):
 - 再計画は `PLAN_PROPOSED → GOAL_SUBMITTED` である(ADR の `PLANNING` ではない)。`PLANNING` は claim されている間だけの状態にするため。
 - 一時停止からの再開先は、一時停止の直前の状態を `selfdev_goals.resume_state` に保存して決める。
 - 計画段階の `BLOCKED` の理由は `PLAN_INVALID` / `PLAN_BUDGET_HOLD` である。ディスパッチ段階の `BUDGET_HOLD` とは分ける。計画段階で止まった Goal は、今の表では `STOPPED` 以外へ進めない(未決の点 U-16)。
+
+### 6.15 周期ワーカーと結果の保持(Issue #231、ADR 0010 追補 6)
+
+エージェント API が有効(`KIVRA_AGENT_API_ENABLED=true`)のときだけ、`CodingReconcileWorker` が起動する。起動時に `coding reconcile worker started` のログが出る。無効のときは起動せず、変数も読まない。
+
+**設定(既定値で動く。k8s の設定は変えていない)**
+
+| 名前 | 既定 | 範囲 | 内容 |
+| --- | --- | --- | --- |
+| `KIVRA_CODING_RECONCILE_INTERVAL_SECONDS` | `60` | 10〜3600 | 周期ワーカーの間隔(秒) |
+| `KIVRA_CODING_RESULT_RETENTION_DAYS` | `30` | 1〜365 | 受理された結果(`coding_results`)を残す日数 |
+
+範囲外や整数でない値は起動に失敗する。エラーには変数名だけが出て、値は出ない。
+
+**一周期で行うこと**
+
+1. 期限切れの attempt に印を付け、予約を計上する(QUEUED で期限切れは EXPIRED、lease が切れた CLAIMED と RUNNING は ORPHANED)。Run は動かさない。Run の UNKNOWN 化は、runner が次に進むときに行われる。
+2. 保持期間を過ぎた結果を消す。消すのは、attempt が非活性で、かつ Run が終端であるか、行が attempt の受理された結果ではないもの。一周期で最大 200 行。残りは次の周期で消える。attempt と `coding_attempt_usage` は消えない。
+
+**複数の起動は安全。** attempt の遷移は CAS で一度だけ、予約は `coding:<attemptId>:<世代>` の鍵で一度だけ計上される。
+
+**デプロイ順序(`EMPTY_PATCH`、`BUDGET_EXCEEDED`、`OVERLOADED`、追補 6)**: kivra を先に出し、そのあとでエージェントの新版を出す。新しいコードを送るエージェントは、kivra がそれを受理できるようになってからでなければ、`fail` が 400 になる。逆の順序では、変更なしや予算超過の報告が落ちる。
+
+**確認の手順**: `coding_results` の行数が増え続けないこと、終端の Run の結果が保持期間を過ぎて消えていることを、次の SQL で見る(本文は見ない)。
+
+```sql
+SELECT COUNT(*) AS rows_kept, MIN(created_at) AS oldest
+  FROM coding_results;
+```
+
+`oldest` が保持期間より新しいこと。保持期間を過ぎた行が、DEVELOPING か UNKNOWN の Run の attempt に残っていてよい。
+

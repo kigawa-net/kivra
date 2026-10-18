@@ -185,6 +185,9 @@ class SelfDevCodingEndToEndTest {
             CodingErrorCode.CLI_NONZERO to Pair(DevelopmentRunState.FAILED, "CODING_CLI_NONZERO"),
             CodingErrorCode.BAD_OUTPUT to Pair(DevelopmentRunState.FAILED, "CODING_BAD_OUTPUT"),
             CodingErrorCode.CANCELLED to Pair(DevelopmentRunState.CANCELLED, "CODING_CANCELLED"),
+            CodingErrorCode.EMPTY_PATCH to Pair(DevelopmentRunState.FAILED, "CODING_EMPTY_PATCH"),
+            CodingErrorCode.BUDGET_EXCEEDED to Pair(DevelopmentRunState.FAILED, "CODING_BUDGET_EXCEEDED"),
+            CodingErrorCode.OVERLOADED to Pair(DevelopmentRunState.FAILED, "CODING_OVERLOADED"),
         )
         assertEquals(CodingErrorCode.entries.toSet(), expected.keys, "every agent error code is covered")
         for ((code, want) in expected) {

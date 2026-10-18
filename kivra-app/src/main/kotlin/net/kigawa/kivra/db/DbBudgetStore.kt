@@ -62,7 +62,7 @@ class DbBudgetStore(
     private val runLimit: BudgetLimit? = null,
     private val clock: Clock = Clock.systemUTC(),
     private val reservationTtl: Duration = Duration.ofMinutes(5),
-) : BudgetPort {
+) : BudgetPort, BudgetOperatorView {
     init {
         require(tenantScope.isNotBlank() && !tenantScope.startsWith(RUN_PREFIX)) { "tenantScope must not be blank or start with run:" }
         requireJpy(tenantLimit, "tenant")
@@ -299,6 +299,59 @@ class DbBudgetStore(
         return result
     }
 
+    /**
+     * Read-only snapshot for the operator screen. Amounts and reservation keys only. The committed total and the reserved sum are
+     * those of the tenant scope in its current JST month. [BudgetOperatorStatus.cliCommittedJpy] is the part of the charged total
+     * whose key is `coding:` (the CLI path). The API path is the rest, so the two always add up to the committed total.
+     * The unpriced list covers every month (an older UNPRICED still blocks until acknowledged), capped at [UNPRICED_LIST_LIMIT].
+     */
+    override fun operatorStatus(): BudgetOperatorStatus = transaction(database) {
+        val now = clock.instant()
+        lockTenant()
+        expireDue(now)
+        val period = periodFor(tenantScope, now)
+        val committed = periodRow(tenantScope, period)?.committed ?: 0L
+        val reserved = reservedFor(tenantScope, period)
+        val cli = execQuery(
+            """
+            SELECT COALESCE(SUM(r.amount_micro_yen), 0)
+              FROM budget_reservation_scopes s
+              JOIN budget_reservations r ON r.reservation_key = s.reservation_key
+             WHERE s.scope_id = ? AND s.period = ? AND r.state IN (?, ?, ?, ?) AND r.reservation_key LIKE ?
+            """.trimIndent(),
+            tenantScope, period, COMMITTED, UNPRICED, ACKNOWLEDGED, LAPSED, "$CODING_KEY_PREFIX%",
+        ) { it.getLong(1) }.single()
+        val rows = execQuery(
+            """
+            SELECT r.reservation_key, r.state, r.amount_micro_yen, s.period
+              FROM budget_reservation_scopes s
+              JOIN budget_reservations r ON r.reservation_key = s.reservation_key
+             WHERE s.scope_id = ? AND r.state IN (?, ?)
+             ORDER BY r.created_at, r.reservation_key
+             LIMIT ${UNPRICED_LIST_LIMIT + 1}
+            """.trimIndent(),
+            tenantScope, UNPRICED, LAPSED,
+        ) { UnpricedReservation(it.getString(1), tenantScope, it.getString(4), it.getString(2), micro(it.getLong(3)), it.getString(1).startsWith(CODING_KEY_PREFIX)) }
+        val count = execQuery(
+            """
+            SELECT COUNT(*)
+              FROM budget_reservation_scopes s
+              JOIN budget_reservations r ON r.reservation_key = s.reservation_key
+             WHERE s.scope_id = ? AND r.state IN (?, ?)
+            """.trimIndent(),
+            tenantScope, UNPRICED, LAPSED,
+        ) { it.getLong(1) }.single()
+        BudgetOperatorStatus(
+            period = period,
+            limitJpy = tenantLimit.hard,
+            committedJpy = micro(committed),
+            reservedJpy = micro(reserved),
+            cliCommittedJpy = micro(cli),
+            unpricedCount = count,
+            unpriced = rows.take(UNPRICED_LIST_LIMIT),
+        )
+    }
+
     // ---- admission --------------------------------------------------------------------------------------------------
 
     /** Checks that do not need the database: scope presence, price known, currency/unit, limits configured. */
@@ -480,6 +533,10 @@ class DbBudgetStore(
 
     companion object {
         const val RUN_PREFIX = "run:"
+        /** The reservation key prefix of the CLI coding path (`coding:<attemptId>:<generation>`, see CodingCostLedger). */
+        const val CODING_KEY_PREFIX = "coding:"
+        /** The most unpriced rows the operator screen lists. The count is still exact. */
+        const val UNPRICED_LIST_LIMIT = 100
         const val PERIOD_ALL = "ALL"
         const val RESERVED = "RESERVED"
         const val LAPSED = "LAPSED"
@@ -512,6 +569,35 @@ class DbBudgetStore(
         }
     }
 }
+
+/**
+ * Read-only view of the budget for the operator screen (`GET /api/admin/budget/status`). Carries amounts and reservation keys only:
+ * no prompt, response, path or model name.
+ */
+interface BudgetOperatorView {
+    fun operatorStatus(): BudgetOperatorStatus
+}
+
+/** The tenant scope's month, in yen. [unpriced] is capped; [unpricedCount] is the exact number of UNPRICED or LAPSED rows. */
+data class BudgetOperatorStatus(
+    val period: String,
+    val limitJpy: BigDecimal,
+    val committedJpy: BigDecimal,
+    val reservedJpy: BigDecimal,
+    val cliCommittedJpy: BigDecimal,
+    val unpricedCount: Long,
+    val unpriced: List<UnpricedReservation>,
+)
+
+/** One UNPRICED or LAPSED reservation on the tenant scope, as the operator can acknowledge it. [cli] is true for a `coding:` key. */
+data class UnpricedReservation(
+    val reservationKey: String,
+    val scopeId: String,
+    val period: String,
+    val state: String,
+    val amountJpy: BigDecimal,
+    val cli: Boolean,
+)
 
 /** Outcome of [DbBudgetStore.recordSpend]. Fixed values only. */
 enum class SpendResult { RECORDED, ALREADY_RECORDED, FAILURE }

@@ -142,7 +142,15 @@
     goalKeyFor: null,
     goalSubmitting: false,
     stop: null,
-    stopping: false
+    stopping: false,
+    budget: null,
+    budgetError: null,
+    budgetVisible: false,
+    budgetLoading: false,
+    budgetCheckedAt: 0,
+    budgetFx: null,
+    budgetDialog: null,
+    budgetSubmitting: false
   };
 
   function $(id) {
@@ -299,9 +307,21 @@
     renderGoalsStatus(Date.now());
   }
 
-  function fail(path, kind, status) {
-    if (kind === 'session' && isApi(path)) markSessionExpired();
+  function fail(path, kind, status, quiet) {
+    if (kind === 'session' && isApi(path) && !quiet) markSessionExpired();
     return { ok: false, kind: kind, status: status };
+  }
+
+  /** The fixed machine code of a JSON error body (e.g. TOO_LARGE), or undefined. The rest of the body is never used. */
+  async function fixedCode(res) {
+    try {
+      var ct = res.headers.get('content-type') || '';
+      if (!/^application\/json(\s*;|\s*$)/i.test(ct)) return undefined;
+      var data = await res.json();
+      return data && typeof data.code === 'string' && /^[A-Z_]{1,32}$/.test(data.code) ? data.code : undefined;
+    } catch (e) {
+      return undefined;
+    }
   }
 
   /**
@@ -309,7 +329,7 @@
    * redirect: 'manual' keeps a redirect to the sign-in page from being followed silently. It shows up as an
    * opaqueredirect response, which is treated as an expired session. The page never builds a redirect URL itself.
    */
-  async function apiFetch(path, method, body) {
+  async function apiFetch(path, method, body, quiet) {
     // Client-side guard only: it saves unneeded requests and is not an authorization check. The server still
     // enforces auth on every request. Only a page reload clears sessionExpired (the sign-in happens on reload).
     if (isApi(path) && state.sessionExpired) return { ok: false, kind: 'session' };
@@ -330,12 +350,16 @@
     } catch (e) {
       return { ok: false, kind: 'network' };
     }
-    if (res.type === 'opaqueredirect' || res.redirected) return fail(path, 'session');
-    if (!res.ok) return fail(path, kindOf(res.status), res.status);
+    if (res.type === 'opaqueredirect' || res.redirected) return fail(path, 'session', undefined, quiet);
+    if (!res.ok) {
+      var failed = fail(path, kindOf(res.status), res.status, quiet);
+      failed.code = await fixedCode(res);
+      return failed;
+    }
     // A 2xx that is not JSON (e.g. an HTML sign-in page served after a followed redirect) is an expired session for /api/*.
     var contentType = res.headers.get('content-type') || '';
     if (!/^application\/json(\s*;|\s*$)/i.test(contentType)) {
-      return fail(path, isApi(path) ? 'session' : 'invalid');
+      return fail(path, isApi(path) ? 'session' : 'invalid', undefined, quiet);
     }
     try {
       return { ok: true, status: res.status, data: await res.json() };
@@ -923,6 +947,376 @@
     showReleaseError(msg);
     // A 409 means the run has changed: show its current state under the dialog.
     if (r.status === 409) reloadReleasedRun(rel);
+  }
+
+
+  // ---- Budget (operator): the month's spend, the CLI / API split, the FX warning and the UNPRICED list (ADR 0003, #230) ----
+  // Shown only when GET /api/admin/budget/status answers 200 to this user. The requests are quiet: a 401 or 403 here means
+  // "not for this user" and does not end the session. Only text enters the DOM (textContent, or h() with text).
+
+  var ACTUAL_RE = /^[0-9]{1,12}(\.[0-9]{1,6})?$/;
+  var YEN_RE = /^-?[0-9]+(\.[0-9]+)?$/;
+  var CODING_KEY_RE = /^coding:([^:]+):([0-9]+)$/;
+  var CODE_RE = /^[A-Z_]{1,32}$/;
+  var FX_WARN_DAYS = 2;
+  var BUDGET_TEXT_MAX = 500;
+  var BUDGET_ACTUAL_MAX = 24;
+  var BUDGET_ACTUAL_HINT = '半角の数字と小数点で入力します（小数は 6 桁まで）。実額は計上額の 100 倍まで。';
+
+  var BUDGET_REASON = {
+    COST_NOT_ESTABLISHED: '費用が確定しない（予約額のまま計上。実額の確認が必要）',
+    TTL_ELAPSED: '期限切れ（保守的に予約額で計上。請求が無かったかもしれない）'
+  };
+
+  var BUDGET_MSG = {
+    loadFailed: '予算の状態を取得できませんでした。「今すぐ更新」で再度お試しください。',
+    invalid: '予算の応答の形式が想定と違います。「今すぐ更新」で再度お試しください。',
+    network: '通信に失敗しました。「今すぐ更新」で再度お試しください。',
+    actualBad: '実額は円の数字（小数は 6 桁まで、12 桁まで）で入力してください。空欄は「実額不明」です。',
+    textBad: '根拠と理由を入力してください（1〜500 文字、制御文字は使えません）。',
+    tooLarge: '実額が計上額の 100 倍を超えています。実額を確かめてください（上限は計上額の 100 倍まで）。',
+    notComparable: '実額の単位が予約と合いません。円の数字で入力してください。',
+    badRequest: '入力を確認してください（実額は円の数字、根拠と理由は 1〜500 文字、制御文字は使えません）。',
+    notFound: 'この予約は見つかりません。「今すぐ更新」で一覧を確認してください。',
+    conflict: 'この予約は未確定ではありません（既に解除されたか、状態が変わりました）。一覧を更新してください。',
+    unavailable: '予算の台帳に書けませんでした。予約は変わっていません。時間をおいて、もう一度お試しください。',
+    acknowledgedDone: '解除しました（監査ログに記録されました）。',
+    alreadyDone: '既に解除済みでした（変更はありません）。'
+  };
+
+  /** A yen amount from the server (a decimal string) as text, or a fixed placeholder when it is not a number. */
+  function moneyText(v) {
+    var t = str(v);
+    if (!YEN_RE.test(t)) return '（不明）';
+    return Number(t).toLocaleString('ja-JP', { maximumFractionDigits: 6 }) + ' 円';
+  }
+
+  function budgetNum(v) {
+    var t = str(v);
+    return YEN_RE.test(t) ? Number(t) : null;
+  }
+
+  /** The reservation key as a short, readable label. A CLI key (coding:<attemptId>:<generation>) shows its attempt. */
+  function keyLabel(key) {
+    var m = CODING_KEY_RE.exec(key);
+    if (m) return 'CLI の attempt ' + m[1].slice(0, 8) + '…（世代 ' + m[2] + '）';
+    return '予約 ' + key.slice(0, 8) + '…';
+  }
+
+  function pathLabel(path) {
+    return path === 'cli' ? 'CLI 経路' : 'API 経路';
+  }
+
+  /** The body is shown only when every field this screen reads has the expected shape. */
+  function isBudgetBody(d) {
+    if (!d || typeof d !== 'object') return false;
+    if (typeof d.period !== 'string' || typeof d.unpricedCount !== 'number' || !Array.isArray(d.unpriced)) return false;
+    var money = [d.limitJpy, d.committedJpy, d.reservedJpy, d.remainingJpy];
+    if (!money.every(function (v) { return YEN_RE.test(str(v)); })) return false;
+    if (!d.paths || !d.paths.api || !d.paths.cli) return false;
+    return YEN_RE.test(str(d.paths.api.committedJpy)) && YEN_RE.test(str(d.paths.cli.committedJpy));
+  }
+
+  /** The screen's refresh. Only the operator sees the section: 401, 403 or 404 keep it hidden. */
+  async function refreshBudget() {
+    if (state.budgetLoading || state.sessionExpired) return;
+    state.budgetLoading = true;
+    try {
+      var results = await Promise.all([
+        apiFetch('/api/admin/budget/status', 'GET', undefined, true),
+        apiFetch('/api/admin/budget/fx', 'GET', undefined, true)
+      ]);
+      var r = results[0];
+      if (!r.ok && (r.status === 401 || r.status === 403 || r.status === 404)) {
+        state.budgetVisible = false;
+        state.budget = null;
+        state.budgetError = null;
+      } else {
+        state.budgetVisible = true;
+        if (!r.ok) {
+          state.budget = null;
+          state.budgetError = r.kind === 'network' ? 'network' : 'loadFailed';
+        } else if (!isBudgetBody(r.data)) {
+          state.budget = null;
+          state.budgetError = 'invalid';
+        } else {
+          state.budget = r.data;
+          state.budgetError = null;
+          state.budgetCheckedAt = Date.now();
+        }
+      }
+      var f = results[1];
+      state.budgetFx = f.ok && f.data && typeof f.data === 'object' && 'fx' in f.data
+        ? { ok: true, fx: f.data.fx }
+        : { ok: false };
+    } finally {
+      state.budgetLoading = false;
+      renderBudget();
+    }
+  }
+
+  function renderBudget() {
+    $('budget-section').hidden = !state.budgetVisible;
+    if (!state.budgetVisible) return;
+    var d = state.budget;
+    $('budget-body').hidden = d === null;
+    $('budget-status').textContent = state.budgetLoading
+      ? '読み込み中…'
+      : d === null
+        ? (BUDGET_MSG[state.budgetError] || BUDGET_MSG.loadFailed)
+        : '最終取得: ' + fmtLocal(state.budgetCheckedAt);
+    if (d === null) return;
+    renderBudgetBar(d);
+    renderBudgetFx();
+    $('budget-month').textContent = '対象の月: ' + d.period + '（JST の暦月。上限は月ごとに数えます）';
+    $('budget-path-api').textContent = moneyText(d.paths.api.committedJpy);
+    $('budget-path-cli').textContent = moneyText(d.paths.cli.committedJpy);
+    renderUnpriced(d);
+  }
+
+  /** The bar and its text. An overspent month says so in words, not only by the bar. */
+  function renderBudgetBar(d) {
+    var limit = budgetNum(d.limitJpy);
+    var committed = budgetNum(d.committedJpy);
+    var reserved = budgetNum(d.reservedJpy);
+    var remaining = budgetNum(d.remainingJpy);
+    var used = committed + reserved;
+    var pct = limit > 0 ? (used / limit) * 100 : 0;
+    var bar = $('budget-bar');
+    bar.max = 100;
+    bar.value = Math.round(Math.min(100, Math.max(0, pct)) * 100) / 100;
+    var text = '確定 ' + moneyText(d.committedJpy) + ' + 予約中 ' + moneyText(d.reservedJpy) + ' / 上限 ' + moneyText(d.limitJpy) +
+      '（使用 ' + Math.floor(pct) + '%）。';
+    if (remaining < 0) {
+      text += '上限を超えています（超過 ' + moneyText(String(-remaining)) + '）。';
+    } else {
+      text += '残り ' + moneyText(d.remainingJpy) + '。';
+    }
+    var el = $('budget-bar-text');
+    el.textContent = text;
+    el.className = remaining < 0 ? 'meta error' : 'meta';
+  }
+
+  /** The FX warning. Two days or less is a warning (amber, with words). An expired rate is an error (red, with words). */
+  function renderBudgetFx() {
+    var el = $('budget-fx');
+    var f = state.budgetFx;
+    el.hidden = false;
+    if (!f || !f.ok) {
+      el.className = 'meta';
+      el.textContent = '為替の状態を取得できませんでした。';
+      return;
+    }
+    if (!f.fx) {
+      el.className = 'meta';
+      el.textContent = '為替レートは設定されていません（USD の単価は使っていません）。';
+      return;
+    }
+    var fx = f.fx;
+    var asOf = str(fx.asOf);
+    var days = typeof fx.daysLeft === 'number' ? fx.daysLeft : null;
+    if (fx.expired === true) {
+      el.className = 'budget-alert error';
+      el.textContent = '為替レートが失効しています（基準日 ' + asOf + '）。失効中は CLI の claim が止まり、報告は金額 0 の未確定になります。レートを更新してください（runbook §4.8）。';
+    } else if (days !== null && days <= FX_WARN_DAYS) {
+      el.className = 'budget-alert warn';
+      el.textContent = '為替レートの有効期限まで残り ' + days + ' 日です（基準日 ' + asOf + '）。期限が切れる前に更新してください。';
+    } else {
+      el.className = 'meta';
+      el.textContent = '為替レート: 基準日 ' + asOf + '、残り ' + (days === null ? '（不明）' : days + ' 日');
+    }
+  }
+
+  function renderUnpriced(d) {
+    var list = $('budget-unpriced-list');
+    clear(list);
+    var rows = d.unpriced.filter(function (row) {
+      return row && typeof row.reservationKey === 'string' && typeof row.scopeId === 'string' && typeof row.period === 'string';
+    });
+    $('budget-unpriced-count').textContent = d.unpricedCount === 0
+      ? '未確定の予約はありません。'
+      : '未確定の予約: ' + d.unpricedCount + ' 件。1 件でも残っている間は、新しい予約（CLI の claim を含む）が UNKNOWN_COST で止まります。';
+    rows.forEach(function (row) {
+      var button = h('button', {
+        type: 'button',
+        className: 'secondary',
+        text: '解除…',
+        'aria-label': keyLabel(row.reservationKey) + 'を解除'
+      });
+      button.addEventListener('click', function () { openBudgetAck(row); });
+      list.appendChild(h('li', { className: 'run-item budget-unpriced-item' }, [
+        h('div', { className: 'run-title', text: keyLabel(row.reservationKey) + '（' + pathLabel(row.path) + '）' }),
+        h('div', { className: 'meta', text: '金額 ' + moneyText(row.amountJpy) + '、期間 ' + str(row.period) + '、状態 ' + str(row.state) }),
+        h('div', { className: 'meta', text: '理由: ' + (BUDGET_REASON[row.reason] || str(row.reason)) }),
+        h('div', { className: 'detail-actions' }, [button])
+      ]));
+    });
+    var note = $('budget-unpriced-note');
+    var more = d.unpricedCount > rows.length;
+    note.hidden = !more;
+    note.textContent = more
+      ? '一覧は ' + rows.length + ' 件までです。残りは runbook §6.13 の SQL で確認してください。'
+      : '';
+  }
+
+  // ---- The acknowledgement dialog: two steps (edit, then confirm) ----
+
+  function budgetFormState() {
+    var actual = $('budget-actual').value.trim();
+    var evidence = $('budget-evidence').value.trim();
+    var reason = $('budget-reason').value.trim();
+    var actualOk = actual === '' || (ACTUAL_RE.test(actual) && actual.length <= BUDGET_ACTUAL_MAX);
+    var textOk = function (t) {
+      var n = Array.from(t).length;
+      return n >= 1 && n <= BUDGET_TEXT_MAX && !CONTROL_CHARS.test(t);
+    };
+    return {
+      actual: actual,
+      actualOk: actualOk,
+      evidence: evidence,
+      reason: reason,
+      textOk: textOk(evidence) && textOk(reason),
+      ok: actualOk && textOk(evidence) && textOk(reason)
+    };
+  }
+
+  function showBudgetError(text) {
+    var el = $('budget-dialog-error');
+    el.textContent = text;
+    el.hidden = text === '';
+  }
+
+  function setBudgetStage(stage) {
+    var confirm = stage === 'confirm';
+    $('budget-dialog-edit').hidden = confirm;
+    $('budget-dialog-confirm').hidden = !confirm;
+    $('budget-back').hidden = !confirm;
+    $('budget-submit').hidden = !confirm;
+    $('budget-next').hidden = confirm;
+    if (state.budgetDialog) state.budgetDialog.stage = stage;
+  }
+
+  function updateBudgetCounts() {
+    $('budget-evidence-count').textContent = Array.from($('budget-evidence').value).length + ' / ' + BUDGET_TEXT_MAX;
+    $('budget-reason-count').textContent = Array.from($('budget-reason').value).length + ' / ' + BUDGET_TEXT_MAX;
+  }
+
+  /** Send, back and submit follow the form: a second request, or a change during a send, is never possible. */
+  function updateBudgetControls() {
+    updateBudgetCounts();
+    var f = budgetFormState();
+    var hint = $('budget-actual-hint');
+    hint.textContent = f.actualOk ? BUDGET_ACTUAL_HINT : BUDGET_MSG.actualBad;
+    hint.className = f.actualOk ? 'meta' : 'meta error';
+    var busy = state.budgetSubmitting === true;
+    $('budget-next').disabled = busy || !f.ok;
+    $('budget-back').disabled = busy;
+    $('budget-cancel').disabled = busy;
+    $('budget-submit').disabled = busy || !f.ok;
+  }
+
+  function openBudgetAck(row) {
+    state.budgetDialog = { row: row, stage: 'edit' };
+    $('budget-dialog-title').textContent = '未確定の予約を解除';
+    $('budget-dialog-explain').textContent = keyLabel(row.reservationKey) + '（' + pathLabel(row.path) + '、期間 ' + str(row.period) +
+      '、計上額 ' + moneyText(row.amountJpy) + '）を解除します。実額が分かれば入力してください。実額が分からなければ空欄のままにします（計上額が残ります）。';
+    $('budget-actual').value = '';
+    $('budget-evidence').value = '';
+    $('budget-reason').value = '';
+    showBudgetError('');
+    setBudgetStage('edit');
+    updateBudgetControls();
+    $('budget-dialog').showModal();
+  }
+
+  function onBudgetNext() {
+    var f = budgetFormState();
+    if (!f.ok) {
+      showBudgetError(f.actualOk ? BUDGET_MSG.textBad : BUDGET_MSG.actualBad);
+      updateBudgetControls();
+      return;
+    }
+    showBudgetError('');
+    var text = f.actual === ''
+      ? '実額は不明のままにします。計上額 ' + moneyText(state.budgetDialog.row.amountJpy) + ' が残ります。'
+      : '実額として ' + f.actual + ' 円を記録します（0 は「請求されていないことを確認済み」の意味です）。';
+    $('budget-confirm-text').textContent = text;
+    setBudgetStage('confirm');
+    updateBudgetControls();
+  }
+
+  function onBudgetBack() {
+    showBudgetError('');
+    setBudgetStage('edit');
+    updateBudgetControls();
+  }
+
+  function budgetErrorText(r) {
+    if (r.kind === 'network') return BUDGET_MSG.network;
+    if (r.kind === 'session') return MESSAGES.session;
+    if (r.status === 400) {
+      if (r.code === 'TOO_LARGE') return BUDGET_MSG.tooLarge;
+      if (r.code === 'NOT_COMPARABLE') return BUDGET_MSG.notComparable;
+      return BUDGET_MSG.badRequest;
+    }
+    if (r.status === 404) return BUDGET_MSG.notFound;
+    if (r.status === 409) return BUDGET_MSG.conflict;
+    if (r.status === 503) return BUDGET_MSG.unavailable;
+    return MESSAGES.server;
+  }
+
+  async function onBudgetSubmit() {
+    var d = state.budgetDialog;
+    if (!d || state.budgetSubmitting || state.sessionExpired) return;
+    var f = budgetFormState();
+    if (!f.ok) {
+      showBudgetError(f.actualOk ? BUDGET_MSG.textBad : BUDGET_MSG.actualBad);
+      setBudgetStage('edit');
+      updateBudgetControls();
+      return;
+    }
+    var row = d.row;
+    var body = { scopeId: row.scopeId, period: row.period, reservationKey: row.reservationKey, evidence: f.evidence, reason: f.reason };
+    // An absent actualAmountJpy means "the actual cost is not known" on the server, so an empty field is left out.
+    if (f.actual !== '') body.actualAmountJpy = f.actual;
+    state.budgetSubmitting = true;
+    showBudgetError('');
+    updateBudgetControls();
+    var r;
+    try {
+      r = await apiFetch('/api/admin/budget/acknowledge', 'POST', body);
+    } finally {
+      state.budgetSubmitting = false;
+    }
+    var status = r.ok && r.data ? r.data.status : null;
+    if (status === 'ACKNOWLEDGED' || status === 'ALREADY_ACKNOWLEDGED') {
+      state.budgetDialog = null;
+      $('budget-dialog').close();
+      var msg = $('budget-msg');
+      msg.textContent = status === 'ALREADY_ACKNOWLEDGED' ? BUDGET_MSG.alreadyDone : BUDGET_MSG.acknowledgedDone;
+      msg.className = 'result ok';
+      refreshBudget();
+      return;
+    }
+    showBudgetError(r.ok ? MESSAGES.invalid : budgetErrorText(r));
+    setBudgetStage('edit');
+    updateBudgetControls();
+    if (!r.ok && (r.status === 404 || r.status === 409)) refreshBudget();
+  }
+
+  function initBudget() {
+    $('budget-refresh').addEventListener('click', refreshBudget);
+    ['budget-actual', 'budget-evidence', 'budget-reason'].forEach(function (id) {
+      $(id).addEventListener('input', updateBudgetControls);
+    });
+    $('budget-next').addEventListener('click', onBudgetNext);
+    $('budget-back').addEventListener('click', onBudgetBack);
+    $('budget-submit').addEventListener('click', onBudgetSubmit);
+    $('budget-cancel').addEventListener('click', function () {
+      if (state.budgetSubmitting) return;
+      state.budgetDialog = null;
+      $('budget-dialog').close();
+    });
   }
 
   // ---- Autopilot (ADR 0011): the Goal form, the Goal list and detail, approvals, and the switches ----------
@@ -1559,6 +1953,8 @@
     $('stop-reason').addEventListener('input', updateGoalControls);
     $('stop-cancel').addEventListener('click', function () { $('stop-dialog').close(); });
     $('stop-submit').addEventListener('click', submitStop);
+    initBudget();
+    refreshBudget();
     updateGoalCounters();
     renderAutopilot();
     refreshAutopilot();

@@ -102,6 +102,33 @@
       <p id="runs-status" class="meta" role="status">未取得</p>
       <ul id="runs-list" class="run-list"></ul>
     </section>
+
+    <!-- Budget (operator). Hidden unless GET /api/admin/budget/status answers 200 to this user. Only text is written into it. -->
+    <section class="card" id="budget-section" aria-labelledby="h-budget" hidden>
+      <div class="card-head">
+        <h2 id="h-budget">予算（運用者向け）</h2>
+        <button type="button" id="budget-refresh" class="secondary">今すぐ更新</button>
+      </div>
+      <p id="budget-status" class="meta" role="status">未取得</p>
+      <p id="budget-msg" class="result" role="status"></p>
+      <div id="budget-body" hidden>
+        <p id="budget-month" class="meta"></p>
+        <p id="budget-bar-label" class="meta">今月の使用額（確定と予約中の合計）</p>
+        <progress id="budget-bar" max="100" value="0" aria-labelledby="budget-bar-label"></progress>
+        <p id="budget-bar-text"></p>
+        <p id="budget-fx" class="meta" role="status" hidden></p>
+        <dl id="budget-paths">
+          <dt>API 経路（API の呼び出し）</dt>
+          <dd id="budget-path-api">-</dd>
+          <dt>CLI 経路（コーディングの Run）</dt>
+          <dd id="budget-path-cli">-</dd>
+        </dl>
+        <h3 id="h-budget-unpriced">未確定の予約（費用が確定しない、または期限切れ）</h3>
+        <p id="budget-unpriced-count" class="meta" role="status"></p>
+        <ul id="budget-unpriced-list" class="run-list" aria-labelledby="h-budget-unpriced"></ul>
+        <p id="budget-unpriced-note" class="meta" hidden></p>
+      </div>
+    </section>
   </div>
 
   <section id="view-detail" class="card" hidden aria-labelledby="h-detail">
@@ -138,6 +165,35 @@
     <div class="dialog-actions">
       <button type="button" class="secondary" id="stop-cancel" autofocus>キャンセル</button>
       <button type="button" id="stop-submit" disabled>中止する</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="budget-dialog" aria-labelledby="budget-dialog-title">
+  <div class="release-body">
+    <h2 id="budget-dialog-title">未確定の予約を解除</h2>
+    <p id="budget-dialog-explain" class="meta"></p>
+    <div id="budget-dialog-edit">
+      <label for="budget-actual">実額（円、任意。分からなければ空欄のまま）</label>
+      <input id="budget-actual" type="text" inputmode="decimal" autocomplete="off" maxlength="24">
+      <p class="meta" id="budget-actual-hint">半角の数字と小数点で入力します（小数は 6 桁まで）。実額は計上額の 100 倍まで。</p>
+      <label for="budget-evidence">根拠（必須、1〜500 文字。例: 請求書の番号など）</label>
+      <input id="budget-evidence" type="text" autocomplete="off">
+      <div class="counter" id="budget-evidence-count">0 / 500</div>
+      <label for="budget-reason">理由（必須、1〜500 文字）</label>
+      <input id="budget-reason" type="text" autocomplete="off">
+      <div class="counter" id="budget-reason-count">0 / 500</div>
+    </div>
+    <div id="budget-dialog-confirm" hidden>
+      <p id="budget-confirm-text"></p>
+      <p class="meta">この操作は監査ログに残り、取り消せません。</p>
+    </div>
+    <p class="error" id="budget-dialog-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="budget-cancel">キャンセル</button>
+      <button type="button" class="secondary" id="budget-back" hidden>入力に戻る</button>
+      <button type="button" id="budget-next" disabled>内容を確認</button>
+      <button type="button" id="budget-submit" hidden>解除する</button>
     </div>
   </div>
 </dialog>

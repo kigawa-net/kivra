@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import net.kigawa.kivra.agent.claude.AgentRunOutcome
 import net.kigawa.kivra.agent.claude.CliOutcomeClassifier
 import net.kigawa.kivra.agent.claude.CliResultLog
+import net.kigawa.kivra.agent.claude.MonitorEvent
 import net.kigawa.kivra.agent.claude.ReportedUsage
 import net.kigawa.kivra.agent.claude.StreamJsonParser
 import net.kigawa.kivra.agent.claude.StreamReport
@@ -62,6 +63,8 @@ class RealExecutorSettings(
     val debugKeep: Boolean = false,
     /** Sends EMPTY_PATCH, BUDGET_EXCEEDED and OVERLOADED instead of the older codes (`KIVRA_AGENT_NEW_ERROR_CODES=1`). Off by default. */
     val newErrorCodes: Boolean = false,
+    /** Sends the run's monitor events to kivra (`KIVRA_AGENT_MONITOR_EVENTS=1`). Off by default. See [MonitorSession] and ADR 0012. */
+    val monitorEvents: Boolean = false,
 ) {
     override fun toString(): String = "RealExecutorSettings(***)"
 }
@@ -122,16 +125,27 @@ class RealAttemptExecutor(
         }
         val state = AttemptState()
         var outcome: AttemptOutcome? = null
+        // The monitor is best effort (ADR 0012 U-11): nothing it does changes the outcome below. It is stopped here, after its last events
+        // are sent (bounded), before the result or the fail is reported.
+        val monitor = if (settings.monitorEvents) {
+            MonitorSession.start(client, attempt.attemptId, attempt.generation)
+        } else {
+            MonitorSession.DISABLED
+        }
         try {
-            val result = attemptOnce(attempt, state, pathRules)
+            val result = attemptOnce(attempt, state, pathRules, monitor)
             outcome = result
             return result
         } finally {
-            // The debug output is taken before the work directory is removed. Nothing is kept for a success (outcome == ResultSubmitted),
-            // and a thrown exception or a cancel leaves outcome null, which is kept as EXCEPTION.
-            debugKeep?.let { keep ->
-                if (outcome !is AttemptOutcome.ResultSubmitted) {
-                    withContext(Dispatchers.IO + NonCancellable) {
+            // One NonCancellable block for everything here. A withContext that returns after the coroutine was cancelled throws, so a
+            // second withContext would skip the rest of this block (the work directory would be left behind).
+            withContext(Dispatchers.IO + NonCancellable) {
+                // The monitor's last events go out first (bounded by its own timeout). It has no effect on the outcome.
+                monitor.finish()
+                // The debug output is taken before the work directory is removed. Nothing is kept for a success (outcome == ResultSubmitted),
+                // and a thrown exception or a cancel leaves outcome null, which is kept as EXCEPTION.
+                debugKeep?.let { keep ->
+                    if (outcome !is AttemptOutcome.ResultSubmitted) {
                         keep.keep(
                             runId = attempt.runId,
                             attemptId = attempt.attemptId,
@@ -141,16 +155,16 @@ class RealAttemptExecutor(
                         )
                     }
                 }
+                state.prepared?.let { work ->
+                    val clean = RunDirCleanup.delete(work.runDir, work.manifest)
+                    if (!clean) logger.warn("work directory was not fully removed: runId={} attemptId={}", attempt.runId, attempt.attemptId)
+                }
+                debugKeep?.prune()
             }
-            state.prepared?.let { work ->
-                val clean = withContext(Dispatchers.IO + NonCancellable) { RunDirCleanup.delete(work.runDir, work.manifest) }
-                if (!clean) logger.warn("work directory was not fully removed: runId={} attemptId={}", attempt.runId, attempt.attemptId)
-            }
-            debugKeep?.let { keep -> withContext(Dispatchers.IO + NonCancellable) { keep.prune() } }
         }
     }
 
-    private suspend fun attemptOnce(attempt: ClaimedAttempt, state: AttemptState, pathRules: PathRules): AttemptOutcome {
+    private suspend fun attemptOnce(attempt: ClaimedAttempt, state: AttemptState, pathRules: PathRules, monitor: MonitorSession): AttemptOutcome {
         val job = currentCoroutineContext().job
         // The blocking work runs to its end even when the coroutine is cancelled: the container is stopped by the cancel check
         // below, and the work directory is removed afterwards. Nothing is left running on a cancel.
@@ -186,7 +200,13 @@ class RealAttemptExecutor(
                 outputLimitBytes = minOf(attempt.limits.maxOutputBytes, DockerRunner.DEFAULT_OUTPUT_LIMIT_BYTES.toLong()).toInt(),
             )
             runner.cleanupOrphans(attempt.runId)
-            val result = runner.run(spec) { !job.isActive || Files.exists(stopFile) }
+            monitor.record(MonitorEvent.AttemptStarted)
+            val result = runner.run(
+                spec,
+                onStdoutLine = monitor.stdoutListener(),
+                cancelRequested = { !job.isActive || Files.exists(stopFile) },
+            )
+            monitor.record(MonitorEvent.ProcessExitConfirmed(result.outcome))
             val report = StreamJsonParser().parse(result.stdout)
             RunState(result, report, CliOutcomeClassifier.classify(result, report))
         }
@@ -231,7 +251,7 @@ class RealAttemptExecutor(
                 )
                 AttemptOutcome.Failed(code, usage)
             }
-            is CollectOutcome.Accepted -> submit(attempt, collected.result, usage)
+            is CollectOutcome.Accepted -> submit(attempt, collected.result, usage, monitor)
         }
     }
 
@@ -247,10 +267,13 @@ class RealAttemptExecutor(
      * Sends the result if the lease is still ours. A stale lease (409) or a missing attempt (404) throws, and the result is discarded.
      * A cancel request seen just before the send means the attempt is reported as CANCELLED, and nothing is sent.
      */
-    private suspend fun submit(attempt: ClaimedAttempt, result: AgentResult, usage: ReportedUsage?): AttemptOutcome {
+    private suspend fun submit(attempt: ClaimedAttempt, result: AgentResult, usage: ReportedUsage?, monitor: MonitorSession): AttemptOutcome {
         currentCoroutineContext().ensureActive()
         client.heartbeat(attempt.attemptId, attempt.generation, ProgressPhase.FINALIZING)
         if (client.status(attempt.attemptId).cancelRequested) return AttemptOutcome.Failed(AgentErrorCode.CANCELLED, usage)
+        // The monitor's events go out before the result, so that the result is the last thing of the attempt (ADR 0012 §2.1).
+        monitor.record(MonitorEvent.Phase(ProgressPhase.FINALIZING))
+        withContext(Dispatchers.IO + NonCancellable) { monitor.finish() }
         return when (client.submitResult(attempt.attemptId, attempt.generation, result, usage)) {
             is ResultReply.Accepted -> {
                 logger.info("result sent: runId={} attemptId={} changes={}", attempt.runId, attempt.attemptId, result.changes.size)

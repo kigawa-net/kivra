@@ -123,6 +123,8 @@ KIVRA_AGENT_EXECUTOR=stub
 #KIVRA_AGENT_DEBUG_KEEP=1
 # 専用のエラーコード(EMPTY_PATCH、BUDGET_EXCEEDED、OVERLOADED)を送る。kivra の対応版をデプロイした後にだけ 1 にする(runbook §6.10d)。
 #KIVRA_AGENT_NEW_ERROR_CODES=1
+# 実行の経過(CLI のツール呼び出しの件数など。固定コードと数値だけ)を kivra へ送る。kivra の対応版をデプロイした後にだけ 1 にする(runbook §6.16)。
+#KIVRA_AGENT_MONITOR_EVENTS=1
 # systemd が JVM の起動スクリプトに使う JDK
 JAVA_HOME=$JAVA_HOME_DIR
 ENV

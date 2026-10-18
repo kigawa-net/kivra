@@ -3,6 +3,7 @@ package net.kigawa.kivra.agent.docker
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import org.slf4j.LoggerFactory
@@ -51,6 +52,18 @@ object ProcessDockerLauncher : DockerLauncher {
 enum class DockerRunOutcome { EXITED, TIMEOUT, CANCELLED, OUTPUT_LIMIT }
 
 /**
+ * One line of the container's standard output, as it is read while the container runs. [Text] holds the line's content (never logged;
+ * [toString] shows no value). [Oversized] is a line over the per-line limit, whose content is not kept.
+ */
+sealed interface StdoutLine {
+    class Text(val value: String) : StdoutLine {
+        override fun toString(): String = "StdoutLine.Text(***)"
+    }
+
+    data object Oversized : StdoutLine
+}
+
+/**
  * The result of one run. [stdout] and [stderr] are bounded and may contain anything the container wrote, including secrets or the
  * task. The caller must not log them. [toString] shows sizes only.
  */
@@ -93,12 +106,20 @@ class DockerRunner(
     /**
      * Runs one container and waits for its end. [cancelRequested] is polled every [pollMillis]. Throws [DockerSpecException] or
      * [DockerArgsRejectedException] when the spec or the arguments are refused (nothing is started).
+     *
+     * [onStdoutLine], when given, receives each line of the standard output while the container runs. It runs on its own thread, behind
+     * a bounded queue: a slow or failing listener never delays the reading, the limits or the kill. A line the queue cannot take is
+     * dropped. The returned [DockerRunResult.stdout] is the same as without the listener.
      */
-    fun run(spec: DockerRunSpec, cancelRequested: () -> Boolean = { false }): DockerRunResult {
+    fun run(
+        spec: DockerRunSpec,
+        onStdoutLine: ((StdoutLine) -> Unit)? = null,
+        cancelRequested: () -> Boolean = { false },
+    ): DockerRunResult {
         val args = builder.build(spec)
         guard.check(args)
         val process = launcher.start(dockerArgv(args), dockerEnv())
-        val stdout = BoundedCapture(process.stdout, outputLimitBytes)
+        val stdout = BoundedCapture(process.stdout, outputLimitBytes, onStdoutLine)
         val stderr = BoundedCapture(process.stderr, outputLimitBytes)
         val deadline = nanoTime() + spec.timeout.toNanos()
 
@@ -200,8 +221,9 @@ class DockerRunner(
     }
 
     /** Keeps the first [limit] bytes and reads the rest to the end. [exceeded] tells the runner to stop the container. */
-    private class BoundedCapture(input: InputStream, private val limit: Int) {
+    private class BoundedCapture(input: InputStream, private val limit: Int, lineListener: ((StdoutLine) -> Unit)? = null) {
         private val kept = ByteArrayOutputStream()
+        private val lines = lineListener?.let { LineForwarder(it) }
 
         @Volatile
         private var total = 0L
@@ -214,6 +236,7 @@ class DockerRunner(
                         val n = stream.read(chunk)
                         if (n < 0) break
                         total += n
+                        lines?.feed(chunk, n)
                         synchronized(kept) {
                             val room = limit - kept.size()
                             if (room > 0) kept.write(chunk, 0, minOf(room, n))
@@ -222,6 +245,8 @@ class DockerRunner(
                 }
             } catch (e: IOException) {
                 // The process was destroyed; what was read so far is kept.
+            } finally {
+                lines?.close()
             }
         }
 
@@ -239,6 +264,64 @@ class DockerRunner(
         }
     }
 
+    /**
+     * Splits the bytes of the standard output into lines, on the reader's thread, and hands them to [listener] on another thread through
+     * a bounded queue. Nothing here blocks the reader: a full queue drops the line, and a listener that throws or blocks only holds its
+     * own thread. A listener failure is logged once, with the exception class only.
+     */
+    private class LineForwarder(private val listener: (StdoutLine) -> Unit) {
+        private val logger = LoggerFactory.getLogger(DockerRunner::class.java)
+        private val queue = LinkedBlockingQueue<Any>(LINE_QUEUE_CAPACITY)
+        private val buffer = ByteArrayOutputStream()
+        private var oversized = false
+        private var listenerFailed = false
+
+        private val consumer = thread(isDaemon = true, name = "docker-stdout-lines") {
+            while (true) {
+                val item = queue.take()
+                if (item === END) break
+                try {
+                    listener(item as StdoutLine)
+                } catch (e: Exception) {
+                    if (!listenerFailed) {
+                        listenerFailed = true
+                        logger.warn("stdout line listener failed: class={}", e.javaClass.simpleName)
+                    }
+                }
+            }
+        }
+
+        fun feed(chunk: ByteArray, n: Int) {
+            for (i in 0 until n) {
+                val b = chunk[i].toInt()
+                if (b == '\n'.code) {
+                    emit()
+                } else if (!oversized) {
+                    if (buffer.size() >= MAX_LINE_BYTES) {
+                        oversized = true
+                        buffer.reset()
+                    } else {
+                        buffer.write(b)
+                    }
+                }
+            }
+        }
+
+        /** Emits a last line that has no newline (a cut output), then ends the listener's thread. Waits briefly for it. */
+        fun close() {
+            if (buffer.size() > 0 || oversized) emit()
+            queue.offer(END)
+            consumer.join(LINE_JOIN_MILLIS)
+        }
+
+        private fun emit() {
+            val item: StdoutLine = if (oversized) StdoutLine.Oversized else StdoutLine.Text(buffer.toString(Charsets.UTF_8))
+            buffer.reset()
+            oversized = false
+            queue.offer(item)
+        }
+    }
+
     companion object {
         const val DEFAULT_POLL_MILLIS = 200L
         const val DEFAULT_OUTPUT_LIMIT_BYTES = 1024 * 1024
@@ -246,5 +329,11 @@ class DockerRunner(
         const val KILL_WAIT_MILLIS = 10_000L
         const val COMMAND_WAIT_MILLIS = 30_000L
         const val STOP_WAIT_MILLIS = 5_000L
+
+        /** The per-line limit of the monitor's stream. The same as the parser's limit (ADR 0010), so a line is oversized in both. */
+        const val MAX_LINE_BYTES = 1024 * 1024
+        private const val LINE_QUEUE_CAPACITY = 1_000
+        private const val LINE_JOIN_MILLIS = 500L
+        private val END = Any()
     }
 }

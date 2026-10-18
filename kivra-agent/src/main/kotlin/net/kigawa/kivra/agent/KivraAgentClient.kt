@@ -20,6 +20,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -75,6 +77,25 @@ sealed interface ClaimResult {
 sealed interface ResultReply {
     data class Accepted(val state: String) : ResultReply
     data object Rejected : ResultReply
+}
+
+/**
+ * The outcome of `events` (ADR 0012 §2.1). [Conflict] carries `lastAcceptedSeq` when kivra gives one (a gap: the events from there are
+ * to be sent again); a 409 without it means the lease is stale, and nothing more is sent. [Rejected] is a 400. [Refused] is any other
+ * client error (401, 403, 404, and the rest). [Unavailable] is a server error, a network error or a timeout.
+ */
+sealed interface EventsReply {
+    data object Accepted : EventsReply
+
+    data class Conflict(val lastAcceptedSeq: Long?) : EventsReply
+
+    data class RateLimited(val retryAfterSeconds: Long?) : EventsReply
+
+    data object Rejected : EventsReply
+
+    data object Refused : EventsReply
+
+    data object Unavailable : EventsReply
 }
 
 /** The state of an attempt and whether kivra has asked to cancel it. */
@@ -157,6 +178,30 @@ class KivraAgentClient(
         return ResultReply.Accepted(parsed.state)
     }
 
+    /**
+     * Sends one batch of monitor events (ADR 0012 §2.1). [body] is the complete JSON body, built by the caller. Never throws for a status
+     * code: each code maps to an [EventsReply]. A network error or a timeout is [EventsReply.Unavailable].
+     */
+    suspend fun postEvents(attemptId: String, body: String): EventsReply {
+        val reply = try {
+            send(HttpMethod.Post, attemptPath(attemptId, "events"), body)
+        } catch (e: AgentApiException) {
+            return EventsReply.Unavailable
+        }
+        return when (reply.status) {
+            in 200..299 -> EventsReply.Accepted
+            400 -> EventsReply.Rejected
+            409 -> EventsReply.Conflict(lastAcceptedSeq(reply.body))
+            429 -> EventsReply.RateLimited(reply.retryAfter?.toLongOrNull()?.takeIf { it in 0..MAX_RETRY_AFTER_SECONDS })
+            in 500..599 -> EventsReply.Unavailable
+            else -> EventsReply.Refused
+        }
+    }
+
+    private fun lastAcceptedSeq(text: String): Long? = runCatching {
+        (JSON.parseToJsonElement(text) as? JsonObject)?.get("lastAcceptedSeq")?.jsonPrimitive?.longOrNull
+    }.getOrNull()?.takeIf { it >= 0 }
+
     suspend fun status(attemptId: String): AttemptStatus {
         val reply = send(HttpMethod.Get, attemptPath(attemptId, "status"), null)
         requireSuccess(reply.status)
@@ -165,7 +210,8 @@ class KivraAgentClient(
         return AttemptStatus(parsed.state, parsed.cancelRequested)
     }
 
-    private class Reply(val status: Int, val body: String)
+    /** [retryAfter] is the raw `Retry-After` header, if any. It is read only for a 429. */
+    private class Reply(val status: Int, val body: String, val retryAfter: String? = null)
 
     private suspend fun send(method: HttpMethod, path: String, json: String?): Reply {
         val token = tokens.token()
@@ -174,7 +220,7 @@ class KivraAgentClient(
                 this.method = method
                 header(HttpHeaders.Authorization, "Bearer ${token.reveal()}")
                 if (json != null) setBody(TextContent(json, ContentType.Application.Json))
-            }.let { Reply(it.status.value, it.bodyAsText()) }
+            }.let { Reply(it.status.value, it.bodyAsText(), it.headers[HttpHeaders.RetryAfter]) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -280,6 +326,7 @@ class KivraAgentClient(
         val SHA = Regex("^[0-9a-f]{40}$")
         val STATE = Regex("^[A-Z_]{1,32}$")
         const val MAX_BODY_CHARS = 8_000
+        const val MAX_RETRY_AFTER_SECONDS = 3_600L
     }
 }
 

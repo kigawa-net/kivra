@@ -25,8 +25,15 @@ private val appJs by lazy { resource("app.js") }
 private val appCss by lazy { resource("app.css") }
 
 private val EXPECTED_CSP =
-    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; " +
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; " +
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+/** Parses a CSP header into directive name to source list. */
+private fun parseCsp(csp: String): Map<String, List<String>> =
+    csp.split(';').map { it.trim() }.filter { it.isNotEmpty() }.associate { directive ->
+        val parts = directive.split(Regex("\\s+"))
+        parts[0] to parts.drop(1)
+    }
 
 class UiRoutesTest {
     private fun assertSecurityHeaders(response: HttpResponse) {
@@ -65,6 +72,27 @@ class UiRoutesTest {
         assertEquals(indexHtml, client.get("/ui").bodyAsText())
         assertEquals(appJs, client.get("/ui/app.js").bodyAsText())
         assertEquals(appCss, client.get("/ui/app.css").bodyAsText())
+    }
+
+    @Test
+    fun `the csp grants only same-origin scripts, styles and images, with no inline code, eval, hashes or third parties`() {
+        val csp = parseCsp(UI_CONTENT_SECURITY_POLICY)
+        // The directives the UI depends on, exactly. Anything else stays denied by default-src 'none'.
+        assertEquals(listOf("'none'"), csp["default-src"])
+        assertEquals(listOf("'self'"), csp["script-src"])
+        assertEquals(listOf("'self'"), csp["style-src"])
+        assertEquals(listOf("'self'"), csp["img-src"])
+        assertEquals(listOf("'self'"), csp["connect-src"])
+        // No directive may allow inline code, eval, hashes or nonces, wildcards, schemes, or third-party hosts.
+        val forbidden = listOf("'unsafe-inline'", "'unsafe-eval'", "'unsafe-hashes'", "'strict-dynamic'", "*", "data:", "blob:")
+        for ((directive, sources) in csp) {
+            for (source in sources) {
+                assertFalse(source.startsWith("'sha") || source.startsWith("'nonce-"), "$directive: $source")
+                assertFalse(source in forbidden, "$directive must not allow $source")
+                assertFalse(source.contains("://") || source.endsWith(":"), "$directive must not allow $source")
+            }
+        }
+        assertFalse(UI_CONTENT_SECURITY_POLICY.contains("cloudflare", ignoreCase = true))
     }
 
     @Test

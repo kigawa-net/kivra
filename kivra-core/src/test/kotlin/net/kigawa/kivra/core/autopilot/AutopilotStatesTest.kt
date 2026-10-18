@@ -52,7 +52,8 @@ class AutopilotStatesTest {
     )
 
     private val expectedTask: Map<Pair<TaskState, TaskState>, Set<AutopilotReason?>> = mapOf(
-        (TaskState.PENDING_APPROVAL to TaskState.QUEUED) to setOf(AutopilotReason.OPERATOR_APPROVED),
+        (TaskState.PENDING_APPROVAL to TaskState.QUEUED) to
+            setOf(AutopilotReason.OPERATOR_APPROVED, AutopilotReason.AUTO_APPROVED),
         (TaskState.PENDING_APPROVAL to TaskState.SKIPPED) to setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.GOAL_STOPPED),
         (TaskState.QUEUED to TaskState.SUBMITTING) to none,
         (TaskState.QUEUED to TaskState.SKIPPED) to setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.GOAL_STOPPED),

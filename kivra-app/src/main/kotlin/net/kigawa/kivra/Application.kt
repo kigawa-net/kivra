@@ -44,10 +44,12 @@ import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.configureSelfDevRoutes
+import net.kigawa.kivra.selfdev.AutopilotDispatcher
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
 import net.kigawa.kivra.selfdev.SelfDevSettings
+import net.kigawa.kivra.selfdev.autopilotBudgetAllows
 import net.kigawa.kivra.selfdev.buildSelfDev
 
 fun Application.module() = appModule(System.getenv())
@@ -60,8 +62,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     val agentApiSettings = AgentApiSettings.fromEnv(env)
     // Fail-closed: when self-development is off, no self-development variable beyond the switch is read (ADR 0008 part 7).
     val selfDevSettings = SelfDevSettings.fromEnv(env)
-    // Fail-closed: when the autopilot is off, nothing beyond its switch is read and nothing is wired (ADR 0011). PR A validates only.
-    AutopilotSettings.fromEnv(env, selfDevSettings)
+    // Fail-closed: when the autopilot is off, nothing beyond its switch is read and nothing is wired (ADR 0011).
+    val autopilotSettings = AutopilotSettings.fromEnv(env, selfDevSettings)
     val config = KivraConfig.from(environment.config)
     val dataSource = createDataSource(config.database)
     migrateDatabase(config.database, dataSource)
@@ -102,6 +104,19 @@ internal fun Application.appModule(env: Map<String, String>) {
         null
     }
     selfDevParts?.worker?.start(this)
+    // Built only when the autopilot is enabled (ADR 0011 section 5). Its monthly-budget check reads the same store as the coding ledger.
+    autopilotSettings.config?.let { autopilot ->
+        AutopilotDispatcher(
+            database = database,
+            runs = runs,
+            config = autopilot,
+            maxActiveSelfDev = selfDevSettings.maxActiveRuns,
+            budgetAllows = { share ->
+                val usage = budgetStore.usage(budgetConfig.tenantId)
+                autopilotBudgetAllows(usage.committed, usage.reserved, budgetConfig.monthlyLimitJpy, share)
+            },
+        ).start(this)
+    }
     val agentParts = agentApiSettings.auth?.let { auth ->
         AgentApiDeps(checkNotNull(codingService), AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)))
     }

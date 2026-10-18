@@ -143,6 +143,24 @@ class SelfDevAutopilotControlRepository(
         }
     }
 
+    /**
+     * Gives back one of today's Run slots, taken by [tryReserveRun], when the submission did not create a Run (the active-run limit
+     * refused it). Only a slot of the current UTC day is given back, and the count never goes below 0.
+     */
+    fun releaseRunSlot() {
+        transaction(database) {
+            val today = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC)
+            execUpdate(
+                """
+                UPDATE selfdev_autopilot_control
+                   SET runs_today = runs_today - 1, version = version + 1
+                 WHERE control_id = 1 AND day_utc = ? AND runs_today > 0
+                """.trimIndent(),
+                today,
+            )
+        }
+    }
+
     private companion object {
         const val CONTROL_ID: Byte = 1
     }

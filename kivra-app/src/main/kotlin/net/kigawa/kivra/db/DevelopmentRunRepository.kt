@@ -272,6 +272,16 @@ class DevelopmentRunRepository(
     }
 
     /**
+     * The number of self-development runs in [state], manual and autopilot runs alike. Read by the autopilot's pending-pull-request
+     * guard (ADR 0011 section 5.2). Read-only.
+     */
+    fun countSelfDevInState(state: DevelopmentRunState): Long = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%") and (DevelopmentRunsTable.state eq state.name) }
+            .count()
+    }
+
+    /**
      * A kind mismatch under the same (principal, idempotency key) is a conflict, never a replay of another kind of run. A different
      * body is a conflict too: the body changes what the agent is asked to do. An empty body and no body are the same.
      */

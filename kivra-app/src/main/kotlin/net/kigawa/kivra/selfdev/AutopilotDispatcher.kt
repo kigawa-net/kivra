@@ -28,6 +28,7 @@ import net.kigawa.kivra.db.SelfDevGoalRepository
 import net.kigawa.kivra.db.SelfDevPlan
 import net.kigawa.kivra.db.SelfDevPlanRepository
 import net.kigawa.kivra.db.SelfDevPlanTask
+import net.kigawa.kivra.db.SubmissionStart
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.db.Transition
 import org.jetbrains.exposed.sql.Database
@@ -44,9 +45,12 @@ private const val RUN_POLICY_REJECTED = "POLICY_REJECTED"
  *    resets the failure count. A failed Run fails the task, counts one failure, and skips the rest of its plan. A run released by the
  *    operator cancels the task and counts nothing.
  * 2. Stops, unless the whole autopilot is paused. Then, for each goal that is queued, running or blocked, it approves auto tasks,
- *    finishes a goal whose tasks are all COMPLETED, and resumes a task left in SUBMITTING (the same idempotency key, so no second Run).
+ *    ends a goal whose tasks have all ended (DONE when all are COMPLETED, otherwise STOPPED with TASKS_INCOMPLETE; ADR 0011 section 2.8b),
+ *    and resumes a task left in SUBMITTING (the same idempotency key, so no second Run).
  * 3. Submits at most one task per goal (the lowest ordinal whose dependencies are all COMPLETED), and only when every guard of
  *    section 5.2 holds. A guard that holds moves the goal to BLOCKED with its fixed reason code, and the next tick re-checks it.
+ *    Before the task moves to SUBMITTING, the goal is read again under its row lock, and a goal that is not TASKS_QUEUED or RUNNING
+ *    (stopped or paused in the meantime) gets no Run (GOAL_NOT_DISPATCHABLE).
  *
  * Exclusion needs no lease (section 2.7): the submission is a CAS on the task row (QUEUED to SUBMITTING, by version) and the
  * idempotency key is unique. Two replicas can run this loop; at most one of them moves a task.
@@ -159,16 +163,30 @@ class AutopilotDispatcher(
         val plan = plans.plansOf(goalId).lastOrNull { it.state == PlanState.PROPOSED } ?: return
         var tasks = approveAuto(plan)
 
-        if (goal.state == GoalState.RUNNING && tasks.isNotEmpty() && tasks.all { it.state == TaskState.COMPLETED }) {
-            transitionGoal(goal, GoalState.DONE, AutopilotReason.ALL_TASKS_COMPLETED)
+        // Every task has ended (COMPLETED, FAILED or SKIPPED): the goal ends. A goal whose tasks all completed is DONE (RUNNING only).
+        // Otherwise a failed or skipped task has stopped it, and it is STOPPED with a fixed reason, so the operator sees it as finished.
+        if (tasks.isNotEmpty() && tasks.all { it.state in TERMINAL_TASK_STATES }) {
+            val allCompleted = tasks.all { it.state == TaskState.COMPLETED }
+            when {
+                allCompleted && goal.state == GoalState.RUNNING ->
+                    transitionGoal(goal, GoalState.DONE, AutopilotReason.ALL_TASKS_COMPLETED)
+                !allCompleted -> transitionGoal(goal, GoalState.STOPPED, AutopilotReason.TASKS_INCOMPLETE)
+            }
             return
         }
 
         val submitting = tasks.firstOrNull { it.state == TaskState.SUBMITTING }
         if (submitting != null) {
             // A submission that was interrupted. Resumed with the same key, so it cannot create a second Run. It is not a new
-            // submission, so it takes no daily slot, and it waits for the guards like any other submission.
-            if (globalBlock() == null) finishSubmission(goal, submitting)
+            // submission, so it takes no daily slot, and it waits for the guards like any other submission. A goal that was stopped
+            // or paused since is not resumed: the Run is not created for it.
+            if (globalBlock() == null) {
+                if (plans.isGoalDispatchable(goalId)) {
+                    finishSubmission(goal, submitting)
+                } else {
+                    logger.info("autopilot dispatch: refused code={} goalId={}", GOAL_NOT_DISPATCHABLE, goalId)
+                }
+            }
             return
         }
 
@@ -265,9 +283,13 @@ class AutopilotDispatcher(
         var slotKept = false
         try {
             if (goal.state == GoalState.TASKS_QUEUED && transitionGoal(goal, GoalState.RUNNING, null) == null) return
-            val started = transitionTask(candidate, TaskState.SUBMITTING, null) ?: return
-            slotKept = true
-            slotKept = finishSubmission(goal, started)
+            // The point of no return: the goal is checked under its lock in the same transaction as the task's move to SUBMITTING.
+            when (val start = plans.startSubmission(goal.goalId, candidate.planId, candidate.ordinal, candidate.version)) {
+                is SubmissionStart.Moved -> slotKept = finishSubmission(goal, start.task)
+                SubmissionStart.GoalNotDispatchable ->
+                    logger.info("autopilot dispatch: refused code={} goalId={} ordinal={}", GOAL_NOT_DISPATCHABLE, goal.goalId, candidate.ordinal)
+                is SubmissionStart.Rejected -> logRejectedSubmission(candidate, start.result)
+            }
         } finally {
             if (!slotKept) control.releaseRunSlot()
         }
@@ -278,7 +300,7 @@ class AutopilotDispatcher(
      * SUBMITTED. Returns false when the active-run limit refused the Run: the task is then back in QUEUED and no Run exists.
      */
     private fun finishSubmission(goal: SelfDevGoal, task: SelfDevPlanTask): Boolean {
-        val principal = principalFor(goal)
+        val principal = principalFor(goal, task)
         try {
             return when (val result = runs.submitTask(
                 principal, task.idempotencyKey, task.title,
@@ -304,10 +326,20 @@ class AutopilotDispatcher(
     }
 
     /**
-     * The principal of the Run is the goal's creator, for every task, auto-approved or not (ADR 0011 section 2.6). That the task
-     * was approved by the autopilot is recorded by the AUTO_APPROVED reason in the task's state transition, not by a principal.
+     * The principal of the Run is the operator who approved the task, or else the operator who approved the goal's Plan (`approved_by`,
+     * V19). A task that the autopilot approved (AUTO_APPROVED, no operator) runs as the goal's creator. The autopilot is not a principal
+     * of its own (ADR 0011 section 2.6): that the task was auto-approved is recorded by the AUTO_APPROVED reason in the state transition.
      */
-    private fun principalFor(goal: SelfDevGoal): String = goal.createdBy
+    private fun principalFor(goal: SelfDevGoal, task: SelfDevPlanTask): String = task.approvedBy ?: goal.approvedBy ?: goal.createdBy
+
+    private fun logRejectedSubmission(task: SelfDevPlanTask, result: Transition<SelfDevPlanTask>) {
+        val code = when (result) {
+            is Transition.Refused -> result.reason.name
+            is Transition.StaleVersion -> "STALE_VERSION"
+            else -> "NOT_FOUND"
+        }
+        logger.info("autopilot task not changed: planId={} ordinal={} code={}", task.planId, task.ordinal, code)
+    }
 
     /** `approval = auto`, the task is not denylisted, and it is low risk (ADR 0011 section 6.1, stage 2). */
     private fun isAutoEligible(task: SelfDevPlanTask): Boolean =
@@ -367,6 +399,13 @@ class AutopilotDispatcher(
 
         const val ACTIVE_RUN_LIMIT = "ACTIVE_RUN_LIMIT"
         const val IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
+        const val GOAL_NOT_DISPATCHABLE = "GOAL_NOT_DISPATCHABLE"
+
+        /**
+         * The task states that count as ended for the goal (ADR 0011 section 2.8b). FAILED and CANCELLED can be requeued by the operator
+         * (section 2.8), but the goal is ended once every task has ended, and a stopped goal is never dispatched again.
+         */
+        val TERMINAL_TASK_STATES = setOf(TaskState.COMPLETED, TaskState.FAILED, TaskState.SKIPPED)
 
         /** Stage 2 of ADR 0011 section 6.1: docs, README.md, or the test sources of a kivra module; size S; at most 3 paths. */
         private val LOW_RISK_TEST_PATH = Regex("^kivra-[^/]+/src/test/.+$")

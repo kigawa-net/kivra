@@ -1144,6 +1144,11 @@ Planner は、`GOAL_SUBMITTED` の Goal を claim して計画を作り、`PLAN_
 **中止**: 詳細の「中止…」で理由(1〜500 文字、必須)を入れる(`POST .../stop`、`{"version": n, "reason": "..."}`)。
 未投入のタスクは `見送り` になり、Goal は `中止` で終わる。**投入済みの Run と、作成済みの PR には触らない**(PR は閉じず、マージもしない。PR の扱いは人が決める)。理由は、今は保存もログにも出さない(ADR 0011 U-18)。
 
+**タスクの失敗で止まった Goal**: 投入したタスクが失敗(`FAILED`)し、残りが見送り(`SKIPPED`)になって、全タスクが終わると、Dispatcher が Goal を `中止` にする(理由は「タスクが完了せずに終わった」。ADR 0011 §2.8)。
+手で止めたのではないので、「中止」の表示を見たら、まず詳細のタスクの状態と、§4.5 の失敗の原因を確かめる。全タスクが `COMPLETED` で終わったときは `完了` になる。
+次のタスクは投入されない。やり直すときは、新しい Goal を出す(`FAILED` のタスクを戻す HTTP の操作は無い)。
+投入の主体は、タスクを承認した運用者。承認が無い自動承認のタスクは、Goal を作った人の名で投入される(`approved_by` が無いとき)。
+
 **再計画**: Goal が `停止中` で、理由が計画段階(`PLAN_INVALID` / `PLAN_BUDGET_HOLD` / `PLAN_CALL_FAILED`)のときだけ、「再計画する」が出る(`POST .../replan`)。Planner が新しい計画を作る。計画の回数の上限は 3 回。
 ディスパッチ段階の停止(予算、日次上限、ブレーカーなど)は、この操作では再開しない。
 
@@ -1167,6 +1172,7 @@ ADR から変えた点(PR A での判断、ADR §2.8 に記録):
 - 再計画は `PLAN_PROPOSED → GOAL_SUBMITTED` である(ADR の `PLANNING` ではない)。`PLANNING` は claim されている間だけの状態にするため。
 - 一時停止からの再開先は、一時停止の直前の状態を `selfdev_goals.resume_state` に保存して決める。
 - 計画段階の `BLOCKED` の理由は `PLAN_INVALID` / `PLAN_BUDGET_HOLD` である。ディスパッチ段階の `BUDGET_HOLD` とは分ける。計画段階で止まった Goal は、今の表では `STOPPED` 以外へ進めない(未決の点 U-16)。
+- 全タスクが終わって全部は完了しなかった Goal は `STOPPED`(理由 `TASKS_INCOMPLETE`)になる(PR E。ADR §2.8b)。`STOPPED` / `DONE` の終端からは動かない。投入の直前に、Goal が `TASKS_QUEUED` / `RUNNING` でなければ投入しない(`GOAL_NOT_DISPATCHABLE`)。
 
 ### 6.15 周期ワーカーと結果の保持(Issue #231、ADR 0010 追補 6)
 

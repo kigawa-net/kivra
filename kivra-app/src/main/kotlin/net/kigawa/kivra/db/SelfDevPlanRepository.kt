@@ -6,6 +6,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.core.autopilot.AutopilotReason
+import net.kigawa.kivra.core.autopilot.GoalState
 import net.kigawa.kivra.core.autopilot.PlanState
 import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.core.autopilot.TransitionDecision
@@ -62,6 +63,7 @@ internal object SelfDevPlanTasksTable : Table("selfdev_plan_tasks") {
     val version = long("version").default(0)
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at")
+    val approvedBy = varchar("approved_by", 255).nullable()
     override val primaryKey = PrimaryKey(planId, ordinal)
 }
 
@@ -94,6 +96,8 @@ data class SelfDevPlanTask(
     val version: Long,
     val createdAt: LocalDateTime,
     val updatedAt: LocalDateTime,
+    /** The operator who approved this task (`approved_by`, V19). Null for a task approved by the autopilot or not yet approved. */
+    val approvedBy: String? = null,
 )
 
 /**
@@ -110,6 +114,15 @@ data class NewTask(
     val requiresApproval: Boolean,
     val initialState: TaskState = TaskState.PENDING_APPROVAL,
 )
+
+/** The outcome of [SelfDevPlanRepository.startSubmission]. */
+sealed interface SubmissionStart {
+    data class Moved(val task: SelfDevPlanTask) : SubmissionStart
+    /** The goal is not TASKS_QUEUED or RUNNING under the lock (for example STOPPED or PAUSED). Nothing changed. */
+    data object GoalNotDispatchable : SubmissionStart
+    /** The task did not move (stale version, no edge, dependency not COMPLETED, not found). Nothing changed. */
+    data class Rejected(val result: Transition<SelfDevPlanTask>) : SubmissionStart
+}
 
 class SelfDevPlanRepository(
     private val database: Database,
@@ -140,13 +153,46 @@ class SelfDevPlanRepository(
         to: TaskState,
         reason: AutopilotReason?,
         runId: String? = null,
-    ): Transition<SelfDevPlanTask> = transaction(database) {
-        val current = taskIn(planId, ordinal) ?: return@transaction Transition.NotFound
-        if (current.version != expectedVersion) return@transaction Transition.StaleVersion
+    ): Transition<SelfDevPlanTask> = transaction(database) { transitionTaskIn(planId, ordinal, expectedVersion, to, reason, runId) }
+
+    /**
+     * QUEUED -> SUBMITTING for a task of [goalId]. The goal row is locked (the operator's stop takes the same lock), and the goal must
+     * still be TASKS_QUEUED or RUNNING under that lock, so a goal stopped or paused just before this point gets no Run (ADR 0011 section 5.1).
+     */
+    fun startSubmission(goalId: String, planId: String, ordinal: Int, expectedVersion: Long): SubmissionStart = transaction(database) {
+        if (!goalDispatchableLocked(goalId)) return@transaction SubmissionStart.GoalNotDispatchable
+        when (val r = transitionTaskIn(planId, ordinal, expectedVersion, TaskState.SUBMITTING, null, null)) {
+            is Transition.Moved -> SubmissionStart.Moved(r.row)
+            else -> SubmissionStart.Rejected(r)
+        }
+    }
+
+    /**
+     * The same goal check as [startSubmission], for a task already SUBMITTING (its Run is created with the same key). It takes the lock
+     * for a moment only, so a stop that lands after the check is not seen: the window is the same as for a Run already being created.
+     */
+    fun isGoalDispatchable(goalId: String): Boolean = transaction(database) { goalDispatchableLocked(goalId) }
+
+    private fun Transaction.goalDispatchableLocked(goalId: String): Boolean {
+        val state = SelfDevGoalsTable.selectAll().where { SelfDevGoalsTable.goalId eq goalId }.forUpdate().firstOrNull()
+            ?.let { GoalState.valueOf(it[SelfDevGoalsTable.state]) }
+        return state == GoalState.TASKS_QUEUED || state == GoalState.RUNNING
+    }
+
+    private fun Transaction.transitionTaskIn(
+        planId: String,
+        ordinal: Int,
+        expectedVersion: Long,
+        to: TaskState,
+        reason: AutopilotReason?,
+        runId: String?,
+    ): Transition<SelfDevPlanTask> {
+        val current = taskIn(planId, ordinal) ?: return Transition.NotFound
+        if (current.version != expectedVersion) return Transition.StaleVersion
         val decision = checkTaskTransition(current.state, to, reason)
-        if (decision is TransitionDecision.Refused) return@transaction Transition.Refused(decision.reason)
+        if (decision is TransitionDecision.Refused) return Transition.Refused(decision.reason)
         if (to == TaskState.SUBMITTING && !dependenciesCompleted(current)) {
-            return@transaction Transition.Refused(TransitionRefusal.GUARD_FAILED)
+            return Transition.Refused(TransitionRefusal.GUARD_FAILED)
         }
         require((to == TaskState.SUBMITTED) == (runId != null)) { "a run id is given exactly when the task is SUBMITTED" }
         val changed = execUpdate(
@@ -165,8 +211,8 @@ class SelfDevPlanRepository(
             expectedVersion,
             current.state.name,
         )
-        if (changed != 1) return@transaction Transition.StaleVersion
-        Transition.Moved(taskIn(planId, ordinal) ?: error("task vanished after transition"))
+        if (changed != 1) return Transition.StaleVersion
+        return Transition.Moved(taskIn(planId, ordinal) ?: error("task vanished after transition"))
     }
 
     /**
@@ -286,6 +332,7 @@ class SelfDevPlanRepository(
         version = this[SelfDevPlanTasksTable.version],
         createdAt = this[SelfDevPlanTasksTable.createdAt],
         updatedAt = this[SelfDevPlanTasksTable.updatedAt],
+        approvedBy = this[SelfDevPlanTasksTable.approvedBy],
     )
 
     private companion object {

@@ -138,7 +138,7 @@ Goal(`selfdev_goals.state`):
 | `BLOCKED` | ガードで止まっている(`state_reason` に理由。§5.2) |
 | `PAUSED` | 運用者が Goal を一時停止した |
 | `DONE` | 全タスクが `COMPLETED`(PR がマージされた)。終端 |
-| `STOPPED` | 運用者が中止した。終端 |
+| `STOPPED` | 運用者が中止した。または、全タスクが終わったが全部は `COMPLETED` でなかった(§2.8b)。終端 |
 
 遷移表(Goal):
 
@@ -158,6 +158,7 @@ Goal(`selfdev_goals.state`):
 | `RUNNING` → `DONE` | 全タスクが `COMPLETED` | — | `ALL_TASKS_COMPLETED` |
 | `TASKS_QUEUED` / `RUNNING` / `BLOCKED` ⇄ `PAUSED` | 運用者の一時停止と再開 | 再開は前の状態に戻す | `OPERATOR_PAUSED` / `OPERATOR_RESUMED` |
 | 有効な状態 → `STOPPED` | 運用者の中止 | 理由 1〜500 文字(監査のみ) | `OPERATOR_STOPPED` |
+| `RUNNING` / `TASKS_QUEUED` / `BLOCKED` → `STOPPED` | 全タスクが終端(`COMPLETED` / `FAILED` / `SKIPPED`)で、全部は `COMPLETED` でない(Dispatcher。§2.8b) | — | `TASKS_INCOMPLETE` |
 
 `DONE` と `STOPPED` は終端である。`PLANNING` の claim が切れたときの `GOAL_SUBMITTED` への戻しは、revision を増やさない。
 
@@ -210,6 +211,17 @@ PR A(V18、リポジトリ層、状態機械)で、本節の判断をした。�
 - **control 行は migration で 1 行入れる**: 行の無い状態を作らないため。`control_id = 1` の CHECK で 2 行目を拒否する。
 - **日次カウンタは UTC の日付**: §U-3 の暫定どおり。`runs_today` と `day_utc` は、1 つの UPDATE の中で日付の変わり目を判定する。
 - **連続失敗の計数は全体で 1 本**: §U-5 の暫定どおり。`breaker_open` は、計数が上限に達した UPDATE の中で立つ。成功は計数を 0 にするが、開いたブレーカーは閉じない(運用者の再開だけが閉じる、§5.4)。
+
+#### 2.8b 実装時(PR E: Dispatcher の追加検査)の判断
+
+PR E で、§2.9 の PR C への申し送り(1)〜(3)を実装した。V19 の後の追加で、マイグレーションは足さない。
+
+- **投入の直前の Goal の検査**: `QUEUED → SUBMITTING` の CAS と同じトランザクションで、Goal の行をロック(`SELECT ... FOR UPDATE`。中止と一時停止も同じ行を更新する)して読み直す。Goal が `TASKS_QUEUED` / `RUNNING` でなければ投入しない(`GOAL_NOT_DISPATCHABLE`、ログには ID と理由コードだけ)。`SUBMITTING` のまま残ったタスクを再開するときも、同じ検査を行う(ロックは短い。その後に Run を作るまでの間は、§5.4 の「投入中のものには触れない」と同じ扱い)。
+- **中止と投入の競合**: 中止は、未投入のタスク(`QUEUED`)の版を進めるので、Dispatcher の CAS が失敗する。Goal の検査は、一時停止のように、タスクの版を進めない操作への防御である。
+- **投入の主体**: §2.6 の順序(タスク、Goal の承認者、Goal の作成者)。段階 2 の自動承認のタスクは、運用者が計画を承認していればその承認者、していなければ Goal の作成者の名で投入される。
+- **全タスクが終端になった Goal**: `RUNNING` / `TASKS_QUEUED` / `BLOCKED` から、全タスクが `COMPLETED` / `FAILED` / `SKIPPED` になったとき、全部が `COMPLETED` なら `DONE`(`RUNNING` のみ、従来どおり)、そうでなければ `STOPPED` に `TASKS_INCOMPLETE` の理由で進める。`STOPPED` の辺の理由に `TASKS_INCOMPLETE` を足した(表と網羅テストを更新)。`FAILED` と `CANCELLED` は、§2.8 のとおり運用者が再投入できる状態だが、Goal を終わらせる判定では終端として数える(再投入の HTTP 操作は無く、Goal が `STOPPED` になった後に自動で投入されることは無い)。
+- **終端化のしかた**: `STOPPED` を「中止」として使うのは、既存の状態の中で表すため(マイグレーションは足さない。`state_reason` は `VARCHAR(64)` で、新しい理由を足すのは Kotlin の列挙だけ)。
+- **残る点(未決)**: 中止された Goal の `SUBMITTING` のタスクは、そのまま残る(§5.4)。運用者が見て判断する。
 
 #### 2.9 実装時(PR D: UI と HTTP)の判断
 
@@ -265,6 +277,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 - 投入の順序: `QUEUED` → `SUBMITTING`(CAS。`version` で取る)→ `submitTask`(`idempotencyKey = ap:{plan_id}:{ordinal}`、`selfDev = true`、主体は承認者)→ `SUBMITTED`(`run_id` を書く)。
 - `submitTask` が `ActiveSelfDevLimitException` を投げたら、タスクは `QUEUED` に戻す。失敗としては数えない(サーキットブレーカーに入れない)。
 - 同時に投入するのは、1 Goal につき 1 件だけ(段階 1 と 2)。段階 3 でも、同じ Goal のタスクは直列にする。
+- 投入の主体(Run の owner、PR E で確定): タスクの `approved_by`、無ければ Goal の `approved_by`(計画の承認者)、どちらも無ければ Goal の作成者(`created_by`)。`autopilot` という主体は作らない(§2.6)。自動承認である事実は、`AUTO_APPROVED` の状態遷移で表す。
 
 #### 5.2 ガード(投入の前に毎回確認する)
 
@@ -278,6 +291,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 | 月次の予算 | §5.3 | 次の月の期間 | `BUDGET_HOLD`(自動で解消) |
 | サーキットブレーカー | 全体で、**連続 3 件**の失敗(`FAILED`、Run の `UNKNOWN`、`PR_ABANDONED`)。成功(`COMPLETED`)で 0 に戻る | 運用者の再開(計数を 0 に戻す) | `CIRCUIT_OPEN`(手動) |
 | 範囲外の変更 | 段階 2 の自動の対象が、実際の差分で範囲を超えた(§6.2) | 運用者が確認して再開 | `AUTO_SCOPE_EXCEEDED`(手動) |
+| 投入の前の Goal の状態 | Goal が `TASKS_QUEUED` / `RUNNING` でない(`STOPPED`、`PAUSED` など)。投入の直前に Goal の行をロックして読み直す(§2.8b、PR E) | 状態は変えず、投入しない | `GOAL_NOT_DISPATCHABLE`(ログのみ) |
 | 承認 | `requires_approval` かつ未承認 | 運用者の承認 | 状態は `PENDING_APPROVAL` のまま |
 
 「状態は変えず、待つ」の欄は、Goal を `BLOCKED` にしない。一時的な混雑で状態が揺れないようにするためである。

@@ -44,6 +44,10 @@ class AutopilotStatesTest {
         )) {
             put(from to GoalState.STOPPED, setOf(AutopilotReason.OPERATOR_STOPPED))
         }
+        // The dispatcher's terminal step: every task ended, not all COMPLETED (ADR 0011 section 2.8b).
+        for (from in listOf(GoalState.TASKS_QUEUED, GoalState.RUNNING, GoalState.BLOCKED)) {
+            put(from to GoalState.STOPPED, setOf(AutopilotReason.OPERATOR_STOPPED, AutopilotReason.TASKS_INCOMPLETE))
+        }
     }
 
     private val expectedPlan: Map<Pair<PlanState?, PlanState>, Set<AutopilotReason?>> = mapOf(

@@ -207,17 +207,19 @@ class DbBudgetStore(
      *
      * There is no hard-limit check here: the money is already spent, so refusing to record it would hide it. Admission is
      * checked separately, before a claim ([admission]). Keyed by [key]: a second call with the same key changes nothing and
-     * returns [SpendResult.ALREADY_RECORDED]. Any failure is [SpendResult.FAILURE] with nothing written.
+     * returns [SpendResult.ALREADY_RECORDED]. Any failure is [SpendResult.FAILURE] with nothing written. When RECORDED, the outcome
+     * also carries the booked period, the booked micro-yen and the month's committed total after the booking (read in the same
+     * locked transaction; null if it cannot be read).
      */
-    fun recordSpend(key: String, amount: BudgetAmount, unpriced: Boolean): SpendResult {
+    fun recordSpend(key: String, amount: BudgetAmount, unpriced: Boolean): SpendOutcome {
         val micro = (if (amount.currency == tenantLimit.currency && amount.unit == tenantLimit.unit) microOrNull(amount) else null)
-            ?: return SpendResult.FAILURE
+            ?: return SpendOutcome(SpendResult.FAILURE)
         ensurePeriodRows(listOf(tenantScope), clock.instant())
         return try {
-            transaction<SpendResult>(database) {
+            transaction<SpendOutcome>(database) {
                 lockTenant()
                 expireDue(clock.instant())
-                if (reservationExists(key)) return@transaction SpendResult.ALREADY_RECORDED
+                if (reservationExists(key)) return@transaction SpendOutcome(SpendResult.ALREADY_RECORDED)
                 val now = clock.instant()
                 val period = periodFor(tenantScope, now)
                 val at = utcNow(clock)
@@ -230,10 +232,15 @@ class DbBudgetStore(
                     key, tenantScope, period,
                 )
                 addToPeriod(tenantScope, period, micro, unpriced = if (unpriced) 1L else 0L)
-                SpendResult.RECORDED
+                SpendOutcome(
+                    SpendResult.RECORDED,
+                    period = period,
+                    amountMicroYen = micro,
+                    monthCommittedMicroYen = periodRow(tenantScope, period)?.committed,
+                )
             }
         } catch (e: Exception) {
-            if (e.isDuplicateKey()) SpendResult.ALREADY_RECORDED else SpendResult.FAILURE
+            SpendOutcome(if (e.isDuplicateKey()) SpendResult.ALREADY_RECORDED else SpendResult.FAILURE)
         }
     }
 
@@ -340,10 +347,16 @@ class DbBudgetStore(
 
     // ---- period rows and locks ---------------------------------------------------------------------------------------
 
-    /** Creates missing period rows in their own transactions, so the locked transaction never waits on an insert. */
+    /**
+     * Creates missing period rows in their own transactions, so the locked transaction never waits on an insert. A row that already
+     * exists is detected by a plain SELECT first, so the common path issues no INSERT (and so no duplicate-key error for the
+     * transaction layer to log). Only a row that is missing is inserted; if another replica creates it in between, the duplicate
+     * key is ignored as before.
+     */
     private fun ensurePeriodRows(scopes: List<String>, now: Instant) {
         for (id in scopes) {
             val period = periodFor(id, now)
+            if (transaction(database) { periodRow(id, period) != null }) continue
             val hard = microFloor(limitFor(id)!!.hard)
             try {
                 transaction(database) {
@@ -502,3 +515,14 @@ class DbBudgetStore(
 
 /** Outcome of [DbBudgetStore.recordSpend]. Fixed values only. */
 enum class SpendResult { RECORDED, ALREADY_RECORDED, FAILURE }
+
+/**
+ * Result of [DbBudgetStore.recordSpend]. The detail fields are set only when [result] is RECORDED; [monthCommittedMicroYen] may be
+ * null even then (the total could not be read). Numbers and the fixed period text only.
+ */
+data class SpendOutcome(
+    val result: SpendResult,
+    val period: String? = null,
+    val amountMicroYen: Long? = null,
+    val monthCommittedMicroYen: Long? = null,
+)

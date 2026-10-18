@@ -26,6 +26,8 @@ import net.kigawa.kivra.db.OutboxRepository
 import net.kigawa.kivra.db.connectDatabase
 import net.kigawa.kivra.db.createDataSource
 import net.kigawa.kivra.db.migrateDatabase
+import net.kigawa.kivra.fx.FxExpiryWatcher
+import net.kigawa.kivra.fx.fxSettingsForWarning
 import net.kigawa.kivra.observability.MetricsRegistry
 import net.kigawa.kivra.routes.AgentApiDeps
 import net.kigawa.kivra.routes.configureAgentApiRoutes
@@ -104,6 +106,10 @@ internal fun Application.appModule(env: Map<String, String>) {
     }
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)
+    // The FX expiry warning (daily). FX is read only when a USD path is on (the agent API or self-development, which need the rate);
+    // otherwise nothing is read and nothing is started.
+    val fxSettings = if (agentApiSettings.auth != null || selfDevSettings.enabled) fxSettingsForWarning(env) else null
+    fxSettings?.let { FxExpiryWatcher(it).start(this) }
     val agentParts = agentApiSettings.auth?.let { auth ->
         AgentApiDeps(checkNotNull(codingService), AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)))
     }
@@ -122,7 +128,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentity)
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()
-            configureBudgetAdminRoutes(budgetStore, taskApiIdentity)
+            configureBudgetAdminRoutes(budgetStore, taskApiIdentity, fx = fxSettings)
             configureSelfDevAdminRoutes(runs, taskApiIdentity)
             configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings)
         }

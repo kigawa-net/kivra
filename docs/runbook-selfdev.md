@@ -268,6 +268,17 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 
 **失効時の症状**: USD を使う呼び出しが UNKNOWN_COST で止まる。JPY の呼び出しは影響を受けない。止まった Run の扱いは §4.1 を参照する。
 
+**失効の警告(kivra-app、起動時と 1 日 1 回)**: 為替が設定されていると、kivra は残り日数を計算してログに出す(`FxExpiryWatcher`、`FxExpiryPolicy`)。残りが 2 日以下なら WARN、失効済みなら ERROR で、次の固定形式の 1 行だけを出す(日付と日数のみ。レートや秘密は出さない)。
+
+- `fx rate expires soon: asOf=<日付> daysLeft=<n>`(残り 2 日以下。`daysLeft=0` は失効日当日で、まだ使える)
+- `fx rate expired: asOf=<日付>`(失効済み。USD の呼び出しは止まっている)
+
+残り日数は、基準日(UTC)から `KIVRA_FX_MAX_AGE_DAYS` 日後の時刻までの端数を切り上げた日数。為替は、API 経路(`KIVRA_AGENT_API_ENABLED`)か自己開発が有効なときだけ読む。為替が未設定の構成(USD を使わない)では何も読まず、何も出ない。`KIVRA_FX_USD_JPY` と `KIVRA_FX_AS_OF` の値が不正なときは、固定の WARN が 1 行出て、警告だけが止まる(起動は続く)。
+
+**状態の確認(読み取り専用)**: `GET /api/admin/budget/fx`(認証は §4.2 の acknowledge と同じ。未認証は 401)。応答は `{"fx":{"asOf":"2026-10-08","daysLeft":2,"expired":false}}`。為替が未設定なら `{"fx":null}`。
+
+**警告が出たら(運用者がやること)**: 残り 2 日以下の WARN が出たら、§4.8 の更新 PR(`chore(kivra-dev): 為替を更新 …`)を探し、本文と差分を確認してマージを依頼する(マージ自体は人が行う)。PR が無ければ、下の手動の更新を行う。ERROR(失効済み)は、USD の呼び出しが止まっているので、同日中に更新する。
+
 **手動の更新(自動が失敗した、または PR が作れないとき)**:
 1. GitHub Actions の `fx-refresh` を `workflow_dispatch` で再実行する。ログの `Refresh FX rate` に `CHANGED`、`NEW_RATE`、`AS_OF` などが出る。
 2. 手元で更新する場合: `python3 -I scripts/fx-refresh.py <kigawa-net-k8s の kivra/dev/kivra.yaml のパス>`(取得は実 API。ネットワークが要る)。終了コード 0 は書き換えた、3 は変更なし、1 は失敗(何も書き換えない)。

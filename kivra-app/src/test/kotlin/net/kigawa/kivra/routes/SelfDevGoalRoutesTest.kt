@@ -477,7 +477,14 @@ class SelfDevGoalRoutesTest {
         "KIVRA_AGENT_API_ENABLED" to "true",
     )
 
-    private fun autopilotEnv(): Map<String, String> = mapOf(AutopilotSettings.ENV_ENABLED to "true")
+    /** The autopilot switch and the CLI cost ledger's settings (ADR 0011 section 5.3). Required to enable it. */
+    private fun autopilotEnv(): Map<String, String> = mapOf(
+        AutopilotSettings.ENV_ENABLED to "true",
+        "KIVRA_AGENT_API_ENABLED" to "true",
+        "KIVRA_FX_USD_JPY" to "150",
+        "KIVRA_FX_AS_OF" to "2026-10-18",
+        "KIVRA_SELFDEV_MODEL_REGISTRY_PATH" to "/nonexistent/registry.json",
+    )
 
     private fun goalOf(goals: SelfDevGoalRepository, key: String): SelfDevGoal =
         (goals.submit(OPERATOR, key, "goal $key", "body", "kigawa-net/kivra") as SubmitResult.Created).goal

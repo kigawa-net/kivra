@@ -223,6 +223,15 @@ PR E で、§2.9 の PR C への申し送り(1)〜(3)を実装した。V19 の�
 - **終端化のしかた**: `STOPPED` を「中止」として使うのは、既存の状態の中で表すため(マイグレーションは足さない。`state_reason` は `VARCHAR(64)` で、新しい理由を足すのは Kotlin の列挙だけ)。
 - **残る点(未決)**: 中止された Goal の `SUBMITTING` のタスクは、そのまま残る(§5.4)。運用者が見て判断する。
 
+#### 2.8c 実装時(不具合の修正: サーキットブレーカーの再開と起動時の検査)の判断
+
+PR E の E2E で見つかった 2 件の修正。マイグレーションは足さない。
+
+- **CIRCUIT_OPEN の Goal の再開**: 運用者の再開(`reset-breaker`)は、制御行の計数と `breaker_open` を戻すだけだった。そのため、`BLOCKED`(`CIRCUIT_OPEN`)の Goal は、自動で解消する理由(`AUTO_CLEARABLE_REASONS`)に入らず、再開されなかった。修正として、Dispatcher の `resumeBlocked` が、`CIRCUIT_OPEN` の Goal を `OPERATOR_RESUMED` の理由で `RUNNING`(投入済みのタスクがあれば)か `TASKS_QUEUED` に戻す。`reset-breaker` の HTTP 経路は変えない。Dispatcher は、ブレーカーが閉じていて(`globalBlock` が無い)ときだけ戻すので、閉じていること自体が運用者の再開の結果である。遷移は版の CAS で、二重の再開は起きない。状態機械の辺は変えていない(`BLOCKED → RUNNING` と `TASKS_QUEUED` は、`OPERATOR_RESUMED` で `DISPATCH_BLOCK_REASONS` のすべてに許可されていた)。
+- **再開しない理由**: 計画段階の理由(`PLAN_INVALID`、`PLAN_BUDGET_HOLD`、`PLAN_CALL_FAILED`)、`AUTO_SCOPE_EXCEEDED`、運用者の中止は、この経路で解消しない。`AUTO_SCOPE_EXCEEDED` は §5.4 で手動だが、この修正の対象は `CIRCUIT_OPEN` だけである。
+- **起動時の検査(§5.3)**: `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` は、CLI 経路の費用の計上が有効なときだけ起動を許す。有効とは、`KIVRA_AGENT_API_ENABLED=true`、`KIVRA_FX_USD_JPY` と `KIVRA_FX_AS_OF` が設定されていること、`KIVRA_SELFDEV_MODEL_REGISTRY_PATH` が設定されていること。不足は、変数名を並べて拒否する(値は出さない)。FX の期限切れは拒否しない(既存の `FxExpiryWatcher` が警告する)。なお `SelfDevSettings` は、自己開発の有効化の時点で、この FX と registry を既に要求している。オートパイロットの検査は、その前提を自己完結させるための重ねである。
+- **起動ログ**: 有効な上限(`maxActiveRuns`、`maxPendingPrs`、`maxConsecutiveFailures`、`maxRunsPerDay`、`budgetSharePercent`)を、数値だけで INFO に 1 行出す。`maxPendingPrs` が `maxActiveRuns` より大きいときは、PR の上限が同時 Run の上限で先に制限される旨の WARN を 1 行出す(§2.8 の E2E の発見)。
+
 #### 2.9 実装時(PR D: UI と HTTP)の判断
 
 PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と §4 の本文に沿い、食い違う点、または本文に無い点だけを記録する。

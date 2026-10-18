@@ -63,6 +63,9 @@ import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
 import net.kigawa.kivra.selfdev.SelfDevSettings
 import net.kigawa.kivra.selfdev.autopilotBudgetAllows
 import net.kigawa.kivra.selfdev.buildSelfDev
+import net.kigawa.kivra.mcp.McpSettings
+import net.kigawa.kivra.mcp.buildMcpRouteDeps
+import net.kigawa.kivra.mcp.registerMcpRoutes
 
 fun Application.module() = appModule(System.getenv())
 
@@ -76,6 +79,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     val selfDevSettings = SelfDevSettings.fromEnv(env)
     // Fail-closed: when the autopilot is off, nothing beyond its switch is read and nothing is wired (ADR 0011).
     val autopilotSettings = AutopilotSettings.fromEnv(env, selfDevSettings)
+    // Fail-closed: when the MCP endpoint is off (the default), nothing beyond its switch is read and no /mcp route is registered (ADR 0013).
+    val mcpSettings = McpSettings.fromEnv(env)
     val config = KivraConfig.from(environment.config)
     val dataSource = createDataSource(config.database)
     migrateDatabase(config.database, dataSource)
@@ -136,6 +141,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     } else {
         null
     }
+    val mcpDeps = buildMcpRouteDeps(mcpSettings, env, runs, selfDevSettings.config?.repo)
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)
     // The FX expiry warning (daily). FX is read only when a USD path is on (the agent API or self-development, which need the rate);
@@ -191,6 +197,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
         }
         if (selfDevParts != null) configureSelfDevRoutes(selfDevParts.routes)
+        registerMcpRoutes(mcpDeps)
         if (agentParts != null) configureAgentApiRoutes(agentParts)
         configureObservabilityRoutes(metrics, config.metrics)
     }

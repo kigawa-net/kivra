@@ -60,8 +60,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     val agentApiSettings = AgentApiSettings.fromEnv(env)
     // Fail-closed: when self-development is off, no self-development variable beyond the switch is read (ADR 0008 part 7).
     val selfDevSettings = SelfDevSettings.fromEnv(env)
-    // Fail-closed: when the autopilot is off, nothing beyond its switch is read and nothing is wired (ADR 0011). PR A validates only.
-    AutopilotSettings.fromEnv(env, selfDevSettings)
+    // Fail-closed: when the autopilot is off, nothing beyond its switch is read and nothing is wired (ADR 0011).
+    val autopilotSettings = AutopilotSettings.fromEnv(env, selfDevSettings)
     val config = KivraConfig.from(environment.config)
     val dataSource = createDataSource(config.database)
     migrateDatabase(config.database, dataSource)
@@ -97,11 +97,13 @@ internal fun Application.appModule(env: Map<String, String>) {
             requireNotNull(taskApiIdentity) { "self-development requires KIVRA_AUTH_MODE=oidc-jwt" },
             deferredPrMerge,
             coding = codingService?.let { CodingAttemptPatchSource(it) },
+            autopilot = autopilotSettings,
         )
     } else {
         null
     }
     selfDevParts?.worker?.start(this)
+    selfDevParts?.planWorker?.start(this)
     val agentParts = agentApiSettings.auth?.let { auth ->
         AgentApiDeps(checkNotNull(codingService), AgentIdentity(auth, RefreshingJwkProvider(auth.jwksUrl)))
     }

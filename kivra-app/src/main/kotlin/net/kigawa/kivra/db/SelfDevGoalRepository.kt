@@ -50,6 +50,7 @@ internal object SelfDevGoalsTable : Table("selfdev_goals") {
     val version = long("version").default(0)
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at")
+    val approvedBy = varchar("approved_by", 255).nullable()
     override val primaryKey = PrimaryKey(goalId)
 }
 
@@ -71,6 +72,8 @@ data class SelfDevGoal(
     val version: Long,
     val createdAt: LocalDateTime,
     val updatedAt: LocalDateTime,
+    /** The operator who approved the Plan (`approved_by`, V19). Null until the Plan is approved. */
+    val approvedBy: String? = null,
 )
 
 /** The outcome of a conditional change of one row. */
@@ -368,5 +371,6 @@ class SelfDevGoalRepository(
         version = this[SelfDevGoalsTable.version],
         createdAt = this[SelfDevGoalsTable.createdAt],
         updatedAt = this[SelfDevGoalsTable.updatedAt],
+        approvedBy = this[SelfDevGoalsTable.approvedBy],
     )
 }

@@ -42,6 +42,15 @@ enum class CommitFault {
  * so that the tests can count provider side effects. There is no merge operation, as in [GitHubPort].
  * Any call with a repository other than [repo] returns NOT_FOUND. Shas are sequential, so runs are deterministic.
  */
+/** A lost answer to a pull request creation: the PR is created (or not) but the response is an UNKNOWN outcome. */
+enum class PrFault {
+    /** The PR is created, then the response is lost. */
+    CREATED_THEN_LOST,
+
+    /** No PR is created, and the response is lost. */
+    NOT_CREATED_LOST,
+}
+
 /** The App bot's numeric user id as the fake reports it for pull requests it creates. */
 const val BOT_USER_ID = 9001L
 
@@ -62,6 +71,25 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
 
     /** When set, [getPullRequest] fails with this kind (for example AUTH) until it is cleared. */
     var pullReadFailure: GitHubFailureKind? = null
+
+    /** When set, the next pull request creation answers UNKNOWN (see [PrFault]). Consumed once. */
+    var prFault: PrFault? = null
+
+    /** Check runs returned by [getCheckRuns]. Null means the call is not expected (it fails as unused). */
+    var checks: CheckRunsSummary? = null
+
+    /** Adds an open pull request with no run marker, as a person or another tool would open it on the same head name. */
+    fun injectForeignPull(headRef: String, body: String): PullRequest {
+        val number = ++counter
+        val pr = PullRequest(
+            repo = repo, number = number, state = PullRequestState.OPEN, merged = false, draft = false,
+            headRef = headRef, headSha = baseSha, baseRef = BASE_BRANCH, body = body,
+            htmlUrl = "https://example.invalid/pull/$number", nodeId = "PR_node_$number", baseRepositoryId = 42L,
+            authorId = 1L,
+        )
+        pulls += pr
+        return pr
+    }
 
     /** Write operations in call order: createRef, commit, updateRef, createPr. */
     val writes = ArrayList<String>()
@@ -181,6 +209,11 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
                 GitHubResult.Failure(GitHubFailureKind.IDENTITY_MISMATCH, GitHubFailureKind.IDENTITY_MISMATCH.code)
             }
         }
+        val fault = prFault
+        if (fault == PrFault.NOT_CREATED_LOST) {
+            prFault = null
+            return GitHubResult.Unknown("ensurePullRequest", "response lost")
+        }
         val number = ++counter
         val pr = PullRequest(
             repo = repo, number = number, state = PullRequestState.OPEN, merged = false, draft = request.draft,
@@ -191,10 +224,18 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
         writes += "createPr"
         pulls += pr
         afterWrite("createPr")
+        if (fault == PrFault.CREATED_THEN_LOST) {
+            prFault = null
+            return GitHubResult.Unknown("ensurePullRequest", "response lost")
+        }
         return GitHubResult.Success(EnsuredPullRequest(pr, created = true))
     }
 
-    override suspend fun getCheckRuns(repo: RepoRef, sha: String): GitHubResult<CheckRunsSummary> = unused()
+    override suspend fun getCheckRuns(repo: RepoRef, sha: String): GitHubResult<CheckRunsSummary> {
+        touch("getCheckRuns")
+        val summary = checks ?: return unused()
+        return GitHubResult.Success(summary)
+    }
 
     override suspend fun getCombinedStatus(repo: RepoRef, sha: String): GitHubResult<CombinedStatus> = unused()
 

@@ -746,3 +746,268 @@ test('a closed breaker hides the reset button, and the toggle says what it will 
   assert.equal(dom.byId('breaker-block').hidden, true);
   assert.equal(dom.byId('autopilot-toggle').textContent, '自律運転を再開');
 });
+
+// ---- Budget (operator) -----------------------------------------------------
+
+const BUDGET_STATUS = {
+  period: '2026-10',
+  limitJpy: '10000',
+  committedJpy: '1300',
+  reservedJpy: '100',
+  remainingJpy: '8600',
+  paths: { api: { committedJpy: '950' }, cli: { committedJpy: '350' } },
+  unpricedCount: 2,
+  unpriced: [
+    { reservationKey: 'coding:01ATTEMPTAAAAAAAAAAAAAAAAAA:1', scopeId: 'tenant', period: '2026-10', state: 'UNPRICED', path: 'cli', amountJpy: '120', reason: 'COST_NOT_ESTABLISHED' },
+    { reservationKey: 'api-req-1', scopeId: 'tenant', period: '2026-09', state: 'LAPSED', path: 'api', amountJpy: '80.5', reason: 'TTL_ELAPSED' },
+  ],
+};
+const BUDGET_FX_OK = { fx: { asOf: '2026-10-08', daysLeft: 10, expired: false } };
+const ACK_KEY = 'coding:01ATTEMPTAAAAAAAAAAAAAAAAAA:1';
+
+/** The budget endpoints as given (or the default), with the run API answering as in `defaults(true)`. */
+function budgetResponder(opts = {}) {
+  const base = defaults(true);
+  return (p, init) => {
+    if (p === '/api/admin/budget/status') return opts.status || { status: 200, data: BUDGET_STATUS };
+    if (p === '/api/admin/budget/fx') return opts.fx || { status: 200, data: BUDGET_FX_OK };
+    if (p === '/api/admin/budget/acknowledge' && opts.ack) return opts.ack(p, init);
+    return base(p, init);
+  };
+}
+
+function allTags(el) { return el.tags(); }
+
+async function openBudget(respond) {
+  const dom = load(respond);
+  await flush();
+  return dom;
+}
+
+function openFirstAck(dom) {
+  dom.byId('budget-unpriced-list').buttons()[0].fire('click');
+}
+
+function fillAck(dom, { actual = '', evidence = 'invoice 123', reason = 'lost response' } = {}) {
+  dom.byId('budget-actual').value = actual;
+  dom.byId('budget-actual').fire('input');
+  dom.byId('budget-evidence').value = evidence;
+  dom.byId('budget-evidence').fire('input');
+  dom.byId('budget-reason').value = reason;
+  dom.byId('budget-reason').fire('input');
+}
+
+test('the budget section stays hidden for a non-operator, and that does not end the session', async () => {
+  const dom = await openBudget(budgetResponder({ status: { status: 401, data: { error: 'unauthorized' } }, fx: { status: 401, data: {} } }));
+  assert.equal(dom.byId('budget-section').hidden, true);
+  // A 401 from the operator-only budget is not an expired session: the run list still refreshes.
+  dom.byId('refresh-btn').fire('click');
+  await flush();
+  assert.ok(dom.calls.some((c) => c.path === '/api/runs'), 'the run list is still requested');
+  assert.equal(dom.byId('refresh-btn').disabled, false);
+  assert.equal(dom.calls.filter((c) => c.path === '/api/admin/budget/status').length, 1, 'the status is read once on load');
+});
+
+test('a 404 (budget route not registered) also keeps the section hidden', async () => {
+  const dom = await openBudget(budgetResponder({ status: { status: 404, data: {} } }));
+  assert.equal(dom.byId('budget-section').hidden, true);
+});
+
+test('the bar, the remaining amount and the CLI / API split are shown as text', async () => {
+  const dom = await openBudget(budgetResponder());
+  assert.equal(dom.byId('budget-section').hidden, false);
+  assert.equal(dom.byId('budget-body').hidden, false);
+  assert.equal(dom.byId('budget-bar').max, 100);
+  assert.equal(dom.byId('budget-bar').value, 14, 'confirmed 1,300 + reserved 100 of 10,000');
+  const text = dom.byId('budget-bar-text').textContent;
+  assert.match(text, /確定 1,300 円 \+ 予約中 100 円 \/ 上限 10,000 円/);
+  assert.match(text, /使用 14%/);
+  assert.match(text, /残り 8,600 円/);
+  assert.equal(dom.byId('budget-bar-text').className, 'meta');
+  assert.equal(dom.byId('budget-path-api').textContent, '950 円');
+  assert.equal(dom.byId('budget-path-cli').textContent, '350 円');
+});
+
+test('an overspent month says so in words, and the bar stops at 100', async () => {
+  const over = { ...BUDGET_STATUS, committedJpy: '10200', remainingJpy: '-200', reservedJpy: '0', unpricedCount: 0, unpriced: [] };
+  const dom = await openBudget(budgetResponder({ status: { status: 200, data: over } }));
+  assert.equal(dom.byId('budget-bar').value, 100);
+  assert.match(dom.byId('budget-bar-text').textContent, /上限を超えています（超過 200 円）/);
+  assert.equal(dom.byId('budget-bar-text').className, 'meta error');
+});
+
+test('the FX warning: two days or less is amber with words, expired is red with words, otherwise plain', async () => {
+  const soon = await openBudget(budgetResponder({ fx: { status: 200, data: { fx: { asOf: '2026-10-08', daysLeft: 2, expired: false } } } }));
+  assert.equal(soon.byId('budget-fx').className, 'budget-alert warn');
+  assert.match(soon.byId('budget-fx').textContent, /残り 2 日です/);
+
+  const gone = await openBudget(budgetResponder({ fx: { status: 200, data: { fx: { asOf: '2026-10-01', daysLeft: 0, expired: true } } } }));
+  assert.equal(gone.byId('budget-fx').className, 'budget-alert error');
+  assert.match(gone.byId('budget-fx').textContent, /為替レートが失効しています/);
+
+  const fine = await openBudget(budgetResponder());
+  assert.equal(fine.byId('budget-fx').className, 'meta');
+  assert.match(fine.byId('budget-fx').textContent, /残り 10 日/);
+
+  const unset = await openBudget(budgetResponder({ fx: { status: 200, data: { fx: null } } }));
+  assert.match(unset.byId('budget-fx').textContent, /設定されていません/);
+});
+
+test('the UNPRICED list shows the attempt, the amount and the reason, and no raw body', async () => {
+  const dom = await openBudget(budgetResponder());
+  const list = dom.byId('budget-unpriced-list');
+  assert.equal(list.children.length, 2);
+  const first = list.children[0].textContent;
+  assert.match(first, /CLI の attempt 01ATTEMP…（世代 1）/);
+  assert.match(first, /CLI 経路/);
+  assert.match(first, /金額 120 円/);
+  assert.match(first, /費用が確定しない/);
+  assert.doesNotMatch(first, /coding:01ATTEMPT/, 'the full key is not shown as text (it is kept for the request)');
+  const second = list.children[1].textContent;
+  assert.match(second, /期限切れ/);
+  assert.match(second, /金額 80.5 円/);
+  assert.match(dom.byId('budget-unpriced-count').textContent, /未確定の予約: 2 件/);
+});
+
+test('a reservation key carrying markup is shown as text only (no element is built from it)', async () => {
+  const hostile = {
+    ...BUDGET_STATUS,
+    unpricedCount: 2,
+    unpriced: [
+      { reservationKey: 'coding:<script>alert(1)</script>:7', scopeId: 'tenant', period: '2026-10', state: 'UNPRICED', path: 'cli', amountJpy: '1', reason: 'COST_NOT_ESTABLISHED' },
+      { reservationKey: EVIL, scopeId: 'tenant', period: '2026-10', state: 'LAPSED', path: 'api', amountJpy: '2', reason: 'TTL_ELAPSED' },
+    ],
+  };
+  const dom = await openBudget(budgetResponder({ status: { status: 200, data: hostile } }));
+  const tags = allTags(dom.byId('budget-unpriced-list'));
+  assert.equal(tags.includes('SCRIPT'), false);
+  assert.equal(tags.includes('IMG'), false);
+  const text = dom.byId('budget-unpriced-list').textContent;
+  assert.ok(text.includes('<script>'), 'the markup is text');
+  assert.ok(text.includes('<img'), 'the markup is text');
+});
+
+test('a malformed status body is refused, and a failed load shows a fixed message', async () => {
+  const bad = await openBudget(budgetResponder({ status: { status: 200, data: { period: '2026-10' } } }));
+  assert.equal(bad.byId('budget-section').hidden, false);
+  assert.equal(bad.byId('budget-body').hidden, true);
+  assert.match(bad.byId('budget-status').textContent, /応答の形式が想定と違います/);
+
+  const down = await openBudget(budgetResponder({ status: { status: 503, data: { error: 'LEAK-503' } } }));
+  assert.equal(down.byId('budget-body').hidden, true);
+  assert.match(down.byId('budget-status').textContent, /取得できませんでした/);
+  assert.doesNotMatch(down.byId('budget-status').textContent, /LEAK/);
+});
+
+test('acknowledge is two steps: nothing is sent until the confirmation, then the body has no operator and no actual unless typed', async () => {
+  const acks = [];
+  const dom = await openBudget(budgetResponder({
+    ack: (p, init) => { acks.push(JSON.parse(init.body)); return { status: 200, data: { status: 'ACKNOWLEDGED', reservationKey: ACK_KEY } }; },
+  }));
+  openFirstAck(dom);
+  assert.equal(dom.byId('budget-dialog').open, true);
+  fillAck(dom);
+  dom.byId('budget-next').fire('click');
+  assert.equal(acks.length, 0, 'the first step sends nothing');
+  assert.equal(dom.byId('budget-dialog-confirm').hidden, false);
+  assert.equal(dom.byId('budget-dialog-edit').hidden, true);
+  assert.match(dom.byId('budget-confirm-text').textContent, /実額は不明のまま/);
+  dom.byId('budget-submit').fire('click');
+  await flush();
+  assert.equal(acks.length, 1);
+  assert.deepEqual(acks[0], {
+    scopeId: 'tenant', period: '2026-10', reservationKey: ACK_KEY, evidence: 'invoice 123', reason: 'lost response',
+  });
+  assert.equal(dom.byId('budget-dialog').open, false);
+  assert.match(dom.byId('budget-msg').textContent, /解除しました/);
+});
+
+test('a typed actual is sent as the decimal string; a 0 is sent as 0', async () => {
+  const acks = [];
+  const dom = await openBudget(budgetResponder({
+    ack: (p, init) => { acks.push(JSON.parse(init.body)); return { status: 200, data: { status: 'ALREADY_ACKNOWLEDGED', reservationKey: ACK_KEY } }; },
+  }));
+  openFirstAck(dom);
+  fillAck(dom, { actual: '12.5' });
+  dom.byId('budget-next').fire('click');
+  dom.byId('budget-submit').fire('click');
+  await flush();
+  assert.equal(acks[0].actualAmountJpy, '12.5');
+  assert.match(dom.byId('budget-msg').textContent, /既に解除済み/);
+});
+
+test('an actual that is not plain digits keeps the send disabled and says why', async () => {
+  const dom = await openBudget(budgetResponder());
+  openFirstAck(dom);
+  fillAck(dom, { actual: '1e3' });
+  assert.equal(dom.byId('budget-next').disabled, true);
+  assert.equal(dom.byId('budget-actual-hint').className, 'meta error');
+  assert.match(dom.byId('budget-actual-hint').textContent, /円の数字/);
+  fillAck(dom, { actual: '' });
+  assert.equal(dom.byId('budget-next').disabled, false, 'an empty actual is allowed (unknown)');
+});
+
+test('the evidence and the reason are required and cannot be only spaces', async () => {
+  const dom = await openBudget(budgetResponder());
+  openFirstAck(dom);
+  fillAck(dom, { evidence: '   ' });
+  assert.equal(dom.byId('budget-next').disabled, true);
+  fillAck(dom, { evidence: 'ok', reason: '' });
+  assert.equal(dom.byId('budget-next').disabled, true);
+});
+
+test('the refusals show fixed texts and never the body; the dialog stays open for an edit', async () => {
+  const cases = [
+    [400, { error: 'LEAK-400', code: 'TOO_LARGE' }, /100 倍を超えています/],
+    [400, { error: 'LEAK-400', code: 'NOT_COMPARABLE' }, /単位が予約と合いません/],
+    [400, { error: 'LEAK-400' }, /入力を確認してください/],
+    [404, { error: 'LEAK-404' }, /見つかりません/],
+    [409, { error: 'LEAK-409' }, /未確定ではありません/],
+    [503, { error: 'LEAK-503' }, /台帳に書けませんでした/],
+  ];
+  for (const [code, data, re] of cases) {
+    const dom = await openBudget(budgetResponder({
+      ack: () => ({ status: code, data }),
+    }));
+    openFirstAck(dom);
+    fillAck(dom, { actual: '5' });
+    dom.byId('budget-next').fire('click');
+    dom.byId('budget-submit').fire('click');
+    await flush();
+    const text = dom.byId('budget-dialog-error').textContent;
+    assert.match(text, re, String(code));
+    assert.doesNotMatch(text, /LEAK/);
+    assert.equal(dom.byId('budget-dialog-error').hidden, false);
+    assert.equal(dom.byId('budget-dialog').open, true, 'the dialog stays open');
+    assert.equal(dom.byId('budget-dialog-edit').hidden, false, 'back to the edit step');
+  }
+});
+
+test('while an acknowledgement is in flight a second submit sends nothing', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const dom = await openBudget(budgetResponder({
+    ack: () => gate.then(() => ({ status: 200, data: { status: 'ACKNOWLEDGED', reservationKey: ACK_KEY } })),
+  }));
+  openFirstAck(dom);
+  fillAck(dom);
+  dom.byId('budget-next').fire('click');
+  dom.byId('budget-submit').fire('click');
+  dom.byId('budget-submit').fire('click');
+  await flush();
+  assert.equal(dom.calls.filter((c) => c.path === '/api/admin/budget/acknowledge').length, 1);
+  assert.equal(dom.byId('budget-submit').disabled, true);
+  assert.equal(dom.byId('budget-cancel').disabled, true);
+  release();
+  await flush();
+});
+
+test('the back button returns to the edit step without sending', async () => {
+  const dom = await openBudget(budgetResponder());
+  openFirstAck(dom);
+  fillAck(dom);
+  dom.byId('budget-next').fire('click');
+  dom.byId('budget-back').fire('click');
+  assert.equal(dom.byId('budget-dialog-edit').hidden, false);
+  assert.equal(dom.calls.filter((c) => c.path === '/api/admin/budget/acknowledge').length, 0);
+});

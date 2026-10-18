@@ -434,3 +434,81 @@ dialog::backdrop {
 .detail-actions {
   margin: 0.75rem 0;
 }
+
+/* Autopilot (ADR 0011): the Goal form, the Goal detail and its Plan tasks. Long operator text wraps; nothing scrolls sideways. */
+textarea {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  resize: vertical;
+  min-height: 5rem;
+}
+
+.goal-detail {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+
+.goal-detail h3 {
+  font-size: 0.95rem;
+  margin: 0.5rem 0 0;
+}
+
+.task-body {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tasks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.task {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem;
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.task .run-head,
+.task .run-sub {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.autopilot-control {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.goal-detail .detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.goal-detail .detail-actions button {
+  flex: 1 1 10rem;
+}

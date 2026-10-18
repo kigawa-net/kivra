@@ -133,6 +133,17 @@ class UiRoutesTest {
     }
 
     @Test
+    fun `the autopilot sections are hidden in the page, and only a 200 that says enabled shows them`() {
+        assertContains(indexHtml, "id=\"goal-section\" aria-labelledby=\"h-goal\" hidden")
+        assertContains(indexHtml, "id=\"plans-section\" aria-labelledby=\"h-plans\" hidden")
+        assertContains(appJs, "apiFetch('/api/selfdev/autopilot', 'GET')")
+        assertContains(appJs, "r.ok && r.data && r.data.enabled === true")
+        assertContains(appJs, "$('goal-section').hidden = !on;")
+        assertContains(appJs, "apiFetch('/api/selfdev/goals', 'POST', body)")
+        assertContains(appJs, "apiFetch('/api/selfdev/goals', 'GET')")
+    }
+
+    @Test
     fun `operators can switch between their own runs and all runs, and the detail keeps the scope`() {
         assertContains(indexHtml, "id=\"scope-form\"")
         assertContains(indexHtml, "id=\"scope-mine\"")

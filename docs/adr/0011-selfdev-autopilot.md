@@ -211,6 +211,29 @@ PR A(V18、リポジトリ層、状態機械)で、本節の判断をした。�
 - **日次カウンタは UTC の日付**: §U-3 の暫定どおり。`runs_today` と `day_utc` は、1 つの UPDATE の中で日付の変わり目を判定する。
 - **連続失敗の計数は全体で 1 本**: §U-5 の暫定どおり。`breaker_open` は、計数が上限に達した UPDATE の中で立つ。成功は計数を 0 にするが、開いたブレーカーは閉じない(運用者の再開だけが閉じる、§5.4)。
 
+#### 2.9 実装時(PR D: UI と HTTP)の判断
+
+PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と §4 の本文に沿い、食い違う点、または本文に無い点だけを記録する。
+
+- **承認者の保存(V19)**: `selfdev_goals` と `selfdev_plan_tasks` に `approved_by`(VARCHAR(255)、認証された主体の owner key)と `approved_at`(DATETIME(6))を NULL 可で足す。expand のみ。PR C の申し送り(承認者がスキーマに無い)への対応。
+- **承認の順序**: 計画の承認(`PLAN_PROPOSED → TASKS_QUEUED`)を Goal 単位で 1 回行い、その後にタスク単位の承認(`PENDING_APPROVAL → QUEUED`)を受け付ける。§2.5 の「1 件目の承認で遷移する」は、計画の承認に一本化した。タスクの承認は、Goal が `TASKS_QUEUED` / `RUNNING` / `BLOCKED` / `PAUSED` のときだけ、見送りは `PLAN_PROPOSED` でも可能。
+- **古い Plan のタスクは操作できない**: タスクの Plan が、Goal の現在の revision で `PROPOSED` でなければ、承認も見送りも拒否する(再計画の後に古い Plan のタスクが投入されることを防ぐ)。
+- **denylist のタスク(`requires_approval`)**: 計画の承認では QUEUED にならない。QUEUED にできるのは、そのタスク自身の承認だけである(状態機械の辺は `PENDING_APPROVAL → QUEUED` の `OPERATOR_APPROVED` の 1 本)。テストで、承認なしの経路が無いことを確かめる。
+- **タスクの識別子(HTTP)**: `{planId}-{ordinal}`(ULID の 26 文字、ハイフン、番号)。§1.2 の `.../plan/tasks/{n}/approve` の形ではなく、§1 の `POST /api/selfdev/tasks/{id}/approve` に従う。
+- **中止**: Goal を `STOPPED` にし、未投入のタスク(`PENDING_APPROVAL` / `QUEUED`)を `SKIPPED`(`GOAL_STOPPED`)にする。`SUBMITTING` 以降のタスクと、作成済みの Run と PR には触れない。Goal の行をロックしたうえで 1 つのトランザクションで行い、タスクの行が途中で動いたら全体を戻して 409 にする。
+- **中止の理由(U-18)**: 1〜500 文字を必須で検査するが、保存もログへの出力もしない。Goal には監査の行が無いため(下記)。
+- **再計画**: 計画段階の `BLOCKED`(U-16)だけを受け付ける。§1.2 の「Plan を作り直す」のうち、`PLAN_PROPOSED` からの再計画(§2.5 の辺)は HTTP に出していない。`revision` が上限(3)に達した Goal は拒否する(次の Plan が DB の制約に反するため)。
+- **一時停止**: 全体の一時停止と再開のみ(`/api/selfdev/autopilot/pause` と `resume`)。Goal 単位の一時停止と再開(§1.2 の `.../pause`、`.../resume`)は未実装。
+- **書き込みの版番号**: すべての Goal とタスクの変更は `{"version": n}` を要求する(読んだ版の CAS)。版が違えば 409、状態の遷移が無ければ 409、行が無ければ 404。
+- **無効時の応答(U-12)**: 503 を採用する。ルートは Task API と同じ条件(`KIVRA_AUTH_MODE=oidc-jwt`)で登録し、認証(401、エージェントは 403)の後に 503 を返す。画面は、`GET /api/selfdev/autopilot` が 200 かつ `enabled: true` のときだけ、Goal の欄を出す。
+- **エージェントの拒否**: オートパイロットが有効なときは `KIVRA_AGENT_REQUIRED_ROLE` が必須(無ければ起動に失敗)。`OidcJwtVerifier` は、このロールを持つトークンを、運用者ロールの有無にかかわらず 403(`AgentRefused`)にする。拒否ロールを渡さない既存の Task API の挙動は変えない。
+- **本文の閲覧**: 一覧は本文を含まない。詳細は、認証された運用者にだけ返す。Task API と同じく、認証は運用者ロール(`admin-panel:admin`)で行うため、作成者と運用者の集合は同じになる。作成者だけに絞る区別は設けていない。
+- **U-9(Goal 本文の保持と削除)**: **未決のまま**。本文は DB に保存し、削除の手段と保存期間は実装していない。
+- **U-18(Goal 単位の監査)**: 監査の表(`audit_events`)は Run 単位のため、Goal の操作は構造化ログ(`net.kigawa.kivra.selfdev.autopilot.operator`)に残す。出すのは、操作の名前、Goal・Plan・タスクの ID、固定の理由コード、運用者の SHA-256 の先頭 12 文字(ダイジェスト)だけである。運用者の生の ID、本文、タイトル、中止の理由は出さない。Goal 単位の監査の表は未決のまま。
+- **変更の範囲**: `OidcJwtVerifier` に、拒否ロールを任意で渡せるようにした(3 値の結果 `OperatorAuth`)。Goal、Plan の既存のリポジトリ(Planner と Dispatcher の書き込み)と、状態機械(`AutopilotStates.kt`)は変えていない。承認と中止の書き込みは、新しい `SelfDevOperatorRepository` にある。
+- **PR C への申し送り**: (1) 中止は、未投入のタスクの版を進めるので、Dispatcher の `QUEUED → SUBMITTING` の CAS は失敗する。Dispatcher は、Goal が `STOPPED` / `PAUSED` でないことも投入の前に確かめる。(2) 承認は、タスクの版を進める。(3) 投入時の承認者は、タスクの `approved_by` を使う。
+
+
 ### 3. Planner(計画の作成)
 
 - **呼び出し**: `ModelGateway` 経由だけ。モデルは Haiku 5.5(`claude-haiku-5-5`)に固定し、`KIVRA_SELFDEV_MODEL_REGISTRY_PATH` の registry に載っていることを起動時に検査する。ツールは渡さない。書き込み権限を持たせない。

@@ -120,7 +120,26 @@
     detailSeq: 0,
     timer: null,
     release: null,
-    releasing: false
+    releasing: false,
+    autopilotEnabled: false,
+    autopilot: null,
+    autopilotLoading: false,
+    autopilotCheckedAt: 0,
+    goals: null,
+    goalsOkAt: 0,
+    goalsFailed: false,
+    goalsLoading: false,
+    goalsPending: false,
+    goalsLastAttemptAt: 0,
+    openGoalId: null,
+    detail: null,
+    detailError: null,
+    detailLoading: false,
+    goalKey: newKey(),
+    goalKeyFor: null,
+    goalSubmitting: false,
+    stop: null,
+    stopping: false
   };
 
   function $(id) {
@@ -139,6 +158,8 @@
       else if (k === 'type') node.setAttribute('type', v);
       // Only the fixed constants '_blank' and 'noopener noreferrer' are passed here (see prNode).
       else if (k === 'target' || k === 'rel') node[k] = v;
+      // Element ids and ARIA attributes, set as attributes (values are fixed strings or ids this page built).
+      else if (k === 'id' || k.indexOf('aria-') === 0) node.setAttribute(k, v);
       else throw new Error('unsupported prop: ' + k);
     });
     (children || []).forEach(function (c) {
@@ -270,7 +291,9 @@
     $('session-banner').hidden = false;
     $('refresh-btn').disabled = true;
     updateSubmitEnabled();
+    updateGoalControls();
     renderRunsStatus(Date.now());
+    renderGoalsStatus(Date.now());
   }
 
   function fail(path, kind, status) {
@@ -899,6 +922,577 @@
     if (r.status === 409) reloadReleasedRun(rel);
   }
 
+  // ---- Autopilot (ADR 0011): the Goal form, the Goal list and detail, approvals, and the switches ----------
+  // Shown only when GET /api/selfdev/autopilot answers 200 with enabled. A 503 (disabled) or any other answer keeps every
+  // autopilot control hidden. The operator's text (goal title and body, task text, reasons) enters the DOM through textContent only.
+
+  var GOAL_STATES = {
+    GOAL_SUBMITTED: { label: '計画待ち', desc: 'Goal を受け付けました。Planner が計画を作るのを待っています' },
+    PLANNING: { label: '計画中', desc: 'Planner が計画を作っています' },
+    PLAN_PROPOSED: { label: '計画の承認待ち', desc: '計画ができました。Plan を確認し、承認すると、承認したタスクだけが投入されます' },
+    TASKS_QUEUED: { label: '承認済み', desc: '計画は承認されています。承認したタスクの投入を待っています' },
+    RUNNING: { label: '投入あり', desc: '投入済みのタスクがあります（Run が作られています）' },
+    BLOCKED: { label: '停止中', desc: '止まっています。理由を確認してください' },
+    PAUSED: { label: '一時停止中', desc: '運用者が一時停止しました' },
+    DONE: { label: '完了', desc: '全タスクが完了しました' },
+    STOPPED: { label: '中止', desc: '運用者が中止しました' }
+  };
+
+  var TASK_STATES = {
+    PENDING_APPROVAL: '承認待ち（運用者の承認が必要です）',
+    QUEUED: '承認済み（投入を待っています）',
+    SUBMITTING: '投入中',
+    SUBMITTED: 'Run を作成済み',
+    COMPLETED: '完了（PR をマージ済み）',
+    FAILED: '失敗（自動では再投入しません）',
+    CANCELLED: '解放済み（運用者が再投入するか見送ります）',
+    SKIPPED: '見送り（却下、または Goal の中止）'
+  };
+
+  var GOAL_REASONS = {
+    PLAN_INVALID: '計画の検証に失敗しました（再計画できます）',
+    PLAN_BUDGET_HOLD: '予算の上限で計画を作れませんでした（再計画できます）',
+    PLAN_CALL_FAILED: 'モデル呼び出しに失敗しました（再計画できます）',
+    CLAIM_EXPIRED: '計画の作成が時間切れになりました',
+    REPLAN_REQUESTED: '再計画を要求しました',
+    PENDING_PR_LIMIT: 'マージ待ちの PR が上限に達しています（自動で再開します）',
+    DAILY_RUN_CAP: '1 日の Run 数の上限に達しています（翌日に再開します）',
+    BUDGET_HOLD: '月次の予算の割当てに達しています（次の期間に再開します）',
+    CIRCUIT_OPEN: '連続して失敗したため止まっています（運用者の再開が必要）',
+    AUTO_SCOPE_EXCEEDED: '変更範囲が計画を超えました（運用者の確認が必要）',
+    OPERATOR_PAUSED: '運用者が一時停止しました',
+    OPERATOR_RESUMED: '運用者が再開しました',
+    OPERATOR_STOPPED: '運用者が中止しました',
+    OPERATOR_APPROVED: '運用者が承認しました',
+    OPERATOR_SKIPPED: '運用者が見送りました',
+    GOAL_STOPPED: 'Goal の中止により見送りました',
+    ALL_TASKS_COMPLETED: 'すべてのタスクが完了しました'
+  };
+
+  var PLAN_BLOCK_CODES = ['PLAN_INVALID', 'PLAN_BUDGET_HOLD', 'PLAN_CALL_FAILED'];
+  var GOAL_STOP_MAX = 500;
+
+  var AP = {
+    goalSaved: 'Goal を受け付けました。Planner が計画を作るまで少し待ってください。',
+    goalReplayed: 'この Goal は既に受け付け済みです（二重には作られません）。',
+    goalKeyConflict: 'この投入キーは別の内容で既に使われていました。投入キーを作り直しました。内容を確認して、もう一度送ってください。',
+    goalBad: '入力内容を確認してください（目的は 1〜200 文字、本文は 0〜8000 文字。制御文字は使えません）。',
+    stale: '状態が変わっていました。一覧と詳細を読み直してから、もう一度操作してください。',
+    refused: 'この操作は、今の状態では行えません。一覧と詳細を確認してください。',
+    notFound: '見つかりません（既に消えたか、ID が違います）。',
+    planApproved: 'Plan を承認しました。投入の対象は、承認されたタスクだけです。',
+    taskApproved: 'タスクを承認しました（投入を待っています）。',
+    taskRejected: 'タスクを見送りました。',
+    replanned: '再計画を要求しました。Planner が新しい計画を作ります。',
+    stopped: 'Goal を中止しました。未投入のタスクは見送りになります（作成済みの PR はそのままです）。',
+    pausedDone: '自律運転を一時停止しました。新しい投入は止まります（投入済みの Run は止めません）。',
+    resumedDone: '自律運転を再開しました。',
+    breakerDone: 'サーキットブレーカーを再開しました（連続失敗の数を 0 に戻しました）。',
+    approvalNeedsPlan: '先に Plan を承認してください。',
+    reasonInvalid: '理由を確認してください（1〜500 文字、空白だけは使えません）。',
+    network: '通信に失敗しました。もう一度お試しください。',
+    unknown: '結果を確認できませんでした。一覧を読み直してください。'
+  };
+
+  function goalStateInfo(s) {
+    var c = str(s);
+    if (has(GOAL_STATES, c)) return GOAL_STATES[c];
+    return { label: c === '' ? '（不明）' : c, desc: '不明な状態です' };
+  }
+
+  function taskStateText(s) {
+    var c = str(s);
+    return has(TASK_STATES, c) ? TASK_STATES[c] : (c === '' ? '（不明）' : c);
+  }
+
+  function goalReasonText(code) {
+    if (code === null || code === undefined || str(code) === '') return '';
+    var c = str(code);
+    return has(GOAL_REASONS, c) ? GOAL_REASONS[c] + '（' + c + '）' : '理由: ' + c;
+  }
+
+  function goalTitleOf(goal) {
+    return clip(goal.title, MAX_TITLE);
+  }
+
+  function updateGoalControls() {
+    var blocked = state.goalSubmitting || state.sessionExpired;
+    $('goal-title').disabled = blocked;
+    $('goal-body').disabled = blocked;
+    $('goal-submit').disabled = blocked;
+    $('plans-refresh').disabled = state.sessionExpired;
+    $('autopilot-toggle').disabled = state.sessionExpired || !state.autopilot;
+    $('breaker-reset').disabled = state.sessionExpired || !state.autopilot;
+    $('stop-submit').disabled = state.stopping || !stopReasonValid(stopReasonText());
+  }
+
+  function updateGoalCounters() {
+    var t = Array.from($('goal-title').value).length;
+    $('goal-title-count').textContent = t + ' / ' + MAX_TITLE;
+    var b = Array.from($('goal-body').value).length;
+    $('goal-count').textContent = b + ' / ' + MAX_BODY;
+  }
+
+  /** The key stays the same while the title and the body stay the same (a retry is the same Goal). */
+  function keyForGoal(title, body) {
+    var sig = title + '\n' + body;
+    if (state.goalKeyFor !== sig) {
+      if (state.goalKeyFor !== null) state.goalKey = newKey();
+      state.goalKeyFor = sig;
+    }
+    return state.goalKey;
+  }
+
+  function showGoalResult(text, cls) {
+    var el = $('goal-result');
+    el.textContent = text;
+    el.className = 'result' + (cls ? ' ' + cls : '');
+  }
+
+  async function onGoalSubmit(ev) {
+    ev.preventDefault();
+    if (state.goalSubmitting || state.sessionExpired || !state.autopilotEnabled) {
+      updateGoalControls();
+      return;
+    }
+    var title = $('goal-title').value.trim();
+    var nTitle = Array.from(title).length;
+    if (nTitle === 0 || nTitle > MAX_TITLE || CONTROL_CHARS.test(title)) {
+      showGoalResult(AP.goalBad, 'error');
+      return;
+    }
+    var text = $('goal-body').value.trim();
+    if (Array.from(text).length > MAX_BODY || BODY_CONTROL_CHARS.test(text)) {
+      showGoalResult(AP.goalBad, 'error');
+      return;
+    }
+    var body = { title: title, idempotencyKey: keyForGoal(title, text) };
+    if (text !== '') body.body = text;
+    state.goalSubmitting = true;
+    updateGoalControls();
+    showGoalResult('送信中です…', '');
+    var r;
+    try {
+      r = await apiFetch('/api/selfdev/goals', 'POST', body);
+    } finally {
+      state.goalSubmitting = false;
+      updateGoalControls();
+    }
+    var accepted = r.ok && (r.status === 202 || r.status === 200) && r.data && typeof r.data.goalId === 'string';
+    if (accepted) {
+      state.goalKey = newKey();
+      state.goalKeyFor = null;
+      $('goal-title').value = '';
+      $('goal-body').value = '';
+      updateGoalCounters();
+      showGoalResult(r.status === 202 ? AP.goalSaved : AP.goalReplayed, 'ok');
+      refreshGoals();
+      return;
+    }
+    if (r.kind === 'conflict') {
+      state.goalKey = newKey();
+      state.goalKeyFor = null;
+      showGoalResult(AP.goalKeyConflict, 'error');
+    } else if (r.status === 503) {
+      showGoalResult(MESSAGES.server, 'error');
+      refreshAutopilot();
+    } else if (r.kind === 'network') {
+      showGoalResult(AP.network, 'error');
+    } else if (r.kind === 'badRequest') {
+      showGoalResult(AP.goalBad, 'error');
+    } else {
+      showGoalResult(MESSAGES[r.kind] || MESSAGES.server, 'error');
+    }
+  }
+
+  // Status of the autopilot. Only a 200 that says enabled shows anything.
+  async function refreshAutopilot() {
+    if (state.autopilotLoading) return;
+    state.autopilotLoading = true;
+    state.autopilotCheckedAt = Date.now();
+    try {
+      var r = await apiFetch('/api/selfdev/autopilot', 'GET');
+      if (r.ok && r.data && r.data.enabled === true) {
+        var firstTime = !state.autopilotEnabled;
+        state.autopilotEnabled = true;
+        state.autopilot = r.data;
+        // The list is read as soon as the autopilot is known to be on (the refresh timer does not run until the next tick).
+        if (firstTime) refreshGoals();
+      } else {
+        state.autopilotEnabled = false;
+        state.autopilot = null;
+      }
+    } finally {
+      state.autopilotLoading = false;
+      renderAutopilot();
+    }
+  }
+
+  function renderAutopilot() {
+    var on = state.autopilotEnabled === true;
+    $('goal-section').hidden = !on;
+    $('plans-section').hidden = !on;
+    if (!on) {
+      state.goals = null;
+      state.openGoalId = null;
+      state.detail = null;
+      renderGoals();
+      updateGoalControls();
+      return;
+    }
+    var a = state.autopilot;
+    $('goal-repo').textContent = str(a.targetRepo) === '' ? '（未設定）' : str(a.targetRepo);
+    var status = a.paused
+      ? '全体: 一時停止中（新しい投入は止まっています。投入済みの Run は止めません）'
+      : '全体: 稼働中（今日の Run ' + str(a.runsToday) + ' / ' + str(a.maxRunsPerDay) + ' 件）';
+    $('autopilot-status').textContent = status;
+    $('autopilot-toggle').textContent = a.paused ? '自律運転を再開' : '自律運転を一時停止';
+    var breaker = a.breakerOpen === true;
+    $('breaker-block').hidden = !breaker;
+    $('breaker-status').hidden = !breaker;
+    $('breaker-status').textContent = breaker
+      ? '連続で ' + str(a.consecutiveFailures) + ' 件失敗したため、自律運転を止めています。原因を確認してから再開してください。'
+      : '';
+    updateGoalControls();
+  }
+
+  async function refreshGoals() {
+    if (!state.autopilotEnabled || state.sessionExpired) return;
+    if (state.goalsLoading) {
+      state.goalsPending = true;
+      return;
+    }
+    state.goalsLoading = true;
+    state.goalsLastAttemptAt = Date.now();
+    try {
+      var r = await apiFetch('/api/selfdev/goals', 'GET');
+      if (r.ok && Array.isArray(r.data)) {
+        state.goals = r.data;
+        state.goalsOkAt = Date.now();
+        state.goalsFailed = false;
+        renderGoals();
+      } else {
+        state.goalsFailed = true;
+      }
+    } finally {
+      state.goalsLoading = false;
+      renderGoalsStatus(Date.now());
+      if (state.goalsPending) {
+        state.goalsPending = false;
+        refreshGoals();
+      }
+    }
+  }
+
+  function renderGoalsStatus(now) {
+    var el = $('plans-status');
+    if (state.sessionExpired) {
+      el.className = 'meta error';
+      el.textContent = 'セッション切れのため、一覧を更新できません';
+      return;
+    }
+    if (state.goalsFailed) {
+      el.className = 'meta error';
+      el.textContent = '一覧を更新できませんでした' + (state.goalsOkAt ? '（前回の取得: ' + fmtLocal(state.goalsOkAt) + '）' : '');
+      return;
+    }
+    el.className = 'meta';
+    el.textContent = state.goalsOkAt === 0 ? '未取得' : '最終取得: ' + fmtLocal(state.goalsOkAt) + '（' + relative(state.goalsOkAt, now) + '）';
+  }
+
+  function renderGoals() {
+    var ul = $('plans-list');
+    clear(ul);
+    if (!state.goals) return;
+    if (state.goals.length === 0) {
+      ul.appendChild(h('li', { className: 'empty', text: 'まだ Goal はありません。上のフォームから Goal を送れます。' }));
+      return;
+    }
+    state.goals.forEach(function (goal) {
+      if (goal && typeof goal === 'object' && typeof goal.goalId === 'string') ul.appendChild(goalRow(goal));
+    });
+  }
+
+  function goalRow(goal) {
+    var id = str(goal.goalId);
+    var open = state.openGoalId === id;
+    var st = goalStateInfo(goal.state);
+    var updated = parseTime(goal.updatedAt);
+    var when = updated === null ? str(goal.updatedAt) : fmtLocal(updated);
+    var toggle = h('button', {
+      type: 'button',
+      className: 'secondary',
+      text: open ? '閉じる' : '詳細',
+      'aria-expanded': open ? 'true' : 'false',
+      'aria-controls': 'goal-detail-' + id
+    });
+    toggle.addEventListener('click', function () { toggleGoal(id); });
+    var kids = [
+      h('div', { className: 'run-head' }, [
+        h('span', { className: 'run-title', text: goalTitleOf(goal) }),
+        h('span', { className: 'badge', text: '状態: ' + st.label })
+      ]),
+      h('div', { className: 'run-meta' }, [
+        h('span', { className: 'time', text: '更新: ' + when }),
+        h('span', { className: 'time', text: '計画の回数: ' + str(goal.revision) })
+      ]),
+      h('div', { className: 'run-sub' }, [
+        goal.stateReason ? h('span', { className: 'reason', text: '理由: ' + goalReasonText(goal.stateReason) }) : null
+      ]),
+      toggle
+    ];
+    if (open) kids.push(goalDetailBox(id));
+    return h('li', { className: 'run-item' }, kids);
+  }
+
+  function goalDetailBox(id) {
+    var box = h('div', { className: 'goal-detail', id: 'goal-detail-' + id });
+    var d = state.detail;
+    if (state.detailLoading || !d || d.goalId !== id) {
+      if (state.detailError) {
+        box.appendChild(h('p', { className: 'error', text: MESSAGES[state.detailError] || MESSAGES.server }));
+      } else {
+        box.appendChild(h('p', { className: 'empty', text: '読み込み中…' }));
+      }
+      return box;
+    }
+    renderGoalDetail(box, d.data);
+    return box;
+  }
+
+  function toggleGoal(id) {
+    if (state.openGoalId === id) {
+      state.openGoalId = null;
+      state.detail = null;
+      state.detailError = null;
+      renderGoals();
+      return;
+    }
+    state.openGoalId = id;
+    state.detail = null;
+    state.detailError = null;
+    renderGoals();
+    loadGoalDetail(id);
+  }
+
+  async function loadGoalDetail(id) {
+    var seq = ++state.detailSeq;
+    state.detailLoading = true;
+    var r = await apiFetch('/api/selfdev/goals/' + encodeURIComponent(id), 'GET');
+    if (seq !== state.detailSeq) return;
+    state.detailLoading = false;
+    if (r.ok && r.data && typeof r.data === 'object' && r.data.goal && typeof r.data.goal === 'object') {
+      state.detail = { goalId: id, data: r.data };
+      state.detailError = null;
+    } else {
+      state.detail = null;
+      state.detailError = r.ok ? 'invalid' : r.kind;
+    }
+    renderGoals();
+  }
+
+  /** Builds the goal detail: the body, the Plan(s) with their tasks, and the actions the current state allows. */
+  function renderGoalDetail(box, data) {
+    clear(box);
+    var goal = data.goal;
+    var st = goalStateInfo(goal.state);
+    box.appendChild(h('h3', { text: '本文' }));
+    box.appendChild(h('pre', { className: 'task-body', text: typeof data.body === 'string' && data.body !== '' ? data.body : '（本文はありません）' }));
+    box.appendChild(h('p', { className: 'meta', text: '状態: ' + st.label + ' — ' + st.desc + (goal.stateReason ? '（' + goalReasonText(goal.stateReason) + '）' : '') }));
+
+    var actions = [];
+    if (goal.state === 'PLAN_PROPOSED') {
+      actions.push(actionButton('この Plan を承認', function () { approvePlan(goal); }));
+    }
+    if (goal.state === 'BLOCKED' && PLAN_BLOCK_CODES.indexOf(str(goal.stateReason)) !== -1) {
+      actions.push(actionButton('再計画する', function () { replanGoal(goal); }));
+    }
+    if (goal.state !== 'DONE' && goal.state !== 'STOPPED') {
+      actions.push(actionButton('中止…', function () { openStop(goal); }, 'secondary'));
+    }
+    if (actions.length) box.appendChild(h('div', { className: 'detail-actions' }, actions));
+
+    var plans = Array.isArray(data.plans) ? data.plans : [];
+    if (plans.length === 0) {
+      box.appendChild(h('p', { className: 'empty', text: 'まだ計画はありません（Planner が作るのを待っています）' }));
+      return;
+    }
+    plans.forEach(function (plan) {
+      if (!plan || typeof plan !== 'object') return;
+      box.appendChild(h('h3', { text: '計画 ' + str(plan.revision) + '（' + str(plan.state) + '）' }));
+      if (plan.summary) box.appendChild(h('p', { className: 'meta', text: str(plan.summary) }));
+      var ol = h('ol', { className: 'tasks' }, []);
+      (Array.isArray(plan.tasks) ? plan.tasks : []).forEach(function (task) {
+        if (task && typeof task === 'object') ol.appendChild(taskItem(goal, task));
+      });
+      box.appendChild(ol);
+    });
+  }
+
+  function actionButton(text, onClick, cls) {
+    var b = h('button', { type: 'button', className: cls || '', text: text });
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function taskItem(goal, task) {
+    var kids = [
+      h('div', { className: 'run-head' }, [
+        h('span', { className: 'run-title', text: str(task.ordinal) + '. ' + clip(task.title, MAX_TITLE) }),
+        h('span', { className: 'badge', text: taskStateText(task.state) })
+      ])
+    ];
+    var sub = [
+      h('span', { text: '規模: ' + str(task.sizeEstimate) }),
+      h('span', { text: '対象: ' + (Array.isArray(task.targetPaths) ? task.targetPaths.join(', ') : '') })
+    ];
+    if (task.requiresApproval === true) sub.push(h('span', { className: 'reason', text: '変更範囲に承認が必要なパス（承認なしでは投入されません）' }));
+    if (task.stateReason) sub.push(h('span', { className: 'reason', text: '理由: ' + goalReasonText(task.stateReason) }));
+    kids.push(h('div', { className: 'run-sub' }, sub));
+    if (typeof task.body === 'string' && task.body !== '') kids.push(h('pre', { className: 'task-body', text: task.body }));
+    if (task.state === 'PENDING_APPROVAL') {
+      var planApproved = goal.state !== 'PLAN_PROPOSED';
+      var approve = actionButton('このタスクを承認', function () { approveTask(goal, task); });
+      approve.disabled = !planApproved || state.sessionExpired;
+      var reject = actionButton('見送る', function () { rejectTask(goal, task); }, 'secondary');
+      reject.disabled = state.sessionExpired;
+      kids.push(h('div', { className: 'detail-actions' }, [approve, reject]));
+      if (!planApproved) kids.push(h('p', { className: 'meta', text: AP.approvalNeedsPlan }));
+    }
+    return h('li', { className: 'task' }, kids);
+  }
+
+  /**
+   * The shared tail of the approval and state actions. The caller sends the request (so each apiFetch path is a literal) and passes
+   * the promise in. The body carries the version the operator read (compare and set), and the goal is reloaded afterwards.
+   */
+  async function goalWrite(pending, goalId, okText) {
+    var r = await pending;
+    var msg;
+    if (r.ok) {
+      msg = okText;
+    } else if (r.kind === 'network') {
+      msg = AP.network;
+    } else if (r.status === 409) {
+      msg = AP.stale;
+    } else if (r.status === 404) {
+      msg = AP.notFound;
+    } else if (r.status === 400) {
+      msg = MESSAGES.badRequest;
+    } else {
+      msg = AP.unknown;
+    }
+    $('plans-msg').textContent = msg;
+    $('plans-msg').className = 'result' + (r.ok ? ' ok' : ' error');
+    refreshGoals();
+    if (state.openGoalId === goalId) {
+      state.detail = null;
+      loadGoalDetail(goalId);
+    }
+    return r;
+  }
+
+  function approvePlan(goal) {
+    if (state.sessionExpired) return;
+    goalWrite(apiFetch('/api/selfdev/goals/' + encodeURIComponent(goal.goalId) + '/approve-plan', 'POST', { version: goal.version }), goal.goalId, AP.planApproved);
+  }
+
+  function replanGoal(goal) {
+    if (state.sessionExpired) return;
+    goalWrite(apiFetch('/api/selfdev/goals/' + encodeURIComponent(goal.goalId) + '/replan', 'POST', { version: goal.version }), goal.goalId, AP.replanned);
+  }
+
+  function approveTask(goal, task) {
+    if (state.sessionExpired) return;
+    goalWrite(apiFetch('/api/selfdev/tasks/' + encodeURIComponent(str(task.taskId)) + '/approve', 'POST', { version: task.version }), goal.goalId, AP.taskApproved);
+  }
+
+  function rejectTask(goal, task) {
+    if (state.sessionExpired) return;
+    goalWrite(apiFetch('/api/selfdev/tasks/' + encodeURIComponent(str(task.taskId)) + '/reject', 'POST', { version: task.version }), goal.goalId, AP.taskRejected);
+  }
+
+  // ---- Stop dialog (the reason is required; it is sent, not kept) --------
+
+  function stopReasonText() {
+    return $('stop-reason').value.trim();
+  }
+
+  function stopReasonValid(text) {
+    var n = Array.from(text).length;
+    return n >= 1 && n <= GOAL_STOP_MAX && !CONTROL_CHARS.test(text);
+  }
+
+  function showStopError(text) {
+    var el = $('stop-error');
+    el.textContent = text;
+    el.hidden = text === '';
+  }
+
+  function openStop(goal) {
+    state.stop = { goalId: goal.goalId, version: goal.version };
+    $('stop-title').textContent = 'Goal の中止';
+    $('stop-explain').textContent = 'この Goal を中止します。まだ投入していないタスクは見送りになります。作成済みの PR は閉じず、マージもしません（PR の扱いは人が決めます）。';
+    $('stop-reason').value = '';
+    showStopError('');
+    updateGoalControls();
+    $('stop-dialog').showModal();
+  }
+
+  async function submitStop() {
+    var s = state.stop;
+    if (!s || state.stopping || state.sessionExpired) return;
+    var reason = stopReasonText();
+    if (!stopReasonValid(reason)) {
+      showStopError(AP.reasonInvalid);
+      updateGoalControls();
+      return;
+    }
+    state.stopping = true;
+    showStopError('');
+    updateGoalControls();
+    var r;
+    try {
+      r = await apiFetch('/api/selfdev/goals/' + encodeURIComponent(s.goalId) + '/stop', 'POST', { version: s.version, reason: reason });
+    } finally {
+      state.stopping = false;
+    }
+    if (r.ok) {
+      state.stop = null;
+      $('stop-dialog').close();
+      $('plans-msg').textContent = AP.stopped;
+      $('plans-msg').className = 'result ok';
+      refreshGoals();
+      if (state.openGoalId === s.goalId) {
+        state.detail = null;
+        loadGoalDetail(s.goalId);
+      }
+      return;
+    }
+    updateGoalControls();
+    var msg = r.kind === 'network' ? AP.network : (r.status === 400 ? AP.reasonInvalid : (r.status === 409 ? AP.stale : (r.status === 404 ? AP.notFound : AP.unknown)));
+    showStopError(msg);
+  }
+
+  // ---- Global pause and the breaker ----------------------------------------
+
+  async function onAutopilotToggle() {
+    if (!state.autopilot || state.sessionExpired) return;
+    var resume = state.autopilot.paused === true;
+    var r = await apiFetch('/api/selfdev/autopilot/' + (resume ? 'resume' : 'pause'), 'POST', {});
+    $('plans-msg').textContent = r.ok ? (resume ? AP.resumedDone : AP.pausedDone) : AP.unknown;
+    $('plans-msg').className = 'result' + (r.ok ? ' ok' : ' error');
+    refreshAutopilot();
+  }
+
+  async function onBreakerReset() {
+    if (!state.autopilot || state.sessionExpired) return;
+    var r = await apiFetch('/api/selfdev/autopilot/reset-breaker', 'POST', {});
+    $('plans-msg').textContent = r.ok ? AP.breakerDone : AP.unknown;
+    $('plans-msg').className = 'result' + (r.ok ? ' ok' : ' error');
+    refreshAutopilot();
+  }
+
   // ---- Timers (stopped while the tab is hidden) --------------------------
 
   function tick() {
@@ -906,7 +1500,10 @@
     if (now - state.runsLastAttemptAt >= REFRESH_MS) refreshRuns();
     if (now - state.healthCheckedAt >= REFRESH_MS) checkHealth();
     if (now - state.statusCheckedAt >= REFRESH_MS) refreshStatus();
+    if (now - state.autopilotCheckedAt >= REFRESH_MS) refreshAutopilot();
+    if (state.autopilotEnabled && now - state.goalsLastAttemptAt >= REFRESH_MS) refreshGoals();
     renderRunsStatus(now);
+    renderGoalsStatus(now);
   }
 
   function startTimers() {
@@ -950,6 +1547,18 @@
       $('release-dialog').close();
     });
     $('release-submit').addEventListener('click', submitRelease);
+    $('goal-form').addEventListener('submit', onGoalSubmit);
+    $('goal-title').addEventListener('input', function () { updateGoalCounters(); updateGoalControls(); });
+    $('goal-body').addEventListener('input', function () { updateGoalCounters(); updateGoalControls(); });
+    $('plans-refresh').addEventListener('click', function () { refreshAutopilot(); refreshGoals(); });
+    $('autopilot-toggle').addEventListener('click', onAutopilotToggle);
+    $('breaker-reset').addEventListener('click', onBreakerReset);
+    $('stop-reason').addEventListener('input', updateGoalControls);
+    $('stop-cancel').addEventListener('click', function () { $('stop-dialog').close(); });
+    $('stop-submit').addEventListener('click', submitStop);
+    updateGoalCounters();
+    renderAutopilot();
+    refreshAutopilot();
     renderRunsStatus(Date.now());
     route();
     if (!document.hidden) startTimers();

@@ -483,3 +483,266 @@ test('the page is still usable with the self-development kind chosen after a rel
   assert.equal(dom.byId('kind-self').disabled, false);
   assert.equal(dom.byId('kind-sim').checked, true);
 });
+
+// ---- Autopilot (ADR 0011): the Goal form, the Goal list and detail, approvals, the switches ---------------------
+
+const G1 = '01GOALAAAAAAAAAAAAAAAAAAAA';
+const P1 = '01PLANAAAAAAAAAAAAAAAAAAAA';
+const AP_STATUS = { enabled: true, targetRepo: 'kigawa-net/kivra', paused: false, breakerOpen: false, consecutiveFailures: 0, runsToday: 0, maxRunsPerDay: 5, maxConsecutiveFailures: 3, approval: 'required' };
+
+/**
+ * A responder for the autopilot API. `s` is the mutable server state: the status, the goal list, and the goal detail body.
+ * Unknown paths fall back to the defaults (status enabled=false, an empty run list).
+ */
+function apResponder(s) {
+  return (p, init) => {
+    if (p === '/api/selfdev/status') return status(false);
+    if (p === '/api/selfdev/autopilot') return s.autopilot === 503 ? { status: 503, data: { error: 'autopilot is disabled' } } : { status: 200, data: s.autopilotStatus };
+    if (p === '/api/selfdev/goals' && init.method === 'GET') return { status: 200, data: s.goals };
+    if (p === '/api/selfdev/goals' && init.method === 'POST') return s.postGoal ? s.postGoal(init) : { status: 202, data: { goalId: G1, state: 'GOAL_SUBMITTED' } };
+    if (p === '/api/selfdev/goals/' + G1) return { status: 200, data: s.detail };
+    if (s.other) {
+      const r = s.other(p, init);
+      if (r) return r;
+    }
+    return defaults(true)(p);
+  };
+}
+
+function apState(overrides = {}) {
+  return {
+    autopilot: 200,
+    autopilotStatus: { ...AP_STATUS },
+    goals: [],
+    detail: null,
+    ...overrides,
+  };
+}
+
+function goalSummary(over = {}) {
+  return {
+    goalId: G1, title: 'CI を速くする', state: 'PLAN_PROPOSED', stateReason: null, revision: 1, version: 2,
+    targetRepo: 'kigawa-net/kivra', createdAt: '2026-10-18T10:00:00Z', updatedAt: '2026-10-18T10:05:00Z', ...over,
+  };
+}
+
+function taskOf(over = {}) {
+  return {
+    taskId: P1 + '-1', ordinal: 1, title: 'テストを足す', body: '手順の本文', targetPaths: ['docs/a.md'], sizeEstimate: 'S',
+    dependsOn: [], requiresApproval: false, state: 'PENDING_APPROVAL', stateReason: null, runId: null, version: 0, ...over,
+  };
+}
+
+function detailOf(goal, tasks, extra = {}) {
+  return {
+    goal: goal,
+    body: '背景の本文',
+    plans: [{ planId: P1, revision: 1, state: 'PROPOSED', summary: '要約', plannerModel: 'claude-haiku-5-5', createdAt: '2026-10-18T10:04:00Z', tasks }],
+    ...extra,
+  };
+}
+
+function buttonIn(container, text) {
+  const found = container.buttons().filter((b) => b.textContent === text);
+  assert.equal(found.length >= 1, true, `no button "${text}" in the container`);
+  return found[0];
+}
+
+test('the autopilot sections stay hidden unless the status answers 200 with enabled (503 and failures show nothing)', async () => {
+  const off = load(apResponder(apState({ autopilot: 503 })));
+  await flush();
+  assert.equal(off.byId('goal-section').hidden, true, '503: the goal form is hidden');
+  assert.equal(off.byId('plans-section').hidden, true, '503: the list and switches are hidden');
+
+  const broken = load(apResponder(apState({ autopilotStatus: null, autopilot: 500 })));
+  await flush();
+  assert.equal(broken.byId('goal-section').hidden, true, 'a failed status keeps the form hidden');
+
+  const on = load(apResponder(apState()));
+  await flush();
+  assert.equal(on.byId('goal-section').hidden, false, 'enabled: the goal form is shown');
+  assert.equal(on.byId('plans-section').hidden, false, 'enabled: the list is shown');
+  assert.equal(on.byId('goal-repo').textContent, 'kigawa-net/kivra');
+  assert.equal(postsTo(on.calls, '/api/selfdev/goals').length, 0, 'nothing is submitted by the page on load');
+});
+
+test('a goal is sent with a title and an optional body, a retry keeps the key, and a blank body is not sent', async () => {
+  let fail = true;
+  const s = apState({
+    postGoal: () => {
+      if (fail) throw new Error('network down');
+      return { status: 202, data: { goalId: G1, state: 'GOAL_SUBMITTED' } };
+    },
+  });
+  const dom = load(apResponder(s));
+  await flush();
+  dom.byId('goal-title').value = '  CI を速くする  ';
+  dom.byId('goal-body').value = '   ';
+  dom.byId('goal-form').fire('submit', { preventDefault() {} });
+  await flush();
+  fail = false;
+  dom.byId('goal-form').fire('submit', { preventDefault() {} });
+  await flush();
+  const sent = postsTo(dom.calls, '/api/selfdev/goals');
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].body.title, 'CI を速くする', 'the title is trimmed');
+  assert.equal('body' in sent[0].body, false, 'a blank body is not sent');
+  assert.equal(sent[0].body.idempotencyKey, sent[1].body.idempotencyKey, 'a retry keeps the key');
+  assert.match(dom.byId('goal-result').textContent, /受け付けました/);
+  assert.equal(dom.byId('goal-title').value, '', 'the form is cleared after success');
+});
+
+test('a goal with a control character is refused before any request; a 409 makes a new key and says so', async () => {
+  const s = apState({
+    postGoal: () => ({ status: 409, data: { error: 'x' } }),
+  });
+  const dom = load(apResponder(s));
+  await flush();
+  dom.byId('goal-title').value = 'a\u0007b';
+  dom.byId('goal-form').fire('submit', { preventDefault() {} });
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals').length, 0, 'a control character is not sent');
+
+  dom.byId('goal-title').value = 'ok';
+  dom.byId('goal-form').fire('submit', { preventDefault() {} });
+  await flush();
+  const first = postsTo(dom.calls, '/api/selfdev/goals')[0].body.idempotencyKey;
+  dom.byId('goal-form').fire('submit', { preventDefault() {} });
+  await flush();
+  const second = postsTo(dom.calls, '/api/selfdev/goals')[1].body.idempotencyKey;
+  assert.notEqual(first, second, 'the key was changed after the 409');
+  assert.match(dom.byId('goal-result').textContent, /別の内容/);
+});
+
+test('the goal list and detail show operator text as text, never as markup', async () => {
+  const s = apState({
+    goals: [goalSummary({ title: EVIL })],
+    detail: detailOf(goalSummary({ title: EVIL }), [taskOf({ title: EVIL, body: EVIL })], { body: EVIL }),
+  });
+  const dom = load(apResponder(s));
+  await flush();
+  const toggle = buttonIn(dom.byId('plans-list'), '詳細');
+  toggle.fire('click');
+  await flush();
+  const tags = [];
+  dom.byId('plans-list').walk((n) => tags.push(n.tagName));
+  assert.equal(tags.includes('IMG'), false, 'no image element is made from operator text');
+  assert.equal(tags.includes('SCRIPT'), false, 'no script element is made from operator text');
+  assert.match(dom.byId('plans-list').textContent, /<img src=x onerror=alert\(1\)>/, 'the text is shown literally');
+  // The list is redrawn after the click, so the toggle is read again.
+  assert.equal(buttonIn(dom.byId('plans-list'), '閉じる').getAttribute('aria-expanded'), 'true');
+});
+
+test('the plan approval comes first; a task is approved with the version the operator read, and a denylisted task waits', async () => {
+  const goal = goalSummary({ state: 'PLAN_PROPOSED', version: 2 });
+  const tasks = [taskOf({ ordinal: 1, taskId: P1 + '-1', version: 0 }), taskOf({ ordinal: 2, taskId: P1 + '-2', title: '権限', requiresApproval: true, version: 0 })];
+  const s = apState({ goals: [goal], detail: detailOf(goal, tasks) });
+  s.other = (p, init) => {
+    if (p === '/api/selfdev/goals/' + G1 + '/approve-plan' && init.method === 'POST') {
+      s.goals = [goalSummary({ state: 'TASKS_QUEUED', version: 3 })];
+      s.detail = detailOf(s.goals[0], tasks);
+      return { status: 200, data: s.goals[0] };
+    }
+    if (p === '/api/selfdev/tasks/' + P1 + '-1/approve' && init.method === 'POST') {
+      return { status: 200, data: taskOf({ ordinal: 1, taskId: P1 + '-1', state: 'QUEUED', version: 1 }) };
+    }
+    return null;
+  };
+  const dom = load(apResponder(s));
+  await flush();
+  buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+  await flush();
+  const list = dom.byId('plans-list');
+  assert.equal(buttonIn(list, 'このタスクを承認').disabled, true, 'a task cannot be approved before the plan');
+  buttonIn(list, 'この Plan を承認').fire('click');
+  await flush();
+  const approvePlan = postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/approve-plan');
+  assert.equal(approvePlan.length, 1);
+  assert.deepEqual(approvePlan[0].body, { version: 2 });
+  assert.match(dom.byId('plans-msg').textContent, /Plan を承認しました/);
+
+  buttonIn(dom.byId('plans-list'), 'このタスクを承認').fire('click');
+  await flush();
+  const approveTask = postsTo(dom.calls, '/api/selfdev/tasks/' + P1 + '-1/approve');
+  assert.equal(approveTask.length, 1);
+  assert.deepEqual(approveTask[0].body, { version: 0 });
+});
+
+test('a 409 on an approval shows the fixed text, never the server text, and reloads the goal', async () => {
+  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 3 });
+  const tasks = [taskOf({ version: 0 })];
+  const s = apState({ goals: [goal], detail: detailOf(goal, tasks) });
+  s.other = (p, init) => (p === '/api/selfdev/tasks/' + P1 + '-1/approve' && init.method === 'POST'
+    ? { status: 409, data: { error: 'SERVER-SECRET-TEXT' } }
+    : null);
+  const dom = load(apResponder(s));
+  await flush();
+  buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(dom.byId('plans-list'), 'このタスクを承認').fire('click');
+  await flush();
+  const msg = dom.byId('plans-msg').textContent;
+  assert.match(msg, /状態が変わっていました/);
+  assert.equal(msg.includes('SERVER-SECRET-TEXT'), false);
+  assert.equal(dom.byId('plans-msg').className, 'result error');
+});
+
+test('stop asks for a reason in a dialog; an empty reason is not sent; the request carries the version', async () => {
+  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 4 });
+  const s = apState({ goals: [goal], detail: detailOf(goal, [taskOf({ version: 0 })]) });
+  s.other = (p, init) => (p === '/api/selfdev/goals/' + G1 + '/stop' && init.method === 'POST'
+    ? { status: 200, data: goalSummary({ state: 'STOPPED', version: 5 }) }
+    : null);
+  const dom = load(apResponder(s));
+  await flush();
+  buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(dom.byId('plans-list'), '中止…').fire('click');
+  assert.equal(dom.byId('stop-dialog').open, true);
+  assert.equal(dom.byId('stop-submit').disabled, true, 'no reason, no send');
+  dom.byId('stop-submit').fire('click');
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 0);
+
+  dom.byId('stop-reason').value = '  もう要らない  ';
+  dom.byId('stop-reason').fire('input');
+  assert.equal(dom.byId('stop-submit').disabled, false);
+  dom.byId('stop-submit').fire('click');
+  await flush();
+  const sent = postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].body, { version: 4, reason: 'もう要らない' });
+  assert.equal(dom.byId('stop-dialog').open, false);
+});
+
+test('pause and resume post an empty JSON object; the breaker button shows only while the breaker is open', async () => {
+  const s = apState();
+  s.autopilotStatus = { ...AP_STATUS, breakerOpen: true, consecutiveFailures: 3 };
+  s.other = (p, init) => {
+    if (p === '/api/selfdev/autopilot/pause' || p === '/api/selfdev/autopilot/resume' || p === '/api/selfdev/autopilot/reset-breaker') {
+      return { status: 200, data: { ok: true } };
+    }
+    return null;
+  };
+  const dom = load(apResponder(s));
+  await flush();
+  assert.equal(dom.byId('breaker-block').hidden, false, 'the breaker is open: the reset is shown');
+  assert.match(dom.byId('breaker-status').textContent, /3 件失敗/);
+
+  dom.byId('autopilot-toggle').fire('click');
+  await flush();
+  const pause = postsTo(dom.calls, '/api/selfdev/autopilot/pause');
+  assert.equal(pause.length, 1);
+  assert.deepEqual(pause[0].body, {});
+
+  dom.byId('breaker-reset').fire('click');
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/selfdev/autopilot/reset-breaker').length, 1);
+});
+
+test('a closed breaker hides the reset button, and the toggle says what it will do', async () => {
+  const dom = load(apResponder(apState({ autopilotStatus: { ...AP_STATUS, paused: true } })));
+  await flush();
+  assert.equal(dom.byId('breaker-block').hidden, true);
+  assert.equal(dom.byId('autopilot-toggle').textContent, '自律運転を再開');
+});

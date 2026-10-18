@@ -28,8 +28,12 @@ class DiffCollectorTest {
         val run: Path get() = prepared.runDir
         private val collector = DiffCollector(root, limits)
 
-        fun collect(summary: String = "Fix docs", exit: Int = 0, session: String? = "sess-1"): CollectOutcome =
-            collector.collect(prepared.runDir, prepared.manifest, summary, exit, session)
+        fun collect(
+            summary: String = "Fix docs",
+            exit: Int = 0,
+            session: String? = "sess-1",
+            pathRules: PathRules = PathRules.BUILT_IN_ONLY,
+        ): CollectOutcome = collector.collect(prepared.runDir, prepared.manifest, summary, exit, session, pathRules)
 
         fun write(rel: String, text: String) {
             val p = run.resolve(rel)
@@ -54,6 +58,37 @@ class DiffCollectorTest {
         fixture.setup()
         val reasons = rejectedBy(fixture.collect())
         assertTrue(reason in reasons, "expected $reason, got $reasons")
+    }
+
+    @Test
+    fun theClaimPatternsAreCheckedOnTopOfTheBuiltInRules() {
+        val fixture = Fixture()
+        fixture.write("docs/a.md", "alpha changed\n")
+        fixture.write("kivra-agent/src/x.kt", "fun x() = 2\n")
+        // The built-in rules accept both files. The claim allows only kivra-*/src/**, so docs/a.md is refused.
+        assertEquals(
+            setOf(DiffRejectReason.PATH_NOT_ALLOWED),
+            rejectedBy(fixture.collect(pathRules = PathRules.fromServer(listOf("kivra-*/src/**"), emptyList()))),
+        )
+        // The claim denies x.kt, so it is refused even though it is allowed.
+        assertEquals(
+            setOf(DiffRejectReason.PATH_DENIED),
+            rejectedBy(fixture.collect(pathRules = PathRules.fromServer(listOf("kivra-*/src/**", "docs/**"), listOf("**/x.kt")))),
+        )
+        // No claim patterns: only the built-in rules, so both files are accepted.
+        assertIs<CollectOutcome.Accepted>(fixture.collect(pathRules = PathRules.fromServer(emptyList(), emptyList())))
+    }
+
+    @Test
+    fun aDeletionOutsideTheClaimAllowlistIsRefusedToo() {
+        val fixture = Fixture()
+        Files.delete(fixture.run.resolve("docs/gone.md"))
+        fixture.write("kivra-agent/src/x.kt", "fun x() = 2\n")
+        // docs/gone.md is a deletion (built-in allowed). The claim does not allow docs/, so it is refused.
+        assertEquals(
+            setOf(DiffRejectReason.PATH_NOT_ALLOWED),
+            rejectedBy(fixture.collect(pathRules = PathRules.fromServer(listOf("kivra-*/src/**"), emptyList()))),
+        )
     }
 
     @Test

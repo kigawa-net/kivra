@@ -59,12 +59,13 @@ class CliOutcomeClassifierTest {
             false,
         )
         assertEquals(AgentRunOutcome.BUDGET_EXCEEDED, CliOutcomeClassifier.classify(run(DockerRunOutcome.EXITED, 1), budgetStop))
-        assertEquals(AgentErrorCode.CLI_NONZERO, AgentRunOutcome.BUDGET_EXCEEDED.errorCode)
+        assertEquals(AgentErrorCode.CLI_NONZERO, AgentRunOutcome.BUDGET_EXCEEDED.errorCode(newErrorCodes = false))
     }
 
     @Test
     fun everyOutcomeMapsToAKivraErrorCodeOrNone() {
-        val expected = mapOf(
+        // Without the new codes (the default): the codes kivra has always accepted.
+        val legacy = mapOf(
             AgentRunOutcome.SUCCEEDED to null,
             AgentRunOutcome.TIMEOUT to AgentErrorCode.TIMEOUT,
             AgentRunOutcome.CANCELLED to AgentErrorCode.CANCELLED,
@@ -76,8 +77,14 @@ class CliOutcomeClassifierTest {
             AgentRunOutcome.CLI_FAILED to AgentErrorCode.CLI_NONZERO,
             AgentRunOutcome.MALFORMED_OUTPUT to AgentErrorCode.BAD_OUTPUT,
         )
-        assertEquals(AgentRunOutcome.entries.toSet(), expected.keys, "every outcome is mapped")
-        for ((outcome, code) in expected) assertEquals(code, outcome.errorCode, outcome.name)
-        assertNull(AgentRunOutcome.SUCCEEDED.errorCode)
+        // With KIVRA_AGENT_NEW_ERROR_CODES=1: only the two changed outcomes differ.
+        val withNewCodes = legacy + mapOf(
+            AgentRunOutcome.BUDGET_EXCEEDED to AgentErrorCode.BUDGET_EXCEEDED,
+            AgentRunOutcome.OVERLOADED to AgentErrorCode.OVERLOADED,
+        )
+        assertEquals(AgentRunOutcome.entries.toSet(), legacy.keys, "every outcome is mapped")
+        for ((outcome, code) in legacy) assertEquals(code, outcome.errorCode(newErrorCodes = false), outcome.name)
+        for ((outcome, code) in withNewCodes) assertEquals(code, outcome.errorCode(newErrorCodes = true), outcome.name)
+        assertNull(AgentRunOutcome.SUCCEEDED.errorCode(newErrorCodes = true))
     }
 }

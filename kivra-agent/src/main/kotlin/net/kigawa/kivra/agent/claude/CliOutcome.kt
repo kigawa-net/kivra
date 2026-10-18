@@ -7,8 +7,11 @@ import net.kigawa.kivra.agent.docker.DockerRunResult
 /**
  * The classification of one attempt's CLI run. Each value maps to one kivra error code (or to none, for success), so that AgentLoop can
  * report it with `fail` without a free-text reason. Only these names and codes are logged.
+ *
+ * [errorCode] takes [newErrorCodes] (`KIVRA_AGENT_NEW_ERROR_CODES`). With it off (the default) the code is the one kivra has always
+ * accepted. With it on, a value that has a dedicated code uses that code (see the `KIVRA_AGENT_NEW_ERROR_CODES` table in the runbook).
  */
-enum class AgentRunOutcome(val errorCode: AgentErrorCode?) {
+enum class AgentRunOutcome(private val legacyCode: AgentErrorCode?, private val newCode: AgentErrorCode? = legacyCode) {
     SUCCEEDED(null),
     TIMEOUT(AgentErrorCode.TIMEOUT),
     CANCELLED(AgentErrorCode.CANCELLED),
@@ -16,16 +19,20 @@ enum class AgentRunOutcome(val errorCode: AgentErrorCode?) {
     AUTH_FAILED(AgentErrorCode.AUTH_REQUIRED),
 
     /**
-     * The CLI stopped at `--max-budget-usd` (result subtype `error_max_budget_usd`). kivra has no code for it, so it is reported as
-     * CLI_NONZERO. The separate outcome only makes the log say why.
+     * The CLI stopped at `--max-budget-usd` (result subtype `error_max_budget_usd`). Before the new codes it is reported as CLI_NONZERO.
+     * With the new codes it is BUDGET_EXCEEDED.
      */
-    BUDGET_EXCEEDED(AgentErrorCode.CLI_NONZERO),
+    BUDGET_EXCEEDED(AgentErrorCode.CLI_NONZERO, AgentErrorCode.BUDGET_EXCEEDED),
     RATE_LIMITED(AgentErrorCode.RATE_LIMITED),
 
-    /** Overloaded is transient, like a rate limit. kivra has no separate code for it, so it is reported as RATE_LIMITED. */
-    OVERLOADED(AgentErrorCode.RATE_LIMITED),
+    /** Overloaded is transient, like a rate limit. Before the new codes it is reported as RATE_LIMITED; with them, OVERLOADED. */
+    OVERLOADED(AgentErrorCode.RATE_LIMITED, AgentErrorCode.OVERLOADED),
     CLI_FAILED(AgentErrorCode.CLI_NONZERO),
     MALFORMED_OUTPUT(AgentErrorCode.BAD_OUTPUT),
+    ;
+
+    /** The code to send with `fail`, or null for [SUCCEEDED]. */
+    fun errorCode(newErrorCodes: Boolean): AgentErrorCode? = if (newErrorCodes) newCode else legacyCode
 }
 
 /**

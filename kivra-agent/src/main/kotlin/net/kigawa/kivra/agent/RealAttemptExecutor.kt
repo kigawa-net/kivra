@@ -28,6 +28,8 @@ import net.kigawa.kivra.agent.workdir.AgentResult
 import net.kigawa.kivra.agent.workdir.CollectOutcome
 import net.kigawa.kivra.agent.workdir.DiffCollector
 import net.kigawa.kivra.agent.workdir.DiffRejectReason
+import net.kigawa.kivra.agent.workdir.PathPatternException
+import net.kigawa.kivra.agent.workdir.PathRules
 import net.kigawa.kivra.agent.workdir.PreparedWorkDir
 import net.kigawa.kivra.agent.workdir.PublicGitMirror
 import net.kigawa.kivra.agent.workdir.RepoSource
@@ -58,6 +60,8 @@ class RealExecutorSettings(
     val budgetUsd: String = CliCommand.DEFAULT_BUDGET_USD,
     /** Keeps the debug output of a failed attempt (`KIVRA_AGENT_DEBUG_KEEP=1`). Off by default. See [AttemptDebugKeep]. */
     val debugKeep: Boolean = false,
+    /** Sends EMPTY_PATCH, BUDGET_EXCEEDED and OVERLOADED instead of the older codes (`KIVRA_AGENT_NEW_ERROR_CODES=1`). Off by default. */
+    val newErrorCodes: Boolean = false,
 ) {
     override fun toString(): String = "RealExecutorSettings(***)"
 }
@@ -102,10 +106,24 @@ class RealAttemptExecutor(
     private val debugKeep: AttemptDebugKeep? = if (settings.debugKeep) AttemptDebugKeep(workRoot).also { it.prune() } else null
 
     override suspend fun execute(attempt: ClaimedAttempt): AttemptOutcome {
+        // The claim's patterns are checked before anything runs. Invalid patterns are not guessed at: the attempt is failed as NEEDS_HUMAN.
+        val pathRules = try {
+            PathRules.fromServer(attempt.allowedPathPatterns, attempt.deniedPathPatterns)
+        } catch (e: PathPatternException) {
+            logger.warn(
+                "claim path patterns refused: runId={} attemptId={} allowed={} denied={} reason={}",
+                attempt.runId,
+                attempt.attemptId,
+                attempt.allowedPathPatterns.size,
+                attempt.deniedPathPatterns.size,
+                e.message,
+            )
+            return AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN)
+        }
         val state = AttemptState()
         var outcome: AttemptOutcome? = null
         try {
-            val result = attemptOnce(attempt, state)
+            val result = attemptOnce(attempt, state, pathRules)
             outcome = result
             return result
         } finally {
@@ -132,7 +150,7 @@ class RealAttemptExecutor(
         }
     }
 
-    private suspend fun attemptOnce(attempt: ClaimedAttempt, state: AttemptState): AttemptOutcome {
+    private suspend fun attemptOnce(attempt: ClaimedAttempt, state: AttemptState, pathRules: PathRules): AttemptOutcome {
         val job = currentCoroutineContext().job
         // The blocking work runs to its end even when the coroutine is cancelled: the container is stopped by the cancel check
         // below, and the work directory is removed afterwards. Nothing is left running on a cancel.
@@ -184,7 +202,7 @@ class RealAttemptExecutor(
         // The CLI ran and gave a result, so its cost is reported with the failure (null when there is no result).
         val usage = run.report.result?.reportedUsage
         if (run.outcome != AgentRunOutcome.SUCCEEDED) {
-            return AttemptOutcome.Failed(run.outcome.errorCode ?: AgentErrorCode.NEEDS_HUMAN, usage)
+            return AttemptOutcome.Failed(run.outcome.errorCode(settings.newErrorCodes) ?: AgentErrorCode.NEEDS_HUMAN, usage)
         }
 
         val work = checkNotNull(state.prepared) { "the work directory is missing after a run" }
@@ -195,12 +213,13 @@ class RealAttemptExecutor(
                 summary = run.report.result?.resultText.orEmpty(),
                 exitStatus = checkNotNull(run.result.exitCode),
                 sessionId = run.report.result?.sessionId,
+                pathRules = pathRules,
             )
         }
         return when (collected) {
             is CollectOutcome.Rejected -> {
                 state.reasons = collected.reasons
-                val code = rejectionCode(collected.reasons)
+                val code = rejectionCode(collected.reasons, settings.newErrorCodes)
                 logger.warn(
                     "change set rejected: runId={} attemptId={} reasons={} code={} numTurns={} permissionDenials={}",
                     attempt.runId,
@@ -259,9 +278,13 @@ class RealAttemptExecutor(
 
         /**
          * The code for a refused change set. A change set with no change is an empty patch: the CLI finished without a change, which
-         * is treated as a failure (CLI_NONZERO), never as success. Every other refusal is a bad output (BAD_OUTPUT).
+         * is treated as a failure, never as success. It is CLI_NONZERO, or EMPTY_PATCH with [newErrorCodes]. Every other refusal is a
+         * bad output (BAD_OUTPUT).
          */
-        internal fun rejectionCode(reasons: List<DiffRejectReason>): AgentErrorCode =
-            if (reasons.all { it == DiffRejectReason.EMPTY_PATCH }) AgentErrorCode.CLI_NONZERO else AgentErrorCode.BAD_OUTPUT
+        internal fun rejectionCode(reasons: List<DiffRejectReason>, newErrorCodes: Boolean = false): AgentErrorCode =
+            when {
+                reasons.all { it == DiffRejectReason.EMPTY_PATCH } -> if (newErrorCodes) AgentErrorCode.EMPTY_PATCH else AgentErrorCode.CLI_NONZERO
+                else -> AgentErrorCode.BAD_OUTPUT
+            }
     }
 }

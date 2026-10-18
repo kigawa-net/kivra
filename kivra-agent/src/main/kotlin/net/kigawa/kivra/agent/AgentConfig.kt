@@ -72,6 +72,7 @@ class AgentConfig private constructor(
         const val ENV_REPO = "KIVRA_AGENT_REPO"
         const val ENV_MODEL = "KIVRA_AGENT_MODEL"
         const val ENV_MAX_BUDGET_USD = "KIVRA_AGENT_MAX_BUDGET_USD"
+        const val ENV_NEW_ERROR_CODES = "KIVRA_AGENT_NEW_ERROR_CODES"
 
         const val MAX_CONCURRENT = 1
         const val DEFAULT_STOP_FILE_NAME = "STOP"
@@ -143,7 +144,19 @@ class AgentConfig private constructor(
                 model = model,
                 budgetUsd = budgetUsd,
                 debugKeep = debugKeep(env),
+                newErrorCodes = newErrorCodes(env),
             )
+        }
+
+        /**
+         * Read only for `KIVRA_AGENT_EXECUTOR=real`. `1` sends EMPTY_PATCH, BUDGET_EXCEEDED and OVERLOADED (Issue #231). `0` or unset
+         * sends the codes kivra has always accepted. Any other value refuses the start. Turn `1` on only after the kivra that accepts
+         * the new codes is deployed.
+         */
+        private fun newErrorCodes(env: Map<String, String>): Boolean = when (optional(env, ENV_NEW_ERROR_CODES)) {
+            null, "0" -> false
+            "1" -> true
+            else -> throw ConfigException("$ENV_NEW_ERROR_CODES must be 1 or 0")
         }
 
         /**

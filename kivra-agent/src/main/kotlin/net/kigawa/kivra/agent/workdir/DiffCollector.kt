@@ -29,7 +29,8 @@ import net.kigawa.kivra.agent.docker.WorkDirPolicy
  * - An executable bit that differs from the base (new or changed) is refused.
  * - A file is read only when it is a change. The content must be UTF-8, must not contain NUL, and must keep its lines and secrets
  *   within the limits of [ChangeRules].
- * - A changed path must pass [ChangeRules.pathReason]: the shape, the denylist and the allowlist of the PatchPolicy. The path must be NFC.
+ * - A changed path must pass [ChangeRules.pathReason] (the built-in shape, denylist and allowlist) AND the patterns of the claim, as [PathRules]
+ *   checks them. The path must be NFC.
  * - The counts and sizes are the PatchPolicy limits ([DiffLimits]), so a change that the server would refuse is refused here first.
  *
  * Reasons never include paths, names or content. The walk does not follow symbolic links.
@@ -39,9 +40,17 @@ class DiffCollector(workRoot: Path, private val limits: DiffLimits = DiffLimits(
 
     /**
      * Compares [runDir] with the base manifest at [manifestPath]. [summary] is the text of the result (checked here, as the server does),
-     * [exitStatus] and [sessionId] describe the CLI run. The caller holds the work root lock.
+     * [exitStatus] and [sessionId] describe the CLI run. [pathRules] holds the claim's patterns, checked on top of the built-in rules.
+     * The caller holds the work root lock.
      */
-    fun collect(runDir: Path, manifestPath: Path, summary: String, exitStatus: Int, sessionId: String?): CollectOutcome {
+    fun collect(
+        runDir: Path,
+        manifestPath: Path,
+        summary: String,
+        exitStatus: Int,
+        sessionId: String?,
+        pathRules: PathRules = PathRules.BUILT_IN_ONLY,
+    ): CollectOutcome {
         val base = try {
             BaseManifest.read(manifestPath)
         } catch (e: WorkDirException) {
@@ -53,7 +62,7 @@ class DiffCollector(workRoot: Path, private val limits: DiffLimits = DiffLimits(
             return CollectOutcome.Rejected(listOf(DiffRejectReason.RUN_DIR_INVALID))
         }
 
-        val scan = Scan(root, base)
+        val scan = Scan(root, base, pathRules)
         Files.walkFileTree(root, scan.visitor())
         scan.finishDeletes()
         scan.checkTotals()
@@ -74,7 +83,7 @@ class DiffCollector(workRoot: Path, private val limits: DiffLimits = DiffLimits(
     }
 
     /** The state of one walk. Each field is a count or a set of codes. */
-    private inner class Scan(private val root: Path, private val base: Map<String, BaseEntry>) {
+    private inner class Scan(private val root: Path, private val base: Map<String, BaseEntry>, private val pathRules: PathRules) {
         val reasons: MutableSet<DiffRejectReason> = EnumSet.noneOf(DiffRejectReason::class.java)
         val changes = ArrayList<AgentChange>()
         private val seen = HashSet<String>()
@@ -158,7 +167,7 @@ class DiffCollector(workRoot: Path, private val limits: DiffLimits = DiffLimits(
                 }
             }
             if (executable != (entry?.executable ?: false)) reasons.add(DiffRejectReason.EXECUTABLE_BIT)
-            ChangeRules.pathReason(rel, limits.maxPathChars)?.let {
+            pathRules.reason(rel, limits.maxPathChars)?.let {
                 reasons.add(it)
                 return
             }
@@ -190,7 +199,7 @@ class DiffCollector(workRoot: Path, private val limits: DiffLimits = DiffLimits(
             if (stopped) return
             for (rel in base.keys) {
                 if (rel in seen) continue
-                val refused = ChangeRules.pathReason(rel, limits.maxPathChars)
+                val refused = pathRules.reason(rel, limits.maxPathChars)
                 if (refused != null) {
                     reasons.add(refused)
                     continue

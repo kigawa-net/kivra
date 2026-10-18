@@ -137,7 +137,7 @@ private class World(
     )
     val stopFile: Path = root.resolve(AgentConfig.DEFAULT_STOP_FILE_NAME)
 
-    fun executor(debugKeep: Boolean = false): RealAttemptExecutor = RealAttemptExecutor(
+    fun executor(debugKeep: Boolean = false, newErrorCodes: Boolean = false): RealAttemptExecutor = RealAttemptExecutor(
         client = client,
         workRoot = root,
         stopFile = stopFile,
@@ -150,6 +150,7 @@ private class World(
             gitBinary = GIT_BIN,
             repo = LocalPath(repo.repo),
             debugKeep = debugKeep,
+            newErrorCodes = newErrorCodes,
         ),
         launcher = docker,
         pollMillis = 20,
@@ -161,6 +162,8 @@ private class World(
         maxOutputBytes: Long = 1_048_576,
         body: String = "",
         bodyTruncated: Boolean = false,
+        allowed: List<String> = listOf("kivra-*/src/**"),
+        denied: List<String> = listOf(".github/**"),
     ) = ClaimedAttempt(
         runId = RUN,
         attemptId = ATTEMPT,
@@ -176,8 +179,8 @@ private class World(
             maxTotalBytes = 1_000_000,
             maxDeletes = 5,
         ),
-        allowedPathPatterns = listOf("kivra-*/src/**"),
-        deniedPathPatterns = listOf(".github/**"),
+        allowedPathPatterns = allowed,
+        deniedPathPatterns = denied,
     )
 
     fun paths(suffix: String) = recorded.count { it.path.endsWith(suffix) }
@@ -360,6 +363,82 @@ class RealAttemptExecutorTest {
     }
 
     @Test
+    fun rejectionCodeUsesEmptyPatchOnlyWithTheNewCodes() {
+        assertEquals(
+            AgentErrorCode.EMPTY_PATCH,
+            RealAttemptExecutor.rejectionCode(listOf(DiffRejectReason.EMPTY_PATCH), newErrorCodes = true),
+        )
+        assertEquals(
+            AgentErrorCode.CLI_NONZERO,
+            RealAttemptExecutor.rejectionCode(listOf(DiffRejectReason.EMPTY_PATCH), newErrorCodes = false),
+        )
+        assertEquals(
+            AgentErrorCode.BAD_OUTPUT,
+            RealAttemptExecutor.rejectionCode(listOf(DiffRejectReason.EMPTY_PATCH, DiffRejectReason.PATH_DENIED), newErrorCodes = true),
+        )
+    }
+
+    @Test
+    fun theServerDenylistIsCheckedBeforeAnythingIsSent() = runBlocking {
+        // Hygiene.kt is allowed by the built-in rules and by the claim's allowlist, but the claim denies it.
+        val world = World(docker = ScriptedDocker(
+            output = { lines(resultLine()) },
+            onRun = { dir -> Files.writeString(dir.resolve(CHANGED), "fun h() = 2\n") },
+        ))
+        val outcome = world.executor().execute(world.attempt(denied = listOf("**/Hygiene.kt")))
+
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.BAD_OUTPUT), outcome)
+        assertEquals(0, world.paths("/result"), "a change the claim denies is never sent")
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun invalidClaimPatternsFailAsNeedsHumanBeforeTheCliRuns() = runBlocking {
+        val logger = LoggerFactory.getLogger("net.kigawa.kivra.agent") as Logger
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        val previousLevel = logger.level
+        logger.level = Level.DEBUG
+        logger.addAppender(appender)
+        try {
+            val marker = "PATTERNMARKER\u0001"
+            val world = World(docker = ScriptedDocker(output = { lines(resultLine()) }))
+            val attempts = listOf(
+                world.attempt(allowed = List(101) { "docs/$it/**" }),
+                world.attempt(denied = listOf("docs/$marker/**")),
+            )
+            for (attempt in attempts) {
+                assertEquals(AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN), world.executor().execute(attempt))
+            }
+            assertEquals(emptyList(), world.docker.argvs.filter { it[1] == "run" }, "the CLI is not started")
+            assertEquals(0, world.paths("/heartbeat"))
+            val text = appender.list.joinToString("\n") { it.formattedMessage }
+            assertTrue(text.contains("claim path patterns refused"), "the refusal is logged")
+            assertFalse(text.contains("PATTERNMARKER"), "a pattern is never logged")
+        } finally {
+            logger.detachAppender(appender)
+            logger.level = previousLevel
+        }
+    }
+
+    @Test
+    fun theNewCodesAreSentOnlyWhenTheGateIsOn() = runBlocking {
+        fun emptyPatch() = World(docker = ScriptedDocker(output = { lines(usageLine()) }))
+        assertEquals("""{"generation":3,"errorCode":"CLI_NONZERO",$usageObject}""", failBodyFromLoop(emptyPatch()))
+        assertEquals("""{"generation":3,"errorCode":"EMPTY_PATCH",$usageObject}""", failBodyFromLoop(emptyPatch(), newErrorCodes = true))
+
+        fun budget() = World(docker = ScriptedDocker(output = { lines(usageLine(subtype = "error_max_budget_usd", isError = true)) }, exitCode = 1))
+        assertEquals("""{"generation":3,"errorCode":"CLI_NONZERO",$usageObject}""", failBodyFromLoop(budget()))
+        assertEquals("""{"generation":3,"errorCode":"BUDGET_EXCEEDED",$usageObject}""", failBodyFromLoop(budget(), newErrorCodes = true))
+
+        fun overloaded() = World(docker = ScriptedDocker(
+            output = { lines("""{"type":"system","subtype":"api_retry","error":"overloaded"}""") },
+            exitCode = 1,
+        ))
+        assertEquals("""{"generation":3,"errorCode":"RATE_LIMITED"}""", failBodyFromLoop(overloaded()))
+        assertEquals("""{"generation":3,"errorCode":"OVERLOADED"}""", failBodyFromLoop(overloaded(), newErrorCodes = true))
+    }
+
+    @Test
     fun aServerErrorOnTheLeaseCheckRemovesTheWorkDirectoryAndPropagates() = runBlocking {
         val world = World(
             docker = ScriptedDocker(output = { lines(resultLine()) }, onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") }),
@@ -535,9 +614,9 @@ class RealAttemptExecutorTest {
         """"inputTokens":120,"outputTokens":45,"cacheCreationTokens":10,"cacheReadTokens":300}"""
 
     /** Runs the loop until kivra gets a fail, and returns that fail's body. */
-    private suspend fun failBodyFromLoop(world: World): String = coroutineScope {
+    private suspend fun failBodyFromLoop(world: World, newErrorCodes: Boolean = false): String = coroutineScope {
         val config = AgentConfig.fromEnv(testConfigEnv(world.root, world.root.resolve("secret").writeSecret("s"), poll = 1_000))
-        val job = launch { AgentLoop(config, world.client, world.executor()).run() }
+        val job = launch { AgentLoop(config, world.client, world.executor(newErrorCodes = newErrorCodes)).run() }
         withTimeout(30_000) { while (world.paths("/fail") == 0) delay(20) }
         job.cancelAndJoin()
         world.recorded.single { it.path.endsWith("/fail") }.body

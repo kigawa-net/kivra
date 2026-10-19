@@ -45,10 +45,11 @@ internal val MIGRATION_FILES = mapOf(
     19 to "V19__selfdev_approval.sql",
     20 to "V20__coding_monitor_events.sql",
     21 to "V21__selfdev_memory.sql",
+    24 to "V24__selfdev_memory_quota_lock.sql",
 )
 
 /**
- * Migration chain V1 -> V2 -> ... -> V21 (Issue #88, #94, #53, #100, #112, #26, #56, #229, #277). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
+ * Migration chain V1 -> V2 -> ... -> V21 -> V24 (Issue #88, #94, #53, #100, #112, #26, #56, #229, #277). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
  *
  * Partial histories are built from copies of the real migration files in a temporary directory. Nothing here repairs,
  * skips or baselines a history: a mismatch must fail.
@@ -56,13 +57,15 @@ internal val MIGRATION_FILES = mapOf(
 class MigrationChainTest {
 
     @Test
-    fun `empty database applies V1 to V21 in order and flyway validate passes`() = TestDb().use { db ->
+    fun `empty database applies V1 to V21 and V24 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
-        assertEquals((1..21).map { it.toString() }, appliedVersions(db.dataSource))
+        assertEquals(((1..21).map { it.toString() } + "24"), appliedVersions(db.dataSource))
         assertEquals(1, db.tableCount("selfdev_memory_records"))
         assertEquals(1, db.tableCount("selfdev_memory_events"))
         assertEquals(1, db.tableCount("selfdev_plan_memory_refs"))
+        assertEquals(1, db.tableCount("selfdev_memory_quota_lock"))
+        assertEquals(1, db.count("selfdev_memory_quota_lock"))
         assertTrue(flyway.info().all().all { it.state == MigrationState.SUCCESS })
         assertEquals(1, db.tableCount("approvals"))
         assertEquals(1, db.tableCount("coding_results"))
@@ -92,7 +95,7 @@ class MigrationChainTest {
             // The later migrations are applied on top of the existing history, in order.
             runMigrations(db.dataSource)
             classpathFlyway(db.dataSource).validate()
-            assertEquals((1..21).map { it.toString() }, appliedVersions(db.dataSource))
+            assertEquals(((1..21).map { it.toString() } + "24"), appliedVersions(db.dataSource))
 
             // The row is kept as written: no backfill, no guessed binding.
             assertEquals(before, db.snapshot(opId))

@@ -90,10 +90,17 @@ class SelfDevMemoryRepository(
         require(MAX_CONDITION_DELETE > 0) { "MAX_CONDITION_DELETE must be positive" }
     }
 
-    /** Validates [candidate] and, when it passes, writes one record. Every write in this class goes through here. */
+    /**
+     * Validates [candidate] and, when it passes, writes one record. Every write in this class goes through here.
+     *
+     * The quotas (V12) are counted over all rows, not per row, so the count and the insert must not interleave with another
+     * [save]. The first statement of the transaction locks the quota row (V24); the counts in [gatherFacts] and the insert
+     * then run under that lock. A lock taken after the count would not stop two saves from both reading "below the limit".
+     */
     fun save(candidate: MemoryCandidate): MemorySaveResult {
         if (!enabled) return MemorySaveResult.Disabled
         return transaction(database) {
+            lockQuota()
             val now = utcNow(clock)
             val facts = gatherFacts(candidate, now)
             when (val verdict = SelfDevMemoryValidator.validate(candidate, facts)) {
@@ -243,6 +250,15 @@ class SelfDevMemoryRepository(
                 eventsPurged = purgedEvents,
             )
         }
+    }
+
+    /**
+     * Locks the quota row (V24) until the transaction ends. Serializes every [save], so no two writers count the quotas at once.
+     * Deletions do not take it: they only lower the counts, which cannot make a save exceed a limit.
+     */
+    private fun org.jetbrains.exposed.sql.Transaction.lockQuota() {
+        execQuery("SELECT guard_id FROM selfdev_memory_quota_lock WHERE guard_id = ? FOR UPDATE", QUOTA_GUARD) { it.getString(1) }
+            .singleOrNull() ?: error("selfdev_memory_quota_lock has no row; V24 is not applied")
     }
 
     /**
@@ -417,6 +433,9 @@ class SelfDevMemoryRepository(
         const val REASON_OPERATOR_DELETE = "OPERATOR_DELETE"
         const val REASON_CONDITION_DELETE = "CONDITION_DELETE"
         const val REASON_RETENTION = "RETENTION"
+
+        /** The one row of `selfdev_memory_quota_lock` (V24). Locked by [save]; never updated. */
+        private const val QUOTA_GUARD = "QUOTA"
 
         private const val SCOPE_ID = "ID"
         private const val SCOPE_CONDITION = "CONDITION"

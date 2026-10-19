@@ -17,7 +17,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 class MigrationRollingUpgradeTest {
 
     @Test
-    fun `a database at every version from V2 to V10 upgrades to V21 and keeps its rows`() {
+    fun `a database at every version from V2 to V10 upgrades to V24 and keeps its rows`() {
         for (current in 2..10) {
             TestDb { ds -> migrateOnly(ds, *(1..current).toList().toIntArray()) }.use { db ->
                 val runId = db.insertRun(task = "task-at-v$current")
@@ -27,7 +27,7 @@ class MigrationRollingUpgradeTest {
 
                 runMigrations(db.dataSource)
                 classpathFlyway(db.dataSource).validate()
-                assertEquals((1..21).map { it.toString() }, appliedVersions(db.dataSource), "from V$current")
+                assertEquals(((1..21).map { it.toString() } + "24"), appliedVersions(db.dataSource), "from V$current")
 
                 // Rows are kept as written. New columns stay NULL, nothing is backfilled.
                 assertEquals(runBefore, db.runRow(runId), "run row changed upgrading from V$current")
@@ -44,10 +44,10 @@ class MigrationRollingUpgradeTest {
     }
 
     @Test
-    fun `a database at V1 upgrades to V21 without any rows`() = TestDb { ds -> migrateOnly(ds, 1) }.use { db ->
+    fun `a database at V1 upgrades to V24 without any rows`() = TestDb { ds -> migrateOnly(ds, 1) }.use { db ->
         runMigrations(db.dataSource)
         classpathFlyway(db.dataSource).validate()
-        assertEquals((1..21).map { it.toString() }, appliedVersions(db.dataSource))
+        assertEquals(((1..21).map { it.toString() } + "24"), appliedVersions(db.dataSource))
     }
 
     /** The later migrations' indexes, keys and NOT NULL columns exist on the full chain (names are the contract for runbooks). */

@@ -21,7 +21,7 @@ class MigrationExpandOnlyTest {
     @Test
     fun `every migration is expand-only, except the listed changes that already need a Contract step`() {
         val files = migrationFiles()
-        assertEquals((1..files.size).toList(), files.keys.toList(), "migration versions must be contiguous from V1")
+        assertEquals(expectedVersions(files.keys.max()), files.keys.toList(), "migration versions must be contiguous from V1, except the reserved gaps")
 
         val found = files.flatMap { (version, sql) -> expandViolations(version, sql) }.toSet()
 
@@ -95,7 +95,17 @@ class MigrationExpandOnlyTest {
         }
     }
 
+    /** The versions from 1 to [last] that a migration may use: every number except the reserved gaps. */
+    private fun expectedVersions(last: Int): List<Int> = (1..last).filter { it !in RESERVED_GAPS }
+
     companion object {
+        /**
+         * Version numbers that may be absent on purpose. V22 stays empty for good (the memory quota lock is V24, numbered after the
+         * open PR #291's V23). V23 is absent only until #291 lands: remove 23 from this set once V23 is on main. A new gap needs an
+         * entry here with a reason.
+         */
+        val RESERVED_GAPS: Set<Int> = setOf(22, 23)
+
         /**
          * Changes that are not Expand-only, with the reason. Each key is `V<n>:<what>` as produced by [expandViolations].
          * Adding an entry here is a decision: the old Writer must be drained first, or the change reworked to be additive.

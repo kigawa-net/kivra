@@ -32,6 +32,42 @@ class SecretFilterTest {
         assertFalse(SecretFilter.containsSecret("https://github.com/kigawa-net/kivra/issues/37"))
     }
 
+    /** ADR 0016 P0: the forms that were not covered before (Anthropic and OpenAI keys, client secrets, Basic auth, key ends, base64). */
+    @Test
+    fun `detects the forms added for the self-development memory`() {
+        val samples = mapOf(
+            SecretKind.API_KEY to "key sk-ant-api03-Zk3Qm9Xp2Lw8Vt5Rb7Nc4Hd6Jf1Gs0YaE9uTxQwEr here",
+            SecretKind.API_KEY to "key sk-proj-Zk3Qm9Xp2Lw8Vt5Rb7Nc4Hd6Jf1Gs0YaE9uTxQwEr here",
+            SecretKind.CLIENT_SECRET to "client_secret=Zk3Qm9Xp2Lw8Vt5Rb7Nc4Hd6Jf1G",
+            SecretKind.CLIENT_SECRET to "{\"client_secret\": \"Zk3Qm9Xp2Lw8Vt5Rb7Nc4Hd6Jf1G\"}",
+            SecretKind.BASIC_AUTH to "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+            SecretKind.PRIVATE_KEY to "-----END RSA PRIVATE KEY-----",
+            SecretKind.HIGH_ENTROPY to "blob Zk3Qm9Xp2Lw8/Vt5Rb7Nc4Hd6Jf1Gs0YaE9uTxQwEr",
+        )
+        for ((kind, text) in samples) {
+            assertTrue(SecretFilter.scan(text).any { it.kind == kind }, "expected $kind in: $text")
+        }
+    }
+
+    /** The false-positive side: ordinary text near the new patterns must stay allowed. */
+    @Test
+    fun `does not flag ordinary text that only resembles the new forms`() {
+        val prose = listOf(
+            "sk-ant is a prefix; the key itself is never written here",
+            "rotate the client secret every quarter, see the runbook",
+            "the client_secret field is required; set it from the vault",
+            "Authorization: Basic auth is not used on this endpoint",
+            "a basic configuration for the server with two replicas",
+            "the bearer of bad news asked for a review",
+            "src/main/kotlin/net/kigawa/kivra/memory/SecretFilter.kt",
+            "KivraSelfDevMemoryValidatorRepositoryTestFixtureNameLong",
+            "プロンプトに秘密を書かない。sk-ant- の形は拒否する。",
+        )
+        for (text in prose) {
+            assertFalse(SecretFilter.containsSecret(text), "unexpected finding in: $text")
+        }
+    }
+
     @Test
     fun `redact masks the value and findings never print it`() {
         val text = "use ghp_abcdefghijklmnopqrstuvwxyz0123456789 now"

@@ -44,6 +44,14 @@ private fun enabledEnv(vararg overrides: Pair<String, String?>): Map<String, Str
 
 class SelfDevSettingsTest {
     @Test
+    fun `the pull request branch update is off by default, only true turns it on, and any other value is a startup error`() {
+        assertFalse(SelfDevSettings.fromEnv(enabledEnv()).prRebaseEnabled)
+        assertFalse(SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_PR_REBASE_ENABLED" to "false")).prRebaseEnabled)
+        assertTrue(SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_PR_REBASE_ENABLED" to "true")).prRebaseEnabled)
+        assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_PR_REBASE_ENABLED" to "yes")) }
+    }
+
+    @Test
     fun `unset or false keeps the feature off and reads no self-development variable`() {
         assertFalse(SelfDevSettings.fromEnv(TrapEnv(emptyMap())).enabled)
         assertFalse(SelfDevSettings.fromEnv(TrapEnv(mapOf("KIVRA_SELFDEV_ENABLED" to "false"))).enabled)

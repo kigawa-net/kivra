@@ -49,6 +49,18 @@ interface DevelopmentRunStore {
      * [net.kigawa.kivra.core.PrMergeAuthorityUnavailableException] when the Authority cannot answer.
      */
     suspend fun completePrOnlyRun(lease: Lease, expectedVersion: Long): DevelopmentRun
+
+    /** Writes the audit row of a branch update attempt, before the update is sent (issue #276). Fenced. */
+    fun recordRebaseAttempt(lease: Lease, headSha: String)
+
+    /** Audits a branch update that was not completed, with a fixed reason code (issue #276). Fenced. */
+    fun recordRebaseHold(lease: Lease, fromHead: String, reasonCode: String)
+
+    /** The branch update attempts of the run: (all, at or after [since]). */
+    fun countRebaseAttempts(runId: RunId, since: Instant): Pair<Int, Int>
+
+    /** Moves the recorded pull request head to [toHead] and audits it, in one transaction (issue #276). Fenced. */
+    fun rebindPullRequestHead(lease: Lease, expectedVersion: Long, fromHead: String, toHead: String, reasonCode: String)
 }
 
 class DbDevelopmentRunStore(
@@ -82,6 +94,16 @@ class DbDevelopmentRunStore(
 
     override suspend fun completePrOnlyRun(lease: Lease, expectedVersion: Long): DevelopmentRun =
         runs.completePrOnlyRun(lease, expectedVersion, actor)
+
+    override fun recordRebaseAttempt(lease: Lease, headSha: String) = runs.recordRebaseAttempt(lease, headSha, actor)
+
+    override fun recordRebaseHold(lease: Lease, fromHead: String, reasonCode: String) =
+        runs.recordRebaseHold(lease, fromHead, reasonCode, actor)
+
+    override fun countRebaseAttempts(runId: RunId, since: Instant): Pair<Int, Int> = runs.countRebaseAttempts(runId, since)
+
+    override fun rebindPullRequestHead(lease: Lease, expectedVersion: Long, fromHead: String, toHead: String, reasonCode: String) =
+        runs.rebindPullRequestHead(lease, expectedVersion, fromHead, toHead, reasonCode, actor)
 
     private companion object {
         const val ACTOR = "selfdev-runner"

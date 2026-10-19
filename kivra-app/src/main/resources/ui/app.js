@@ -150,7 +150,8 @@
     budgetCheckedAt: 0,
     budgetFx: null,
     budgetDialog: null,
-    budgetSubmitting: false
+    budgetSubmitting: false,
+    exec: null
   };
 
   function $(id) {
@@ -170,7 +171,7 @@
       // Only the fixed constants '_blank' and 'noopener noreferrer' are passed here (see prNode).
       else if (k === 'target' || k === 'rel') node[k] = v;
       // Element ids and ARIA attributes, set as attributes (values are fixed strings or ids this page built).
-      else if (k === 'id' || k.indexOf('aria-') === 0) node.setAttribute(k, v);
+      else if (k === 'id' || k === 'role' || k.indexOf('aria-') === 0) node.setAttribute(k, v);
       else throw new Error('unsupported prop: ' + k);
     });
     (children || []).forEach(function (c) {
@@ -299,6 +300,7 @@
    */
   function markSessionExpired() {
     state.sessionExpired = true;
+    stopExecution();
     $('session-banner').hidden = false;
     $('refresh-btn').disabled = true;
     updateSubmitEnabled();
@@ -762,6 +764,9 @@
     container.appendChild(dl);
     var releaseKind = releaseKindOf(run);
     if (releaseKind !== null) container.appendChild(releaseActionNode(run, all, releaseKind));
+    if (run.mode === SELF_DEV_KIND && typeof run.runId === 'string' && RUN_ID_RE.test(run.runId)) {
+      container.appendChild(beginExecution(run.runId, str(run.state)));
+    }
     if (Array.isArray(run.events)) {
       container.appendChild(h('h3', { text: '状態の経過' }));
       if (run.events.length === 0) {
@@ -777,6 +782,7 @@
   }
 
   async function loadDetail(id, all) {
+    stopExecution();
     var seq = ++state.detailSeq;
     var body = $('detail-body');
     clear(body);
@@ -818,6 +824,7 @@
   }
 
   function route() {
+    stopExecution();
     var r = parseRoute();
     var showDetail = r !== null;
     $('view-list').hidden = showDetail;
@@ -1891,6 +1898,427 @@
     refreshAutopilot();
   }
 
+  // ---- Execution (ADR 0012 PR 4, "実行の経過") -------------------------------
+  // Shown only for a self-development Run whose execution snapshot answers 200 with attempts. Everything else (404,
+  // 403, no attempts, a simulation) hides the section. The REST snapshot is the base; SSE is an optional nudge.
+  // A dropped stream or a stopped watch is never shown as "the Run is fine" or "the problem is gone".
+
+  var EXEC = {
+    POLL_MS: 5000,
+    POLL_HIDDEN_MS: 30000,
+    POLL_STREAM_MS: 15000,
+    BACKOFF_MAX_MS: 60000,
+    STREAM_MAX_ERRORS: 3,
+    NUDGE_MS: 500
+  };
+  var EXEC_TERMINAL = { COMPLETED: true, FAILED: true, CANCELLED: true };
+  var EXEC_ACTIVE_ATTEMPT = { QUEUED: true, CLAIMED: true, RUNNING: true };
+  var EXEC_ATTEMPT_STATES = {
+    QUEUED: '待機中',
+    CLAIMED: '割り当て済み',
+    RUNNING: '稼働中（CLI）',
+    RESULT_RECEIVED: '結果を受信',
+    FAILED: '失敗',
+    CANCELLED: '取消し',
+    EXPIRED: '期限切れ',
+    ORPHANED: '孤立（対応する実行が見つからない）'
+  };
+  // The fixed tool names (MonitorEventSchema.TOOL_NAMES) and their labels. Any other name is counted as OTHER.
+  var EXEC_TOOLS = [
+    ['Read', '読み取り（Read）'],
+    ['Edit', '編集（Edit）'],
+    ['Write', '書き込み（Write）'],
+    ['Bash', 'シェル（Bash）'],
+    ['Grep', '内容の検索（Grep）'],
+    ['Glob', 'ファイルの検索（Glob）'],
+    ['Task', 'サブタスク（Task）'],
+    ['TodoWrite', 'TODO の更新（TodoWrite）'],
+    ['OTHER', 'その他']
+  ];
+  var EXEC_PHASES = {
+    STARTED: '開始',
+    EDITING: '編集中',
+    TESTING: 'テスト中',
+    ROUND_COMPLETED: 'ラウンド完了',
+    FINALIZING: '仕上げ中'
+  };
+  var EXEC_STOP = {
+    NONE: '停止要求はありません',
+    REQUESTED: '停止要求あり（エージェントの確認待ち）',
+    STOPPING: '停止中（エージェントが停止要求を受けたと報告）',
+    EXIT_CONFIRMED: '停止確認（エージェントがプロセスの終了を報告）',
+    CANCELLED: '取消し済み（Run が CANCELLED）'
+  };
+  var EXEC_MSG = {
+    loadFailed: '監視の情報を取得できませんでした（通信または応答の失敗）。Run の状態ではありません。しばらくすると自動で取り直します。',
+    stale: '表示は古い可能性があります',
+    noReceipt: '受信の記録がありません。表示は古い可能性があります',
+    stopped: 'Run の状態が終端のため、取得を止めました（表示は取得時点のものです）。'
+  };
+
+  function parseInstant(s) {
+    var m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/.exec(str(s));
+    if (!m) return null;
+    // Only milliseconds are used: browsers differ on longer fractions.
+    var t = Date.parse(m[1] + '.' + (m[2] ? (m[2] + '000').slice(0, 3) : '000') + 'Z');
+    return isNaN(t) ? null : t;
+  }
+
+  /** A count from the server: a non-negative whole number, or null (shown as 不明). */
+  function count(v) {
+    return typeof v === 'number' && isFinite(v) && v >= 0 && Math.floor(v) === v ? String(v) : '不明';
+  }
+
+  /** A money value (a decimal string from the server): always labelled with USD by the caller. */
+  function usd(v) {
+    return typeof v === 'string' && /^[0-9]{1,12}(\.[0-9]{1,6})?$/.test(v) ? 'USD ' + v : '不明';
+  }
+
+  function lookup(map, key) {
+    return has(map, str(key)) ? map[str(key)] : str(key) === '' ? '（不明）' : '不明な値（' + str(key) + '）';
+  }
+
+  function beginExecution(runId, runState) {
+    stopExecution();
+    var body = h('div', { className: 'exec-body', 'aria-live': 'polite' }, []);
+    var section = h('section', { className: 'exec-section', 'aria-labelledby': 'h-exec' }, [
+      h('h3', { id: 'h-exec', text: '実行の経過' }),
+      h('p', { className: 'meta', text: '自己開発（CLI 経路）の実行を、読み取り専用で表示します。停止はこの画面からは行えません。' }),
+      body
+    ]);
+    section.hidden = true;
+    var ex = {
+      runId: runId, runState: runState, section: section, body: body,
+      active: true, shown: false, timer: null, inFlight: false, pendingNudge: false,
+      failures: 0, lastError: null, snap: null, snapAt: 0, skewMs: 0,
+      stream: null, streamOpen: false, streamErrors: 0, streamResyncs: 0, streamDisabled: false
+    };
+    state.exec = ex;
+    execFetch(ex);
+    return section;
+  }
+
+  function stopExecution() {
+    var ex = state.exec;
+    if (!ex) return;
+    ex.active = false;
+    if (ex.timer !== null) clearTimeout(ex.timer);
+    ex.timer = null;
+    streamClose(ex);
+    state.exec = null;
+  }
+
+  function execSchedule(ex, ms) {
+    if (ex.timer !== null) clearTimeout(ex.timer);
+    ex.timer = setTimeout(function () {
+      ex.timer = null;
+      execFetch(ex);
+    }, ms);
+  }
+
+  /** The next poll interval: longer while the tab is hidden or the stream is open, and backed off after failures. */
+  function execDelay(ex) {
+    var base = document.hidden ? EXEC.POLL_HIDDEN_MS : (ex.streamOpen ? EXEC.POLL_STREAM_MS : EXEC.POLL_MS);
+    if (ex.failures === 0) return base;
+    return Math.min(EXEC.BACKOFF_MAX_MS, base * Math.pow(2, Math.min(ex.failures, 4)));
+  }
+
+  function execReschedule(ex) {
+    if (!ex.active || ex.inFlight) return;
+    execSchedule(ex, execDelay(ex));
+  }
+
+  /** A stream message or resync: read the snapshot soon, once (several messages in a row make one read). */
+  function execNudge(ex) {
+    if (!ex.active) return;
+    if (ex.inFlight) {
+      ex.pendingNudge = true;
+      return;
+    }
+    execSchedule(ex, EXEC.NUDGE_MS);
+  }
+
+  function execVisibilityChanged() {
+    var ex = state.exec;
+    if (!ex || !ex.active || ex.inFlight) return;
+    if (document.hidden) execReschedule(ex);
+    else execFetch(ex);
+  }
+
+  function isOlderRevision(a, b) {
+    return a.attemptVersion < b.attemptVersion || (a.attemptVersion === b.attemptVersion && a.eventCount < b.eventCount);
+  }
+
+  function validSnapshot(d) {
+    return d && typeof d === 'object' && typeof d.runState === 'string' && Array.isArray(d.attempts) &&
+      d.revision && typeof d.revision === 'object' && typeof d.freshness === 'string' &&
+      d.tools && typeof d.tools === 'object' && d.stop && typeof d.stop === 'object' &&
+      d.cost && typeof d.cost === 'object';
+  }
+
+  async function execFetch(ex) {
+    if (!ex.active) return;
+    if (ex.inFlight) {
+      ex.pendingNudge = true;
+      return;
+    }
+    if (ex.timer !== null) clearTimeout(ex.timer);
+    ex.timer = null;
+    ex.inFlight = true;
+    var r = await apiFetch('/api/admin/runs/' + encodeURIComponent(ex.runId) + '/execution', 'GET', undefined, true);
+    ex.inFlight = false;
+    if (!ex.active) return;
+    if (!r.ok) {
+      execFailed(ex, r);
+    } else if (!validSnapshot(r.data)) {
+      execFailed(ex, { kind: 'invalid' });
+    } else {
+      execAccepted(ex, r.data);
+    }
+    if (ex.active && ex.pendingNudge) {
+      ex.pendingNudge = false;
+      execNudge(ex);
+    }
+  }
+
+  function execFailed(ex, r) {
+    // 401, 403 and 404: this Run has no execution view for this user (an API-path run, or not visible). Hide, stop.
+    if (r.status === 401 || r.status === 403 || r.status === 404 || r.kind === 'session') {
+      if (state.sessionExpired) {
+        stopExecution();
+        return;
+      }
+      ex.shown = false;
+      ex.active = false;
+      renderExecution(ex);
+      return;
+    }
+    ex.failures += 1;
+    ex.lastError = r.kind === 'network' ? 'network' : 'failed';
+    ex.shown = true;
+    renderExecution(ex);
+    execReschedule(ex);
+  }
+
+  function execAccepted(ex, d) {
+    ex.failures = 0;
+    ex.lastError = null;
+    if (d.attempts.length === 0) {
+      // No attempt: not a CLI run (yet). Hidden; the page is read again on the next load.
+      ex.shown = false;
+      ex.active = false;
+      renderExecution(ex);
+      return;
+    }
+    // A snapshot older than the one shown never replaces it (a late answer must not move the state back).
+    var accept = !ex.snap || !isOlderRevision(d.revision, ex.snap.revision);
+    var now = Date.now();
+    var serverNow = parseInstant(d.snapshotAt);
+    if (accept) {
+      ex.snap = d;
+      ex.snapAt = now;
+      ex.skewMs = serverNow === null ? 0 : serverNow - now;
+      ex.runState = d.runState;
+    }
+    ex.shown = true;
+    renderExecution(ex);
+    if (EXEC_TERMINAL[ex.runState] === true) {
+      streamClose(ex);
+      ex.active = false;
+      renderExecution(ex);
+      return;
+    }
+    if (!ex.streamOpen && !ex.streamDisabled && ex.stream === null) streamStart(ex);
+    if (ex.pendingNudge) return;
+    execReschedule(ex);
+  }
+
+  /** SSE: optional. A failure, or a stream that keeps dropping, falls back to the REST poll (which runs anyway). */
+  function streamStart(ex) {
+    if (state.sessionExpired || ex.streamDisabled || ex.stream !== null || typeof window.EventSource !== 'function') return;
+    var es;
+    try {
+      es = new window.EventSource('/api/admin/runs/' + encodeURIComponent(ex.runId) + '/execution/stream');
+    } catch (e) {
+      ex.streamDisabled = true;
+      return;
+    }
+    ex.stream = es;
+    es.onopen = function () {
+      if (ex.stream !== es) return;
+      ex.streamOpen = true;
+      renderExecution(ex);
+    };
+    es.addEventListener('monitor', function () {
+      if (ex.stream !== es) return;
+      ex.streamErrors = 0;
+      execNudge(ex);
+    });
+    es.addEventListener('resync', function () {
+      if (ex.stream !== es) return;
+      // The server says the cursor is gone: read the snapshot again and open a new stream. A second resync in this view: stop using SSE.
+      streamClose(ex);
+      ex.streamResyncs += 1;
+      if (ex.streamResyncs > 1) ex.streamDisabled = true;
+      renderExecution(ex);
+      execNudge(ex);
+    });
+    es.onerror = function () {
+      if (ex.stream !== es) return;
+      ex.streamOpen = false;
+      ex.streamErrors += 1;
+      if (es.readyState === 2 || ex.streamErrors >= EXEC.STREAM_MAX_ERRORS) {
+        streamClose(ex);
+        ex.streamDisabled = true;
+        execReschedule(ex);
+      }
+      renderExecution(ex);
+    };
+  }
+
+  function streamClose(ex) {
+    if (ex.stream !== null) {
+      ex.stream.onopen = null;
+      ex.stream.onerror = null;
+      ex.stream.close();
+    }
+    ex.stream = null;
+    ex.streamOpen = false;
+  }
+
+  function staleMinutes(ex) {
+    var last = parseInstant(ex.snap && ex.snap.lastReceivedAt);
+    if (last === null) return null;
+    var elapsed = Date.now() + ex.skewMs - last;
+    return Math.max(0, Math.floor(elapsed / 60000));
+  }
+
+  function statusLine(ex) {
+    if (!ex.snap) return null;
+    var fresh = ex.snap.freshness;
+    if (fresh === 'STALE') {
+      var n = staleMinutes(ex);
+      var text = n === null ? EXEC_MSG.noReceipt : '最終の受信から ' + (n < 1 ? '1 分未満' : n + ' 分経過。' + EXEC_MSG.stale);
+      return h('p', { className: 'exec-stale', role: 'status', text: text });
+    }
+    var last = parseInstant(ex.snap.lastReceivedAt);
+    return h('p', { className: 'meta', text: '鮮度: ' + fresh + '。最終の受信: ' + (last === null ? '不明' : fmtLocal(last)) });
+  }
+
+  function renderExecution(ex) {
+    ex.section.hidden = !ex.shown;
+    if (ex.section.hidden) {
+      clear(ex.body);
+      return;
+    }
+    var body = ex.body;
+    clear(body);
+    var nodes = [];
+    if (ex.lastError) {
+      var at = ex.snapAt ? '（最後に取得できた時点: ' + fmtClock(ex.snapAt) + '）' : '';
+      nodes.push(h('p', { className: 'exec-warn', role: 'status', text: EXEC_MSG.loadFailed + at }));
+    }
+    if (!ex.snap) {
+      if (!ex.lastError) nodes.push(h('p', { className: 'empty', text: '読み込み中…' }));
+      body.appendChild(h('div', { className: 'exec-block' }, nodes));
+      return;
+    }
+    var snap = ex.snap;
+    var stale = statusLine(ex);
+    if (stale) nodes.push(stale);
+    nodes.push(h('p', { className: 'meta', text: streamText(ex) }));
+    body.appendChild(h('div', { className: 'exec-block' }, nodes));
+
+    var warn = [];
+    if (snap.warnings > 0) warn.push('警告: ' + count(snap.warnings) + ' 件');
+    if (snap.dropped > 0) warn.push('送信の取りこぼし（上限などで落とした件数）: ' + count(snap.dropped) + ' 件');
+    if (snap.truncated === true) warn.push('記録の上限に達したため、以降は一部だけ記録されています');
+    var retries = snap.apiRetries && typeof snap.apiRetries === 'object' ? Object.keys(snap.apiRetries) : [];
+    retries.forEach(function (k) { warn.push('API の再試行（' + k + '）: ' + count(snap.apiRetries[k]) + ' 回'); });
+    if (warn.length > 0) {
+      body.appendChild(h('div', { className: 'exec-block' }, [
+        h('h4', { text: '注意' }),
+        h('ul', { className: 'exec-warnlist' }, warn.map(function (t) { return h('li', { text: t }); }))
+      ]));
+    }
+
+    var attemptItems = snap.attempts.map(function (a) {
+      if (!a || typeof a !== 'object') return null;
+      var t = '試行 #' + count(a.attemptNo) + '：' + lookup(EXEC_ATTEMPT_STATES, a.state) +
+        '（世代 ' + count(a.leaseGeneration) + '）';
+      var last = parseInstant(a.lastReceivedAt);
+      if (last !== null) t += '、最終の受信 ' + fmtLocal(last);
+      return h('li', { text: t });
+    }).filter(function (n) { return n !== null; });
+    var active = snap.attempts.some(function (a) { return a && EXEC_ACTIVE_ATTEMPT[str(a.state)] === true; });
+    var progress = [
+      h('h4', { text: '試行' }),
+      h('ul', { className: 'exec-list' }, attemptItems)
+    ];
+    if (active) {
+      progress.push(h('p', { className: 'meta', text: '進み具合: 不確定（総量の上限は分からないため、割合は出しません）' }));
+      progress.push(h('progress', { 'aria-label': '進み具合（不確定）' }, []));
+    }
+    body.appendChild(h('div', { className: 'exec-block' }, progress));
+
+    var phase = snap.lastPhase === null || snap.lastPhase === undefined ? 'なし' : lookup(EXEC_PHASES, snap.lastPhase);
+    var toolDl = h('dl', { className: 'exec-dl' }, []);
+    EXEC_TOOLS.forEach(function (pair) {
+      toolDl.appendChild(h('dt', { text: pair[1] }));
+      toolDl.appendChild(h('dd', { text: count(toolCountFor(snap.tools, pair[0])) + ' 回' }));
+    });
+    body.appendChild(h('div', { className: 'exec-block' }, [
+      h('h4', { text: '進み（ターン・ツール呼び出し）' }),
+      h('dl', { className: 'exec-dl' }, [
+        h('dt', { text: 'ターン' }), h('dd', { text: 'ターン ' + count(snap.turns) }),
+        h('dt', { text: 'ツール呼び出し（合計）' }), h('dd', { text: count(snap.tools.total) + ' 回' }),
+        h('dt', { text: 'ツール結果の失敗' }), h('dd', { text: count(snap.tools.errors) + ' 件' }),
+        h('dt', { text: '権限の拒否' }), h('dd', { text: count(snap.permissionDenied) + ' 件' }),
+        h('dt', { text: '最後の段階（エージェントの報告）' }), h('dd', { text: phase }),
+        h('dt', { text: 'テストの段階' }), h('dd', { text: snap.testingReported === true ? '報告あり' : '報告なし' })
+      ]),
+      h('h4', { text: 'ツールの種類別の件数' }),
+      toolDl
+    ]));
+
+    var cost = snap.cost;
+    body.appendChild(h('div', { className: 'exec-block' }, [
+      h('h4', { text: '費用' }),
+      h('dl', { className: 'exec-dl' }, [
+        h('dt', { text: '確定（CLI の報告。終了後に確定します）' }), h('dd', { text: usd(cost.confirmedUsd) }),
+        h('dt', { text: '推定（予約からの見積り。確定ではありません）' }), h('dd', { className: 'exec-estimate', text: usd(cost.estimatedUsd) + '（推定）' })
+      ])
+    ]));
+
+    var stop = snap.stop;
+    body.appendChild(h('div', { className: 'exec-block' }, [
+      h('h4', { text: '停止' }),
+      h('dl', { className: 'exec-dl' }, [
+        h('dt', { text: '段階' }), h('dd', { text: lookup(EXEC_STOP, stop.stage) }),
+        h('dt', { text: '停止要求' }), h('dd', { text: stop.runCancelRequested === true ? 'あり' : 'なし' }),
+        h('dt', { text: 'エージェントの確認（エージェントの報告）' }), h('dd', { text: stop.agentAcknowledged === true ? '停止要求を受けたと報告' : '報告なし' }),
+        h('dt', { text: 'プロセスの終了（エージェントの報告）' }), h('dd', { text: stop.processExitConfirmed === true ? '終了を報告' : '報告なし' })
+      ])
+    ]));
+  }
+
+  /** Tool counts by the fixed names. Unknown names are not shown: they are added to OTHER. */
+  function toolCountFor(tools, name) {
+    var by = tools.byName && typeof tools.byName === 'object' ? tools.byName : {};
+    if (name !== 'OTHER') return has(by, name) ? by[name] : 0;
+    var other = has(by, 'OTHER') ? by.OTHER : 0;
+    Object.keys(by).forEach(function (k) {
+      if (!EXEC_TOOLS.some(function (p) { return p[0] === k; })) other += typeof by[k] === 'number' ? by[k] : 0;
+    });
+    return other;
+  }
+
+  function streamText(ex) {
+    if (ex.streamOpen) return '取得方法: 常時接続（SSE）。定期の取得も併用しています。';
+    if (ex.streamDisabled) return '取得方法: 定期取得（' + Math.round(EXEC.POLL_MS / 1000) + ' 秒ごと）。常時接続は使えなかったため、定期取得に切り替えました。';
+    return '取得方法: 定期取得（' + Math.round(EXEC.POLL_MS / 1000) + ' 秒ごと）';
+  }
+
   // ---- Timers (stopped while the tab is hidden) --------------------------
 
   function tick() {
@@ -1933,6 +2361,7 @@
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) stopTimers();
       else startTimers();
+      execVisibilityChanged();
     });
     updateCounter();
     renderHealth();

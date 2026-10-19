@@ -196,6 +196,7 @@ MCP サーバーは **Control Plane のアダプター**とする。新しい Ru
 | PR 1 | kigawa-net/kivra#263 | マージ済み(2026-10-18、main b2697a4) | kivra の `/mcp` の骨格、OIDC の検証、読み取りの 2 ツール |
 | PR 2 | kigawa01/k8s-system#280 | 作成済み・未マージ | Keycloak の public client `kivra-mcp`、スコープ、audience mapper |
 | PR 3 | kigawa-net/kigawa-net-k8s#369 | 作成済み・未マージ | `/mcp` と `/.well-known/oauth-protected-resource` を oauth2-proxy の外へ出す ingress |
+| PR 4 | (本 PR、`feat/mcp-start`) | 実装済み・既定で無効 | 書き込みツール `kivra_selfdev_start`(`KIVRA_MCP_WRITE_ENABLED`、既定 `false`) |
 
 ### PR 1(kivra#263)の範囲
 
@@ -231,9 +232,24 @@ MCP サーバーは **Control Plane のアダプター**とする。新しい Ru
 - **`KIVRA_AGENT_REQUIRED_ROLE`**: 任意。設定すると、`<client>:<role>` の形のロールを持つ token は 403 になる。エージェントの token は audience の検査で先に 401 になるので、これは多層防御。
 - **env 名**: MCP の audience は `KIVRA_MCP_AUDIENCE`。ADR の §10 にあった `KIVRA_MCP_OIDC_AUDIENCE` は誤りで、実装の名前に合わせて直した。
 
+### PR 4 の範囲(書き込みツール `kivra_selfdev_start`、既定で無効)
+
+- 設定: `KIVRA_MCP_WRITE_ENABLED`(既定 `false`)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` なら起動を止める(変数名だけを出す)。この変数だけは、MCP が off のときも読んで、`true` を拒否するために使う(§5 の 1)。
+- 書き込みが無効のとき、`tools/list` に出さず、`tools/call` は未知のツールと同じ応答(-32602)。ツールは登録しない。存在を漏らさないため、§3 と §5 の `CAPABILITY_UNAVAILABLE` は採らない(この点は §3・§5 の文より本節が優先する)。
+- `KIVRA_SELFDEV_ENABLED=false`(キルスイッチ)のとき、ツールは `tools/list` に出ず、呼ばれると固定の理由 `KILL_SWITCH_OFF`(`structuredContent.error.code`、`isError: true`)で拒否する。
+- 入力は `title`(1〜200、必須)、`body`(0〜8000、任意)、`idempotency_key`(1〜128、必須)だけ。余分な項目は -32602。スキーマに認証情報、環境変数、コマンド、リポジトリは無い。
+- 投入は既存の `DevelopmentRunRepository.submitTask`(`selfDev = true`)だけを呼ぶ。`POST /api/selfdev/tasks` と同じ関数で、Run の正本と状態機械は増やさない。参照(`#n` など)は既存の #229 の経路が実行時に解決する。MCP の側に解決の実装は無い。
+- 結果: 作成は `CREATED`、同じ key と同じ内容の再送は `replayed: true` で同じ Run。内容が違えば `IDEMPOTENCY_CONFLICT`(Run の ID は返さない)。同時 Run の上限は `CONCURRENCY_LIMIT`。
+- スコープ `kivra.selfdev.start`。無ければ 403 と `insufficient_scope`。所有者は `iss`+`sub` で、同じ key でも主体が違えば別の Run。
+- 書き込みのレート制限(U-7 の暫定値): `KIVRA_MCP_WRITE_RATE_PER_MINUTE`、既定 1 分 5 件、主体ごと。読み取りの上限(60 件)とは別。超えると 429 と `RATE_LIMITED`。
+- 監査: `mcp.call via=mcp ... outcome=... run_id=...`。投入時は `mcp.selfdev_start via=mcp kind=SELF_DEV run_id=... replayed=...`。題名、本文、`idempotency_key`、主体の生の値は出さない。Run に新しい列は足していない(migration なし)。
+- 切断は Run のキャンセルにしない。投入された Run は残る。同じ key の再送で同じ Run が返る。
+- 予算の検査は投入の時点では足さない(U-11 の既定どおり)。実行の段階の既存の判定に任せる。
+- プロンプトインジェクション: 題名と本文は UNTRUSTED のまま。テストで、題名に「他の指示を無視」と入れても、通常の CREATED の Run として投入されることを確かめている。
+- 有効化の手順と止め方は runbook §8.7。
+
 ### 未実装・残件
 
-- PR 4: 書き込みツール `kivra_selfdev_start`(既定で無効)。
 - PR 5: `kivra_run_stop` と `kivra_run_execution`。
 - 実際の MCP クライアント(Claude Code、OpenCode など)からの接続の確認。**未確認**。
 - 最新の仕様 `2026-07-28` への対応。**未対応**。

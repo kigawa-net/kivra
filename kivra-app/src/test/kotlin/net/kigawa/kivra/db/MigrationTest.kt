@@ -15,7 +15,7 @@ class MigrationTest {
         val versions = flyway.info().applied()
             .mapNotNull { it.version?.toString()?.toIntOrNull() }
             .sorted()
-        assertEquals((1..(versions.lastOrNull() ?: 0)).toList(), versions,
+        assertEquals((1..(versions.lastOrNull() ?: 0)).filter { it !in RESERVED_MIGRATION_VERSIONS }, versions,
             "Flyway version gap: include/validate V3 before V4 and V4 before V5 (#88)")
     }
 

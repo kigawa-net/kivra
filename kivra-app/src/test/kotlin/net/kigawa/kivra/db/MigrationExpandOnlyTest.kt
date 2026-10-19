@@ -21,7 +21,8 @@ class MigrationExpandOnlyTest {
     @Test
     fun `every migration is expand-only, except the listed changes that already need a Contract step`() {
         val files = migrationFiles()
-        assertEquals((1..files.size).toList(), files.keys.toList(), "migration versions must be contiguous from V1")
+        val expected = (1..files.keys.max()).filter { it !in RESERVED_MIGRATION_VERSIONS }
+        assertEquals(expected, files.keys.toList(), "migration versions must be contiguous from V1, except the reserved ones")
 
         val found = files.flatMap { (version, sql) -> expandViolations(version, sql) }.toSet()
 

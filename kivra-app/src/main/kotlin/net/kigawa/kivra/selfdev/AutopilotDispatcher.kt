@@ -66,6 +66,11 @@ class AutopilotDispatcher(
     /** True when the monthly budget still has the autopilot's share left (see [autopilotBudgetAllows]). Called only from [tick]. */
     private val budgetAllows: (sharePercent: Int) -> Boolean,
     private val clock: Clock = Clock.systemUTC(),
+    /**
+     * True when the goal may get a Run from its order's point of view (ADR 0015 section 5.4). The default allows every goal, which is the
+     * flow without orders: the goal has no order, so nothing changes. Called before a goal's tasks are submitted.
+     */
+    private val orderGate: (goalId: String) -> Boolean = { true },
 ) {
     private val goals = SelfDevGoalRepository(database, clock)
     private val plans = SelfDevPlanRepository(database, clock)
@@ -159,6 +164,10 @@ class AutopilotDispatcher(
     // ---- 2 and 3. Dispatch -----------------------------------------------------------------------------------------------------
 
     private fun dispatchGoal(goalId: String) {
+        if (!orderGate(goalId)) {
+            logger.info("autopilot dispatch: refused code={} goalId={}", ORDER_NOT_ACTIVE, goalId)
+            return
+        }
         var goal = goals.get(goalId) ?: return
         val plan = plans.plansOf(goalId).lastOrNull { it.state == PlanState.PROPOSED } ?: return
         var tasks = approveAuto(plan)
@@ -290,6 +299,11 @@ class AutopilotDispatcher(
      * task QUEUED to SUBMITTING (CAS), the Run, task SUBMITTING to SUBMITTED with the run id.
      */
     private fun submitCandidate(goal: SelfDevGoal, candidate: SelfDevPlanTask) {
+        // Read again right before the Run is created: a stop may have been approved since the goal was read (ADR 0015 section 5.4).
+        if (!orderGate(goal.goalId)) {
+            logger.info("autopilot dispatch: refused code={} goalId={} ordinal={}", ORDER_NOT_ACTIVE, goal.goalId, candidate.ordinal)
+            return
+        }
         if (!control.tryReserveRun(config.maxRunsPerDay)) {
             logger.info("autopilot dispatch: blocked code={} goalId={} ordinal={}", AutopilotReason.DAILY_RUN_CAP.name, goal.goalId, candidate.ordinal)
             if (goal.state == GoalState.TASKS_QUEUED || goal.state == GoalState.RUNNING) {
@@ -417,6 +431,7 @@ class AutopilotDispatcher(
         const val ACTIVE_RUN_LIMIT = "ACTIVE_RUN_LIMIT"
         const val IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
         const val GOAL_NOT_DISPATCHABLE = "GOAL_NOT_DISPATCHABLE"
+        const val ORDER_NOT_ACTIVE = "ORDER_NOT_ACTIVE"
 
         /**
          * The task states that count as ended for the goal (ADR 0011 section 2.8b). FAILED and CANCELLED can be requeued by the operator

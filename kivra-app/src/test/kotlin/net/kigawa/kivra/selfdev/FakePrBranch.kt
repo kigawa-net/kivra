@@ -24,6 +24,12 @@ class FakeGitObjects {
 
     fun parentsOf(sha: String): List<String>? = commits[sha]?.parents
 
+    /** The commits [base] has that [head] does not have, as the compare API counts them (`behind_by`). Null when a commit is unknown. */
+    fun behindCount(base: String, head: String): Int? {
+        if (base !in commits || head !in commits) return null
+        return (ancestors(base) - ancestors(head)).size
+    }
+
     fun treeOf(sha: String): Map<String, Pair<String, String>>? = commits[sha]?.tree
 
     /** The merge base of [a] and [b]: a common ancestor that is not an ancestor of another common ancestor. */
@@ -49,8 +55,17 @@ class FakeGitObjects {
  * [onUpdate] runs when an update request is accepted: a test uses it to make the update land (move the pull request head) or not.
  */
 class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjects) : PrBranchPort {
-    /** GitHub's `mergeable_state` reported for the pull request. */
-    var mergeableState: String? = "behind"
+    /** GitHub's `mergeable_state` reported for the pull request. A real repository without the up-to-date protection reports "unstable". */
+    var mergeableState: String? = "unstable"
+
+    /** GitHub's `mergeable` reported for the pull request: null while computing, false on a conflict. */
+    var mergeable: Boolean? = true
+
+    /** When set, the compare request answers with this result instead of the distance computed from the object graph. */
+    var compareResult: GitHubResult<Int>? = null
+
+    var compareCalls = 0
+        private set
 
     /** When set, the update request answers with this result (and does not run [onUpdate]). */
     var updateResult: GitHubResult<Unit>? = null
@@ -73,10 +88,19 @@ class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjec
     override suspend fun getPrRebaseView(repo: RepoRef, number: Int): GitHubResult<PrRebaseView> {
         totalCalls++
         return when (val r = github.getPullRequest(repo, number)) {
-            is GitHubResult.Success -> GitHubResult.Success(PrRebaseView(r.value, mergeableState))
+            is GitHubResult.Success -> GitHubResult.Success(PrRebaseView(r.value, mergeableState, mergeable))
             is GitHubResult.Failure -> r
             is GitHubResult.Unknown -> r
         }
+    }
+
+    override suspend fun getBehindBy(repo: RepoRef, base: String, headSha: String): GitHubResult<Int> {
+        totalCalls++
+        compareCalls++
+        compareResult?.let { return it }
+        // The compare API takes a branch name for the base: it is resolved to the branch's head, as GitHub does.
+        val baseSha = (github.getBranch(repo, base) as? GitHubResult.Success)?.value?.headSha ?: return notFound()
+        return git.behindCount(baseSha, headSha)?.let { GitHubResult.Success(it) } ?: notFound()
     }
 
     override suspend fun updatePrBranch(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<Unit> {

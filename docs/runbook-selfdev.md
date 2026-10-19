@@ -306,7 +306,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 
 ### 4.9 自己開発 PR のブランチを main に追従させる(Issue #276、既定は無効)
 
-**実装済み(既定は無効)。** kivra の Run に束縛された、人のレビュー待ちの自己開発 PR が `main` より behind で、コンフリクトが無いとき、`PUT /pulls/{n}/update-branch`(`expected_head_sha` つき)でブランチを更新する。更新後の head は、kivra が検証してから Run に保存した head を更新する。検証が通らないときは、Run をそのまま人に残す。失敗にはしない。
+**実装済み(既定は無効)。** kivra の Run に束縛された、人のレビュー待ちの自己開発 PR が `main` より遅れていて(compare API の `behind_by` > 0)、コンフリクトが無いとき、`PUT /pulls/{n}/update-branch`(`expected_head_sha` つき)でブランチを更新する。更新後の head は、kivra が検証してから Run に保存した head を更新する。検証が通らないときは、Run をそのまま人に残す。失敗にはしない。
 
 **有効化**
 - `KIVRA_SELFDEV_PR_REBASE_ENABLED=true`(既定は `false`。`true` と `false` と空以外は起動失敗)。自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)のときだけ読まれる。
@@ -315,6 +315,11 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 
 **止め方**
 - `KIVRA_SELFDEV_PR_REBASE_ENABLED` を `false` にして再起動する。無効のときは、この機能の経路は一切動かない(GitHub への追加の呼び出しも、監査行も無い)。
+
+**更新の契機**(すべて満たしたときだけ、更新の要求を出す)
+- 追従の契機は、`mergeable_state` の `behind` ではなく、compare API `GET /repos/{owner}/{repo}/compare/main...{head}` の `behind_by` > 0。`behind` は、ブランチ保護の「マージ前にブランチを最新にする」が有効なときだけ返り、このリポジトリの `main` では返らない(実機で確認。PR #271 は 9 コミット遅れでも `unstable`)。
+- `mergeable` が `true`(計算中の `null`、コンフリクトの `false` は触らない)。`mergeable_state` が `dirty` のときも触らない。
+- `behind_by` が整数でない応答、または読めないときは、何もしない(追従しない)。
 
 **再束縛の条件**(すべて満たしたときだけ、Run に保存した head を新しい head に更新する)
 - (a) 新しい head がマージコミットで、親が「旧 head」と「main の先頭」の 2 つだけ。
@@ -332,7 +337,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 
 | 理由コード | 意味 | 対応 |
 |---|---|---|
-| (コードなし) | コンフリクト(`mergeable_state` が `dirty`)、状態が不明、作者が bot でない、または behind でない | 人がレビューする。kivra は触らない |
+| (コードなし) | コンフリクト(`mergeable` が `false` または `mergeable_state` が `dirty`)、`mergeable` が未計算(`null`)、作者が bot でない、または `behind_by` が 0 | 人がレビューする。kivra は触らない(未計算のときは次の周期に回る) |
 | `GITHUB_CONFLICT` | 更新の要求が拒否された(head が動いた、またはコンフリクト) | 人がレビューする |
 | `GITHUB_PERMISSION` | App に権限が無い(403)。**有効化の前の確認事項**(下記) | App の権限を確認する |
 | `PR_REBASE_NOT_OBSERVED` | 要求は通ったが、新しい head が見えなかった | 後から届いた更新は、次の周期で検証されて再束縛される。届かなければ人が確認する |

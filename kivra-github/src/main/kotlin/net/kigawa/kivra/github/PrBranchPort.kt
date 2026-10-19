@@ -8,8 +8,18 @@ package net.kigawa.kivra.github
  * a run's own pull request, and only after it verifies the new head (see `PrBranchRebaser`). Its other methods are read-only.
  */
 interface PrBranchPort {
-    /** Read-only. The pull request (see [GitHubPort.getPullRequest]) with its `mergeable_state` (`behind`, `dirty`, `clean`, ...). */
+    /**
+     * Read-only. The pull request (see [GitHubPort.getPullRequest]) with its `mergeable` and `mergeable_state` as GitHub reports them.
+     * `mergeable_state` is `behind` only when the base branch has the "require up to date" protection; use [getBehindBy] for the
+     * distance to the base.
+     */
     suspend fun getPrRebaseView(repo: RepoRef, number: Int): GitHubResult<PrRebaseView>
+
+    /**
+     * Read-only. How many commits [base] has that [headSha] does not have (`behind_by` of `GET /compare/{base}...{head}`). Zero means
+     * the head already contains the base. A response whose `behind_by` is not a non-negative integer is a protocol failure.
+     */
+    suspend fun getBehindBy(repo: RepoRef, base: String, headSha: String): GitHubResult<Int>
 
     /**
      * `PUT /pulls/{n}/update-branch` with `expected_head_sha`. GitHub answers 202 and performs the update asynchronously, so a success
@@ -28,5 +38,8 @@ interface PrBranchPort {
     suspend fun listTreeAt(repo: RepoRef, commitSha: String): GitHubResult<RepoTree>
 }
 
-/** A pull request with its `mergeable_state` as GitHub reports it. Null when GitHub has not computed it yet. */
-data class PrRebaseView(val pullRequest: PullRequest, val mergeableState: String?)
+/**
+ * A pull request with `mergeable` and `mergeable_state` as GitHub reports them. [mergeable] is null while GitHub is still computing it,
+ * and false on a conflict. [mergeableState] is null when the response does not carry it.
+ */
+data class PrRebaseView(val pullRequest: PullRequest, val mergeableState: String?, val mergeable: Boolean?)

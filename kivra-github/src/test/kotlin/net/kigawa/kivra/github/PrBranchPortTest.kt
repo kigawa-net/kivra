@@ -37,11 +37,31 @@ private class BranchRemote(val handler: suspend MockRequestHandleScope.(HttpRequ
     )
 }
 
-private fun prJson(number: Int = 7, headSha: String = PB_HEAD, state: String = "open", mergeableState: String = "behind"): String =
+// The shape of a live response for a pull request of a repository without the "require up to date" protection: `mergeable` is a JSON
+// boolean (or null while computing), and `mergeable_state` is "unstable" (or "clean"), never "behind" for a head that is merely old.
+private fun prJson(
+    number: Int = 7,
+    headSha: String = PB_HEAD,
+    state: String = "open",
+    mergeableState: String = "unstable",
+    mergeable: String = "true",
+): String =
     """{"number":$number,"state":"$state","merged":false,"draft":false,"head":{"ref":"kivra/run-r1","sha":"$headSha"},
         "base":{"ref":"main","sha":"$PB_BASE","repo":{"full_name":"kigawa-net/kivra","id":42}},
         "body":"x","html_url":"https://example.invalid/pull/$number","node_id":"PR_node","user":{"id":9001},
-        "mergeable_state":"$mergeableState"}"""
+        "mergeable":$mergeable,"rebaseable":true,"mergeable_state":"$mergeableState"}"""
+
+// The shape of `GET /repos/{owner}/{repo}/compare/{base}...{head}` as the live API sent it for a head 1 commit ahead and 9 behind `main`
+// (checked read-only, the key set only). `behind_by` is a JSON integer; the other keys are the ones the live response carries.
+private fun compareJson(behindBy: String, aheadBy: Int = 1): String =
+    """{"url":"https://api.github.com/repos/kigawa-net/kivra/compare/main...$PB_HEAD",
+        "html_url":"https://github.com/kigawa-net/kivra/compare/main...$PB_HEAD",
+        "permalink_url":"https://github.com/kigawa-net/kivra/compare/main@{1}...$PB_HEAD",
+        "diff_url":"https://github.com/kigawa-net/kivra/compare/main...$PB_HEAD.diff",
+        "patch_url":"https://github.com/kigawa-net/kivra/compare/main...$PB_HEAD.patch",
+        "base_commit":{"sha":"$PB_BASE"},"merge_base_commit":{"sha":"$PB_OTHER"},
+        "status":"diverged","ahead_by":$aheadBy,"behind_by":$behindBy,"total_commits":${aheadBy + 1},
+        "commits":[],"files":[]}"""
 
 class PrBranchPortTest {
     @Test
@@ -79,14 +99,60 @@ class PrBranchPortTest {
     }
 
     @Test
-    fun `the pull request view carries mergeable_state and the same identity fields as getPullRequest`() = runTest {
-        val f = BranchRemote { respond(prJson(mergeableState = "behind"), HttpStatusCode.OK, PB_JSON) }
+    fun `the behind distance is read from the compare API and a live diverged head reports nine`() = runTest {
+        val f = BranchRemote { respond(compareJson(behindBy = "9"), HttpStatusCode.OK, PB_JSON) }
+        assertEquals(9, assertIs<GitHubResult.Success<Int>>(f.adapter.getBehindBy(PB_REPO, "main", PB_HEAD)).value)
+        val req = f.requests.single()
+        assertEquals(HttpMethod.Get, req.method)
+        assertEquals("/repos/kigawa-net/kivra/compare/main...$PB_HEAD", req.url.encodedPath)
+    }
+
+    @Test
+    fun `a head that contains the base reports zero behind`() = runTest {
+        val f = BranchRemote { respond(compareJson(behindBy = "0", aheadBy = 2), HttpStatusCode.OK, PB_JSON) }
+        assertEquals(0, assertIs<GitHubResult.Success<Int>>(f.adapter.getBehindBy(PB_REPO, "main", PB_HEAD)).value)
+    }
+
+    @Test
+    fun `a compare answer whose behind_by is not a non-negative integer is a protocol failure`() = runTest {
+        // Each of these is a shape GitHub does not send for `behind_by`; none may be read as a count.
+        val shapes = listOf("\"9\"", "9.5", "-1", "true", "null", "1e3")
+        for (shape in shapes) {
+            val f = BranchRemote { respond(compareJson(behindBy = shape), HttpStatusCode.OK, PB_JSON) }
+            val result = f.adapter.getBehindBy(PB_REPO, "main", PB_HEAD)
+            assertTrue(result is GitHubResult.Failure, "behind_by=$shape read as $result")
+            assertEquals(GitHubFailureKind.PROTOCOL, result.kind, shape)
+        }
+        val missing = BranchRemote { respond("""{"status":"diverged","ahead_by":1}""", HttpStatusCode.OK, PB_JSON) }
+        assertEquals(GitHubFailureKind.PROTOCOL, assertIs<GitHubResult.Failure>(missing.adapter.getBehindBy(PB_REPO, "main", PB_HEAD)).kind)
+    }
+
+    @Test
+    fun `a base that is not a branch name or a head that is not a commit id is refused before any request`() = runTest {
+        val f = BranchRemote { respond(compareJson(behindBy = "1"), HttpStatusCode.OK, PB_JSON) }
+        assertIs<GitHubResult.Failure>(f.adapter.getBehindBy(PB_REPO, "main\n", PB_HEAD))
+        assertIs<GitHubResult.Failure>(f.adapter.getBehindBy(PB_REPO, "main", "main"))
+        assertEquals(0, f.requests.size)
+    }
+
+    @Test
+    fun `the pull request view carries mergeable and mergeable_state as GitHub sends them`() = runTest {
+        val f = BranchRemote { respond(prJson(mergeableState = "unstable", mergeable = "true"), HttpStatusCode.OK, PB_JSON) }
         val view = assertIs<GitHubResult.Success<PrRebaseView>>(f.adapter.getPrRebaseView(PB_REPO, 7)).value
-        assertEquals("behind", view.mergeableState)
+        assertEquals("unstable", view.mergeableState)
+        assertEquals(true, view.mergeable)
         assertEquals(PB_HEAD, view.pullRequest.headSha)
         assertEquals(42L, view.pullRequest.baseRepositoryId)
         assertEquals(9001L, view.pullRequest.authorId)
         assertTrue(f.requests.all { it.method == HttpMethod.Get })
+    }
+
+    @Test
+    fun `a mergeable that GitHub has not computed yet is null, and a conflict is false`() = runTest {
+        val pending = BranchRemote { respond(prJson(mergeable = "null", mergeableState = "unknown"), HttpStatusCode.OK, PB_JSON) }
+        assertEquals(null, assertIs<GitHubResult.Success<PrRebaseView>>(pending.adapter.getPrRebaseView(PB_REPO, 7)).value.mergeable)
+        val conflict = BranchRemote { respond(prJson(mergeable = "false", mergeableState = "dirty"), HttpStatusCode.OK, PB_JSON) }
+        assertEquals(false, assertIs<GitHubResult.Success<PrRebaseView>>(conflict.adapter.getPrRebaseView(PB_REPO, 7)).value.mergeable)
     }
 
     @Test

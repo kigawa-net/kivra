@@ -232,6 +232,20 @@ class AutopilotDispatcherTest {
     }
 
     @Test
+    fun `a goal whose order gate refuses gets no Run, and the same goal runs once the gate allows it`() = TestDb().use { db ->
+        val env = Env(db)
+        val (goalId, planId) = env.plannedGoal("order-gate", listOf(task("only")), approve = listOf(1))
+        val refusing = AutopilotDispatcher(db.database, db.runs, env.cfg, env.maxActive, { _ -> true }, env.clock, orderGate = { false })
+        refusing.tick()
+        assertEquals(GoalState.TASKS_QUEUED, env.goal(goalId).state)
+        assertEquals(TaskState.QUEUED, env.task(planId, 1).state)
+        assertEquals(0, db.count("development_runs"))
+
+        AutopilotDispatcher(db.database, db.runs, env.cfg, env.maxActive, { _ -> true }, env.clock, orderGate = { true }).tick()
+        assertEquals(TaskState.SUBMITTED, env.task(planId, 1).state)
+    }
+
+    @Test
     fun `a goal that the operator has not queued is not dispatched`() = TestDb().use { db ->
         val env = Env(db)
         val (goalId, planId) = env.plannedGoal("proposed", listOf(task("only")), approve = listOf(1), queue = false)

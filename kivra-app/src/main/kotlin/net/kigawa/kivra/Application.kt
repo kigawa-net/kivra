@@ -28,6 +28,7 @@ import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevPlanRepository
 import net.kigawa.kivra.db.NoPrMergeAuthority
@@ -58,9 +59,13 @@ import net.kigawa.kivra.routes.configureRunViewRoutes
 import net.kigawa.kivra.routes.SelfDevGoalRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.configureSelfDevGoalRoutes
+import net.kigawa.kivra.routes.SelfDevOrderRouteDeps
+import net.kigawa.kivra.routes.configureSelfDevOrderRoutes
 import net.kigawa.kivra.routes.requiredAgentRole
 import net.kigawa.kivra.routes.configureSelfDevRoutes
 import net.kigawa.kivra.selfdev.AutopilotDispatcher
+import net.kigawa.kivra.selfdev.OrderSettings
+import net.kigawa.kivra.selfdev.OrderWatch
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
@@ -83,12 +88,16 @@ internal fun Application.appModule(env: Map<String, String>) {
     val selfDevSettings = SelfDevSettings.fromEnv(env)
     // Fail-closed: when the autopilot is off, nothing beyond its switch is read and nothing is wired (ADR 0011).
     val autopilotSettings = AutopilotSettings.fromEnv(env, selfDevSettings)
+    // Fail-closed: when the orders are off (the default), nothing beyond the switch is read and nothing is wired (ADR 0015 stage 1).
+    val orderSettings = OrderSettings.fromEnv(env, autopilotSettings)
     // Fail-closed: when the MCP endpoint is off (the default), nothing beyond its switch is read and no /mcp route is registered (ADR 0013).
     val mcpSettings = McpSettings.fromEnv(env)
     val config = KivraConfig.from(environment.config)
     val dataSource = createDataSource(config.database)
     migrateDatabase(config.database, dataSource)
     val database = connectDatabase(dataSource)
+    // The order repository exists only when the orders are on (ADR 0015 stage 1). It is not touched otherwise.
+    val orderRepo = if (orderSettings.enabled) SelfDevOrderRepository(database) else null
     // Self-development installs the GitHub merge Authority later (in buildSelfDev, before the worker starts). Without it, nothing is verified.
     val deferredPrMerge = DeferredPrMergeAuthority()
     val audit = AuditRepository()
@@ -130,18 +139,33 @@ internal fun Application.appModule(env: Map<String, String>) {
     }
     // The autopilot's operator API (ADR 0011 section 1). Registered with the Task API identity, so the OIDC operator role is required. Its
     // agent-role setting is read only while the autopilot is enabled. Every goal endpoint answers 503 while it is disabled.
-    val goalRoutes = if (taskApiIdentity != null) {
-        resolveOperatorVerifier(env, if (autopilotSettings.enabled) requiredAgentRole(env) else null)?.let { verifier ->
-            SelfDevGoalRouteDeps(
-                operators = verifier,
-                autopilot = autopilotSettings,
-                targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
-                goals = SelfDevGoalRepository(database),
-                plans = SelfDevPlanRepository(database),
-                operations = SelfDevOperatorRepository(database),
-                control = SelfDevAutopilotControlRepository(database),
-            )
-        }
+    val operatorVerifier = if (taskApiIdentity != null) {
+        resolveOperatorVerifier(env, if (autopilotSettings.enabled) requiredAgentRole(env) else null)
+    } else {
+        null
+    }
+    val goalRoutes = operatorVerifier?.let { verifier ->
+        SelfDevGoalRouteDeps(
+            operators = verifier,
+            autopilot = autopilotSettings,
+            targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
+            goals = SelfDevGoalRepository(database),
+            plans = SelfDevPlanRepository(database),
+            operations = SelfDevOperatorRepository(database),
+            control = SelfDevAutopilotControlRepository(database),
+        )
+    }
+    // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
+    val orderRoutes = if (orderRepo != null && operatorVerifier != null) {
+        SelfDevOrderRouteDeps(
+            operators = operatorVerifier,
+            autopilot = autopilotSettings,
+            orderSettings = orderSettings,
+            targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
+            orders = orderRepo,
+            goals = SelfDevGoalRepository(database),
+            operations = SelfDevOperatorRepository(database),
+        )
     } else {
         null
     }
@@ -151,6 +175,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     )
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)
+    // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD). Nothing runs before this.
+    orderRepo?.holdActiveOnStartup()
     // The FX expiry warning (daily). FX is read only when a USD path is on (the agent API or self-development, which need the rate);
     // otherwise nothing is read and nothing is started.
     val fxSettings = if (agentApiSettings.auth != null || selfDevSettings.enabled) fxSettingsForWarning(env) else null
@@ -166,7 +192,21 @@ internal fun Application.appModule(env: Map<String, String>) {
                 val usage = budgetStore.usage(budgetConfig.tenantId)
                 autopilotBudgetAllows(usage.committed, usage.reserved, budgetConfig.monthlyLimitJpy, share)
             },
+            // With the orders off the gate allows every goal, so the dispatcher's flow is the same as before.
+            orderGate = orderRepo?.let { repo -> { goalId: String -> repo.dispatchAllowed(goalId) } } ?: { _: String -> true },
         ).start(this)
+        // The order guards (ADR 0015 section 5.2): the same budget share as the dispatcher, and the FX rate. Only with the orders on.
+        orderRepo?.let { repo ->
+            val fxForGuard = fxSettingsForWarning(env)
+            OrderWatch(
+                orders = repo,
+                budgetAllows = {
+                    val usage = budgetStore.usage(budgetConfig.tenantId)
+                    autopilotBudgetAllows(usage.committed, usage.reserved, budgetConfig.monthlyLimitJpy, autopilot.budgetSharePercent)
+                },
+                fxExpired = { fxForGuard?.expiry(java.time.Clock.systemUTC())?.expired == true },
+            ).start(this)
+        }
     }
     // The coding reconcile and the retention of stored change sets (ADR 0010 addendum 6). Only when the agent API is on.
     codingService?.let {
@@ -209,6 +249,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureSelfDevAdminRoutes(runs, taskApiIdentity)
             configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings)
             if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
+            if (orderRoutes != null) configureSelfDevOrderRoutes(orderRoutes)
             executionDeps?.let { configureRunExecutionRoutes(it) }
         }
         if (selfDevParts != null) configureSelfDevRoutes(selfDevParts.routes)

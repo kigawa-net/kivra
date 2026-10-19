@@ -50,6 +50,12 @@ class InMemoryCodingResultStore : CodingResultStore {
 }
 
 class CodingRuntimeServiceTest {
+    @Test
+    fun theDefaultOutputLimitIsEightMiBForTheConfigAndTheLimitsSentToTheAgent() {
+        assertEquals(8L * 1024 * 1024, CodingRuntimeConfig().maxOutputBytes)
+        assertEquals(8L * 1024 * 1024, CodingLimits().maxOutputBytes)
+    }
+
     private val baseSha = "a".repeat(40)
 
     private fun goodResult(

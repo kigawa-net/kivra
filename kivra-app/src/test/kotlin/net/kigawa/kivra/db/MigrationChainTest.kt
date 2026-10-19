@@ -45,11 +45,18 @@ internal val MIGRATION_FILES = mapOf(
     19 to "V19__selfdev_approval.sql",
     20 to "V20__coding_monitor_events.sql",
     21 to "V21__selfdev_memory.sql",
+    23 to "V23__selfdev_orders.sql",
     24 to "V24__selfdev_memory_quota_lock.sql",
 )
 
+/** The versions applied on the full chain. V22 is never used (reserved gap), so the list skips it. */
+internal val EXPECTED_APPLIED_VERSIONS: List<String> = (1..21).map { it.toString() } + listOf("23", "24")
+
+/** Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved). */
+internal val RESERVED_MIGRATION_VERSIONS: Set<Int> = setOf(22)
+
 /**
- * Migration chain V1 -> V2 -> ... -> V21 -> V24 (Issue #88, #94, #53, #100, #112, #26, #56, #229, #277). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
+ * Migration chain V1 -> V2 -> ... -> V21 (Issue #88, #94, #53, #100, #112, #26, #56, #229, #277). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
  *
  * Partial histories are built from copies of the real migration files in a temporary directory. Nothing here repairs,
  * skips or baselines a history: a mismatch must fail.
@@ -57,15 +64,20 @@ internal val MIGRATION_FILES = mapOf(
 class MigrationChainTest {
 
     @Test
-    fun `empty database applies V1 to V21 and V24 in order and flyway validate passes`() = TestDb().use { db ->
+    fun `empty database applies V1 to V21, V23 and V24 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
-        assertEquals(((1..21).map { it.toString() } + "24"), appliedVersions(db.dataSource))
+        assertEquals(EXPECTED_APPLIED_VERSIONS, appliedVersions(db.dataSource))
         assertEquals(1, db.tableCount("selfdev_memory_records"))
         assertEquals(1, db.tableCount("selfdev_memory_events"))
         assertEquals(1, db.tableCount("selfdev_plan_memory_refs"))
         assertEquals(1, db.tableCount("selfdev_memory_quota_lock"))
         assertEquals(1, db.count("selfdev_memory_quota_lock"))
+        assertEquals(1, db.tableCount("selfdev_orders"))
+        assertEquals(1, db.tableCount("selfdev_order_stop_requests"))
+        assertEquals(1, db.tableCount("selfdev_order_events"))
+        assertEquals(1, db.columnCount("selfdev_goals", "order_id"))
+        assertEquals(1, db.columnCount("selfdev_goals", "cycle_no"))
         assertTrue(flyway.info().all().all { it.state == MigrationState.SUCCESS })
         assertEquals(1, db.tableCount("approvals"))
         assertEquals(1, db.tableCount("coding_results"))
@@ -95,7 +107,7 @@ class MigrationChainTest {
             // The later migrations are applied on top of the existing history, in order.
             runMigrations(db.dataSource)
             classpathFlyway(db.dataSource).validate()
-            assertEquals(((1..21).map { it.toString() } + "24"), appliedVersions(db.dataSource))
+            assertEquals(EXPECTED_APPLIED_VERSIONS, appliedVersions(db.dataSource))
 
             // The row is kept as written: no backfill, no guessed binding.
             assertEquals(before, db.snapshot(opId))

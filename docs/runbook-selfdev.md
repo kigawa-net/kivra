@@ -231,6 +231,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - 優先されるのは、リポジトリに実在し、読み取れ、上限内で、書き込みの許可パス(`kivra-*/src/**`、`docs/**`、`README.md`)かつ拒否パスでないもの。`..`、絶対パス、`.git` で始まるものは無視する。
 - 優先されたファイルも上限(ファイル数、1 ファイルのサイズ、合計バイト)の内側に入る。上限は変わらない。
 - 優先されても、モデルに見せていないファイルへの書き込みは従来どおり拒否される(`UNSEEN_OVERWRITE`)。
+- 大きなファイル(目安として 50 KB か 1,000 行以上)の全体を 1 タスクで読み書きしないよう、Planner のプロンプトで指示している(#283。プロンプトだけの制約で、検査は無い)。大きなファイルの変更は、Planner が複数のタスクに分ける。
 
 ### 4.7 Web 画面(`/ui`)で Run を見る
 
@@ -562,7 +563,7 @@ claude -p <固定 prompt> --output-format stream-json --verbose --permission-mod
 | --- | --- | --- |
 | `TIMEOUT` | 実行が時間切れで止められた | `TIMEOUT` |
 | `CANCELLED` | キャンセル要求で止められた | `CANCELLED` |
-| `OUTPUT_LIMIT` | 実行の出力上限、または解析の総量上限、または 1 MiB を超える行 | `OUTPUT_LIMIT` |
+| `OUTPUT_LIMIT` | 実行の出力上限(8 MiB と claim の `maxOutputBytes` の小さいほう)、または解析の総量上限(8 MiB)、または 1 MiB を超える行 | `OUTPUT_LIMIT` |
 | `AUTH_FAILED` | `result` がなく認証の `api_retry`。または不正な行がなく結果が失敗で、認証の `api_retry` がある | `AUTH_REQUIRED` |
 | `RATE_LIMITED` | 同じ条件でレート制限 | `RATE_LIMITED` |
 | `OVERLOADED` | 同じ条件で過負荷 | `RATE_LIMITED`(kivra に過負荷のコードがないため) |
@@ -576,8 +577,23 @@ claude -p <固定 prompt> --output-format stream-json --verbose --permission-mod
 **未確認の事項(実際の CLI で確かめる。PR 9 までに)**:
 - `--allowedTools` の値を並べる形(空白区切り)と、`--permission-mode dontAsk` の挙動。`--max-turns` 到達時の終了コードと `result` の `subtype`(`error_max_turns` を想定)。
 - `result` の `subtype` が成功のとき `success` であること。`api_retry` の `error` の分類名(`authentication_failed` など)の全部。
-- `stream-json` の `usage` の全フィールド。Write のツール入力が stdout に入るため、1 MiB の出力上限が小さすぎないか(ADR 0010 の出力量の上限は未決)。
+- `stream-json` の `usage` の全フィールド。Write のツール入力が stdout に入るため、出力上限が小さすぎないか(上限は #283 で 1 MiB から 8 MiB に上げた。ADR 0010 の出力量の上限は未決のまま)。
 - `.kivra/` の書き込み権限(uid 10001)と、task ファイルを PR 8 の差分から外す処理。
+
+### 6.7b 出力の上限(`OUTPUT_LIMIT`、Issue #283)
+
+**原因(2026-10-19 の実機)**: 1 Run の標準出力(stream-json)の合計が上限を超えた。Claude CLI の `--verbose` の stream-json は、ツールの結果(読んだファイルの全文)も流す。そのため、大きなファイル(目安として約 100 KB 以上)を読む、編集する、読み直す、の組み合わせで、1 MiB の上限を超えた。失敗は `CODING_OUTPUT_LIMIT`(分類 `OUTPUT_LIMIT`)で、Run は FAILED になる。自動の再試行は無い。ログでの裏付け(`docker run finished` の `outcome=OUTPUT_LIMIT`、`stream-json parsed` の `outputLimitReached=true`)は、運用者が確かめる。
+
+**上限の値(実装済み)**:
+- 合計: 8 MiB。値は `CliOutputLimits.MAX_TOTAL_BYTES`(`kivra-agent/.../agent/docker/CliOutputLimits.kt`)の 1 か所で、Docker 実行の打ち切りと stream-json の解析の総量の両方が参照する。エージェントは、サーバーが claim で渡す `maxOutputBytes` と、この 8 MiB の小さいほうを使う(大きくはしない)。
+- サーバーの `maxOutputBytes` の既定は 8 MiB(`CODING_MAX_OUTPUT_BYTES`、kivra-app の `CodingTypes.kt`)。**環境変数による設定は無い**(値はコードに固定。変えるには再ビルドと再デプロイが要る)。
+- 1 行: 1 MiB(変えない)。超えた行は読み捨て、`oversizedLines` に数え、`OUTPUT_LIMIT` になる。
+- メモリ: 合計上限までの出力を、エージェントのプロセス内のメモリに保持する(ディスクには書かない)。上限を 8 MiB にしても、保持する量は最大で 8 MiB(文字列にすると、さらに一時的に同程度)。ディスクに書くのは §6.12 のデバッグ保存だけで、既定は無効。有効なら失敗した attempt ごとに最大 8 MiB、新しい順に 20 件まで。
+
+**対処**:
+- 再ビルドと配備(§6.11 の手順。PR の本文を参照)の後に、新しい Run で流し直す。既に FAILED になった Run は自動では再試行されない。必要なら計画を作り直す。
+- 同じ上限に繰り返し当たるなら、タスクを小さく分ける。Planner のプロンプトには「大きなファイルの全体を 1 タスクで読み書きしない。複数の小さなタスクに分ける」という制約を入れた(#283。プロンプトだけの制約で、決定的な検査は無い)。
+- 出力の中身を確かめるには、§6.12 の `stream.jsonl` を有効にする。ただし上限を超えた実行では、その上限で切れている。
 
 ### 6.8 作業ディレクトリと差分(PatchSet)の生成(PR 8)
 
@@ -729,7 +745,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 **実行の手順(1 アテンプト)**:
 1. 基底コミットを、ホスト側の bare mirror(`<KIVRA_AGENT_WORK_DIR>/.mirror.git`)へ取り込み、`baseSha` の tar を `WorkDirPreparer` で `<作業ルート>/<runId>-<attemptId>` に展開する。`.kivra/task.json` を書く(タスク文は title。claim の `input.task.body` は、`.kivra/task.json` の `body` に渡す。エージェント側のこの変更は kivra 側より先に出す。ADR 0010 追補 5)。
 2. `DockerRunner.cleanupOrphans` で、このエージェントのラベル付きの孤児コンテナを消す。
-3. CLI のコンテナを 1 つ起動する(§6.6、§6.7 の引数)。時間制限は `limits.maxRuntimeSeconds`。出力上限は `min(limits.maxOutputBytes, 1 MiB)`。
+3. CLI のコンテナを 1 つ起動する(§6.6、§6.7 の引数)。時間制限は `limits.maxRuntimeSeconds`。出力上限は `min(limits.maxOutputBytes, 8 MiB)`(#283 で 1 MiB から変えた)。
 4. コンテナが止まった後で `StreamJsonParser` と `CliOutcomeClassifier` で分類し、分類が成功なら `DiffCollector` で変更を集める(§6.8)。
 5. 結果は、heartbeat(世代の確認)と status(キャンセルの確認)の後に `POST /attempts/{id}/result` で送る。
 6. 作業ディレクトリとマニフェストを `RunDirCleanup` で消す。どの経路でも消す(失敗、キャンセル、例外)。消せなかったものが残ったときは、警告ログ(`work directory was not fully removed`、runId と attemptId だけ)を出す。残ったディレクトリは手で消す。
@@ -819,7 +835,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 
 **未解決(この PR の範囲外)**:
 - claim のパターンは差分の検査に使う(Issue #231、§6.10d)。組み込みの規則とサーバーの規則の両方を満たすことが要件である。
-- 出力上限は、claim の `maxOutputBytes` を 1 MiB の上限まで縮めるだけに使う。
+- 出力上限は、claim の `maxOutputBytes` を 8 MiB の上限まで縮めるだけに使う(引き上げには使わない)。
 - タスク文は title と、Run に保存された本文(claim の `input.task.body`、§5.1)。
 - 実際の docker、`claude` CLI、`/etc/subuid` の所有権、作業ディレクトリの削除は、この PR では実機で確かめていない(§6.6、§6.7、§6.8 の未確認事項)。
 - 有効化: `KIVRA_AGENT_EXECUTOR=real` は既定で無効。実機の確認の後、別の PR で有効にする。
@@ -1030,7 +1046,7 @@ sudo runuser -u kivra-agent -- env XDG_RUNTIME_DIR=/run/user/1001 journalctl --u
 - 値は `1`(有効)、`0` または未設定(無効)。それ以外の値は起動を拒否する(exit 2。メッセージは変数名だけ)。
 
 **保存先**: `/var/lib/kivra-agent/work/debug/<runId>-<attemptId>/`(`KIVRA_AGENT_WORK_DIR` の下の `debug/`)。
-- `stream.jsonl`: CLI の stdout(stream-json)全体。8 MiB で先頭から切る。ただし実行の出力上限(claim の `maxOutputBytes` と 1 MiB の小さいほう)を超えた実行では、その上限で既に切れている。
+- `stream.jsonl`: CLI の stdout(stream-json)全体。8 MiB で先頭から切る。ただし実行の出力上限(claim の `maxOutputBytes` と 8 MiB の小さいほう)を超えた実行では、その上限で既に切れている。
 - `task.json`: CLI に渡った `.kivra/task.json`。渡った title が分かる。
 - `outcome.txt`: `code=<失敗コード>`。差分が拒否されたときは `reasons=<理由>` も付く(例: `code=CLI_NONZERO` と `reasons=EMPTY_PATCH`)。`code=EXCEPTION` は、結果が返る前に例外や中断(キャンセル、リースの喪失など)で終わったこと。
 
@@ -1344,6 +1360,61 @@ ADR から変えた点(PR A での判断、ADR §2.8 に記録):
 - 一時停止からの再開先は、一時停止の直前の状態を `selfdev_goals.resume_state` に保存して決める。
 - 計画段階の `BLOCKED` の理由は `PLAN_INVALID` / `PLAN_BUDGET_HOLD` である。ディスパッチ段階の `BUDGET_HOLD` とは分ける。計画段階で止まった Goal は、今の表では `STOPPED` 以外へ進めない(未決の点 U-16)。
 - 全タスクが終わって全部は完了しなかった Goal は `STOPPED`(理由 `TASKS_INCOMPLETE`)になる(PR E。ADR §2.8b)。`STOPPED` / `DONE` の終端からは動かない。投入の直前に、Goal が `TASKS_QUEUED` / `RUNNING` でなければ投入しない(`GOAL_NOT_DISPATCHABLE`)。
+
+### 7.6 自己開発の order(ADR 0015 段階 1、Issue #273、既定は無効)
+
+order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 は**ルートの order 1 件**だけで、子の order、周の自動の開始、複数周はまだ無い(最大 1 周。周は運用者が開始する)。UI と MCP もまだ無い。操作は HTTP だけである。
+
+#### 7.6.1 有効化の前提(起動時に検査される)
+
+| 変数 | 必須 | 内容 |
+|---|---|---|
+| `KIVRA_SELFDEV_ORDERS_ENABLED` | ○ | `true` で有効。`false` か未設定で無効(既定)。`true` / `false` 以外は起動に失敗する。オートパイロットが無効のときは、この変数も他の order の変数も読まれず、order は無効(ルートも作られず、ルートの API は 404)。 |
+| `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` | ○(有効時) | order の周は、オートパイロットの Planner と Dispatcher が回す。オートパイロットが無効なら起動に失敗する。 |
+| `KIVRA_SELFDEV_ROOT_APPROVER` | ○(有効時) | ルートの停止を承認できる唯一の主体の owner key(`<長さ>:<issuer>:<sub>`)。kigawa の値を入れる。コードには固定しない。ログには出さない。 |
+| `KIVRA_SELFDEV_AI_PRINCIPAL` | 任意 | AI の主体の owner key(AI 専用の Keycloak ユーザー。ADR 0015 の U-28)。停止の要求と読み取りだけ許す。承認者と同じ値は起動に失敗する。 |
+
+有効化の順序: dev で有効化し、E2E を確かめる。有効化の後の起動では、既存の `ACTIVE` の order はすべて `PAUSED`(理由 `STARTUP_HOLD`)になる(U-14)。運用者が再開するまで、周は始まらない。
+
+#### 7.6.2 ルートの作成と周の開始(運用者)
+
+- 作成: `POST /api/selfdev/orders` `{"title": "...", "policy": "..."}`。ルートは 1 件だけ(2 件目は 409)。`policy` は方針の文で、作成後は変えられない。AI の主体は作成できない(403)。
+- 周の開始: `POST /api/selfdev/orders/{id}/cycles` `{"version": n}`。Goal が 1 件作られ(`order_id` と `cycle_no` = 1)、既存の Planner と Plan の承認に進む。進行中の周があるとき、上限(既定 1 周)に達したとき、期限切れのとき、全体の一時停止中のときは 409。
+- 状況: `GET /api/selfdev/orders/{id}`(状態、理由、周の数、保留中の停止の要求。方針と題名は運用者だけに返る)、`GET /api/selfdev/orders/{id}/cycles`。一覧 `GET /api/selfdev/orders` には題名と方針を含めない。
+
+#### 7.6.3 状態
+
+| 状態 | 意味 | 解除 |
+|---|---|---|
+| `ACTIVE` | 周を続けてよい | — |
+| `PAUSED` | 周を始めない。理由コードを持つ | 運用者の再開(`POST .../resume`)。ただし `LIMIT_REACHED` と `EXPIRED` は再開できない(新しい order が要る) |
+| `STOP_REQUESTED` | 停止を要求中。周を始めない。承認を待つ | 承認(`STOPPED`)、却下、取り消し、期限切れ(24 時間。`PAUSED` に戻る) |
+| `STOPPED` | 終端。承認でだけ入る | なし |
+
+理由コードの例: `OPERATOR_PAUSED`(運用者の一時停止)、`STARTUP_HOLD`、`BUDGET_HOLD`(月次の割当ての枯渇)、`FX_EXPIRED`(為替の期限切れ)、`UNKNOWN_RUN`(周の Run が UNKNOWN)、`CYCLE_FAILURES`(周が 2 回続けて失敗)、`LIMIT_REACHED`、`EXPIRED`、`STOP_NOT_APPROVED`。一時停止の理由は、この固定コードだけである(自由な文は保存しない)。
+
+#### 7.6.4 止め方
+
+- **一時停止(承認は不要)**: `POST /api/selfdev/orders/{id}/pause` `{"version": n}`(運用者)。周だけが止まり、order は生きている。緊急時はこちら。全体の止め方は §7.4 の `POST /api/selfdev/autopilot/pause` も使える(周の開始と投入を止める。order の状態は変えない)。
+- **安全装置の一時停止(承認は不要、自動)**: 監視(約 60 秒ごと)が、`BUDGET_HOLD`、`FX_EXPIRED`、`UNKNOWN_RUN`、`CYCLE_FAILURES`、`LIMIT_REACHED`、`EXPIRED` を検出すると、`ACTIVE` の order を `PAUSED` にする。自動では再開しない。原因を確かめてから、運用者が `resume` する。
+- **停止(承認が要る)**: 次の手順で、ルートの承認者が承認する。
+  1. 要求: `POST /api/selfdev/orders/{id}/stop-requests` `{"version": n, "reasonCode": "..."}`。理由は固定の列挙だけ(`OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN`)。自由な文は受け付けない。要求の時点で order は `STOP_REQUESTED` になり、周は始まらない。木に未決の要求は 1 件まで。
+  2. 承認者が一覧を見る: `GET /api/selfdev/stop-requests?state=PENDING`(承認者だけ。`digest` を含む)。
+  3. 承認: `POST /api/selfdev/stop-requests/{id}/approve` `{"digest": "<一覧の digest>"}`。承認者は、要求した主体と同じ owner key では承認できない(409 ではなく 403)。`digest` が違えば 409。承認すると order は `STOPPED`、要求は `CONSUMED`。その周の Goal も既存の停止で止まる。投入済みの Run と PR には変更が無い(kivra は PR を閉じず、マージもしない)。
+  4. 却下: `POST /api/selfdev/stop-requests/{id}/reject`(承認者)。取り消し: `POST /api/selfdev/stop-requests/{id}/cancel`(要求した運用者か承認者。AI の主体は取り消せない)。どちらも order は `PAUSED`(`STOP_NOT_APPROVED`)に戻り、自動では再開しない。
+  5. 期限切れ: 要求から 24 時間で `EXPIRED`、order は `PAUSED`(`STOP_NOT_APPROVED`)。承認は期限切れの後は受け付けない。
+
+AI の主体ができるのは、読み取りと停止の要求だけである。作成、周の開始、一時停止、再開、承認、却下、取り消しは、AI の主体には 403 を返す。
+
+#### 7.6.5 監査とログ
+
+- 監査: `selfdev_order_events`(追記専用)。ID、種類、理由コード、状態、主体の種類(`HUMAN` / `AI` / `SYSTEM`)、owner key の SHA-256 の先頭 12 文字(`actor_ref`)だけを持つ。題名、方針、理由の本文は入らない。
+- ログ: 固定のコード、ID、operator の先頭のハッシュだけ(`net.kigawa.kivra.selfdev.order.operator`)。
+- 確認: `SELECT kind, from_state, to_state, reason_code, actor_kind, occurred_at FROM selfdev_order_events WHERE order_id = '...' ORDER BY occurred_at;`
+
+#### 7.6.6 段階 1 の範囲外
+
+子の order、子の停止、周の自動の開始、複数周、MCP の読み取りと停止の要求、`/ui` の画面は、後の段階である(ADR 0015 §7)。order の費用の上限(`order_budget_jpy`)も後の段階である。
 
 ### 6.15 周期ワーカーと結果の保持(Issue #231、ADR 0010 追補 6)
 

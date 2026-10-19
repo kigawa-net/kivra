@@ -245,6 +245,26 @@ class RealAttemptExecutorTest {
     }
 
     @Test
+    fun theServerLimitBelowTheAgentLimitIsTheOneThatApplies() = runBlocking {
+        val world = World(docker = ScriptedDocker(output = { paddingEvents(2 * MIB) + lines(resultLine()) }))
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.OUTPUT_LIMIT), world.executor().execute(world.attempt(maxOutputBytes = MIB.toLong())))
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun aServerLimitAboveEightMiBIsCappedAtEightMiB() = runBlocking {
+        val fits = World(docker = ScriptedDocker(
+            output = { paddingEvents(2 * MIB) + lines(resultLine()) },
+            onRun = { dir -> Files.writeString(dir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") },
+        ))
+        assertEquals(AttemptOutcome.ResultSubmitted, fits.executor().execute(fits.attempt(maxOutputBytes = 64L * MIB)))
+
+        val tooBig = World(docker = ScriptedDocker(output = { paddingEvents(9 * MIB) + lines(resultLine()) }))
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.OUTPUT_LIMIT), tooBig.executor().execute(tooBig.attempt(maxOutputBytes = 64L * MIB)))
+        tooBig.assertNoRunLeft()
+    }
+
+    @Test
     fun cliOutcomesAreMappedToTheirCodes() = runBlocking {
         val cases = listOf(
             Triple("no result, exit 1", "", 1) to AgentErrorCode.CLI_NONZERO,
@@ -828,4 +848,12 @@ class RealAttemptExecutorMonitorTest {
         private fun resultLine(summary: String): String =
             """{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"$summary","session_id":"sess-42"}"""
     }
+}
+
+private const val MIB = 1024 * 1024
+
+/** Valid stream-json events with no result, [totalBytes] in all (a multiple of 512 KiB). Each line is well under the per-line limit. */
+private fun paddingEvents(totalBytes: Int): String = buildString {
+    val line = 512 * 1024
+    repeat(totalBytes / line) { append("{\"type\":\"user\",\"pad\":\"").append("a".repeat(line - 25)).append("\"}\n") }
 }

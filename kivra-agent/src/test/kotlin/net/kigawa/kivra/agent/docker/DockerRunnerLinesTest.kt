@@ -55,6 +55,19 @@ class DockerRunLinesTest {
     }
 
     @Test
+    fun aLineOfExactlyTheLineLimitIsDeliveredAndOneByteMoreIsOversized() {
+        val exact = "x".repeat(CliOutputLimits.MAX_LINE_BYTES)
+        val over = "y".repeat(CliOutputLimits.MAX_LINE_BYTES + 1)
+        val fake = FakeDocker().apply { runStdout = "$exact\n$over\n".toByteArray() }
+        val lines = Collections.synchronizedList(mutableListOf<StdoutLine>())
+        runner(fake).run(fixture.spec(), onStdoutLine = { lines += it })
+
+        val all = lines.toList()
+        assertEquals(exact, (all[0] as StdoutLine.Text).value)
+        assertEquals(StdoutLine.Oversized, all[1])
+    }
+
+    @Test
     fun aListenerThatThrowsDoesNotChangeTheRun() {
         val fake = FakeDocker().apply {
             runExitCode = 0

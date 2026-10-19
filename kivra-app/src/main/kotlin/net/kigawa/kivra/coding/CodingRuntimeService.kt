@@ -30,7 +30,8 @@ data class CodingRuntimeConfig(
     val queueTtl: Duration = Duration.ofHours(24),
     val maxRuntime: Duration = Duration.ofMinutes(30),
     val maxTurns: Int = 30,
-    val maxOutputBytes: Long = 1024L * 1024,
+    /** The agent's total stdout limit (see [CodingLimits.maxOutputBytes]). */
+    val maxOutputBytes: Long = CODING_MAX_OUTPUT_BYTES,
     /** How many queued attempts one claim looks at before it gives up. */
     val maxClaimCandidates: Int = 10,
     /** How many rows one reconcile pass settles. */

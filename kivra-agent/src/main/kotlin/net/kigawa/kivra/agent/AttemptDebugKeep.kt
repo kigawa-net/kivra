@@ -12,6 +12,7 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import net.kigawa.kivra.agent.docker.CliOutputLimits
 import net.kigawa.kivra.agent.docker.DockerPatterns
 import org.slf4j.LoggerFactory
 
@@ -146,7 +147,7 @@ class AttemptDebugKeep(workRoot: Path, private val clock: Clock = Clock.systemUT
         const val TASK_FILE = "task.json"
         const val OUTCOME_FILE = "outcome.txt"
 
-        const val STREAM_LIMIT_BYTES = 8 * 1024 * 1024
+        const val STREAM_LIMIT_BYTES: Int = CliOutputLimits.MAX_TOTAL_BYTES.toInt()
         const val TASK_LIMIT_BYTES = 256 * 1024
         val MAX_AGE: Duration = Duration.ofHours(24)
         const val MAX_ENTRIES = 20

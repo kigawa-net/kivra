@@ -94,6 +94,8 @@ class AutopilotPlanner(
     private val gateway: ModelGateway,
     private val config: PlannerConfig,
     private val nonceSource: () -> String = PlannerPrompt::newNonce,
+    /** The repository file list (Issue #293). Null when it is disabled: the prompts are then the ones used before. */
+    private val repoFiles: PlannerRepoFiles? = null,
 ) {
 
     suspend fun planGoal(goalId: String): PlanAttempt {
@@ -107,10 +109,13 @@ class AutopilotPlanner(
         val fence = GoalClaim(goalId, claimed.version, checkNotNull(claimed.claimToken) { "a claimed goal has a claim token" })
         logger.info("planner claimed: goalId={}", goalId)
 
+        // Read once per goal. A failed read gives null, and the Planner works without the list (never a stop).
+        val repoList = repoFiles?.list()
+        var rejectedPath: String? = null
         var attempt = 1
         while (true) {
             val response = try {
-                gateway.invoke(request(fence, attempt, claimed.title, claimed.body))
+                gateway.invoke(request(fence, attempt, claimed.title, claimed.body, repoList, rejectedPath))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: GatewayException) {
@@ -134,6 +139,8 @@ class AutopilotPlanner(
                     // A cut answer would be cut the same way again, so it is not re-sent (as in LlmDeveloper).
                     val retry = attempt < PlannerConfig.MAX_ATTEMPTS && response.finishReason != FinishReason.LENGTH
                     if (!retry) return block(fence, AutopilotReason.PLAN_INVALID)
+                    // Only the path refusal is fed back, and only with the file list enabled (Issue #293).
+                    rejectedPath = if (repoFiles != null && check.reason == PlanRejectReason.PATH_NOT_ALLOWED) check.path else null
                     attempt++
                 }
             }
@@ -179,22 +186,34 @@ class AutopilotPlanner(
         }
     }
 
-    private fun request(fence: GoalClaim, attempt: Int, title: String, body: String?): ModelRequest {
+    private fun request(
+        fence: GoalClaim,
+        attempt: Int,
+        title: String,
+        body: String?,
+        repoList: String?,
+        rejectedPath: String?,
+    ): ModelRequest {
         val nonce = (1..PlannerPrompt.MAX_NONCE_ATTEMPTS)
             .asSequence()
             .map { nonceSource() }
-            .firstOrNull { PlannerPrompt.user(title, body, it) != null }
+            .firstOrNull { PlannerPrompt.user(title, body, it, repoList) != null }
             ?: throw IllegalStateException("no usable nonce for the planner prompt")
-        val user = checkNotNull(PlannerPrompt.user(title, body, nonce))
+        val user = checkNotNull(PlannerPrompt.user(title, body, nonce, repoList))
+        val retryNote = if (rejectedPath != null) {
+            PlannerPrompt.RETRY_NOTE + "\n" + PlannerPrompt.pathRetryNote(rejectedPath)
+        } else {
+            PlannerPrompt.RETRY_NOTE
+        }
         return ModelRequest(
             // Unique per claim and attempt: the version changes with every claim, so a retried claim never reuses a request id.
             requestId = "planner-${fence.goalId}-${fence.version}-$attempt",
             principal = config.principal,
             purpose = Purpose.PLANNING,
             messages = buildList {
-                add(Message(Role.SYSTEM, PlannerPrompt.system()))
+                add(Message(Role.SYSTEM, PlannerPrompt.system(repoFiles = repoList != null)))
                 add(Message(Role.USER, user))
-                if (attempt > 1) add(Message(Role.USER, PlannerPrompt.RETRY_NOTE))
+                if (attempt > 1) add(Message(Role.USER, retryNote))
             },
             dataClass = config.dataClass,
             budgetScopes = config.budgetScopes,

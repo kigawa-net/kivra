@@ -34,6 +34,13 @@ import net.kigawa.kivra.db.SubmitResult
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.db.Transition
 import net.kigawa.kivra.db.execUpdate
+import net.kigawa.kivra.github.GitHubFailureKind
+import net.kigawa.kivra.github.GitHubPort
+import net.kigawa.kivra.github.GitHubResult
+import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.github.RepoTree
+import net.kigawa.kivra.github.TreeEntry
+import net.kigawa.kivra.github.TreeEntryType
 import net.kigawa.kivra.modelgateway.BudgetController
 import net.kigawa.kivra.modelgateway.BudgetLimit
 import net.kigawa.kivra.modelgateway.CallContext
@@ -55,6 +62,7 @@ import net.kigawa.kivra.modelgateway.ModelRef
 import net.kigawa.kivra.modelgateway.ModelRegistry
 import net.kigawa.kivra.modelgateway.ModelRequest
 import net.kigawa.kivra.modelgateway.ModelResponse
+import net.kigawa.kivra.modelgateway.Part
 import net.kigawa.kivra.modelgateway.Price
 import net.kigawa.kivra.modelgateway.ProviderEntry
 import net.kigawa.kivra.modelgateway.ProviderHealth
@@ -463,4 +471,118 @@ class AutopilotPlannerTest {
         assertNotNull(refused.exceptionOrNull())
     }
 
+}
+
+/** A GitHub port whose only real method is [listTree]; the rest is the shared fake's. Counts the listings. */
+private class PlanTreeGitHub(private val respond: () -> GitHubResult<RepoTree>) : GitHubPort by FakeGitHub() {
+    var calls = 0
+    override suspend fun listTree(repo: RepoRef, ref: String): GitHubResult<RepoTree> {
+        calls++
+        return respond()
+    }
+}
+
+private fun treeOf(vararg paths: String) = PlanTreeGitHub {
+    GitHubResult.Success(RepoTree("a".repeat(40), paths.map { TreeEntry(it, TreeEntryType.BLOB, "100644", 100) }, truncated = false))
+}
+
+private fun textOf(message: Message): String = message.parts.filterIsInstance<Part.Text>().joinToString("") { it.text }
+
+class PlannerRepoFilesPlanTest {
+    private val repo = RepoRef("kigawa-net", "kivra")
+
+    private fun submitGoal(db: TestDb, key: String, title: String = GOAL_TITLE_MARKER, body: String? = GOAL_BODY_MARKER): String =
+        assertIs<SubmitResult.Created>(SelfDevGoalRepository(db.database).submit("op", key, title, body, "kigawa-net/kivra")).goal.goalId
+
+    private fun plannerWith(db: TestDb, harness: PlannerHarness, files: PlannerRepoFiles?) = AutopilotPlanner(
+        goals = SelfDevGoalRepository(db.database),
+        gateway = harness.gateway,
+        config = PlannerConfig(budgetScopes = listOf(TENANT), autopilot = REQUIRED),
+        nonceSource = { NONCE },
+        repoFiles = files,
+    )
+
+    @Test
+    fun `the first request carries the file list as a repo-data element, and the system prompt the rules for it`() = TestDb().use { db ->
+        val provider = ScriptedPlanner { _, req, ctx -> reply(validPlan(), req, ctx) }
+        val goalId = submitGoal(db, "k-list")
+        val attempt = runBlocking {
+            plannerWith(db, PlannerHarness(provider), PlannerRepoFiles(treeOf("docs/a.md"), repo, "main")).planGoal(goalId)
+        }
+
+        assertIs<PlanAttempt.Proposed>(attempt)
+        val request = provider.calls.single()
+        val user = textOf(request.messages.single { it.role == Role.USER })
+        assertTrue(user.contains("<repo-data nonce=\"$NONCE\" kind=\"repo_files\">"), user)
+        assertTrue(user.contains("docs/a.md"))
+        assertTrue(textOf(request.messages.first()).contains("Use targetPaths only with paths from that list"))
+    }
+
+    @Test
+    fun `a failed listing gives a prompt with no repo-data, and the plan goes on as before`() = TestDb().use { db ->
+        val provider = ScriptedPlanner { _, req, ctx -> reply(validPlan(), req, ctx) }
+        val goalId = submitGoal(db, "k-fail")
+        val failing = PlanTreeGitHub { GitHubResult.Failure(GitHubFailureKind.TREE_TRUNCATED, GitHubFailureKind.TREE_TRUNCATED.code) }
+        val attempt = runBlocking { plannerWith(db, PlannerHarness(provider), PlannerRepoFiles(failing, repo, "main")).planGoal(goalId) }
+
+        assertIs<PlanAttempt.Proposed>(attempt)
+        val request = provider.calls.single()
+        assertFalse(textOf(request.messages.single { it.role == Role.USER }).contains("repo-data"))
+        assertEquals(PlannerPrompt.system(), textOf(request.messages.first()))
+    }
+
+    @Test
+    fun `a refused path is fed back on the retry, with the rules and without the goal text`() = TestDb().use { db ->
+        val provider = ScriptedPlanner { call, req, ctx ->
+            reply(if (call == 1) validPlan(paths = """["ui/app.js"]""") else validPlan(), req, ctx)
+        }
+        val goalId = submitGoal(db, "k-retry")
+        val attempt = runBlocking {
+            plannerWith(db, PlannerHarness(provider), PlannerRepoFiles(treeOf("docs/a.md"), repo, "main")).planGoal(goalId)
+        }
+
+        assertIs<PlanAttempt.Proposed>(attempt)
+        val retry = textOf(provider.calls[1].messages.last())
+        assertTrue(retry.contains("\"ui/app.js\""), retry)
+        for (rule in listOf("kivra-*/src/**", "docs/**", "README.md")) assertTrue(retry.contains(rule), retry)
+        assertFalse(retry.contains(GOAL_TITLE_MARKER))
+        assertFalse(retry.contains(GOAL_BODY_MARKER))
+    }
+
+    @Test
+    fun `with the file list off, the retry note is the one used before`() = TestDb().use { db ->
+        val provider = ScriptedPlanner { call, req, ctx ->
+            reply(if (call == 1) validPlan(paths = """["ui/app.js"]""") else validPlan(), req, ctx)
+        }
+        val goalId = submitGoal(db, "k-retry-off")
+        runBlocking { plannerWith(db, PlannerHarness(provider), null).planGoal(goalId) }
+
+        assertEquals(PlannerPrompt.RETRY_NOTE, textOf(provider.calls[1].messages.last()))
+    }
+
+    @Test
+    fun `the listing is read once for several goals, and nothing of the goal or the paths is logged`() = TestDb().use { db ->
+        val provider = ScriptedPlanner { call, req, ctx ->
+            reply(if (call == 1) validPlan(paths = """["ui/app.js"]""") else validPlan(), req, ctx)
+        }
+        val first = submitGoal(db, "k-log-1")
+        val second = submitGoal(db, "k-log-2")
+        val github = treeOf("docs/a.md")
+        val planner = plannerWith(db, PlannerHarness(provider), PlannerRepoFiles(github, repo, "main"))
+
+        val events = captureLogs {
+            runBlocking {
+                planner.planGoal(first)
+                planner.planGoal(second)
+            }
+        }
+
+        assertEquals(1, github.calls)
+        val logged = events.joinToString("\n") { it.formattedMessage }
+        assertTrue(logged.contains("planner repo files:"), logged)
+        assertFalse(logged.contains(GOAL_TITLE_MARKER))
+        assertFalse(logged.contains(GOAL_BODY_MARKER))
+        assertFalse(logged.contains("docs/a.md"))
+        assertFalse(logged.contains("ui/app.js"))
+    }
 }

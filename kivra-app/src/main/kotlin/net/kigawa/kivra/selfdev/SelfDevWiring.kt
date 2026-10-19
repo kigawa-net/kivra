@@ -175,7 +175,9 @@ internal fun buildSelfDev(
     )
     // Built only when the autopilot is enabled. Nothing about planning exists otherwise (ADR 0011, PR B).
     val planWorker = autopilot.config?.takeIf { autopilot.enabled }?.let { autopilotConfig ->
-        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevGoalRepository(database), tenantId)
+        // The Planner's file list reads the same GitHub adapter, on the configured base branch (Issue #293). Off when the switch is off.
+        val repoFiles = if (autopilotConfig.plannerRepoTree) PlannerRepoFiles(github, config.repo, config.baseBranch) else null
+        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevGoalRepository(database), tenantId, repoFiles)
     }
     return SelfDevParts(
         worker = worker,
@@ -194,6 +196,7 @@ private fun buildPlanWorker(
     gateway: ModelGateway,
     goals: SelfDevGoalRepository,
     tenantId: String,
+    repoFiles: PlannerRepoFiles?,
 ): PlannerWorker {
     check(registry.models.any { it.id == PLANNER_MODEL_ID && it.lifecycle == Lifecycle.ACTIVE }) {
         "the autopilot planner model is not an active model in the registry"
@@ -202,6 +205,7 @@ private fun buildPlanWorker(
         goals = goals,
         gateway = gateway,
         config = PlannerConfig(budgetScopes = listOf(tenantId), autopilot = config),
+        repoFiles = repoFiles,
     )
     return PlannerWorker(goals, planner, Duration.ofSeconds(config.planIntervalSeconds))
 }

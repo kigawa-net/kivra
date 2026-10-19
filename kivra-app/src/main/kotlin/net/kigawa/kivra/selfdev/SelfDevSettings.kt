@@ -78,11 +78,19 @@ class SelfDevSettings private constructor(
     /** Present only when [enabled]. */
     val modelRegistryPath: String?,
     val fx: FxConfig?,
+    /**
+     * `KIVRA_SELFDEV_PR_REBASE_ENABLED` (issue #276). Off by default. When off, nothing about the pull request branch update runs. Read only
+     * when [enabled].
+     */
+    val prRebaseEnabled: Boolean = false,
 ) {
     override fun toString(): String = "SelfDevSettings(enabled=$enabled)"
 
     companion object {
         const val ENV_ENABLED = "KIVRA_SELFDEV_ENABLED"
+
+        /** Keeps waiting pull requests on top of the base (issue #276). Off by default. */
+        const val ENV_PR_REBASE_ENABLED = "KIVRA_SELFDEV_PR_REBASE_ENABLED"
         const val ENV_TARGET_REPO = "KIVRA_SELFDEV_TARGET_REPO"
         const val ENV_BASE_BRANCH = "KIVRA_SELFDEV_BASE_BRANCH"
         const val ENV_GITHUB_TOKEN = "KIVRA_SELFDEV_GITHUB_TOKEN"
@@ -182,8 +190,16 @@ class SelfDevSettings private constructor(
                 githubBotUserId = Secret(botUserId),
                 modelRegistryPath = registry,
                 fx = fx,
+                prRebaseEnabled = prRebaseEnabled(env),
             )
         }
+
+        private fun prRebaseEnabled(env: Map<String, String>): Boolean =
+            when (env[ENV_PR_REBASE_ENABLED]?.trim()) {
+                null, "", "false" -> false
+                "true" -> true
+                else -> throw IllegalStateException("$ENV_PR_REBASE_ENABLED must be true or false")
+            }
 
         /**
          * `KIVRA_SELFDEV_RUNTIME`: `api` (the default, the single model call) or `cli` (the local coding agent, ADR 0010).

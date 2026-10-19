@@ -247,6 +247,13 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
   - 未確定の予約の一覧(UNPRICED と期限切れの LAPSED)。予約キーは短く表示する(CLI は attempt ID と世代)。「解除…」は二段階: 入力の画面、次に確認の画面、そのあと「解除する」。実額は任意(空欄は実額不明)。`POST /api/admin/budget/acknowledge` と同じ。拒否の理由は固定の文言で出す(実額が計上額の 100 倍を超える、単位が合わない、など)。
 - **開発目標(Goal)の欄**: オートパイロット(ADR 0011)が有効のときだけ出る。Goal の入力、計画の承認、タスクの承認と見送り、中止、再計画、全体の一時停止とブレーカーの再開。手順は §7.4。
 - **上部の注意書き**: `GET /api/selfdev/status` の `enabled` で出し分ける。有効なら「自己開発の Run は GitHub に PR を作成します(実際に実行されます)」、無効なら「自己開発は無効です」。状態を取れなければ「設定を取得できていません」と出す(有効・無効は推測しない)。
+- **実行の経過(自己開発の CLI 経路の Run の詳細にだけ出る節、ADR 0012 PR 4)**: `GET /api/admin/runs/{id}/execution` が 200 で試行(attempt)を返す Run にだけ出る。API 経路の Run、シミュレーションの Run、404・403、試行がまだ無い Run では、節ごと出ない。詳細の画面を開いたときに一度だけ判定する(出ない Run は、再読み込みで判定し直す)。
+  - 表示: 試行の状態と世代、ターン数、ツール呼び出しの合計と種類別の件数(Read / Edit / Write / Bash / Grep / Glob / Task / TodoWrite / その他の固定の名前だけ)、ツール結果の失敗、権限の拒否、警告・取りこぼし・上限到達、費用、停止の段階。Run の本文・タイトル・パス・プロンプトは出さない。進み具合は割合にせず、「ターン N」と件数で示す。活動中の試行には「不確定」の棒を出す(上限が分からないため)。
+  - 費用: 「確定」は CLI が結果で報告した額(終了後に確定する)。「推定」は予約からの見積りで、確定ではない。実行中の費用は推定だけになりうる(assistant の usage が実行中に届くかは未確認)。
+  - 停止: この画面に停止ボタンは無い(PR 5)。「停止要求あり(エージェントの確認待ち)」は停止済みを意味しない。エージェントの報告は観測であり、検証された事実ではない。
+  - 更新: Run が終端(COMPLETED / FAILED / CANCELLED)になるまで、画面を開いている間だけ 5 秒ごとにスナップショットを取り直す。タブが隠れている間は 30 秒ごと。失敗が続くと 10・20・40 秒と延ばし、上限は 60 秒。画面を離れると止まる。古い応答(`revision` が表示中のものより古い)は捨てる。
+  - SSE(`/execution/stream`): 使えるブラウザでだけ試す。接続が 3 回続けて失敗する、または `resync` が 2 回来ると、SSE を止めて定期取得だけに戻る。SSE は任意の最適化で、定期取得だけでも同じ内容が出る(SSE が oauth2-proxy を通るかは未確認。§6.19)。
+  - **鮮度**: `STALE` は「最終の受信から N 分経過。表示は古い可能性があります」を赤く出す。監視が途切れているだけで、Run が止まっているとは限らない。SSE の切断、定期取得の失敗、画面を隠している間の停止は、Run の障害が解消した証拠にも、成功の証拠にもならない。「監視の情報を取得できませんでした」が出たら、下の表示は最後に取れた時点のものである。
 - **一覧**: 既定は「自分の Run」(`GET /api/runs`)。「全員の Run(運用者向け)」は `GET /api/admin/runs` で、作成者(`createdBy`)を併記する。ロールを持つ運用者は、どの Run も見られる。
 - **種別バッジ**: `シミュレーション`(SIMULATED。AI や GitHub は呼ばれない)、`自己開発(PR を作成)`(SELF_DEV。GitHub に PR を作る)。想定外の値は「不明な種別」と値そのものを出す。
 - **タイトル**: 種別によらず、投入した本人と運用者の画面に表示する(`textContent` で表示し、長さは表示側で制限する)。MVP では、認証済みの運用者が投入したタイトルを、同じ運用者の画面に表示する。将来 Issue 由来のテキストを扱う場合(ADR 0008 の ⑪)は、信頼できない入力として再検討する(`textContent` のみ、長さ制限は維持)。種別が不明な Run は、タイトルを表示しない。(ADR 0008 の追補、2026-10-17)
@@ -296,6 +303,55 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 **方針を変える**: 式は `scripts/fx-refresh.py` の `compute_rate`。52 週の窓は `WINDOW_DAYS`、警告の閾値は `BIG_MOVE_RATIO`、検査の範囲は `MIN_RATE` / `MAX_RATE` / `MAX_STALE_DAYS` / `MIN_RANGE_POINTS`。変更は kivra リポジトリの PR で行い、`scripts/test_fx_refresh.py` を更新する。頻度は `fx-refresh.yml` の `cron`(7 日の失効より十分短く保つ)。余裕と税の比率は k8s 側の環境変数で、kivra の設定を変える。
 
 **k8s の他の PR との関係**: cd.yml の deploy PR も同じファイルを更新するが、触る行が違うので通常は競合しない。競合したら、この節の式で値を直し直す。
+
+### 4.9 自己開発 PR のブランチを main に追従させる(Issue #276、既定は無効)
+
+**実装済み(既定は無効)。** kivra の Run に束縛された、人のレビュー待ちの自己開発 PR が `main` より遅れていて(compare API の `behind_by` > 0)、コンフリクトが無いとき、`PUT /pulls/{n}/update-branch`(`expected_head_sha` つき)でブランチを更新する。更新後の head は、kivra が検証してから Run に保存した head を更新する。検証が通らないときは、Run をそのまま人に残す。失敗にはしない。
+
+**有効化**
+- `KIVRA_SELFDEV_PR_REBASE_ENABLED=true`(既定は `false`。`true` と `false` と空以外は起動失敗)。自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)のときだけ読まれる。
+- 環境変数は起動時に一度だけ読まれるため、変更には再起動が要る。
+- 有効化の前に、「App の権限」(下記)を確認する。
+
+**止め方**
+- `KIVRA_SELFDEV_PR_REBASE_ENABLED` を `false` にして再起動する。無効のときは、この機能の経路は一切動かない(GitHub への追加の呼び出しも、監査行も無い)。
+
+**更新の契機**(すべて満たしたときだけ、更新の要求を出す)
+- 追従の契機は、`mergeable_state` の `behind` ではなく、compare API `GET /repos/{owner}/{repo}/compare/main...{head}` の `behind_by` > 0。`behind` は、ブランチ保護の「マージ前にブランチを最新にする」が有効なときだけ返り、このリポジトリの `main` では返らない(実機で確認。PR #271 は 9 コミット遅れでも `unstable`)。
+- `mergeable` が `true`(計算中の `null`、コンフリクトの `false` は触らない)。`mergeable_state` が `dirty` のときも触らない。
+- `behind_by` が整数でない応答、または読めないときは、何もしない(追従しない)。
+
+**再束縛の条件**(すべて満たしたときだけ、Run に保存した head を新しい head に更新する)
+- (a) 新しい head がマージコミットで、親が「旧 head」と「main の先頭」の 2 つだけ。
+- (b) PR 自身の差分が、更新の前後で同一。差分は、旧 head と main の merge-base からの差分と、main から新しい head までの差分で、ファイルの一覧、モード、内容のハッシュ(git の blob id)で比べる。
+- ポリシー(PatchPolicy)は再実行しない。差分が同一なら、ポリシーの結果も同じだからである。
+- 上限: 1 つの PR につき、更新の要求は 1 時間に 1 回、合計 3 回まで。
+
+**監査ログ**(`audit_events`、Run の ID で引く)
+- `PR_REBASE_ATTEMPTED`: 更新の要求の前に書く。要求の回数は、この行の数で数える(要求が失敗しても数える)。
+- `PR_REBASE_HELD`: 要求のあとに人に残った。理由コードを持つ。
+- `PR_REBASE_REBOUND`: 再束縛した。payload は `{"from": 旧 head の先頭 12 文字, "to": 新 head の先頭 12 文字, "reasonCode": "PR_REBASE_VERIFIED"}`。
+- 題名、本文、パス、ファイルの内容は、監査にも、ログにも出さない。
+
+**人に残るケース**(Run は PULL_REQUEST のまま。`Waiting` の理由コードに出る)
+
+| 理由コード | 意味 | 対応 |
+|---|---|---|
+| (コードなし) | コンフリクト(`mergeable` が `false` または `mergeable_state` が `dirty`)、`mergeable` が未計算(`null`)、作者が bot でない、または `behind_by` が 0 | 人がレビューする。kivra は触らない(未計算のときは次の周期に回る) |
+| `GITHUB_CONFLICT` | 更新の要求が拒否された(head が動いた、またはコンフリクト) | 人がレビューする |
+| `GITHUB_PERMISSION` | App に権限が無い(403)。**有効化の前の確認事項**(下記) | App の権限を確認する |
+| `PR_REBASE_NOT_OBSERVED` | 要求は通ったが、新しい head が見えなかった | 後から届いた更新は、次の周期で検証されて再束縛される。届かなければ人が確認する |
+| `PR_REBASE_UPDATE_UNKNOWN` | 要求の応答が不明(再送はしない) | `NOT_OBSERVED` と同じ扱い |
+| `PR_REBASE_PARENTS_MISMATCH` | 新しい head の親が「旧 head と main の先頭」にならない(人の push の可能性を含む) | 人が確認する |
+| `PR_REBASE_DIFF_CHANGED` | PR の差分が変わった(改ざんの可能性を含む)。再束縛しない | 人が差分を確認する |
+| `PR_REBASE_VERIFY_FAILED` | 読み取りに失敗した、またはツリーが切り詰められた | 次の周期で再試行される。続くなら人が確認する |
+| `PR_REBASE_REBIND_FAILED` | 再束縛の DB 書き込みに失敗した(旧 head のまま。同じ transaction で巻き戻る) | DB とログを確認する |
+| `PR_REBASE_LIMIT_TOTAL` | 合計 3 回を使い切った | 人が PR を確認する |
+
+**確認事項(未確認): App の権限**
+- kivra の GitHub App のトークンは、`contents:write` と `pull_requests:write` を要求する(`kivra-github` の `GitHubAppTokenMinter`)。
+- この実装では、`update-branch` に必要な権限と、App の実際の付与(GitHub 上の設定)は確認していない。有効化の前に、dev で `PUT /pulls/{n}/update-branch` が 403 にならないことを確認する。403 のときは `GITHUB_PERMISSION` で人に残り、その試行も上限に数えられる。
+- 権限の追加は共有基盤の変更であり、リポジトリ管理者の承認が要る。
 
 ## 5. 動作確認
 
@@ -1426,7 +1482,7 @@ SELECT kind, COUNT(*) AS n
 
 ### 6.19 実行の経過の読み取り(ADR 0012 PR 3、Issue #223 / #224)
 
-運用者が、Run の実行の経過(attempt の状態、ツール呼び出しの件数、ターン数、費用の確定と推定、停止の段階、鮮度)を読むための API。読み取りだけで、Run も attempt も変えない。画面は PR 4、停止は PR 5。値は §6.17 の監視イベントから作る。
+運用者が、Run の実行の経過(attempt の状態、ツール呼び出しの件数、ターン数、費用の確定と推定、停止の段階、鮮度)を読むための API。読み取りだけで、Run も attempt も変えない。画面は PR 4(§4.7 の「実行の経過」)、停止は PR 5。値は §6.17 の監視イベントから作る。画面は SSE が使えなくても、REST の定期取得だけで全部の表示が動く。
 
 **API**
 
@@ -1486,7 +1542,7 @@ SELECT kind, COUNT(*) AS n
 
 これらが動かない場合の代替: 画面は REST のポーリング(スナップショットを数秒ごと、差分は `events` のカーソル)で足りる。SSE は必要にならない限り使わなくてよい。
 
-## 8. MCP エンドポイント(`/mcp`、ADR 0013、Issue #181、PR 1: 読み取りのみ)
+## 8. MCP エンドポイント(`/mcp`、ADR 0013、Issue #181、PR 1: 読み取り、PR 4: 書き込み `kivra_selfdev_start`)
 
 既定は無効。`KIVRA_MCP_ENABLED` が未設定、`false`、空のとき、MCP の変数は他に一つも読まれず、`/mcp` と `/.well-known/oauth-protected-resource` は登録されない(404)。
 
@@ -1500,6 +1556,8 @@ SELECT kind, COUNT(*) AS n
 - `KIVRA_MCP_ALLOWED_ORIGINS`(任意)。カンマ区切りの `Origin`(例 `https://kivra-dev.kigawa.net`)。`Origin` ヘッダーが付いたリクエストは、一覧に一致する必要がある。`Origin` が無いリクエスト(非ブラウザのクライアント)は通す。
 - `KIVRA_MCP_RATE_PER_MINUTE`(任意、既定 60、1〜6000)。主体(所有者のキー)ごとに、1 分あたりの上限。超えると 429。
 - `KIVRA_AGENT_REQUIRED_ROLE`(任意)。設定されていれば、そのロールを持つトークンは 403(エージェントは MCP の呼び出し元ではない)。`aud` の検査で、エージェントのトークンは既に 401 になる。これは多層防御。
+- `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
+- `KIVRA_MCP_WRITE_RATE_PER_MINUTE`(任意、既定 5、1〜6000)。書き込みの呼び出しの、主体ごとの 1 分あたりの上限。読み取りの上限(`KIVRA_MCP_RATE_PER_MINUTE`)とは別。超えると 429。書き込みが無効のときは読まれない。
 
 不正な値は起動を止める。エラーには変数の名前だけが出て、値は出ない。
 
@@ -1532,11 +1590,58 @@ SELECT kind, COUNT(*) AS n
 
 - 入力は厳格(未知の項目、型違い、範囲外は JSON-RPC の -32602)。
 - 題名(title)、本文、パッチ、トークン、ログは返さない。
-- 書き込みのツール(`kivra_selfdev_start`、`kivra_run_stop`)は、この PR では `tools/list` に出ず、呼べば -32602(未知のツール)。
+- 書き込みのツール `kivra_selfdev_start` は §8.7 のとおり。`KIVRA_MCP_WRITE_ENABLED` が `false` のときは `tools/list` に出ず、呼べば -32602(未知のツール)。`kivra_run_stop` は、まだ存在しない(PR 5)。
 
 ### 8.5 ログと監査
 
-1 リクエストにつき 1 行。メソッド名、ツール名、主体のハッシュ(SHA-256 の先頭 12 文字)、結果コードだけ。引数の値、Run の本文、トークン、主体の生の値は出さない。
+1 リクエストにつき 1 行。`via=mcp`、メソッド名、ツール名、主体のハッシュ(SHA-256 の先頭 12 文字)、結果コード、書き込みの場合は `run_id`。引数の値(題名、本文、`idempotency_key`)、トークン、主体の生の値は出さない。書き込みが投入されたときは、別に `mcp.selfdev_start via=mcp kind=SELF_DEV run_id=... replayed=...` の 1 行が出る。
+
+### 8.7 書き込み(`kivra_selfdev_start`、PR 4、既定は無効)
+
+#### 有効化の前提と順序
+
+書き込みは、次の順で有効にする。途中で読み取りの確認が取れなければ、先へ進まない。
+
+1. **読み取りだけを dev で確かめる**: `KIVRA_MCP_ENABLED=true` の状態で、`tools/list` に `kivra_run_list` と `kivra_run_get` が出て、`kivra_selfdev_start` が出ないことを確かめる(`KIVRA_MCP_WRITE_ENABLED` が未設定か `false`)。
+2. **キルスイッチが有効であること**: `KIVRA_SELFDEV_ENABLED=true`。off のとき、書き込みは `tools/list` に出ず、呼べば固定の理由 `KILL_SWITCH_OFF` で拒否される(§8.7 の応答)。
+3. **書き込みを有効にする**: `KIVRA_MCP_WRITE_ENABLED=true`(dev だけ。本番の既定は `false` のまま)。`KIVRA_MCP_WRITE_RATE_PER_MINUTE` は既定の 5 のまま始める。
+4. **確認**: `tools/list` に `kivra_selfdev_start` が出る(書き込みのスコープ `kivra.selfdev.start` を持つトークンだけ)。小さな依頼を一件だけ投入し、同じ `idempotency_key` で再送して `replayed: true` の同じ `run_id` が返ることを確かめる。
+
+`KIVRA_MCP_WRITE_ENABLED=true` は `KIVRA_MCP_ENABLED=true` なしでは起動を止める。
+
+#### スキーマ
+
+| 項目 | 必須 | 規則 |
+|---|---|---|
+| `title` | はい | 1〜200 文字、制御文字なし。Issue の参照(`https://github.com/<owner>/<repo>/issues/<n>`、`#<n>`、`<owner>/<repo>#<n>`)も可。参照は既存の経路で解決される(§5.1) |
+| `body` | いいえ | 0〜8000 文字。改行とタブは可、ほかの制御文字は不可。空白だけは body 無しと同じ |
+| `idempotency_key` | はい | クライアントが生成する。1〜128 文字、制御文字なし |
+
+- 余分な項目(`repo`、`command`、`env`、`token`、`branch` など)は -32602。認証情報、環境変数、任意のコマンド、リポジトリは受け取らない。
+- 型違い、範囲外、制御文字は -32602。Run は作られない。
+- 本文は UNTRUSTED のデータとして扱われる。題名に「指示を無視して」と書いても、通常の依頼として投入されるだけである。
+
+#### スコープ
+
+- 必要なスコープは `kivra.selfdev.start`。無い場合は HTTP 403 と `WWW-Authenticate: Bearer error="insufficient_scope", scope="kivra.selfdev.start"`。読み取りのスコープ(`kivra.runs.read`)だけでは呼べない。
+- 所有者は `iss` と `sub` から作るキー。同じ `idempotency_key` でも、主体が違えば別の Run になる。他人の Run を再送で取ることはできない。
+
+#### 応答(`structuredContent`)
+
+- 成功: `{"run_id": "...", "state": "CREATED", "stage": "...(あれば)", "replayed": false, "reason_code": "...(あれば)"}`。`replayed: true` は同じ key と同じ内容の再送。
+- 拒否(`isError: true`、`structuredContent.error.code` に固定の値):
+  - `KILL_SWITCH_OFF`: `KIVRA_SELFDEV_ENABLED=false`。
+  - `CONCURRENCY_LIMIT`: 同時に進む自己開発 Run が上限(`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`)に達した。
+  - `IDEMPOTENCY_CONFLICT`: 同じ key で内容が違う。既存の Run の ID は返さない。
+- 書き込みの呼び出しが上限を超えると、HTTP 429 と JSON-RPC の `-32029`(`RATE_LIMITED`)。
+- 状態は実際の値をそのまま返す(`UNKNOWN`、`WAITING` など)。「PR ができた」とは言わない。PR は `kivra_run_get` で確かめる。
+
+#### 止め方
+
+- 書き込みだけを止める: `KIVRA_MCP_WRITE_ENABLED=false`(または未設定)にして再起動。ツールは `tools/list` から消え、呼べば未知のツールになる。読み取りは続く。
+- 自己開発を全体で止める: `KIVRA_SELFDEV_ENABLED=false`(キルスイッチ、§4.4)。書き込みは `KILL_SWITCH_OFF` で拒否される。
+- MCP を全体で止める: `KIVRA_MCP_ENABLED=false`。`/mcp` は 404 になる。
+- クライアントの切断は Run をキャンセルしない。投入された Run は、切断と無関係に続く。応答が失われたら、同じ `idempotency_key` で再送すれば同じ Run が返る。
 
 ### 8.6 接続(PR 2 と PR 3 の後)
 

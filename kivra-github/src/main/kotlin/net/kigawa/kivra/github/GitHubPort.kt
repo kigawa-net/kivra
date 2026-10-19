@@ -77,7 +77,14 @@ interface GitHubPort {
 enum class TreeEntryType { BLOB, TREE, COMMIT }
 
 /** One tree entry. [sizeBytes] is set for blobs only. */
-data class TreeEntry(val path: String, val type: TreeEntryType, val mode: String, val sizeBytes: Long?)
+data class TreeEntry(
+    val path: String,
+    val type: TreeEntryType,
+    val mode: String,
+    val sizeBytes: Long?,
+    /** The git object id of the entry (the content hash for a blob). Null when the listing did not carry it. */
+    val sha: String? = null,
+)
 
 /** A recursive tree listing. [truncated] is always false in a returned tree; a truncated listing is a failure. */
 data class RepoTree(val sha: String, val entries: List<TreeEntry>, val truncated: Boolean)

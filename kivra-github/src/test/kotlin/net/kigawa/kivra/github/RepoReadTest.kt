@@ -79,10 +79,10 @@ class RepoReadTest {
         assertFalse(tree.truncated)
         assertEquals(
             listOf(
-                TreeEntry("README.md", TreeEntryType.BLOB, "100644", 12),
-                TreeEntry("docs", TreeEntryType.TREE, "040000", null),
-                TreeEntry("link", TreeEntryType.BLOB, "120000", 3),
-                TreeEntry("sub", TreeEntryType.COMMIT, "160000", null),
+                TreeEntry("README.md", TreeEntryType.BLOB, "100644", 12, RR_SHA),
+                TreeEntry("docs", TreeEntryType.TREE, "040000", null, RR_SHA),
+                TreeEntry("link", TreeEntryType.BLOB, "120000", 3, RR_SHA),
+                TreeEntry("sub", TreeEntryType.COMMIT, "160000", null, RR_SHA),
             ),
             tree.entries,
         )

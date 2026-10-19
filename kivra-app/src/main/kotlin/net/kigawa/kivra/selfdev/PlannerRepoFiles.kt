@@ -98,8 +98,11 @@ internal data class RenderedRepoFiles(
 
 /** Pure functions: the list, its size limit, and the path checks. No I/O. */
 internal object PlannerRepoFileList {
-    /** The size limit of the list body (24 KB). A larger list is replaced by a directory summary. */
-    const val MAX_BYTES = 24 * 1024
+    /**
+     * The size limit of the list body (48 KB). A larger list is replaced by a directory summary. The full list of the real `main` is
+     * about 37 KB (Issue #293 follow-up), so it fits with room for the repository to grow.
+     */
+    const val MAX_BYTES = 48 * 1024
 
     /** Files at or above this size carry their size in KB (20 KB). */
     const val LARGE_FILE_BYTES = 20 * 1024L
@@ -208,6 +211,6 @@ internal object PlannerRepoFileList {
         "Repository files that the planner may name in targetPaths (complete paths from the repository root). " +
             "Sizes are given in KB for files of 20 KB or more."
     private const val SUMMARY_HEADER =
-        "Repository files, SUMMARIZED by directory because the full list is larger than 24 KB. Each line is a directory and its " +
+        "Repository files, SUMMARIZED by directory because the full list is larger than ${MAX_BYTES / 1024} KB. Each line is a directory and its " +
             "file count. The files themselves are not listed."
 }

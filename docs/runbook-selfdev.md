@@ -1361,6 +1361,61 @@ ADR から変えた点(PR A での判断、ADR §2.8 に記録):
 - 計画段階の `BLOCKED` の理由は `PLAN_INVALID` / `PLAN_BUDGET_HOLD` である。ディスパッチ段階の `BUDGET_HOLD` とは分ける。計画段階で止まった Goal は、今の表では `STOPPED` 以外へ進めない(未決の点 U-16)。
 - 全タスクが終わって全部は完了しなかった Goal は `STOPPED`(理由 `TASKS_INCOMPLETE`)になる(PR E。ADR §2.8b)。`STOPPED` / `DONE` の終端からは動かない。投入の直前に、Goal が `TASKS_QUEUED` / `RUNNING` でなければ投入しない(`GOAL_NOT_DISPATCHABLE`)。
 
+### 7.6 自己開発の order(ADR 0015 段階 1、Issue #273、既定は無効)
+
+order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 は**ルートの order 1 件**だけで、子の order、周の自動の開始、複数周はまだ無い(最大 1 周。周は運用者が開始する)。UI と MCP もまだ無い。操作は HTTP だけである。
+
+#### 7.6.1 有効化の前提(起動時に検査される)
+
+| 変数 | 必須 | 内容 |
+|---|---|---|
+| `KIVRA_SELFDEV_ORDERS_ENABLED` | ○ | `true` で有効。`false` か未設定で無効(既定)。`true` / `false` 以外は起動に失敗する。オートパイロットが無効のときは、この変数も他の order の変数も読まれず、order は無効(ルートも作られず、ルートの API は 404)。 |
+| `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` | ○(有効時) | order の周は、オートパイロットの Planner と Dispatcher が回す。オートパイロットが無効なら起動に失敗する。 |
+| `KIVRA_SELFDEV_ROOT_APPROVER` | ○(有効時) | ルートの停止を承認できる唯一の主体の owner key(`<長さ>:<issuer>:<sub>`)。kigawa の値を入れる。コードには固定しない。ログには出さない。 |
+| `KIVRA_SELFDEV_AI_PRINCIPAL` | 任意 | AI の主体の owner key(AI 専用の Keycloak ユーザー。ADR 0015 の U-28)。停止の要求と読み取りだけ許す。承認者と同じ値は起動に失敗する。 |
+
+有効化の順序: dev で有効化し、E2E を確かめる。有効化の後の起動では、既存の `ACTIVE` の order はすべて `PAUSED`(理由 `STARTUP_HOLD`)になる(U-14)。運用者が再開するまで、周は始まらない。
+
+#### 7.6.2 ルートの作成と周の開始(運用者)
+
+- 作成: `POST /api/selfdev/orders` `{"title": "...", "policy": "..."}`。ルートは 1 件だけ(2 件目は 409)。`policy` は方針の文で、作成後は変えられない。AI の主体は作成できない(403)。
+- 周の開始: `POST /api/selfdev/orders/{id}/cycles` `{"version": n}`。Goal が 1 件作られ(`order_id` と `cycle_no` = 1)、既存の Planner と Plan の承認に進む。進行中の周があるとき、上限(既定 1 周)に達したとき、期限切れのとき、全体の一時停止中のときは 409。
+- 状況: `GET /api/selfdev/orders/{id}`(状態、理由、周の数、保留中の停止の要求。方針と題名は運用者だけに返る)、`GET /api/selfdev/orders/{id}/cycles`。一覧 `GET /api/selfdev/orders` には題名と方針を含めない。
+
+#### 7.6.3 状態
+
+| 状態 | 意味 | 解除 |
+|---|---|---|
+| `ACTIVE` | 周を続けてよい | — |
+| `PAUSED` | 周を始めない。理由コードを持つ | 運用者の再開(`POST .../resume`)。ただし `LIMIT_REACHED` と `EXPIRED` は再開できない(新しい order が要る) |
+| `STOP_REQUESTED` | 停止を要求中。周を始めない。承認を待つ | 承認(`STOPPED`)、却下、取り消し、期限切れ(24 時間。`PAUSED` に戻る) |
+| `STOPPED` | 終端。承認でだけ入る | なし |
+
+理由コードの例: `OPERATOR_PAUSED`(運用者の一時停止)、`STARTUP_HOLD`、`BUDGET_HOLD`(月次の割当ての枯渇)、`FX_EXPIRED`(為替の期限切れ)、`UNKNOWN_RUN`(周の Run が UNKNOWN)、`CYCLE_FAILURES`(周が 2 回続けて失敗)、`LIMIT_REACHED`、`EXPIRED`、`STOP_NOT_APPROVED`。一時停止の理由は、この固定コードだけである(自由な文は保存しない)。
+
+#### 7.6.4 止め方
+
+- **一時停止(承認は不要)**: `POST /api/selfdev/orders/{id}/pause` `{"version": n}`(運用者)。周だけが止まり、order は生きている。緊急時はこちら。全体の止め方は §7.4 の `POST /api/selfdev/autopilot/pause` も使える(周の開始と投入を止める。order の状態は変えない)。
+- **安全装置の一時停止(承認は不要、自動)**: 監視(約 60 秒ごと)が、`BUDGET_HOLD`、`FX_EXPIRED`、`UNKNOWN_RUN`、`CYCLE_FAILURES`、`LIMIT_REACHED`、`EXPIRED` を検出すると、`ACTIVE` の order を `PAUSED` にする。自動では再開しない。原因を確かめてから、運用者が `resume` する。
+- **停止(承認が要る)**: 次の手順で、ルートの承認者が承認する。
+  1. 要求: `POST /api/selfdev/orders/{id}/stop-requests` `{"version": n, "reasonCode": "..."}`。理由は固定の列挙だけ(`OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN`)。自由な文は受け付けない。要求の時点で order は `STOP_REQUESTED` になり、周は始まらない。木に未決の要求は 1 件まで。
+  2. 承認者が一覧を見る: `GET /api/selfdev/stop-requests?state=PENDING`(承認者だけ。`digest` を含む)。
+  3. 承認: `POST /api/selfdev/stop-requests/{id}/approve` `{"digest": "<一覧の digest>"}`。承認者は、要求した主体と同じ owner key では承認できない(409 ではなく 403)。`digest` が違えば 409。承認すると order は `STOPPED`、要求は `CONSUMED`。その周の Goal も既存の停止で止まる。投入済みの Run と PR には変更が無い(kivra は PR を閉じず、マージもしない)。
+  4. 却下: `POST /api/selfdev/stop-requests/{id}/reject`(承認者)。取り消し: `POST /api/selfdev/stop-requests/{id}/cancel`(要求した運用者か承認者。AI の主体は取り消せない)。どちらも order は `PAUSED`(`STOP_NOT_APPROVED`)に戻り、自動では再開しない。
+  5. 期限切れ: 要求から 24 時間で `EXPIRED`、order は `PAUSED`(`STOP_NOT_APPROVED`)。承認は期限切れの後は受け付けない。
+
+AI の主体ができるのは、読み取りと停止の要求だけである。作成、周の開始、一時停止、再開、承認、却下、取り消しは、AI の主体には 403 を返す。
+
+#### 7.6.5 監査とログ
+
+- 監査: `selfdev_order_events`(追記専用)。ID、種類、理由コード、状態、主体の種類(`HUMAN` / `AI` / `SYSTEM`)、owner key の SHA-256 の先頭 12 文字(`actor_ref`)だけを持つ。題名、方針、理由の本文は入らない。
+- ログ: 固定のコード、ID、operator の先頭のハッシュだけ(`net.kigawa.kivra.selfdev.order.operator`)。
+- 確認: `SELECT kind, from_state, to_state, reason_code, actor_kind, occurred_at FROM selfdev_order_events WHERE order_id = '...' ORDER BY occurred_at;`
+
+#### 7.6.6 段階 1 の範囲外
+
+子の order、子の停止、周の自動の開始、複数周、MCP の読み取りと停止の要求、`/ui` の画面は、後の段階である(ADR 0015 §7)。order の費用の上限(`order_budget_jpy`)も後の段階である。
+
 ### 6.15 周期ワーカーと結果の保持(Issue #231、ADR 0010 追補 6)
 
 エージェント API が有効(`KIVRA_AGENT_API_ENABLED=true`)のときだけ、`CodingReconcileWorker` が起動する。起動時に `coding reconcile worker started` のログが出る。無効のときは起動せず、変数も読まない。

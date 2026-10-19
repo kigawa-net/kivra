@@ -34,8 +34,9 @@ data class PrRebaseSettings(
  * run waits for a person, and only when the feature is switched on (`KIVRA_SELFDEV_PR_REBASE_ENABLED`, off by default).
  *
  * Two paths:
- * - **Behind, no conflict, the head is still the recorded one**: the update is requested with `expected_head_sha` (after the audit row
- *   of the attempt is written). The new head is then verified and, only if it passes, recorded.
+ * - **Behind (`behind_by` > 0 by the compare API), mergeable with no conflict, the head is still the recorded one**: the update is
+ *   requested with `expected_head_sha` (after the audit row of the attempt is written). The new head is then verified and, only if it
+ *   passes, recorded.
  * - **The head differs from the recorded one** (an update that landed later, or a push by a person): the new head is verified in the same
  *   way, and only a passing head is recorded. A head that does not pass stays, and the run waits for a person.
  *
@@ -101,8 +102,13 @@ class PrBranchRebaser(
             is GitHubResult.Success -> r.value
             else -> return Outcome.NoAction
         }
-        // "behind" means the head is behind the base with no conflict. A conflict ("dirty"), an unknown state or a clean head is not touched.
-        if (view.mergeableState != MERGEABLE_BEHIND || view.pullRequest.headSha != binding.headSha) return Outcome.NoAction
+        // The trigger is the distance to the base (compare API), not `mergeable_state`: GitHub reports "behind" only when the base branch
+        // requires the head to be up to date, which this repository does not. A conflict, or a mergeable value that is not known yet, is
+        // not touched. A distance that cannot be read is not a reason to update.
+        if (view.pullRequest.headSha != binding.headSha) return Outcome.NoAction
+        if (view.mergeable != true || view.mergeableState == MERGEABLE_DIRTY) return Outcome.NoAction
+        val behindBy = (port.getBehindBy(repo, baseBranch, binding.headSha) as? GitHubResult.Success)?.value ?: return Outcome.NoAction
+        if (behindBy <= 0) return Outcome.NoAction
 
         val now = clock.instant()
         val (total, recent) = runs.countRebaseAttempts(run.runId, now.minus(settings.window))
@@ -222,8 +228,8 @@ class PrBranchRebaser(
     private companion object {
         val logger = LoggerFactory.getLogger(PrBranchRebaser::class.java)
 
-        /** GitHub's `mergeable_state` when the head is behind the base and has no conflict. */
-        const val MERGEABLE_BEHIND = "behind"
+        /** GitHub's `mergeable_state` when the head conflicts with the base. */
+        const val MERGEABLE_DIRTY = "dirty"
 
         const val VERIFIED = "PR_REBASE_VERIFIED"
         const val LIMIT_TOTAL = "PR_REBASE_LIMIT_TOTAL"

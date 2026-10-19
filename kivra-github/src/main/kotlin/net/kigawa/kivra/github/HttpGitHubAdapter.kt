@@ -283,6 +283,7 @@ class HttpGitHubAdapter(
     private fun sameRepo(fullName: String?, repo: RepoRef) = fullName != null && fullName.equals(repo.toString(), ignoreCase = true)
 
     private val sha40 = Regex("[0-9a-f]{40}")
+    private val behindByLiteral = Regex("0|[1-9][0-9]{0,9}")
 
     /** Lookup failures that decide which PR is ours; reported even when the create outcome was unknown. */
     private val IDENTITY_DECISIONS = setOf(
@@ -841,7 +842,28 @@ class HttpGitHubAdapter(
         }
         val o = parse(raw) as? JsonObject ?: return protocol("pr")
         if (o.long("number")?.toInt() != number) return mismatch()
-        return parsePr(repo, o).map { PrRebaseView(it, o.str("mergeable_state")) }
+        val mergeable = when (val m = o["mergeable"]) {
+            null, JsonNull -> null
+            is JsonPrimitive -> if (m.isString) null else m.booleanOrNull
+            else -> null
+        }
+        return parsePr(repo, o).map { PrRebaseView(it, o.str("mergeable_state"), mergeable) }
+    }
+
+    override suspend fun getBehindBy(repo: RepoRef, base: String, headSha: String): GitHubResult<Int> {
+        if (!isValidRef(base) || !sha40.matches(headSha)) return validation("compare")
+        val raw = when (val g = get("${repoPath(repo)}/compare/$base...$headSha")) {
+            is GitHubResult.Success -> g.value
+            is GitHubResult.Failure -> return g
+            is GitHubResult.Unknown -> return g
+        }
+        val o = parse(raw) as? JsonObject ?: return protocol("compare")
+        // A JSON number only: a string "9" or a fraction is not the count, and a negative count is not one either.
+        val prim = o["behind_by"] as? JsonPrimitive ?: return protocol("compare.behind_by")
+        // The literal's text must be a plain non-negative integer: no quotes, sign, fraction or exponent, and no leading zero.
+        if (prim.isString || !behindByLiteral.matches(prim.content)) return protocol("compare.behind_by")
+        val behind = prim.content.toIntOrNull() ?: return protocol("compare.behind_by")
+        return GitHubResult.Success(behind)
     }
 
     override suspend fun updatePrBranch(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<Unit> {

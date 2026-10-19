@@ -215,10 +215,65 @@ class PrBranchRebaseTest {
             val runId = h.openedRun()
             val old = h.head()
             h.mainMoves()
-            for (state in listOf("dirty", "unknown", null)) {
+            // Behind by one commit, but a conflict ("dirty", mergeable false) or a mergeable value not computed yet (null): left alone.
+            for ((state, mergeable) in listOf("dirty" to true, "dirty" to false, "unstable" to false, "unstable" to null)) {
+                h.port.mergeableState = state
+                h.port.mergeable = mergeable
+                assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), h.runner().advance(runId), "state=$state mergeable=$mergeable")
+            }
+            assertEquals(0, h.port.updateCalls)
+            assertEquals(emptyList(), db.rebaseRows(runId))
+            assertEquals(old, h.binding(runId))
+        }
+    }
+
+    @Test
+    fun aHeadBehindMainIsUpdatedWithoutTheUpToDateProtection() = runBlocking {
+        // The live repository has no "require up to date" protection, so GitHub reports "unstable", never "behind".
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            h.mainMoves()
+            h.registerMerge(MERGE, "blob-new")
+            h.port.mergeableState = "unstable"
+            h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_VERIFIED"), h.runner().advance(runId))
+            assertEquals(MERGE, h.binding(runId))
+            assertEquals(1, h.port.updateCalls)
+        }
+    }
+
+    @Test
+    fun aHeadThatContainsMainIsNotUpdatedWhateverTheMergeableState() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            // main has nothing the head lacks (behind_by is 0), so no state reported by GitHub is a reason to update.
+            for (state in listOf("clean", "unstable", "behind")) {
                 h.port.mergeableState = state
                 assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), h.runner().advance(runId), "state=$state")
             }
+            assertEquals(3, h.port.compareCalls)
+            assertEquals(0, h.port.updateCalls)
+            assertEquals(emptyList(), db.rebaseRows(runId))
+            assertEquals(old, h.binding(runId))
+        }
+    }
+
+    @Test
+    fun aDistanceThatCannotBeReadIsNotAReasonToUpdate() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainMoves()
+            h.registerMerge(MERGE, "blob-new")
+            h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+            h.port.compareResult = GitHubResult.Failure(GitHubFailureKind.PROTOCOL, "unexpected response shape: compare.behind_by")
+
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), h.runner().advance(runId))
             assertEquals(0, h.port.updateCalls)
             assertEquals(emptyList(), db.rebaseRows(runId))
             assertEquals(old, h.binding(runId))
@@ -315,6 +370,7 @@ class PrBranchRebaseTest {
             val runs = DevelopmentRunRepository(db.database, db.outbox, AuditRepository(clock), db.prAuthority, clock)
             val h = Harness(db, runs = runs, clock = clock)
             val runId = h.openedRun()
+            h.mainMoves()
             // The update is accepted but the head does not move, so each attempt ends in NOT_OBSERVED.
             suspend fun tick() = h.runner().advance(runId)
             val waiting = Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
@@ -375,7 +431,7 @@ class PrBranchRebaseTest {
             val runId = h.openedRun()
             val old = h.head()
             h.mainMoves()
-            h.port.mergeableState = "behind"
+            h.port.mergeableState = "unstable"
 
             repeat(2) { assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), h.runner().advance(runId)) }
             assertEquals(0, h.port.totalCalls)

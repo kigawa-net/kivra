@@ -88,7 +88,24 @@
     DEVELOPER_POLICY_REJECTED: 'モデルの変更案がポリシーに通らなかった',
     CODING_EMPTY_PATCH: '変更が無く終了しました',
     CODING_BUDGET_EXCEEDED: '1 attempt の費用上限に達しました',
-    CODING_OVERLOADED: 'モデルが混雑していました'
+    CODING_OVERLOADED: 'モデルが混雑していました',
+    // The CODING_ codes below are written from the runbook (docs/runbook-selfdev.md, 6.7 and the Run state table) and CodingPatchSource.
+    CODING_AUTH_REQUIRED: '認証に失敗した（運用者が判断する）',
+    CODING_NEEDS_HUMAN: 'ホスト側の異常で、運用者の判断が必要（自動の再試行はしない）',
+    CODING_TIMEOUT: '実行が時間切れで止められた',
+    CODING_OUTPUT_LIMIT: 'CLI の出力が上限を超えた（出力の合計、または 1 行の上限）',
+    CODING_RATE_LIMITED: 'レート制限で止まった（自動の再試行はしない）',
+    CODING_BAD_OUTPUT: 'CLI の出力を読めなかった、または変更が拒否された',
+    CODING_CLI_NONZERO: 'CLI が異常終了した（終了コードが 0 以外、または結果が失敗）',
+    CODING_CANCELLED: '実行が取り消された',
+    CODING_FAILED: '実行が失敗したが、理由の内容が記録されていない',
+    CODING_ORPHANED: '実行の期限（lease）が切れ、結果が分からない（運用者が判断する）',
+    CODING_QUEUE_EXPIRED: '実行の待ち行列で 24 時間を過ぎ、期限切れになった（運用者が判断する）',
+    CODING_RESULT_MISSING: '変更の結果を読めなかった（再提案はしない）',
+    CODING_NO_ATTEMPT: '実行の記録（試行）が見つからなかった',
+    CODING_NOT_DEVELOPING: '開発の段階ではなかったため、実行を始めなかった',
+    CODING_ENQUEUE_REFUSED: '実行の投入が拒否された（Run が見つからない、開発中でない、または入力が不正）',
+    OPERATOR_RELEASED_UNBOUND_PR: '運用者が解放した（PR と結び付いていない）'
   };
 
   var ACTIONS = {
@@ -2196,6 +2213,11 @@
   function statusLine(ex) {
     if (!ex.snap) return null;
     var fresh = ex.snap.freshness;
+    // A finished run stops receiving on purpose: no stale warning for it (the freshness value itself is unchanged).
+    if (EXEC_TERMINAL[ex.runState] === true) {
+      var ended = parseInstant(ex.snap.lastReceivedAt);
+      return h('p', { className: 'meta', text: '終了済み（Run の状態が終端のため、受信は止まっています）。最終の受信: ' + (ended === null ? '不明' : fmtLocal(ended)) });
+    }
     if (fresh === 'STALE') {
       var n = staleMinutes(ex);
       var text = n === null ? EXEC_MSG.noReceipt : '最終の受信から ' + (n < 1 ? '1 分未満' : n + ' 分経過。' + EXEC_MSG.stale);
@@ -2268,25 +2290,30 @@
       toolDl.appendChild(h('dd', { text: count(toolCountFor(snap.tools, pair[0])) + ' 回' }));
     });
     body.appendChild(h('div', { className: 'exec-block' }, [
-      h('h4', { text: '進み（ターン・ツール呼び出し）' }),
+      h('h4', { text: '進み（メッセージ数・ツール呼び出し）' }),
       h('dl', { className: 'exec-dl' }, [
-        h('dt', { text: 'ターン' }), h('dd', { text: 'ターン ' + count(snap.turns) }),
+        h('dt', { text: 'メッセージ数' }), h('dd', { text: count(snap.turns) + ' 件' }),
         h('dt', { text: 'ツール呼び出し（合計）' }), h('dd', { text: count(snap.tools.total) + ' 回' }),
         h('dt', { text: 'ツール結果の失敗' }), h('dd', { text: count(snap.tools.errors) + ' 件' }),
         h('dt', { text: '権限の拒否' }), h('dd', { text: count(snap.permissionDenied) + ' 件' }),
         h('dt', { text: '最後の段階（エージェントの報告）' }), h('dd', { text: phase }),
         h('dt', { text: 'テストの段階' }), h('dd', { text: snap.testingReported === true ? '報告あり' : '報告なし' })
       ]),
+      h('p', { className: 'meta', text: 'メッセージ数は assistant のメッセージの数です。API のターン数とは異なることがあります。' }),
       h('h4', { text: 'ツールの種類別の件数' }),
       toolDl
     ]));
 
     var cost = snap.cost;
+    // A failed attempt has no CLI report (confirmed 0) and its estimate is the reserve: the estimate is then not a real cost.
+    var failedNoReport = snap.attempts.some(function (a) { return a && str(a.state) === 'FAILED'; }) &&
+      /^0(\.0+)?$/.test(str(cost.confirmedUsd)) && cost.estimatedBasis === 'RESERVE_ESTIMATE';
+    var estimateText = usd(cost.estimatedUsd) + '（推定）' + (failedNoReport ? '。予約額。実費ではない' : '');
     body.appendChild(h('div', { className: 'exec-block' }, [
       h('h4', { text: '費用' }),
       h('dl', { className: 'exec-dl' }, [
         h('dt', { text: '確定（CLI の報告。終了後に確定します）' }), h('dd', { text: usd(cost.confirmedUsd) }),
-        h('dt', { text: '推定（予約からの見積り。確定ではありません）' }), h('dd', { className: 'exec-estimate', text: usd(cost.estimatedUsd) + '（推定）' })
+        h('dt', { text: '推定（予約からの見積り。確定ではありません）' }), h('dd', { className: 'exec-estimate', text: estimateText })
       ])
     ]));
 

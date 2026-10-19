@@ -26,6 +26,8 @@ data class AutopilotConfig(
     val budgetSharePercent: Int,
     /** How often the Planner worker looks for goals to plan (seconds). Never a secret. */
     val planIntervalSeconds: Long = AutopilotSettings.DEFAULT_PLAN_INTERVAL_SECONDS,
+    /** Whether the Planner is shown the repository's file list (Issue #293). On by default; `KIVRA_SELFDEV_PLANNER_REPO_TREE=false` turns it off. */
+    val plannerRepoTree: Boolean = true,
 ) {
     /** True when the task waits for the operator. A denylisted task waits under every [approval], including AUTO. */
     fun requiresApproval(denylisted: Boolean): Boolean = denylisted || approval == AutopilotApproval.REQUIRED
@@ -64,6 +66,9 @@ class AutopilotSettings private constructor(
         const val ENV_MAX_RUNS_PER_DAY = "KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY"
         const val ENV_BUDGET_SHARE_PERCENT = "KIVRA_SELFDEV_AUTOPILOT_BUDGET_SHARE_PERCENT"
         const val ENV_PLAN_INTERVAL_SECONDS = "KIVRA_SELFDEV_AUTOPILOT_PLAN_INTERVAL_SECONDS"
+
+        /** The Planner's repository file list (Issue #293). Read only when the autopilot is on. Unset means on; other values are refused. */
+        const val ENV_PLANNER_REPO_TREE = "KIVRA_SELFDEV_PLANNER_REPO_TREE"
 
         const val DEFAULT_APPROVAL = "required"
         const val DEFAULT_MAX_PENDING_PRS = 3
@@ -127,6 +132,7 @@ class AutopilotSettings private constructor(
                     env, ENV_PLAN_INTERVAL_SECONDS, DEFAULT_PLAN_INTERVAL_SECONDS,
                     MIN_PLAN_INTERVAL_SECONDS, MAX_PLAN_INTERVAL_SECONDS,
                 ),
+                plannerRepoTree = plannerRepoTree(env),
             )
             logLimits(config, selfDev.maxActiveRuns)
             return AutopilotSettings(enabled = true, config = config)
@@ -157,6 +163,13 @@ class AutopilotSettings private constructor(
                     config.maxPendingPrs, maxActiveRuns,
                 )
             }
+        }
+
+        /** `true` (or unset) or `false`. Any other value is a startup failure; the message names the variable only. */
+        private fun plannerRepoTree(env: Map<String, String>): Boolean = when (env[ENV_PLANNER_REPO_TREE]?.trim()) {
+            null, "", "true" -> true
+            "false" -> false
+            else -> throw IllegalStateException("$ENV_PLANNER_REPO_TREE must be true or false")
         }
 
         /** A long in [min, max]; unset or blank means [default]. The message names the variable only. */

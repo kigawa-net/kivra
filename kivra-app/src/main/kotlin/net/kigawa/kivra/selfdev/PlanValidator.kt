@@ -54,7 +54,8 @@ enum class PlanRejectReason {
 
 sealed interface PlanCheck {
     data class Valid(val summary: String?, val tasks: List<NewTask>) : PlanCheck
-    data class Invalid(val reason: PlanRejectReason) : PlanCheck
+    /** [path] is set only for [PlanRejectReason.PATH_NOT_ALLOWED]: the model's own text, for the retry note only (never logged). */
+    data class Invalid(val reason: PlanRejectReason, val path: String? = null) : PlanCheck
 }
 
 /** Paths that make a task need the operator's approval even under AUTO (ADR 0011 section 4), beyond the PatchPolicy denylist. */
@@ -110,6 +111,12 @@ object PlanValidator {
     internal fun isAutoScopePath(path: String): Boolean = autoPolicy.allowsPath(path)
 
     /**
+     * True when the Planner may name [path] in a task: the same rule as [validate] (the allowlist, and not denylisted). Used to choose the
+     * repository files the Planner is shown, so a listed path is always one the validator accepts. It never accepts a path by itself.
+     */
+    internal fun allowsPlannedPath(path: String): Boolean = policy.allowsPath(path)
+
+    /**
      * Parses and checks the model's [text]. Returns [PlanCheck.Valid] with the tasks to store, or the first reason it fails.
      * The dependency rule (`dependsOn` names only earlier tasks) also rules out cycles, so no separate cycle check is needed.
      */
@@ -148,7 +155,7 @@ object PlanValidator {
                 if (policy.deniesPath(path)) {
                     denylisted = true
                 } else if (!policy.allowsPath(path)) {
-                    return PlanCheck.Invalid(PlanRejectReason.PATH_NOT_ALLOWED)
+                    return PlanCheck.Invalid(PlanRejectReason.PATH_NOT_ALLOWED, path)
                 }
             }
             // Stage 2 (ADR 0011 section 6.1): AUTO only, S, at most 3 paths, all in the narrow allowlist, none denylisted.

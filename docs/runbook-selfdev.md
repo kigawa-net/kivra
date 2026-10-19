@@ -231,6 +231,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - 優先されるのは、リポジトリに実在し、読み取れ、上限内で、書き込みの許可パス(`kivra-*/src/**`、`docs/**`、`README.md`)かつ拒否パスでないもの。`..`、絶対パス、`.git` で始まるものは無視する。
 - 優先されたファイルも上限(ファイル数、1 ファイルのサイズ、合計バイト)の内側に入る。上限は変わらない。
 - 優先されても、モデルに見せていないファイルへの書き込みは従来どおり拒否される(`UNSEEN_OVERWRITE`)。
+- 大きなファイル(目安として 50 KB か 1,000 行以上)の全体を 1 タスクで読み書きしないよう、Planner のプロンプトで指示している(#283。プロンプトだけの制約で、検査は無い)。大きなファイルの変更は、Planner が複数のタスクに分ける。
 
 ### 4.7 Web 画面(`/ui`)で Run を見る
 
@@ -562,7 +563,7 @@ claude -p <固定 prompt> --output-format stream-json --verbose --permission-mod
 | --- | --- | --- |
 | `TIMEOUT` | 実行が時間切れで止められた | `TIMEOUT` |
 | `CANCELLED` | キャンセル要求で止められた | `CANCELLED` |
-| `OUTPUT_LIMIT` | 実行の出力上限、または解析の総量上限、または 1 MiB を超える行 | `OUTPUT_LIMIT` |
+| `OUTPUT_LIMIT` | 実行の出力上限(8 MiB と claim の `maxOutputBytes` の小さいほう)、または解析の総量上限(8 MiB)、または 1 MiB を超える行 | `OUTPUT_LIMIT` |
 | `AUTH_FAILED` | `result` がなく認証の `api_retry`。または不正な行がなく結果が失敗で、認証の `api_retry` がある | `AUTH_REQUIRED` |
 | `RATE_LIMITED` | 同じ条件でレート制限 | `RATE_LIMITED` |
 | `OVERLOADED` | 同じ条件で過負荷 | `RATE_LIMITED`(kivra に過負荷のコードがないため) |
@@ -576,8 +577,23 @@ claude -p <固定 prompt> --output-format stream-json --verbose --permission-mod
 **未確認の事項(実際の CLI で確かめる。PR 9 までに)**:
 - `--allowedTools` の値を並べる形(空白区切り)と、`--permission-mode dontAsk` の挙動。`--max-turns` 到達時の終了コードと `result` の `subtype`(`error_max_turns` を想定)。
 - `result` の `subtype` が成功のとき `success` であること。`api_retry` の `error` の分類名(`authentication_failed` など)の全部。
-- `stream-json` の `usage` の全フィールド。Write のツール入力が stdout に入るため、1 MiB の出力上限が小さすぎないか(ADR 0010 の出力量の上限は未決)。
+- `stream-json` の `usage` の全フィールド。Write のツール入力が stdout に入るため、出力上限が小さすぎないか(上限は #283 で 1 MiB から 8 MiB に上げた。ADR 0010 の出力量の上限は未決のまま)。
 - `.kivra/` の書き込み権限(uid 10001)と、task ファイルを PR 8 の差分から外す処理。
+
+### 6.7b 出力の上限(`OUTPUT_LIMIT`、Issue #283)
+
+**原因(2026-10-19 の実機)**: 1 Run の標準出力(stream-json)の合計が上限を超えた。Claude CLI の `--verbose` の stream-json は、ツールの結果(読んだファイルの全文)も流す。そのため、大きなファイル(目安として約 100 KB 以上)を読む、編集する、読み直す、の組み合わせで、1 MiB の上限を超えた。失敗は `CODING_OUTPUT_LIMIT`(分類 `OUTPUT_LIMIT`)で、Run は FAILED になる。自動の再試行は無い。ログでの裏付け(`docker run finished` の `outcome=OUTPUT_LIMIT`、`stream-json parsed` の `outputLimitReached=true`)は、運用者が確かめる。
+
+**上限の値(実装済み)**:
+- 合計: 8 MiB。値は `CliOutputLimits.MAX_TOTAL_BYTES`(`kivra-agent/.../agent/docker/CliOutputLimits.kt`)の 1 か所で、Docker 実行の打ち切りと stream-json の解析の総量の両方が参照する。エージェントは、サーバーが claim で渡す `maxOutputBytes` と、この 8 MiB の小さいほうを使う(大きくはしない)。
+- サーバーの `maxOutputBytes` の既定は 8 MiB(`CODING_MAX_OUTPUT_BYTES`、kivra-app の `CodingTypes.kt`)。**環境変数による設定は無い**(値はコードに固定。変えるには再ビルドと再デプロイが要る)。
+- 1 行: 1 MiB(変えない)。超えた行は読み捨て、`oversizedLines` に数え、`OUTPUT_LIMIT` になる。
+- メモリ: 合計上限までの出力を、エージェントのプロセス内のメモリに保持する(ディスクには書かない)。上限を 8 MiB にしても、保持する量は最大で 8 MiB(文字列にすると、さらに一時的に同程度)。ディスクに書くのは §6.12 のデバッグ保存だけで、既定は無効。有効なら失敗した attempt ごとに最大 8 MiB、新しい順に 20 件まで。
+
+**対処**:
+- 再ビルドと配備(§6.11 の手順。PR の本文を参照)の後に、新しい Run で流し直す。既に FAILED になった Run は自動では再試行されない。必要なら計画を作り直す。
+- 同じ上限に繰り返し当たるなら、タスクを小さく分ける。Planner のプロンプトには「大きなファイルの全体を 1 タスクで読み書きしない。複数の小さなタスクに分ける」という制約を入れた(#283。プロンプトだけの制約で、決定的な検査は無い)。
+- 出力の中身を確かめるには、§6.12 の `stream.jsonl` を有効にする。ただし上限を超えた実行では、その上限で切れている。
 
 ### 6.8 作業ディレクトリと差分(PatchSet)の生成(PR 8)
 
@@ -729,7 +745,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 **実行の手順(1 アテンプト)**:
 1. 基底コミットを、ホスト側の bare mirror(`<KIVRA_AGENT_WORK_DIR>/.mirror.git`)へ取り込み、`baseSha` の tar を `WorkDirPreparer` で `<作業ルート>/<runId>-<attemptId>` に展開する。`.kivra/task.json` を書く(タスク文は title。claim の `input.task.body` は、`.kivra/task.json` の `body` に渡す。エージェント側のこの変更は kivra 側より先に出す。ADR 0010 追補 5)。
 2. `DockerRunner.cleanupOrphans` で、このエージェントのラベル付きの孤児コンテナを消す。
-3. CLI のコンテナを 1 つ起動する(§6.6、§6.7 の引数)。時間制限は `limits.maxRuntimeSeconds`。出力上限は `min(limits.maxOutputBytes, 1 MiB)`。
+3. CLI のコンテナを 1 つ起動する(§6.6、§6.7 の引数)。時間制限は `limits.maxRuntimeSeconds`。出力上限は `min(limits.maxOutputBytes, 8 MiB)`(#283 で 1 MiB から変えた)。
 4. コンテナが止まった後で `StreamJsonParser` と `CliOutcomeClassifier` で分類し、分類が成功なら `DiffCollector` で変更を集める(§6.8)。
 5. 結果は、heartbeat(世代の確認)と status(キャンセルの確認)の後に `POST /attempts/{id}/result` で送る。
 6. 作業ディレクトリとマニフェストを `RunDirCleanup` で消す。どの経路でも消す(失敗、キャンセル、例外)。消せなかったものが残ったときは、警告ログ(`work directory was not fully removed`、runId と attemptId だけ)を出す。残ったディレクトリは手で消す。
@@ -819,7 +835,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 
 **未解決(この PR の範囲外)**:
 - claim のパターンは差分の検査に使う(Issue #231、§6.10d)。組み込みの規則とサーバーの規則の両方を満たすことが要件である。
-- 出力上限は、claim の `maxOutputBytes` を 1 MiB の上限まで縮めるだけに使う。
+- 出力上限は、claim の `maxOutputBytes` を 8 MiB の上限まで縮めるだけに使う(引き上げには使わない)。
 - タスク文は title と、Run に保存された本文(claim の `input.task.body`、§5.1)。
 - 実際の docker、`claude` CLI、`/etc/subuid` の所有権、作業ディレクトリの削除は、この PR では実機で確かめていない(§6.6、§6.7、§6.8 の未確認事項)。
 - 有効化: `KIVRA_AGENT_EXECUTOR=real` は既定で無効。実機の確認の後、別の PR で有効にする。
@@ -1030,7 +1046,7 @@ sudo runuser -u kivra-agent -- env XDG_RUNTIME_DIR=/run/user/1001 journalctl --u
 - 値は `1`(有効)、`0` または未設定(無効)。それ以外の値は起動を拒否する(exit 2。メッセージは変数名だけ)。
 
 **保存先**: `/var/lib/kivra-agent/work/debug/<runId>-<attemptId>/`(`KIVRA_AGENT_WORK_DIR` の下の `debug/`)。
-- `stream.jsonl`: CLI の stdout(stream-json)全体。8 MiB で先頭から切る。ただし実行の出力上限(claim の `maxOutputBytes` と 1 MiB の小さいほう)を超えた実行では、その上限で既に切れている。
+- `stream.jsonl`: CLI の stdout(stream-json)全体。8 MiB で先頭から切る。ただし実行の出力上限(claim の `maxOutputBytes` と 8 MiB の小さいほう)を超えた実行では、その上限で既に切れている。
 - `task.json`: CLI に渡った `.kivra/task.json`。渡った title が分かる。
 - `outcome.txt`: `code=<失敗コード>`。差分が拒否されたときは `reasons=<理由>` も付く(例: `code=CLI_NONZERO` と `reasons=EMPTY_PATCH`)。`code=EXCEPTION` は、結果が返る前に例外や中断(キャンセル、リースの喪失など)で終わったこと。
 

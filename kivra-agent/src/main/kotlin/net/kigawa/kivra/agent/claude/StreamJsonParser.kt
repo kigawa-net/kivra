@@ -15,6 +15,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
+import net.kigawa.kivra.agent.docker.CliOutputLimits
 import org.slf4j.LoggerFactory
 
 /** The kind of an API error that the CLI reported in a `system` event with subtype `api_retry`. Only these kinds are kept. */
@@ -111,8 +112,8 @@ class StreamReport(
  * Nothing from the output is logged: only the counts. The logger receives the counts and nothing else.
  */
 class StreamJsonParser(
-    private val maxLineBytes: Int = MAX_LINE_BYTES,
-    private val maxTotalBytes: Long = MAX_TOTAL_BYTES,
+    private val maxLineBytes: Int = CliOutputLimits.MAX_LINE_BYTES,
+    private val maxTotalBytes: Long = CliOutputLimits.MAX_TOTAL_BYTES,
 ) {
     private val logger = LoggerFactory.getLogger(StreamJsonParser::class.java)
 
@@ -272,8 +273,6 @@ class StreamJsonParser(
     }
 
     companion object {
-        const val MAX_LINE_BYTES = 1024 * 1024
-        const val MAX_TOTAL_BYTES = 8L * 1024 * 1024
         const val MAX_RESULT_CHARS = 64 * 1024
         private const val MAX_TURNS = 1000
         private const val MAX_TOKENS = 10_000_000_000L

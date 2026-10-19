@@ -1180,7 +1180,7 @@ test('the section shows the attempt, the turn count, the tool counts and the war
   assert.equal(sec.hidden, false);
   const text = sec.textContent;
   assert.match(text, /試行 #1：稼働中（CLI）（世代 2）/);
-  assert.equal(valueAfter(sec, 'ターン'), 'ターン 4');
+  assert.equal(valueAfter(sec, 'メッセージ数'), '4 件');
   assert.equal(valueAfter(sec, 'ツール呼び出し（合計）'), '12 回');
   assert.equal(valueAfter(sec, 'ツール結果の失敗'), '1 件');
   assert.equal(valueAfter(sec, '読み取り（Read）'), '5 回');
@@ -1247,6 +1247,80 @@ test('LIVE shows no stale sentence', async () => {
   assert.match(sec.textContent, /鮮度: LIVE/);
 });
 
+test('a reason code with a Japanese explanation shows the explanation and the code as text', async () => {
+  const dom = await openDetail(selfRun('FAILED', { reasonCode: 'CODING_OUTPUT_LIMIT' }));
+  const text = dom.byId('detail-body').textContent;
+  assert.ok(text.includes('CLI の出力が上限を超えた'), 'the explanation is shown');
+  assert.ok(text.includes('（CODING_OUTPUT_LIMIT）'), 'the code is shown after the explanation');
+});
+
+test('a reason code without an explanation is shown as the unknown reason with its code only', async () => {
+  const dom = await openDetail(selfRun('FAILED', { reasonCode: 'CODING_SOMETHING_NEW' }));
+  assert.ok(dom.byId('detail-body').textContent.includes('不明な理由（CODING_SOMETHING_NEW）'));
+});
+
+test('a reason code that is markup is shown as text, never as an element', async () => {
+  const dom = await openDetail(selfRun('FAILED', { reasonCode: EVIL }));
+  const tags = dom.byId('detail-body').tags();
+  assert.equal(tags.filter((t) => t === 'IMG' || t === 'SCRIPT').length, 0);
+  assert.ok(dom.byId('detail-body').textContent.includes(EVIL));
+});
+
+test('every coding failure code the runbook names has an explanation (none falls back to the unknown reason)', async () => {
+  const codes = ['CODING_AUTH_REQUIRED', 'CODING_NEEDS_HUMAN', 'CODING_TIMEOUT', 'CODING_OUTPUT_LIMIT', 'CODING_RATE_LIMITED',
+    'CODING_BAD_OUTPUT', 'CODING_CLI_NONZERO', 'CODING_CANCELLED', 'CODING_FAILED', 'CODING_ORPHANED', 'CODING_QUEUE_EXPIRED',
+    'CODING_RESULT_MISSING', 'CODING_NO_ATTEMPT', 'CODING_NOT_DEVELOPING', 'CODING_ENQUEUE_REFUSED', 'CODING_EMPTY_PATCH',
+    'CODING_BUDGET_EXCEEDED', 'CODING_OVERLOADED', 'OPERATOR_RELEASED_UNBOUND_PR'];
+  for (const code of codes) {
+    const dom = await openDetail(selfRun('FAILED', { reasonCode: code }));
+    const text = dom.byId('detail-body').textContent;
+    assert.ok(!text.includes('不明な理由（' + code + '）'), code + ' has an explanation');
+    assert.ok(text.includes('（' + code + '）'), code + ' is shown with its code');
+  }
+});
+
+test('a finished run (COMPLETED, FAILED, CANCELLED) shows no stale warning, even with STALE freshness', async () => {
+  for (const runState of ['COMPLETED', 'FAILED', 'CANCELLED']) {
+    const dom = await openExec(selfRun(runState), () => ({ status: 200, data: snapshot({ runState, freshness: 'STALE', lastReceivedAt: '2026-10-18T23:53:00Z' }) }));
+    const sec = execSection(dom);
+    const stale = []; sec.walk((n) => { if (n.className === 'exec-stale') stale.push(n); });
+    assert.equal(stale.length, 0, runState + ': no exec-stale element');
+    assert.doesNotMatch(sec.textContent, /古い可能性/, runState);
+    assert.match(sec.textContent, /終了済み/, runState);
+  }
+});
+
+test('a running run with STALE freshness still shows the stale warning', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'), () => ({ status: 200, data: snapshot({ runState: 'DEVELOPING', freshness: 'STALE', lastReceivedAt: '2026-10-18T23:53:00Z' }) }));
+  const sec = execSection(dom);
+  const stale = []; sec.walk((n) => { if (n.className === 'exec-stale') stale.push(n); });
+  assert.equal(stale.length, 1);
+  assert.match(sec.textContent, /表示は古い可能性があります/);
+  assert.doesNotMatch(sec.textContent, /終了済み/);
+});
+
+test('the turn count is labelled as messages, with a note that it may differ from the API turn count', async () => {
+  const dom = await openExec(selfRun('DEVELOPING'));
+  const sec = execSection(dom);
+  assert.equal(valueAfter(sec, 'メッセージ数'), '4 件');
+  assert.match(sec.textContent, /assistant のメッセージの数です。API のターン数とは異なることがあります/);
+  assert.doesNotMatch(sec.textContent, /ターン 4/);
+});
+
+test('a failed attempt with no CLI report shows its reserve estimate as a reserve, not a real cost', async () => {
+  const failed = [{ attemptId: ATT, attemptNo: 1, state: 'FAILED', leaseGeneration: 2, lastReceivedAt: null }];
+  const dom = await openExec(selfRun('FAILED'), () => ({ status: 200, data: snapshot({ runState: 'FAILED', attempts: failed, cost: { confirmedUsd: '0.000000', estimatedUsd: '0.500000', confirmedBasis: 'REPORTED_USAGE', estimatedBasis: 'RESERVE_ESTIMATE' } }) }));
+  assert.equal(valueAfter(execSection(dom), '推定（予約からの見積り。確定ではありません）'), 'USD 0.500000（推定）。予約額。実費ではない');
+});
+
+test('the reserve note is not shown when the attempt did not fail, or when a confirmed cost is there', async () => {
+  const running = await openExec(selfRun('DEVELOPING'), () => ({ status: 200, data: snapshot({ cost: { confirmedUsd: '0.000000', estimatedUsd: '0.500000' } }) }));
+  assert.equal(valueAfter(execSection(running), '推定（予約からの見積り。確定ではありません）'), 'USD 0.500000（推定）');
+  const failed = [{ attemptId: ATT, attemptNo: 1, state: 'FAILED', leaseGeneration: 2, lastReceivedAt: null }];
+  const confirmed = await openExec(selfRun('FAILED'), () => ({ status: 200, data: snapshot({ runState: 'FAILED', attempts: failed, cost: { confirmedUsd: '0.250000', estimatedUsd: '0.500000' } }) }));
+  assert.equal(valueAfter(execSection(confirmed), '推定（予約からの見積り。確定ではありません）'), 'USD 0.500000（推定）');
+});
+
 test('a non-terminal run is read every 5 seconds; a terminal run is read once and not again', async () => {
   const dom = await openExec(selfRun('DEVELOPING'));
   assert.equal(execCalls(dom).length, 1);
@@ -1302,7 +1376,7 @@ test('consecutive failures back off (10, 20, 40, 60, 60 seconds); the last shown
   const sec = execSection(dom);
   assert.match(sec.textContent, /監視の情報を取得できませんでした/);
   assert.match(sec.textContent, /Run の状態ではありません/);
-  assert.match(sec.textContent, /ターン 4/, 'the last snapshot is still shown');
+  assert.match(sec.textContent, /メッセージ数4 件/, 'the last snapshot is still shown');
   assert.doesNotMatch(sec.textContent, /LEAK/);
   assert.doesNotMatch(sec.textContent, /正常|解消/);
 
@@ -1325,7 +1399,7 @@ test('a network failure before any answer shows the section with the fixed messa
   assert.match(sec.textContent, /監視の情報を取得できませんでした/);
   fail = false;
   await dom.clock.advance(10000);
-  assert.match(execSection(dom).textContent, /ターン 4/);
+  assert.match(execSection(dom).textContent, /メッセージ数4 件/);
 });
 
 test('a malformed answer is a failure with the fixed message, not a blank or a crash', async () => {
@@ -1341,10 +1415,10 @@ test('an older snapshot (by revision) never replaces the one shown', async () =>
     if (n === 1) return { status: 200, data: snapshot({ turns: 9, revision: { attemptVersion: 5, eventCount: 10 } }) };
     return { status: 200, data: snapshot({ turns: 2, revision: { attemptVersion: 4, eventCount: 10 } }) };
   });
-  assert.equal(valueAfter(execSection(dom), 'ターン'), 'ターン 9');
+  assert.equal(valueAfter(execSection(dom), 'メッセージ数'), '9 件');
   await dom.clock.advance(5000);
   assert.equal(execCalls(dom).length, 2);
-  assert.equal(valueAfter(execSection(dom), 'ターン'), 'ターン 9', 'the older answer is ignored');
+  assert.equal(valueAfter(execSection(dom), 'メッセージ数'), '9 件', 'the older answer is ignored');
 });
 
 test('a stop requested is shown as waiting for the agent, never as stopped', async () => {
@@ -1383,7 +1457,7 @@ test('a malformed attempt number or count is shown as unknown', async () => {
     data: snapshot({ turns: -1, tools: { total: 1.5, byName: {}, errors: 'x' } }),
   }));
   const sec = execSection(dom);
-  assert.equal(valueAfter(sec, 'ターン'), 'ターン 不明');
+  assert.equal(valueAfter(sec, 'メッセージ数'), '不明 件');
   assert.equal(valueAfter(sec, 'ツール呼び出し（合計）'), '不明 回');
   assert.equal(valueAfter(sec, 'ツール結果の失敗'), '不明 件');
 });

@@ -99,6 +99,34 @@ class DockerRunnerTest {
         assertEquals(1024, result.stdout.length)
     }
 
+    private fun defaultLimitRunner(fake: FakeDocker) = DockerRunner(
+        settings = fixture.settings,
+        launcher = fake,
+        nanoTime = { fake.clockNanos },
+        pollMillis = 1_000,
+    )
+
+    @Test
+    fun outputOfTwoMiBIsKeptWithTheDefaultLimit() {
+        val fake = FakeDocker().apply {
+            runExitCode = 0
+            runStdout = ByteArray(2 * MIB) { 'a'.code.toByte() }
+        }
+        val result = defaultLimitRunner(fake).run(fixture.spec())
+        assertEquals(DockerRunOutcome.EXITED, result.outcome)
+        assertFalse(result.outputTruncated)
+        assertEquals(2 * MIB, result.stdout.length)
+    }
+
+    @Test
+    fun outputOverEightMiBIsOutputLimitWithTheDefaultLimit() {
+        val fake = FakeDocker().apply { runStdout = ByteArray(8 * MIB + 1) { 'a'.code.toByte() } }
+        val result = defaultLimitRunner(fake).run(fixture.spec())
+        assertEquals(DockerRunOutcome.OUTPUT_LIMIT, result.outcome)
+        assertTrue(result.outputTruncated)
+        assertEquals(8 * MIB, result.stdout.length)
+    }
+
     @Test
     fun orphanCleanupRemovesOnlyStaleLabelledContainers() {
         val fake = FakeDocker().apply {
@@ -179,3 +207,5 @@ class DockerRunnerTest {
         assertFalse(result.toString().contains("SECRET"))
     }
 }
+
+private const val MIB = 1024 * 1024

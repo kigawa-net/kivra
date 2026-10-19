@@ -297,7 +297,7 @@ class DockerRunner(
                 if (b == '\n'.code) {
                     emit()
                 } else if (!oversized) {
-                    if (buffer.size() >= MAX_LINE_BYTES) {
+                    if (buffer.size() >= CliOutputLimits.MAX_LINE_BYTES) {
                         oversized = true
                         buffer.reset()
                     } else {
@@ -324,14 +324,13 @@ class DockerRunner(
 
     companion object {
         const val DEFAULT_POLL_MILLIS = 200L
-        const val DEFAULT_OUTPUT_LIMIT_BYTES = 1024 * 1024
+        /** The total stdout limit of one run: the same value as [CliOutputLimits.MAX_TOTAL_BYTES]. */
+        const val DEFAULT_OUTPUT_LIMIT_BYTES: Int = CliOutputLimits.MAX_TOTAL_BYTES.toInt()
         const val COMMAND_OUTPUT_LIMIT_BYTES = 64 * 1024
         const val KILL_WAIT_MILLIS = 10_000L
         const val COMMAND_WAIT_MILLIS = 30_000L
         const val STOP_WAIT_MILLIS = 5_000L
 
-        /** The per-line limit of the monitor's stream. The same as the parser's limit (ADR 0010), so a line is oversized in both. */
-        const val MAX_LINE_BYTES = 1024 * 1024
         private const val LINE_QUEUE_CAPACITY = 1_000
         private const val LINE_JOIN_MILLIS = 500L
         private val END = Any()

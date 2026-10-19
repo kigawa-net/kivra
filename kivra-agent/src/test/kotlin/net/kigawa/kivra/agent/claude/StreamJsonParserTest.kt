@@ -172,6 +172,28 @@ class StreamJsonParserTest {
         assertEquals(1, StreamJsonParser(maxLineBytes = line.length - 1).parse(line + "\n").oversizedLines)
     }
 
+    /** One valid stream-json event of exactly [bytes] bytes, newline included. */
+    private fun eventOf(bytes: Int): String = "{\"type\":\"user\",\"pad\":\"" + "a".repeat(bytes - 25) + "\"}\n"
+
+    @Test
+    fun theDefaultTotalLimitIsEightMiB() {
+        val half = 512 * 1024
+        assertFalse(StreamJsonParser().parse(eventOf(half).repeat(4)).outputLimitReached, "2 MiB is read to the end")
+        assertFalse(StreamJsonParser().parse(eventOf(half).repeat(16)).outputLimitReached, "exactly 8 MiB is read to the end")
+        assertTrue(StreamJsonParser().parse(eventOf(half).repeat(16) + "x").outputLimitReached, "the byte after 8 MiB stops the reading")
+    }
+
+    @Test
+    fun theDefaultLineLimitStaysOneMiB() {
+        val oneMiB = 1024 * 1024
+        val exact = StreamJsonParser().parse("x".repeat(oneMiB) + "\n")
+        assertEquals(0, exact.oversizedLines)
+        assertEquals(1, exact.invalidLines)
+        val over = StreamJsonParser().parse("x".repeat(oneMiB + 1) + "\n")
+        assertEquals(1, over.oversizedLines)
+        assertEquals(0, over.invalidLines)
+    }
+
     @Test
     fun streamLongerThanTheTotalLimitStopsAndIsOutputLimit() {
         val limited = StreamJsonParser(maxTotalBytes = 200)

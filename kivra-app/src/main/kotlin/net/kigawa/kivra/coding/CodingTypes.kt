@@ -25,6 +25,12 @@ class UntrustedText(val origin: String, val value: String, val trust: Trust, val
 }
 
 /**
+ * The default total stdout limit of one attempt (8 MiB). The agent keeps at most this much of the CLI output, and may use a smaller
+ * value from the claim, never a larger one. Must equal the agent's `CliOutputLimits.MAX_TOTAL_BYTES`.
+ */
+const val CODING_MAX_OUTPUT_BYTES: Long = 8L * 1024 * 1024
+
+/**
  * Limits the agent must enforce for one attempt. The file limits are copied from the PatchPolicy configuration, so the agent and the
  * server check against one set of numbers (see [CodingRuntimeService] for the copy).
  *
@@ -35,7 +41,8 @@ class UntrustedText(val origin: String, val value: String, val trust: Trust, val
 data class CodingLimits(
     val maxRuntime: Duration = Duration.ofMinutes(30),
     val maxTurns: Int = 30,
-    val maxOutputBytes: Long = 1024L * 1024,
+    /** Must match the agent's `CliOutputLimits.MAX_TOTAL_BYTES` (kivra-app does not depend on kivra-agent). */
+    val maxOutputBytes: Long = CODING_MAX_OUTPUT_BYTES,
     val maxChangedFiles: Int = PatchPolicyConfig().maxFiles,
     val maxFileBytes: Long = PatchPolicyConfig().maxFileBytes,
     val maxTotalBytes: Long = PatchPolicyConfig().maxTotalBytes,

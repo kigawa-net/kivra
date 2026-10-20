@@ -190,10 +190,10 @@ private fun OrderCycle.json(): JsonObject = buildJsonObject {
     put("created_at", createdAt.utc())
 }
 
-private fun LocalDateTime.utc(): String = toInstant(ZoneOffset.UTC).toString()
+internal fun LocalDateTime.utc(): String = toInstant(ZoneOffset.UTC).toString()
 
 /** `version`, a JSON integer of 0 or more. A string, a fraction and a negative number are refused with a fixed text. */
-private fun JsonObject.requiredVersion(): Long {
+internal fun JsonObject.requiredVersion(): Long {
     val primitive = this["version"] as? JsonPrimitive ?: throw InvalidParamsException("version is required")
     if (primitive.isString) throw InvalidParamsException("version must be an integer")
     val value = primitive.longOrNull ?: throw InvalidParamsException("version must be an integer")

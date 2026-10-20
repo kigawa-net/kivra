@@ -21,7 +21,11 @@ import net.kigawa.kivra.appModule
 class McpAppWiringTest {
     private class TrapEnv(private val base: Map<String, String>) : Map<String, String> by base {
         override fun get(key: String): String? {
-            if ((key.startsWith("KIVRA_MCP_") || key == McpSettings.ENV_AGENT_ROLE) && key != McpSettings.ENV_ENABLED && key != McpSettings.ENV_WRITE_ENABLED) {
+            // The write and Goal switches are read while the endpoint is off only to refuse `true` (ADR 0013 section 5, ADR 0019 S1).
+            val allowedWhileOff = setOf(
+                McpSettings.ENV_ENABLED, McpSettings.ENV_WRITE_ENABLED, McpSettings.ENV_GOAL_READ_ENABLED, McpSettings.ENV_GOAL_STOP_ENABLED,
+            )
+            if ((key.startsWith("KIVRA_MCP_") || key == McpSettings.ENV_AGENT_ROLE) && key !in allowedWhileOff) {
                 throw AssertionError("an MCP variable was read while the endpoint is off")
             }
             return base[key]

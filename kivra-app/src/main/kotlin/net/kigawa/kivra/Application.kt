@@ -77,6 +77,7 @@ import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRetentionWorker
 import net.kigawa.kivra.selfdev.memory.SelfDevMemorySettings
 import net.kigawa.kivra.mcp.McpSettings
+import net.kigawa.kivra.mcp.McpGoalDeps
 import net.kigawa.kivra.mcp.McpOrderDeps
 import net.kigawa.kivra.mcp.buildMcpRouteDeps
 import net.kigawa.kivra.mcp.registerMcpRoutes
@@ -182,11 +183,25 @@ internal fun Application.appModule(env: Map<String, String>) {
     } else {
         null
     }
+    // The Goal stop over MCP needs the autopilot (ADR 0019 S1): refused at startup otherwise, as the write switch is.
+    check(!mcpSettings.goalStopEnabled || autopilotSettings.config != null) {
+        "${McpSettings.ENV_GOAL_STOP_ENABLED}=true requires the autopilot"
+    }
     val mcpDeps = buildMcpRouteDeps(
         mcpSettings, env, runs, selfDevSettings.config?.repo,
         selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns,
         // The order tools serve only while the orders answer (the same condition as the REST routes' requireEnabled).
         orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, orderSettings.aiPrincipal) },
+        // The Goal tools serve only while the autopilot answers (the same condition as the REST goal routes' requireEnabled).
+        goals = autopilotSettings.config?.let {
+            McpGoalDeps(
+                operations = SelfDevOperatorRepository(database),
+                plans = SelfDevPlanRepository(database),
+                runs = runs,
+                aiPrincipal = orderSettings.aiPrincipal,
+                memory = memory,
+            )
+        },
     )
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)

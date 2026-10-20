@@ -24,13 +24,16 @@ fun buildMcpRouteDeps(
     selfDevEnabled: Boolean = false,
     maxActiveSelfDev: Int = 1,
     orders: McpOrderDeps? = null,
+    goals: McpGoalDeps? = null,
 ): McpRouteDeps? {
     if (!settings.enabled) return null
     val oidc = OidcJwtConfig.fromEnv(env).copy(audience = checkNotNull(settings.audience))
     // The order tools are registered only while the orders are on ([orders] is null otherwise). The stop request also needs the write switch.
+    // The Goal tools (ADR 0019 S1) need the autopilot ([goals] is null otherwise); the stop also needs the write switch.
     val tools = McpRunTools(runs, targetRepo).tools() +
         (if (settings.writeEnabled) McpWriteTools(runs, selfDevEnabled, maxActiveSelfDev).tools() else emptyList()) +
-        (orders?.let { McpOrderTools(it).tools(settings.writeEnabled) } ?: emptyList())
+        (orders?.let { McpOrderTools(it).tools(settings.writeEnabled) } ?: emptyList()) +
+        (goals?.let { McpGoalTools(it).tools(settings.goalReadEnabled, settings.writeEnabled && settings.goalStopEnabled) } ?: emptyList())
     return McpRouteDeps(
         settings = settings,
         verifier = McpJwtVerifier(oidc, jwkProvider ?: RefreshingJwkProvider(oidc.jwksUrl), settings.agentRole),

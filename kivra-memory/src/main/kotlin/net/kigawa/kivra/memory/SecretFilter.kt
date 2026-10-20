@@ -50,6 +50,9 @@ object SecretFilter {
     /** Entropy threshold in bits/char above which a long token-like run is treated as a secret. */
     private const val ENTROPY_THRESHOLD = 4.0
 
+    /** A run of lower-case letters that is long enough to be a word (see [isWordLike]). */
+    private val LOWER_WORD = Regex("[a-z]{3,}")
+
     fun scan(text: String): List<SecretFinding> {
         val out = ArrayList<SecretFinding>()
         for ((kind, re) in patterns) {
@@ -100,9 +103,16 @@ object SecretFilter {
         ).count { it }
         // Pure lowercase/uppercase words, long identifiers separated by '-' / '_' and plain paths are not secrets.
         if (classes < 2) return false
-        // A run with no digit is an identifier (CamelCase or snake_case), not a random token (ADR 0016 P0 false-positive fix).
-        if (v.none { it in '0'..'9' }) return false
+        // A digit-free run that reads as identifier words (CamelCase or snake_case) is not a random token.
+        // Only word-like runs are exempt: a digit-free random token has nothing else to hide behind.
+        if (v.none { it in '0'..'9' } && isWordLike(v)) return false
         return entropy(v) >= ENTROPY_THRESHOLD
+    }
+
+    /** Lower-case words of 3+ letters cover at least half of the run. Identifiers have such words; random tokens rarely do. */
+    private fun isWordLike(v: String): Boolean {
+        val covered = LOWER_WORD.findAll(v).sumOf { it.value.length }
+        return covered * 2 >= v.length
     }
 
     /** A base64 run of 40+ characters that mixes upper case, lower case and digits, with enough entropy. Paths and words do not match. */

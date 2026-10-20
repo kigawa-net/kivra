@@ -8,8 +8,41 @@ on:
 permissions:
   contents: read
 
+# test-h2 と test-mariadb は並列に走る(別のランナー、MariaDB のサービスは test-mariadb だけ)。
+# 最終の `test` は、両方が success のときだけ成功する(ブランチ保護の必須チェック名を保つため)。
 jobs:
-  test:
+  test-h2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # 為替更新スクリプト(標準ライブラリだけ。ネットワークは使わない)。
+      - name: Test fx-refresh.py
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
+      # H2 (MODE=MySQL): fast tests without external services.
+      - name: Test (H2)
+        run: ./gradlew test --no-daemon
+
+      # build は直前の test の結果を再利用する(H2 の設定のまま)。
+      - name: Build
+        run: ./gradlew build --no-daemon
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-h2
+          path: "**/build/reports/tests/"
+
+  test-mariadb:
     runs-on: ubuntu-latest
     services:
       mariadb:
@@ -33,30 +66,39 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # 為替更新スクリプト(標準ライブラリだけ。ネットワークは使わない)。
-      - name: Test fx-refresh.py
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
-
-      # H2 (MODE=MySQL): fast tests without external services.
-      - name: Test (H2)
-        run: ./gradlew test --no-daemon
-
       # MariaDB 11: the same suite, including Flyway migration, unique / lease / transaction / Outbox concurrency.
       # Each test creates and drops its own schema (see TestDb).
+      # --rerun: test タスクだけを必ず再実行する(UP-TO-DATE で飛ばさない)。
       - name: Test (MariaDB 11, migrations and concurrency)
         env:
           KIVRA_TEST_DB: mariadb
           KIVRA_TEST_MARIADB_URL: jdbc:mariadb://127.0.0.1:3306/
           KIVRA_TEST_MARIADB_USER: root
           KIVRA_TEST_MARIADB_PASSWORD: test
-        run: ./gradlew :kivra-app:test --rerun-tasks --no-daemon
-
-      - name: Build
-        run: ./gradlew build --no-daemon
+        run: ./gradlew :kivra-app:test --rerun --no-daemon
 
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-reports
+          name: test-reports-mariadb
           path: "**/build/reports/tests/"
+
+  # 必須チェック用の最終ジョブ。needs の結果が 1 つでも success 以外なら失敗にする。
+  # (job レベルの if で飛ばすと skipped になり、必須チェックで成功扱いになるため、step で判定する)
+  test:
+    runs-on: ubuntu-latest
+    needs: [test-h2, test-mariadb]
+    if: always()
+    steps:
+      - name: Check required test jobs
+        env:
+          H2: ${{ needs.test-h2.result }}
+          MARIADB: ${{ needs.test-mariadb.result }}
+        run: |
+          echo "test-h2: $H2"
+          echo "test-mariadb: $MARIADB"
+          if [ "$H2" != "success" ] || [ "$MARIADB" != "success" ]; then
+            echo "required test job did not succeed" >&2
+            exit 1
+          fi

@@ -90,6 +90,17 @@ class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjec
     var lastExpectedHead: String? = null
         private set
 
+    /** When set, the merge base read answers with this failure instead of the merge base computed from the object graph. */
+    var mergeBaseFailure: GitHubFailureKind? = null
+
+    /** Commits whose tree read fails with the given kind (for example a truncated tree). */
+    val failingTrees = HashMap<String, GitHubFailureKind>()
+
+    var mergeBaseCalls = 0
+        private set
+    var treeCalls = 0
+        private set
+
     /** Every call of the port, reads included. */
     var totalCalls = 0
         private set
@@ -135,11 +146,15 @@ class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjec
 
     override suspend fun mergeBaseOf(repo: RepoRef, a: String, b: String): GitHubResult<String> {
         totalCalls++
+        mergeBaseCalls++
+        mergeBaseFailure?.let { return GitHubResult.Failure(it, it.code) }
         return git.mergeBase(a, b)?.let { GitHubResult.Success(it) } ?: notFound()
     }
 
     override suspend fun listTreeAt(repo: RepoRef, commitSha: String): GitHubResult<RepoTree> {
         totalCalls++
+        treeCalls++
+        failingTrees[commitSha]?.let { return GitHubResult.Failure(it, it.code) }
         val tree = git.treeOf(commitSha) ?: return notFound()
         val entries = tree.map { (path, modeAndBlob) ->
             TreeEntry(path, TreeEntryType.BLOB, modeAndBlob.first, 1L, modeAndBlob.second)

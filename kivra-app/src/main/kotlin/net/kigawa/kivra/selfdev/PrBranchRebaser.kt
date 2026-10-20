@@ -63,6 +63,11 @@ class PrBranchRebaser(
     private val clock: Clock = Clock.systemUTC(),
     private val pause: suspend (Duration) -> Unit = { delay(it.toMillis()) },
 ) {
+    /** The overlap result per (pull request head, base head) pair, least recently used first. Guarded by itself. */
+    private val overlapCache = object : LinkedHashMap<Pair<String, String>, Boolean>(OVERLAP_CACHE_SIZE, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, String>, Boolean>?): Boolean = size > OVERLAP_CACHE_SIZE
+    }
+
     /** What one look did. [Held] carries a fixed reason code. [Rebound] means the recorded head was moved to a verified head. */
     sealed interface Outcome {
         data object NoAction : Outcome
@@ -117,6 +122,12 @@ class PrBranchRebaser(
         if (total >= settings.maxTotal) return held(run, LIMIT_TOTAL)
         if (recent >= settings.maxPerWindow) return Outcome.NoAction
 
+        // Before the request (not an attempt, so it does not count): a path that both the pull request and main changed is never the same
+        // change after the update, so the new head would be refused by (b) and the recorded head would stay behind. Such a branch is not
+        // updated. A check that cannot be read is not a reason to update.
+        val overlap = overlapsMain(binding.headSha) ?: return Outcome.NoAction
+        if (overlap) return held(run, OVERLAPPING_PATHS)
+
         // The attempt is written before the request, so a crash after the request still counts against the limit.
         renew()
         runs.recordRebaseAttempt(lease, binding.headSha)
@@ -132,6 +143,29 @@ class PrBranchRebaser(
         val verdict = verify(binding.headSha, newHead)
         if (verdict != null) return holdAfterAttempt(lease, run, binding.headSha, verdict)
         return rebind(lease, run, binding.headSha, newHead, renew, version)
+    }
+
+    /**
+     * Whether the pull request and the current base head change a common path, both measured from their merge base. Null when a read fails
+     * or a tree is truncated. A result for a (head, base head) pair never changes (the commits are immutable), so a determined result is kept
+     * for that pair, and the next look reads only the base head.
+     */
+    private suspend fun overlapsMain(headSha: String): Boolean? {
+        val mainHead = when (val r = github.getBranch(repo, baseBranch)) {
+            is GitHubResult.Success -> r.value?.headSha ?: return null
+            else -> return null
+        }
+        val key = headSha to mainHead
+        synchronized(overlapCache) { overlapCache[key] }?.let { return it }
+        val mergeBase = (port.mergeBaseOf(repo, headSha, mainHead) as? GitHubResult.Success)?.value ?: return null
+        val baseTree = treeOf(mergeBase) ?: return null
+        val prTree = treeOf(headSha) ?: return null
+        val mainTree = treeOf(mainHead) ?: return null
+        val prPaths = changedFiles(baseTree, prTree)?.mapTo(HashSet()) { it.path } ?: return null
+        val mainPaths = changedFiles(baseTree, mainTree)?.mapTo(HashSet()) { it.path } ?: return null
+        val overlap = prPaths.any { it in mainPaths }
+        synchronized(overlapCache) { overlapCache[key] = overlap }
+        return overlap
     }
 
     /** Reads the pull request until its head differs from [oldHead], at most [PrRebaseSettings.observePolls] times. */
@@ -259,7 +293,11 @@ class PrBranchRebaser(
         /** GitHub's `mergeable_state` when the head conflicts with the base. */
         const val MERGEABLE_DIRTY = "dirty"
 
+        /** Pairs kept by the overlap cache. A pull request's head and the base head change about once a minute at most. */
+        const val OVERLAP_CACHE_SIZE = 16
+
         const val VERIFIED = "PR_REBASE_VERIFIED"
+        const val OVERLAPPING_PATHS = "PR_REBASE_OVERLAPPING_PATHS"
         const val LIMIT_TOTAL = "PR_REBASE_LIMIT_TOTAL"
         const val UPDATE_UNKNOWN = "PR_REBASE_UPDATE_UNKNOWN"
         const val NOT_OBSERVED = "PR_REBASE_NOT_OBSERVED"

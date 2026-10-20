@@ -19,7 +19,8 @@ import net.kigawa.kivra.auth.resolveTaskApiAuthMode
  * - `KIVRA_MCP_RATE_PER_MINUTE`: requests per principal per minute, 1 to 6000, default 60. Over the limit, 429.
  * - `KIVRA_AGENT_REQUIRED_ROLE`: optional, `<client>:<role>` of the agent token. When it is set, a token that carries it is refused
  *   (403). The audience check already rejects agent tokens, so this is a second layer.
- * - `KIVRA_MCP_WRITE_ENABLED`: `true` to register the write tool `kivra_selfdev_start` (ADR 0013 section 5). Off by default. It needs
+ * - `KIVRA_MCP_WRITE_ENABLED`: `true` to register the write tools: `kivra_selfdev_start` (ADR 0013 section 5) and, while the orders are on,
+ *   `kivra_order_request_stop` (ADR 0015 section 6). Off by default. It needs
  *   `KIVRA_MCP_ENABLED=true`: with the endpoint off, `true` refuses the start. This is the only MCP variable read while the endpoint is
  *   off, and only to refuse it.
  * - `KIVRA_MCP_WRITE_RATE_PER_MINUTE`: write calls per principal per minute, 1 to 6000, default 5. Over the limit, 429. Read only when

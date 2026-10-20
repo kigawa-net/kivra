@@ -10,11 +10,13 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.autopilot.GoalState
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.OrderReason
@@ -144,6 +146,19 @@ class SelfDevOrderRepositoryTest {
         assertTrue(!f.repo.hasUnknownRun(started.goalId))
         assertEquals(1, f.count("SELECT COUNT(*) FROM selfdev_goals WHERE order_id = '${root.orderId}' AND cycle_no = 1"))
         assertEquals(OrderResult.Refused(OrderConflict.CYCLE_IN_PROGRESS), f.repo.startCycle(root.orderId, started.order.version, OPERATOR))
+    }
+
+    @Test
+    fun `hasUnknownRun is true only while a task of the goal holds a Run that is UNKNOWN`() = withFixture { f ->
+        val root = f.root()
+        val started = assertIs<OrderResult.Moved<CycleStarted>>(f.repo.startCycle(root.orderId, root.version, OPERATOR)).value
+        assertFalse(f.repo.hasUnknownRun(started.goalId))
+        val run = assertIs<TaskSubmitResult.Created>(f.db.runs.submitTask(OPERATOR, "unknown-run-repo", "a task")).run
+        f.db.linkRunToGoal(started.goalId, run.runId.value)
+        assertFalse(f.repo.hasUnknownRun(started.goalId), "a CREATED Run is not UNKNOWN")
+        f.db.forceState(run.runId.value, DevelopmentRunState.UNKNOWN)
+        assertTrue(f.repo.hasUnknownRun(started.goalId))
+        assertFalse(f.repo.hasUnknownRun("01ZZZZZZZZZZZZZZZZZZZZZZZZ"), "another goal has no task with that Run")
     }
 
     @Test
@@ -397,5 +412,30 @@ class SelfDevOrderRepositoryTest {
         } finally {
             pool.shutdownNow()
         }
+    }
+}
+
+/**
+ * Links a Run to a goal the way a Plan does (ADR 0011 section 5): one PROPOSED plan of the goal, with one task that holds the Run. The
+ * Run's state is the caller's to set. Used by the order tests that need an UNKNOWN Run of the current cycle.
+ */
+internal fun TestDb.linkRunToGoal(goalId: String, runId: String) {
+    val planId = Ulid.generate()
+    transaction(database) {
+        execUpdate(
+            """
+            INSERT INTO selfdev_plans (plan_id, goal_id, revision, state, summary, planner_model, output_sha256, request_ledger_id, created_at)
+            VALUES (?, ?, 1, 'PROPOSED', NULL, 'test-model', ?, NULL, NOW(6))
+            """.trimIndent(),
+            planId, goalId, "0".repeat(64),
+        )
+        execUpdate(
+            """
+            INSERT INTO selfdev_plan_tasks (plan_id, ordinal, title, target_paths, size_estimate, depends_on, requires_approval, state,
+                idempotency_key, run_id, attempts, version, created_at, updated_at)
+            VALUES (?, 1, 'a task', '[]', 'S', '[]', FALSE, 'SUBMITTED', ?, ?, 1, 0, NOW(6), NOW(6))
+            """.trimIndent(),
+            planId, "ap:$planId:1", runId,
+        )
     }
 }

@@ -6,9 +6,11 @@ import java.time.Instant
 import java.time.ZoneId
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.autopilot.GoalState
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.OrderReason
@@ -20,8 +22,10 @@ import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.SelfDevGoalRepository
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
+import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.db.execUpdate
+import net.kigawa.kivra.db.linkRunToGoal
 import org.jetbrains.exposed.sql.transactions.transaction
 
 private val START: Instant = Instant.parse("2026-10-19T10:00:00Z")
@@ -81,6 +85,30 @@ class OrderWatchTest {
         f.fxExpired = true
         f.watch.tick()
         assertEquals(OrderState.STOP_REQUESTED, f.state(root.orderId).state)
+    }
+
+    @Test
+    fun `an UNKNOWN Run of the current cycle pauses the ACTIVE order with UNKNOWN_RUN`() = withFixture { f ->
+        val root = f.root()
+        val started = assertIs<OrderResult.Moved<CycleStarted>>(f.repo.startCycle(root.orderId, root.version, "1:i:kigawa")).value
+        val run = assertIs<TaskSubmitResult.Created>(f.db.runs.submitTask("1:i:kigawa", "watch-unknown-run", "a task")).run
+        f.db.linkRunToGoal(started.goalId, run.runId.value)
+        f.db.forceState(run.runId.value, DevelopmentRunState.UNKNOWN)
+        f.watch.tick()
+        val paused = f.state(root.orderId)
+        assertEquals(OrderState.PAUSED, paused.state)
+        assertEquals(OrderReason.UNKNOWN_RUN, paused.stateReason)
+    }
+
+    @Test
+    fun `a Run of the current cycle that is not UNKNOWN leaves the ACTIVE order alone`() = withFixture { f ->
+        val root = f.root()
+        val started = assertIs<OrderResult.Moved<CycleStarted>>(f.repo.startCycle(root.orderId, root.version, "1:i:kigawa")).value
+        val run = assertIs<TaskSubmitResult.Created>(f.db.runs.submitTask("1:i:kigawa", "watch-created-run", "a task")).run
+        f.db.linkRunToGoal(started.goalId, run.runId.value)
+        f.watch.tick()
+        assertEquals(OrderState.ACTIVE, f.state(root.orderId).state)
+        assertFalse(f.repo.hasUnknownRun(started.goalId))
     }
 
     @Test

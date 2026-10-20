@@ -77,12 +77,19 @@ private data class TaskApiError(val error: String)
 internal const val MAX_TASK_TITLE_CODE_POINTS = 200
 internal const val MAX_IDEMPOTENCY_KEY_CODE_POINTS = 128
 
-/** Returns the trimmed value, or null when it is empty, too long (in code points) or contains control characters. */
+/**
+ * True for a bidirectional control (LRE, RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI, LRM, RLM, ALM). Such a character makes text
+ * read differently from how it is stored (Trojan Source). ZWJ, ZWNJ and variation selectors are not listed: emoji and Japanese need them.
+ */
+internal fun isBidiControl(c: Char): Boolean =
+    c in '‪'..'‮' || c in '⁦'..'⁩' || c == '‎' || c == '‏' || c == '؜'
+
+/** Returns the trimmed value, or null when it is empty, too long (in code points), contains control characters or a bidi control. */
 internal fun validatedText(raw: String, maxCodePoints: Int): String? {
     val value = raw.trim()
     if (value.isEmpty()) return null
     if (value.codePointCount(0, value.length) > maxCodePoints) return null
-    if (value.any { it.isISOControl() }) return null
+    if (value.any { it.isISOControl() || isBidiControl(it) }) return null
     return value
 }
 

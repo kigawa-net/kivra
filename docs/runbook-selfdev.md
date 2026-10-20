@@ -402,6 +402,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 
 - **body**(任意): 0〜8000 文字(コードポイント)。改行(LF)とタブは使えるが、ほかの制御文字(CR を含む)は 400。空白だけの body は body 無しと同じ。
 - **title の規則は変えない**: 1〜200 文字、制御文字なし。
+- **双方向制御文字**(U+202A〜U+202E、U+2066〜U+2069、U+200E、U+200F、U+061C)は、title と body のどちらにあっても 400(MCP も同じ)。ゼロ幅結合子(U+200D)などは使える。
 - **参照**: title が次のどれか一つの全体に一致すると、kivra が Issue を読んで本文にする。
   - `https://github.com/<owner>/<repo>/issues/<n>`(`/pull/<n>` も受け付けて、後で PR として拒否する)
   - `#<n>`(対象リポジトリの Issue)

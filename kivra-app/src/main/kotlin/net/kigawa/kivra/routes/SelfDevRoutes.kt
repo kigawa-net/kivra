@@ -43,13 +43,13 @@ internal class SelfDevRouteDeps(
 @Serializable
 data class SubmitSelfDevTaskRequest(val title: String, val idempotencyKey: String, val body: String? = null)
 
-/** The task body of a submission: trimmed, at most [MAX_TASK_BODY_CODE_POINTS] code points, with no control characters but line feed and tab. Null when empty. */
+/** The task body of a submission: trimmed, at most [MAX_TASK_BODY_CODE_POINTS] code points, with no control characters but line feed and tab, and no bidi control ([isBidiControl]). Null when empty. */
 internal fun validatedBody(raw: String?): String? {
     if (raw == null) return null
     val value = raw.trim()
     if (value.isEmpty()) return null
     if (value.codePointCount(0, value.length) > MAX_TASK_BODY_CODE_POINTS) return null
-    if (value.any { it.isISOControl() && it != '\n' && it != '\t' }) return null
+    if (value.any { (it.isISOControl() && it != '\n' && it != '\t') || isBidiControl(it) }) return null
     return value
 }
 

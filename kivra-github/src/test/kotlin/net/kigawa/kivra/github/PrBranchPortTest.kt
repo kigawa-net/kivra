@@ -114,6 +114,26 @@ class PrBranchPortTest {
     }
 
     @Test
+    fun `the ahead distance is read from the compare API between two commit ids, and zero means an ancestor`() = runTest {
+        val f = BranchRemote { respond(compareJson(behindBy = "1", aheadBy = 0), HttpStatusCode.OK, PB_JSON) }
+        assertEquals(0, assertIs<GitHubResult.Success<Int>>(f.adapter.getAheadBy(PB_REPO, PB_BASE, PB_HEAD)).value)
+        assertEquals("/repos/kigawa-net/kivra/compare/$PB_BASE...$PB_HEAD", f.requests.single().url.encodedPath)
+    }
+
+    @Test
+    fun `an ahead_by that is not a non-negative integer is a protocol failure, and a base that is not a commit id is refused`() = runTest {
+        for (shape in listOf("\"0\"", "-1", "0.5", "null", "1e3")) {
+            val f = BranchRemote { respond(compareJson(behindBy = "1", aheadBy = 0).replace("\"ahead_by\":0", "\"ahead_by\":$shape"), HttpStatusCode.OK, PB_JSON) }
+            val result = f.adapter.getAheadBy(PB_REPO, PB_BASE, PB_HEAD)
+            assertTrue(result is GitHubResult.Failure, "ahead_by=$shape read as $result")
+            assertEquals(GitHubFailureKind.PROTOCOL, result.kind, shape)
+        }
+        val f = BranchRemote { respond(compareJson(behindBy = "1", aheadBy = 0), HttpStatusCode.OK, PB_JSON) }
+        assertIs<GitHubResult.Failure>(f.adapter.getAheadBy(PB_REPO, "main", PB_HEAD))
+        assertEquals(0, f.requests.size)
+    }
+
+    @Test
     fun `a compare answer whose behind_by is not a non-negative integer is a protocol failure`() = runTest {
         // Each of these is a shape GitHub does not send for `behind_by`; none may be read as a count.
         val shapes = listOf("\"9\"", "9.5", "-1", "true", "null", "1e3")

@@ -283,7 +283,7 @@ class HttpGitHubAdapter(
     private fun sameRepo(fullName: String?, repo: RepoRef) = fullName != null && fullName.equals(repo.toString(), ignoreCase = true)
 
     private val sha40 = Regex("[0-9a-f]{40}")
-    private val behindByLiteral = Regex("0|[1-9][0-9]{0,9}")
+    private val compareCountLiteral = Regex("0|[1-9][0-9]{0,9}")
 
     /** Lookup failures that decide which PR is ours; reported even when the create outcome was unknown. */
     private val IDENTITY_DECISIONS = setOf(
@@ -852,6 +852,16 @@ class HttpGitHubAdapter(
 
     override suspend fun getBehindBy(repo: RepoRef, base: String, headSha: String): GitHubResult<Int> {
         if (!isValidRef(base) || !sha40.matches(headSha)) return validation("compare")
+        return compareCount(repo, base, headSha, "behind_by")
+    }
+
+    override suspend fun getAheadBy(repo: RepoRef, baseSha: String, headSha: String): GitHubResult<Int> {
+        if (!sha40.matches(baseSha) || !sha40.matches(headSha)) return validation("compare")
+        return compareCount(repo, baseSha, headSha, "ahead_by")
+    }
+
+    /** One count of `GET /compare/{base}...{head}`, named by [field]. */
+    private suspend fun compareCount(repo: RepoRef, base: String, headSha: String, field: String): GitHubResult<Int> {
         val raw = when (val g = get("${repoPath(repo)}/compare/$base...$headSha")) {
             is GitHubResult.Success -> g.value
             is GitHubResult.Failure -> return g
@@ -859,11 +869,11 @@ class HttpGitHubAdapter(
         }
         val o = parse(raw) as? JsonObject ?: return protocol("compare")
         // A JSON number only: a string "9" or a fraction is not the count, and a negative count is not one either.
-        val prim = o["behind_by"] as? JsonPrimitive ?: return protocol("compare.behind_by")
+        val prim = o[field] as? JsonPrimitive ?: return protocol("compare.$field")
         // The literal's text must be a plain non-negative integer: no quotes, sign, fraction or exponent, and no leading zero.
-        if (prim.isString || !behindByLiteral.matches(prim.content)) return protocol("compare.behind_by")
-        val behind = prim.content.toIntOrNull() ?: return protocol("compare.behind_by")
-        return GitHubResult.Success(behind)
+        if (prim.isString || !compareCountLiteral.matches(prim.content)) return protocol("compare.$field")
+        val count = prim.content.toIntOrNull() ?: return protocol("compare.$field")
+        return GitHubResult.Success(count)
     }
 
     override suspend fun updatePrBranch(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<Unit> {

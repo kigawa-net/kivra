@@ -41,9 +41,11 @@ data class PrRebaseSettings(
  *   way, and only a passing head is recorded. A head that does not pass stays, and the run waits for a person.
  *
  * Verification of a new head `N` against the recorded head `O` and the current `main` head `M` (all must hold):
- * (a) `N` is a merge commit whose two parents are exactly `O` and `M`.
- * (b) The pull request's own change set is the same before and after: the files that differ between `merge-base(O, M)` and `O` (path, mode
- *     and blob hash, sorted) equal the files that differ between `M` and `N`. A change set that differs, or that cannot be read in full,
+ * (a) `N` is a merge commit whose two parents are exactly `O` and `P`, two different commits. `P` is `M` or an ancestor of `M`
+ *     (the compare API reports `ahead_by` 0 for `M...P`): `main` may have moved on since the update was made, and the update is still
+ *     the same change.
+ * (b) The pull request's own change set is the same before and after: the files that differ between `merge-base(O, P)` and `O` (path, mode
+ *     and blob hash, sorted) equal the files that differ between `P` and `N`. A change set that differs, or that cannot be read in full,
  *     is refused. Because the change set is the same, the policy result is the same, so the policy is not run again.
  *
  * A refusal is never a failure: the run stays in PULL_REQUEST with a fixed reason code. Logs and audit rows carry the run id, the first 12
@@ -147,24 +149,50 @@ class PrBranchRebaser(
      * is a read-only GET, and a failed or truncated read is a refusal, never a pass.
      */
     private suspend fun verify(oldHead: String, newHead: String): String? {
+        if (newHead == oldHead) return PARENTS_MISMATCH
         val main = when (val r = github.getBranch(repo, baseBranch)) {
             is GitHubResult.Success -> r.value?.headSha ?: return VERIFY_FAILED
             else -> return VERIFY_FAILED
         }
-        if (main == oldHead || newHead == oldHead) return PARENTS_MISMATCH
         val parents = (port.getCommitParents(repo, newHead) as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
-        // (a) A merge of exactly the recorded head and the base head.
-        if (parents.size != 2 || parents.toSet() != setOf(oldHead, main)) return PARENTS_MISMATCH
+        // (a) A merge of exactly two different commits, one of them the recorded head. The other one is the base as it was when the
+        // update was made: it is the current base head or one of its ancestors (main may have moved again since then).
+        if (parents.size != 2 || parents.toSet().size != 2 || oldHead !in parents) return PARENTS_MISMATCH
+        val other = parents.single { it != oldHead }
+        val ahead = (port.getAheadBy(repo, main, other) as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
+        if (ahead < 0) return VERIFY_FAILED
+        if (ahead > 0) return PARENTS_MISMATCH
 
-        val base = (port.mergeBaseOf(repo, oldHead, main) as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
+        val base = (port.mergeBaseOf(repo, oldHead, other) as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
         val baseTree = treeOf(base) ?: return VERIFY_FAILED
         val oldTree = treeOf(oldHead) ?: return VERIFY_FAILED
-        val mainTree = treeOf(main) ?: return VERIFY_FAILED
+        val otherTree = treeOf(other) ?: return VERIFY_FAILED
         val newTree = treeOf(newHead) ?: return VERIFY_FAILED
         // (b) The pull request's own change set is identical before and after.
         val before = changedFiles(baseTree, oldTree) ?: return VERIFY_FAILED
-        val after = changedFiles(mainTree, newTree) ?: return VERIFY_FAILED
+        val after = changedFiles(otherTree, newTree) ?: return VERIFY_FAILED
         return if (before == after) null else DIFF_CHANGED
+    }
+
+    /**
+     * A merged pull request whose head is not the recorded one (issue #276): the recorded head is moved to [pullRequest]'s head only when
+     * it passes [verify]. A refusal writes nothing, and the caller then completes the run through the merge Authority as before, which
+     * refuses the head mismatch. This is not an update request, so it does not count against the limits.
+     */
+    suspend fun reconcileMergedHead(
+        lease: Lease,
+        run: DevelopmentRun,
+        binding: PullRequestBinding,
+        pullRequest: PullRequest,
+        renew: () -> Unit,
+        version: () -> Long,
+    ): Outcome {
+        if (!pullRequest.merged) return Outcome.NoAction
+        if (pullRequest.authorId != botUserId) return Outcome.NoAction
+        if (pullRequest.headSha == binding.headSha) return Outcome.NoAction
+        val verdict = verify(binding.headSha, pullRequest.headSha)
+        if (verdict != null) return held(run, verdict)
+        return rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version)
     }
 
     private suspend fun treeOf(commitSha: String): RepoTree? =

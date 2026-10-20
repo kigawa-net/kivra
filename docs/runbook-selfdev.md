@@ -323,9 +323,10 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - `behind_by` が整数でない応答、または読めないときは、何もしない(追従しない)。
 
 **再束縛の条件**(すべて満たしたときだけ、Run に保存した head を新しい head に更新する)
-- (a) 新しい head がマージコミットで、親が「旧 head」と「main の先頭」の 2 つだけ。
+- (a) 新しい head がマージコミットで、親がちょうど 2 つ(異なる 2 つのコミット)で、一方が「旧 head」、もう一方が P。P は「現在の main の先頭」またはその祖先(compare API `main...P` の `ahead_by` が 0)。更新の後に main がさらに進んでも、P が main の履歴にあれば通る。
 - (b) PR 自身の差分が、更新の前後で同一。差分は、旧 head と main の merge-base からの差分と、main から新しい head までの差分で、ファイルの一覧、モード、内容のハッシュ(git の blob id)で比べる。
 - ポリシー(PatchPolicy)は再実行しない。差分が同一なら、ポリシーの結果も同じだからである。
+- マージ済みの PR で、head が Run に保存した head と違うとき(更新が kivra の記録の後に届いた、または人が push した)も、同じ検証を通ったときだけ保存した head を更新する。更新リクエストは送らないので、上限(1 時間 1 回、合計 3 回)には数えない。通らなければ何もしない。その後のマージの照合(PrMergeVerifier)は変えず、`HEAD_SHA_MISMATCH` で待機のまま残る。
 - 上限: 1 つの PR につき、更新の要求は 1 時間に 1 回、合計 3 回まで。
 
 **監査ログ**(`audit_events`、Run の ID で引く)
@@ -343,7 +344,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 | `GITHUB_PERMISSION` | App に権限が無い(403)。**有効化の前の確認事項**(下記) | App の権限を確認する |
 | `PR_REBASE_NOT_OBSERVED` | 要求は通ったが、新しい head が見えなかった | 後から届いた更新は、次の周期で検証されて再束縛される。届かなければ人が確認する |
 | `PR_REBASE_UPDATE_UNKNOWN` | 要求の応答が不明(再送はしない) | `NOT_OBSERVED` と同じ扱い |
-| `PR_REBASE_PARENTS_MISMATCH` | 新しい head の親が「旧 head と main の先頭」にならない(人の push の可能性を含む) | 人が確認する |
+| `PR_REBASE_PARENTS_MISMATCH` | 新しい head の親が「旧 head と、main の先頭またはその祖先」の組にならない(人の push の可能性を含む) | 人が確認する |
 | `PR_REBASE_DIFF_CHANGED` | PR の差分が変わった(改ざんの可能性を含む)。再束縛しない | 人が差分を確認する |
 | `PR_REBASE_VERIFY_FAILED` | 読み取りに失敗した、またはツリーが切り詰められた | 次の周期で再試行される。続くなら人が確認する |
 | `PR_REBASE_REBIND_FAILED` | 再束縛の DB 書き込みに失敗した(旧 head のまま。同じ transaction で巻き戻る) | DB とログを確認する |

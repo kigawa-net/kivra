@@ -27,6 +27,7 @@ import net.kigawa.kivra.db.SubmitResult
 import net.kigawa.kivra.db.Transition
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
+import net.kigawa.kivra.selfdev.stage1ToStage2Readout
 import org.slf4j.LoggerFactory
 
 /*
@@ -118,6 +119,19 @@ data class AutopilotStatusResponse(
     val approval: String,
 )
 
+/** The stage 1 -> 2 readout (ADR 0011 section 6.3). Fixed ids and numbers only; the UI names each id. */
+@Serializable
+data class PromotionReadoutResponse(val conditions: List<PromotionConditionResponse>)
+
+@Serializable
+data class PromotionConditionResponse(
+    val id: String,
+    val measured: Boolean,
+    val current: Long?,
+    val required: Long?,
+    val met: Boolean?,
+)
+
 @Serializable
 private data class GoalError(val error: String)
 
@@ -166,6 +180,19 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
                 maxRunsPerDay = config.maxRunsPerDay,
                 maxConsecutiveFailures = config.maxConsecutiveFailures,
                 approval = config.approval.name.lowercase(),
+            ),
+        )
+    }
+
+    get("/api/selfdev/autopilot/promotion") {
+        if (deps.requireOperator(call) == null) return@get
+        if (!deps.requireEnabled(call)) return@get
+        val readout = stage1ToStage2Readout(deps.plans.promotionCounts())
+        call.respond(
+            PromotionReadoutResponse(
+                conditions = readout.conditions.map {
+                    PromotionConditionResponse(it.id, it.measured, it.current, it.required, it.met)
+                },
             ),
         )
     }

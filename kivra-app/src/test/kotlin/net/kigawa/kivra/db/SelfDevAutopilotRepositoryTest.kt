@@ -16,6 +16,7 @@ import net.kigawa.kivra.core.autopilot.GoalState
 import net.kigawa.kivra.core.autopilot.PlanState
 import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.core.autopilot.TransitionRefusal
+import net.kigawa.kivra.selfdev.PromotionCounts
 import java.sql.SQLException
 import org.jetbrains.exposed.sql.transactions.transaction
 
@@ -397,6 +398,30 @@ class SelfDevAutopilotRepositoryTest {
         assertTrue(resumed.version > paused.version)
     }
 
+    @Test
+    fun `the promotion counts read only operator-approved tasks, and a policy rejection counts by its task or by its Run`() = TestDb().use { db ->
+        val goals = SelfDevGoalRepository(db.database)
+        val plans = SelfDevPlanRepository(db.database)
+        val (_, committed) = proposed(goals, "k-promotion")
+        val planId = committed.plan.planId
+        assertEquals(PromotionCounts(0, 0, 0), plans.promotionCounts())
+
+        // Ten approved and COMPLETED tasks count; an unapproved COMPLETED task does not.
+        for (ordinal in 3..12) db.insertPlanTask(planId, ordinal, "COMPLETED", approved = true)
+        db.insertPlanTask(planId, 13, "COMPLETED", approved = false)
+        // A POLICY_REJECTED on the task row, and one on the Run the task points to.
+        db.insertPlanTask(planId, 14, "FAILED", approved = true, reason = "POLICY_REJECTED")
+        val policyRun = db.insertRun("selfdev:promotion-policy")
+        transaction(db.database) {
+            execUpdate("UPDATE development_runs SET state = 'FAILED', state_reason = 'POLICY_REJECTED' WHERE run_id = ?", policyRun)
+        }
+        db.insertPlanTask(planId, 15, "FAILED", approved = true, reason = "RUN_FAILED", runId = policyRun)
+        // An out-of-scope task (the stage 2 re-check) is counted in the scope count whether or not it was approved.
+        db.insertPlanTask(planId, 16, "PENDING_APPROVAL", approved = false, reason = "AUTO_SCOPE_EXCEEDED")
+
+        assertEquals(PromotionCounts(approvedCompleted = 10, approvedPolicyRejected = 2, scopeExceeded = 1), plans.promotionCounts())
+    }
+
     // ---- helpers -------------------------------------------------------------------------------------------------------------
 
     private fun goalOf(goals: SelfDevGoalRepository, key: String) =
@@ -424,6 +449,27 @@ class SelfDevAutopilotRepositoryTest {
     /** Makes the claim's deadline pass on the DB clock. */
     private fun TestDb.expireGoalClaim(goalId: String) = transaction(database) {
         execUpdate("UPDATE selfdev_goals SET claimed_until = TIMESTAMPADD(SECOND, -10, NOW(6)) WHERE goal_id = ?", goalId)
+    }
+
+    private fun TestDb.insertPlanTask(
+        planId: String,
+        ordinal: Int,
+        state: String,
+        approved: Boolean,
+        reason: String? = null,
+        runId: String? = null,
+    ) {
+        transaction(database) {
+            execUpdate(
+                """
+                INSERT INTO selfdev_plan_tasks
+                    (plan_id, ordinal, title, body, target_paths, size_estimate, depends_on, requires_approval, state, state_reason,
+                     idempotency_key, run_id, attempts, version, created_at, updated_at, approved_by)
+                VALUES (?, ?, 'task', NULL, '[]', 'S', '[]', FALSE, ?, ?, ?, ?, 0, 0, NOW(6), NOW(6), ?)
+                """.trimIndent(),
+                planId, ordinal, state, reason, "ap:$planId:$ordinal", runId, if (approved) "op" else null,
+            )
+        }
     }
 
     private fun TestDb.insertRun(task: String): String {

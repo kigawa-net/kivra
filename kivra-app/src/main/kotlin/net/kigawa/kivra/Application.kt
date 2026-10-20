@@ -28,6 +28,7 @@ import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevMemoryRepository
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevPlanRepository
@@ -72,6 +73,9 @@ import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
 import net.kigawa.kivra.selfdev.SelfDevSettings
 import net.kigawa.kivra.selfdev.autopilotBudgetAllows
 import net.kigawa.kivra.selfdev.buildSelfDev
+import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
+import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRetentionWorker
+import net.kigawa.kivra.selfdev.memory.SelfDevMemorySettings
 import net.kigawa.kivra.mcp.McpSettings
 import net.kigawa.kivra.mcp.buildMcpRouteDeps
 import net.kigawa.kivra.mcp.registerMcpRoutes
@@ -88,6 +92,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     val selfDevSettings = SelfDevSettings.fromEnv(env)
     // Fail-closed: when the autopilot is off, nothing beyond its switch is read and nothing is wired (ADR 0011).
     val autopilotSettings = AutopilotSettings.fromEnv(env, selfDevSettings)
+    // Fail-closed: the self-development memory's switch is read only while the autopilot is on (ADR 0016 P1). A bad value fails the startup.
+    val memorySettings = SelfDevMemorySettings.fromStartupEnv(env, autopilotSettings)
     // Fail-closed: when the orders are off (the default), nothing beyond the switch is read and nothing is wired (ADR 0015 stage 1).
     val orderSettings = OrderSettings.fromEnv(env, autopilotSettings)
     // Fail-closed: when the MCP endpoint is off (the default), nothing beyond its switch is read and no /mcp route is registered (ADR 0013).
@@ -98,6 +104,9 @@ internal fun Application.appModule(env: Map<String, String>) {
     val database = connectDatabase(dataSource)
     // The order repository exists only when the orders are on (ADR 0015 stage 1). It is not touched otherwise.
     val orderRepo = if (orderSettings.enabled) SelfDevOrderRepository(database) else null
+    // The memory repository and its recorder exist only when the memory switch is on. Otherwise nothing is written, read or started.
+    val memoryRepo = if (memorySettings.enabled) SelfDevMemoryRepository(database, enabled = true) else null
+    val memory = memoryRepo?.let { SelfDevMemoryRecorder.of(it) } ?: SelfDevMemoryRecorder.OFF
     // Self-development installs the GitHub merge Authority later (in buildSelfDev, before the worker starts). Without it, nothing is verified.
     val deferredPrMerge = DeferredPrMergeAuthority()
     val audit = AuditRepository()
@@ -133,6 +142,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             deferredPrMerge,
             coding = codingService?.let { CodingAttemptPatchSource(it) },
             autopilot = autopilotSettings,
+            memory = memory,
         )
     } else {
         null
@@ -153,6 +163,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             plans = SelfDevPlanRepository(database),
             operations = SelfDevOperatorRepository(database),
             control = SelfDevAutopilotControlRepository(database),
+            memory = memory,
         )
     }
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
@@ -175,6 +186,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     )
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)
+    // The memory's retention step (ADR 0016 section 9). Started only with the memory switch on.
+    memoryRepo?.let { repo -> SelfDevMemoryRetentionWorker({ repo.purgeRetention() }, SelfDevMemoryRetentionWorker.DEFAULT_INTERVAL).start(this) }
     // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD). Nothing runs before this.
     orderRepo?.holdActiveOnStartup()
     // The FX expiry warning (daily). FX is read only when a USD path is on (the agent API or self-development, which need the rate);
@@ -194,6 +207,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             },
             // With the orders off the gate allows every goal, so the dispatcher's flow is the same as before.
             orderGate = orderRepo?.let { repo -> { goalId: String -> repo.dispatchAllowed(goalId) } } ?: { _: String -> true },
+            memory = memory,
         ).start(this)
         // The order guards (ADR 0015 section 5.2): the same budget share as the dispatcher, and the FX rate. Only with the orders on.
         orderRepo?.let { repo ->

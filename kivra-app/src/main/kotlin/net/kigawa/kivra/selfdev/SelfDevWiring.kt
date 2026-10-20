@@ -38,6 +38,7 @@ import net.kigawa.kivra.modelgateway.RegistryLoader
 import net.kigawa.kivra.modelgateway.StaticKeyAuth
 import net.kigawa.kivra.modelgateway.Requirements
 import net.kigawa.kivra.routes.SelfDevRouteDeps
+import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import org.jetbrains.exposed.sql.Database
 
 /** The self-development components built by [buildSelfDev]. Built only when [SelfDevSettings.enabled] is true. */
@@ -79,6 +80,8 @@ internal fun buildSelfDev(
     prMergeAuthority: DeferredPrMergeAuthority,
     coding: CodingPatchSource? = null,
     autopilot: AutopilotSettings = AutopilotSettings.disabled(),
+    /** The shadow record of the self-development memory (ADR 0016 P1). Used by the Planner only. */
+    memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
 ): SelfDevParts {
     val config = checkNotNull(settings.config) { "self-development settings are not enabled" }
     val auth = checkNotNull(settings.githubAuth) { "self-development GitHub authentication is missing" }
@@ -177,7 +180,7 @@ internal fun buildSelfDev(
     val planWorker = autopilot.config?.takeIf { autopilot.enabled }?.let { autopilotConfig ->
         // The Planner's file list reads the same GitHub adapter, on the configured base branch (Issue #293). Off when the switch is off.
         val repoFiles = if (autopilotConfig.plannerRepoTree) PlannerRepoFiles(github, config.repo, config.baseBranch) else null
-        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevGoalRepository(database), tenantId, repoFiles)
+        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevGoalRepository(database), tenantId, repoFiles, memory)
     }
     return SelfDevParts(
         worker = worker,
@@ -197,6 +200,7 @@ private fun buildPlanWorker(
     goals: SelfDevGoalRepository,
     tenantId: String,
     repoFiles: PlannerRepoFiles?,
+    memory: SelfDevMemoryRecorder,
 ): PlannerWorker {
     check(registry.models.any { it.id == PLANNER_MODEL_ID && it.lifecycle == Lifecycle.ACTIVE }) {
         "the autopilot planner model is not an active model in the registry"
@@ -206,6 +210,7 @@ private fun buildPlanWorker(
         gateway = gateway,
         config = PlannerConfig(budgetScopes = listOf(tenantId), autopilot = config),
         repoFiles = repoFiles,
+        memory = memory,
     )
     return PlannerWorker(goals, planner, Duration.ofSeconds(config.planIntervalSeconds))
 }

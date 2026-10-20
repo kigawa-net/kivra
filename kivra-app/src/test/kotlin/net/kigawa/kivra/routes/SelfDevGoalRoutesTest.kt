@@ -247,6 +247,18 @@ class SelfDevGoalRoutesTest {
     }
 
     @Test
+    fun `a bidi control in the goal title or body is 400 and nothing is stored`() {
+        TestDb().use { db ->
+            testApplication {
+                setUp(db)
+                assertEquals(HttpStatusCode.BadRequest, post("/api/selfdev/goals", """{"title":"a\u202Eb","body":"背景","idempotencyKey":"k"}""").status)
+                assertEquals(HttpStatusCode.BadRequest, post("/api/selfdev/goals", """{"title":"t","body":"背景\u2067","idempotencyKey":"k"}""").status)
+            }
+            assertEquals(0, db.count("selfdev_goals"))
+        }
+    }
+
+    @Test
     fun `a blank body is no body, and the list leaves bodies out while the detail shows them`() {
         TestDb().use { db ->
             testApplication {

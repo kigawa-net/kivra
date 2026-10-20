@@ -1834,6 +1834,49 @@
     goalWrite(apiFetch('/api/selfdev/tasks/' + encodeURIComponent(str(task.taskId)) + '/reject', 'POST', { version: task.version }), goal.goalId, AP.taskRejected);
   }
 
+  /**
+   * Shared reason dialog: resolves with the trimmed reason, or null on cancel and Esc.
+   * options.dialog, options.input, options.submit and options.cancel are element ids; options.max is the length limit (code points).
+   * Submit stays disabled until the reason is valid. The listeners are removed when the dialog closes.
+   */
+  function openReasonDialog(options) {
+    var dialog = $(options.dialog);
+    var input = $(options.input);
+    var submit = $(options.submit);
+    var cancel = $(options.cancel);
+    var reasonValid = function (text) {
+      var n = Array.from(text).length;
+      return n >= 1 && n <= options.max && !CONTROL_CHARS.test(text);
+    };
+    var update = function () {
+      submit.disabled = !reasonValid(input.value.trim());
+    };
+    var onSubmit = function () {
+      var text = input.value.trim();
+      if (reasonValid(text)) dialog.close(text);
+    };
+    var onCancel = function () {
+      dialog.close('');
+    };
+    return new Promise(function (resolve) {
+      var onClose = function () {
+        input.removeEventListener('input', update);
+        submit.removeEventListener('click', onSubmit);
+        cancel.removeEventListener('click', onCancel);
+        dialog.removeEventListener('close', onClose);
+        resolve(dialog.returnValue === '' ? null : dialog.returnValue);
+      };
+      input.addEventListener('input', update);
+      submit.addEventListener('click', onSubmit);
+      cancel.addEventListener('click', onCancel);
+      dialog.addEventListener('close', onClose);
+      input.value = '';
+      dialog.returnValue = '';
+      update();
+      dialog.showModal();
+    });
+  }
+
   // ---- Stop dialog (the reason is required; it is sent, not kept) --------
 
   function stopReasonText() {

@@ -435,7 +435,7 @@ private suspend fun ApplicationCall.respondOutcome(outcome: OrderResult<*>) {
     }
 }
 
-private fun refusedText(reason: OrderConflict): String = when (reason) {
+internal fun refusedText(reason: OrderConflict): String = when (reason) {
     OrderConflict.STOP_ALREADY_PENDING -> "a stop request is already pending for this tree"
     OrderConflict.STOP_NOT_PENDING -> "the stop request is no longer pending"
     OrderConflict.STOP_EXPIRED -> "the stop request has expired; the order is paused"

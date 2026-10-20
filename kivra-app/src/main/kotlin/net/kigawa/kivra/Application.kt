@@ -73,6 +73,7 @@ import net.kigawa.kivra.selfdev.SelfDevSettings
 import net.kigawa.kivra.selfdev.autopilotBudgetAllows
 import net.kigawa.kivra.selfdev.buildSelfDev
 import net.kigawa.kivra.mcp.McpSettings
+import net.kigawa.kivra.mcp.McpOrderDeps
 import net.kigawa.kivra.mcp.buildMcpRouteDeps
 import net.kigawa.kivra.mcp.registerMcpRoutes
 
@@ -172,6 +173,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     val mcpDeps = buildMcpRouteDeps(
         mcpSettings, env, runs, selfDevSettings.config?.repo,
         selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns,
+        // The order tools serve only while the orders answer (the same condition as the REST routes' requireEnabled).
+        orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, orderSettings.aiPrincipal) },
     )
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)

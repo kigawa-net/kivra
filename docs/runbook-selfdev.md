@@ -1418,7 +1418,7 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 - **一時停止(承認は不要)**: `POST /api/selfdev/orders/{id}/pause` `{"version": n}`(運用者)。周だけが止まり、order は生きている。緊急時はこちら。全体の止め方は §7.4 の `POST /api/selfdev/autopilot/pause` も使える(周の開始と投入を止める。order の状態は変えない)。
 - **安全装置の一時停止(承認は不要、自動)**: 監視(約 60 秒ごと)が、`BUDGET_HOLD`、`FX_EXPIRED`、`UNKNOWN_RUN`、`CYCLE_FAILURES`、`LIMIT_REACHED`、`EXPIRED` を検出すると、`ACTIVE` の order を `PAUSED` にする。自動では再開しない。原因を確かめてから、運用者が `resume` する。
 - **停止(承認が要る)**: 次の手順で、ルートの承認者が承認する。
-  1. 要求: `POST /api/selfdev/orders/{id}/stop-requests` `{"version": n, "reasonCode": "..."}`。理由は固定の列挙だけ(`OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN`)。自由な文は受け付けない。要求の時点で order は `STOP_REQUESTED` になり、周は始まらない。木に未決の要求は 1 件まで。
+  1. 要求: `POST /api/selfdev/orders/{id}/stop-requests` `{"version": n, "reasonCode": "..."}`(MCP の `kivra_order_request_stop` も同じ規則。§8.8)。理由は固定の列挙だけ(`OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN`)。自由な文は受け付けない。要求の時点で order は `STOP_REQUESTED` になり、周は始まらない。木に未決の要求は 1 件まで。
   2. 承認者が一覧を見る: `GET /api/selfdev/stop-requests?state=PENDING`(承認者だけ。`digest` を含む)。
   3. 承認: `POST /api/selfdev/stop-requests/{id}/approve` `{"digest": "<一覧の digest>"}`。承認者は、要求した主体と同じ owner key では承認できない(409 ではなく 403)。`digest` が違えば 409。承認すると order は `STOPPED`、要求は `CONSUMED`。その周の Goal も既存の停止で止まる。投入済みの Run と PR には変更が無い(kivra は PR を閉じず、マージもしない)。
   4. 却下: `POST /api/selfdev/stop-requests/{id}/reject`(承認者)。取り消し: `POST /api/selfdev/stop-requests/{id}/cancel`(要求した運用者か承認者。AI の主体は取り消せない)。どちらも order は `PAUSED`(`STOP_NOT_APPROVED`)に戻り、自動では再開しない。
@@ -1434,7 +1434,7 @@ AI の主体ができるのは、読み取りと停止の要求だけである�
 
 #### 7.6.6 段階 1 の範囲外
 
-子の order、子の停止、周の自動の開始、複数周、MCP の読み取りと停止の要求、`/ui` の画面は、後の段階である(ADR 0015 §7)。order の費用の上限(`order_budget_jpy`)も後の段階である。
+子の order、子の停止、周の自動の開始、複数周、`/ui` の画面は、後の段階である(ADR 0015 §7)。MCP の読み取りと停止の要求は PR 2a で入った(§8.8)。order の費用の上限(`order_budget_jpy`)も後の段階である。
 
 ### 6.15 周期ワーカーと結果の保持(Issue #231、ADR 0010 追補 6)
 
@@ -1647,7 +1647,7 @@ SELECT kind, COUNT(*) AS n
 - `KIVRA_MCP_ALLOWED_ORIGINS`(任意)。カンマ区切りの `Origin`(例 `https://kivra-dev.kigawa.net`)。`Origin` ヘッダーが付いたリクエストは、一覧に一致する必要がある。`Origin` が無いリクエスト(非ブラウザのクライアント)は通す。
 - `KIVRA_MCP_RATE_PER_MINUTE`(任意、既定 60、1〜6000)。主体(所有者のキー)ごとに、1 分あたりの上限。超えると 429。
 - `KIVRA_AGENT_REQUIRED_ROLE`(任意)。設定されていれば、そのロールを持つトークンは 403(エージェントは MCP の呼び出し元ではない)。`aud` の検査で、エージェントのトークンは既に 401 になる。これは多層防御。
-- `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
+- `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。order が有効なときは、停止の要求のツール `kivra_order_request_stop` も登録する(§8.8)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
 - `KIVRA_MCP_WRITE_RATE_PER_MINUTE`(任意、既定 5、1〜6000)。書き込みの呼び出しの、主体ごとの 1 分あたりの上限。読み取りの上限(`KIVRA_MCP_RATE_PER_MINUTE`)とは別。超えると 429。書き込みが無効のときは読まれない。
 
 不正な値は起動を止める。エラーには変数の名前だけが出て、値は出ない。
@@ -1733,6 +1733,23 @@ SELECT kind, COUNT(*) AS n
 - 自己開発を全体で止める: `KIVRA_SELFDEV_ENABLED=false`(キルスイッチ、§4.4)。書き込みは `KILL_SWITCH_OFF` で拒否される。
 - MCP を全体で止める: `KIVRA_MCP_ENABLED=false`。`/mcp` は 404 になる。
 - クライアントの切断は Run をキャンセルしない。投入された Run は、切断と無関係に続く。応答が失われたら、同じ `idempotency_key` で再送すれば同じ Run が返る。
+
+### 8.8 order のツール(ADR 0015 段階 1、PR 2a、既定は無効)
+
+order が有効(`KIVRA_SELFDEV_ORDERS_ENABLED=true` かつ `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true`)のときだけ、次のツールを登録する。無効なら一つも出ず、呼べば未知のツールと同じ -32602 になる。
+
+| ツール | 必要なスコープ | 入力 | 出力(`structuredContent`) |
+|---|---|---|---|
+| `kivra_order_list` | `kivra.runs.read` | なし | `orders`(古い順、最大 50 件)。各件は REST の一覧と同じ項目(`order_id`、`state`、`state_reason`、周の数、`expires_at`、`version` など) |
+| `kivra_order_get` | `kivra.runs.read` | `order_id`(26 文字) | 1 件の同じ項目、`cycles`(`cycle_no`、`goal_id`、`goal_state`、`state_reason`)、`pending_stop_request`(保留中の要求。`request_id`、`requester_kind`、`reason_code`、`state`、`order_version`、`expires_at`。`digest` は含まない)。無い order は `reason_code: NOT_FOUND`(`isError: true`) |
+| `kivra_order_request_stop` | `kivra.selfdev.stop` | `order_id`、`version`(0 以上の整数)、`reason`(`OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN` のどれか) | 要求の `request_id`、`state`、`reason_code`、`requester_kind`、`order_version`。**`KIVRA_MCP_WRITE_ENABLED=true` のときだけ登録される** |
+
+- 入力は厳格。未知の項目(`policy`、`reason` 以外の自由な文を含む)、列挙外の理由、型違い、負の版は -32602 で、何も書かれない。
+- **停止の要求だけ**。承認、却下、取り消し、作成、周の開始、一時停止、再開は、MCP には無い(ADR 0015 U-9)。承認は REST の `approve` だけで、要求した主体は承認できない(`SAME_PRINCIPAL`。REST は 403)。
+- 認可は REST と同じ。MCP の主体(所有者のキー)が `KIVRA_SELFDEV_AI_PRINCIPAL` と一致すれば AI の主体、それ以外は人の運用者。停止の要求は REST と同じく両方ができ、遷移の可否はリポジトリの規則で決まる。
+- 拒否は REST と同じ固定コードを `structuredContent.error.code` に返す(例: `STOP_ALREADY_PENDING`、`STALE_VERSION`、`ORDER_NOT_FOUND`)。理由の文は固定の文だけ。
+- 題名、方針、目標の本文、`digest` は返さない。ログと監査には、固定のコード、ID、主体のハッシュだけが出る(`net.kigawa.kivra.selfdev.order.operator`、`via=mcp`)。
+- 有効化: order と MCP を有効にし、停止の要求も使うなら `KIVRA_MCP_WRITE_ENABLED=true` を加える(dev で先に確かめる)。戻すには該当の変数を `false` にして再起動する。order の状態は DB に残り、起動時に既存の `ACTIVE` は `PAUSED`(`STARTUP_HOLD`)になる。
 
 ### 8.6 接続(PR 2 と PR 3 の後)
 

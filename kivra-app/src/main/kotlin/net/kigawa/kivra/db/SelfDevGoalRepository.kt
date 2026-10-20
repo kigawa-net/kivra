@@ -14,6 +14,7 @@ import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.javatime.datetime
@@ -86,6 +87,15 @@ sealed interface Transition<out T> {
     data class Refused(val reason: TransitionRefusal) : Transition<Nothing>
 }
 
+/**
+ * A per-operator cap on the goals created since [since] (a UTC instant, the start of the day). Used by the MCP submission only (ADR 0019 S2).
+ * It counts the rows the operator already created, so a replay that creates no row is never counted.
+ */
+data class DailyGoalLimit(val max: Int, val since: LocalDateTime)
+
+/** Thrown inside the submit transaction when the [DailyGoalLimit] is reached. Nothing is written. */
+class DailyGoalLimitException : RuntimeException("daily goal limit reached")
+
 sealed interface SubmitResult {
     data class Created(val goal: SelfDevGoal) : SubmitResult
     /** The same operator, key and content: the existing goal is returned and nothing is created. */
@@ -135,8 +145,17 @@ class SelfDevGoalRepository(
     /**
      * Stores a goal. Idempotent per (operator, key): a repeat with the same content returns the stored goal, and a repeat with
      * other content is refused. The unique constraint decides a race between two submissions.
+     * With [dailyLimit] (the MCP submission only), a new goal past the cap throws [DailyGoalLimitException]; a replay is answered first and is
+     * never refused by the cap.
      */
-    fun submit(createdBy: String, idempotencyKey: String, title: String, body: String?, targetRepo: String): SubmitResult {
+    fun submit(
+        createdBy: String,
+        idempotencyKey: String,
+        title: String,
+        body: String?,
+        targetRepo: String,
+        dailyLimit: DailyGoalLimit? = null,
+    ): SubmitResult {
         require(createdBy.isNotEmpty() && createdBy.length <= 255) { "created_by must be 1 to 255 characters" }
         require(idempotencyKey.isNotEmpty() && idempotencyKey.length <= 128) { "idempotency key must be 1 to 128 characters" }
         require(title.isNotEmpty() && title.codePointCount(0, title.length) <= 200) { "title must be 1 to 200 characters" }
@@ -153,6 +172,7 @@ class SelfDevGoalRepository(
                     SubmitResult.KeyConflict
                 }
             findByKey(createdBy, idempotencyKey)?.let { return@transaction replayOrConflict(it) }
+            if (dailyLimit != null && countCreatedSince(createdBy, dailyLimit.since) >= dailyLimit.max) throw DailyGoalLimitException()
 
             val goalId = Ulid.generate(clock)
             val now = utcNow(clock)
@@ -339,6 +359,11 @@ class SelfDevGoalRepository(
         SelfDevGoalsTable.selectAll()
             .where { (SelfDevGoalsTable.createdBy eq createdBy) and (SelfDevGoalsTable.idempotencyKey eq idempotencyKey) }
             .firstOrNull()?.toGoal()
+
+    private fun countCreatedSince(createdBy: String, since: LocalDateTime): Long =
+        SelfDevGoalsTable.selectAll()
+            .where { (SelfDevGoalsTable.createdBy eq createdBy) and (SelfDevGoalsTable.createdAt greaterEq since) }
+            .count()
 
     private fun getIn(goalId: String): SelfDevGoal? =
         SelfDevGoalsTable.selectAll().where { SelfDevGoalsTable.goalId eq goalId }.firstOrNull()?.toGoal()

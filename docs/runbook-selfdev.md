@@ -1711,7 +1711,8 @@ SELECT kind, COUNT(*) AS n
 - `KIVRA_AGENT_REQUIRED_ROLE`(任意)。設定されていれば、そのロールを持つトークンは 403(エージェントは MCP の呼び出し元ではない)。`aud` の検査で、エージェントのトークンは既に 401 になる。これは多層防御。
 - `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。order が有効なときは、停止の要求のツール `kivra_order_request_stop` も登録する(§8.8)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
 - `KIVRA_MCP_WRITE_RATE_PER_MINUTE`(任意、既定 5、1〜6000)。書き込みの呼び出しの、主体ごとの 1 分あたりの上限。読み取りの上限(`KIVRA_MCP_RATE_PER_MINUTE`)とは別。超えると 429。書き込みが無効のときは読まれない。
-- `KIVRA_MCP_GOAL_READ_ENABLED`、`KIVRA_MCP_GOAL_STOP_ENABLED`(任意、既定 `false`)。Goal の読み取りと中止のツール(§8.9)。どちらも `KIVRA_MCP_ENABLED=true` と オートパイロットが要る。中止は `KIVRA_MCP_WRITE_ENABLED=true` も要る。MCP が off のまま `true` にすると起動を止める。
+- `KIVRA_MCP_GOAL_READ_ENABLED`、`KIVRA_MCP_GOAL_STOP_ENABLED`、`KIVRA_MCP_GOAL_SUBMIT_ENABLED`(任意、既定 `false`)。Goal の読み取り、中止、投入のツール(§8.9)。どれも `KIVRA_MCP_ENABLED=true` と オートパイロットが要る。中止と投入は `KIVRA_MCP_WRITE_ENABLED=true` も要る。MCP が off のまま `true` にすると起動を止める。
+- `KIVRA_MCP_GOAL_SUBMIT_DAILY_LIMIT`(任意、既定 10、1〜100)。`kivra_goal_submit` で、運用者 1 人が UTC の 1 日に投入できる Goal の件数。冪等の再送は数えない。
 
 不正な値は起動を止める。エラーには変数の名前だけが出て、値は出ない。
 
@@ -1816,7 +1817,17 @@ order が有効(`KIVRA_SELFDEV_ORDERS_ENABLED=true` かつ `KIVRA_SELFDEV_AUTOPI
 
 ### 8.9 Goal のツール(ADR 0019 S1、既定は無効)
 
-Goal の読み取りは、`KIVRA_MCP_GOAL_READ_ENABLED=true` かつ `KIVRA_MCP_ENABLED=true` かつ オートパイロットが有効のときだけ、`kivra_goal_list` と `kivra_goal_get` を登録する。中止は `KIVRA_MCP_GOAL_STOP_ENABLED=true` のとき、さらに `KIVRA_MCP_WRITE_ENABLED=true` と オートパイロットが要る。どれかが欠けると、中止のフラグは起動を止める。すべて既定は `false`。投入(`kivra_goal_submit`)は S2 で、この段階には無い。
+Goal の読み取りは、`KIVRA_MCP_GOAL_READ_ENABLED=true` かつ `KIVRA_MCP_ENABLED=true` かつ オートパイロットが有効のときだけ、`kivra_goal_list` と `kivra_goal_get` を登録する。中止は `KIVRA_MCP_GOAL_STOP_ENABLED=true` のとき、さらに `KIVRA_MCP_WRITE_ENABLED=true` と オートパイロットが要る。投入(`kivra_goal_submit`、S2)は `KIVRA_MCP_GOAL_SUBMIT_ENABLED=true` のとき、さらに `KIVRA_MCP_WRITE_ENABLED=true` と オートパイロットが要る。どれかが欠けると、そのフラグは起動を止める。すべて既定は `false`。
+
+| ツール(S2) | 必要なスコープ | 入力 | 出力(`structuredContent`) |
+|---|---|---|---|
+| `kivra_goal_submit` | `kivra.selfdev.start` | `title`(1〜200 字)、`body`(任意、8000 字まで)、`idempotency_key`(必須、1〜128 字) | `goal_id`、`state`(`GOAL_SUBMITTED`)、`replayed`(同じ鍵と同じ内容の再送は `true` で既存の Goal を返す)。 |
+
+- **投入の規則**: `POST /api/selfdev/goals` と同じ。同じ関数で検証する(題名と鍵は制御文字を含めない、本文は改行とタブだけ許す。長さの上限も同じ)。`(運用者, idempotency_key)` で同一性を判定し、同じ内容は既存の Goal を返し、違う内容は `IDEMPOTENCY_CONFLICT`(既存の Goal の ID は返さない)。検証の失敗は `INVALID_INPUT`、AI の主体は `forbidden`。どちらも Goal は作られず、入力の文は返らない。
+- **1 日の上限**: `DAILY_LIMIT`。主体が作成した Goal のうち、UTC の今日(0 時から)の `created_at` の件数を数えて判定する(REST で作った分も数える。マイグレーションは無い)。上限に達したあとの冪等の再送は、既存の Goal を `replayed: true` で返し、上限に数えず拒否もしない。翌日の 0 時(UTC)に数えが 0 に戻る。
+- **返さない項目と記録**: 題名、本文、冪等キーの値は、応答にもログにも出さない。ログは `net.kigawa.kivra.selfdev.autopilot.operator` に、`via=mcp`、操作名、Goal の ID の先頭 12 文字、`idempotencyKey=present` と結果のコードだけ。題名は、REST と同じく Goal の題名の記憶(ADR 0016)に記録される(本文は記録されない)。
+- **レート制限**: 書き込みの共有の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`、既定 1 分 5 件)に乗る。
+- **有効化**: 投入は計画の作成を始めるため、dev での有効化は運用者の承認を経る。既定は off。
 
 | ツール | 必要なスコープ | 入力 | 出力(`structuredContent`) |
 |---|---|---|---|

@@ -33,7 +33,13 @@ fun buildMcpRouteDeps(
     val tools = McpRunTools(runs, targetRepo).tools() +
         (if (settings.writeEnabled) McpWriteTools(runs, selfDevEnabled, maxActiveSelfDev).tools() else emptyList()) +
         (orders?.let { McpOrderTools(it).tools(settings.writeEnabled) } ?: emptyList()) +
-        (goals?.let { McpGoalTools(it).tools(settings.goalReadEnabled, settings.writeEnabled && settings.goalStopEnabled) } ?: emptyList())
+        (goals?.let {
+            McpGoalTools(it).tools(
+                settings.goalReadEnabled,
+                settings.writeEnabled && settings.goalStopEnabled,
+                settings.writeEnabled && settings.goalSubmitEnabled,
+            )
+        } ?: emptyList())
     return McpRouteDeps(
         settings = settings,
         verifier = McpJwtVerifier(oidc, jwkProvider ?: RefreshingJwkProvider(oidc.jwksUrl), settings.agentRole),

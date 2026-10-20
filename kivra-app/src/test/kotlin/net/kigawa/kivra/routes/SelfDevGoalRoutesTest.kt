@@ -251,8 +251,8 @@ class SelfDevGoalRoutesTest {
         TestDb().use { db ->
             testApplication {
                 setUp(db)
-                assertEquals(HttpStatusCode.BadRequest, post("/api/selfdev/goals", """{"title":"a‮b","body":"背景","idempotencyKey":"k"}""").status)
-                assertEquals(HttpStatusCode.BadRequest, post("/api/selfdev/goals", """{"title":"t","body":"背景⁧","idempotencyKey":"k"}""").status)
+                assertEquals(HttpStatusCode.BadRequest, post("/api/selfdev/goals", """{"title":"a\u202Eb","body":"背景","idempotencyKey":"k"}""").status)
+                assertEquals(HttpStatusCode.BadRequest, post("/api/selfdev/goals", """{"title":"t","body":"背景\u2067","idempotencyKey":"k"}""").status)
             }
             assertEquals(0, db.count("selfdev_goals"))
         }

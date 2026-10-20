@@ -82,7 +82,7 @@ internal const val MAX_IDEMPOTENCY_KEY_CODE_POINTS = 128
  * read differently from how it is stored (Trojan Source). ZWJ, ZWNJ and variation selectors are not listed: emoji and Japanese need them.
  */
 internal fun isBidiControl(c: Char): Boolean =
-    c in '‪'..'‮' || c in '⁦'..'⁩' || c == '‎' || c == '‏' || c == '؜'
+    c in '\u202A'..'\u202E' || c in '\u2066'..'\u2069' || c == '\u200E' || c == '\u200F' || c == '\u061C'
 
 /** Returns the trimmed value, or null when it is empty, too long (in code points), contains control characters or a bidi control. */
 internal fun validatedText(raw: String, maxCodePoints: Int): String? {

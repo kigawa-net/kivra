@@ -7,9 +7,9 @@ import kotlin.test.assertNull
 class ValidatorsTest {
     /** The bidi controls that must be refused: U+202A..202E, U+2066..2069, U+200E, U+200F, U+061C. */
     private val bidi = listOf(
-        '‪', '‫', '‬', '‭', '‮',
-        '⁦', '⁧', '⁨', '⁩',
-        '‎', '‏', '؜',
+        '\u202A', '\u202B', '\u202C', '\u202D', '\u202E',
+        '\u2066', '\u2067', '\u2068', '\u2069',
+        '\u200E', '\u200F', '\u061C',
     )
 
     @Test
@@ -24,18 +24,18 @@ class ValidatorsTest {
 
     @Test
     fun `a bidi control in a multi-line body is refused too`() {
-        assertNull(validatedBody("line1\nline2‮evil"))
-        assertNull(validatedBody("⁧line1\n"))
+        assertNull(validatedBody("line1\nline2\u202Eevil"))
+        assertNull(validatedBody("\u2067line1\n"))
     }
 
     @Test
     fun `ZWJ emoji, ZWNJ, variation selectors, Japanese, plain emoji and line breaks still pass`() {
-        assertEquals("👨‍👩‍👧", validatedText("👨‍👩‍👧", 200))
-        assertEquals("a‌b", validatedText("a‌b", 200))
-        assertEquals("☺️", validatedText("☺️", 200))
+        assertEquals("👨\u200D👩\u200D👧", validatedText("👨\u200D👩\u200D👧", 200))
+        assertEquals("a\u200Cb", validatedText("a\u200Cb", 200))
+        assertEquals("☺\uFE0F", validatedText("☺\uFE0F", 200))
         assertEquals("日本語のタイトル 🚀", validatedText("日本語のタイトル 🚀", 200))
-        assertEquals("👨‍👩", validatedBody("👨‍👩"))
-        assertEquals("a‌b️ 日本語", validatedBody("a‌b️ 日本語"))
+        assertEquals("👨\u200D👩", validatedBody("👨\u200D👩"))
+        assertEquals("a\u200Cb\uFE0F 日本語", validatedBody("a\u200Cb\uFE0F 日本語"))
     }
 
     @Test

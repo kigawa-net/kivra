@@ -87,6 +87,27 @@
       <ul id="plans-list" class="run-list" aria-label="Goal の一覧"></ul>
     </section>
 
+    <!-- Self-development orders (ADR 0015 stage 1, PR 2b). Hidden unless GET /api/selfdev/orders answers 200 (the autopilot is on). -->
+    <section class="card" id="orders-section" aria-labelledby="h-orders" hidden>
+      <div class="card-head">
+        <h2 id="h-orders">order の一覧（ADR 0015）</h2>
+        <button type="button" id="orders-refresh" class="secondary">今すぐ更新</button>
+      </div>
+      <p class="meta" role="note">order は、Goal を周回させる長く生きる指示です。題名と方針は、この画面には表示しません。停止は、要求の後で承認者が承認したときだけ行われます。</p>
+      <p id="orders-msg" class="result" role="status"></p>
+      <p id="orders-status" class="meta" role="status">未取得</p>
+      <ul id="orders-list" class="run-list" aria-label="order の一覧"></ul>
+    </section>
+
+    <!-- Stop approval (the root approver only). Hidden unless GET /api/selfdev/stop-requests?state=PENDING answers 200. -->
+    <section class="card" id="approval-section" aria-labelledby="h-approval" hidden>
+      <h2 id="h-approval">停止の承認（承認者だけ）</h2>
+      <p class="meta" role="note">承認すると、対象の order は停止済みになり、元に戻せません。要求の方針や題名、要求者の ID は表示しません。</p>
+      <p id="approval-msg" class="result" role="status"></p>
+      <p id="approval-status" class="meta" role="status">未取得</p>
+      <ul id="approval-list" class="run-list" aria-label="保留中の停止の要求"></ul>
+    </section>
+
     <section class="card" aria-labelledby="h-runs">
       <div class="card-head">
         <h2 id="h-runs">Run の一覧</h2>
@@ -194,6 +215,18 @@
       <button type="button" class="secondary" id="budget-back" hidden>入力に戻る</button>
       <button type="button" id="budget-next" disabled>内容を確認</button>
       <button type="button" id="budget-submit" hidden>解除する</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="order-approve-dialog" aria-labelledby="order-approve-title">
+  <div class="release-body">
+    <h2 id="order-approve-title">停止の承認</h2>
+    <p id="order-approve-text"></p>
+    <p class="meta" id="order-approve-target"></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="order-approve-cancel" autofocus>キャンセル</button>
+      <button type="button" id="order-approve-submit" disabled>停止を承認する</button>
     </div>
   </div>
 </dialog>

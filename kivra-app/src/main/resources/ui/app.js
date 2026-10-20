@@ -140,7 +140,6 @@
     detailSeq: 0,
     timer: null,
     release: null,
-    releasing: false,
     autopilotEnabled: false,
     autopilot: null,
     autopilotLoading: false,
@@ -891,28 +890,14 @@
     return h('div', { className: 'detail-actions' }, [button]);
   }
 
-  /** The reason as sent: trimmed. It must be 1 to 500 characters (code points) and have no control characters. */
-  function releaseReasonText() {
-    return $('release-reason').value.trim();
-  }
-
-  function reasonIsValid(text) {
-    var n = Array.from(text).length;
-    return n >= 1 && n <= RELEASE_MAX && !CONTROL_CHARS.test(text);
-  }
-
   function showReleaseError(text) {
     var el = $('release-error');
     el.textContent = text;
     el.hidden = text === '';
   }
 
-  /** The send button is enabled only for a valid reason and while no send is running. */
-  function updateReleaseControls() {
-    var text = releaseReasonText();
-    $('release-count').textContent = Array.from(text).length + ' / ' + RELEASE_MAX;
-    $('release-submit').disabled = state.releasing || !reasonIsValid(text);
-    $('release-cancel').disabled = state.releasing;
+  function updateReleaseCount() {
+    $('release-count').textContent = Array.from($('release-reason').value.trim()).length + ' / ' + RELEASE_MAX;
   }
 
   function openRelease(run, all, kind) {
@@ -920,10 +905,12 @@
     state.release = { runId: run.runId, all: all, kind: kind };
     $('release-title').textContent = text.title;
     $('release-explain').textContent = text.explain;
-    $('release-reason').value = '';
     showReleaseError('');
-    updateReleaseControls();
-    $('release-dialog').showModal();
+    openReasonDialog({
+      dialog: 'release-dialog', input: 'release-reason', submit: 'release-submit', cancel: 'release-cancel',
+      max: RELEASE_MAX, send: submitRelease
+    });
+    updateReleaseCount();
   }
 
   /** Reloads the detail only when it is still the page on screen (the operator may have navigated away). */
@@ -932,26 +919,14 @@
     if (cur && cur.id === rel.runId) loadDetail(rel.runId, rel.all);
   }
 
-  async function submitRelease() {
+  /** Sends the reason (already validated by openReasonDialog). The dialog stays open on failure. */
+  async function submitRelease(reason) {
     var rel = state.release;
-    if (!rel || state.releasing || state.sessionExpired) return;
-    var reason = releaseReasonText();
-    if (!reasonIsValid(reason)) {
-      showReleaseError(MESSAGES.releaseBadRequest);
-      updateReleaseControls();
-      return;
-    }
-    state.releasing = true;
+    if (!rel || state.sessionExpired) return;
     showReleaseError('');
-    updateReleaseControls();
-    var r;
-    try {
-      r = rel.kind === 'UNKNOWN'
-        ? await apiFetch('/api/admin/selfdev/runs/' + encodeURIComponent(rel.runId) + '/release', 'POST', { reason: reason })
-        : await apiFetch('/api/admin/selfdev/runs/' + encodeURIComponent(rel.runId) + '/release-unbound-pr', 'POST', { reason: reason });
-    } finally {
-      state.releasing = false;
-    }
+    var r = rel.kind === 'UNKNOWN'
+      ? await apiFetch('/api/admin/selfdev/runs/' + encodeURIComponent(rel.runId) + '/release', 'POST', { reason: reason })
+      : await apiFetch('/api/admin/selfdev/runs/' + encodeURIComponent(rel.runId) + '/release-unbound-pr', 'POST', { reason: reason });
 
     if (r.ok) {
       state.release = null;
@@ -961,7 +936,6 @@
       refreshRuns();
       return;
     }
-    updateReleaseControls();
     var msg;
     if (r.kind === 'network') msg = MESSAGES.releaseNetwork;
     else if (r.status === 400) msg = MESSAGES.releaseBadRequest;
@@ -1835,7 +1809,9 @@
   }
 
   /**
-   * Shared reason dialog: resolves with the trimmed reason, or null on cancel and Esc.
+   * Shared reason dialog. Submit calls options.send(trimmed reason) and keeps the dialog open while it runs (Submit and
+   * Cancel are disabled); the caller closes the dialog when the send succeeds. Cancel and Esc close it.
+   * The returned promise resolves with the dialog's return value when it closes, or null on cancel and Esc.
    * options.dialog, options.input, options.submit and options.cancel are element ids; options.max is the length limit (code points).
    * Submit stays disabled until the reason is valid. The listeners are removed when the dialog closes.
    */
@@ -1844,16 +1820,26 @@
     var input = $(options.input);
     var submit = $(options.submit);
     var cancel = $(options.cancel);
+    var busy = false;
     var reasonValid = function (text) {
       var n = Array.from(text).length;
       return n >= 1 && n <= options.max && !CONTROL_CHARS.test(text);
     };
     var update = function () {
-      submit.disabled = !reasonValid(input.value.trim());
+      submit.disabled = busy || !reasonValid(input.value.trim());
+      cancel.disabled = busy;
     };
-    var onSubmit = function () {
+    var onSubmit = async function () {
       var text = input.value.trim();
-      if (reasonValid(text)) dialog.close(text);
+      if (busy || !reasonValid(text)) return;
+      busy = true;
+      update();
+      try {
+        await options.send(text);
+      } finally {
+        busy = false;
+        update();
+      }
     };
     var onCancel = function () {
       dialog.close('');
@@ -2439,11 +2425,7 @@
     renderKindNote();
     updateKindControls();
     $('kind-form').addEventListener('change', onKindChange);
-    $('release-reason').addEventListener('input', updateReleaseControls);
-    $('release-cancel').addEventListener('click', function () {
-      $('release-dialog').close();
-    });
-    $('release-submit').addEventListener('click', submitRelease);
+    $('release-reason').addEventListener('input', updateReleaseCount);
     $('goal-form').addEventListener('submit', onGoalSubmit);
     $('goal-title').addEventListener('input', function () { updateGoalCounters(); updateGoalControls(); });
     $('goal-body').addEventListener('input', function () { updateGoalCounters(); updateGoalControls(); });

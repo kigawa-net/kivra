@@ -100,6 +100,13 @@ class PrBranchRebaseTest {
             return MAIN
         }
 
+        /** Moves `main` past the base with a change to `docs/a.md`, the file the pull request changes too. Returns its id. */
+        fun mainChangesSamePath(): String {
+            git.commit(MAIN, listOf(github.baseSha), BASE_TREE + ("docs/a.md" to ("100644" to "blob-main")))
+            github.moveBranch("main", MAIN)
+            return MAIN
+        }
+
         /** Moves `main` once more, to [MAIN2] (a child of [MAIN]), and returns its id. */
         fun mainMovesAgain(): String {
             git.commit(MAIN2, listOf(MAIN), BASE_TREE + ("other.md" to ("100644" to "blob-other")) + ("more.md" to ("100644" to "blob-more")))
@@ -600,6 +607,71 @@ class PrBranchRebaseTest {
             assertEquals(0, h.port.updateCalls)
             assertEquals(emptyList(), db.rebaseRows(runId))
             assertEquals(old, h.binding(runId))
+        }
+    }
+
+    @Test
+    fun aPathThatBothThePullRequestAndMainChangedIsNotUpdated() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainChangesSamePath()
+            h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+            val held = Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_OVERLAPPING_PATHS")
+
+            // Not requested, not an attempt, and not counted against the limits, however often the run is looked at.
+            repeat(4) { assertEquals(held, h.runner().advance(runId)) }
+            assertEquals(0, h.port.updateCalls)
+            assertEquals(null, h.lastExpected())
+            assertEquals(emptyList(), db.rebaseRows(runId))
+            assertEquals(old, h.binding(runId))
+            assertEquals(old, h.pr().headSha)
+        }
+    }
+
+    @Test
+    fun aFailedOrTruncatedOverlapCheckIsNotAReasonToUpdate() = runBlocking {
+        // main moves on another path, so the check would pass if it could be read.
+        val failures: List<Pair<String, (Harness) -> Unit>> = listOf(
+            "merge base" to { h -> h.port.mergeBaseFailure = GitHubFailureKind.PROTOCOL },
+            "pull request tree truncated" to { h -> h.port.failingTrees[h.head()] = GitHubFailureKind.TREE_TRUNCATED },
+            "main tree truncated" to { h -> h.port.failingTrees[MAIN] = GitHubFailureKind.TREE_TRUNCATED },
+        )
+        for ((name, breakCheck) in failures) {
+            TestDb().use { db ->
+                val h = Harness(db)
+                val runId = h.openedRun()
+                val old = h.head()
+                h.mainMoves()
+                h.registerMerge(MERGE, "blob-new")
+                h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+                breakCheck(h)
+
+                assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), h.runner().advance(runId), name)
+                assertEquals(0, h.port.updateCalls, name)
+                assertEquals(emptyList(), db.rebaseRows(runId), name)
+                assertEquals(old, h.binding(runId), name)
+            }
+        }
+    }
+
+    @Test
+    fun theOverlapCheckIsReadOncePerPairOfHeads() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            h.mainChangesSamePath()
+            val held = Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_OVERLAPPING_PATHS")
+
+            assertEquals(held, h.runner().advance(runId))
+            assertEquals(1, h.port.mergeBaseCalls)
+            assertEquals(3, h.port.treeCalls)
+
+            // The same pair of heads: the next looks read the base head only, not the merge base or the trees again.
+            repeat(3) { assertEquals(held, h.runner().advance(runId)) }
+            assertEquals(1, h.port.mergeBaseCalls)
+            assertEquals(3, h.port.treeCalls)
         }
     }
 

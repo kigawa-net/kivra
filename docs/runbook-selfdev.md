@@ -329,6 +329,11 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - マージ済みの PR で、head が Run に保存した head と違うとき(更新が kivra の記録の後に届いた、または人が push した)も、同じ検証を通ったときだけ保存した head を更新する。更新リクエストは送らないので、上限(1 時間 1 回、合計 3 回)には数えない。通らなければ何もしない。その後のマージの照合(PrMergeVerifier)は変えず、`HEAD_SHA_MISMATCH` で待機のまま残る。
 - 上限: 1 つの PR につき、更新の要求は 1 時間に 1 回、合計 3 回まで。
 
+**更新の前の事前チェック**(更新の要求の前に行う。読み取りだけで、試行にも上限にも数えない)
+- PR の変更するパスと、main が merge-base からの間に変更したパスを比べる(パスだけ見る。path、mode、blob の一致は見ない)。両方が変更したパスが 1 つでもあれば、更新の要求を送らず、`PR_REBASE_OVERLAPPING_PATHS` で人に残る。更新すると、新しい head の差分が (b) で必ず不一致になり、Run が詰むためである。
+- 読み取りに失敗したとき、ツリーが切り詰められたときは、更新しない(何もしない)。更新を行うのは、重ならないと確認できたときだけ。
+- 結果は (PR の head SHA, main の head SHA) の組ごとにメモリに保持する(16 組までの LRU。再起動で消える)。同じ組では、merge-base とツリーの読み取りを繰り返さない。main の head の読み取り(ブランチの取得)は、毎周期 1 回ある。
+
 **監査ログ**(`audit_events`、Run の ID で引く)
 - `PR_REBASE_ATTEMPTED`: 更新の要求の前に書く。要求の回数は、この行の数で数える(要求が失敗しても数える)。
 - `PR_REBASE_HELD`: 要求のあとに人に残った。理由コードを持つ。
@@ -349,6 +354,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 | `PR_REBASE_VERIFY_FAILED` | 読み取りに失敗した、またはツリーが切り詰められた | 次の周期で再試行される。続くなら人が確認する |
 | `PR_REBASE_REBIND_FAILED` | 再束縛の DB 書き込みに失敗した(旧 head のまま。同じ transaction で巻き戻る) | DB とログを確認する |
 | `PR_REBASE_LIMIT_TOTAL` | 合計 3 回を使い切った | 人が PR を確認する |
+| `PR_REBASE_OVERLAPPING_PATHS` | main が PR と同じパスを変更している。更新すると検証に通らず Run が詰むため、更新しない(試行にも数えない) | 人が必要に応じて main を手元で取り込む、またはそのままマージする(head が変わらないので Run は完了する) |
 
 **確認事項(未確認): App の権限**
 - kivra の GitHub App のトークンは、`contents:write` と `pull_requests:write` を要求する(`kivra-github` の `GitHubAppTokenMinter`)。

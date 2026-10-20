@@ -30,6 +30,12 @@ class FakeGitObjects {
         return (ancestors(base) - ancestors(head)).size
     }
 
+    /** The commits [head] has that [base] does not have, as the compare API counts them (`ahead_by`). Null when a commit is unknown. */
+    fun aheadCount(base: String, head: String): Int? {
+        if (base !in commits || head !in commits) return null
+        return (ancestors(head) - ancestors(base)).size
+    }
+
     fun treeOf(sha: String): Map<String, Pair<String, String>>? = commits[sha]?.tree
 
     /** The merge base of [a] and [b]: a common ancestor that is not an ancestor of another common ancestor. */
@@ -67,6 +73,9 @@ class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjec
     var compareCalls = 0
         private set
 
+    /** When set, the ahead-by compare answers with this result instead of the count computed from the object graph. */
+    var aheadResult: GitHubResult<Int>? = null
+
     /** When set, the update request answers with this result (and does not run [onUpdate]). */
     var updateResult: GitHubResult<Unit>? = null
 
@@ -101,6 +110,12 @@ class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjec
         // The compare API takes a branch name for the base: it is resolved to the branch's head, as GitHub does.
         val baseSha = (github.getBranch(repo, base) as? GitHubResult.Success)?.value?.headSha ?: return notFound()
         return git.behindCount(baseSha, headSha)?.let { GitHubResult.Success(it) } ?: notFound()
+    }
+
+    override suspend fun getAheadBy(repo: RepoRef, baseSha: String, headSha: String): GitHubResult<Int> {
+        totalCalls++
+        aheadResult?.let { return it }
+        return git.aheadCount(baseSha, headSha)?.let { GitHubResult.Success(it) } ?: notFound()
     }
 
     override suspend fun updatePrBranch(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<Unit> {

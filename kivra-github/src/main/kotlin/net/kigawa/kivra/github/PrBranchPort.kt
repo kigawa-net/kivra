@@ -22,6 +22,13 @@ interface PrBranchPort {
     suspend fun getBehindBy(repo: RepoRef, base: String, headSha: String): GitHubResult<Int>
 
     /**
+     * Read-only. How many commits [headSha] has that [baseSha] does not have (`ahead_by` of `GET /compare/{base}...{head}`, both 40-hex
+     * commit ids). Zero means [headSha] is [baseSha] or one of its ancestors. A response whose `ahead_by` is not a non-negative integer is a
+     * protocol failure.
+     */
+    suspend fun getAheadBy(repo: RepoRef, baseSha: String, headSha: String): GitHubResult<Int>
+
+    /**
      * `PUT /pulls/{n}/update-branch` with `expected_head_sha`. GitHub answers 202 and performs the update asynchronously, so a success
      * does not yet show the new head: the caller reads the pull request again. A 409 or 422 (the head moved, or a merge conflict) is
      * [GitHubFailureKind.CONFLICT]. A transport failure or 5xx is [GitHubResult.Unknown] and is never re-sent.

@@ -15,6 +15,7 @@ import net.kigawa.kivra.db.AuditEntry
 import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.AdjustableClock
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.FakeTrustedPrMergeAuthority
 import net.kigawa.kivra.db.PR_REBASE_REBOUND
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.developer.FakeDeveloper
@@ -98,6 +99,16 @@ class PrBranchRebaseTest {
             github.moveBranch("main", MAIN)
             return MAIN
         }
+
+        /** Moves `main` once more, to [MAIN2] (a child of [MAIN]), and returns its id. */
+        fun mainMovesAgain(): String {
+            git.commit(MAIN2, listOf(MAIN), BASE_TREE + ("other.md" to ("100644" to "blob-other")) + ("more.md" to ("100644" to "blob-more")))
+            github.moveBranch("main", MAIN2)
+            return MAIN2
+        }
+
+        /** A person merges the pull request, as GitHub reports it (the head is whatever the pull request has now). */
+        fun humanMerges() = github.humanMerges(pr().number)
 
         /** Registers a commit with [parents] whose `docs/a.md` has [docsBlob] and whose other files are those of `main`. */
         fun registerMerge(sha: String, docsBlob: String, parents: List<String> = listOf(head(), MAIN)) {
@@ -200,11 +211,162 @@ class PrBranchRebaseTest {
             val runId = h.openedRun()
             val old = h.head()
             h.mainMoves()
+            // OTHER is a real commit, but not in the history of main: it has a commit main lacks (ahead_by 1).
+            h.git.commit(OTHER, listOf(h.github.baseSha), BASE_TREE)
             h.registerMerge(MERGE, "blob-new", parents = listOf(old, OTHER))
             h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
 
             assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_PARENTS_MISMATCH"), h.runner().advance(runId))
             assertEquals(old, h.binding(runId))
+        }
+    }
+
+    @Test
+    fun aMergeWithAnAncestorOfMainIsAcceptedAfterMainMovedAgain() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            // The update is made against MAIN; main then moves on to MAIN2 before the new head is read.
+            h.mainMoves()
+            h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+            h.port.beforeUpdate = { _ -> h.mainMovesAgain() }
+            h.registerMerge(MERGE, "blob-new", parents = listOf(old, MAIN))
+
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_VERIFIED"), h.runner().advance(runId))
+            assertEquals(MERGE, h.binding(runId))
+            assertEquals(listOf("PR_REBASE_ATTEMPTED", PR_REBASE_REBOUND), db.rebaseRows(runId).map { it.first })
+        }
+    }
+
+    @Test
+    fun aParentThatCannotBeComparedWithMainIsNotVerified() = runBlocking {
+        for (answer in listOf(GitHubResult.Failure(GitHubFailureKind.NOT_FOUND, "NOT_FOUND"), GitHubResult.Success(-1))) {
+            TestDb().use { db ->
+                val h = Harness(db)
+                val runId = h.openedRun()
+                val old = h.head()
+                h.mainMoves()
+                h.registerMerge(MERGE, "blob-new")
+                h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+                h.port.aheadResult = answer
+
+                assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_VERIFY_FAILED"), h.runner().advance(runId), "$answer")
+                assertEquals(old, h.binding(runId))
+            }
+        }
+    }
+
+    @Test
+    fun aMergeWithOtherThanTwoDistinctParentsIsRefused() = runBlocking {
+        val cases = listOf(
+            "three parents" to listOf("OLD", "MAIN", "OTHER"),
+            "the recorded head twice" to listOf("OLD", "OLD"),
+        )
+        for ((name, shape) in cases) {
+            TestDb().use { db ->
+                val h = Harness(db)
+                val runId = h.openedRun()
+                val old = h.head()
+                h.mainMoves()
+                h.git.commit(OTHER, listOf(h.github.baseSha), BASE_TREE)
+                val parents = shape.map { if (it == "OLD") old else if (it == "MAIN") MAIN else OTHER }
+                h.registerMerge(MERGE, "blob-new", parents = parents)
+                h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+
+                assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_PARENTS_MISMATCH"), h.runner().advance(runId), name)
+                assertEquals(old, h.binding(runId), name)
+            }
+        }
+    }
+
+    @Test
+    fun aMergeWhosePathModeOrBlobDiffersFromTheRecordedChangeIsRefused() = runBlocking {
+        val tampered = mapOf(
+            "a blob" to mapOf("README.md" to ("100644" to "blob-readme"), "docs/a.md" to ("100644" to "blob-tampered"), "other.md" to ("100644" to "blob-other")),
+            "a mode" to mapOf("README.md" to ("100644" to "blob-readme"), "docs/a.md" to ("100755" to "blob-new"), "other.md" to ("100644" to "blob-other")),
+            "a path" to mapOf(
+                "README.md" to ("100644" to "blob-readme"), "docs/a.md" to ("100644" to "blob-new"),
+                "other.md" to ("100644" to "blob-other"), "extra.md" to ("100644" to "blob-extra"),
+            ),
+        )
+        for ((name, tree) in tampered) {
+            TestDb().use { db ->
+                val h = Harness(db)
+                val runId = h.openedRun()
+                val old = h.head()
+                h.mainMoves()
+                h.git.commit(MERGE, listOf(old, MAIN), tree)
+                h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+
+                assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_DIFF_CHANGED"), h.runner().advance(runId), name)
+                assertEquals(old, h.binding(runId), name)
+            }
+        }
+    }
+
+    @Test
+    fun aMergedPullRequestWhoseVerifiedHeadDiffersIsRecordedAndCompleted() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainMoves()
+            h.registerMerge(MERGE, "blob-new", parents = listOf(old, MAIN))
+            // The head moved without the rebaser (no update request from kivra), and a person merged it.
+            h.github.setPullHead(h.pr().number, MERGE)
+            h.humanMerges()
+            // The Authority reports the pull request's head as GitHub has it.
+            db.prAuthority.answer = { b -> FakeTrustedPrMergeAuthority.merged(b).copy(headSha = h.pr().headSha) }
+
+            assertEquals(Advanced(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.COMPLETED, "PR_MERGED"), h.runner().advance(runId))
+            assertEquals(MERGE, h.binding(runId))
+            assertEquals(0, h.port.updateCalls)
+            // The head move is audited as a rebind only: it is not an update request, so no attempt is counted.
+            assertEquals(listOf(PR_REBASE_REBOUND), db.rebaseRows(runId).map { it.first })
+        }
+    }
+
+    @Test
+    fun aMergedPullRequestWhoseNewHeadDoesNotVerifyStaysWaitingOnTheOldHead() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainMoves()
+            // A diff that changed: the verification refuses it.
+            h.registerMerge(MERGE, "blob-tampered", parents = listOf(old, MAIN))
+            h.github.setPullHead(h.pr().number, MERGE)
+            h.humanMerges()
+            db.prAuthority.answer = { b -> FakeTrustedPrMergeAuthority.merged(b).copy(headSha = h.pr().headSha) }
+
+            repeat(2) { assertEquals(Waiting(WaitReason.MERGE_NOT_VERIFIED, "HEAD_SHA_MISMATCH"), h.runner().advance(runId)) }
+            assertEquals(DevelopmentRunState.PULL_REQUEST, db.runs.get(runId)!!.state)
+            assertEquals(old, h.binding(runId))
+            assertEquals(emptyList(), db.rebaseRows(runId))
+            assertEquals(0, h.port.updateCalls)
+        }
+    }
+
+    @Test
+    fun aMergedPullRequestOfAnotherAuthorIsNotReconciled() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainMoves()
+            h.registerMerge(MERGE, "blob-new", parents = listOf(old, MAIN))
+            h.github.setPullHead(h.pr().number, MERGE)
+            h.github.setPullAuthor(h.pr().number, 1L)
+            h.humanMerges()
+            // The Authority reports the pull request as GitHub has it: its head and its author.
+            db.prAuthority.answer = { b -> FakeTrustedPrMergeAuthority.merged(b).copy(headSha = h.pr().headSha, authorId = h.pr().authorId) }
+
+            repeat(2) { assertEquals(Waiting(WaitReason.MERGE_NOT_VERIFIED, "HEAD_SHA_MISMATCH"), h.runner().advance(runId)) }
+            assertEquals(DevelopmentRunState.PULL_REQUEST, db.runs.get(runId)!!.state)
+            assertEquals(old, h.binding(runId))
+            assertEquals(emptyList(), db.rebaseRows(runId))
+            assertEquals(0, h.port.updateCalls)
         }
     }
 
@@ -448,6 +610,7 @@ class PrBranchRebaseTest {
         const val MERGE = "2222222222222222222222222222222222222222"
         const val PERSON = "3333333333333333333333333333333333333333"
         const val OTHER = "4444444444444444444444444444444444444444"
+        const val MAIN2 = "5555555555555555555555555555555555555555"
         const val BLOB_NEW = "blob-new"
 
         val BASE_TREE: Map<String, Pair<String, String>> = mapOf(

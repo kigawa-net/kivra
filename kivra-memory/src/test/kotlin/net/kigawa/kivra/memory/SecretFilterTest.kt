@@ -82,4 +82,90 @@ class SecretFilterTest {
         val red = SecretFilter.redact("API_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789")
         assertFalse(red.contains("abcdefghij"))
     }
+
+    /**
+     * Fixed sample of random digit-free tokens (seeded, generated for this test, not credentials).
+     * Lengths 32, 40 and 64 over upper and lower case letters, and over base64url without digits.
+     * They must be detected: a digit-free run is not exempt unless it reads as identifier words.
+     */
+    @Test
+    fun `detects random digit-free tokens`() {
+        val tokens = listOf(
+            "IyLayzuOPoEzzaobdRNLOdhDAfgtWRqZ",
+            "ljjhPdhTdVqkwVUaLJxrHgjgtZDfgKnK",
+            "zPgZyBZnPakvJQRrPUXNMbZeSqHpVNuq",
+            "uTlcHrqfHxUeMTJnsQondaJDnljiUGXE",
+            "GwlJtBoEMGxSCdjypXrsjxCOTfrDPukV",
+            "oudnxQTPqHYaYJXWOjWRTOTnhrcGeSpK",
+            "hgXSXALZMJuKyvHquvYhcqcJymFUsMpa",
+            "vNQyeehihaYjIkhMYrAElTdVrBpbkOWD",
+            "BojCEoNKvhPjJBufODpPywBMejVTrBvIoPQNhshW",
+            "jRcyJqsJKfnJHoRYHGKJbYhOBirbZzxhLDTZrLvG",
+            "RLhoBpUsZreIFnuCQYMRRVOrGzlrLAefYrgkQuLW",
+            "dIwkuzCbyvqFUKjqZbPpjMZKaIPlhJXfcuLDJQty",
+            "wFhgivvTlBLFPElWnwqzjQSMMzrIVDLVnjHweOXE",
+            "feOeUBkbRylXyhEgkeZOgXtqaOyocRdFjCqqacNp",
+            "kIFlsoCJxDUVJQICIrqFNYGfdWuojfvHOHpJciQP",
+            "kNbLJcyVPFBOrHGsSgHkqATjnDFflqGtMcnmHKxc",
+            "MBszFifhgfEfeDvcKbcrutDVXFrznmiCxbHWLSAiGuQlIRawVCEewlUMKbrjHFnu",
+            "YCTQDVBUgfeuClwkhUYHEAnGrNijoyaHoAaTykRXsLUbMyEXINDbbKUKiOspCaYh",
+            "LpyKrMnfLtyffpdIfRZNCrKqKGVFURlGiqfIBuxRgUhxorKWjgtlwAVbQHAdQUHs",
+            "ZyOyReiKqTdBLegrbjprztnfeddmiZaqqYiqaJPFcAohnZjgXFHQSHbkcpTCrNVU",
+            "rxyMOuCtUEPNIvuJMGMJQRnAleKkKMSluUkbvwrHHMaGHqbfnwnTLMTjuprnaORO",
+            "ditrQdlWosOcSNQAhBqANHVVfQMjgjpJntgVuAFMtgWoMEGiqXPTPNBwqwXtGItf",
+            "SdnTlXZzdvQGFiVEQjyTVlFnTKDPdJSzanSXzKfkiOajhobsxTSVfxrFEtpVPCsX",
+            "HXMfJstUiuorKXuQbKDSdRczjYeqzGSNzwycxqFQntSumHoPNwzLIpqSmRuZXuzm",
+            "kPwYsQKqoFzYEBwUmoKDbYyIZQKUIGlF",
+            "ANx_RgkSvWpViDyGUOryyyazcZlhZA-Y",
+            "XSWiHyLQmBPmW_Rvdu_fMJVfIFzMVAHD",
+            "UBvRFbHLHAmgUhfWl-CZBFaLdREmxmPs",
+            "RwVy_QTZrmgYzWwRlXxBEFeoggoRDukrbGhTdkzq",
+            "vfHC-VkZqWwMUDbIYBEmujnHgyziHiUHmEvNRXmS",
+            "BxkGGa_fMGokKoXpaUYPVqUzdYWJhKUxZTyfoowc",
+            "NUHxOKhCpUFDgDEzjUklwVsiZeNEpCHmXEbzPhgA",
+            "mJpHlYercczUGSAEsOCcsQakfLnehRmMMJRRVpUNKfJYqceGbhmxzAbsxQGnqyfU",
+            "izxQqmOHcYI_nkbySCrNUendzJZqANPMQRwEAHCHWAargCAvbjUpkrSCfLhNjtbz",
+            "vAvyCPCdwOPbJTYzAUu_NiEtckRXnVmRgsJ-BRcpISDhJFHBQyKBCHIBzqRcdklj",
+            "ZwCNHTvlfuhxEpXQLYFmoJh-lpIDiBnvWRa_G_qbTEFsiRfLTOMgHyvcMNCYoVXz",
+        )
+        for (t in tokens) assertTrue(SecretFilter.containsSecret(t), "expected a finding for a random token of length ${t.length}")
+    }
+
+    /** Identifiers from this repository (CamelCase and snake_case, no digits): not secrets, must not be flagged. */
+    @Test
+    fun `does not flag digit-free identifiers that read as words`() {
+        val identifiers = listOf(
+            "aBadRequestDiscardsTheBatchAndItsSeqsAreReused",
+            "aCrashAfterThePullRequestOpensDoesNotOpenASecondOne",
+            "aLeadingSlashIsLiteralAsOnTheServer",
+            "anOpenPullRequestPastTheReviewTimeoutCancelsTheRunButIsNotClosed",
+            "aPullRequestRunWithoutABindingIsNotCompletedAndTheAuthorityIsNotAsked",
+            "assistantGivesATurnAndTheToolNameOnly",
+            "cachedTokenIsNotExchangedBeforeRecommendedWindow",
+            "claimIgnoresUnknownTaskFieldsAndRejectsAWrongBodyType",
+            "confirmedDataHandlingNeedsConfirmerDateAndSource",
+            "debugKeepStoresTheStreamTheTaskAndTheOutcomeOfAnEmptyPatch",
+            "disabledByDefaultWhenFlagMissing",
+            "estimateOfTheDevRequestFitsTheMonthlyLimit",
+            "failedAttemptsReleaseReservations",
+            "GitHubChecksAndFailureContractTest",
+            "internalDataRequiresConfirmedDataHandlingForExternal",
+            "lateCommitWithoutActualKeepsEstimateAndLateReleaseRefunds",
+            "marginsCanBeZeroAndTheRateIsAppliedExactly",
+            "modesAreSetWhenTheDirectoryIsCreatedByTheWrite",
+            "noResultOrMalformedUsageSendsNoUsage",
+            "overwritingAFileTheModelWasShownIsAccepted",
+            "publicDataMayUseUnconfirmedProvider",
+            "repeatedRequestIdIsAnsweredFromTheLedgerWithoutAProviderCall",
+            "retryWaitsWithBackoffAndUsesRotatedJwt",
+            "secretLikeTextInSummaryIsRejected",
+            "startupCleanupWithoutActiveRunRemovesEveryLabelledContainer",
+            "successfulRunWithResultIsSucceeded",
+            "textOutsideTheFenceStillRejected",
+            "theProviderPortHasNoMergeOperationAndTheRunnerNeverCallsOne",
+            "totalDeadlineProducesTimeoutAndSettlesBudgetAsEstimated",
+            "unpricedModelIsRefusedOnStreamToo",
+        )
+        for (id in identifiers) assertFalse(SecretFilter.containsSecret(id), "unexpected finding for an identifier of length ${id.length}")
+    }
 }

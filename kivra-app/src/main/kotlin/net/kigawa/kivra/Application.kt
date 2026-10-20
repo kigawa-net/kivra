@@ -78,6 +78,7 @@ import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRetentionWorker
 import net.kigawa.kivra.selfdev.memory.SelfDevMemorySettings
 import net.kigawa.kivra.mcp.McpSettings
 import net.kigawa.kivra.mcp.McpGoalDeps
+import net.kigawa.kivra.mcp.McpGoalSubmitDeps
 import net.kigawa.kivra.mcp.McpOrderDeps
 import net.kigawa.kivra.mcp.buildMcpRouteDeps
 import net.kigawa.kivra.mcp.registerMcpRoutes
@@ -183,9 +184,13 @@ internal fun Application.appModule(env: Map<String, String>) {
     } else {
         null
     }
-    // The Goal stop over MCP needs the autopilot (ADR 0019 S1): refused at startup otherwise, as the write switch is.
+    // The Goal stop over MCP needs the autopilot (ADR 0019 S1): refused at startup otherwise, as the write switch is. The same holds for the
+    // Goal submission (ADR 0019 S2).
     check(!mcpSettings.goalStopEnabled || autopilotSettings.config != null) {
         "${McpSettings.ENV_GOAL_STOP_ENABLED}=true requires the autopilot"
+    }
+    check(!mcpSettings.goalSubmitEnabled || autopilotSettings.config != null) {
+        "${McpSettings.ENV_GOAL_SUBMIT_ENABLED}=true requires the autopilot"
     }
     val mcpDeps = buildMcpRouteDeps(
         mcpSettings, env, runs, selfDevSettings.config?.repo,
@@ -200,6 +205,14 @@ internal fun Application.appModule(env: Map<String, String>) {
                 runs = runs,
                 aiPrincipal = orderSettings.aiPrincipal,
                 memory = memory,
+                // The Goal submission over MCP (ADR 0019 S2) needs the target repository, as the REST submission does.
+                submit = selfDevSettings.config?.repo?.let {
+                    McpGoalSubmitDeps(
+                        goals = SelfDevGoalRepository(database),
+                        targetRepo = "${it.owner}/${it.repo}",
+                        dailyLimit = mcpSettings.goalSubmitDailyLimit,
+                    )
+                },
             )
         },
     )

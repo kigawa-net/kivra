@@ -29,6 +29,10 @@ import net.kigawa.kivra.auth.resolveTaskApiAuthMode
  *   while the autopilot is on, and needs `KIVRA_MCP_ENABLED=true`.
  * - `KIVRA_MCP_GOAL_STOP_ENABLED`: `true` to register `kivra_goal_stop` (ADR 0019 S1), an operator-only stop. Off by default. Needs
  *   `KIVRA_MCP_ENABLED=true` and `KIVRA_MCP_WRITE_ENABLED=true`, and the autopilot must be on (checked at startup). The AI principal is refused.
+ * - `KIVRA_MCP_GOAL_SUBMIT_ENABLED`: `true` to register `kivra_goal_submit` (ADR 0019 S2), the operator's Goal submission. Off by default. Needs
+ *   `KIVRA_MCP_ENABLED=true` and `KIVRA_MCP_WRITE_ENABLED=true`, and the autopilot must be on (checked at startup). The AI principal is refused.
+ * - `KIVRA_MCP_GOAL_SUBMIT_DAILY_LIMIT`: goals one operator may submit over MCP per UTC day, 1 to 100, default 10. Read only when the submit
+ *   tool is enabled. A replay does not count.
  */
 class McpSettings private constructor(
     val enabled: Boolean,
@@ -45,6 +49,10 @@ class McpSettings private constructor(
     val goalReadEnabled: Boolean = false,
     /** Whether the Goal stop tool is registered (`KIVRA_MCP_GOAL_STOP_ENABLED=true`). Never true unless [writeEnabled]. */
     val goalStopEnabled: Boolean = false,
+    /** Whether the Goal submit tool is registered (`KIVRA_MCP_GOAL_SUBMIT_ENABLED=true`). Never true unless [writeEnabled]. */
+    val goalSubmitEnabled: Boolean = false,
+    /** Goals one operator may submit over MCP per UTC day. Only meaningful when [goalSubmitEnabled]. */
+    val goalSubmitDailyLimit: Int = DEFAULT_GOAL_SUBMIT_DAILY_LIMIT,
 ) {
     /** `https://<host>[:port]`, the origin of [audience]. Null when disabled. */
     val publicOrigin: String? get() = audience?.let { URI(it).let { u -> "${u.scheme}://${u.rawAuthority}" } }
@@ -63,11 +71,15 @@ class McpSettings private constructor(
         const val ENV_WRITE_RATE_PER_MINUTE = "KIVRA_MCP_WRITE_RATE_PER_MINUTE"
         const val ENV_GOAL_READ_ENABLED = "KIVRA_MCP_GOAL_READ_ENABLED"
         const val ENV_GOAL_STOP_ENABLED = "KIVRA_MCP_GOAL_STOP_ENABLED"
+        const val ENV_GOAL_SUBMIT_ENABLED = "KIVRA_MCP_GOAL_SUBMIT_ENABLED"
+        const val ENV_GOAL_SUBMIT_DAILY_LIMIT = "KIVRA_MCP_GOAL_SUBMIT_DAILY_LIMIT"
 
         const val DEFAULT_RATE_PER_MINUTE = 60
         const val DEFAULT_WRITE_RATE_PER_MINUTE = 5
         private const val MAX_RATE_PER_MINUTE = 6_000
         private const val MAX_LIST_ENTRIES = 10
+        const val DEFAULT_GOAL_SUBMIT_DAILY_LIMIT = 10
+        private const val MAX_GOAL_SUBMIT_DAILY_LIMIT = 100
 
         /** The settings with the endpoint off. Nothing else is read. */
         val DISABLED = McpSettings(false, null, emptySet(), emptySet(), DEFAULT_RATE_PER_MINUTE, null)
@@ -76,10 +88,13 @@ class McpSettings private constructor(
             val writeFlag = switch(env, ENV_WRITE_ENABLED)
             val goalReadFlag = switch(env, ENV_GOAL_READ_ENABLED)
             val goalStopFlag = switch(env, ENV_GOAL_STOP_ENABLED)
+            val goalSubmitFlag = switch(env, ENV_GOAL_SUBMIT_ENABLED)
             when (val flag = env[ENV_ENABLED]?.trim()) {
                 null, "", "false" -> {
                     check(!writeFlag) { "$ENV_WRITE_ENABLED=true requires $ENV_ENABLED=true" }
-                    check(!goalReadFlag && !goalStopFlag) { "$ENV_GOAL_READ_ENABLED and $ENV_GOAL_STOP_ENABLED require $ENV_ENABLED=true" }
+                    check(!goalReadFlag && !goalStopFlag && !goalSubmitFlag) {
+                        "$ENV_GOAL_READ_ENABLED, $ENV_GOAL_STOP_ENABLED and $ENV_GOAL_SUBMIT_ENABLED require $ENV_ENABLED=true"
+                    }
                     return DISABLED
                 }
                 "true" -> Unit
@@ -95,7 +110,12 @@ class McpSettings private constructor(
             val agentRole = env[ENV_AGENT_ROLE]?.trim()?.takeIf { it.isNotEmpty() }?.let { RequiredRole.parse(it, ENV_AGENT_ROLE) }
             val writeRate = if (writeFlag) writeRate(env) else DEFAULT_WRITE_RATE_PER_MINUTE
             check(!goalStopFlag || writeFlag) { "$ENV_GOAL_STOP_ENABLED=true requires $ENV_WRITE_ENABLED=true" }
-            return McpSettings(true, audience, hosts, origins, rate, agentRole, writeFlag, writeRate, goalReadFlag, goalStopFlag)
+            check(!goalSubmitFlag || writeFlag) { "$ENV_GOAL_SUBMIT_ENABLED=true requires $ENV_WRITE_ENABLED=true" }
+            val submitLimit = if (goalSubmitFlag) goalSubmitDailyLimit(env) else DEFAULT_GOAL_SUBMIT_DAILY_LIMIT
+            return McpSettings(
+                true, audience, hosts, origins, rate, agentRole, writeFlag, writeRate, goalReadFlag, goalStopFlag,
+                goalSubmitFlag, submitLimit,
+            )
         }
 
         /** The `true`/`false` switch. Unset and empty are `false`. Any other value is refused by name only. */
@@ -109,6 +129,13 @@ class McpSettings private constructor(
             val raw = env[ENV_WRITE_RATE_PER_MINUTE]?.trim()?.takeIf { it.isNotEmpty() } ?: return DEFAULT_WRITE_RATE_PER_MINUTE
             val value = raw.toIntOrNull() ?: throw IllegalStateException("$ENV_WRITE_RATE_PER_MINUTE must be a whole number")
             require(value in 1..MAX_RATE_PER_MINUTE) { "$ENV_WRITE_RATE_PER_MINUTE must be 1 to $MAX_RATE_PER_MINUTE" }
+            return value
+        }
+
+        private fun goalSubmitDailyLimit(env: Map<String, String>): Int {
+            val raw = env[ENV_GOAL_SUBMIT_DAILY_LIMIT]?.trim()?.takeIf { it.isNotEmpty() } ?: return DEFAULT_GOAL_SUBMIT_DAILY_LIMIT
+            val value = raw.toIntOrNull() ?: throw IllegalStateException("$ENV_GOAL_SUBMIT_DAILY_LIMIT must be a whole number")
+            require(value in 1..MAX_GOAL_SUBMIT_DAILY_LIMIT) { "$ENV_GOAL_SUBMIT_DAILY_LIMIT must be 1 to $MAX_GOAL_SUBMIT_DAILY_LIMIT" }
             return value
         }
 

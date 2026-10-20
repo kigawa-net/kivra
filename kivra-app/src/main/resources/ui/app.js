@@ -324,6 +324,7 @@
     updateGoalControls();
     renderRunsStatus(Date.now());
     renderGoalsStatus(Date.now());
+    updateOrderControls();
   }
 
   function fail(path, kind, status, quiet) {
@@ -1540,6 +1541,7 @@
         state.autopilot = r.data;
         // The list is read as soon as the autopilot is known to be on (the refresh timer does not run until the next tick).
         if (firstTime) refreshGoals();
+        if (firstTime) refreshOrders();
       } else {
         state.autopilotEnabled = false;
         state.autopilot = null;
@@ -2398,6 +2400,7 @@
     if (now - state.statusCheckedAt >= REFRESH_MS) refreshStatus();
     if (now - state.autopilotCheckedAt >= REFRESH_MS) refreshAutopilot();
     if (state.autopilotEnabled && now - state.goalsLastAttemptAt >= REFRESH_MS) refreshGoals();
+    if (now - ORD.listLastAttemptAt >= REFRESH_MS) refreshOrders();
     renderRunsStatus(now);
     renderGoalsStatus(now);
   }
@@ -2411,6 +2414,443 @@
   function stopTimers() {
     if (state.timer) clearInterval(state.timer);
     state.timer = null;
+  }
+
+  // ---- Self-development orders (ADR 0015 stage 1, PR 2b): the order list and detail, the operator's pause and resume, and the
+  // stop approval of the root approver. Shown only when the API answers 200 (503, 404 and 403 keep a section hidden).
+  // The title, the policy, a requester's ID and any free text are never written into the page. The digest stays in memory
+  // and is sent back by the approval only; it is never shown. Every code is shown through the fixed tables below.
+
+  var ORD_ID = /^[0-9A-Z]{26}$/;
+  var ORD_DIGEST = /^[0-9a-f]{64}$/;
+  var ORD_CODE = /^[A-Z_]{1,40}$/;
+
+  var ORDER_STATES = {
+    ACTIVE: { label: '稼働中', desc: '周を始められる状態です（周は運用者が開始します）' },
+    PAUSED: { label: '一時停止中', desc: '周を始めません。理由を確認してください' },
+    STOP_REQUESTED: { label: '停止の承認待ち', desc: '停止が要求されています。承認されるまで、新しい周は始まりません' },
+    STOPPED: { label: '停止済み', desc: '終端の状態です。元に戻せません' }
+  };
+
+  var ORDER_REASONS = {
+    OPERATOR_PAUSED: '運用者が一時停止しました',
+    OPERATOR_RESUMED: '運用者が再開しました',
+    STARTUP_HOLD: '機能の有効化後の起動時に保留されました（運用者が確認して再開します）',
+    BUDGET_HOLD: '月次の予算の割当てが尽きたため保留されました（運用者が再開します）',
+    CYCLE_FAILURES: '周が続けて失敗したため保留されました（運用者が再開します）',
+    UNKNOWN_RUN: '周の Run の結果が不明なため保留されました（運用者が確認して再開します）',
+    FX_EXPIRED: '為替レートが古く、費用を換算できないため保留されました（運用者が再開します）',
+    LIMIT_REACHED: '周の上限に達しました（再開できません。新しい order が必要です）',
+    EXPIRED: '期限が過ぎました（再開できません。新しい order が必要です）',
+    STOP_REQUESTED: '停止が要求されました',
+    STOP_NOT_APPROVED: '停止は承認されませんでした（却下、取り消し、または期限切れ）。再開できます',
+    OPERATOR_STOPPED: '承認により停止しました'
+  };
+
+  var STOP_REASONS = {
+    OPERATOR_REQUEST: '運用者の要求',
+    RUNAWAY_SUSPECTED: '暴走の疑い',
+    BUDGET_CONCERN: '予算への懸念',
+    SCOPE_CONCERN: '範囲への懸念'
+  };
+
+  var REQUESTER_KINDS = { AI: 'AI の主体', HUMAN: '人（運用者）' };
+  // A paused order with one of these reasons is not resumed by an operator (ADR 0015, U-11).
+  var NOT_RESUMABLE_REASONS = ['LIMIT_REACHED', 'EXPIRED'];
+
+  var ORDER_MSG = {
+    confirm: 'この order を停止します。元に戻せません。',
+    approved: '停止を承認しました。order は停止済みになりました（元に戻せません）。',
+    rejected: '停止の要求を却下しました。order は一時停止中になります（自動では再開しません）。',
+    paused: 'order を一時停止しました。',
+    resumed: 'order を再開しました。',
+    stale: '状態が変わっていました。一覧と詳細を読み直してから、もう一度操作してください。',
+    forbidden: 'この操作は、あなたの権限では行えません。',
+    notFound: '見つかりません（既に消えたか、状態が変わりました）。',
+    badRequest: '入力を確認できませんでした。ページを再読み込みしてください。',
+    disabled: '自己開発の order は、今は無効です。',
+    network: '通信に失敗しました。操作されたかどうかは、一覧を読み直して確認してください。',
+    unknown: '結果を確認できませんでした。一覧を読み直してください。'
+  };
+
+  var ORD = {
+    enabled: false,
+    list: null,
+    listOkAt: 0,
+    listLoading: false,
+    listPending: false,
+    listLastAttemptAt: 0,
+    approver: false,
+    requests: null,
+    openId: null,
+    detail: null,
+    detailFail: null,
+    detailLoading: false,
+    detailSeq: 0,
+    busy: false,
+    pendingApprove: null
+  };
+
+  /** A fixed code as text: the explanation and the code. A code outside the table is shown as unknown (with the code, if it has the code shape). */
+  function ordCodeText(table, code) {
+    if (code === null || code === undefined || str(code) === '') return '';
+    var c = str(code);
+    if (has(table, c)) return table[c] + '（' + c + '）';
+    return ORD_CODE.test(c) ? '不明（' + c + '）' : '不明';
+  }
+
+  function ordStateInfo(s) {
+    var c = str(s);
+    if (has(ORDER_STATES, c)) return ORDER_STATES[c];
+    return { label: ORD_CODE.test(c) ? '不明（' + c + '）' : '不明', desc: '不明な状態です（この画面に説明はありません）' };
+  }
+
+  function ordNum(v) {
+    return typeof v === 'number' && isFinite(v) ? String(v) : '不明';
+  }
+
+  function ordTime(s) {
+    var t = parseTime(s);
+    return t === null ? '不明' : fmtLocal(t);
+  }
+
+  function ordRequesterText(kind) {
+    var c = str(kind);
+    return has(REQUESTER_KINDS, c) ? REQUESTER_KINDS[c] : '不明';
+  }
+
+  function ordValidSummary(o) {
+    return !!o && typeof o === 'object' && typeof o.orderId === 'string' && ORD_ID.test(o.orderId);
+  }
+
+  function ordValidRequest(q) {
+    return !!q && typeof q === 'object' && q.state === 'PENDING' &&
+      typeof q.requestId === 'string' && ORD_ID.test(q.requestId) &&
+      typeof q.orderId === 'string' && ORD_ID.test(q.orderId);
+  }
+
+  function ordDigestOk(d) {
+    return typeof d === 'string' && ORD_DIGEST.test(d);
+  }
+
+  function ordSetMsg(id, text, cls) {
+    var el = $(id);
+    el.textContent = text;
+    el.className = 'result' + (cls ? ' ' + cls : '');
+  }
+
+  /** The fixed text for a failed order request. The response body is never shown. */
+  function ordFailText(r) {
+    if (r.kind === 'session') return MESSAGES.session;
+    if (r.kind === 'network') return ORDER_MSG.network;
+    if (r.status === 409) return ORDER_MSG.stale;
+    if (r.status === 403) return ORDER_MSG.forbidden;
+    if (r.status === 404) return ORDER_MSG.notFound;
+    if (r.status === 400) return ORDER_MSG.badRequest;
+    if (r.status === 503) return ORDER_MSG.disabled;
+    return ORDER_MSG.unknown;
+  }
+
+  function ordPendingText(p) {
+    return 'あり（理由: ' + ordCodeText(STOP_REASONS, p.reasonCode) + '、要求の時刻: ' + ordTime(p.createdAt) + '、期限: ' + ordTime(p.expiresAt) + '）';
+  }
+
+  function updateOrderControls() {
+    var blocked = ORD.busy || state.sessionExpired;
+    $('orders-refresh').disabled = state.sessionExpired;
+    $('order-approve-submit').disabled = blocked || ORD.pendingApprove === null;
+    renderOrderList();
+    renderApprovals();
+  }
+
+  function renderOrderSection() {
+    $('orders-section').hidden = !ORD.enabled;
+    $('approval-section').hidden = !(ORD.enabled && ORD.approver);
+    if (state.sessionExpired) {
+      $('orders-status').textContent = 'セッション切れのため、一覧を更新できません';
+    } else {
+      $('orders-status').textContent = ORD.listOkAt === 0 ? '未取得' : '最終取得: ' + fmtLocal(ORD.listOkAt);
+    }
+    $('approval-status').textContent = ORD.requests === null ? '未取得' : '保留中の要求: ' + ORD.requests.length + ' 件';
+    updateOrderControls();
+  }
+
+  async function refreshOrders() {
+    if (state.sessionExpired) return;
+    if (ORD.listLoading) {
+      ORD.listPending = true;
+      return;
+    }
+    ORD.listLoading = true;
+    ORD.listLastAttemptAt = Date.now();
+    try {
+      // The order API answers 503 while the autopilot is off, so nothing is read until the autopilot is known to be on.
+      var r = state.autopilotEnabled ? await apiFetch('/api/selfdev/orders', 'GET') : { ok: false };
+      if (r.ok && Array.isArray(r.data)) {
+        ORD.enabled = true;
+        ORD.list = r.data.filter(ordValidSummary);
+        ORD.listOkAt = Date.now();
+        var q = await apiFetch('/api/selfdev/stop-requests?state=PENDING', 'GET');
+        if (q.ok && Array.isArray(q.data)) {
+          ORD.approver = true;
+          ORD.requests = q.data.filter(ordValidRequest);
+        } else {
+          ORD.approver = false;
+          ORD.requests = null;
+        }
+      } else {
+        ORD.enabled = false;
+        ORD.list = null;
+        ORD.approver = false;
+        ORD.requests = null;
+      }
+    } finally {
+      ORD.listLoading = false;
+      renderOrderSection();
+      if (ORD.listPending) {
+        ORD.listPending = false;
+        refreshOrders();
+      }
+    }
+  }
+
+  function renderOrderList() {
+    var ul = $('orders-list');
+    clear(ul);
+    if (!ORD.enabled || !ORD.list) return;
+    if (ORD.list.length === 0) {
+      ul.appendChild(h('li', { className: 'empty', text: 'まだ order はありません。' }));
+      return;
+    }
+    ORD.list.forEach(function (o) { ul.appendChild(ordRow(o)); });
+  }
+
+  function ordRow(o) {
+    var id = o.orderId;
+    var open = ORD.openId === id;
+    var st = ordStateInfo(o.state);
+    var toggle = h('button', {
+      type: 'button',
+      className: 'secondary',
+      text: open ? '閉じる' : '詳細',
+      'aria-expanded': open ? 'true' : 'false',
+      'aria-controls': 'order-detail-' + id
+    });
+    toggle.addEventListener('click', function () { toggleOrder(id); });
+    var kids = [
+      h('div', { className: 'run-head' }, [
+        h('span', { className: 'run-title', text: 'order ' + id }),
+        h('span', { className: 'badge', text: '状態: ' + st.label })
+      ]),
+      h('div', { className: 'run-meta' }, [
+        h('span', { className: 'time', text: '深さ: ' + ordNum(o.depth) }),
+        h('span', { className: 'time', text: '周: ' + ordNum(o.cyclesStarted) + ' / ' + ordNum(o.maxCycles) }),
+        h('span', { className: 'time', text: '連続して失敗した周: ' + ordNum(o.consecutiveFailedCycles) }),
+        h('span', { className: 'time', text: '期限: ' + ordTime(o.expiresAt) })
+      ]),
+      h('div', { className: 'run-sub' }, [
+        o.stateReason ? h('span', { className: 'reason', text: '理由: ' + ordCodeText(ORDER_REASONS, o.stateReason) }) : null
+      ]),
+      toggle
+    ];
+    if (open) kids.push(ordDetailBox(id));
+    return h('li', { className: 'run-item' }, kids);
+  }
+
+  function ordDetailBox(id) {
+    var box = h('div', { className: 'goal-detail', id: 'order-detail-' + id });
+    var d = ORD.detail;
+    if (ORD.detailLoading || !d || d.orderId !== id) {
+      if (ORD.detailFail) box.appendChild(h('p', { className: 'error', text: ORD.detailFail }));
+      else box.appendChild(h('p', { className: 'empty', text: '読み込み中…' }));
+      return box;
+    }
+    ordRenderDetail(box, d);
+    return box;
+  }
+
+  /** The detail: the state and the cycles, the pending stop request (without its digest), and the pause or resume the state allows. */
+  function ordRenderDetail(box, d) {
+    var o = d.order;
+    var st = ordStateInfo(o.state);
+    box.appendChild(h('p', {
+      className: 'meta',
+      text: '状態: ' + st.label + ' — ' + st.desc + (o.stateReason ? '（' + ordCodeText(ORDER_REASONS, o.stateReason) + '）' : '')
+    }));
+    box.appendChild(h('p', {
+      className: 'meta',
+      text: '周: 開始 ' + ordNum(o.cyclesStarted) + ' / 上限 ' + ordNum(o.maxCycles) + '（連続して失敗した周: ' + ordNum(o.consecutiveFailedCycles) + '）'
+    }));
+    box.appendChild(h('p', { className: 'meta', text: '停止の要求: ' + (d.pending ? ordPendingText(d.pending) : 'なし') }));
+    box.appendChild(h('p', { className: 'meta', text: '題名と方針は、この画面には表示しません。' }));
+
+    var actions = [];
+    var versionOk = typeof o.version === 'number' && isFinite(o.version);
+    if (versionOk && o.state === 'ACTIVE') {
+      actions.push(actionButton('一時停止', function () { ordPause(d); }, 'secondary'));
+    }
+    if (versionOk && o.state === 'PAUSED' && NOT_RESUMABLE_REASONS.indexOf(str(o.stateReason)) === -1) {
+      actions.push(actionButton('再開', function () { ordResume(d); }));
+    }
+    actions.forEach(function (b) { b.disabled = ORD.busy || state.sessionExpired; });
+    if (actions.length) box.appendChild(h('div', { className: 'detail-actions' }, actions));
+  }
+
+  function toggleOrder(id) {
+    if (ORD.openId === id) {
+      ORD.openId = null;
+      ORD.detail = null;
+      ORD.detailFail = null;
+      renderOrderList();
+      return;
+    }
+    ORD.openId = id;
+    ORD.detail = null;
+    ORD.detailFail = null;
+    renderOrderList();
+    loadOrderDetail(id);
+  }
+
+  async function loadOrderDetail(id) {
+    var seq = ++ORD.detailSeq;
+    ORD.detailLoading = true;
+    var r = await apiFetch('/api/selfdev/orders/' + encodeURIComponent(id), 'GET');
+    if (seq !== ORD.detailSeq) return;
+    ORD.detailLoading = false;
+    var d = r.ok && r.data && typeof r.data === 'object' ? r.data : null;
+    if (d && ordValidSummary(d.order)) {
+      // Only the state and the pending request are read. The title, the policy and any other field are not used.
+      ORD.detail = {
+        orderId: id,
+        order: d.order,
+        pending: d.pendingStopRequest && typeof d.pendingStopRequest === 'object' ? d.pendingStopRequest : null
+      };
+      ORD.detailFail = null;
+    } else {
+      ORD.detail = null;
+      ORD.detailFail = r.ok ? ORDER_MSG.unknown : ordFailText(r);
+    }
+    renderOrderList();
+  }
+
+  /** After a write: the list and the stop requests are read again, and the open detail too when it is the same order. */
+  function ordAfterWrite(orderId) {
+    refreshOrders();
+    if (ORD.openId === orderId) loadOrderDetail(orderId);
+  }
+
+  function ordPause(d) {
+    ordWrite('/api/selfdev/orders/' + encodeURIComponent(d.orderId) + '/pause', { version: d.order.version }, ORDER_MSG.paused, d.orderId);
+  }
+
+  function ordResume(d) {
+    ordWrite('/api/selfdev/orders/' + encodeURIComponent(d.orderId) + '/resume', { version: d.order.version }, ORDER_MSG.resumed, d.orderId);
+  }
+
+  async function ordWrite(path, body, okText, orderId) {
+    if (ORD.busy || state.sessionExpired) return;
+    ORD.busy = true;
+    updateOrderControls();
+    var r;
+    try {
+      r = await apiFetch(path, 'POST', body);
+    } finally {
+      ORD.busy = false;
+    }
+    ordSetMsg('orders-msg', r.ok ? okText : ordFailText(r), r.ok ? 'ok' : 'error');
+    ordAfterWrite(orderId);
+  }
+
+  function renderApprovals() {
+    var ul = $('approval-list');
+    clear(ul);
+    if (!ORD.enabled || !ORD.approver || !ORD.requests) return;
+    if (ORD.requests.length === 0) {
+      ul.appendChild(h('li', { className: 'empty', text: '保留中の停止の要求はありません。' }));
+      return;
+    }
+    ORD.requests.forEach(function (req) { ul.appendChild(ordApprovalRow(req)); });
+  }
+
+  /** One pending stop request. Its digest is used by the approval only, and is not written into the page. */
+  function ordApprovalRow(req) {
+    var approve = actionButton('承認', function () { ordOpenApprove(req); });
+    approve.disabled = ORD.busy || state.sessionExpired || !ordDigestOk(req.digest);
+    var reject = actionButton('却下', function () { ordReject(req); }, 'secondary');
+    reject.disabled = ORD.busy || state.sessionExpired;
+    return h('li', { className: 'run-item' }, [
+      h('div', { className: 'run-head' }, [
+        h('span', { className: 'run-title', text: '対象の order: ' + req.orderId }),
+        h('span', { className: 'badge', text: '保留中' })
+      ]),
+      h('div', { className: 'run-sub' }, [
+        h('span', { className: 'reason', text: '理由: ' + ordCodeText(STOP_REASONS, req.reasonCode) })
+      ]),
+      h('div', { className: 'run-meta' }, [
+        h('span', { className: 'time', text: '要求した主体: ' + ordRequesterText(req.requesterKind) }),
+        h('span', { className: 'time', text: '要求の時刻: ' + ordTime(req.createdAt) }),
+        h('span', { className: 'time', text: '期限: ' + ordTime(req.expiresAt) })
+      ]),
+      h('div', { className: 'detail-actions' }, [approve, reject])
+    ]);
+  }
+
+  function ordOpenApprove(req) {
+    if (ORD.busy || state.sessionExpired || !ordDigestOk(req.digest)) return;
+    ORD.pendingApprove = req;
+    $('order-approve-text').textContent = ORDER_MSG.confirm;
+    $('order-approve-target').textContent = '対象の order: ' + req.orderId + '（理由: ' + ordCodeText(STOP_REASONS, req.reasonCode) + '）';
+    updateOrderControls();
+    $('order-approve-dialog').showModal();
+  }
+
+  /** The approval sends the digest back as it was read, and nothing else. A failure closes the dialog and shows a fixed text. */
+  async function ordSubmitApprove() {
+    var req = ORD.pendingApprove;
+    if (!req || ORD.busy || state.sessionExpired || !ordDigestOk(req.digest)) return;
+    ORD.busy = true;
+    updateOrderControls();
+    var r;
+    try {
+      r = await apiFetch('/api/selfdev/stop-requests/' + encodeURIComponent(req.requestId) + '/approve', 'POST', { digest: req.digest });
+    } finally {
+      ORD.busy = false;
+    }
+    ORD.pendingApprove = null;
+    $('order-approve-dialog').close();
+    ordSetMsg('approval-msg', r.ok ? ORDER_MSG.approved : ordFailText(r), r.ok ? 'ok' : 'error');
+    updateOrderControls();
+    ordAfterWrite(req.orderId);
+  }
+
+  async function ordReject(req) {
+    if (ORD.busy || state.sessionExpired) return;
+    ORD.busy = true;
+    updateOrderControls();
+    var r;
+    try {
+      // The reject takes no reason. The body is an empty JSON object, because the route requires a JSON content type.
+      r = await apiFetch('/api/selfdev/stop-requests/' + encodeURIComponent(req.requestId) + '/reject', 'POST', {});
+    } finally {
+      ORD.busy = false;
+    }
+    ordSetMsg('approval-msg', r.ok ? ORDER_MSG.rejected : ordFailText(r), r.ok ? 'ok' : 'error');
+    ordAfterWrite(req.orderId);
+  }
+
+  function initOrders() {
+    $('orders-refresh').addEventListener('click', function () { refreshOrders(); });
+    $('order-approve-cancel').addEventListener('click', function () {
+      ORD.pendingApprove = null;
+      $('order-approve-dialog').close();
+      updateOrderControls();
+    });
+    $('order-approve-submit').addEventListener('click', ordSubmitApprove);
+    $('order-approve-dialog').addEventListener('close', function () {
+      ORD.pendingApprove = null;
+      updateOrderControls();
+    });
+    renderOrderSection();
   }
 
   function init() {
@@ -2454,6 +2894,7 @@
     $('stop-cancel').addEventListener('click', function () { $('stop-dialog').close(); });
     $('stop-submit').addEventListener('click', submitStop);
     initBudget();
+    initOrders();
     refreshBudget();
     updateGoalCounters();
     renderAutopilot();

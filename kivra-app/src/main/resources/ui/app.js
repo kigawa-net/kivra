@@ -2740,25 +2740,29 @@
   }
 
   function ordPause(d) {
-    ordWrite('/api/selfdev/orders/' + encodeURIComponent(d.orderId) + '/pause', { version: d.order.version }, ORDER_MSG.paused, d.orderId);
+    ordWrite('pause', d, ORDER_MSG.paused);
   }
 
   function ordResume(d) {
-    ordWrite('/api/selfdev/orders/' + encodeURIComponent(d.orderId) + '/resume', { version: d.order.version }, ORDER_MSG.resumed, d.orderId);
+    ordWrite('resume', d, ORDER_MSG.resumed);
   }
 
-  async function ordWrite(path, body, okText, orderId) {
+  /** Pause or resume, sent with the version the operator read. The paths are literal (see the fetch-target rule in the UI test). */
+  async function ordWrite(action, d, okText) {
     if (ORD.busy || state.sessionExpired) return;
     ORD.busy = true;
     updateOrderControls();
+    var body = { version: d.order.version };
     var r;
     try {
-      r = await apiFetch(path, 'POST', body);
+      r = action === 'pause'
+        ? await apiFetch('/api/selfdev/orders/' + encodeURIComponent(d.orderId) + '/pause', 'POST', body)
+        : await apiFetch('/api/selfdev/orders/' + encodeURIComponent(d.orderId) + '/resume', 'POST', body);
     } finally {
       ORD.busy = false;
     }
     ordSetMsg('orders-msg', r.ok ? okText : ordFailText(r), r.ok ? 'ok' : 'error');
-    ordAfterWrite(orderId);
+    ordAfterWrite(d.orderId);
   }
 
   function renderApprovals() {

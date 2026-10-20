@@ -1281,6 +1281,7 @@ dev での有効化の手順は §7.5。
 
 - HTTP: `POST /api/selfdev/goals`(`{"title", "body"?, "idempotencyKey"}`。ほかの項目は 400)。202 は新規、200 は既に受け付け済み、409 は同じ投入キーで別の内容。
 - 本文は、一覧には出ない。詳細(`GET /api/selfdev/goals/{id}`)でだけ見える。
+- AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL` の owner key)は、Goal の書き込み(投入、計画の承認、replan、中止、タスクの承認と見送り)を 403 `forbidden` で拒否される(ADR 0019。拒否の前に本文は読まれず、何も保存されない)。読み取り(`GET`)は AI の主体にも許す。`KIVRA_SELFDEV_AI_PRINCIPAL` は order の有効化(`KIVRA_SELFDEV_ORDERS_ENABLED=true`)のときだけ読まれる。未設定、または order を無効にしたままのときは、この拒否は効かない。
 
 **計画の承認**: `計画の承認待ち` の Goal の詳細で、Plan(計画)と各タスクを確かめ、「この Plan を承認」を押す(`POST .../approve-plan`、`{"version": n}`)。
 承認すると、Goal は `承認済み` になる。計画の承認は、個々のタスクの承認を代わりに行わない(`requiresApproval` のタスクは、タスクごとの承認が要る)。`auto` のときは、段階 2 の条件に当たる低リスクのタスクだけが、計画の承認の後に投入の対象になる。

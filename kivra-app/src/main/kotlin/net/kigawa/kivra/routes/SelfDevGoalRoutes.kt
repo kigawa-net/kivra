@@ -40,6 +40,9 @@ import org.slf4j.LoggerFactory
  *
  * Changing calls take `{"version": n}`, the version the caller read, so a stale view is a 409 (compare and set). Errors use fixed text
  * and never echo a request value. Goal, plan and task text is returned only by the detail view, never logged.
+ *
+ * The AI principal (`KIVRA_SELFDEV_AI_PRINCIPAL`) may read, and may not change a goal or a task: every write to a goal, a plan or a task
+ * answers 403 `forbidden` for it (ADR 0019; the same rule as the order routes, ADR 0015 section 4.6). Its reads are unchanged.
  */
 class SelfDevGoalRouteDeps(
     val operators: OperatorAuthenticator,
@@ -52,6 +55,8 @@ class SelfDevGoalRouteDeps(
     val control: SelfDevAutopilotControlRepository,
     /** The shadow record of the self-development memory (ADR 0016 P1). Off unless the memory switch is on. Never read here. */
     val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
+    /** The AI principal's owner key (`KIVRA_SELFDEV_AI_PRINCIPAL`), or null when it is not configured. Null changes nothing. */
+    val aiPrincipal: String? = null,
 )
 
 @Serializable
@@ -224,6 +229,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     post("/api/selfdev/goals") {
         val principal = deps.requireOperator(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "GOAL_SUBMIT")) return@post
         val request = try {
             strictJson.decodeFromString(SubmitGoalRequest.serializer(), call.receiveText())
         } catch (_: Exception) {
@@ -281,6 +287,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     post("/api/selfdev/goals/{id}/approve-plan") {
         val principal = deps.requireOperator(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "GOAL_APPROVE_PLAN")) return@post
         val goalId = goalIdOf(call)
         val version = call.readVersion() ?: return@post
         if (goalId == null) {
@@ -299,6 +306,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     post("/api/selfdev/goals/{id}/replan") {
         val principal = deps.requireOperator(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "GOAL_REPLAN")) return@post
         val goalId = goalIdOf(call)
         val version = call.readVersion() ?: return@post
         if (goalId == null) {
@@ -317,6 +325,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     post("/api/selfdev/goals/{id}/stop") {
         val principal = deps.requireOperator(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "GOAL_STOP")) return@post
         val goalId = goalIdOf(call)
         val request = try {
             strictJson.decodeFromString(StopGoalRequest.serializer(), call.receiveText())
@@ -347,6 +356,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     post("/api/selfdev/tasks/{id}/approve") {
         val principal = deps.requireOperator(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "TASK_APPROVE")) return@post
         val id = taskIdOf(call)
         val version = call.readVersion() ?: return@post
         if (id == null) {
@@ -366,6 +376,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     post("/api/selfdev/tasks/{id}/reject") {
         val principal = deps.requireOperator(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "TASK_REJECT")) return@post
         val id = taskIdOf(call)
         val version = call.readVersion() ?: return@post
         if (id == null) {
@@ -393,6 +404,7 @@ private const val REASON_INVALID = "reason must be 1-500 characters without cont
 private const val AUTOPILOT_DISABLED = "autopilot is disabled"
 private const val STALE = "the goal or task changed; reload and try again"
 private const val REFUSED = "the state does not allow this operation"
+private const val FORBIDDEN = "forbidden"
 
 /**
  * Authenticates the caller. Responds 401 (no valid operator token) or 403 (an agent token), and returns the principal otherwise.
@@ -415,6 +427,18 @@ private suspend fun SelfDevGoalRouteDeps.requireOperator(call: ApplicationCall):
 private suspend fun SelfDevGoalRouteDeps.requireEnabled(call: ApplicationCall): Boolean {
     if (autopilot.enabled && autopilot.config != null) return true
     call.respond(HttpStatusCode.ServiceUnavailable, GoalError(AUTOPILOT_DISABLED))
+    return false
+}
+
+/**
+ * Only a human operator may change a goal, a plan or a task (ADR 0019). The AI principal gets 403 with the fixed code `forbidden`, and
+ * nothing else; the refusal is logged with the action name and that fixed code only (no principal, title, body or reason). Returns false
+ * after responding. Runs before the body is read, so a refused request stores nothing.
+ */
+private suspend fun SelfDevGoalRouteDeps.requireHuman(call: ApplicationCall, principal: String, action: String): Boolean {
+    if (principal != aiPrincipal) return true
+    operatorLog.info("autopilot operator refused: action={} actor=AI result={}", action, FORBIDDEN)
+    call.respond(HttpStatusCode.Forbidden, GoalError(FORBIDDEN))
     return false
 }
 

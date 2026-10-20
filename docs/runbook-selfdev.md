@@ -1711,6 +1711,7 @@ SELECT kind, COUNT(*) AS n
 - `KIVRA_AGENT_REQUIRED_ROLE`(任意)。設定されていれば、そのロールを持つトークンは 403(エージェントは MCP の呼び出し元ではない)。`aud` の検査で、エージェントのトークンは既に 401 になる。これは多層防御。
 - `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。order が有効なときは、停止の要求のツール `kivra_order_request_stop` も登録する(§8.8)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
 - `KIVRA_MCP_WRITE_RATE_PER_MINUTE`(任意、既定 5、1〜6000)。書き込みの呼び出しの、主体ごとの 1 分あたりの上限。読み取りの上限(`KIVRA_MCP_RATE_PER_MINUTE`)とは別。超えると 429。書き込みが無効のときは読まれない。
+- `KIVRA_MCP_GOAL_READ_ENABLED`、`KIVRA_MCP_GOAL_STOP_ENABLED`(任意、既定 `false`)。Goal の読み取りと中止のツール(§8.9)。どちらも `KIVRA_MCP_ENABLED=true` と オートパイロットが要る。中止は `KIVRA_MCP_WRITE_ENABLED=true` も要る。MCP が off のまま `true` にすると起動を止める。
 
 不正な値は起動を止める。エラーには変数の名前だけが出て、値は出ない。
 
@@ -1812,6 +1813,23 @@ order が有効(`KIVRA_SELFDEV_ORDERS_ENABLED=true` かつ `KIVRA_SELFDEV_AUTOPI
 - 拒否は REST と同じ固定コードを `structuredContent.error.code` に返す(例: `STOP_ALREADY_PENDING`、`STALE_VERSION`、`ORDER_NOT_FOUND`)。理由の文は固定の文だけ。
 - 題名、方針、目標の本文、`digest` は返さない。ログと監査には、固定のコード、ID、主体のハッシュだけが出る(`net.kigawa.kivra.selfdev.order.operator`、`via=mcp`)。
 - 有効化: order と MCP を有効にし、停止の要求も使うなら `KIVRA_MCP_WRITE_ENABLED=true` を加える(dev で先に確かめる)。戻すには該当の変数を `false` にして再起動する。order の状態は DB に残り、起動時に既存の `ACTIVE` は `PAUSED`(`STARTUP_HOLD`)になる。
+
+### 8.9 Goal のツール(ADR 0019 S1、既定は無効)
+
+Goal の読み取りは、`KIVRA_MCP_GOAL_READ_ENABLED=true` かつ `KIVRA_MCP_ENABLED=true` かつ オートパイロットが有効のときだけ、`kivra_goal_list` と `kivra_goal_get` を登録する。中止は `KIVRA_MCP_GOAL_STOP_ENABLED=true` のとき、さらに `KIVRA_MCP_WRITE_ENABLED=true` と オートパイロットが要る。どれかが欠けると、中止のフラグは起動を止める。すべて既定は `false`。投入(`kivra_goal_submit`)は S2 で、この段階には無い。
+
+| ツール | 必要なスコープ | 入力 | 出力(`structuredContent`) |
+|---|---|---|---|
+| `kivra_goal_list` | `kivra.runs.read` | なし | `goals`(更新の新しい順、最大 50 件)。各件は `goal_id`、`state`、`state_reason`、`version`、`created_at`、`updated_at`、`task_counts`(タスクの状態別の件数。最新の Plan)。 |
+| `kivra_goal_get` | `kivra.runs.read` | `goal_id`(26 文字) | 1 件の同じ項目と、`tasks`(最新の Plan のタスクごとの `ordinal`、`state`、`state_reason`、`run_id`)。無い Goal は `GOAL_NOT_FOUND`(`isError`)。 |
+| `kivra_goal_stop` | `kivra.selfdev.stop` | `goal_id`、`version`(0 以上の整数)、`reason`(`OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN` のどれか) | `state`(`STOPPED`)、`reason_code`(`OPERATOR_STOPPED`)、`version`(新しい版)、`run_still_active`。 |
+
+- **返さない項目**: Goal の題名、本文、タスクの題名と本文。これは UNTRUSTED の入力であり(ADR 0019 §3)、MCP の読み取りでは返さない(REST の詳細は返す)。`kivra_goal_stop` も、理由の文は保存もログ出力もしない(固定コードだけ)。
+- **`run_still_active`**: 中止は Goal の計画を打ち切るだけで、投入済みの Run は止まらず、PR も閉じない(ADR 0019 §6)。`true` は、その Goal のタスクに、まだ終わっていない Run があること(`SUBMITTING` のタスクを含む)。Run を止めるには、ADR 0012 PR 5 の取消し(未実装)か、`UNKNOWN` の解放(§4.1)が要る。`false` は、紐づく Run がすべて終端であること。
+- **認可**: 中止は運用者本人だけ。MCP の主体が `KIVRA_SELFDEV_AI_PRINCIPAL` と一致すると、`forbidden`(`isError`)で拒否し、Goal は変わらない。読み取りは AI の主体にも許す。role の無いトークンは MCP の認証で拒否される。REST の中止と同じ `stopGoal` を呼ぶ。
+- **版**: 中止には `version` が要る。古い版は `STALE_VERSION`。中止は冪等ではない。成功の後の再送は、版の不一致か、状態の遷移の拒否になる。
+- **ログ**: `net.kigawa.kivra.selfdev.autopilot.operator` に、`via=mcp`、固定の理由コード、Goal の ID の先頭 12 文字だけが出る。題名、本文、主体の生の値は出ない。
+- 有効化: dev で先に確かめる。共有基盤の変更のため、dev での有効化は運用者の承認を経る(ADR 0019 決定 4)。戻すには該当の変数を `false` にして再起動する。
 
 ### 8.6 接続(PR 2 と PR 3 の後)
 

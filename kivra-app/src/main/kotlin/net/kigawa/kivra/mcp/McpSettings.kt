@@ -21,10 +21,14 @@ import net.kigawa.kivra.auth.resolveTaskApiAuthMode
  *   (403). The audience check already rejects agent tokens, so this is a second layer.
  * - `KIVRA_MCP_WRITE_ENABLED`: `true` to register the write tools: `kivra_selfdev_start` (ADR 0013 section 5) and, while the orders are on,
  *   `kivra_order_request_stop` (ADR 0015 section 6). Off by default. It needs
- *   `KIVRA_MCP_ENABLED=true`: with the endpoint off, `true` refuses the start. This is the only MCP variable read while the endpoint is
- *   off, and only to refuse it.
+ *   `KIVRA_MCP_ENABLED=true`: with the endpoint off, `true` refuses the start. The write and Goal switches are the only MCP variables read
+ *   while the endpoint is off, and only to refuse `true`.
  * - `KIVRA_MCP_WRITE_RATE_PER_MINUTE`: write calls per principal per minute, 1 to 6000, default 5. Over the limit, 429. Read only when
  *   the write tool is enabled.
+ * - `KIVRA_MCP_GOAL_READ_ENABLED`: `true` to register `kivra_goal_list` and `kivra_goal_get` (ADR 0019 S1). Off by default. Registered only
+ *   while the autopilot is on, and needs `KIVRA_MCP_ENABLED=true`.
+ * - `KIVRA_MCP_GOAL_STOP_ENABLED`: `true` to register `kivra_goal_stop` (ADR 0019 S1), an operator-only stop. Off by default. Needs
+ *   `KIVRA_MCP_ENABLED=true` and `KIVRA_MCP_WRITE_ENABLED=true`, and the autopilot must be on (checked at startup). The AI principal is refused.
  */
 class McpSettings private constructor(
     val enabled: Boolean,
@@ -37,6 +41,10 @@ class McpSettings private constructor(
     val writeEnabled: Boolean = false,
     /** Write calls per principal per minute. Only meaningful when [writeEnabled]. */
     val writeRatePerMinute: Int = DEFAULT_WRITE_RATE_PER_MINUTE,
+    /** Whether the Goal read tools are registered (`KIVRA_MCP_GOAL_READ_ENABLED=true`). Never true when [enabled] is false. */
+    val goalReadEnabled: Boolean = false,
+    /** Whether the Goal stop tool is registered (`KIVRA_MCP_GOAL_STOP_ENABLED=true`). Never true unless [writeEnabled]. */
+    val goalStopEnabled: Boolean = false,
 ) {
     /** `https://<host>[:port]`, the origin of [audience]. Null when disabled. */
     val publicOrigin: String? get() = audience?.let { URI(it).let { u -> "${u.scheme}://${u.rawAuthority}" } }
@@ -53,6 +61,8 @@ class McpSettings private constructor(
         const val ENV_AGENT_ROLE = "KIVRA_AGENT_REQUIRED_ROLE"
         const val ENV_WRITE_ENABLED = "KIVRA_MCP_WRITE_ENABLED"
         const val ENV_WRITE_RATE_PER_MINUTE = "KIVRA_MCP_WRITE_RATE_PER_MINUTE"
+        const val ENV_GOAL_READ_ENABLED = "KIVRA_MCP_GOAL_READ_ENABLED"
+        const val ENV_GOAL_STOP_ENABLED = "KIVRA_MCP_GOAL_STOP_ENABLED"
 
         const val DEFAULT_RATE_PER_MINUTE = 60
         const val DEFAULT_WRITE_RATE_PER_MINUTE = 5
@@ -64,9 +74,12 @@ class McpSettings private constructor(
 
         fun fromEnv(env: Map<String, String>): McpSettings {
             val writeFlag = switch(env, ENV_WRITE_ENABLED)
+            val goalReadFlag = switch(env, ENV_GOAL_READ_ENABLED)
+            val goalStopFlag = switch(env, ENV_GOAL_STOP_ENABLED)
             when (val flag = env[ENV_ENABLED]?.trim()) {
                 null, "", "false" -> {
                     check(!writeFlag) { "$ENV_WRITE_ENABLED=true requires $ENV_ENABLED=true" }
+                    check(!goalReadFlag && !goalStopFlag) { "$ENV_GOAL_READ_ENABLED and $ENV_GOAL_STOP_ENABLED require $ENV_ENABLED=true" }
                     return DISABLED
                 }
                 "true" -> Unit
@@ -81,7 +94,8 @@ class McpSettings private constructor(
             val rate = rate(env)
             val agentRole = env[ENV_AGENT_ROLE]?.trim()?.takeIf { it.isNotEmpty() }?.let { RequiredRole.parse(it, ENV_AGENT_ROLE) }
             val writeRate = if (writeFlag) writeRate(env) else DEFAULT_WRITE_RATE_PER_MINUTE
-            return McpSettings(true, audience, hosts, origins, rate, agentRole, writeFlag, writeRate)
+            check(!goalStopFlag || writeFlag) { "$ENV_GOAL_STOP_ENABLED=true requires $ENV_WRITE_ENABLED=true" }
+            return McpSettings(true, audience, hosts, origins, rate, agentRole, writeFlag, writeRate, goalReadFlag, goalStopFlag)
         }
 
         /** The `true`/`false` switch. Unset and empty are `false`. Any other value is refused by name only. */

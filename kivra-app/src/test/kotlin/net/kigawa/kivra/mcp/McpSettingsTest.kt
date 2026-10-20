@@ -9,12 +9,15 @@ import kotlin.test.assertTrue
 
 class McpSettingsTest {
     /**
-     * Fails if any MCP variable other than the switch is read. Used for the off case. The write switch is the one exception: it is read
-     * while the endpoint is off only to refuse `true` (ADR 0013 section 5).
+     * Fails if any MCP variable other than the switch is read. Used for the off case. The write switch (ADR 0013 section 5) and the Goal
+     * switches (ADR 0019 S1) are the exceptions: they are read while the endpoint is off only to refuse `true`.
      */
     private class TrapEnv(private val base: Map<String, String>) : Map<String, String> by base {
         override fun get(key: String): String? {
-            if ((key.startsWith("KIVRA_MCP_") || key == McpSettings.ENV_AGENT_ROLE) && key != McpSettings.ENV_ENABLED && key != McpSettings.ENV_WRITE_ENABLED) {
+            val allowedWhileOff = setOf(
+                McpSettings.ENV_ENABLED, McpSettings.ENV_WRITE_ENABLED, McpSettings.ENV_GOAL_READ_ENABLED, McpSettings.ENV_GOAL_STOP_ENABLED,
+            )
+            if ((key.startsWith("KIVRA_MCP_") || key == McpSettings.ENV_AGENT_ROLE) && key !in allowedWhileOff) {
                 throw AssertionError("an MCP variable was read while the endpoint is off")
             }
             return base[key]

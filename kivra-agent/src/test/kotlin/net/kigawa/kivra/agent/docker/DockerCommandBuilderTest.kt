@@ -56,7 +56,7 @@ class DockerCommandBuilderTest {
             "dontAsk",
             "--no-session-persistence",
             "--max-turns",
-            "40",
+            "30",
             "--model",
             "claude-haiku-5-5",
             "--max-budget-usd",

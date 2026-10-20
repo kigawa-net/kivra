@@ -34,8 +34,8 @@ const val CODING_MAX_OUTPUT_BYTES: Long = 8L * 1024 * 1024
  * Limits the agent must enforce for one attempt. The file limits are copied from the PatchPolicy configuration, so the agent and the
  * server check against one set of numbers (see [CodingRuntimeService] for the copy).
  *
- * [maxRuntime] is the wall-clock limit for one attempt (the agent kills the container after it). [maxTurns] limits the number of
- * model turns. The CLI flag for it is unverified (design section 0, `--max-turns`), so the agent enforces it by its own count.
+ * [maxRuntime] is the wall-clock limit for one attempt (the agent kills the container after it). [maxTurns] is passed to the CLI as
+ * `--max-turns` (the agent uses the claimed value as it is).
  * [maxOutputBytes] limits what the agent keeps from the CLI output.
  */
 data class CodingLimits(

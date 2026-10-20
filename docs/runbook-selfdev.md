@@ -535,7 +535,7 @@ claude -p <固定 prompt> --output-format stream-json --verbose --permission-mod
   --no-session-persistence --max-turns <1..200> --allowedTools Read Edit Write Glob Grep Bash
 ```
 
-- 既定の `--max-turns` は 40(`CliCommand.DEFAULT_MAX_TURNS`)。値は整数だけ(`05`、`+5`、空は拒否)。
+- `--max-turns` の値は claim の `limits.maxTurns` をそのまま使う(サーバーの既定は 30。`CodingRuntimeConfig.maxTurns`)。`CliCommand.DEFAULT_MAX_TURNS`(30)は、値を指定せずに spec を作るときだけの既定で、実行の経路では使わない。値は整数だけ(`05`、`+5`、空は拒否)。
 - `--bare` は使わない(ADR 0010。OAuth 認証を読まなくなるため)。
 - ガードの拒否規則(`GuardRule`):
 

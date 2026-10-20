@@ -1,5 +1,7 @@
 package net.kigawa.kivra.agent
 
+import net.kigawa.kivra.agent.workdir.DiffLimits
+
 /** Where the task text came from. Only UNTRUSTED exists: the task is data, never an instruction. */
 const val TRUST_UNTRUSTED = "UNTRUSTED"
 
@@ -29,6 +31,24 @@ data class AgentLimits(
     val maxTotalBytes: Long,
     val maxDeletes: Int,
 )
+
+/**
+ * The change-set limits of one attempt: the server's claim values, each capped by the agent's own default (the smaller one wins).
+ * The walk and text limits are not in the claim, so they stay at the defaults. Before this, the claim's file limits were not used.
+ */
+fun AgentLimits.toDiffLimits(): DiffLimits {
+    val defaults = DiffLimits()
+    return DiffLimits(
+        maxWalkEntries = defaults.maxWalkEntries,
+        maxChangedFiles = minOf(maxChangedFiles, defaults.maxChangedFiles),
+        maxDeletes = minOf(maxDeletes, defaults.maxDeletes),
+        maxWriteFileBytes = minOf(maxFileBytes, defaults.maxWriteFileBytes),
+        maxTotalWriteBytes = minOf(maxTotalBytes, defaults.maxTotalWriteBytes),
+        maxPathChars = defaults.maxPathChars,
+        maxLineChars = defaults.maxLineChars,
+        maxSummaryChars = defaults.maxSummaryChars,
+    )
+}
 
 /** An attempt handed to this agent by `claim`. [generation] must be sent with every later request for it. */
 data class ClaimedAttempt(

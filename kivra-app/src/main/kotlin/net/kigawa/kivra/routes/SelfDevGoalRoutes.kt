@@ -26,6 +26,7 @@ import net.kigawa.kivra.db.SelfDevPlanTask
 import net.kigawa.kivra.db.SubmitResult
 import net.kigawa.kivra.db.Transition
 import net.kigawa.kivra.selfdev.AutopilotSettings
+import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import net.kigawa.kivra.selfdev.stage1ToStage2Readout
 import org.slf4j.LoggerFactory
 
@@ -49,6 +50,8 @@ class SelfDevGoalRouteDeps(
     val plans: SelfDevPlanRepository,
     val operations: SelfDevOperatorRepository,
     val control: SelfDevAutopilotControlRepository,
+    /** The shadow record of the self-development memory (ADR 0016 P1). Off unless the memory switch is on. Never read here. */
+    val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
 )
 
 @Serializable
@@ -247,6 +250,8 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         when (val result = deps.goals.submit(principal, key, title, body, repo)) {
             is SubmitResult.Created -> {
                 operatorLog.info("autopilot operator action: action=GOAL_SUBMITTED actor={} goalId={} result=GOAL_SUBMITTED", operatorTag(principal), result.goal.goalId)
+                // The title only (ADR 0016 U-6). The body is never recorded.
+                deps.memory.goalTitle(result.goal.goalId, title, principal)
                 call.respond(HttpStatusCode.Accepted, result.goal.summary())
             }
             is SubmitResult.Replayed -> call.respond(HttpStatusCode.OK, result.goal.summary())
@@ -332,6 +337,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         when (val r = deps.operations.stopGoal(goalId, request.version)) {
             is Transition.Moved -> {
                 operatorLog.info("autopilot operator action: action=STOP actor={} goalId={} reason={}", operatorTag(principal), goalId, AutopilotReason.OPERATOR_STOPPED)
+                deps.memory.goalFact(goalId, r.row.stateReason)
                 call.respond(HttpStatusCode.OK, r.row.summary())
             }
             else -> call.respondTransition(r)
@@ -350,6 +356,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         when (val r = deps.operations.approveTask(id.first, id.second, version, principal)) {
             is Transition.Moved -> {
                 operatorLog.info("autopilot operator action: action=TASK_APPROVED actor={} planId={} ordinal={} result=QUEUED", operatorTag(principal), id.first, id.second)
+                deps.memory.taskFact({ deps.operations.goalIdOfPlan(id.first) }, r.row, r.row.stateReason)
                 call.respond(HttpStatusCode.OK, r.row.response())
             }
             else -> call.respondTransition(r)
@@ -368,6 +375,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         when (val r = deps.operations.rejectTask(id.first, id.second, version)) {
             is Transition.Moved -> {
                 operatorLog.info("autopilot operator action: action=TASK_REJECTED actor={} planId={} ordinal={} result=SKIPPED", operatorTag(principal), id.first, id.second)
+                deps.memory.taskFact({ deps.operations.goalIdOfPlan(id.first) }, r.row, r.row.stateReason)
                 call.respond(HttpStatusCode.OK, r.row.response())
             }
             else -> call.respondTransition(r)

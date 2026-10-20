@@ -49,6 +49,9 @@ class SelfDevOperatorRepository(
 
     fun goal(goalId: String): SelfDevGoal? = transaction(database) { goalIn(goalId) }
 
+    /** The goal of [planId], or null. Read only; used by the self-development memory to link a task's fact to its goal. */
+    fun goalIdOfPlan(planId: String): String? = transaction(database) { planOf(planId)?.goalId }
+
     /** PLAN_PROPOSED -> TASKS_QUEUED for the goal's proposed Plan. Fenced by [expectedVersion]; records [approver]. */
     fun approvePlan(goalId: String, expectedVersion: Long, approver: String): Transition<SelfDevGoal> = transaction(database) {
         val current = lockGoal(goalId) ?: return@transaction Transition.NotFound

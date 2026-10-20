@@ -1590,3 +1590,315 @@ test('a terminal run closes the stream and stops', async () => {
   await dom.clock.advance(60000);
   assert.equal(execCalls(dom).length, 1);
 });
+
+// ---- Self-development orders (ADR 0015 stage 1, PR 2b): the order list and detail, pause and resume, the stop approval ----
+
+const O1 = '01ORDER' + 'A'.repeat(19);
+const O2 = '01ORDER' + 'B'.repeat(19);
+const R1 = '01REQUEST' + 'A'.repeat(17);
+const R2 = '01REQUEST' + 'B'.repeat(17);
+const DIGEST = 'ab'.repeat(32);
+const SECRET_TITLE = 'ORDER-TITLE-SECRET';
+const SECRET_POLICY = 'POLICY-SECRET-TEXT';
+const SECRET_OWNER = 'SECRET-OWNER-KEY';
+const APPROVE = '/api/selfdev/stop-requests/' + R1 + '/approve';
+
+function orderOf(over = {}) {
+  return {
+    orderId: O1, parentOrderId: null, depth: 0, state: 'ACTIVE', stateReason: null, cyclesStarted: 0, maxCycles: 1,
+    currentGoalId: null, consecutiveFailedCycles: 0, expiresAt: '2026-11-19T00:00:00Z', version: 3,
+    createdAt: '2026-10-18T00:00:00Z', updatedAt: '2026-10-18T10:00:00Z', ...over,
+  };
+}
+
+function orderDetailOf(over = {}, pending = null) {
+  return { order: orderOf(over), title: SECRET_TITLE, policy: SECRET_POLICY, pendingStopRequest: pending };
+}
+
+function stopRequestOf(over = {}) {
+  return {
+    requestId: R1, orderId: O1, requesterKind: 'AI', reasonCode: 'RUNAWAY_SUSPECTED', state: 'PENDING', orderVersion: 3,
+    digest: DIGEST, expiresAt: '2026-10-19T12:00:00Z', createdAt: '2026-10-18T12:00:00Z', ...over,
+  };
+}
+
+/** The order routes. `s.orderList`, `s.orderDetail` and `s.requestList` are { status, data }; `s.orderPost` may answer a write. */
+function ordersOther(s) {
+  return (p, init) => {
+    if (p === '/api/selfdev/orders' && init.method === 'GET') return s.orderList;
+    if (p === '/api/selfdev/stop-requests?state=PENDING' && init.method === 'GET') return s.requestList;
+    if (p === '/api/selfdev/orders/' + O1 && init.method === 'GET') return s.orderDetail;
+    if (s.orderPost) return s.orderPost(p, init);
+    return null;
+  };
+}
+
+function ordState(over = {}) {
+  return apState({
+    orderList: { status: 200, data: [orderOf()] },
+    orderDetail: { status: 200, data: orderDetailOf() },
+    requestList: { status: 403, data: { error: 'forbidden' } },
+    ...over,
+  });
+}
+
+function ordLoad(s) {
+  s.other = ordersOther(s);
+  return load(apResponder(s));
+}
+
+function attrsOf(el) {
+  const out = [];
+  el.walk((n) => Object.values(n.attrs).forEach((v) => out.push(v)));
+  return out.join('\n');
+}
+
+function hasButton(container, text) {
+  return container.buttons().some((b) => b.textContent === text);
+}
+
+test('the order sections stay hidden on 404 and 503 and while the autopilot is off; a non-approver sees no approval section', async () => {
+  let dom = ordLoad(ordState({ orderList: { status: 404, data: { error: 'x' } } }));
+  await flush();
+  assert.equal(dom.byId('orders-section').hidden, true, '404: no order section');
+  assert.equal(dom.byId('approval-section').hidden, true, '404: no approval section');
+
+  dom = ordLoad(ordState({ orderList: { status: 503, data: { error: 'x' } } }));
+  await flush();
+  assert.equal(dom.byId('orders-section').hidden, true, '503: no order section');
+
+  dom = ordLoad(ordState({ autopilot: 503 }));
+  await flush();
+  assert.equal(dom.byId('orders-section').hidden, true, 'autopilot off: no order section');
+  assert.equal(dom.calls.filter((c) => c.path === '/api/selfdev/orders').length, 0, 'the order list is not read while the autopilot is off');
+
+  dom = ordLoad(ordState());
+  await flush();
+  assert.equal(dom.byId('orders-section').hidden, false, 'an operator sees the order list');
+  assert.equal(dom.byId('approval-section').hidden, true, '403 on the approvals: no approval section');
+  assert.match(dom.byId('orders-list').textContent, new RegExp('order ' + O1));
+});
+
+test('the order list shows the state, the cycles and the reason as fixed Japanese text; a code outside the table is shown as unknown', async () => {
+  const s = ordState({
+    orderList: {
+      status: 200,
+      data: [
+        orderOf({ state: 'PAUSED', stateReason: 'LIMIT_REACHED', cyclesStarted: 1, maxCycles: 1 }),
+        orderOf({ orderId: O2, state: 'WEIRD', stateReason: 'NEW_CODE' }),
+        orderOf({ orderId: R2, state: 'ACTIVE', stateReason: '<img src=x onerror=alert(1)>' }),
+      ],
+    },
+  });
+  const dom = ordLoad(s);
+  await flush();
+  const text = dom.byId('orders-list').textContent;
+  assert.match(text, /状態: 一時停止中/);
+  assert.match(text, /周の上限に達しました（再開できません。新しい order が必要です）（LIMIT_REACHED）/);
+  assert.match(text, /周: 1 \/ 1/);
+  assert.match(text, /状態: 不明（WEIRD）/, 'an unknown state shows the code');
+  assert.match(text, /理由: 不明（NEW_CODE）/, 'an unknown reason shows the code only');
+  assert.equal(text.includes('<img'), false, 'markup is never shown as markup');
+  const tags = [];
+  dom.byId('orders-list').walk((n) => tags.push(n.tagName));
+  assert.equal(tags.includes('IMG'), false, 'no image element is made from a response value');
+});
+
+test('the detail offers pause only when ACTIVE, and resume only when PAUSED for a resumable reason; pause sends the version', async () => {
+  const s = ordState({
+    orderPost: (p) => (p === '/api/selfdev/orders/' + O1 + '/pause'
+      ? { status: 200, data: orderOf({ state: 'PAUSED', stateReason: 'OPERATOR_PAUSED', version: 4 }) }
+      : null),
+  });
+  let dom = ordLoad(s);
+  await flush();
+  buttonIn(dom.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  assert.equal(hasButton(dom.byId('orders-list'), '一時停止'), true, 'ACTIVE: pause');
+  assert.equal(hasButton(dom.byId('orders-list'), '再開'), false, 'ACTIVE: no resume');
+  buttonIn(dom.byId('orders-list'), '一時停止').fire('click');
+  await flush();
+  const sent = postsTo(dom.calls, '/api/selfdev/orders/' + O1 + '/pause');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].body, { version: 3 });
+  assert.match(dom.byId('orders-msg').textContent, /一時停止しました/);
+
+  const cases = [
+    [{ state: 'PAUSED', stateReason: 'STOP_NOT_APPROVED' }, true],
+    [{ state: 'PAUSED', stateReason: 'LIMIT_REACHED' }, false],
+    [{ state: 'PAUSED', stateReason: 'EXPIRED' }, false],
+  ];
+  for (const [over, expectResume] of cases) {
+    dom = ordLoad(ordState({ orderDetail: { status: 200, data: orderDetailOf(over) } }));
+    await flush();
+    buttonIn(dom.byId('orders-list'), '詳細').fire('click');
+    await flush();
+    assert.equal(hasButton(dom.byId('orders-list'), '再開'), expectResume, `${over.stateReason}: resume`);
+    assert.equal(hasButton(dom.byId('orders-list'), '一時停止'), false, `${over.stateReason}: no pause`);
+  }
+});
+
+test('the approval list shows the reason, the requester kind and the times as text, and never the digest, the title, the policy or a requester ID', async () => {
+  const s = ordState({
+    orderList: { status: 200, data: [orderOf({ title: SECRET_TITLE, policy: SECRET_POLICY, requestedBy: SECRET_OWNER })] },
+    requestList: { status: 200, data: [stopRequestOf({ title: SECRET_TITLE, policy: SECRET_POLICY, requestedBy: SECRET_OWNER })] },
+  });
+  const dom = ordLoad(s);
+  await flush();
+  assert.equal(dom.byId('approval-section').hidden, false, 'the approver sees the approval section');
+  const text = dom.byId('approval-list').textContent;
+  assert.match(text, new RegExp('対象の order: ' + O1));
+  assert.match(text, /理由: 暴走の疑い（RUNAWAY_SUSPECTED）/);
+  assert.match(text, /要求した主体: AI の主体/);
+  assert.match(text, /要求の時刻: /);
+  assert.match(text, /期限: /);
+  for (const secret of [DIGEST, 'digest', SECRET_TITLE, SECRET_POLICY, SECRET_OWNER]) {
+    assert.equal(text.includes(secret), false, `not shown: ${secret}`);
+    assert.equal(attrsOf(dom.byId('approval-list')).includes(secret), false, `not in an attribute: ${secret}`);
+    assert.equal(dom.byId('orders-list').textContent.includes(secret), false, `the order list does not show: ${secret}`);
+  }
+});
+
+test('approve opens a confirmation first (nothing is sent until it is confirmed), then sends the digest as it was read', async () => {
+  let approveCount = 0;
+  const s = ordState({
+    requestList: { status: 200, data: [stopRequestOf()] },
+    orderPost: (p) => {
+      if (p !== APPROVE) return null;
+      approveCount++;
+      return { status: 200, data: orderOf({ state: 'STOPPED', stateReason: 'OPERATOR_STOPPED', version: 4 }) };
+    },
+  });
+  const dom = ordLoad(s);
+  await flush();
+  buttonIn(dom.byId('approval-list'), '承認').fire('click');
+  assert.equal(dom.byId('order-approve-dialog').open, true, 'the confirmation opens');
+  assert.match(dom.byId('order-approve-text').textContent, /この order を停止します。元に戻せません/);
+  assert.equal(dom.byId('order-approve-target').textContent.includes(DIGEST), false, 'the digest is not in the dialog');
+  assert.equal(approveCount, 0, 'nothing is sent before the confirmation');
+
+  dom.byId('order-approve-submit').fire('click');
+  await flush();
+  assert.equal(approveCount, 1);
+  const sent = postsTo(dom.calls, APPROVE);
+  assert.deepEqual(sent[0].body, { digest: DIGEST }, 'the body is the digest as it was read, and nothing else');
+  assert.equal(dom.byId('order-approve-dialog').open, false);
+  assert.match(dom.byId('approval-msg').textContent, /停止を承認しました/);
+});
+
+test('cancel in the confirmation sends nothing and closes it', async () => {
+  const s = ordState({ requestList: { status: 200, data: [stopRequestOf()] } });
+  const dom = ordLoad(s);
+  await flush();
+  buttonIn(dom.byId('approval-list'), '承認').fire('click');
+  dom.byId('order-approve-cancel').fire('click');
+  await flush();
+  assert.equal(dom.byId('order-approve-dialog').open, false);
+  assert.equal(postsTo(dom.calls, APPROVE).length, 0);
+});
+
+test('reject sends an empty JSON object (it takes no reason) and shows the fixed text', async () => {
+  const s = ordState({
+    requestList: { status: 200, data: [stopRequestOf()] },
+    orderPost: (p) => (p === '/api/selfdev/stop-requests/' + R1 + '/reject'
+      ? { status: 200, data: orderOf({ state: 'PAUSED', stateReason: 'STOP_NOT_APPROVED', version: 4 }) }
+      : null),
+  });
+  const dom = ordLoad(s);
+  await flush();
+  buttonIn(dom.byId('approval-list'), '却下').fire('click');
+  await flush();
+  const sent = postsTo(dom.calls, '/api/selfdev/stop-requests/' + R1 + '/reject');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].body, {});
+  assert.match(dom.byId('approval-msg').textContent, /却下しました/);
+});
+
+test('while an approval is in flight a second click sends nothing, and the buttons are disabled', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let approveCount = 0;
+  const s = ordState({
+    requestList: { status: 200, data: [stopRequestOf()] },
+    orderPost: (p) => {
+      if (p !== APPROVE) return null;
+      approveCount++;
+      return gate.then(() => ({ status: 200, data: orderOf({ state: 'STOPPED', version: 4 }) }));
+    },
+  });
+  const dom = ordLoad(s);
+  await flush();
+  buttonIn(dom.byId('approval-list'), '承認').fire('click');
+  dom.byId('order-approve-submit').fire('click');
+  dom.byId('order-approve-submit').fire('click');
+  await flush();
+  assert.equal(approveCount, 1, 'one request while in flight');
+  assert.equal(dom.byId('order-approve-submit').disabled, true, 'the confirm button is disabled while in flight');
+  assert.equal(buttonIn(dom.byId('approval-list'), '承認').disabled, true, 'the approve button is disabled while in flight');
+  release();
+  await flush();
+  assert.equal(approveCount, 1, 'still one request after the answer');
+});
+
+test('a 409 on the approval shows the fixed text, never the server text; the dialog closes and the list is read again', async () => {
+  const s = ordState({
+    requestList: { status: 200, data: [stopRequestOf()] },
+    orderPost: (p) => (p === APPROVE
+      ? { status: 409, data: { error: 'the digest does not match the stop request', code: 'DIGEST_MISMATCH' } }
+      : null),
+  });
+  const dom = ordLoad(s);
+  await flush();
+  const readsBefore = dom.calls.filter((c) => c.path === '/api/selfdev/stop-requests?state=PENDING').length;
+  buttonIn(dom.byId('approval-list'), '承認').fire('click');
+  dom.byId('order-approve-submit').fire('click');
+  await flush();
+  const msg = dom.byId('approval-msg').textContent;
+  assert.match(msg, /状態が変わっていました/);
+  assert.equal(msg.includes('DIGEST_MISMATCH'), false, 'the fixed code of the body is not shown');
+  assert.equal(msg.includes('digest'), false, 'the server text is not shown');
+  assert.equal(dom.byId('order-approve-dialog').open, false);
+  const readsAfter = dom.calls.filter((c) => c.path === '/api/selfdev/stop-requests?state=PENDING').length;
+  assert.equal(readsAfter > readsBefore, true, 'the list is read again');
+});
+
+test('a response that carries a title, a policy or a requester ID shows none of them in the order views', async () => {
+  const s = ordState({
+    orderList: { status: 200, data: [orderOf({ title: SECRET_TITLE, policy: SECRET_POLICY, requestedBy: SECRET_OWNER })] },
+    orderDetail: {
+      status: 200,
+      data: orderDetailOf({ requestedBy: SECRET_OWNER }, stopRequestOf({ requestedBy: SECRET_OWNER, policy: SECRET_POLICY })),
+    },
+  });
+  const dom = ordLoad(s);
+  await flush();
+  buttonIn(dom.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  const text = dom.byId('orders-list').textContent;
+  assert.match(text, /停止の要求: あり（理由: 暴走の疑い（RUNAWAY_SUSPECTED）/);
+  for (const secret of [SECRET_TITLE, SECRET_POLICY, SECRET_OWNER, DIGEST]) {
+    assert.equal(text.includes(secret), false, `not shown: ${secret}`);
+    assert.equal(attrsOf(dom.byId('orders-list')).includes(secret), false, `not in an attribute: ${secret}`);
+  }
+});
+
+test('an approval with an unknown requester kind or reason shows unknown with the code only, and markup is text', async () => {
+  const s = ordState({
+    requestList: {
+      status: 200,
+      data: [
+        stopRequestOf({ requesterKind: 'NEW_KIND', reasonCode: 'NEW_CODE' }),
+        stopRequestOf({ requestId: R2, reasonCode: '<b>x</b>' }),
+      ],
+    },
+  });
+  const dom = ordLoad(s);
+  await flush();
+  const text = dom.byId('approval-list').textContent;
+  assert.match(text, /理由: 不明（NEW_CODE）/);
+  assert.match(text, /要求した主体: 不明/);
+  assert.equal(text.includes('<b>'), false);
+  const tags = [];
+  dom.byId('approval-list').walk((n) => tags.push(n.tagName));
+  assert.equal(tags.includes('B'), false, 'no element is made from a response value');
+});

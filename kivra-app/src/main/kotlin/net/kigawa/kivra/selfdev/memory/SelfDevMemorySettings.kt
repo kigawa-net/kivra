@@ -1,5 +1,7 @@
 package net.kigawa.kivra.selfdev.memory
 
+import net.kigawa.kivra.selfdev.AutopilotSettings
+
 /**
  * The self-development memory's switch (ADR 0016 section 10). Fail-closed, like [net.kigawa.kivra.selfdev.AutopilotSettings]:
  *
@@ -21,5 +23,12 @@ class SelfDevMemorySettings private constructor(val enabled: Boolean) {
             "true" -> SelfDevMemorySettings(enabled = true)
             else -> throw IllegalStateException("$ENV_ENABLED must be true or false")
         }
+
+        /**
+         * The switch as Application.kt reads it at startup (ADR 0016 section 10). The records are written by the autopilot's flows, so the
+         * switch is read only while the autopilot is on. With the autopilot off, nothing beyond its own switch is read, as before.
+         */
+        fun fromStartupEnv(env: Map<String, String>, autopilot: AutopilotSettings): SelfDevMemorySettings =
+            if (autopilot.enabled) fromEnv(env) else disabled()
     }
 }

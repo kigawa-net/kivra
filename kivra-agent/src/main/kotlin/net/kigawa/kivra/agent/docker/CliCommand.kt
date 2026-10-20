@@ -18,7 +18,8 @@ object CliCommand {
     /** The tools the CLI may use. Anything else is denied by `dontAsk`. */
     val TOOLS: List<String> = listOf("Read", "Edit", "Write", "Glob", "Grep", "Bash")
 
-    const val DEFAULT_MAX_TURNS = 40
+    /** Only the default of a spec built without a value. A run passes the claim value, which the server sets to 30. */
+    const val DEFAULT_MAX_TURNS = 30
     const val MAX_MAX_TURNS = 200
 
     /** The model of a run. kivra's policy is Haiku 5.5 only (runbook 6.10b). Without `--model` the CLI would pick its own default. */

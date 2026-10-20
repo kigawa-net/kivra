@@ -105,7 +105,7 @@ class RealAttemptExecutor(
     )
     private val mirror = PublicGitMirror(settings.gitBinary, workRoot.resolve(MIRROR_DIR_NAME))
     private val preparer = WorkDirPreparer(workRoot)
-    private val collector = DiffCollector(workRoot)
+    private val changeRoot: Path = workRoot
     private val debugKeep: AttemptDebugKeep? = if (settings.debugKeep) AttemptDebugKeep(workRoot).also { it.prune() } else null
 
     override suspend fun execute(attempt: ClaimedAttempt): AttemptOutcome {
@@ -227,7 +227,7 @@ class RealAttemptExecutor(
 
         val work = checkNotNull(state.prepared) { "the work directory is missing after a run" }
         val collected = withContext(Dispatchers.IO + NonCancellable) {
-            collector.collect(
+            DiffCollector(changeRoot, attempt.limits.toDiffLimits()).collect(
                 runDir = work.runDir,
                 manifestPath = work.manifest,
                 summary = run.report.result?.resultText.orEmpty(),

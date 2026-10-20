@@ -548,6 +548,7 @@ function apResponder(s) {
     if (p === '/api/selfdev/goals' && init.method === 'GET') return { status: 200, data: s.goals };
     if (p === '/api/selfdev/goals' && init.method === 'POST') return s.postGoal ? s.postGoal(init) : { status: 202, data: { goalId: G1, state: 'GOAL_SUBMITTED' } };
     if (p === '/api/selfdev/goals/' + G1) return { status: 200, data: s.detail };
+    if (p === '/api/selfdev/autopilot/promotion') return s.promotion || { status: 404, data: { error: 'not found' } };
     if (s.other) {
       const r = s.other(p, init);
       if (r) return r;
@@ -792,6 +793,57 @@ test('a closed breaker hides the reset button, and the toggle says what it will 
   await flush();
   assert.equal(dom.byId('breaker-block').hidden, true);
   assert.equal(dom.byId('autopilot-toggle').textContent, '自律運転を再開');
+});
+
+const PROMOTION_OK = {
+  conditions: [
+    { id: 'APPROVED_COMPLETED', measured: true, current: 10, required: 10, met: true },
+    { id: 'POLICY_REJECTED', measured: true, current: 2, required: 0, met: false },
+    { id: 'OUT_OF_SCOPE', measured: true, current: 0, required: 0, met: true },
+    { id: 'BUDGET_CONFIRMED', measured: false, current: null, required: null, met: null },
+  ],
+};
+
+test('the promotion readout shows each condition as fixed words and numbers, and the unmeasured one says so', async () => {
+  const dom = load(apResponder(apState({ promotion: { status: 200, data: PROMOTION_OK } })));
+  await flush();
+  const items = dom.byId('promotion-list').children.map((c) => c.textContent);
+  assert.equal(items[0], '承認したタスクのうち完了したもの：10 件（必要: 10 件以上、達成）');
+  assert.equal(items[1], 'ポリシーで止まった承認済みタスク：2 件（必要: ゼロ、未達）');
+  assert.equal(items[2], '範囲外の変更として止まったタスク：0 件（必要: ゼロ、達成）');
+  assert.match(items[3], /^予算の計上の実機確認（#230）：未計測/);
+  assert.match(dom.byId('promotion-status').textContent, /未達が 1 件/);
+  const reads = dom.calls.filter((c) => c.path === '/api/selfdev/autopilot/promotion');
+  assert.equal(reads.length >= 1 && reads.every((c) => c.method === 'GET'), true, 'the readout is a GET only');
+});
+
+test('a failed or malformed readout shows a fixed message, and no server text is shown', async () => {
+  const down = load(apResponder(apState({ promotion: { status: 500, data: { error: 'LEAK-500' } } })));
+  await flush();
+  assert.match(down.byId('promotion-status').textContent, /取得できませんでした/);
+  assert.equal(down.byId('promotion-list').children.length, 0);
+  assert.doesNotMatch(down.byId('promotion-status').textContent, /LEAK/);
+
+  const bad = load(apResponder(apState({ promotion: { status: 200, data: { conditions: [{ id: 'X', measured: true, current: '3', required: 0, met: true }] } } })));
+  await flush();
+  assert.match(bad.byId('promotion-status').textContent, /取得できませんでした/);
+  assert.equal(bad.byId('promotion-list').children.length, 0, 'a value that is not a number is not shown');
+});
+
+test('an id the page does not know is shown as an unknown condition, never with the server text', async () => {
+  const dom = load(apResponder(apState({ promotion: { status: 200, data: { conditions: [
+    { id: '<img src=x onerror=alert(1)>', measured: false, current: null, required: null, met: null },
+  ] } } })));
+  await flush();
+  const items = dom.byId('promotion-list').children;
+  assert.equal(items[0].textContent, '不明な条件');
+  assert.equal(items[0].children.filter((c) => c.nodeType !== 3).length, 0, 'no element is built from the id');
+});
+
+test('the readout is not read while the autopilot is off', async () => {
+  const off = load(apResponder(apState({ autopilot: 503 })));
+  await flush();
+  assert.equal(off.calls.filter((c) => c.path === '/api/selfdev/autopilot/promotion').length, 0);
 });
 
 // ---- Budget (operator) -----------------------------------------------------

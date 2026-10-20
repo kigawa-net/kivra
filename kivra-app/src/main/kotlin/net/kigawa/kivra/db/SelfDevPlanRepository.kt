@@ -14,6 +14,7 @@ import net.kigawa.kivra.core.autopilot.TransitionDecision
 import net.kigawa.kivra.core.autopilot.TransitionRefusal
 import net.kigawa.kivra.core.autopilot.checkGoalTransition
 import net.kigawa.kivra.core.autopilot.checkTaskTransition
+import net.kigawa.kivra.selfdev.PromotionCounts
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.ResultRow
@@ -142,6 +143,32 @@ class SelfDevPlanRepository(
     fun tasksOf(planId: String): List<SelfDevPlanTask> = transaction(database) { tasksIn(planId) }
 
     fun task(planId: String, ordinal: Int): SelfDevPlanTask? = transaction(database) { taskIn(planId, ordinal) }
+
+    /**
+     * The counts for the stage 1 -> 2 readout (ADR 0011 section 6.3). SELECT only: it reads the task rows and the Runs they point to.
+     * "Approved" means `approved_by` is set (the operator's approval, V19). A POLICY_REJECTED is counted when the task row or its Run says so.
+     */
+    fun promotionCounts(): PromotionCounts = transaction(database) {
+        PromotionCounts(
+            approvedCompleted = execQuery(
+                "SELECT COUNT(*) FROM selfdev_plan_tasks WHERE approved_by IS NOT NULL AND state = ?",
+                TaskState.COMPLETED.name,
+            ) { it.getLong(1) }.single(),
+            approvedPolicyRejected = execQuery(
+                """
+                SELECT COUNT(*) FROM selfdev_plan_tasks t
+                WHERE t.approved_by IS NOT NULL
+                  AND (t.state_reason = ? OR EXISTS (SELECT 1 FROM development_runs r WHERE r.run_id = t.run_id AND r.state_reason = ?))
+                """.trimIndent(),
+                AutopilotReason.POLICY_REJECTED.name,
+                AutopilotReason.POLICY_REJECTED.name,
+            ) { it.getLong(1) }.single(),
+            scopeExceeded = execQuery(
+                "SELECT COUNT(*) FROM selfdev_plan_tasks WHERE state_reason = ?",
+                AutopilotReason.AUTO_SCOPE_EXCEEDED.name,
+            ) { it.getLong(1) }.single(),
+        )
+    }
 
     /**
      * Moves one task. The state machine decides whether the edge exists and the reason is allowed. The row must still be at

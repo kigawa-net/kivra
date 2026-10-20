@@ -407,6 +407,30 @@ class SelfDevGoalRoutesTest {
         }
     }
 
+    @Test
+    fun `the promotion readout is a GET with the four ADR conditions, and is 503 while the autopilot is disabled`() {
+        TestDb().use { db ->
+            testApplication {
+                setUp(db, enabled = false)
+                assertEquals(HttpStatusCode.ServiceUnavailable, send(HttpMethod.Get, "/api/selfdev/autopilot/promotion").status)
+            }
+        }
+        TestDb().use { db ->
+            testApplication {
+                setUp(db)
+                val response = send(HttpMethod.Get, "/api/selfdev/autopilot/promotion")
+                assertEquals(HttpStatusCode.OK, response.status)
+                val conditions = response.json().getValue("conditions").jsonArray.map { it.jsonObject }
+                assertEquals(listOf("APPROVED_COMPLETED", "POLICY_REJECTED", "OUT_OF_SCOPE", "BUDGET_CONFIRMED"), conditions.map { it.str("id") })
+                assertEquals(0, conditions[0].getValue("current").jsonPrimitive.int)
+                assertEquals(10, conditions[0].getValue("required").jsonPrimitive.int)
+                assertEquals(false, conditions[0].getValue("met").jsonPrimitive.boolean)
+                assertEquals(false, conditions[3].getValue("measured").jsonPrimitive.boolean)
+                assertEquals(JsonNull, conditions[3].getValue("current"))
+            }
+        }
+    }
+
     // ---- logs and the operator tag ---------------------------------------------------------------------------------------
 
     @Test

@@ -144,6 +144,8 @@
     autopilot: null,
     autopilotLoading: false,
     autopilotCheckedAt: 0,
+    promotion: null,
+    promotionLoading: false,
     goals: null,
     goalsOkAt: 0,
     goalsFailed: false,
@@ -1501,6 +1503,81 @@
     }
   }
 
+  // The stage 1 -> 2 readout (ADR 0011 section 6.3). The server counts; this page only names the fixed ids and shows the numbers.
+  // The labels are fixed here, so no text from the server is shown. An id that is not known is shown as an unknown condition.
+  var PROMOTION_LABELS = {
+    APPROVED_COMPLETED: { label: '承認したタスクのうち完了したもの', atLeast: true },
+    POLICY_REJECTED: { label: 'ポリシーで止まった承認済みタスク', atLeast: false },
+    OUT_OF_SCOPE: { label: '範囲外の変更として止まったタスク', atLeast: false },
+    BUDGET_CONFIRMED: { label: '予算の計上の実機確認（#230）', atLeast: false }
+  };
+  var PROMOTION_UNMEASURED = '未計測（DB の集計では分かりません。runbook の手順で確認してください）';
+
+  /** A readout is shown only when every entry has the expected shape; anything else is a failure with the fixed message. */
+  function promotionShapeOk(list) {
+    return Array.isArray(list) && list.every(function (c) {
+      if (!c || typeof c.id !== 'string' || typeof c.measured !== 'boolean') return false;
+      if (!c.measured) return c.current === null && c.required === null && c.met === null;
+      return Number.isInteger(c.current) && Number.isInteger(c.required) && typeof c.met === 'boolean';
+    });
+  }
+
+  async function refreshPromotion() {
+    if (!state.autopilotEnabled || state.sessionExpired || state.promotionLoading) return;
+    state.promotionLoading = true;
+    try {
+      var r = await apiFetch('/api/selfdev/autopilot/promotion', 'GET');
+      if (r.ok && r.data && promotionShapeOk(r.data.conditions)) {
+        state.promotion = r.data.conditions;
+      } else {
+        state.promotion = false;
+      }
+    } finally {
+      state.promotionLoading = false;
+      renderPromotion();
+    }
+  }
+
+  function promotionLine(c) {
+    var known = has(PROMOTION_LABELS, c.id) ? PROMOTION_LABELS[c.id] : null;
+    if (!known) return '不明な条件';
+    if (!c.measured) return known.label + '：' + PROMOTION_UNMEASURED;
+    var need = known.atLeast ? c.required + ' 件以上' : 'ゼロ';
+    var verdict = c.met ? '達成' : '未達';
+    return known.label + '：' + c.current + ' 件（必要: ' + need + '、' + verdict + '）';
+  }
+
+  function renderPromotion() {
+    var list = $('promotion-list');
+    var status = $('promotion-status');
+    list.textContent = '';
+    if (!state.autopilotEnabled) {
+      status.textContent = '未取得';
+      return;
+    }
+    if (state.promotion === false) {
+      status.textContent = '昇格条件を取得できませんでした。しばらくしてから、もう一度お試しください。';
+      return;
+    }
+    if (!Array.isArray(state.promotion)) {
+      status.textContent = '未取得';
+      return;
+    }
+    var unmet = state.promotion.filter(function (c) { return c.measured && c.met === false; }).length;
+    status.textContent = unmet > 0
+      ? '測定できた条件のうち未達が ' + unmet + ' 件あります。'
+      : '測定できた条件はすべて達成しています。予算の確認は手動です。';
+    state.promotion.forEach(function (c) {
+      var li = document.createElement('li');
+      li.textContent = promotionLine(c);
+      list.appendChild(li);
+    });
+    // A note, not a control: the promotion is a settings change made by the operator, and this page changes nothing.
+    var note = document.createElement('li');
+    note.textContent = '昇格は設定の変更で、運用者が判断します。この表示は何も変えません。';
+    list.appendChild(note);
+  }
+
   // Status of the autopilot. Only a 200 that says enabled shows anything.
   async function refreshAutopilot() {
     if (state.autopilotLoading) return;
@@ -1514,9 +1591,11 @@
         state.autopilot = r.data;
         // The list is read as soon as the autopilot is known to be on (the refresh timer does not run until the next tick).
         if (firstTime) refreshGoals();
+        refreshPromotion();
       } else {
         state.autopilotEnabled = false;
         state.autopilot = null;
+        state.promotion = null;
       }
     } finally {
       state.autopilotLoading = false;

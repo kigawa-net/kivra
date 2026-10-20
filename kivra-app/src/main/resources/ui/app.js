@@ -158,7 +158,6 @@
     goalKeyFor: null,
     goalSubmitting: false,
     stop: null,
-    stopping: false,
     budget: null,
     budgetError: null,
     budgetVisible: false,
@@ -1420,7 +1419,6 @@
     $('plans-refresh').disabled = state.sessionExpired;
     $('autopilot-toggle').disabled = state.sessionExpired || !state.autopilot;
     $('breaker-reset').disabled = state.sessionExpired || !state.autopilot;
-    $('stop-submit').disabled = state.stopping || !stopReasonValid(stopReasonText());
   }
 
   function updateGoalCounters() {
@@ -1867,15 +1865,6 @@
 
   // ---- Stop dialog (the reason is required; it is sent, not kept) --------
 
-  function stopReasonText() {
-    return $('stop-reason').value.trim();
-  }
-
-  function stopReasonValid(text) {
-    var n = Array.from(text).length;
-    return n >= 1 && n <= GOAL_STOP_MAX && !CONTROL_CHARS.test(text);
-  }
-
   function showStopError(text) {
     var el = $('stop-error');
     el.textContent = text;
@@ -1886,30 +1875,19 @@
     state.stop = { goalId: goal.goalId, version: goal.version };
     $('stop-title').textContent = 'Goal の中止';
     $('stop-explain').textContent = 'この Goal を中止します。まだ投入していないタスクは見送りになります。作成済みの PR は閉じず、マージもしません（PR の扱いは人が決めます）。';
-    $('stop-reason').value = '';
     showStopError('');
-    updateGoalControls();
-    $('stop-dialog').showModal();
+    openReasonDialog({
+      dialog: 'stop-dialog', input: 'stop-reason', submit: 'stop-submit', cancel: 'stop-cancel',
+      max: GOAL_STOP_MAX, send: submitStop
+    });
   }
 
-  async function submitStop() {
+  /** Sends the reason (already validated by openReasonDialog). The dialog stays open on failure. */
+  async function submitStop(reason) {
     var s = state.stop;
-    if (!s || state.stopping || state.sessionExpired) return;
-    var reason = stopReasonText();
-    if (!stopReasonValid(reason)) {
-      showStopError(AP.reasonInvalid);
-      updateGoalControls();
-      return;
-    }
-    state.stopping = true;
+    if (!s || state.sessionExpired) return;
     showStopError('');
-    updateGoalControls();
-    var r;
-    try {
-      r = await apiFetch('/api/selfdev/goals/' + encodeURIComponent(s.goalId) + '/stop', 'POST', { version: s.version, reason: reason });
-    } finally {
-      state.stopping = false;
-    }
+    var r = await apiFetch('/api/selfdev/goals/' + encodeURIComponent(s.goalId) + '/stop', 'POST', { version: s.version, reason: reason });
     if (r.ok) {
       state.stop = null;
       $('stop-dialog').close();
@@ -1922,7 +1900,6 @@
       }
       return;
     }
-    updateGoalControls();
     var msg = r.kind === 'network' ? AP.network : (r.status === 400 ? AP.reasonInvalid : (r.status === 409 ? AP.stale : (r.status === 404 ? AP.notFound : AP.unknown)));
     showStopError(msg);
   }
@@ -2876,9 +2853,6 @@
     $('plans-refresh').addEventListener('click', function () { refreshAutopilot(); refreshGoals(); });
     $('autopilot-toggle').addEventListener('click', onAutopilotToggle);
     $('breaker-reset').addEventListener('click', onBreakerReset);
-    $('stop-reason').addEventListener('input', updateGoalControls);
-    $('stop-cancel').addEventListener('click', function () { $('stop-dialog').close(); });
-    $('stop-submit').addEventListener('click', submitStop);
     initBudget();
     initOrders();
     refreshBudget();

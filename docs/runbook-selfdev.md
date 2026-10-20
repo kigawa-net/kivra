@@ -1236,6 +1236,35 @@ dev での有効化の手順は §7.5。
   この機能が無効のときは、再試行は今までどおり。
 - ログ: 件数、要約の有無、バイト数、除外数だけを出す。パスの一覧、Goal の本文は出さない。
 
+### 7.2d 自己開発の記憶(ADR 0016 P1: 保存のみ、影)
+
+- 状態: 段階 P1(保存のみ)。記録は書くだけで、**読まない**。Planner のプロンプト、`PlanValidator`、承認と投入の判断は、記録に依存しない。
+  運用者のメモの入力 API、閲覧、削除の API は、まだ無い(P2 以降)。
+- 環境変数: `KIVRA_SELFDEV_MEMORY_ENABLED`。既定は `false`。`true` と `false` 以外は起動に失敗する(変数名だけを出す)。
+  オートパイロット(`KIVRA_SELFDEV_AUTOPILOT_ENABLED=true`)が無効のときは、この変数を読まない(記録を書く流れが無いため)。
+- 記録する事実(固定のコードと件数だけ。文章は下の題名だけ):
+  - `PLAN_FACT`: `PLAN_PROPOSED`(件数はタスク数)。計画が提案されたとき。失敗で止まったときは、理由コード(`PLAN_INVALID` など)。
+  - `TASK_FACT`: 理由コードが `OPERATOR_APPROVED` / `AUTO_APPROVED` / `OPERATOR_SKIPPED` / `GOAL_STOPPED` / `PR_MERGED` /
+    `RUN_FAILED` / `POLICY_REJECTED` / `PR_ABANDONED` / `RUN_RELEASED` / `AUTO_SCOPE_EXCEEDED` のとき。`identity_sha256` は
+    タスクのパスの集合の SHA-256(パスそのものは入れない)。
+  - `RUN_FACT`: Run の結果(`PR_MERGED`、`FAILED` の理由コードなど)。
+  - `GOAL_FACT`: Goal の終了(`ALL_TASKS_COMPLETED` / `TASKS_INCOMPLETE` / `OPERATOR_STOPPED`)。
+  - `GOAL_TITLE`: 運用者が Goal を投入したときの**題名だけ**(200 字まで)。本文は記録しない(ADR 0016 U-6)。
+- 記録しないもの: Goal の本文、計画の文、タスクの本文、PR の本文、モデルの出力、運用者の生の ID(ハッシュの先頭 12 文字だけ)。
+- 書き込みの経路: すべて `SelfDevMemoryRepository.save`(検証を通ったものだけ保存)。状態遷移の後、**別のトランザクション**で書く。
+  書けなかった・拒否されたときは、固定コードのログ(`selfdev memory refused: kind=... code=...` / `selfdev memory write failed:
+  exception=<例外の型名>`)だけを出し、流れは止めない。例外の文言はログに出ない。
+- 止め方: `KIVRA_SELFDEV_MEMORY_ENABLED=false` にして再起動する。記録の書き込みも、保持ジョブも止まる。既に書かれた記録は残る
+  (消すのは保持期間の後。手で消す手段は P2 まで無い)。
+- 保持期間(ADR 0016 section 9): 文章(`GOAL_TITLE` を含む)180 日、削除された文章の墓標 30 日、事実 365 日、監査 365 日。
+  保持ジョブは 1 時間ごとに動く。期間は `created_at` からの経過で判定する。
+- 確認(件数の集計。本文は出ない):
+  ```sql
+  SELECT kind, code, COUNT(*) FROM selfdev_memory_records WHERE status = 'ACTIVE' GROUP BY kind, code;
+  SELECT kind, code, COUNT(*) FROM selfdev_memory_events GROUP BY kind, code;
+  ```
+- 未実装(P1 の範囲外): `ATTEMPT_FACT`、`COST_FACT`、`PLAN_RATIONALE`、`FAILURE_EXPLANATION`、`CYCLE_REVIEW`、運用者のメモの API。
+
 ### 7.4 運用手順(PR D: 画面と HTTP)
 
 画面は `/ui` の「開発目標(Goal)」の欄。オートパイロットが無効のとき、この欄と「Goal の一覧と承認」の欄は出ない。
@@ -1383,7 +1412,7 @@ ADR から変えた点(PR A での判断、ADR §2.8 に記録):
 
 ### 7.6 自己開発の order(ADR 0015 段階 1、Issue #273、既定は無効)
 
-order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 は**ルートの order 1 件**だけで、子の order、周の自動の開始、複数周はまだ無い(最大 1 周。周は運用者が開始する)。UI と MCP もまだ無い。操作は HTTP だけである。
+order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 は**ルートの order 1 件**だけで、子の order、周の自動の開始、複数周はまだ無い(最大 1 周。周は運用者が開始する)。操作は HTTP、MCP(§8.8)、`/ui` の画面(§7.6.7)である。
 
 #### 7.6.1 有効化の前提(起動時に検査される)
 
@@ -1434,7 +1463,17 @@ AI の主体ができるのは、読み取りと停止の要求だけである�
 
 #### 7.6.6 段階 1 の範囲外
 
-子の order、子の停止、周の自動の開始、複数周、`/ui` の画面は、後の段階である(ADR 0015 §7)。MCP の読み取りと停止の要求は PR 2a で入った(§8.8)。order の費用の上限(`order_budget_jpy`)も後の段階である。
+子の order、子の停止、周の自動の開始、複数周は、後の段階である(ADR 0015 §7)。MCP の読み取りと停止の要求は PR 2a で入った(§8.8)。order の費用の上限(`order_budget_jpy`)も後の段階である。
+
+#### 7.6.7 `/ui` の画面(PR 2b)
+
+- **一覧**: オートパイロットが有効で `GET /api/selfdev/orders` が 200 のときだけ、「order の一覧（ADR 0015）」を出す。状態、周の数、連続して失敗した周、期限を見られる。題名と方針は表示しない。「詳細」で、停止の要求の有無を見られる。
+- **一時停止と再開**: 詳細の「一時停止」は `ACTIVE` のときだけ、「再開」は `PAUSED` で理由が `LIMIT_REACHED` と `EXPIRED` 以外のときだけ出す。
+- **停止の承認**: `GET /api/selfdev/stop-requests?state=PENDING` が 200 の主体(承認者)だけに、「停止の承認（承認者だけ）」を出す。要求の対象、理由、要求した主体(AI の主体か人)、要求の時刻、期限を表示する。
+  - 「承認」は確認のダイアログ(「この order を停止します。元に戻せません。」)を挟んでから送る。送る本文は、一覧で読んだ `digest` だけである。`digest` は画面に表示しない。
+  - 「却下」は理由を取らず、空の JSON(`{}`)を送る。どちらも、結果は固定の文で出る。
+- **表示の規則**: 理由とコードは、`app.js` の固定の対応表で日本語にする(order の状態と理由、停止の理由 `OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN`)。対応表にないコードは「不明（コード）」と、コードの文字列だけを出す。API の応答の文字列(題名、方針、要求者の ID)は、どの節にも出さない。
+- **実機の確認(運用者)**: 承認者で `/ui` を開き、承認の節が出ること、承認の確認ダイアログが出ること、承認後に対象の order が「停止済み」になることを確かめる。承認を試すのは、停止を実際に行ってよいときだけにする。
 
 ### 6.15 周期ワーカーと結果の保持(Issue #231、ADR 0010 追補 6)
 

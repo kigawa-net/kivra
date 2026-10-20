@@ -52,6 +52,7 @@ import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.autopilot.GoalState
 import net.kigawa.kivra.core.autopilot.TaskState
+import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingAttemptResult
 import net.kigawa.kivra.db.DbCodingResultStore
@@ -279,6 +280,8 @@ internal class E2eWorld(
     private val files: Map<String, String> = E2E_FILES,
     /** The self-development concurrency limit (KIVRA_SELFDEV_MAX_ACTIVE_RUNS). The default is 1. */
     private val maxActive: Int = 1,
+    /** The self-development memory's recorder (ADR 0016 P1). Off unless a test passes one. */
+    val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
 ) {
     val goals = SelfDevGoalRepository(db.database)
     val plans = SelfDevPlanRepository(db.database)
@@ -311,6 +314,7 @@ internal class E2eWorld(
         gateway = plannerGateway(model),
         config = PlannerConfig(budgetScopes = listOf(TENANT), autopilot = config),
         nonceSource = { NONCE },
+        memory = memory,
     )
     private val plannerWorker = PlannerWorker(goals, planner, Duration.ofSeconds(30))
 
@@ -321,6 +325,7 @@ internal class E2eWorld(
         config = cfg,
         maxActiveSelfDev = maxActive,
         budgetAllows = { share -> autopilotBudgetAllows(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal(BUDGET_LIMIT_JPY), share) },
+        memory = memory,
     )
 
     fun tick() = dispatcher().tick()
@@ -404,6 +409,9 @@ internal class OperatorApi(private val client: HttpClient) {
     suspend fun approveTask(planId: String, ordinal: Int, version: Long): HttpResponse =
         post("/api/selfdev/tasks/$planId-$ordinal/approve", """{"version":$version}""")
 
+    suspend fun rejectTask(planId: String, ordinal: Int, version: Long): HttpResponse =
+        post("/api/selfdev/tasks/$planId-$ordinal/reject", """{"version":$version}""")
+
     suspend fun stop(goalId: String, version: Long, reason: String): HttpResponse = post(
         "/api/selfdev/goals/$goalId/stop",
         buildJsonObject { put("version", version); put("reason", reason) }.toString(),
@@ -440,6 +448,7 @@ internal fun ApplicationTestBuilder.operatorApp(world: E2eWorld, settings: Autop
         plans = world.plans,
         operations = SelfDevOperatorRepository(world.db.database),
         control = world.control,
+        memory = world.memory,
     )
     application {
         install(ContentNegotiation) { json() }

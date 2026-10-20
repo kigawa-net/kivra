@@ -31,6 +31,7 @@ import net.kigawa.kivra.db.SelfDevPlanTask
 import net.kigawa.kivra.db.SubmissionStart
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.db.Transition
+import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import org.jetbrains.exposed.sql.Database
 import org.slf4j.LoggerFactory
 
@@ -71,6 +72,11 @@ class AutopilotDispatcher(
      * flow without orders: the goal has no order, so nothing changes. Called before a goal's tasks are submitted.
      */
     private val orderGate: (goalId: String) -> Boolean = { true },
+    /**
+     * The shadow record of the self-development memory (ADR 0016 P1). Written after a transition has won, never read: no decision here
+     * depends on it. Off by default.
+     */
+    private val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
 ) {
     private val goals = SelfDevGoalRepository(database, clock)
     private val plans = SelfDevPlanRepository(database, clock)
@@ -120,45 +126,51 @@ class AutopilotDispatcher(
                 if (task.state != TaskState.SUBMITTED) continue
                 val runId = task.runId ?: continue
                 val run = runs.get(RunId(runId)) ?: continue
-                recordOutcome(task, run.state, run.stateReason)
+                // The Run's fact is written only when this tick moved the task (a lost race writes nothing).
+                if (recordOutcome(ref.goalId, task, run.state, run.stateReason)) {
+                    memory.runFact(ref.goalId, task, runId, run.stateReason ?: run.state.name)
+                }
             } catch (e: Exception) {
                 logger.warn("autopilot dispatch: outcome failed, goalId={} ordinal={} exception={}", ref.goalId, ref.ordinal, e.javaClass.simpleName)
             }
         }
     }
 
-    private fun recordOutcome(task: SelfDevPlanTask, state: DevelopmentRunState, stateReason: String?) {
-        when (state) {
-            DevelopmentRunState.COMPLETED -> {
-                if (transitionTask(task, TaskState.COMPLETED, AutopilotReason.PR_MERGED) != null) {
-                    control.recordRunOutcome(succeeded = true, maxConsecutiveFailures = config.maxConsecutiveFailures)
-                }
-            }
-            DevelopmentRunState.FAILED -> failTask(task, if (stateReason == RUN_POLICY_REJECTED) AutopilotReason.POLICY_REJECTED else AutopilotReason.RUN_FAILED)
-            // UNKNOWN is counted when it is first seen (ADR 0011 section 5.2). It is not counted again when the operator releases it.
-            DevelopmentRunState.UNKNOWN -> failTask(task, AutopilotReason.RUN_FAILED)
-            DevelopmentRunState.CANCELLED -> {
-                if (stateReason == PR_ABANDONED_REASON) {
-                    failTask(task, AutopilotReason.PR_ABANDONED)
-                } else {
-                    // A run cancelled by the operator (a release, or a cancel request) is not a failure and is not counted.
-                    transitionTask(task, TaskState.CANCELLED, AutopilotReason.RUN_RELEASED)
-                }
-            }
-            else -> Unit
+    /** Returns true when the task moved (the outcome was recorded by this call). */
+    private fun recordOutcome(goalId: String, task: SelfDevPlanTask, state: DevelopmentRunState, stateReason: String?): Boolean = when (state) {
+        DevelopmentRunState.COMPLETED -> {
+            val moved = transitionTask(goalId, task, TaskState.COMPLETED, AutopilotReason.PR_MERGED) != null
+            if (moved) control.recordRunOutcome(succeeded = true, maxConsecutiveFailures = config.maxConsecutiveFailures)
+            moved
         }
+        DevelopmentRunState.FAILED ->
+            failTask(goalId, task, if (stateReason == RUN_POLICY_REJECTED) AutopilotReason.POLICY_REJECTED else AutopilotReason.RUN_FAILED)
+        // UNKNOWN is counted when it is first seen (ADR 0011 section 5.2). It is not counted again when the operator releases it.
+        DevelopmentRunState.UNKNOWN -> failTask(goalId, task, AutopilotReason.RUN_FAILED)
+        DevelopmentRunState.CANCELLED ->
+            if (stateReason == PR_ABANDONED_REASON) {
+                failTask(goalId, task, AutopilotReason.PR_ABANDONED)
+            } else {
+                // A run cancelled by the operator (a release, or a cancel request) is not a failure and is not counted.
+                transitionTask(goalId, task, TaskState.CANCELLED, AutopilotReason.RUN_RELEASED) != null
+            }
+        else -> false
     }
 
-    /** The task fails, the failure is counted once (only the winning CAS counts), and the rest of the plan is skipped. */
-    private fun failTask(task: SelfDevPlanTask, reason: AutopilotReason) {
-        if (transitionTask(task, TaskState.FAILED, reason) == null) return
+    /**
+     * The task fails, the failure is counted once (only the winning CAS counts), and the rest of the plan is skipped. Returns true when
+     * the task moved.
+     */
+    private fun failTask(goalId: String, task: SelfDevPlanTask, reason: AutopilotReason): Boolean {
+        if (transitionTask(goalId, task, TaskState.FAILED, reason) == null) return false
         control.recordRunOutcome(succeeded = false, maxConsecutiveFailures = config.maxConsecutiveFailures)
         var skipped = 0
         for (other in plans.tasksOf(task.planId)) {
             if (other.state != TaskState.PENDING_APPROVAL && other.state != TaskState.QUEUED) continue
-            if (transitionTask(other, TaskState.SKIPPED, AutopilotReason.GOAL_STOPPED) != null) skipped++
+            if (transitionTask(goalId, other, TaskState.SKIPPED, AutopilotReason.GOAL_STOPPED) != null) skipped++
         }
         logger.info("autopilot dispatch: plan stopped, planId={} code={} skipped={}", task.planId, reason.name, skipped)
+        return true
     }
 
     // ---- 2 and 3. Dispatch -----------------------------------------------------------------------------------------------------
@@ -235,7 +247,7 @@ class AutopilotDispatcher(
             if (task.state != TaskState.PENDING_APPROVAL || task.stateReason == AutopilotReason.AUTO_SCOPE_EXCEEDED || !isAutoEligible(task)) {
                 continue
             }
-            if (transitionTask(task, TaskState.QUEUED, AutopilotReason.AUTO_APPROVED) != null) {
+            if (transitionTask(plan.goalId, task, TaskState.QUEUED, AutopilotReason.AUTO_APPROVED) != null) {
                 logger.info(
                     "autopilot dispatch: auto-approved ordinal={} planId={} approval={} code={}",
                     task.ordinal, plan.planId, AutopilotApproval.AUTO.name, AutopilotReason.AUTO_APPROVED.name,
@@ -338,7 +350,7 @@ class AutopilotDispatcher(
                 selfDev = true, maxActiveSelfDev = maxActiveSelfDev, body = task.body,
             )) {
                 is TaskSubmitResult.Created, is TaskSubmitResult.Replayed -> {
-                    if (transitionTask(task, TaskState.SUBMITTED, null, runId = result.run.runId.value) != null) {
+                    if (transitionTask(goal.goalId, task, TaskState.SUBMITTED, null, runId = result.run.runId.value) != null) {
                         logger.info("autopilot dispatch: submitted goalId={} ordinal={} runId={}", goal.goalId, task.ordinal, result.run.runId.value)
                     }
                     true
@@ -350,7 +362,7 @@ class AutopilotDispatcher(
                 }
             }
         } catch (e: ActiveSelfDevLimitException) {
-            transitionTask(task, TaskState.QUEUED, AutopilotReason.ACTIVE_RUN_LIMIT)
+            transitionTask(goal.goalId, task, TaskState.QUEUED, AutopilotReason.ACTIVE_RUN_LIMIT)
             logger.info("autopilot dispatch: waiting code={} goalId={} ordinal={}", ACTIVE_RUN_LIMIT, goal.goalId, task.ordinal)
             return false
         }
@@ -385,6 +397,7 @@ class AutopilotDispatcher(
                     "autopilot goal: goalId={} from={} to={} reason={}",
                     goal.goalId, goal.state.name, to.name, reason?.name ?: "none",
                 )
+                memory.goalFact(goal.goalId, reason)
                 r.row
             }
             is Transition.StaleVersion -> {
@@ -400,13 +413,17 @@ class AutopilotDispatcher(
     }
 
     private fun transitionTask(
+        goalId: String,
         task: SelfDevPlanTask,
         to: TaskState,
         reason: AutopilotReason?,
         runId: String? = null,
     ): SelfDevPlanTask? {
         return when (val r = plans.transitionTask(task.planId, task.ordinal, task.version, to, reason, runId)) {
-            is Transition.Moved -> r.row
+            is Transition.Moved -> {
+                memory.taskFact({ goalId }, r.row, reason)
+                r.row
+            }
             is Transition.StaleVersion -> {
                 logger.info("autopilot task not changed: planId={} ordinal={} code=STALE_VERSION", task.planId, task.ordinal)
                 null

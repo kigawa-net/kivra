@@ -34,6 +34,7 @@ import net.kigawa.kivra.modelgateway.Requirements
 import net.kigawa.kivra.modelgateway.ResponseFormat
 import net.kigawa.kivra.modelgateway.Role
 import net.kigawa.kivra.modelgateway.ThinkingMode
+import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import kotlin.time.toKotlinDuration
 import org.slf4j.LoggerFactory
 
@@ -96,6 +97,8 @@ class AutopilotPlanner(
     private val nonceSource: () -> String = PlannerPrompt::newNonce,
     /** The repository file list (Issue #293). Null when it is disabled: the prompts are then the ones used before. */
     private val repoFiles: PlannerRepoFiles? = null,
+    /** The shadow record of the self-development memory (ADR 0016 P1). Written after the plan or the block is stored. Never read. */
+    private val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
 ) {
 
     suspend fun planGoal(goalId: String): PlanAttempt {
@@ -170,6 +173,7 @@ class AutopilotPlanner(
                     goalId, result.plan.planId, result.plan.revision, result.tasks.size, queued,
                     digest.take(DIGEST_PREFIX), response.cost.amount.toPlainString(), response.cost.currency,
                 )
+                memory.planProposed(goalId, result.plan.planId, result.tasks.size)
                 PlanAttempt.Proposed(result.tasks.size, queued)
             }
         }
@@ -179,6 +183,7 @@ class AutopilotPlanner(
     private fun block(fence: GoalClaim, reason: AutopilotReason): PlanAttempt {
         return if (goals.blockPlanning(fence, reason)) {
             logger.warn("planner blocked: goalId={} reason={}", fence.goalId, reason.name)
+            memory.planBlocked(fence.goalId, reason)
             PlanAttempt.Blocked(reason)
         } else {
             logger.warn("planner result discarded: goalId={} reason=PLAN_DISCARDED_STALE", fence.goalId)

@@ -165,6 +165,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             operations = SelfDevOperatorRepository(database),
             control = SelfDevAutopilotControlRepository(database),
             memory = memory,
+            aiPrincipal = orderSettings.aiPrincipal,
         )
     }
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.

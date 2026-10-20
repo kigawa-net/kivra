@@ -61,6 +61,7 @@ import org.slf4j.LoggerFactory
 import java.time.Duration
 
 private const val OPERATOR = "op-1"
+private const val AI_PRINCIPAL = "1:i:ai"
 private const val AGENT_HEADER = "X-Test-Agent"
 private const val PRINCIPAL_HEADER = "X-Test-Principal"
 private val TTL = Duration.ofSeconds(60)
@@ -81,7 +82,7 @@ class SelfDevGoalRoutesTest {
         }
     }
 
-    private fun ApplicationTestBuilder.setUp(db: TestDb, enabled: Boolean = true) {
+    private fun ApplicationTestBuilder.setUp(db: TestDb, enabled: Boolean = true, aiPrincipal: String? = null) {
         val autopilot = if (enabled) AutopilotSettings.fromEnv(autopilotEnv(), cliSelfDev) else AutopilotSettings.disabled()
         val deps = SelfDevGoalRouteDeps(
             operators = StubAuth,
@@ -91,6 +92,7 @@ class SelfDevGoalRoutesTest {
             plans = SelfDevPlanRepository(db.database),
             operations = SelfDevOperatorRepository(db.database),
             control = SelfDevAutopilotControlRepository(db.database),
+            aiPrincipal = aiPrincipal,
         )
         application {
             install(ContentNegotiation) { json() }
@@ -331,6 +333,97 @@ class SelfDevGoalRoutesTest {
                 assertEquals(HttpStatusCode.NotFound, post("/api/selfdev/tasks/$ULID_NONE-1/approve", """{"version":0}""").status)
                 assertEquals(HttpStatusCode.NotFound, post("/api/selfdev/tasks/${plan.planId}-0/approve", """{"version":0}""").status)
             }
+        }
+    }
+
+    // ---- the AI principal (ADR 0019): it reads, and it changes nothing -------------------------------------------------
+
+    @Test
+    fun `the AI principal is refused a goal submission with 403 and the fixed code, and nothing is stored`() {
+        TestDb().use { db ->
+            testApplication {
+                setUp(db, aiPrincipal = AI_PRINCIPAL)
+                val refused = post("/api/selfdev/goals", """{"title":"AI 題名 MARKER-AI-TITLE","body":"AI 本文","idempotencyKey":"k"}""", AI_PRINCIPAL)
+                assertEquals(HttpStatusCode.Forbidden, refused.status)
+                assertEquals("""{"error":"forbidden"}""", text(refused))
+                assertEquals(HttpStatusCode.Accepted, post("/api/selfdev/goals", """{"title":"運用者","idempotencyKey":"k2"}""").status)
+            }
+            assertEquals(0, db.count("selfdev_goals", "created_by = '$AI_PRINCIPAL'"))
+            assertEquals(1, db.count("selfdev_goals"))
+        }
+    }
+
+    @Test
+    fun `the AI principal is refused a goal stop with 403, and the goal keeps its state and version`() {
+        TestDb().use { db ->
+            val (goal, _) = proposed(db, "k1")
+            val goals = SelfDevGoalRepository(db.database)
+            val before = goals.get(goal.goalId)!!
+            testApplication {
+                setUp(db, aiPrincipal = AI_PRINCIPAL)
+                val refused = post("/api/selfdev/goals/${goal.goalId}/stop", """{"version":${goal.version},"reason":"AI の中止"}""", AI_PRINCIPAL)
+                assertEquals(HttpStatusCode.Forbidden, refused.status)
+                assertEquals("""{"error":"forbidden"}""", text(refused))
+            }
+            val after = goals.get(goal.goalId)!!
+            assertEquals(before.state, after.state)
+            assertEquals(before.version, after.version)
+            assertEquals(before.stateReason, after.stateReason)
+        }
+    }
+
+    @Test
+    fun `the AI principal is refused every goal, plan and task write with 403 and changes nothing`() {
+        TestDb().use { db ->
+            val (goal, plan) = proposed(db, "k1")
+            val goals = SelfDevGoalRepository(db.database)
+            val before = goals.get(goal.goalId)!!
+            testApplication {
+                setUp(db, aiPrincipal = AI_PRINCIPAL)
+                val writes = listOf(
+                    "/api/selfdev/goals/${goal.goalId}/approve-plan" to """{"version":${goal.version}}""",
+                    "/api/selfdev/goals/${goal.goalId}/replan" to """{"version":${goal.version}}""",
+                    "/api/selfdev/goals/${goal.goalId}/stop" to """{"version":${goal.version},"reason":"AI の中止"}""",
+                    "/api/selfdev/tasks/${plan.planId}-1/approve" to """{"version":0}""",
+                    "/api/selfdev/tasks/${plan.planId}-1/reject" to """{"version":0}""",
+                )
+                for ((path, body) in writes) {
+                    val response = post(path, body, AI_PRINCIPAL)
+                    assertEquals(HttpStatusCode.Forbidden, response.status, path)
+                    assertEquals("""{"error":"forbidden"}""", text(response), path)
+                }
+            }
+            val after = goals.get(goal.goalId)!!
+            assertEquals(before.state, after.state)
+            assertEquals(before.version, after.version)
+            assertEquals(GoalState.PLAN_PROPOSED, after.state)
+        }
+    }
+
+    @Test
+    fun `the AI principal may read the goals and the detail, and the operator may still submit and stop`() {
+        TestDb().use { db ->
+            val (goal, _) = proposed(db, "k1")
+            testApplication {
+                setUp(db, aiPrincipal = AI_PRINCIPAL)
+                assertEquals(HttpStatusCode.OK, send(HttpMethod.Get, "/api/selfdev/goals", null, principal = AI_PRINCIPAL).status)
+                assertEquals(HttpStatusCode.OK, send(HttpMethod.Get, "/api/selfdev/goals/${goal.goalId}", null, principal = AI_PRINCIPAL).status)
+                assertEquals(HttpStatusCode.Accepted, post("/api/selfdev/goals", """{"title":"運用者","idempotencyKey":"k2"}""").status)
+                val stopped = post("/api/selfdev/goals/${goal.goalId}/stop", """{"version":${goal.version},"reason":"止める"}""")
+                assertEquals(HttpStatusCode.OK, stopped.status)
+                assertEquals(GoalState.STOPPED.name, stopped.json().str("state"))
+            }
+        }
+    }
+
+    @Test
+    fun `with no AI principal configured, a caller under that owner key is an operator as before`() {
+        TestDb().use { db ->
+            testApplication {
+                setUp(db, aiPrincipal = null)
+                assertEquals(HttpStatusCode.Accepted, post("/api/selfdev/goals", """{"title":"t","idempotencyKey":"k"}""", AI_PRINCIPAL).status)
+            }
+            assertEquals(1, db.count("selfdev_goals", "created_by = '$AI_PRINCIPAL'"))
         }
     }
 

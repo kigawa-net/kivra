@@ -19,6 +19,7 @@ import net.kigawa.kivra.db.FakeTrustedPrMergeAuthority
 import net.kigawa.kivra.db.PR_REBASE_REBOUND
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.developer.FakeDeveloper
+import net.kigawa.kivra.github.ComparedFile
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.PullRequest
@@ -123,6 +124,11 @@ class PrBranchRebaseTest {
         }
 
         fun binding(runId: RunId) = assertNotNull(runs.loadPullRequestBinding(runId)).headSha
+
+        /** Registers the compare answer of a commit pair (base to head), as the second step of (b) reads it. */
+        fun compareOf(base: String, head: String, files: List<ComparedFile>) {
+            port.compareFiles[base to head] = files
+        }
     }
 
     /** The PR_REBASE audit rows of a run, in order: (action, payload). */
@@ -158,6 +164,8 @@ class PrBranchRebaseTest {
             assertEquals(MERGE, h.pr().headSha)
             assertEquals(old, h.port.lastExpectedHead)
             assertEquals(1, h.port.updateCalls)
+            // The same change set (first step): the compare API is not read.
+            assertEquals(0, h.port.compareFilesCalls)
 
             val rows = db.rebaseRows(runId)
             assertEquals(listOf("PR_REBASE_ATTEMPTED", PR_REBASE_REBOUND), rows.map { it.first })
@@ -182,6 +190,9 @@ class PrBranchRebaseTest {
             h.mainMoves()
             // The update puts a different content into the pull request's own file: the change set differs.
             h.registerMerge(MERGE, "blob-tampered")
+            // The changed lines differ too: the same path, the same mode, but a different line in the pull request's own change.
+            h.compareOf(h.github.baseSha, old, listOf(modified("docs/a.md", BEFORE_PATCH)))
+            h.compareOf(MAIN, MERGE, listOf(modified("docs/a.md", "@@ -1 +1 @@\n-old\n+tampered\n")))
             h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
 
             assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_DIFF_CHANGED"), h.runner().advance(runId))
@@ -289,21 +300,34 @@ class PrBranchRebaseTest {
 
     @Test
     fun aMergeWhosePathModeOrBlobDiffersFromTheRecordedChangeIsRefused() = runBlocking {
+        // Each case: the tree of the new head, and the compare answer of main to the new head (the pull request's change as main sees it).
         val tampered = mapOf(
-            "a blob" to mapOf("README.md" to ("100644" to "blob-readme"), "docs/a.md" to ("100644" to "blob-tampered"), "other.md" to ("100644" to "blob-other")),
-            "a mode" to mapOf("README.md" to ("100644" to "blob-readme"), "docs/a.md" to ("100755" to "blob-new"), "other.md" to ("100644" to "blob-other")),
-            "a path" to mapOf(
-                "README.md" to ("100644" to "blob-readme"), "docs/a.md" to ("100644" to "blob-new"),
-                "other.md" to ("100644" to "blob-other"), "extra.md" to ("100644" to "blob-extra"),
+            "a blob" to Pair(
+                mapOf("README.md" to ("100644" to "blob-readme"), "docs/a.md" to ("100644" to "blob-tampered"), "other.md" to ("100644" to "blob-other")),
+                listOf(modified("docs/a.md", "@@ -1 +1 @@\n-old\n+tampered\n")),
+            ),
+            "a mode" to Pair(
+                mapOf("README.md" to ("100644" to "blob-readme"), "docs/a.md" to ("100755" to "blob-new"), "other.md" to ("100644" to "blob-other")),
+                listOf(modified("docs/a.md", BEFORE_PATCH)),
+            ),
+            "a path" to Pair(
+                mapOf(
+                    "README.md" to ("100644" to "blob-readme"), "docs/a.md" to ("100644" to "blob-new"),
+                    "other.md" to ("100644" to "blob-other"), "extra.md" to ("100644" to "blob-extra"),
+                ),
+                listOf(modified("docs/a.md", BEFORE_PATCH), ComparedFile("extra.md", "added", "@@ -0,0 +1 @@\n+extra\n")),
             ),
         )
-        for ((name, tree) in tampered) {
+        for ((name, case) in tampered) {
+            val (tree, after) = case
             TestDb().use { db ->
                 val h = Harness(db)
                 val runId = h.openedRun()
                 val old = h.head()
                 h.mainMoves()
                 h.git.commit(MERGE, listOf(old, MAIN), tree)
+                h.compareOf(h.github.baseSha, old, listOf(modified("docs/a.md", BEFORE_PATCH)))
+                h.compareOf(MAIN, MERGE, after)
                 h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
 
                 assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_DIFF_CHANGED"), h.runner().advance(runId), name)
@@ -675,9 +699,150 @@ class PrBranchRebaseTest {
         }
     }
 
+    @Test
+    fun aChangedLineThatDiffersInContentOrOrderOrCountIsRefused() = runBlocking {
+        // The pull request's own patch, as the compare API reports it before the update.
+        val before = "@@ -1,2 +1,2 @@\n-x\n-old\n+new\n+y\n"
+        val after = mapOf(
+            "a + line differs" to "@@ -1,2 +1,2 @@\n-x\n-old\n+new\n+z\n",
+            "the - lines are in another order" to "@@ -1,2 +1,2 @@\n-old\n-x\n+new\n+y\n",
+            "the + lines are in another order" to "@@ -1,2 +1,2 @@\n-x\n-old\n+y\n+new\n",
+            "a + line is added" to "@@ -1,2 +1,3 @@\n-x\n-old\n+new\n+y\n+w\n",
+            "a - line is removed" to "@@ -1,2 +1,1 @@\n-x\n+new\n+y\n",
+            "a no-newline marker is added" to "@@ -1,2 +1,2 @@\n-x\n-old\n+new\n+y\n\\ No newline at end of file\n",
+        )
+        for ((name, patch) in after) {
+            TestDb().use { db ->
+                val h = Harness(db)
+                val runId = h.openedRun()
+                val old = h.head()
+                h.mainMoves()
+                h.registerMerge(MERGE, "blob-tampered")
+                h.compareOf(h.github.baseSha, old, listOf(modified("docs/a.md", before)))
+                h.compareOf(MAIN, MERGE, listOf(modified("docs/a.md", patch)))
+                h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+
+                assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_DIFF_CHANGED"), h.runner().advance(runId), name)
+                assertEquals(old, h.binding(runId), name)
+            }
+        }
+    }
+
+    @Test
+    fun aChangeWhoseStatusPatchOrSizeIsNotComparableIsRefused() = runBlocking {
+        val big = "x".repeat(140_000)
+        val cases = mapOf(
+            "a renamed file" to Pair(
+                listOf(ComparedFile("docs/a.md", "renamed", BEFORE_PATCH)),
+                listOf(ComparedFile("docs/a.md", "renamed", BEFORE_PATCH)),
+            ),
+            "a copied file" to Pair(
+                listOf(ComparedFile("docs/a.md", "copied", BEFORE_PATCH)),
+                listOf(ComparedFile("docs/a.md", "copied", BEFORE_PATCH)),
+            ),
+            "a status that differs between the two sides" to Pair(
+                listOf(modified("docs/a.md", BEFORE_PATCH)),
+                listOf(ComparedFile("docs/a.md", "removed", BEFORE_PATCH)),
+            ),
+            "no patch before" to Pair(listOf(modified("docs/a.md", null)), listOf(modified("docs/a.md", BEFORE_PATCH))),
+            "no patch after" to Pair(listOf(modified("docs/a.md", BEFORE_PATCH)), listOf(modified("docs/a.md", null))),
+            "the patches are too large in total" to Pair(
+                listOf(modified("docs/a.md", "-old\n+$big\n")),
+                listOf(modified("docs/a.md", "-old\n+$big\n")),
+            ),
+            "300 files (the list may be cut)" to Pair(
+                List(300) { ComparedFile("f$it.md", "added", "+x\n") },
+                List(300) { ComparedFile("f$it.md", "added", "+x\n") },
+            ),
+        )
+        for ((name, sides) in cases) {
+            TestDb().use { db ->
+                val h = Harness(db)
+                val runId = h.openedRun()
+                val old = h.head()
+                h.mainMoves()
+                h.registerMerge(MERGE, "blob-tampered")
+                h.compareOf(h.github.baseSha, old, sides.first)
+                h.compareOf(MAIN, MERGE, sides.second)
+                h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+
+                assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_DIFF_CHANGED"), h.runner().advance(runId), name)
+                assertEquals(old, h.binding(runId), name)
+            }
+        }
+    }
+
+    @Test
+    fun aCompareThatCannotBeReadIsVerifyFailedNotAccepted() = runBlocking {
+        for (failure in listOf<GitHubFailureKind?>(GitHubFailureKind.NETWORK, GitHubFailureKind.TOO_LARGE, GitHubFailureKind.PROTOCOL, null)) {
+            TestDb().use { db ->
+                val h = Harness(db)
+                val runId = h.openedRun()
+                val old = h.head()
+                h.mainMoves()
+                h.registerMerge(MERGE, "blob-tampered")
+                // With null nothing is registered for the pair: the read answers not found.
+                if (failure != null) h.port.compareFilesFailure = failure
+                h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+
+                assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_VERIFY_FAILED"), h.runner().advance(runId), "$failure")
+                assertEquals(old, h.binding(runId))
+            }
+        }
+    }
+
+    @Test
+    fun aMergedPullRequestWhoseChangedLinesAreTheSameIsRecordedAndCompleted() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            // main changed the same file in another place: the blobs differ, but the pull request's own lines do not.
+            h.mainChangesSamePath()
+            h.git.commit(MERGE, listOf(old, MAIN), BASE_TREE + ("docs/a.md" to ("100644" to "blob-merged")))
+            h.compareOf(h.github.baseSha, old, listOf(modified("docs/a.md", BEFORE_PATCH)))
+            // The same two lines, under another hunk header with a context line that main added.
+            h.compareOf(MAIN, MERGE, listOf(modified("docs/a.md", "@@ -1,2 +1,2 @@\n main-line\n-old\n+new\n")))
+            h.github.setPullHead(h.pr().number, MERGE)
+            h.humanMerges()
+            db.prAuthority.answer = { b -> FakeTrustedPrMergeAuthority.merged(b).copy(headSha = h.pr().headSha) }
+
+            assertEquals(Advanced(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.COMPLETED, "PR_MERGED"), h.runner().advance(runId))
+            assertEquals(MERGE, h.binding(runId))
+            assertEquals(0, h.port.updateCalls)
+            assertEquals(listOf(PR_REBASE_REBOUND), db.rebaseRows(runId).map { it.first })
+            assertEquals(2, h.port.compareFilesCalls)
+        }
+    }
+
+    @Test
+    fun aMergedPullRequestWhoseChangedLinesDifferIsNotRecorded() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainChangesSamePath()
+            h.git.commit(MERGE, listOf(old, MAIN), BASE_TREE + ("docs/a.md" to ("100644" to "blob-merged")))
+            h.compareOf(h.github.baseSha, old, listOf(modified("docs/a.md", BEFORE_PATCH)))
+            h.compareOf(MAIN, MERGE, listOf(modified("docs/a.md", "@@ -1 +1 @@\n-main\n+new\n")))
+            h.github.setPullHead(h.pr().number, MERGE)
+            h.humanMerges()
+            db.prAuthority.answer = { b -> FakeTrustedPrMergeAuthority.merged(b).copy(headSha = h.pr().headSha) }
+
+            repeat(2) { assertEquals(Waiting(WaitReason.MERGE_NOT_VERIFIED, "HEAD_SHA_MISMATCH"), h.runner().advance(runId)) }
+            assertEquals(old, h.binding(runId))
+            assertEquals(emptyList(), db.rebaseRows(runId))
+        }
+    }
+
     private fun Harness.lastExpected(): String? = port.lastExpectedHead
 
+    private fun modified(path: String, patch: String?) = ComparedFile(path, "modified", patch)
+
     private companion object {
+        /** The pull request's own change to `docs/a.md`: one line replaced. */
+        const val BEFORE_PATCH = "@@ -1 +1 @@\n-old\n+new\n"
+
         const val MAIN = "1111111111111111111111111111111111111111"
         const val MERGE = "2222222222222222222222222222222222222222"
         const val PERSON = "3333333333333333333333333333333333333333"

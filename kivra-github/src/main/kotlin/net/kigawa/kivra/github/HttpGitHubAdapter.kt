@@ -96,6 +96,9 @@ data class GitHubAdapterConfig(
 /** Upper bound of one issue response. A GitHub issue body is at most 65,536 characters; the JSON around it is small. */
 internal const val ISSUE_MAX_RESPONSE_BYTES = 512 * 1024
 
+/** Upper bound of a compare answer read for the branch update check (at most 300 files, each with a patch). */
+internal const val COMPARE_FILES_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
 /** Builds the HTTP client with timeouts. Tests pass a MockEngine here. */
 fun githubHttpClient(engine: HttpClientEngine, config: GitHubAdapterConfig = GitHubAdapterConfig()): HttpClient =
     HttpClient(engine) {
@@ -874,6 +877,30 @@ class HttpGitHubAdapter(
         if (prim.isString || !compareCountLiteral.matches(prim.content)) return protocol("compare.$field")
         val count = prim.content.toIntOrNull() ?: return protocol("compare.$field")
         return GitHubResult.Success(count)
+    }
+
+    override suspend fun getCompareFiles(repo: RepoRef, base: String, head: String): GitHubResult<List<ComparedFile>> {
+        if (!sha40.matches(base) || !sha40.matches(head)) return validation("compare")
+        val raw = when (val g = get("${repoPath(repo)}/compare/$base...$head", maxBodyBytes = COMPARE_FILES_MAX_RESPONSE_BYTES)) {
+            is GitHubResult.Success -> g.value
+            is GitHubResult.Failure -> return g
+            is GitHubResult.Unknown -> return g
+        }
+        val o = parse(raw) as? JsonObject ?: return protocol("compare")
+        val arr = o["files"] as? JsonArray ?: return protocol("compare.files")
+        val out = ArrayList<ComparedFile>(arr.size)
+        for (el in arr) {
+            val f = el as? JsonObject ?: return protocol("compare.files[]")
+            val filename = f.str("filename") ?: return protocol("compare.files[].filename")
+            val status = f.str("status") ?: return protocol("compare.files[].status")
+            val patch = when (val p = f["patch"]) {
+                null, JsonNull -> null
+                is JsonPrimitive -> if (p.isString) p.content else return protocol("compare.files[].patch")
+                else -> return protocol("compare.files[].patch")
+            }
+            out += ComparedFile(filename, status, patch)
+        }
+        return GitHubResult.Success(out)
     }
 
     override suspend fun updatePrBranch(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<Unit> {

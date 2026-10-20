@@ -9,6 +9,7 @@ import net.kigawa.kivra.core.LeaseLostException
 import net.kigawa.kivra.core.PullRequestBinding
 import net.kigawa.kivra.core.VersionConflictException
 import net.kigawa.kivra.db.DevelopmentRun
+import net.kigawa.kivra.github.ComparedFile
 import net.kigawa.kivra.github.GitHubPort
 import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.PrBranchPort
@@ -45,8 +46,11 @@ data class PrRebaseSettings(
  *     (the compare API reports `ahead_by` 0 for `M...P`): `main` may have moved on since the update was made, and the update is still
  *     the same change.
  * (b) The pull request's own change set is the same before and after: the files that differ between `merge-base(O, P)` and `O` (path, mode
- *     and blob hash, sorted) equal the files that differ between `P` and `N`. A change set that differs, or that cannot be read in full,
- *     is refused. Because the change set is the same, the policy result is the same, so the policy is not run again.
+ *     and blob hash, sorted) equal the files that differ between `P` and `N`. If they differ, the changed lines of the pull request
+ *     are compared (second step, `sameChangedLines`): the same paths, statuses `added`/`modified`/`removed`, patches present and within a
+ *     size limit, the `+`/`-` lines equal in order, and the modes of the changed paths equal in `O` and `N`. Blobs and the context lines are
+ *     not compared, so a change to main's own lines around the pull request's lines passes. A change set or lines that differ, or that
+ *     cannot be read in full, is refused. The policy result is not run again.
  *
  * A refusal is never a failure: the run stays in PULL_REQUEST with a fixed reason code. Logs and audit rows carry the run id, the first 12
  * characters of heads, and fixed codes only: never a title, body, path, file content, or model output.
@@ -202,11 +206,62 @@ class PrBranchRebaser(
         val oldTree = treeOf(oldHead) ?: return VERIFY_FAILED
         val otherTree = treeOf(other) ?: return VERIFY_FAILED
         val newTree = treeOf(newHead) ?: return VERIFY_FAILED
-        // (b) The pull request's own change set is identical before and after.
+        // (b) The pull request's own change set is identical before and after (path, mode, blob). When the blobs differ only because main
+        // changed the same file, the changed lines are compared instead (see sameChangedLines).
         val before = changedFiles(baseTree, oldTree) ?: return VERIFY_FAILED
         val after = changedFiles(otherTree, newTree) ?: return VERIFY_FAILED
-        return if (before == after) null else DIFF_CHANGED
+        if (before == after) return null
+        return sameChangedLines(base, oldHead, other, newHead, oldTree, newTree)
     }
+
+    /**
+     * (b), second step: the changed lines of the pull request are the same before and after. Only called when the (path, mode, blob) sets
+     * differ. Every check below is a refusal with [DIFF_CHANGED], except a read that fails, which is [VERIFY_FAILED]:
+     * (i) the same paths; (ii) the same status per path, `added`, `modified` or `removed`; (iii) a patch for every path; (vii) the patches
+     * within [PATCH_BYTE_LIMIT] in total; (iv) for every path, the `+` and `-` lines of the patch (hunk headers and context lines left out,
+     * `\ No newline` lines kept) are equal in order; (vi) the mode of every changed path is the same in the old and the new tree.
+     */
+    private suspend fun sameChangedLines(
+        base: String,
+        oldHead: String,
+        other: String,
+        newHead: String,
+        oldTree: RepoTree,
+        newTree: RepoTree,
+    ): String? {
+        val before = compareFilesOf(base, oldHead) ?: return VERIFY_FAILED
+        val after = compareFilesOf(other, newHead) ?: return VERIFY_FAILED
+        if (before.size >= COMPARE_FILE_LIMIT || after.size >= COMPARE_FILE_LIMIT) return DIFF_CHANGED
+        val beforeByPath = before.associateBy { it.filename }
+        val afterByPath = after.associateBy { it.filename }
+        if (beforeByPath.size != before.size || afterByPath.size != after.size) return DIFF_CHANGED
+        if (beforeByPath.keys != afterByPath.keys) return DIFF_CHANGED
+        var bytes = 0L
+        for ((path, b) in beforeByPath) {
+            val a = afterByPath.getValue(path)
+            if (b.status !in CHANGE_STATUSES || b.status != a.status) return DIFF_CHANGED
+            val bp = b.patch ?: return DIFF_CHANGED
+            val ap = a.patch ?: return DIFF_CHANGED
+            bytes += bp.toByteArray(Charsets.UTF_8).size + ap.toByteArray(Charsets.UTF_8).size
+            if (bytes > PATCH_BYTE_LIMIT) return DIFF_CHANGED
+        }
+        val oldModes = blobsOf(oldTree) ?: return VERIFY_FAILED
+        val newModes = blobsOf(newTree) ?: return VERIFY_FAILED
+        for ((path, b) in beforeByPath) {
+            val a = afterByPath.getValue(path)
+            if (changedLinesOf(b.patch.orEmpty()) != changedLinesOf(a.patch.orEmpty())) return DIFF_CHANGED
+            if (oldModes[path]?.first != newModes[path]?.first) return DIFF_CHANGED
+        }
+        return null
+    }
+
+    /** The compare answer of a commit pair, or null when it cannot be read. */
+    private suspend fun compareFilesOf(base: String, head: String): List<ComparedFile>? =
+        (port.getCompareFiles(repo, base, head) as? GitHubResult.Success)?.value
+
+    /** The `+` and `-` lines of a patch, in order, and the `\ No newline` markers. Hunk headers and context lines are not part of it. */
+    private fun changedLinesOf(patch: String): List<String> =
+        patch.split('\n').filter { it.startsWith('+') || it.startsWith('-') || it.startsWith(NO_NEWLINE_MARKER) }
 
     /**
      * A merged pull request whose head is not the recorded one (issue #276): the recorded head is moved to [pullRequest]'s head only when
@@ -295,6 +350,17 @@ class PrBranchRebaser(
 
         /** Pairs kept by the overlap cache. A pull request's head and the base head change about once a minute at most. */
         const val OVERLAP_CACHE_SIZE = 16
+
+        /** The compare API lists at most this many files; a list this long may be cut, so it is refused. */
+        const val COMPARE_FILE_LIMIT = 300
+
+        /** Total size of the patches compared by the second step of (b). */
+        const val PATCH_BYTE_LIMIT = 256L * 1024
+
+        const val NO_NEWLINE_MARKER = "\\ No newline at end of file"
+
+        /** The statuses whose changed lines can be compared. A rename, copy or type change is refused. */
+        val CHANGE_STATUSES = setOf("added", "modified", "removed")
 
         const val VERIFIED = "PR_REBASE_VERIFIED"
         const val OVERLAPPING_PATHS = "PR_REBASE_OVERLAPPING_PATHS"

@@ -208,4 +208,68 @@ class PrBranchPortTest {
         assertEquals(PB_OTHER, entry.sha)
         assertEquals("100644", entry.mode)
     }
+
+    @Test
+    fun `the compare files are read in order with their status and patch, and a missing or null patch is null`() = runTest {
+        val body = """{"status":"diverged","files":[
+            {"filename":"docs/a.md","status":"modified","patch":"@@ -1 +1 @@\n-old\n+new\n"},
+            {"filename":"bin/x.png","status":"added"},
+            {"filename":"docs/b.md","status":"removed","patch":null}]}"""
+        val f = BranchRemote { respond(body, HttpStatusCode.OK, PB_JSON) }
+        val files = assertIs<GitHubResult.Success<List<ComparedFile>>>(f.adapter.getCompareFiles(PB_REPO, PB_BASE, PB_HEAD)).value
+        assertEquals(
+            listOf(
+                ComparedFile("docs/a.md", "modified", "@@ -1 +1 @@\n-old\n+new\n"),
+                ComparedFile("bin/x.png", "added", null),
+                ComparedFile("docs/b.md", "removed", null),
+            ),
+            files,
+        )
+        val req = f.requests.single()
+        assertEquals(HttpMethod.Get, req.method)
+        assertEquals("/repos/kigawa-net/kivra/compare/$PB_BASE...$PB_HEAD", req.url.encodedPath)
+    }
+
+    @Test
+    fun `an empty compare has no files`() = runTest {
+        val f = BranchRemote { respond("""{"status":"identical","files":[]}""", HttpStatusCode.OK, PB_JSON) }
+        assertEquals(emptyList(), assertIs<GitHubResult.Success<List<ComparedFile>>>(f.adapter.getCompareFiles(PB_REPO, PB_BASE, PB_HEAD)).value)
+    }
+
+    @Test
+    fun `a compare answer whose files or entries have a wrong shape is a protocol failure`() = runTest {
+        val shapes = listOf(
+            """{"status":"diverged"}""",
+            """{"status":"diverged","files":{"filename":"a","status":"added"}}""",
+            """{"status":"diverged","files":["a"]}""",
+            """{"status":"diverged","files":[{"status":"added"}]}""",
+            """{"status":"diverged","files":[{"filename":"a"}]}""",
+            """{"status":"diverged","files":[{"filename":5,"status":"added"}]}""",
+            """{"status":"diverged","files":[{"filename":"a","status":"added","patch":5}]}""",
+            """{"status":"diverged","files":[{"filename":"a","status":"added","patch":true}]}""",
+            """{"status":"diverged","files":[{"filename":"a","status":"added","patch":["+x"]}]}""",
+            """{"status":"diverged","files":[{"filename":"a","status":"added","patch":{"x":1}}]}""",
+            "not json",
+        )
+        for (body in shapes) {
+            val f = BranchRemote { respond(body, HttpStatusCode.OK, PB_JSON) }
+            val result = f.adapter.getCompareFiles(PB_REPO, PB_BASE, PB_HEAD)
+            assertEquals(GitHubFailureKind.PROTOCOL, assertIs<GitHubResult.Failure>(result).kind, body)
+        }
+    }
+
+    @Test
+    fun `a compare of commit ids that are not 40-hex is refused before any request`() = runTest {
+        val f = BranchRemote { respond("""{"files":[]}""", HttpStatusCode.OK, PB_JSON) }
+        assertIs<GitHubResult.Failure>(f.adapter.getCompareFiles(PB_REPO, "main", PB_HEAD))
+        assertIs<GitHubResult.Failure>(f.adapter.getCompareFiles(PB_REPO, PB_BASE, "$PB_HEAD\n"))
+        assertIs<GitHubResult.Failure>(f.adapter.getCompareFiles(PB_REPO, PB_BASE, PB_HEAD.uppercase()))
+        assertEquals(0, f.requests.size)
+    }
+
+    @Test
+    fun `a compare that GitHub refuses is a failure with its kind`() = runTest {
+        val f = BranchRemote { respond("""{"message":"Not Found"}""", HttpStatusCode.NotFound, PB_JSON) }
+        assertEquals(GitHubFailureKind.NOT_FOUND, assertIs<GitHubResult.Failure>(f.adapter.getCompareFiles(PB_REPO, PB_BASE, PB_HEAD)).kind)
+    }
 }

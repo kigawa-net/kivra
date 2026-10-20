@@ -1,5 +1,6 @@
 package net.kigawa.kivra.selfdev
 
+import net.kigawa.kivra.github.ComparedFile
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.PrBranchPort
@@ -127,6 +128,22 @@ class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjec
         totalCalls++
         aheadResult?.let { return it }
         return git.aheadCount(baseSha, headSha)?.let { GitHubResult.Success(it) } ?: notFound()
+    }
+
+    /** The compare answer per (base, head) commit pair. A pair that is not registered is not found. */
+    val compareFiles = HashMap<Pair<String, String>, List<ComparedFile>>()
+
+    /** When set, every compare-files read fails with this kind. */
+    var compareFilesFailure: GitHubFailureKind? = null
+
+    var compareFilesCalls = 0
+        private set
+
+    override suspend fun getCompareFiles(repo: RepoRef, base: String, head: String): GitHubResult<List<ComparedFile>> {
+        totalCalls++
+        compareFilesCalls++
+        compareFilesFailure?.let { return GitHubResult.Failure(it, it.code) }
+        return compareFiles[base to head]?.let { GitHubResult.Success(it) } ?: notFound()
     }
 
     override suspend fun updatePrBranch(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<Unit> {

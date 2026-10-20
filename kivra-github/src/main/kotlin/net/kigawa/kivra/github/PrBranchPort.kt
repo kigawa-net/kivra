@@ -35,6 +35,14 @@ interface PrBranchPort {
      */
     suspend fun updatePrBranch(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<Unit>
 
+    /**
+     * Read-only. The changed files of `GET /compare/{base}...{head}` (both 40-hex commit ids), in the order GitHub lists them. [ComparedFile.patch]
+     * is null when GitHub sent no patch (a binary or a very large diff). A response whose `files` is not an array, whose entries lack a
+     * string `filename` or `status`, or whose `patch` is neither a string nor absent, is a protocol failure. A response over the size limit is
+     * [GitHubFailureKind.TOO_LARGE].
+     */
+    suspend fun getCompareFiles(repo: RepoRef, base: String, head: String): GitHubResult<List<ComparedFile>>
+
     /** Read-only. The parents of [sha] (a 40-hex commit id), in git order. */
     suspend fun getCommitParents(repo: RepoRef, sha: String): GitHubResult<List<String>>
 
@@ -50,3 +58,6 @@ interface PrBranchPort {
  * and false on a conflict. [mergeableState] is null when the response does not carry it.
  */
 data class PrRebaseView(val pullRequest: PullRequest, val mergeableState: String?, val mergeable: Boolean?)
+
+/** One changed file of a compare answer: its path, its status as GitHub names it (for example `modified`), and its patch when sent. */
+data class ComparedFile(val filename: String, val status: String, val patch: String?)

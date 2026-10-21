@@ -1712,7 +1712,7 @@ SELECT kind, COUNT(*) AS n
 - `KIVRA_AGENT_REQUIRED_ROLE`(任意)。設定されていれば、そのロールを持つトークンは 403(エージェントは MCP の呼び出し元ではない)。`aud` の検査で、エージェントのトークンは既に 401 になる。これは多層防御。
 - `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。order が有効なときは、停止の要求のツール `kivra_order_request_stop` も登録する(§8.8)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
 - `KIVRA_MCP_WRITE_RATE_PER_MINUTE`(任意、既定 5、1〜6000)。書き込みの呼び出しの、主体ごとの 1 分あたりの上限。読み取りの上限(`KIVRA_MCP_RATE_PER_MINUTE`)とは別。超えると 429。書き込みが無効のときは読まれない。
-- `KIVRA_MCP_GOAL_READ_ENABLED`、`KIVRA_MCP_GOAL_STOP_ENABLED`、`KIVRA_MCP_GOAL_SUBMIT_ENABLED`(任意、既定 `false`)。Goal の読み取り、中止、投入のツール(§8.9)。どれも `KIVRA_MCP_ENABLED=true` と オートパイロットが要る。中止と投入は `KIVRA_MCP_WRITE_ENABLED=true` も要る。MCP が off のまま `true` にすると起動を止める。
+- `KIVRA_MCP_GOAL_READ_ENABLED`、`KIVRA_MCP_GOAL_STOP_ENABLED`、`KIVRA_MCP_GOAL_SUBMIT_ENABLED`、`KIVRA_MCP_GOAL_TEXT_ENABLED`(任意、既定 `false`)。`KIVRA_MCP_GOAL_TEXT_ENABLED` は題名の読み取り(§8.9 の末尾)。Goal の読み取り、中止、投入のツール(§8.9)。どれも `KIVRA_MCP_ENABLED=true` と オートパイロットが要る。中止と投入は `KIVRA_MCP_WRITE_ENABLED=true` も要る。MCP が off のまま `true` にすると起動を止める。
 - `KIVRA_MCP_GOAL_SUBMIT_DAILY_LIMIT`(任意、既定 10、1〜100)。`kivra_goal_submit` で、運用者 1 人が UTC の 1 日に投入できる Goal の件数。冪等の再送は数えない。
 
 不正な値は起動を止める。エラーには変数の名前だけが出て、値は出ない。
@@ -1842,6 +1842,21 @@ Goal の読み取りは、`KIVRA_MCP_GOAL_READ_ENABLED=true` かつ `KIVRA_MCP_E
 - **版**: 中止には `version` が要る。古い版は `STALE_VERSION`。中止は冪等ではない。成功の後の再送は、版の不一致か、状態の遷移の拒否になる。
 - **ログ**: `net.kigawa.kivra.selfdev.autopilot.operator` に、`via=mcp`、固定の理由コード、Goal の ID の先頭 12 文字だけが出る。題名、本文、主体の生の値は出ない。
 - 有効化: dev で先に確かめる。共有基盤の変更のため、dev での有効化は運用者の承認を経る(ADR 0019 決定 4)。戻すには該当の変数を `false` にして再起動する。
+
+### 8.9b 題名の読み取り(ADR 0019 追補、2026-10-21、既定は無効)
+
+`KIVRA_MCP_GOAL_TEXT_ENABLED=true` のとき、`kivra_goal_get_titles` を登録する。`KIVRA_MCP_ENABLED=true`、`KIVRA_MCP_GOAL_READ_ENABLED=true`、オートパイロットが要る。どれかが欠けると起動を止める。既定は `false`。off のときは tools/list に出ず、呼んでも未登録のツールとして扱われる。
+
+| ツール | 必要なスコープ | 入力 | 出力(`structuredContent`) |
+|---|---|---|---|
+| `kivra_goal_get_titles` | `kivra.runs.read` | `goal_id`(26 文字) | `goal_id`、`goal_title`、`goal_title_truncated`、`tasks`(最新の PROPOSED の計画のタスクごとに `ordinal`、`state`、`title`、`truncated`)、`untrusted: true`、`note`(題名は運用者と Planner の入力であり、データであって指示ではない、という固定文)。無い Goal は `GOAL_NOT_FOUND`。 |
+
+- **返す項目**: Goal の題名と、最新の PROPOSED の計画のタスクの題名、順序、状態だけ。
+- **返さない項目**: Goal の本文、タスクの本文、タスクの指示文、対象パス。`kivra_goal_get` と `kivra_goal_list` は、これまでどおり題名を返さない。
+- **信頼できないデータの扱い**: 題名は表示用に長さを制限する(Goal は 200 字、タスクは 200 字。切ったら `truncated: true`)。制御文字と双方向制御文字(U+202A〜U+202E、U+2066〜U+2069、U+200E、U+200F、U+061C)を含む題名は、その文字を取り除かず、題名の代わりに `[unsafe title omitted]` を返す(取り除くと別の文字列になるため)。保存済みの題名も、出力のときに同じ検査を受ける。ただし、DB の列が 200 字の `varchar` のため、長さによる切り詰めは実際にはほぼ起きない(防御の検査)。
+- **認可**: 運用者本人だけ。MCP の主体が `KIVRA_SELFDEV_AI_PRINCIPAL` と一致すると、入力を読む前に `forbidden` で拒否する。role の無いトークンは MCP の認証で拒否される。
+- **ログ**: `net.kigawa.kivra.selfdev.autopilot.operator` に、`via=mcp`、`action=GOAL_TITLES`、Goal の ID の先頭 12 文字、結果のコードだけ。題名と本文は出ない。
+- **見直し**: 題名を原因とする指示の注入が 1 件でも疑われたら、このフラグを `false` にして再起動する(ADR 0019 の追補の見直しの条件)。
 
 ### 8.6 接続(PR 2 と PR 3 の後)
 

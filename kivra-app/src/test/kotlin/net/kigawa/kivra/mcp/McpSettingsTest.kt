@@ -15,7 +15,7 @@ class McpSettingsTest {
     private class TrapEnv(private val base: Map<String, String>) : Map<String, String> by base {
         override fun get(key: String): String? {
             val allowedWhileOff = setOf(
-                McpSettings.ENV_ENABLED, McpSettings.ENV_WRITE_ENABLED, McpSettings.ENV_GOAL_READ_ENABLED, McpSettings.ENV_GOAL_STOP_ENABLED, McpSettings.ENV_GOAL_SUBMIT_ENABLED,
+                McpSettings.ENV_ENABLED, McpSettings.ENV_WRITE_ENABLED, McpSettings.ENV_GOAL_READ_ENABLED, McpSettings.ENV_GOAL_STOP_ENABLED, McpSettings.ENV_GOAL_SUBMIT_ENABLED, McpSettings.ENV_GOAL_TEXT_ENABLED,
             )
             if ((key.startsWith("KIVRA_MCP_") || key == McpSettings.ENV_AGENT_ROLE) && key !in allowedWhileOff) {
                 throw AssertionError("an MCP variable was read while the endpoint is off")
@@ -142,5 +142,15 @@ class McpSettingsTest {
         }
         // The write rate is read only when the write tool is on.
         McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_WRITE_RATE_PER_MINUTE to "0"))
+    }
+
+    @Test
+    fun `the goal title switch defaults to off, and needs the endpoint and the goal read switch`() {
+        assertFalse(McpSettings.fromEnv(enabledEnv).goalTextEnabled)
+        val on = McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_GOAL_READ_ENABLED to "true") + (McpSettings.ENV_GOAL_TEXT_ENABLED to "true"))
+        assertTrue(on.goalTextEnabled)
+        assertFailsWith<IllegalStateException> { McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_GOAL_TEXT_ENABLED to "true")) }
+        assertFailsWith<IllegalStateException> { McpSettings.fromEnv(mapOf(McpSettings.ENV_GOAL_TEXT_ENABLED to "true")) }
+        assertFailsWith<IllegalStateException> { McpSettings.fromEnv(enabledEnv + (McpSettings.ENV_GOAL_TEXT_ENABLED to "yes")) }
     }
 }

@@ -815,6 +815,33 @@ test('a stop dialog cancelled and opened again sends the request once (the liste
   assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 1, 'one request after reopening');
 });
 
+test('while a stop is in flight the send and cancel buttons are disabled, and they are enabled again after the answer', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 4 });
+  const s = apState({ goals: [goal], detail: detailOf(goal, [taskOf({ version: 0 })]) });
+  s.other = (p, init) => (p === '/api/selfdev/goals/' + G1 + '/stop' && init.method === 'POST'
+    ? gate.then(() => ({ status: 200, data: goalSummary({ state: 'STOPPED', version: 5 }) }))
+    : null);
+  const dom = load(apResponder(s));
+  await flush();
+  buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(dom.byId('plans-list'), '中止…').fire('click');
+  dom.byId('stop-reason').value = 'もう要らない';
+  dom.byId('stop-reason').fire('input');
+  dom.byId('stop-submit').fire('click');
+  dom.byId('stop-submit').fire('click');
+  await flush();
+  assert.equal(dom.byId('stop-submit').disabled, true, 'disabled while the stop is in flight');
+  assert.equal(dom.byId('stop-cancel').disabled, true, 'cancel is disabled while the stop is in flight');
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 1, 'a second click sends nothing');
+  release();
+  await flush();
+  assert.equal(dom.byId('stop-submit').disabled, false, 'submit is enabled again after the answer');
+  assert.equal(dom.byId('stop-cancel').disabled, false, 'cancel is enabled again after the answer');
+});
+
 test('pause and resume post an empty JSON object; the breaker button shows only while the breaker is open', async () => {
   const s = apState();
   s.autopilotStatus = { ...AP_STATUS, breakerOpen: true, consecutiveFailures: 3 };

@@ -45,6 +45,11 @@ class El {
   setAttribute(n, v) { this.attrs[n] = String(v); }
   getAttribute(n) { return this.attrs[n] === undefined ? null : this.attrs[n]; }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
+  removeEventListener(type, fn) {
+    const list = this.listeners[type] || [];
+    const i = list.indexOf(fn);
+    if (i !== -1) list.splice(i, 1);
+  }
   fire(type, ev) { (this.listeners[type] || []).forEach((fn) => fn(ev || { preventDefault() {} })); }
   focus() { this.focused = true; }
   showModal() { this.open = true; }
@@ -523,6 +528,28 @@ test('while a release is in flight the send and cancel buttons are disabled (no 
   await flush();
 });
 
+test('a release dialog cancelled and opened again sends the request once (the listeners of the first opening are removed)', async () => {
+  const dom = await openDetail(selfRun('UNKNOWN'), (p) => {
+    if (p === '/api/admin/selfdev/runs/' + SELF_RUN_ID + '/release') {
+      return { status: 200, data: { runId: SELF_RUN_ID, state: 'CANCELLED', reasonCode: 'OPERATOR_RELEASED' } };
+    }
+    return null;
+  });
+  findButton(dom, '運用者の解放…').fire('click');
+  dom.byId('release-reason').value = 'やめる';
+  dom.byId('release-reason').fire('input');
+  dom.byId('release-cancel').fire('click');
+  dom.byId('release-dialog').fire('close'); // a browser fires close on cancel; the stub's close() does not
+  assert.equal(postsTo(dom.calls, '/api/admin/selfdev/runs/' + SELF_RUN_ID + '/release').length, 0, 'cancel sends nothing');
+
+  findButton(dom, '運用者の解放…').fire('click');
+  dom.byId('release-reason').value = '確認した';
+  dom.byId('release-reason').fire('input');
+  dom.byId('release-submit').fire('click');
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/admin/selfdev/runs/' + SELF_RUN_ID + '/release').length, 1, 'one request after reopening');
+});
+
 test('the page is still usable with the self-development kind chosen after a release reload', async () => {
   // Sanity: the kind radios and key logic are untouched by the detail view.
   const dom = load(defaults(true));
@@ -761,6 +788,31 @@ test('stop asks for a reason in a dialog; an empty reason is not sent; the reque
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].body, { version: 4, reason: 'もう要らない' });
   assert.equal(dom.byId('stop-dialog').open, false);
+});
+
+test('a stop dialog cancelled and opened again sends the request once (the listeners of the first opening are removed)', async () => {
+  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 4 });
+  const s = apState({ goals: [goal], detail: detailOf(goal, [taskOf({ version: 0 })]) });
+  s.other = (p, init) => (p === '/api/selfdev/goals/' + G1 + '/stop' && init.method === 'POST'
+    ? { status: 200, data: goalSummary({ state: 'STOPPED', version: 5 }) }
+    : null);
+  const dom = load(apResponder(s));
+  await flush();
+  buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(dom.byId('plans-list'), '中止…').fire('click');
+  dom.byId('stop-reason').value = 'やめる';
+  dom.byId('stop-reason').fire('input');
+  dom.byId('stop-cancel').fire('click');
+  dom.byId('stop-dialog').fire('close'); // a browser fires close on cancel; the stub's close() does not
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 0, 'cancel sends nothing');
+
+  buttonIn(dom.byId('plans-list'), '中止…').fire('click');
+  dom.byId('stop-reason').value = 'もう要らない';
+  dom.byId('stop-reason').fire('input');
+  dom.byId('stop-submit').fire('click');
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 1, 'one request after reopening');
 });
 
 test('pause and resume post an empty JSON object; the breaker button shows only while the breaker is open', async () => {

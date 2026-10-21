@@ -523,7 +523,30 @@ test('while a release is in flight the send and cancel buttons are disabled (no 
   await flush();
 });
 
-test('the page is still usable with the self-development kind chosen after a release reload', async () => {
+test('a reopened release dialog sends once: the closed dialog gives up its listeners', async () => {
+  const dom = await openDetail(selfRun('UNKNOWN'), (p) => {
+    if (p === '/api/admin/selfdev/runs/' + SELF_RUN_ID + '/release') {
+      return { status: 200, data: { runId: SELF_RUN_ID, state: 'CANCELLED', reasonCode: 'OPERATOR_RELEASED' } };
+    }
+    return null;
+  });
+  findButton(dom, '運用者の解放…').fire('click');
+  dom.byId('release-reason').value = 'first try';
+  dom.byId('release-reason').fire('input');
+  dom.byId('release-cancel').fire('click');
+  // A browser fires 'close' when the dialog closes; the stub only sets open to false, so the event is fired here.
+  dom.byId('release-dialog').fire('close');
+  assert.equal(dom.byId('release-dialog').open, false, 'dialog closed');
+
+  findButton(dom, '運用者の解放…').fire('click');
+  dom.byId('release-reason').value = 'reason';
+  dom.byId('release-reason').fire('input');
+  dom.byId('release-submit').fire('click');
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/admin/selfdev/runs/' + SELF_RUN_ID + '/release').length, 1, 'one request after reopening');
+});
+
+test('the page is still usable with the self-development kind chosen after a release reload',async () => {
   // Sanity: the kind radios and key logic are untouched by the detail view.
   const dom = load(defaults(true));
   await flush();

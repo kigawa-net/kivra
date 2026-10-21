@@ -38,6 +38,7 @@ fun buildMcpRouteDeps(
                 settings.goalReadEnabled,
                 settings.writeEnabled && settings.goalStopEnabled,
                 settings.writeEnabled && settings.goalSubmitEnabled,
+                settings.goalTextEnabled,
             )
         } ?: emptyList())
     return McpRouteDeps(

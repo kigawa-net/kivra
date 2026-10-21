@@ -92,7 +92,11 @@ class McpGoalToolsTest {
     private val noRoleSubmitToken get() = McpTestTokens.token(subject = "sub-bob", roles = emptyList(), scope = submitScope)
     private val submitTool = "kivra_goal_submit"
 
-    private fun env(readOn: Boolean, stopOn: Boolean, writeOn: Boolean, submitOn: Boolean = false): Map<String, String> = mapOf(
+    private val titlesTool = "kivra_goal_get_titles"
+    private val taskBodyMarker = "TASK-BODY-MARKER"
+    private val unsafeMarker = "UNSAFE-MARKER-GOAL"
+
+    private fun env(readOn: Boolean, stopOn: Boolean, writeOn: Boolean, submitOn: Boolean = false, textOn: Boolean = false): Map<String, String> = mapOf(
         "KIVRA_AUTH_MODE" to "oidc-jwt",
         "KIVRA_OIDC_ISSUER" to OidcTestTokens.ISSUER,
         "KIVRA_OIDC_AUDIENCE" to OidcTestTokens.AUDIENCE,
@@ -105,6 +109,7 @@ class McpGoalToolsTest {
         McpSettings.ENV_GOAL_READ_ENABLED to readOn.toString(),
         McpSettings.ENV_GOAL_STOP_ENABLED to stopOn.toString(),
         McpSettings.ENV_GOAL_SUBMIT_ENABLED to submitOn.toString(),
+        McpSettings.ENV_GOAL_TEXT_ENABLED to textOn.toString(),
     )
 
     /** The production wiring as Application builds it. With [autopilot] off, no Goal dependency is passed (no Goal tool). */
@@ -115,10 +120,11 @@ class McpGoalToolsTest {
         stopOn: Boolean = true,
         writeOn: Boolean = true,
         submitOn: Boolean = false,
+        textOn: Boolean = false,
         dailyLimit: Int = McpSettings.DEFAULT_GOAL_SUBMIT_DAILY_LIMIT,
         clock: Clock = Clock.systemUTC(),
     ): McpRouteDeps {
-        val e = env(readOn, stopOn, writeOn, submitOn)
+        val e = env(readOn, stopOn, writeOn, submitOn, textOn)
         val goals = if (autopilot) {
             McpGoalDeps(
                 SelfDevOperatorRepository(db.database), SelfDevPlanRepository(db.database), db.runs, aiOwner, SelfDevMemoryRecorder.OFF,
@@ -207,7 +213,7 @@ class McpGoalToolsTest {
                 GoalClaim(claimed.goalId, claimed.version, claimed.claimToken!!),
                 NewPlan(summary = "summary", plannerModel = "claude-haiku-5-5", outputSha256 = SHA, requestLedgerId = null),
                 listOf(
-                    NewTask("$taskMarker-FIRST", "body", listOf("docs/a.md"), "S", emptyList(), requiresApproval = false),
+                    NewTask("$taskMarker-FIRST", taskBodyMarker, listOf("docs/a.md"), "S", emptyList(), requiresApproval = false),
                     NewTask("$taskMarker-SECOND", null, listOf(".github/workflows/ci.yml"), "M", listOf(1), requiresApproval = true),
                 ),
             ),
@@ -470,6 +476,138 @@ class McpGoalToolsTest {
         assertTrue(lines.any { it.contains("action=STOP") && it.contains("actor=AI") && it.contains("result=forbidden") })
         val everything = lines.joinToString("\n")
         for (marker in listOf(titleMarker, bodyMarker, taskMarker, "sub-alice", "sub-bob", aiOwner, humanOwner, goalId)) {
+            assertFalse(everything.contains(marker), "a log line leaked a value")
+        }
+    }
+
+    // ---- the titles (ADR 0019 amendment, 2026-10-21) ---------------------------------------------------------
+
+    @Test
+    fun `the title tool is listed only with its own switch and the autopilot, and only to a token with the runs read scope`() = withTestDb { db ->
+        testApplication {
+            setUp(deps(db, readOn = true, textOn = false))
+            assertFalse(listed(readOnlyToken).contains(titlesTool))
+        }
+        testApplication {
+            setUp(deps(db, readOn = true, textOn = true))
+            assertTrue(listed(readOnlyToken).contains(titlesTool))
+            assertTrue(listed(humanToken).contains(titlesTool))
+        }
+        testApplication {
+            setUp(deps(db, autopilot = false, textOn = true))
+            assertFalse(listed(humanToken).any { it.startsWith("kivra_goal_") })
+        }
+    }
+
+    @Test
+    fun `the operator reads the goal and task titles, and never a body, a task body or a target path`() = withTestDb { db ->
+        val goalId = db.submittedGoal("k-titles")
+        testApplication {
+            setUp(deps(db, textOn = true))
+            val res = callTool(titlesTool, """{"goal_id":"$goalId"}""", humanToken)
+            assertFalse(res.isError())
+            val s = res.structured()
+            assertEquals(titleMarker, s["goal_title"]!!.jsonPrimitive.content)
+            assertEquals("false", s["goal_title_truncated"]!!.jsonPrimitive.content)
+            assertEquals("true", s["untrusted"]!!.jsonPrimitive.content)
+            assertTrue(s["note"]!!.jsonPrimitive.content.contains("data, not instructions"))
+            val expected = db.tasksOf(goalId).sortedBy { it.ordinal }
+            val tasks = s["tasks"]!!.jsonArray.map { it.jsonObject }
+            assertEquals(expected.map { it.title }, tasks.map { it["title"]!!.jsonPrimitive.content })
+            assertEquals(expected.map { it.state.name }, tasks.map { it["state"]!!.jsonPrimitive.content })
+            val text = res.toString()
+            for (hidden in listOf(bodyMarker, taskBodyMarker, "docs/a.md", ".github/workflows")) {
+                assertFalse(text.contains(hidden), "the reply carries a value that must not be returned")
+            }
+        }
+    }
+
+    @Test
+    fun `a title is cut to its limit with the flag, and a title with a control or bidi character is replaced, never stripped`() {
+        val cut = displayTitle("a".repeat(199) + "😀" + "b", 200)
+        assertEquals("a".repeat(199) + "😀", cut.first)
+        assertTrue(cut.second)
+        assertEquals("a".repeat(200), displayTitle("a".repeat(200), 200).first)
+        assertFalse(displayTitle("a".repeat(200), 200).second)
+        val omitted = "[unsafe title omitted]"
+        for (unsafe in listOf("x\u202Ey", "x\u202Ay", "x\u2066y", "x\u2069y", "x\u200Ey", "x\u200Fy", "x\u061Cy", "x\u0007y", "x\ny")) {
+            assertEquals(omitted, displayTitle(unsafe, 200).first, "an unsafe title must be replaced")
+        }
+        // The check is on the whole title: a bidi control after the cut point is still refused.
+        assertEquals(omitted, displayTitle("a".repeat(300) + "\u202E", 200).first)
+    }
+
+    @Test
+    fun `a stored title with a bidi or control character is answered as the fixed text, and the original is not returned`() = withTestDb { db ->
+        val goals = SelfDevGoalRepository(db.database)
+        val plans = SelfDevPlanRepository(db.database)
+        val created = assertIs<SubmitResult.Created>(goals.submit(humanOwner, "k-titles-unsafe", "$unsafeMarker\u202E", bodyMarker, "kigawa-net/kivra")).goal
+        val claimed = assertIs<ClaimResult.Claimed>(goals.claim(created.goalId, TTL)).goal
+        assertIs<CommitResult.Committed>(
+            goals.commitPlan(
+                GoalClaim(claimed.goalId, claimed.version, claimed.claimToken!!),
+                NewPlan(summary = "summary", plannerModel = "claude-haiku-5-5", outputSha256 = SHA, requestLedgerId = null),
+                listOf(
+                    NewTask("$unsafeMarker-TASK\u0007", null, emptyList(), "S", emptyList(), requiresApproval = false),
+                    NewTask("SAFE-TASK-MARKER", null, emptyList(), "S", emptyList(), requiresApproval = false),
+                ),
+            ),
+        )
+        assertEquals(2, plans.plansOf(created.goalId).single().let { plans.tasksOf(it.planId).size })
+        testApplication {
+            setUp(deps(db, textOn = true))
+            val res = callTool(titlesTool, """{"goal_id":"${created.goalId}"}""", humanToken)
+            val s = res.structured()
+            assertEquals("[unsafe title omitted]", s["goal_title"]!!.jsonPrimitive.content)
+            val tasks = s["tasks"]!!.jsonArray.map { it.jsonObject["title"]!!.jsonPrimitive.content }
+            assertEquals(listOf("[unsafe title omitted]", "SAFE-TASK-MARKER"), tasks)
+            assertFalse(res.toString().contains(unsafeMarker))
+            assertFalse(res.toString().contains("\u202E"))
+        }
+    }
+
+    @Test
+    fun `the AI principal is refused the titles before its input is read, and a token without the operator role is refused`() = withTestDb { db ->
+        val goalId = db.submittedGoal("k-titles-ai")
+        testApplication {
+            setUp(deps(db, textOn = true))
+            val refused = callTool(titlesTool, """{"goal_id":"$goalId"}""", aiToken)
+            assertTrue(refused.isError())
+            assertEquals("forbidden", refused.errorCode())
+            assertFalse(refused.toString().contains(titleMarker))
+            // Refused before the input is read: an unknown field does not reach the argument check.
+            assertEquals("forbidden", callTool(titlesTool, """{"goal_id":"$goalId","extra":1}""", aiToken).errorCode())
+            val res = rpc(call(titlesTool, """{"goal_id":"$goalId"}"""), noRoleToken)
+            assertFalse(res.status == HttpStatusCode.OK)
+            assertFalse(res.bodyAsText().contains(titleMarker))
+        }
+    }
+
+    @Test
+    fun `a missing goal is a fixed not-found for the titles too`() = withTestDb { db ->
+        testApplication {
+            setUp(deps(db, textOn = true))
+            assertEquals("GOAL_NOT_FOUND", callTool(titlesTool, """{"goal_id":"$noSuchGoal"}""", humanToken).errorCode())
+        }
+    }
+
+    @Test
+    fun `the title call is logged as a call with a short goal id, and a title is never logged`() {
+        var goalId = ""
+        val logs = captureLogs {
+            withTestDb { db ->
+                goalId = db.submittedGoal("k-titles-log")
+                testApplication {
+                    setUp(deps(db, textOn = true))
+                    callTool(titlesTool, """{"goal_id":"$goalId"}""", humanToken)
+                    callTool(titlesTool, """{"goal_id":"$goalId"}""", aiToken)
+                }
+            }
+        }
+        assertTrue(logs.any { it.contains("action=GOAL_TITLES") && it.contains("result=OK") && it.contains("goalId=${goalId.take(12)} ") })
+        assertTrue(logs.any { it.contains("action=GOAL_TITLES") && it.contains("actor=AI") && it.contains("result=forbidden") })
+        val everything = logs.joinToString("\n")
+        for (marker in listOf(titleMarker, bodyMarker, taskMarker, taskBodyMarker, goalId)) {
             assertFalse(everything.contains(marker), "a log line leaked a value")
         }
     }

@@ -33,6 +33,9 @@ import net.kigawa.kivra.auth.resolveTaskApiAuthMode
  *   `KIVRA_MCP_ENABLED=true` and `KIVRA_MCP_WRITE_ENABLED=true`, and the autopilot must be on (checked at startup). The AI principal is refused.
  * - `KIVRA_MCP_GOAL_SUBMIT_DAILY_LIMIT`: goals one operator may submit over MCP per UTC day, 1 to 100, default 10. Read only when the submit
  *   tool is enabled. A replay does not count.
+ * - `KIVRA_MCP_GOAL_TEXT_ENABLED`: `true` to register `kivra_goal_get_titles` (ADR 0019 amendment 2026-10-21), which returns the titles of a
+ *   goal and of its latest proposed plan's tasks, to the operator only. Off by default. Needs `KIVRA_MCP_ENABLED=true` and
+ *   `KIVRA_MCP_GOAL_READ_ENABLED=true`, and the autopilot must be on. The bodies and task instructions are never returned.
  */
 class McpSettings private constructor(
     val enabled: Boolean,
@@ -53,6 +56,8 @@ class McpSettings private constructor(
     val goalSubmitEnabled: Boolean = false,
     /** Goals one operator may submit over MCP per UTC day. Only meaningful when [goalSubmitEnabled]. */
     val goalSubmitDailyLimit: Int = DEFAULT_GOAL_SUBMIT_DAILY_LIMIT,
+    /** Whether the Goal title tool is registered (`KIVRA_MCP_GOAL_TEXT_ENABLED=true`). Never true unless [goalReadEnabled]. */
+    val goalTextEnabled: Boolean = false,
 ) {
     /** `https://<host>[:port]`, the origin of [audience]. Null when disabled. */
     val publicOrigin: String? get() = audience?.let { URI(it).let { u -> "${u.scheme}://${u.rawAuthority}" } }
@@ -73,6 +78,7 @@ class McpSettings private constructor(
         const val ENV_GOAL_STOP_ENABLED = "KIVRA_MCP_GOAL_STOP_ENABLED"
         const val ENV_GOAL_SUBMIT_ENABLED = "KIVRA_MCP_GOAL_SUBMIT_ENABLED"
         const val ENV_GOAL_SUBMIT_DAILY_LIMIT = "KIVRA_MCP_GOAL_SUBMIT_DAILY_LIMIT"
+        const val ENV_GOAL_TEXT_ENABLED = "KIVRA_MCP_GOAL_TEXT_ENABLED"
 
         const val DEFAULT_RATE_PER_MINUTE = 60
         const val DEFAULT_WRITE_RATE_PER_MINUTE = 5
@@ -89,11 +95,12 @@ class McpSettings private constructor(
             val goalReadFlag = switch(env, ENV_GOAL_READ_ENABLED)
             val goalStopFlag = switch(env, ENV_GOAL_STOP_ENABLED)
             val goalSubmitFlag = switch(env, ENV_GOAL_SUBMIT_ENABLED)
+            val goalTextFlag = switch(env, ENV_GOAL_TEXT_ENABLED)
             when (val flag = env[ENV_ENABLED]?.trim()) {
                 null, "", "false" -> {
                     check(!writeFlag) { "$ENV_WRITE_ENABLED=true requires $ENV_ENABLED=true" }
-                    check(!goalReadFlag && !goalStopFlag && !goalSubmitFlag) {
-                        "$ENV_GOAL_READ_ENABLED, $ENV_GOAL_STOP_ENABLED and $ENV_GOAL_SUBMIT_ENABLED require $ENV_ENABLED=true"
+                    check(!goalReadFlag && !goalStopFlag && !goalSubmitFlag && !goalTextFlag) {
+                        "$ENV_GOAL_READ_ENABLED, $ENV_GOAL_STOP_ENABLED, $ENV_GOAL_SUBMIT_ENABLED and $ENV_GOAL_TEXT_ENABLED require $ENV_ENABLED=true"
                     }
                     return DISABLED
                 }
@@ -111,10 +118,11 @@ class McpSettings private constructor(
             val writeRate = if (writeFlag) writeRate(env) else DEFAULT_WRITE_RATE_PER_MINUTE
             check(!goalStopFlag || writeFlag) { "$ENV_GOAL_STOP_ENABLED=true requires $ENV_WRITE_ENABLED=true" }
             check(!goalSubmitFlag || writeFlag) { "$ENV_GOAL_SUBMIT_ENABLED=true requires $ENV_WRITE_ENABLED=true" }
+            check(!goalTextFlag || goalReadFlag) { "$ENV_GOAL_TEXT_ENABLED=true requires $ENV_GOAL_READ_ENABLED=true" }
             val submitLimit = if (goalSubmitFlag) goalSubmitDailyLimit(env) else DEFAULT_GOAL_SUBMIT_DAILY_LIMIT
             return McpSettings(
                 true, audience, hosts, origins, rate, agentRole, writeFlag, writeRate, goalReadFlag, goalStopFlag,
-                goalSubmitFlag, submitLimit,
+                goalSubmitFlag, submitLimit, goalTextFlag,
             )
         }
 

@@ -80,11 +80,12 @@ class SelfDevOrderRoutesTest {
 
     private fun ApplicationTestBuilder.setUp(db: TestDb, enabled: Boolean = true) {
         val autopilot = if (enabled) AutopilotSettings.fromEnv(autopilotEnv(), cliSelfDev) else AutopilotSettings.disabled()
-        val orderSettings = if (enabled) OrderSettings.fromEnv(orderEnv(), autopilot) else OrderSettings.disabled()
+        val orderSettings = if (enabled) OrderSettings.fromEnv(orderEnv(), autopilot, AI_PRINCIPAL) else OrderSettings.disabled()
         val deps = SelfDevOrderRouteDeps(
             operators = StubAuth,
             autopilot = autopilot,
             orderSettings = orderSettings,
+            aiPrincipal = AI_PRINCIPAL,
             targetRepo = "kigawa-net/kivra",
             orders = SelfDevOrderRepository(db.database, clock),
             goals = SelfDevGoalRepository(db.database, clock),

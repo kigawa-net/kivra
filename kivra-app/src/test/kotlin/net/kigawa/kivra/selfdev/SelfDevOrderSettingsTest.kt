@@ -17,9 +17,13 @@ class SelfDevOrderSettingsTest {
 
     @Test
     fun `off by default and reads no other variable`() {
-        assertFalse(OrderSettings.fromEnv(emptyMap(), AutopilotSettings.disabled()).enabled)
+        assertFalse(OrderSettings.fromEnv(emptyMap(), AutopilotSettings.disabled(), null).enabled)
         // A broken approver value is ignored while the switch is off: nothing beyond the switch is read.
-        val settings = OrderSettings.fromEnv(mapOf(OrderSettings.ENV_ENABLED to "false", OrderSettings.ENV_ROOT_APPROVER to "!!"), AutopilotSettings.disabled())
+        val settings = OrderSettings.fromEnv(
+            mapOf(OrderSettings.ENV_ENABLED to "false", OrderSettings.ENV_ROOT_APPROVER to "!!"),
+            AutopilotSettings.disabled(),
+            null,
+        )
         assertFalse(settings.enabled)
         assertNull(settings.rootApprover)
     }
@@ -27,7 +31,7 @@ class SelfDevOrderSettingsTest {
     @Test
     fun `a value other than true or false is a startup failure`() {
         assertFailsWith<IllegalStateException> {
-            OrderSettings.fromEnv(mapOf(OrderSettings.ENV_ENABLED to "yes"), enabledAutopilot)
+            OrderSettings.fromEnv(mapOf(OrderSettings.ENV_ENABLED to "yes"), enabledAutopilot, null)
         }
     }
 
@@ -37,22 +41,27 @@ class SelfDevOrderSettingsTest {
         val settings = OrderSettings.fromEnv(
             mapOf(OrderSettings.ENV_ENABLED to "yes", OrderSettings.ENV_ROOT_APPROVER to "!!"),
             AutopilotSettings.disabled(),
+            null,
         )
         assertFalse(settings.enabled)
         val trap = object : Map<String, String> by mapOf(OrderSettings.ENV_ENABLED to "true") {
             override fun get(key: String): String? = throw AssertionError("read $key while the autopilot is off")
         }
-        assertFalse(OrderSettings.fromEnv(trap, AutopilotSettings.disabled()).enabled)
+        assertFalse(OrderSettings.fromEnv(trap, AutopilotSettings.disabled(), null).enabled)
     }
 
     @Test
     fun `on needs a root approver, and the failure never shows a value`() {
         val e = assertFailsWith<IllegalStateException> {
-            OrderSettings.fromEnv(mapOf(OrderSettings.ENV_ENABLED to "true"), enabledAutopilot)
+            OrderSettings.fromEnv(mapOf(OrderSettings.ENV_ENABLED to "true"), enabledAutopilot, null)
         }
         assertTrue(e.message!!.contains(OrderSettings.ENV_ROOT_APPROVER))
         val bad = assertFailsWith<IllegalStateException> {
-            OrderSettings.fromEnv(mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to "kigawa-secret-subject"), enabledAutopilot)
+            OrderSettings.fromEnv(
+                mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to "kigawa-secret-subject"),
+                enabledAutopilot,
+                null,
+            )
         }
         assertFalse(bad.message!!.contains("kigawa-secret-subject"))
     }
@@ -61,8 +70,9 @@ class SelfDevOrderSettingsTest {
     fun `the AI principal must differ from the root approver`() {
         val e = assertFailsWith<IllegalStateException> {
             OrderSettings.fromEnv(
-                mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to approver, OrderSettings.ENV_AI_PRINCIPAL to approver),
+                mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to approver),
                 enabledAutopilot,
+                approver,
             )
         }
         assertFalse(e.message!!.contains(approver))
@@ -70,15 +80,56 @@ class SelfDevOrderSettingsTest {
 
     @Test
     fun `on with a valid approver is enabled, and the AI principal is optional`() {
-        val without = OrderSettings.fromEnv(mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to approver), enabledAutopilot)
+        val without = OrderSettings.fromEnv(
+            mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to approver),
+            enabledAutopilot,
+            null,
+        )
         assertTrue(without.enabled)
         assertEquals(approver, without.rootApprover)
-        assertNull(without.aiPrincipal)
         val with = OrderSettings.fromEnv(
-            mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to approver, OrderSettings.ENV_AI_PRINCIPAL to ai),
+            mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to approver),
             enabledAutopilot,
+            ai,
         )
-        assertEquals(ai, with.aiPrincipal)
+        assertTrue(with.enabled)
+    }
+
+    // The AI principal is read on its own, whatever the order switch says (#311).
+
+    @Test
+    fun `the AI principal is read while the orders are off, so the Goal refusals hold`() {
+        assertEquals(ai, aiPrincipalFromEnv(mapOf(OrderSettings.ENV_AI_PRINCIPAL to ai), enabledAutopilot))
+        assertEquals(ai, aiPrincipalFromEnv(mapOf(OrderSettings.ENV_AI_PRINCIPAL to " $ai "), enabledAutopilot))
+        assertEquals(
+            ai,
+            aiPrincipalFromEnv(mapOf(OrderSettings.ENV_ENABLED to "false", OrderSettings.ENV_AI_PRINCIPAL to ai), enabledAutopilot),
+        )
+    }
+
+    @Test
+    fun `with the autopilot off the AI principal is not read at all, as the orders are not`() {
+        val trap = object : Map<String, String> by mapOf(OrderSettings.ENV_AI_PRINCIPAL to "!!") {
+            override fun get(key: String): String? = throw AssertionError("read $key while the autopilot is off")
+        }
+        assertNull(aiPrincipalFromEnv(trap, AutopilotSettings.disabled()))
+    }
+
+    @Test
+    fun `an unset or blank AI principal is null, and nothing else is read for it`() {
+        assertNull(aiPrincipalFromEnv(emptyMap(), enabledAutopilot))
+        assertNull(aiPrincipalFromEnv(mapOf(OrderSettings.ENV_AI_PRINCIPAL to "   "), enabledAutopilot))
+    }
+
+    @Test
+    fun `a malformed AI principal is a startup failure even with the orders off, and the failure never shows the value`() {
+        for (bad in listOf("kigawa-secret-subject", "1:i", "1:i:", "1:i:ai\u0007")) {
+            val e = assertFailsWith<IllegalStateException> {
+                aiPrincipalFromEnv(mapOf(OrderSettings.ENV_ENABLED to "false", OrderSettings.ENV_AI_PRINCIPAL to bad), enabledAutopilot)
+            }
+            assertTrue(e.message!!.contains(OrderSettings.ENV_AI_PRINCIPAL))
+            assertFalse(e.message!!.contains("kigawa-secret-subject"))
+        }
     }
 
     private fun selfDev(): SelfDevSettings = SelfDevSettings.fromEnv(

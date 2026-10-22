@@ -71,6 +71,7 @@ import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
 import net.kigawa.kivra.selfdev.SelfDevSettings
+import net.kigawa.kivra.selfdev.aiPrincipalFromEnv
 import net.kigawa.kivra.selfdev.autopilotBudgetAllows
 import net.kigawa.kivra.selfdev.buildSelfDev
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
@@ -97,8 +98,11 @@ internal fun Application.appModule(env: Map<String, String>) {
     val autopilotSettings = AutopilotSettings.fromEnv(env, selfDevSettings)
     // Fail-closed: the self-development memory's switch is read only while the autopilot is on (ADR 0016 P1). A bad value fails the startup.
     val memorySettings = SelfDevMemorySettings.fromStartupEnv(env, autopilotSettings)
+    // The AI principal (ADR 0015 section 4.6) is read whatever the order switch says, so the Goal refusals hold with the orders off (#311).
+    // It is read only while the autopilot is on, as the orders are.
+    val aiPrincipal = aiPrincipalFromEnv(env, autopilotSettings)
     // Fail-closed: when the orders are off (the default), nothing beyond the switch is read and nothing is wired (ADR 0015 stage 1).
-    val orderSettings = OrderSettings.fromEnv(env, autopilotSettings)
+    val orderSettings = OrderSettings.fromEnv(env, autopilotSettings, aiPrincipal)
     // Fail-closed: when the MCP endpoint is off (the default), nothing beyond its switch is read and no /mcp route is registered (ADR 0013).
     val mcpSettings = McpSettings.fromEnv(env)
     val config = KivraConfig.from(environment.config)
@@ -167,7 +171,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             operations = SelfDevOperatorRepository(database),
             control = SelfDevAutopilotControlRepository(database),
             memory = memory,
-            aiPrincipal = orderSettings.aiPrincipal,
+            aiPrincipal = aiPrincipal,
         )
     }
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
@@ -176,6 +180,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             operators = operatorVerifier,
             autopilot = autopilotSettings,
             orderSettings = orderSettings,
+            aiPrincipal = aiPrincipal,
             targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
             orders = orderRepo,
             goals = SelfDevGoalRepository(database),
@@ -196,14 +201,14 @@ internal fun Application.appModule(env: Map<String, String>) {
         mcpSettings, env, runs, selfDevSettings.config?.repo,
         selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns,
         // The order tools serve only while the orders answer (the same condition as the REST routes' requireEnabled).
-        orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, orderSettings.aiPrincipal) },
+        orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, aiPrincipal) },
         // The Goal tools serve only while the autopilot answers (the same condition as the REST goal routes' requireEnabled).
         goals = autopilotSettings.config?.let {
             McpGoalDeps(
                 operations = SelfDevOperatorRepository(database),
                 plans = SelfDevPlanRepository(database),
                 runs = runs,
-                aiPrincipal = orderSettings.aiPrincipal,
+                aiPrincipal = aiPrincipal,
                 memory = memory,
                 // The Goal submission over MCP (ADR 0019 S2) needs the target repository, as the REST submission does.
                 submit = selfDevSettings.config?.repo?.let {

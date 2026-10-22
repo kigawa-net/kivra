@@ -25,6 +25,7 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
+import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -61,6 +62,20 @@ private val START: Instant = Instant.parse("2026-10-19T10:00:00Z")
  * owner-key rules are exercised here: the AI principal may only request a stop and read, and only the root approver approves.
  */
 class SelfDevOrderRoutesTest {
+
+    /**
+     * Every database of a test is closed after it. A MariaDB TestDb holds a Hikari pool (10 connections by default); a pool that is not
+     * closed keeps them, and the server's max_connections (151 in CI) runs out.
+     */
+    private val openDbs = mutableListOf<TestDb>()
+
+    private fun newDb(): TestDb = TestDb().also { openDbs += it }
+
+    @AfterTest
+    fun closeDbs() {
+        openDbs.forEach { it.close() }
+        openDbs.clear()
+    }
 
     private object StubAuth : OperatorAuthenticator {
         override suspend fun authenticate(headers: io.ktor.http.Headers): OperatorAuth = when {
@@ -131,7 +146,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `while the orders are off every endpoint answers 503 and nothing is read`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db, enabled = false)
         assertEquals(HttpStatusCode.ServiceUnavailable, send(HttpMethod.Get, "/api/selfdev/orders", null).status)
         assertEquals(HttpStatusCode.ServiceUnavailable, createRoot().status)
@@ -139,7 +154,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `no token is 401 and an agent token is 403`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         assertEquals(HttpStatusCode.Unauthorized, send(HttpMethod.Get, "/api/selfdev/orders", null, principal = null).status)
         assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Get, "/api/selfdev/orders", null, principal = null, headers = mapOf(AGENT_HEADER to "1")).status)
@@ -149,7 +164,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `the root is created once and a second one is refused`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         assertEquals(HttpStatusCode.Created, createRoot().status)
         assertEquals(HttpStatusCode.Conflict, createRoot().status)
@@ -157,7 +172,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `a blank title, a control character in the policy and an unknown body field are 400`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"  ","policy":"p"}""").status)
         assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/orders", "{\"title\":\"t\",\"policy\":\"a\u0007b\"}").status)
@@ -168,7 +183,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `the AI principal can read and request a stop, and cannot create, start, pause, resume, approve, reject or cancel`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         createRoot()
         val id = rootId()
@@ -192,7 +207,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `an operator who is not the root approver starts a cycle but cannot approve`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         createRoot()
         val id = rootId()
@@ -208,7 +223,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `the root approver approves an AI request with the digest it was shown, and the order stops`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         createRoot()
         val id = rootId()
@@ -229,7 +244,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `the requester cannot approve its own request, even as the root approver`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         createRoot()
         val id = rootId()
@@ -243,7 +258,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `an approval after 24 hours is refused, and the order is paused and not stopped`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         createRoot()
         val id = rootId()
@@ -259,7 +274,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `a rejection pauses the order, and a bad reason code is 400`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         createRoot()
         val id = rootId()
@@ -275,7 +290,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `an operator pauses and resumes with the version check`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         createRoot()
         val id = rootId()
@@ -295,7 +310,7 @@ class SelfDevOrderRoutesTest {
         logger.level = Level.DEBUG
         logger.addAppender(appender)
         try {
-            val db = TestDb()
+            val db = newDb()
             setUp(db)
             createRoot()
             val id = rootId()
@@ -340,7 +355,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `children are disabled by default, and the create answers 409 CHILDREN_DISABLED`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db)
         createRoot()
         val response = createChild(rootId())
@@ -350,7 +365,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `the operator creates a child, a replay answers 200 with the same child, and another content under the key is 409`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db, extraOrderEnv = depth2)
         createRoot()
         val id = rootId()
@@ -372,7 +387,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `the AI principal is refused with 403 before the body is read, and a parent that is not active is 409`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db, extraOrderEnv = depth2)
         createRoot()
         val id = rootId()
@@ -388,7 +403,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `a child's title, policy, key and budget are checked, and a bidi control in the policy is refused for the root too`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db, extraOrderEnv = depth2)
         createRoot()
         val id = rootId()
@@ -411,7 +426,7 @@ class SelfDevOrderRoutesTest {
 
     @Test
     fun `no route changes a child's parent`() = testApplication {
-        val db = TestDb()
+        val db = newDb()
         setUp(db, extraOrderEnv = depth2)
         createRoot()
         val id = rootId()

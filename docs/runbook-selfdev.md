@@ -376,6 +376,7 @@ ADR 0014 の第 1 の部品。`net.kigawa.kivra.selfdev.automerge` の `decideAu
   - C2 承認: 承認の種別が `AUTO_APPROVED`。運用者承認と、承認の無いタスクは拒否する。
   - C3 差分: ファイル数 1 から 3、`additions + deletions` が 200 以下、`status` は `added` か `modified`、パスは安全で対象内、mode は `100644`。
   - 対象: `kivra-*/src/test/kotlin/**/*.kt` のみ(U-1)。禁止領域(§2.1 の表)に当たるパスは、対象内でも拒否する。
+  - 禁止領域のテスト側(門番自身のテストを、自動承認の変更で弱められないように。`PATH_OUT_OF_SCOPE`): `kivra-*/src/test/kotlin/**/selfdev/automerge/**`、ファイル名に `PatchPolicy`、`AutoScope`、`PathRules`、`DiffCollector`、`DiffLimits` を含む `*.kt`、`*ArchitectureTest*.kt`、`*Invariant*Test*.kt`、`kivra-policy/src/test/**`、`kivra-github/src/test/**`、`kivra-core/src/test/kotlin/net/kigawa/kivra/core/**`、`kivra-*/src/test/kotlin/**/auth/**`、`kivra-app/src/test/kotlin/net/kigawa/kivra/selfdev/**`、`kivra-app/src/test/kotlin/net/kigawa/kivra/mcp/**`、`kivra-app/src/test/kotlin/net/kigawa/kivra/routes/**`。このため、対象に残るのは、これらに当たらないテストだけになる(例: `kivra-app/src/test/kotlin/net/kigawa/kivra/util/XTest.kt`)。
   - C4 head: PR の head、binding の head、本文の `kivra-head-sha:` マーカーが同じ SHA。
   - C5 チェック: 必須の名前(U-3。設定の値)がすべて、同じ head SHA で `completed` かつ `success`。欠けると拒否。`queued` と `in_progress` は保留し、60 分を超えたら拒否。
   - C6 マージ可能: `mergeable == true` かつ `mergeable_state == "clean"`。`mergeable` が null か、state が `unknown` なら保留。draft は拒否。

@@ -43,6 +43,24 @@ internal object AutoMergePaths {
         "kivra-*/src/test/resources/**",
         // git internals and dotfiles that carry configuration
         "**/.git*",
+        // The gate's own tests: an auto-approved change must not weaken the assertions that guard the gate (ADR 0014 section 2.1, applied to tests).
+        "kivra-*/src/test/kotlin/**/selfdev/automerge/**",
+        "kivra-*/src/test/kotlin/**/*PatchPolicy*.kt",
+        "kivra-*/src/test/kotlin/**/*AutoScope*.kt",
+        "kivra-*/src/test/kotlin/**/*PathRules*.kt",
+        "kivra-*/src/test/kotlin/**/*DiffCollector*.kt",
+        "kivra-*/src/test/kotlin/**/*DiffLimits*.kt",
+        "kivra-*/src/test/kotlin/**/*ArchitectureTest*.kt",
+        "kivra-*/src/test/kotlin/**/*Invariant*Test*.kt",
+        // tests of the policy, GitHub, core, authentication and selfdev cores
+        "kivra-policy/src/test/**",
+        "kivra-github/src/test/**",
+        "kivra-core/src/test/kotlin/net/kigawa/kivra/core/**",
+        "kivra-*/src/test/kotlin/**/auth/**",
+        "kivra-app/src/test/kotlin/net/kigawa/kivra/selfdev/**",
+        // tests of the MCP endpoint and the routes, whose permission checks must not be weakened
+        "kivra-app/src/test/kotlin/net/kigawa/kivra/mcp/**",
+        "kivra-app/src/test/kotlin/net/kigawa/kivra/routes/**",
     )
 
     /**

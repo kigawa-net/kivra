@@ -310,7 +310,7 @@ class AutoMergeDecisionTest {
 
     @Test
     fun `scope accepts test sources and rejects everything else`() {
-        val accepted = listOf(IN_SCOPE, "kivra-core/src/test/kotlin/net/kigawa/kivra/core/XTest.kt", "kivra-selfdev/src/test/kotlin/A.kt")
+        val accepted = listOf(IN_SCOPE, "kivra-app/src/test/kotlin/net/kigawa/kivra/util/XTest.kt", "kivra-selfdev/src/test/kotlin/A.kt")
         for (path in accepted) {
             assertEquals(Eligible, decide(input(files = fileOf(path))), path)
         }
@@ -339,6 +339,32 @@ class AutoMergeDecisionTest {
         )
         for ((path, code) in rejected) {
             assertEquals(Refuse(code), decide(input(files = fileOf(path))), path)
+        }
+    }
+
+    @Test
+    fun `test sources of the gate and its guards are refused by the denylist`() {
+        // Each path matches the scope (kivra-*/src/test/kotlin/**/*.kt) but also a denylist pattern (ADR 0014 section 2.1, applied to tests).
+        val denied = listOf(
+            "kivra-app/src/test/kotlin/net/kigawa/kivra/selfdev/automerge/AutoMergeDecisionTest.kt",
+            "kivra-app/src/test/kotlin/net/kigawa/kivra/selfdev/AutopilotDispatcherTest.kt",
+            "kivra-app/src/test/kotlin/net/kigawa/kivra/coding/AutoScopeGuardTest.kt",
+            "kivra-core/src/test/kotlin/net/kigawa/kivra/core/patch/PatchPolicyTest.kt",
+            "kivra-core/src/test/kotlin/net/kigawa/kivra/core/States.kt",
+            "kivra-agent/src/test/kotlin/net/kigawa/kivra/agent/workdir/PathRulesTest.kt",
+            "kivra-agent/src/test/kotlin/net/kigawa/kivra/agent/workdir/DiffCollectorTest.kt",
+            "kivra-agent/src/test/kotlin/net/kigawa/kivra/agent/workdir/DiffLimitsTest.kt",
+            "kivra-app/src/test/kotlin/net/kigawa/kivra/ArchitectureTest.kt",
+            "kivra-app/src/test/kotlin/net/kigawa/kivra/x/InvariantCheckTest.kt",
+            "kivra-app/src/test/kotlin/net/kigawa/kivra/x/SelfDevInvariantsTest.kt",
+            "kivra-policy/src/test/kotlin/net/kigawa/kivra/policy/XTest.kt",
+            "kivra-github/src/test/kotlin/net/kigawa/kivra/github/XTest.kt",
+            "kivra-model-gateway/src/test/kotlin/net/kigawa/kivra/auth/AuthTest.kt",
+            "kivra-app/src/test/kotlin/net/kigawa/kivra/mcp/McpToolsTest.kt",
+            "kivra-app/src/test/kotlin/net/kigawa/kivra/routes/RoutesTest.kt",
+        )
+        for (path in denied) {
+            assertEquals(Refuse(AutoMergeReason.PATH_OUT_OF_SCOPE), decide(input(files = fileOf(path))), path)
         }
     }
 

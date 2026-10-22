@@ -17,6 +17,7 @@ import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.ChildCreateResult
 import net.kigawa.kivra.db.ChildLimits
+import net.kigawa.kivra.db.DEFAULT_CYCLE_BUDGET_JPY
 import net.kigawa.kivra.db.ChildRefusal
 import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.OrderConflict
@@ -92,6 +93,10 @@ data class OrderSummaryResponse(
     val orderBudgetJpy: Long,
     val allocatedJpy: Long,
     val childCount: Int,
+    val spentJpy: Long,
+    val cycleBudgetJpy: Long,
+    /** orderBudgetJpy - spentJpy. */
+    val remainingJpy: Long,
 )
 
 @Serializable
@@ -123,7 +128,7 @@ data class CycleResponse(val cycleNo: Int, val goalId: String, val goalState: St
 data class CycleStartedResponse(val orderId: String, val goalId: String, val cycleNo: Int, val version: Long)
 
 @Serializable
-private data class OrderError(val error: String, val code: String? = null)
+private data class OrderError(val error: String, val code: String? = null, val orderId: String? = null)
 
 /** Who is calling: the owner key and whether it is the AI principal. */
 private data class OrderCaller(val principal: String, val kind: OrderActor)
@@ -153,6 +158,7 @@ private const val STATE_INVALID = "state must be PENDING"
 private const val CHILDREN_DISABLED = "child orders are disabled"
 private const val CHILD_FIELDS_INVALID = "title and policy as for an order, and idempotencyKey 1-128 characters without control characters"
 private const val BUDGET_INVALID = "orderBudgetJpy must be a whole number of yen from 1 to 999999999999"
+private const val BUDGET_BELOW_CYCLE = "orderBudgetJpy must be at least the cycle budget of 1000 yen"
 private const val PARENT_NOT_ACTIVE = "the parent order is not active; a child needs an active parent"
 private const val KEY_CONFLICT = "idempotency key was already used with a different request"
 
@@ -240,6 +246,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         val key = validatedText(request.idempotencyKey, MAX_CHILD_KEY_CODE_POINTS)
         if (title == null || policy == null || key == null) return@post call.respond(HttpStatusCode.BadRequest, OrderError(CHILD_FIELDS_INVALID))
         if (request.orderBudgetJpy !in 1..MAX_BUDGET_JPY) return@post call.respond(HttpStatusCode.BadRequest, OrderError(BUDGET_INVALID))
+        // A child's cycle budget is the default (ADR 0015 section 3.2). A child whose budget is below it could never start a cycle.
+        if (request.orderBudgetJpy < DEFAULT_CYCLE_BUDGET_JPY) return@post call.respond(HttpStatusCode.BadRequest, OrderError(BUDGET_BELOW_CYCLE))
         val parentId = orderIdOf(call) ?: return@post call.respond(HttpStatusCode.Conflict, OrderError(PARENT_NOT_ACTIVE, "PARENT_NOT_ACTIVE"))
         val limits = ChildLimits(
             maxDepth = deps.orderSettings.maxDepth,
@@ -481,7 +489,7 @@ private suspend fun ApplicationCall.respondOutcome(outcome: OrderResult<*>) {
         OrderResult.StaleVersion -> respond(HttpStatusCode.Conflict, OrderError(STALE))
         is OrderResult.Refused -> when (outcome.reason) {
             OrderConflict.SAME_PRINCIPAL -> respond(HttpStatusCode.Forbidden, OrderError(FORBIDDEN))
-            else -> respond(HttpStatusCode.Conflict, OrderError(refusedText(outcome.reason), outcome.reason.name))
+            else -> respond(HttpStatusCode.Conflict, OrderError(refusedText(outcome.reason), outcome.reason.name, outcome.orderId))
         }
         is OrderResult.Moved<*> -> respond(HttpStatusCode.OK)
     }
@@ -497,6 +505,7 @@ internal fun refusedText(reason: OrderConflict): String = when (reason) {
     OrderConflict.CYCLE_LIMIT_REACHED -> "the cycle limit is reached; a new order is needed"
     OrderConflict.ORDER_EXPIRED -> "the order has expired"
     OrderConflict.AUTOPILOT_PAUSED -> "the autopilot is paused"
+    OrderConflict.ORDER_BUDGET -> "an order on the path to the root has less budget left than one cycle needs"
     OrderConflict.NOT_ACTIVE -> "the order is not active"
     OrderConflict.RESUME_NOT_ALLOWED -> "this order cannot be resumed; a new order is needed"
     OrderConflict.ACTOR_NOT_ALLOWED -> "this caller may not make this change"
@@ -531,6 +540,9 @@ private fun SelfDevOrder.summary() = OrderSummaryResponse(
     orderBudgetJpy = orderBudgetJpy,
     allocatedJpy = allocatedJpy,
     childCount = childCount,
+    spentJpy = spentJpy,
+    cycleBudgetJpy = cycleBudgetJpy,
+    remainingJpy = orderBudgetJpy - spentJpy,
 )
 
 private fun SelfDevOrderStopRequest.response(approverView: Boolean) = StopRequestResponse(

@@ -537,6 +537,60 @@ class SelfDevOrderRepositoryTest {
         assertEquals(0, f.count("SELECT COUNT(*) FROM selfdev_order_events WHERE reason_code LIKE '%$TITLE_MARKER%' OR reason_code LIKE '%$POLICY_MARKER%'"))
     }
 
+    // ---- the cycle budget check (ADR 0015 section 2.7, stage 2 PR 3b) -------------------------------------------------------------
+
+    /** Sets the cost of an order by SQL: nothing in the application writes spent_jpy yet (PR 3c feeds it). */
+    private fun Fixture.setSpent(orderId: String, spent: Long) = exec("UPDATE selfdev_orders SET spent_jpy = ? WHERE order_id = ?", spent, orderId)
+
+    private fun Fixture.goalsOf(orderId: String): Int = count("SELECT COUNT(*) FROM selfdev_goals WHERE order_id = '$orderId'")
+
+    @Test
+    fun `a new order has no spend and a 1,000 yen cycle budget, and a cycle needs the budget left, at the limit too`() = withFixture { f ->
+        val root = f.root()
+        assertEquals(0, root.spentJpy)
+        assertEquals(1_000, root.cycleBudgetJpy)
+        f.setSpent(root.orderId, 4_001) // 999 left, below the 1,000 yen of one cycle
+        assertEquals(OrderResult.Refused(OrderConflict.ORDER_BUDGET, root.orderId), f.repo.startCycle(root.orderId, root.version, OPERATOR))
+        assertEquals(0, f.repo.get(root.orderId)!!.cyclesStarted)
+        assertEquals(0, f.goalsOf(root.orderId), "a refused start writes no goal")
+        f.setSpent(root.orderId, 4_000) // exactly 1,000 left: allowed
+        assertIs<OrderResult.Moved<CycleStarted>>(f.repo.startCycle(root.orderId, root.version, OPERATOR))
+    }
+
+    @Test
+    fun `a child's cycle is refused by the child's own budget, then by an ancestor's, and each refusal names that order`() = withFixture { f ->
+        val root = f.root()
+        val child = f.created(f.child(root.orderId, budget = 3_000, key = "budget-child"))
+        f.setSpent(child.orderId, 2_001) // the child has 999 left
+        assertEquals(OrderResult.Refused(OrderConflict.ORDER_BUDGET, child.orderId), f.repo.startCycle(child.orderId, child.version, OPERATOR))
+        f.setSpent(child.orderId, 0)
+        f.setSpent(root.orderId, 4_500) // the child has enough, the root has 500 left
+        assertEquals(OrderResult.Refused(OrderConflict.ORDER_BUDGET, root.orderId), f.repo.startCycle(child.orderId, child.version, OPERATOR))
+        assertEquals(0, f.repo.get(child.orderId)!!.cyclesStarted)
+        assertEquals(0, f.goalsOf(child.orderId), "a refused start writes no goal")
+        f.setSpent(root.orderId, 0)
+        val started = assertIs<OrderResult.Moved<CycleStarted>>(f.repo.startCycle(child.orderId, child.version, OPERATOR)).value
+        assertEquals(1, started.order.cyclesStarted)
+        assertEquals(1, f.goalsOf(child.orderId))
+        assertEquals(0, f.repo.get(root.orderId)!!.cyclesStarted, "the child's cycle is not counted on the root")
+    }
+
+    @Test
+    fun `two cycle starts on two children of one tree at the same time both start, without a deadlock`() = withFixture { f ->
+        val root = f.root()
+        val children = listOf(
+            f.created(f.child(root.orderId, budget = 2_000, key = "cycle-a")),
+            f.created(f.child(root.orderId, budget = 2_000, key = "cycle-b")),
+        )
+        val next = java.util.concurrent.atomic.AtomicInteger()
+        val results = concurrently(2) {
+            val child = children[next.getAndIncrement()]
+            f.repo.startCycle(child.orderId, child.version, OPERATOR)
+        }
+        results.forEach { assertIs<OrderResult.Moved<CycleStarted>>(it) }
+        assertEquals(2, f.count("SELECT COUNT(*) FROM selfdev_goals WHERE order_id IN (SELECT order_id FROM selfdev_orders WHERE parent_order_id = '${root.orderId}')"))
+    }
+
     private fun requestByAi(f: Fixture, root: SelfDevOrder): SelfDevOrderStopRequest =
         assertIs<OrderResult.Moved<SelfDevOrderStopRequest>>(
             f.repo.requestStop(root.orderId, root.version, AI, OrderActor.AI, StopRequestReason.OPERATOR_REQUEST),

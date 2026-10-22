@@ -591,6 +591,129 @@ class SelfDevOrderRepositoryTest {
         assertEquals(2, f.count("SELECT COUNT(*) FROM selfdev_goals WHERE order_id IN (SELECT order_id FROM selfdev_orders WHERE parent_order_id = '${root.orderId}')"))
     }
 
+    // ---- the effective state (ADR 0015 section 2.4, stage 2 PR 3c) ---------------------------------------------------------------
+
+    /** A root, a child and a grandchild: the grandchild's cycle and resume are checked against both ancestors. */
+    private fun Fixture.tree(): Triple<SelfDevOrder, SelfDevOrder, SelfDevOrder> {
+        val root = root()
+        val child = created(child(root.orderId, budget = 3_000, key = "eff-child"))
+        val grand = created(child(child.orderId, budget = 1_000, key = "eff-grand"))
+        // Creating a child bumps its parent's version, so the versions are read again after the whole tree exists.
+        return Triple(repo.get(root.orderId)!!, repo.get(child.orderId)!!, repo.get(grand.orderId)!!)
+    }
+
+    @Test
+    fun `a child's cycle starts only under ACTIVE ancestors, and a refused start writes nothing`() = withFixture { f ->
+        val (root, child, grand) = f.tree()
+        val childVersion = f.repo.get(child.orderId)!!.version
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.pauseByOperator(root.orderId, root.version, OPERATOR))
+        val rootPaused = f.repo.get(root.orderId)!!
+        val goalsBefore = f.count("SELECT COUNT(*) FROM selfdev_goals")
+        assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, root.orderId), f.repo.startCycle(child.orderId, child.version, OPERATOR))
+        assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, root.orderId), f.repo.startCycle(grand.orderId, grand.version, OPERATOR))
+        assertEquals(goalsBefore, f.count("SELECT COUNT(*) FROM selfdev_goals"), "a refused start writes no goal")
+        val childAfter = f.repo.get(child.orderId)!!
+        assertEquals(0, childAfter.cyclesStarted)
+        assertEquals(childVersion, childAfter.version, "the child's row is not changed by its parent's pause")
+        assertEquals(rootPaused.cyclesStarted, f.repo.get(root.orderId)!!.cyclesStarted)
+    }
+
+    @Test
+    fun `a parent in STOP_REQUESTED stops a child's cycle, and a stopped ancestor stops it too`() = withFixture { f ->
+        val (root, child, grand) = f.tree()
+        val request = requestByAi(f, root)
+        assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, root.orderId), f.repo.startCycle(child.orderId, child.version, OPERATOR))
+        assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, root.orderId), f.repo.startCycle(grand.orderId, grand.version, OPERATOR))
+        // A cancelled request leaves the root PAUSED (STOP_NOT_APPROVED); the operator resumes it.
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.endStopRequest(request.requestId, StopEnd.CANCELLED, OPERATOR, OrderActor.HUMAN))
+        assertEquals(OrderState.PAUSED, f.repo.get(root.orderId)!!.state)
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.resumeByOperator(root.orderId, f.repo.get(root.orderId)!!.version, OPERATOR))
+        assertIs<OrderResult.Moved<CycleStarted>>(f.repo.startCycle(child.orderId, child.version, OPERATOR))
+
+        // The child is stopped (approved): its ACTIVE grandchild is blocked by the nearest ancestor that is not ACTIVE.
+        val childRequest = requestByAi(f, f.repo.get(child.orderId)!!)
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.approveStop(childRequest.requestId, OPERATOR, childRequest.digest))
+        assertEquals(OrderState.STOPPED, f.repo.get(child.orderId)!!.state)
+        assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, child.orderId), f.repo.startCycle(grand.orderId, grand.version, OPERATOR))
+    }
+
+    @Test
+    fun `a grandchild's cycle is refused by a PAUSED grandparent, and a child under a paused parent is refused too`() = withFixture { f ->
+        val (root, child, grand) = f.tree()
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.pauseByOperator(root.orderId, root.version, OPERATOR))
+        assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, root.orderId), f.repo.startCycle(grand.orderId, grand.version, OPERATOR))
+        // The middle one is ACTIVE, the root is paused: the grandchild is blocked by the root, the nearest one that is not ACTIVE.
+        assertEquals(OrderState.ACTIVE, f.repo.get(child.orderId)!!.state)
+        assertEquals(0, f.repo.get(grand.orderId)!!.cyclesStarted)
+    }
+
+    @Test
+    fun `a child's resume is refused while an ancestor is held, and goes through once the ancestor is ACTIVE again`() = withFixture { f ->
+        val (root, child, grand) = f.tree()
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.pauseByOperator(child.orderId, child.version, OPERATOR))
+        val pausedChild = f.repo.get(child.orderId)!!
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.pauseByOperator(root.orderId, root.version, OPERATOR))
+        assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, root.orderId), f.repo.resumeByOperator(child.orderId, pausedChild.version, OPERATOR))
+        val afterRefusal = f.repo.get(child.orderId)!!
+        assertEquals(OrderState.PAUSED, afterRefusal.state, "the refused resume does not write the child")
+        assertEquals(pausedChild.version, afterRefusal.version)
+
+        val rootPaused = f.repo.get(root.orderId)!!
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.resumeByOperator(root.orderId, rootPaused.version, OPERATOR))
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.resumeByOperator(child.orderId, pausedChild.version, OPERATOR))
+        assertEquals(OrderState.ACTIVE, f.repo.get(child.orderId)!!.state)
+        assertIs<OrderResult.Moved<CycleStarted>>(f.repo.startCycle(grand.orderId, grand.version, OPERATOR))
+    }
+
+    @Test
+    fun `a child's resume is refused while the parent is in STOP_REQUESTED, and the request is not approved by it`() = withFixture { f ->
+        val (root, child, _) = f.tree()
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.pauseByOperator(child.orderId, child.version, OPERATOR))
+        val pausedChild = f.repo.get(child.orderId)!!
+        val request = requestByAi(f, f.repo.get(root.orderId)!!)
+        assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, root.orderId), f.repo.resumeByOperator(child.orderId, pausedChild.version, OPERATOR))
+        assertEquals(OrderState.STOP_REQUESTED, f.repo.get(root.orderId)!!.state)
+        assertEquals(StopRequestState.PENDING, f.repo.stopRequest(request.requestId)!!.state)
+    }
+
+    @Test
+    fun `a pause under a held ancestor is allowed and does not reach the parent`() = withFixture { f ->
+        val (root, child, _) = f.tree()
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.pauseByOperator(root.orderId, root.version, OPERATOR))
+        val rootPaused = f.repo.get(root.orderId)!!
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.pauseByOperator(child.orderId, child.version, OPERATOR))
+        assertEquals(OrderState.PAUSED, f.repo.get(child.orderId)!!.state)
+        val rootAfter = f.repo.get(root.orderId)!!
+        assertEquals(rootPaused.version, rootAfter.version, "the child's pause writes nothing to the parent")
+        assertEquals(OrderReason.OPERATOR_PAUSED, rootAfter.stateReason)
+    }
+
+    @Test
+    fun `a parent's pause and a child's cycle start at the same time both finish, without a deadlock`() = withFixture { f ->
+        val (root, child, grand) = f.tree()
+        val next = java.util.concurrent.atomic.AtomicInteger()
+        val startSeen = java.util.concurrent.atomic.AtomicReference<OrderResult<CycleStarted>>()
+        concurrently(2) {
+            if (next.getAndIncrement() == 0) {
+                f.repo.pauseByOperator(root.orderId, root.version, OPERATOR)
+            } else {
+                startSeen.set(f.repo.startCycle(grand.orderId, grand.version, OPERATOR))
+            }
+        }
+        // Either the start came first (its cycle is written, and the pause then moves the root) or the pause came first (the start is refused
+        // with the root's ID). In both cases the goal count matches the start's result, and nothing else is left half-written.
+        val start = startSeen.get()
+        assertEquals(OrderState.PAUSED, f.repo.get(root.orderId)!!.state)
+        assertEquals(OrderState.ACTIVE, f.repo.get(child.orderId)!!.state)
+        when (start) {
+            is OrderResult.Moved -> assertEquals(1, f.goalsOf(grand.orderId))
+            else -> {
+                assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, root.orderId), start)
+                assertEquals(0, f.goalsOf(grand.orderId))
+            }
+        }
+    }
+
     private fun requestByAi(f: Fixture, root: SelfDevOrder): SelfDevOrderStopRequest =
         assertIs<OrderResult.Moved<SelfDevOrderStopRequest>>(
             f.repo.requestStop(root.orderId, root.version, AI, OrderActor.AI, StopRequestReason.OPERATOR_REQUEST),

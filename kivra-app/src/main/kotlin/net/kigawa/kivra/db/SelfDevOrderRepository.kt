@@ -89,6 +89,11 @@ enum class OrderConflict {
     STOP_ALREADY_PENDING, STOP_NOT_PENDING, STOP_EXPIRED, SAME_PRINCIPAL, DIGEST_MISMATCH, ORDER_CHANGED,
     /** A cycle start: some order on the path to the root has less left than its cycle budget. [OrderResult.Refused.orderId] names it. */
     ORDER_BUDGET,
+    /**
+     * A cycle start or a resume: an ancestor is not ACTIVE (PAUSED, STOP_REQUESTED or STOPPED), so the order's effective state is not
+     * ACTIVE (ADR 0015 section 2.4). [OrderResult.Refused.orderId] names the nearest such ancestor (a fixed ID, no text).
+     */
+    ANCESTOR_NOT_ACTIVE,
 }
 
 sealed interface OrderResult<out T> {
@@ -96,7 +101,7 @@ sealed interface OrderResult<out T> {
     data object NotFound : OrderResult<Nothing>
     /** The expected version is not the current one. Nothing changed. */
     data object StaleVersion : OrderResult<Nothing>
-    /** [orderId] is set only for [OrderConflict.ORDER_BUDGET]: the ID of the order that does not have the budget (a fixed ID, no text). */
+    /** [orderId] is set only for [OrderConflict.ORDER_BUDGET] and [OrderConflict.ANCESTOR_NOT_ACTIVE]: a fixed ID of an order, no text. */
     data class Refused(val reason: OrderConflict, val orderId: String? = null) : OrderResult<Nothing>
 }
 
@@ -236,7 +241,7 @@ class SelfDevOrderRepository(
 
     /**
      * Creates a child of [parentId] (ADR 0015 section 2.7), ACTIVE, with no cycle yet. The checks and the writes are one transaction. The
-     * root row is locked first, then the parent: every child creation takes the locks in that order, so two creations in one tree wait for
+     * root row is locked first, then the path down to the parent ([lockPath]): every child creation takes the locks in that order, so two creations in one tree wait for
      * each other. That keeps the tree size (TREE_LIMIT) and the parent's budget (BUDGET_EXCEEDS_PARENT) exact under concurrency.
      *
      * A key that is already used under this parent returns the child when the title, the policy and the budget are the same
@@ -255,7 +260,8 @@ class SelfDevOrderRepository(
         transaction(database) {
             val now = utcNow(clock)
             execQuery("SELECT order_id FROM selfdev_orders WHERE root_slot = 1 FOR UPDATE") { it.getString(1) }
-            val parent = lockOrder(parentId) ?: throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.PARENT_NOT_ACTIVE))
+            val path = lockPath(parentId) ?: throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.PARENT_NOT_ACTIVE))
+            val parent = path.first()
             findChildByKey(parentId, idempotencyKey)?.let { existing ->
                 return@transaction if (existing.title == title && existing.policy == policy && existing.orderBudgetJpy == orderBudgetJpy) {
                     ChildCreateResult.Replayed(existing)
@@ -263,7 +269,7 @@ class SelfDevOrderRepository(
                     ChildCreateResult.KeyConflict
                 }
             }
-            if (parent.state != OrderState.ACTIVE || !parent.expiresAt.isAfter(now) || !ancestorsActive(parent)) {
+            if (parent.state != OrderState.ACTIVE || !parent.expiresAt.isAfter(now) || firstStoppingAncestor(path.drop(1)) != null) {
                 throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.PARENT_NOT_ACTIVE))
             }
             if (parent.depth + 1 > limits.maxDepth) throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.DEPTH_LIMIT))
@@ -375,6 +381,10 @@ class SelfDevOrderRepository(
      * The budget check (ADR 0015 section 2.7): every order on the path from this one to the root must have `order_budget_jpy - spent_jpy`
      * at least its own `cycle_budget_jpy`. The first one that does not refuses the start with [OrderConflict.ORDER_BUDGET] and its ID; nothing
      * is written. The path is locked from the root down (see [lockPath]).
+     *
+     * The effective state (ADR 0015 section 2.4): every ancestor must be ACTIVE too. The first one that is not refuses the start with
+     * [OrderConflict.ANCESTOR_NOT_ACTIVE] and its ID; nothing is written. Checked under the same locks, so a pause of an ancestor and this start
+     * cannot both win.
      */
     fun startCycle(orderId: String, expectedVersion: Long, operatorKey: String): OrderResult<CycleStarted> = try {
         transaction(database) {
@@ -382,6 +392,7 @@ class SelfDevOrderRepository(
             val current = path.first()
             if (current.version != expectedVersion) return@transaction OrderResult.StaleVersion
             if (current.state != OrderState.ACTIVE) throw Rollback(OrderResult.Refused(OrderConflict.NOT_ACTIVE))
+            firstStoppingAncestor(path.drop(1))?.let { throw Rollback(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, it.orderId)) }
             if (current.currentGoalId != null) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_IN_PROGRESS))
             if (current.cyclesStarted >= current.maxCycles) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_LIMIT_REACHED))
             val now = utcNow(clock)
@@ -664,11 +675,17 @@ class SelfDevOrderRepository(
         requestId: String?,
     ): OrderResult<SelfDevOrder> = try {
         transaction(database) {
-            val current = lockOrder(orderId) ?: return@transaction OrderResult.NotFound
+            // A resume is checked against the ancestors (transition 5), so it locks the path, as a cycle start does. A pause locks the order.
+            val path = (if (to == OrderState.ACTIVE) lockPath(orderId) else lockOrder(orderId)?.let { listOf(it) })
+                ?: return@transaction OrderResult.NotFound
+            val current = path.first()
             if (current.version != expectedVersion) return@transaction OrderResult.StaleVersion
             val decision = checkOrderTransition(current.state, to, reason, actor, current.stateReason)
             if (decision is OrderTransitionDecision.Refused) {
                 throw Rollback(OrderResult.Refused(OrderConflict.valueOf(decision.reason.name)))
+            }
+            if (to == OrderState.ACTIVE) {
+                firstStoppingAncestor(path.drop(1))?.let { throw Rollback(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, it.orderId)) }
             }
             val now = utcNow(clock)
             if (!updateState(orderId, expectedVersion, to, reason, now)) throw Rollback(OrderResult.StaleVersion)
@@ -757,16 +774,11 @@ class SelfDevOrderRepository(
             parentId, idempotencyKey,
         ) { it.toOrder() }.firstOrNull()
 
-    /** True when every ancestor of [order] is ACTIVE (its effective state, ADR 0015 section 2.4). Reads the rows without locking them. */
-    private fun Transaction.ancestorsActive(order: SelfDevOrder): Boolean {
-        var next = order.parentOrderId
-        while (next != null) {
-            val ancestor = getIn(next) ?: return false
-            if (ancestor.state != OrderState.ACTIVE) return false
-            next = ancestor.parentOrderId
-        }
-        return true
-    }
+    /**
+     * The nearest ancestor that is not ACTIVE, or null when all are (ADR 0015 section 2.4: a PAUSED, STOP_REQUESTED or STOPPED ancestor stops
+     * the order's effective state). [ancestors] is the path from the parent up to the root, as [lockPath] returns it without its first row.
+     */
+    private fun firstStoppingAncestor(ancestors: List<SelfDevOrder>): SelfDevOrder? = ancestors.firstOrNull { it.state != OrderState.ACTIVE }
 
     /**
      * Carries a refusal out of a transaction. The transaction rolls back, so no write made before the throw survives. The caller turns the

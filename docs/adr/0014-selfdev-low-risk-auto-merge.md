@@ -204,3 +204,15 @@ S1 の前提(P):
 - 必須チェックの名前が実際の PR と合わないとき、または `skipped` と `neutral` の扱いが期待と違うとき。
 - 同時の Run を 2 件以上にするとき。merge queue(§3 の C)を再検討する。
 - ADR 0011 の段階 2 の自動承認の数値(失敗率、費用、範囲外の件数)が、§6 の前提を満たさないとき。自動マージの前に、段階 2 の見直しを行う。
+
+## 追記(2026-10-22): 門番自身のテストを禁止領域に入れる
+
+- **きっかけ**: 部品 A(純粋な判定ロジック。#324)のレビューで、§2.1 の表が本体のパスだけを対象にしていることが分かった。対象の範囲 `kivra-*/src/test/kotlin/**/*.kt` の中には、門番自身のテストが含まれる。このままだと、自動承認のタスクが、判定や範囲検査のテストのアサーションを弱める PR(削除行は 200 行以内)を出し、CI が通れば自動マージされうる。
+- **決定**: §2.1 の原則「自動マージの門番を、門番自身が書き換えない」を、テスト側にも適用する。次のパターンを禁止領域に追加する。`AutoMergePaths.kt` の `DENYLIST` と完全に一致させる。
+  - 門番のテスト: `kivra-*/src/test/kotlin/**/selfdev/automerge/**`、`kivra-*/src/test/kotlin/**/*PatchPolicy*.kt`、`kivra-*/src/test/kotlin/**/*AutoScope*.kt`、`kivra-*/src/test/kotlin/**/*PathRules*.kt`、`kivra-*/src/test/kotlin/**/*DiffCollector*.kt`、`kivra-*/src/test/kotlin/**/*DiffLimits*.kt`、`kivra-*/src/test/kotlin/**/*ArchitectureTest*.kt`、`kivra-*/src/test/kotlin/**/*Invariant*Test*.kt`
+  - 禁止領域の本体に対応するテスト: `kivra-policy/src/test/**`、`kivra-github/src/test/**`、`kivra-core/src/test/kotlin/net/kigawa/kivra/core/**`、`kivra-*/src/test/kotlin/**/auth/**`、`kivra-app/src/test/kotlin/net/kigawa/kivra/selfdev/**`
+  - 認証・認可・MCP の検査のテスト: `kivra-app/src/test/kotlin/net/kigawa/kivra/mcp/**`、`kivra-app/src/test/kotlin/net/kigawa/kivra/routes/**`
+- **結果**: 対象に残るのは、上のどれにも当たらないテストだけになる(例: `kivra-app/src/test/kotlin/net/kigawa/kivra/util/XTest.kt`)。最初は狭く始め、S1(影の判定)の実績を見てから、広げるかを別に判断する。
+- **照合の違い**: 禁止領域の照合は大文字小文字を区別しない。対象の範囲の照合は区別する(実装どおり)。理由: 大文字小文字だけ違う名前を、禁止領域から漏らさないため。範囲の照合で区別しても、大文字小文字だけ違うパスは範囲の外として拒否される。
+- **残るリスク**: 対象に残るテストでも、テストを弱めることは可能である。C3 の上限(3 ファイル、200 行)と、S1 の影の判定で、人が確認する。
+- **見直しの条件**: S1 の影の判定で、人が確認して「自動マージしてはいけなかった」PR が 1 件でも出たら、対象を見直す。

@@ -347,6 +347,7 @@ class HttpGitHubAdapter(
                 baseRepositoryId = o.nestedLong("base", "repo", "id"),
                 mergeCommitSha = o.str("merge_commit_sha")?.takeIf { sha40.matches(it) },
                 authorId = o.nestedLong("user", "id"),
+                labels = (o["labels"] as? JsonArray)?.mapNotNull { (it as? JsonObject)?.str("name") },
             ),
         )
     }
@@ -720,6 +721,7 @@ class HttpGitHubAdapter(
                     headSha = headSha,
                     status = c.str("status") ?: return protocol("check status"),
                     conclusion = c.str("conclusion")?.let(::conclusionOf),
+                    startedAt = c.str("started_at")?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() },
                 )
             }
             if (runs.size >= total || arr.isEmpty()) break
@@ -851,6 +853,31 @@ class HttpGitHubAdapter(
             else -> null
         }
         return parsePr(repo, o).map { PrRebaseView(it, o.str("mergeable_state"), mergeable) }
+    }
+
+    override suspend fun listPullRequestFiles(repo: RepoRef, number: Int): GitHubResult<PullRequestFiles> {
+        val out = mutableListOf<PullRequestFile>()
+        // Pages of 100 until the page is short or the limit is reached. The limit is a refusal, never a partial answer.
+        for (page in 1..PULL_REQUEST_FILES_LIMIT / 100) {
+            val raw = when (val r = get("${repoPath(repo)}/pulls/$number/files?per_page=100&page=$page")) {
+                is GitHubResult.Success -> r.value
+                is GitHubResult.Failure -> return r
+                is GitHubResult.Unknown -> return r
+            }
+            val arr = parse(raw) as? JsonArray ?: return protocol("pull files")
+            for (el in arr) {
+                val f = el as? JsonObject ?: return protocol("pull files[]")
+                out += PullRequestFile(
+                    path = f.str("filename") ?: return protocol("pull files[].filename"),
+                    status = f.str("status") ?: return protocol("pull files[].status"),
+                    additions = f.long("additions")?.takeIf { it >= 0 } ?: return protocol("pull files[].additions"),
+                    deletions = f.long("deletions")?.takeIf { it >= 0 } ?: return protocol("pull files[].deletions"),
+                )
+            }
+            if (out.size >= PULL_REQUEST_FILES_LIMIT) return GitHubResult.Success(PullRequestFiles(out.take(PULL_REQUEST_FILES_LIMIT), truncated = true))
+            if (arr.size < 100) break
+        }
+        return GitHubResult.Success(PullRequestFiles(out, truncated = false))
     }
 
     override suspend fun getBehindBy(repo: RepoRef, base: String, headSha: String): GitHubResult<Int> {

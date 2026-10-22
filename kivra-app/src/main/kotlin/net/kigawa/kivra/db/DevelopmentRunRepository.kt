@@ -297,6 +297,15 @@ class DevelopmentRunRepository(
             .count()
     }
 
+    /** Ids of the self-development runs in [state], oldest first, at most [limit]. Read-only (ADR 0014 shadow judgement). */
+    fun selfDevRunIdsInState(state: DevelopmentRunState, limit: Int): List<RunId> = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%") and (DevelopmentRunsTable.state eq state.name) }
+            .orderBy(DevelopmentRunsTable.createdAt to SortOrder.ASC, DevelopmentRunsTable.runId to SortOrder.ASC)
+            .limit(limit)
+            .map { RunId(it[DevelopmentRunsTable.runId]) }
+    }
+
     /**
      * A kind mismatch under the same (principal, idempotency key) is a conflict, never a replay of another kind of run. A different
      * body is a conflict too: the body changes what the agent is asked to do. An empty body and no body are the same.

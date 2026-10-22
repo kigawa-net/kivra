@@ -5,8 +5,10 @@ import io.ktor.client.engine.cio.CIO
 import java.io.File
 import java.time.Duration
 import net.kigawa.kivra.auth.TaskApiIdentity
+import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DbRequestLedger
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevGoalRepository
 import net.kigawa.kivra.db.SelfDevPlanRepository
 import net.kigawa.kivra.db.SqlLeaseStore
@@ -38,6 +40,10 @@ import net.kigawa.kivra.modelgateway.RegistryLoader
 import net.kigawa.kivra.modelgateway.StaticKeyAuth
 import net.kigawa.kivra.modelgateway.Requirements
 import net.kigawa.kivra.routes.SelfDevRouteDeps
+import net.kigawa.kivra.selfdev.automerge.AutoMergeShadowWatch
+import net.kigawa.kivra.selfdev.automerge.DbAutoMergeShadowStore
+import net.kigawa.kivra.selfdev.automerge.GitHubAutoMergeShadowPort
+import net.kigawa.kivra.selfdev.automerge.buildAutoMergeShadowWatch
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import org.jetbrains.exposed.sql.Database
 
@@ -47,6 +53,8 @@ internal class SelfDevParts(
     val routes: SelfDevRouteDeps,
     /** The autopilot Planner's loop. Non-null only when [AutopilotSettings.enabled] (ADR 0011). */
     val planWorker: PlannerWorker? = null,
+    /** The shadow judgement of the automatic merge (ADR 0014 S1). Non-null only with the autopilot and its shadow switch on. */
+    val autoMergeShadow: AutoMergeShadowWatch? = null,
 )
 
 /** The principal the developer's model calls are made under. Not a user identity. */
@@ -182,10 +190,22 @@ internal fun buildSelfDev(
         val repoFiles = if (autopilotConfig.plannerRepoTree) PlannerRepoFiles(github, config.repo, config.baseBranch) else null
         buildPlanWorker(autopilotConfig, registry, gateway, SelfDevGoalRepository(database), tenantId, repoFiles, memory)
     }
+    // ADR 0014 S1: the shadow judgement. Built only with the autopilot and its shadow switch on; it reads GitHub and writes the audit only.
+    val autoMergeShadow = buildAutoMergeShadowWatch(
+        autopilot = autopilot,
+        store = DbAutoMergeShadowStore(
+            database, runs, SelfDevPlanRepository(database), SelfDevAutopilotControlRepository(database), AuditRepository(),
+        ),
+        port = GitHubAutoMergeShadowPort(github, github),
+        repo = config.repo,
+        baseBranch = config.baseBranch,
+        botAuthorId = botUserId.reveal().toLong(),
+    )
     return SelfDevParts(
         worker = worker,
         routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github),
         planWorker = planWorker,
+        autoMergeShadow = autoMergeShadow,
     )
 }
 

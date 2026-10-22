@@ -230,6 +230,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     )
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)
+    // ADR 0014 S1: the shadow judgement of the automatic merge. Started only with its switch on (the watch is null otherwise).
+    selfDevParts?.autoMergeShadow?.start(this)
     // The memory's retention step (ADR 0016 section 9). Started only with the memory switch on.
     memoryRepo?.let { repo -> SelfDevMemoryRetentionWorker({ repo.purgeRetention() }, SelfDevMemoryRetentionWorker.DEFAULT_INTERVAL).start(this) }
     // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD). Nothing runs before this.

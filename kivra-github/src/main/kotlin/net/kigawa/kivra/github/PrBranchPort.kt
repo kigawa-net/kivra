@@ -51,7 +51,22 @@ interface PrBranchPort {
 
     /** Read-only. The recursive tree of a commit (40-hex id). A truncated tree is [GitHubFailureKind.TREE_TRUNCATED]. */
     suspend fun listTreeAt(repo: RepoRef, commitSha: String): GitHubResult<RepoTree>
+
+    /**
+     * Read-only (GET `/pulls/{n}/files`). The files of a pull request in GitHub's order, at most [PULL_REQUEST_FILES_LIMIT] of them.
+     * [PullRequestFiles.truncated] is true when the limit was reached, so the list may be incomplete and a caller must refuse.
+     */
+    suspend fun listPullRequestFiles(repo: RepoRef, number: Int): GitHubResult<PullRequestFiles>
 }
+
+/** The most files [PrBranchPort.listPullRequestFiles] reads (three pages of 100). */
+const val PULL_REQUEST_FILES_LIMIT = 300
+
+/** One changed file of a pull request: its path, its status as GitHub names it, and its line counts. */
+data class PullRequestFile(val path: String, val status: String, val additions: Long, val deletions: Long)
+
+/** The files of a pull request. [truncated] is true when [PULL_REQUEST_FILES_LIMIT] was reached. */
+data class PullRequestFiles(val files: List<PullRequestFile>, val truncated: Boolean)
 
 /**
  * A pull request with `mergeable` and `mergeable_state` as GitHub reports them. [mergeable] is null while GitHub is still computing it,

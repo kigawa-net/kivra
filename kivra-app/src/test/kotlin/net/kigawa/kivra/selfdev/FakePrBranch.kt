@@ -5,6 +5,7 @@ import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.PrBranchPort
 import net.kigawa.kivra.github.PrRebaseView
+import net.kigawa.kivra.github.PullRequestFiles
 import net.kigawa.kivra.github.RepoRef
 import net.kigawa.kivra.github.RepoTree
 import net.kigawa.kivra.github.TreeEntry
@@ -177,6 +178,11 @@ class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjec
             TreeEntry(path, TreeEntryType.BLOB, modeAndBlob.first, 1L, modeAndBlob.second)
         }
         return GitHubResult.Success(RepoTree(commitSha, entries, truncated = false))
+    }
+
+    override suspend fun listPullRequestFiles(repo: RepoRef, number: Int): GitHubResult<PullRequestFiles> {
+        totalCalls++
+        return GitHubResult.Failure(GitHubFailureKind.VALIDATION, "unused in self-development tests")
     }
 
     private fun <T> notFound(): GitHubResult<T> = GitHubResult.Failure(GitHubFailureKind.NOT_FOUND, GitHubFailureKind.NOT_FOUND.code)

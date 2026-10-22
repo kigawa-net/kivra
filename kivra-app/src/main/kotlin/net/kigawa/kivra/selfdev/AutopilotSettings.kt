@@ -28,6 +28,10 @@ data class AutopilotConfig(
     val planIntervalSeconds: Long = AutopilotSettings.DEFAULT_PLAN_INTERVAL_SECONDS,
     /** Whether the Planner is shown the repository's file list (Issue #293). On by default; `KIVRA_SELFDEV_PLANNER_REPO_TREE=false` turns it off. */
     val plannerRepoTree: Boolean = true,
+    /** The shadow judgement of the automatic merge (ADR 0014 S1). Judges and records only. Off unless `KIVRA_SELFDEV_AUTOMERGE_SHADOW_ENABLED=true`. */
+    val autoMergeShadow: Boolean = false,
+    /** The check names the shadow judgement requires on the PR head and on the base branch (ADR 0014 U-3). */
+    val autoMergeRequiredChecks: Set<String> = AutopilotSettings.DEFAULT_AUTOMERGE_REQUIRED_CHECKS,
 ) {
     /** True when the task waits for the operator. A denylisted task waits under every [approval], including AUTO. */
     fun requiresApproval(denylisted: Boolean): Boolean = denylisted || approval == AutopilotApproval.REQUIRED
@@ -69,6 +73,16 @@ class AutopilotSettings private constructor(
 
         /** The Planner's repository file list (Issue #293). Read only when the autopilot is on. Unset means on; other values are refused. */
         const val ENV_PLANNER_REPO_TREE = "KIVRA_SELFDEV_PLANNER_REPO_TREE"
+
+        /** The shadow judgement of the automatic merge (ADR 0014 S1). Read only when the autopilot is on. Unset or false means off. */
+        const val ENV_AUTOMERGE_SHADOW = "KIVRA_SELFDEV_AUTOMERGE_SHADOW_ENABLED"
+
+        /** The required check names of the shadow judgement, comma separated. Read only when the shadow switch is on. */
+        const val ENV_AUTOMERGE_REQUIRED_CHECKS = "KIVRA_SELFDEV_AUTOMERGE_REQUIRED_CHECKS"
+        const val DEFAULT_AUTOMERGE_REQUIRED_CHECKS_TEXT = "test,build,boot"
+        val DEFAULT_AUTOMERGE_REQUIRED_CHECKS: Set<String> = setOf("test", "build", "boot")
+        const val MAX_AUTOMERGE_REQUIRED_CHECKS = 10
+        private val CHECK_NAME = Regex("[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,99}")
 
         const val DEFAULT_APPROVAL = "required"
         const val DEFAULT_MAX_PENDING_PRS = 3
@@ -116,6 +130,7 @@ class AutopilotSettings private constructor(
                 "auto" -> AutopilotApproval.AUTO
                 else -> throw IllegalStateException("$ENV_APPROVAL must be required or auto")
             }
+            val shadow = autoMergeShadow(env)
             val config = AutopilotConfig(
                 approval = approval,
                 maxPendingPrs = bounded(env, ENV_MAX_PENDING_PRS, DEFAULT_MAX_PENDING_PRS, MIN_MAX_PENDING_PRS, MAX_MAX_PENDING_PRS),
@@ -133,6 +148,8 @@ class AutopilotSettings private constructor(
                     MIN_PLAN_INTERVAL_SECONDS, MAX_PLAN_INTERVAL_SECONDS,
                 ),
                 plannerRepoTree = plannerRepoTree(env),
+                autoMergeShadow = shadow,
+                autoMergeRequiredChecks = if (shadow) requiredChecks(env) else DEFAULT_AUTOMERGE_REQUIRED_CHECKS,
             )
             logLimits(config, selfDev.maxActiveRuns)
             return AutopilotSettings(enabled = true, config = config)
@@ -170,6 +187,28 @@ class AutopilotSettings private constructor(
             null, "", "true" -> true
             "false" -> false
             else -> throw IllegalStateException("$ENV_PLANNER_REPO_TREE must be true or false")
+        }
+
+        /** `true`, `false`, or unset (off). Any other value is a startup failure; the message names the variable only. */
+        private fun autoMergeShadow(env: Map<String, String>): Boolean = when (env[ENV_AUTOMERGE_SHADOW]?.trim()) {
+            null, "", "false" -> false
+            "true" -> true
+            else -> throw IllegalStateException("$ENV_AUTOMERGE_SHADOW must be true or false")
+        }
+
+        /**
+         * The comma-separated required check names: 1 to [MAX_AUTOMERGE_REQUIRED_CHECKS] distinct names, each made of letters, digits, spaces
+         * and `._()/-`. Unset means the default. The message names the variable only.
+         */
+        private fun requiredChecks(env: Map<String, String>): Set<String> {
+            val raw = env[ENV_AUTOMERGE_REQUIRED_CHECKS]?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_AUTOMERGE_REQUIRED_CHECKS_TEXT
+            val names = raw.split(",").map { it.trim() }
+            check(
+                names.size in 1..MAX_AUTOMERGE_REQUIRED_CHECKS &&
+                    names.all { CHECK_NAME.matches(it) } &&
+                    names.toSet().size == names.size,
+            ) { "$ENV_AUTOMERGE_REQUIRED_CHECKS must be 1 to $MAX_AUTOMERGE_REQUIRED_CHECKS distinct check names separated by commas" }
+            return names.toSet()
         }
 
         /** A long in [min, max]; unset or blank means [default]. The message names the variable only. */

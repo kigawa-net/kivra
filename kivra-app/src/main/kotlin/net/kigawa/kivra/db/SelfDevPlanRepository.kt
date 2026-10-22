@@ -193,6 +193,11 @@ class SelfDevPlanRepository(
      */
     fun autoTaskOfRun(runId: String): SelfDevPlanTask? = transaction(database) { autoTaskOfRunIn(runId) }
 
+    /** The task of [runId] whoever approved it (read only), or null when the Run is not the run of a task of a Plan (ADR 0014 shadow). */
+    fun taskOfRun(runId: String): SelfDevPlanTask? = transaction(database) {
+        SelfDevPlanTasksTable.selectAll().where { SelfDevPlanTasksTable.runId eq runId }.firstOrNull()?.toTask()
+    }
+
     /**
      * Moves the auto-approved task of [runId] from SUBMITTED to PENDING_APPROVAL with AUTO_SCOPE_EXCEEDED, and a RUNNING or TASKS_QUEUED
      * goal to BLOCKED with the same reason, in one transaction. The goal row is locked first, as the dispatcher's submission does. Returns

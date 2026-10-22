@@ -550,6 +550,31 @@ test('a release dialog cancelled and opened again sends the request once (the li
   assert.equal(postsTo(dom.calls, '/api/admin/selfdev/runs/' + SELF_RUN_ID + '/release').length, 1, 'one request after reopening');
 });
 
+test('a release dialog closed without cancel (Esc) removes its listeners and the next opening starts with an empty reason', async () => {
+  const dom = await openDetail(selfRun('UNKNOWN'), (p) => {
+    if (p === '/api/admin/selfdev/runs/' + SELF_RUN_ID + '/release') {
+      return { status: 200, data: { runId: SELF_RUN_ID, state: 'CANCELLED', reasonCode: 'OPERATOR_RELEASED' } };
+    }
+    return null;
+  });
+  findButton(dom, '運用者の解放…').fire('click');
+  dom.byId('release-reason').value = 'やめる';
+  dom.byId('release-reason').fire('input');
+  dom.byId('release-dialog').fire('close'); // Esc closes the dialog without a click on cancel
+  dom.byId('release-submit').fire('click'); // the listeners are gone: a click after the close sends nothing
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/admin/selfdev/runs/' + SELF_RUN_ID + '/release').length, 0, 'no request after the close');
+
+  findButton(dom, '運用者の解放…').fire('click');
+  assert.equal(dom.byId('release-reason').value, '', 'the reopened reason is empty');
+  assert.equal(dom.byId('release-submit').disabled, true, 'the reopened submit needs a reason');
+  dom.byId('release-reason').value = '確認した';
+  dom.byId('release-reason').fire('input');
+  dom.byId('release-submit').fire('click');
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/admin/selfdev/runs/' + SELF_RUN_ID + '/release').length, 1, 'one request after reopening');
+});
+
 test('the page is still usable with the self-development kind chosen after a release reload', async () => {
   // Sanity: the kind radios and key logic are untouched by the detail view.
   const dom = load(defaults(true));

@@ -49,6 +49,22 @@
       <p id="submit-result" class="result" role="status"></p>
     </section>
 
+    <section class="card" aria-labelledby="h-runs">
+      <div class="card-head">
+        <h2 id="h-runs">Run の一覧</h2>
+        <button type="button" id="refresh-btn" class="secondary">今すぐ更新</button>
+      </div>
+      <form id="scope-form" class="scope">
+        <fieldset>
+          <legend>表示する範囲</legend>
+          <label><input type="radio" name="scope" id="scope-mine" value="mine" checked> 自分の Run</label>
+          <label><input type="radio" name="scope" id="scope-all" value="all"> 全員の Run（運用者向け）</label>
+        </fieldset>
+      </form>
+      <p id="runs-status" class="meta" role="status">未取得</p>
+      <ul id="runs-list" class="run-list"></ul>
+    </section>
+
     <!-- Autopilot (ADR 0011). Hidden unless GET /api/selfdev/autopilot answers 200 with the autopilot enabled. -->
     <section class="card" id="goal-section" aria-labelledby="h-goal" hidden>
       <h2 id="h-goal">開発目標（Goal）</h2>
@@ -92,6 +108,15 @@
       <ul id="plans-list" class="run-list" aria-label="Goal の一覧"></ul>
     </section>
 
+    <!-- Stop approval (the root approver only). Hidden unless GET /api/selfdev/stop-requests?state=PENDING answers 200. -->
+    <section class="card" id="approval-section" aria-labelledby="h-approval" hidden>
+      <h2 id="h-approval">停止の承認（承認者だけ）</h2>
+      <p class="meta" role="note">承認すると、対象の order は停止済みになり、元に戻せません。要求の方針や題名、要求者の ID は表示しません。</p>
+      <p id="approval-msg" class="result" role="status"></p>
+      <p id="approval-status" class="meta" role="status">未取得</p>
+      <ul id="approval-list" class="run-list" aria-label="保留中の停止の要求"></ul>
+    </section>
+
     <!-- Self-development orders (ADR 0015 stage 1, PR 2b). Hidden unless GET /api/selfdev/orders answers 200 (the autopilot is on). -->
     <section class="card" id="orders-section" aria-labelledby="h-orders" hidden>
       <div class="card-head">
@@ -104,15 +129,32 @@
       <ul id="orders-list" class="run-list" aria-label="order の一覧"></ul>
     </section>
 
-    <!-- Stop approval (the root approver only). Hidden unless GET /api/selfdev/stop-requests?state=PENDING answers 200. -->
-    <section class="card" id="approval-section" aria-labelledby="h-approval" hidden>
-      <h2 id="h-approval">停止の承認（承認者だけ）</h2>
-      <p class="meta" role="note">承認すると、対象の order は停止済みになり、元に戻せません。要求の方針や題名、要求者の ID は表示しません。</p>
-      <p id="approval-msg" class="result" role="status"></p>
-      <p id="approval-status" class="meta" role="status">未取得</p>
-      <ul id="approval-list" class="run-list" aria-label="保留中の停止の要求"></ul>
+    <!-- Budget (operator). Hidden unless GET /api/admin/budget/status answers 200 to this user. Only text is written into it. -->
+    <section class="card" id="budget-section" aria-labelledby="h-budget" hidden>
+      <div class="card-head">
+        <h2 id="h-budget">予算（運用者向け）</h2>
+        <button type="button" id="budget-refresh" class="secondary">今すぐ更新</button>
+      </div>
+      <p id="budget-status" class="meta" role="status">未取得</p>
+      <p id="budget-msg" class="result" role="status"></p>
+      <div id="budget-body" hidden>
+        <p id="budget-month" class="meta"></p>
+        <p id="budget-bar-label" class="meta">今月の使用額（確定と予約中の合計）</p>
+        <progress id="budget-bar" max="100" value="0" aria-labelledby="budget-bar-label"></progress>
+        <p id="budget-bar-text"></p>
+        <p id="budget-fx" class="meta" role="status" hidden></p>
+        <dl id="budget-paths">
+          <dt>API 経路（API の呼び出し）</dt>
+          <dd id="budget-path-api">-</dd>
+          <dt>CLI 経路（コーディングの Run）</dt>
+          <dd id="budget-path-cli">-</dd>
+        </dl>
+        <h3 id="h-budget-unpriced">未確定の予約（費用が確定しない、または期限切れ）</h3>
+        <p id="budget-unpriced-count" class="meta" role="status"></p>
+        <ul id="budget-unpriced-list" class="run-list" aria-labelledby="h-budget-unpriced"></ul>
+        <p id="budget-unpriced-note" class="meta" hidden></p>
+      </div>
     </section>
-
     <!-- Self-development memory (operator, ADR 0016 P2). Hidden unless GET /api/selfdev/memory answers 200. Only text is written into it. -->
     <section class="card" id="memory-section" aria-labelledby="h-memory" hidden>
       <div class="card-head">
@@ -143,48 +185,6 @@
       <p id="memory-dryrun-result" class="meta" role="status"></p>
     </section>
 
-    <section class="card" aria-labelledby="h-runs">
-      <div class="card-head">
-        <h2 id="h-runs">Run の一覧</h2>
-        <button type="button" id="refresh-btn" class="secondary">今すぐ更新</button>
-      </div>
-      <form id="scope-form" class="scope">
-        <fieldset>
-          <legend>表示する範囲</legend>
-          <label><input type="radio" name="scope" id="scope-mine" value="mine" checked> 自分の Run</label>
-          <label><input type="radio" name="scope" id="scope-all" value="all"> 全員の Run（運用者向け）</label>
-        </fieldset>
-      </form>
-      <p id="runs-status" class="meta" role="status">未取得</p>
-      <ul id="runs-list" class="run-list"></ul>
-    </section>
-
-    <!-- Budget (operator). Hidden unless GET /api/admin/budget/status answers 200 to this user. Only text is written into it. -->
-    <section class="card" id="budget-section" aria-labelledby="h-budget" hidden>
-      <div class="card-head">
-        <h2 id="h-budget">予算（運用者向け）</h2>
-        <button type="button" id="budget-refresh" class="secondary">今すぐ更新</button>
-      </div>
-      <p id="budget-status" class="meta" role="status">未取得</p>
-      <p id="budget-msg" class="result" role="status"></p>
-      <div id="budget-body" hidden>
-        <p id="budget-month" class="meta"></p>
-        <p id="budget-bar-label" class="meta">今月の使用額（確定と予約中の合計）</p>
-        <progress id="budget-bar" max="100" value="0" aria-labelledby="budget-bar-label"></progress>
-        <p id="budget-bar-text"></p>
-        <p id="budget-fx" class="meta" role="status" hidden></p>
-        <dl id="budget-paths">
-          <dt>API 経路（API の呼び出し）</dt>
-          <dd id="budget-path-api">-</dd>
-          <dt>CLI 経路（コーディングの Run）</dt>
-          <dd id="budget-path-cli">-</dd>
-        </dl>
-        <h3 id="h-budget-unpriced">未確定の予約（費用が確定しない、または期限切れ）</h3>
-        <p id="budget-unpriced-count" class="meta" role="status"></p>
-        <ul id="budget-unpriced-list" class="run-list" aria-labelledby="h-budget-unpriced"></ul>
-        <p id="budget-unpriced-note" class="meta" hidden></p>
-      </div>
-    </section>
   </div>
 
   <section id="view-detail" class="card" hidden aria-labelledby="h-detail">

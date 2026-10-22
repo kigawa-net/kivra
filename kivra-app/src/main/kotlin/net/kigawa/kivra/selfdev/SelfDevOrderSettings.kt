@@ -15,6 +15,15 @@ class OrderSettings private constructor(
     val enabled: Boolean,
     /** Present only when [enabled]. */
     val rootApprover: String?,
+    /**
+     * The deepest level a child order may have (ADR 0015 section 2.7). 0 (the default, and the rollback of stage 2) means no child can be
+     * created. Present only when [enabled].
+     */
+    val maxDepth: Int = 0,
+    /** The most children one parent may have. Present only when [enabled]. */
+    val maxChildren: Int = DEFAULT_MAX_CHILDREN,
+    /** The most orders one tree may have, the root included. Present only when [enabled]. */
+    val maxTree: Int = DEFAULT_MAX_TREE,
 ) {
     override fun toString(): String = "OrderSettings(enabled=$enabled)"
 
@@ -22,6 +31,11 @@ class OrderSettings private constructor(
         const val ENV_ENABLED = "KIVRA_SELFDEV_ORDERS_ENABLED"
         const val ENV_ROOT_APPROVER = "KIVRA_SELFDEV_ROOT_APPROVER"
         const val ENV_AI_PRINCIPAL = "KIVRA_SELFDEV_AI_PRINCIPAL"
+        const val ENV_MAX_DEPTH = "KIVRA_SELFDEV_ORDER_MAX_DEPTH"
+        const val ENV_MAX_CHILDREN = "KIVRA_SELFDEV_ORDER_MAX_CHILDREN"
+        const val ENV_MAX_TREE = "KIVRA_SELFDEV_ORDER_MAX_TREE"
+        const val DEFAULT_MAX_CHILDREN = 5
+        const val DEFAULT_MAX_TREE = 15
 
         /** The settings when the feature is off. Reads nothing but [ENV_ENABLED]. */
         fun disabled(): OrderSettings = OrderSettings(enabled = false, rootApprover = null)
@@ -43,9 +57,24 @@ class OrderSettings private constructor(
             if (aiPrincipal != null) {
                 check(aiPrincipal != approver) { "$ENV_AI_PRINCIPAL must not be the root approver ($ENV_ROOT_APPROVER)" }
             }
-            return OrderSettings(enabled = true, rootApprover = approver)
+            // Read only while the orders are on. A bad value fails the startup, and the message never shows the value.
+            return OrderSettings(
+                enabled = true,
+                rootApprover = approver,
+                maxDepth = boundedInt(env, ENV_MAX_DEPTH, default = 0, range = 0..2),
+                maxChildren = boundedInt(env, ENV_MAX_CHILDREN, default = DEFAULT_MAX_CHILDREN, range = 1..20),
+                maxTree = boundedInt(env, ENV_MAX_TREE, default = DEFAULT_MAX_TREE, range = 1..100),
+            )
         }
     }
+}
+
+/** An integer setting with a range. Unset or blank is [default]. A value out of range or not an integer is a startup failure. */
+private fun boundedInt(env: Map<String, String>, name: String, default: Int, range: IntRange): Int {
+    val raw = env[name]?.trim()?.takeIf { it.isNotEmpty() } ?: return default
+    val value = raw.toIntOrNull()
+    check(value != null && value in range) { "$name must be an integer from ${range.first} to ${range.last}" }
+    return value
 }
 
 /** An owner key is `<issuer byte length>:<issuer>:<subject>` (see `oidcOwnerKey`). */

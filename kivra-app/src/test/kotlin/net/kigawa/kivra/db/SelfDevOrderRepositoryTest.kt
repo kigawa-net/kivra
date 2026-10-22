@@ -1,5 +1,6 @@
 package net.kigawa.kivra.db
 
+import java.security.MessageDigest
 import java.sql.SQLException
 import java.time.Clock
 import java.time.Duration
@@ -31,6 +32,7 @@ private const val TARGET = "kigawa-net/kivra"
 private const val TITLE_MARKER = "TITLE-MARKER-XYZ"
 private const val POLICY_MARKER = "POLICY-MARKER-XYZ"
 private val START: Instant = Instant.parse("2026-10-19T10:00:00Z")
+private val CHILD_LIMITS = ChildLimits(maxDepth = 2, maxChildren = 5, maxTree = 15)
 
 /** A clock the test moves. */
 private class MovableClock(var now: Instant) : Clock() {
@@ -389,6 +391,150 @@ class SelfDevOrderRepositoryTest {
         val request = requestByAi(f, f.repo.get(root.orderId)!!)
         f.repo.approveStop(request.requestId, OPERATOR, request.digest)
         assertTrue(!f.repo.dispatchAllowed(started.goalId))
+    }
+
+    // ---- child orders (ADR 0015 section 2.7, stage 2 PR 3a) ----------------------------------------------------------------
+
+    private fun Fixture.child(
+        parentId: String,
+        budget: Long = 1_000,
+        key: String = "key-$parentId-${budget}-${Ulid.generate()}",
+        title: String = "child",
+        policy: String = "child policy",
+        lim: ChildLimits = CHILD_LIMITS,
+    ): ChildCreateResult = repo.createChild(parentId, title, policy, budget, key, OPERATOR, lim)
+
+    private fun Fixture.created(result: ChildCreateResult): SelfDevOrder = assertIs<ChildCreateResult.Created>(result).order
+
+    private fun Fixture.refusal(result: ChildCreateResult): ChildRefusal = assertIs<ChildCreateResult.Refused>(result).reason
+
+    @Test
+    fun `a child is ACTIVE under an ACTIVE parent, with the budget, the parent link and the depth`() = withFixture { f ->
+        val root = f.root()
+        val child = f.created(f.child(root.orderId, budget = 3_000, key = "first"))
+        assertEquals(root.orderId, child.parentOrderId)
+        assertEquals(1, child.depth)
+        assertEquals(OrderState.ACTIVE, child.state)
+        assertEquals(3_000, child.orderBudgetJpy)
+        assertEquals(0, child.allocatedJpy)
+        assertEquals(0, child.childCount)
+        assertEquals(TARGET, child.targetRepo)
+        val parent = f.repo.get(root.orderId)!!
+        assertEquals(3_000, parent.allocatedJpy)
+        assertEquals(1, parent.childCount)
+        assertEquals(root.version + 1, parent.version)
+    }
+
+    @Test
+    fun `a child needs an ACTIVE parent and ACTIVE ancestors, and a refusal writes nothing`() = withFixture { f ->
+        val root = f.root()
+        val c1 = f.created(f.child(root.orderId, key = "c1"))
+        val c2 = f.created(f.child(root.orderId, key = "c2"))
+        val c3 = f.created(f.child(root.orderId, key = "c3"))
+        val c4 = f.created(f.child(root.orderId, key = "c4"))
+        // c2 is STOPPED (approved), c3 is waiting for a stop, c4 is PAUSED, and the root is PAUSED (so c1 has a paused ancestor).
+        val request2 = requestByAi(f, f.repo.get(c2.orderId)!!)
+        assertIs<OrderResult.Moved<*>>(f.repo.approveStop(request2.requestId, OPERATOR, request2.digest))
+        requestByAi(f, f.repo.get(c3.orderId)!!)
+        f.repo.pauseByOperator(c4.orderId, f.repo.get(c4.orderId)!!.version, OPERATOR)
+        f.repo.pauseByOperator(root.orderId, f.repo.get(root.orderId)!!.version, OPERATOR)
+
+        val ordersBefore = f.count("SELECT COUNT(*) FROM selfdev_orders")
+        val eventsBefore = f.count("SELECT COUNT(*) FROM selfdev_order_events")
+        val rootBefore = f.repo.get(root.orderId)!!
+
+        assertEquals(ChildRefusal.PARENT_NOT_ACTIVE, f.refusal(f.child("01ZZZZZZZZZZZZZZZZZZZZZZZZ", key = "missing")))
+        assertEquals(ChildRefusal.PARENT_NOT_ACTIVE, f.refusal(f.child(c1.orderId, key = "under-paused-ancestor")))
+        assertEquals(ChildRefusal.PARENT_NOT_ACTIVE, f.refusal(f.child(c2.orderId, key = "under-stopped")))
+        assertEquals(ChildRefusal.PARENT_NOT_ACTIVE, f.refusal(f.child(c3.orderId, key = "under-waiting")))
+        assertEquals(ChildRefusal.PARENT_NOT_ACTIVE, f.refusal(f.child(c4.orderId, key = "under-paused")))
+
+        assertEquals(ordersBefore, f.count("SELECT COUNT(*) FROM selfdev_orders"))
+        assertEquals(eventsBefore, f.count("SELECT COUNT(*) FROM selfdev_order_events"))
+        val rootAfter = f.repo.get(root.orderId)!!
+        assertEquals(rootBefore.allocatedJpy, rootAfter.allocatedJpy)
+        assertEquals(rootBefore.childCount, rootAfter.childCount)
+        assertEquals(rootBefore.version, rootAfter.version)
+    }
+
+    @Test
+    fun `depth 2 is the limit, so a grandchild is made and a great-grandchild is refused`() = withFixture { f ->
+        val root = f.root()
+        val child = f.created(f.child(root.orderId, key = "c"))
+        val grand = f.created(f.child(child.orderId, key = "g"))
+        assertEquals(2, grand.depth)
+        assertEquals(ChildRefusal.DEPTH_LIMIT, f.refusal(f.child(grand.orderId, key = "gg")))
+    }
+
+    @Test
+    fun `a parent takes five children and a sixth is refused`() = withFixture { f ->
+        val root = f.root()
+        repeat(5) { i -> f.created(f.child(root.orderId, budget = 1, key = "k$i")) }
+        assertEquals(5, f.repo.get(root.orderId)!!.childCount)
+        assertEquals(ChildRefusal.CHILD_LIMIT, f.refusal(f.child(root.orderId, budget = 1, key = "k5")))
+    }
+
+    @Test
+    fun `a tree holds fifteen orders with the root, and the sixteenth is refused`() = withFixture { f ->
+        val root = f.root()
+        val wide = ChildLimits(maxDepth = 2, maxChildren = 20, maxTree = 15)
+        repeat(14) { i -> f.created(f.child(root.orderId, budget = 1, key = "w$i", lim = wide)) }
+        assertEquals(15, f.count("SELECT COUNT(*) FROM selfdev_orders"))
+        assertEquals(ChildRefusal.TREE_LIMIT, f.refusal(f.child(root.orderId, budget = 1, key = "w14", lim = wide)))
+    }
+
+    @Test
+    fun `the children of a parent never allocate more than its budget`() = withFixture { f ->
+        val root = f.root()
+        f.created(f.child(root.orderId, budget = 3_000, key = "a"))
+        assertEquals(ChildRefusal.BUDGET_EXCEEDS_PARENT, f.refusal(f.child(root.orderId, budget = 2_001, key = "b")))
+        f.created(f.child(root.orderId, budget = 2_000, key = "c"))
+        val parent = f.repo.get(root.orderId)!!
+        assertEquals(5_000, parent.allocatedJpy)
+        assertEquals(2, parent.childCount)
+    }
+
+    @Test
+    fun `two children created at the same time never allocate more than the parent's budget`() = withFixture { f ->
+        val root = f.root()
+        val results = concurrently(2) {
+            f.repo.createChild(root.orderId, "race", "race policy", 3_000, "race-${Thread.currentThread().id}", OPERATOR, CHILD_LIMITS)
+        }
+        assertEquals(1, results.count { it is ChildCreateResult.Created }, "results=$results")
+        assertEquals(listOf(ChildRefusal.BUDGET_EXCEEDS_PARENT), results.filterIsInstance<ChildCreateResult.Refused>().map { it.reason })
+        val parent = f.repo.get(root.orderId)!!
+        assertEquals(3_000, parent.allocatedJpy)
+        assertEquals(1, parent.childCount)
+    }
+
+    @Test
+    fun `the same key with the same content replays the child, and another content under the key is a conflict`() = withFixture { f ->
+        val root = f.root()
+        val first = f.created(f.child(root.orderId, budget = 1_000, key = "same"))
+        val replay = assertIs<ChildCreateResult.Replayed>(f.child(root.orderId, budget = 1_000, key = "same")).order
+        assertEquals(first.orderId, replay.orderId)
+        assertIs<ChildCreateResult.KeyConflict>(f.child(root.orderId, budget = 1_000, key = "same", title = "other"))
+        assertIs<ChildCreateResult.KeyConflict>(f.child(root.orderId, budget = 2_000, key = "same"))
+        val parent = f.repo.get(root.orderId)!!
+        assertEquals(1_000, parent.allocatedJpy)
+        assertEquals(1, parent.childCount)
+    }
+
+    @Test
+    fun `a child creation is audited with the parent, the depth and the amount, and never with the title or the policy`() = withFixture { f ->
+        val root = f.root()
+        val child = f.created(f.child(root.orderId, budget = 1_000, title = TITLE_MARKER, policy = POLICY_MARKER))
+        val rows = transaction(f.db.database) {
+            execQuery(
+                "SELECT order_id, parent_order_id, depth, amount_jpy, actor_kind, actor_ref FROM selfdev_order_events WHERE kind = 'CHILD_CREATED'",
+            ) { rs ->
+                listOf(rs.getString(1), rs.getString(2), rs.getInt(3).toString(), rs.getLong(4).toString(), rs.getString(5), rs.getString(6))
+            }
+        }
+        val expectedRef = MessageDigest.getInstance("SHA-256").digest(OPERATOR.toByteArray(Charsets.UTF_8))
+            .take(6).joinToString("") { "%02x".format(it) }
+        assertEquals(listOf(child.orderId, root.orderId, "1", "1000", "HUMAN", expectedRef), rows.single())
+        assertEquals(0, f.count("SELECT COUNT(*) FROM selfdev_order_events WHERE reason_code LIKE '%$TITLE_MARKER%' OR reason_code LIKE '%$POLICY_MARKER%'"))
     }
 
     private fun requestByAi(f: Fixture, root: SelfDevOrder): SelfDevOrderStopRequest =

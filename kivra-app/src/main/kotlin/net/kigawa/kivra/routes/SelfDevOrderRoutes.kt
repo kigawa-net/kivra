@@ -15,6 +15,9 @@ import net.kigawa.kivra.auth.OperatorAuthenticator
 import net.kigawa.kivra.core.autopilot.GoalState
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.StopRequestReason
+import net.kigawa.kivra.db.ChildCreateResult
+import net.kigawa.kivra.db.ChildLimits
+import net.kigawa.kivra.db.ChildRefusal
 import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.OrderConflict
 import net.kigawa.kivra.db.OrderCycle
@@ -61,6 +64,10 @@ data class CreateOrderRequest(val title: String, val policy: String)
 @Serializable
 data class OrderVersionRequest(val version: Long)
 
+/** A child order (ADR 0015 section 2.7). The same title and policy rules as the root; the budget is whole yen. */
+@Serializable
+data class CreateChildRequest(val title: String, val policy: String, val orderBudgetJpy: Long, val idempotencyKey: String)
+
 @Serializable
 data class RequestStopRequest(val version: Long, val reasonCode: String)
 
@@ -82,6 +89,9 @@ data class OrderSummaryResponse(
     val version: Long,
     val createdAt: String,
     val updatedAt: String,
+    val orderBudgetJpy: Long,
+    val allocatedJpy: Long,
+    val childCount: Int,
 )
 
 @Serializable
@@ -124,6 +134,9 @@ private val DIGEST_SHAPE = Regex("[0-9a-f]{64}")
 private const val LIST_LIMIT = 50
 private const val MAX_TITLE_CODE_POINTS = 200
 private const val MAX_POLICY_CODE_POINTS = 2_000
+private const val MAX_CHILD_KEY_CODE_POINTS = 128
+/** The largest value of DECIMAL(12,0), the budget columns' type. */
+private const val MAX_BUDGET_JPY = 999_999_999_999L
 
 private const val ORDERS_DISABLED = "self-development orders are disabled"
 private const val INVALID_BODY = "invalid request body"
@@ -137,6 +150,11 @@ private const val ROOT_EXISTS = "the root order already exists"
 private const val REASON_INVALID = "reasonCode is not one of the fixed codes"
 private const val DIGEST_INVALID = "digest must be 64 lowercase hex characters"
 private const val STATE_INVALID = "state must be PENDING"
+private const val CHILDREN_DISABLED = "child orders are disabled"
+private const val CHILD_FIELDS_INVALID = "title and policy as for an order, and idempotencyKey 1-128 characters without control characters"
+private const val BUDGET_INVALID = "orderBudgetJpy must be a whole number of yen from 1 to 999999999999"
+private const val PARENT_NOT_ACTIVE = "the parent order is not active; a child needs an active parent"
+private const val KEY_CONFLICT = "idempotency key was already used with a different request"
 
 private val operatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.order.operator")
 
@@ -207,6 +225,38 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
                 )
             }
             else -> call.respondOutcome(r)
+        }
+    }
+
+    post("/api/selfdev/orders/{id}/children") {
+        val caller = deps.caller(call) ?: return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        // Only the operator creates a child (ADR 0015 U-19). The AI principal is refused before the body is read.
+        if (!caller.isHuman(call)) return@post
+        if (deps.orderSettings.maxDepth < 1) return@post call.respond(HttpStatusCode.Conflict, OrderError(CHILDREN_DISABLED, "CHILDREN_DISABLED"))
+        val request = decodeOr<CreateChildRequest>(call) ?: return@post
+        val title = validatedText(request.title, MAX_TITLE_CODE_POINTS)
+        val policy = validatedPolicy(request.policy)
+        val key = validatedText(request.idempotencyKey, MAX_CHILD_KEY_CODE_POINTS)
+        if (title == null || policy == null || key == null) return@post call.respond(HttpStatusCode.BadRequest, OrderError(CHILD_FIELDS_INVALID))
+        if (request.orderBudgetJpy !in 1..MAX_BUDGET_JPY) return@post call.respond(HttpStatusCode.BadRequest, OrderError(BUDGET_INVALID))
+        val parentId = orderIdOf(call) ?: return@post call.respond(HttpStatusCode.Conflict, OrderError(PARENT_NOT_ACTIVE, "PARENT_NOT_ACTIVE"))
+        val limits = ChildLimits(
+            maxDepth = deps.orderSettings.maxDepth,
+            maxChildren = deps.orderSettings.maxChildren,
+            maxTree = deps.orderSettings.maxTree,
+        )
+        when (val r = deps.orders.createChild(parentId, title, policy, request.orderBudgetJpy, key, caller.principal, limits)) {
+            is ChildCreateResult.Created -> {
+                operatorLog.info(
+                    "order operator action: action=CHILD_CREATED actor={} orderId={} parentOrderId={} depth={} result=ACTIVE",
+                    operatorTag(caller.principal), r.order.orderId, parentId, r.order.depth,
+                )
+                call.respond(HttpStatusCode.Created, r.order.summary())
+            }
+            is ChildCreateResult.Replayed -> call.respond(HttpStatusCode.OK, r.order.summary())
+            is ChildCreateResult.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedChildText(r.reason), r.reason.name))
+            ChildCreateResult.KeyConflict -> call.respond(HttpStatusCode.Conflict, OrderError(KEY_CONFLICT, "KEY_CONFLICT"))
         }
     }
 
@@ -454,6 +504,14 @@ internal fun refusedText(reason: OrderConflict): String = when (reason) {
     OrderConflict.SAME_PRINCIPAL -> FORBIDDEN
 }
 
+internal fun refusedChildText(reason: ChildRefusal): String = when (reason) {
+    ChildRefusal.PARENT_NOT_ACTIVE -> PARENT_NOT_ACTIVE
+    ChildRefusal.DEPTH_LIMIT -> "the tree is at its depth limit"
+    ChildRefusal.CHILD_LIMIT -> "the parent is at its child limit"
+    ChildRefusal.TREE_LIMIT -> "the tree is at its size limit"
+    ChildRefusal.BUDGET_EXCEEDS_PARENT -> "orderBudgetJpy is more than the parent's unallocated budget"
+}
+
 private fun java.time.LocalDateTime.utc(): String = toInstant(ZoneOffset.UTC).toString()
 
 private fun SelfDevOrder.summary() = OrderSummaryResponse(
@@ -470,6 +528,9 @@ private fun SelfDevOrder.summary() = OrderSummaryResponse(
     version = version,
     createdAt = createdAt.utc(),
     updatedAt = updatedAt.utc(),
+    orderBudgetJpy = orderBudgetJpy,
+    allocatedJpy = allocatedJpy,
+    childCount = childCount,
 )
 
 private fun SelfDevOrderStopRequest.response(approverView: Boolean) = StopRequestResponse(
@@ -497,6 +558,6 @@ internal fun validatedPolicy(raw: String): String? {
     val value = raw.trim()
     if (value.isEmpty()) return null
     if (value.codePointCount(0, value.length) > MAX_POLICY_CODE_POINTS) return null
-    if (value.any { it.isISOControl() && it != '\n' && it != '\t' }) return null
+    if (value.any { (it.isISOControl() && it != '\n' && it != '\t') || isBidiControl(it) }) return null
     return value
 }

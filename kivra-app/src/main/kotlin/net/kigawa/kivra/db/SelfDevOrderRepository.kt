@@ -50,6 +50,12 @@ data class SelfDevOrder(
     val version: Long,
     val createdAt: LocalDateTime,
     val updatedAt: LocalDateTime,
+    /** The order's budget in whole yen (ADR 0015 section 2.7). */
+    val orderBudgetJpy: Long,
+    /** The part of the budget given to children. Never above [orderBudgetJpy]. */
+    val allocatedJpy: Long,
+    /** The number of children. */
+    val childCount: Int,
 )
 
 enum class StopRequestState { PENDING, CONSUMED, REJECTED, CANCELLED, EXPIRED }
@@ -95,6 +101,21 @@ sealed interface CreateRootResult {
 
 /** The outcome of a successful cycle start: the order and the new goal. */
 data class CycleStarted(val order: SelfDevOrder, val goalId: String, val cycleNo: Int)
+
+/** The fixed refusal codes of a child creation (ADR 0015 section 2.7). When one holds, nothing is written. */
+enum class ChildRefusal { PARENT_NOT_ACTIVE, DEPTH_LIMIT, CHILD_LIMIT, TREE_LIMIT, BUDGET_EXCEEDS_PARENT }
+
+sealed interface ChildCreateResult {
+    data class Created(val order: SelfDevOrder) : ChildCreateResult
+    /** The same key with the same content: the child made before. Nothing is written. */
+    data class Replayed(val order: SelfDevOrder) : ChildCreateResult
+    data class Refused(val reason: ChildRefusal) : ChildCreateResult
+    /** The key was already used for a different request. Nothing is written. */
+    data object KeyConflict : ChildCreateResult
+}
+
+/** The limits of a child creation, from the settings (`KIVRA_SELFDEV_ORDER_MAX_*`). */
+data class ChildLimits(val maxDepth: Int, val maxChildren: Int, val maxTree: Int)
 
 /** A stop request is ended by a rejection (by the approver) or a cancellation (by the requester or the approver). */
 enum class StopEnd { REJECTED, CANCELLED }
@@ -201,6 +222,83 @@ class SelfDevOrderRepository(
     } catch (e: Exception) {
         if (!e.hasUniqueViolation()) throw e
         CreateRootResult.RootExists
+    }
+
+    /**
+     * Creates a child of [parentId] (ADR 0015 section 2.7), ACTIVE, with no cycle yet. The checks and the writes are one transaction. The
+     * root row is locked first, then the parent: every child creation takes the locks in that order, so two creations in one tree wait for
+     * each other. That keeps the tree size (TREE_LIMIT) and the parent's budget (BUDGET_EXCEEDS_PARENT) exact under concurrency.
+     *
+     * A key that is already used under this parent returns the child when the title, the policy and the budget are the same
+     * ([ChildCreateResult.Replayed]), and [ChildCreateResult.KeyConflict] otherwise. The child takes the parent's target repo. Its lifetime
+     * is 14 days, and never longer than the parent's.
+     */
+    fun createChild(
+        parentId: String,
+        title: String,
+        policy: String,
+        orderBudgetJpy: Long,
+        idempotencyKey: String,
+        createdBy: String,
+        limits: ChildLimits,
+    ): ChildCreateResult = try {
+        transaction(database) {
+            val now = utcNow(clock)
+            execQuery("SELECT order_id FROM selfdev_orders WHERE root_slot = 1 FOR UPDATE") { it.getString(1) }
+            val parent = lockOrder(parentId) ?: throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.PARENT_NOT_ACTIVE))
+            findChildByKey(parentId, idempotencyKey)?.let { existing ->
+                return@transaction if (existing.title == title && existing.policy == policy && existing.orderBudgetJpy == orderBudgetJpy) {
+                    ChildCreateResult.Replayed(existing)
+                } else {
+                    ChildCreateResult.KeyConflict
+                }
+            }
+            if (parent.state != OrderState.ACTIVE || !parent.expiresAt.isAfter(now) || !ancestorsActive(parent)) {
+                throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.PARENT_NOT_ACTIVE))
+            }
+            if (parent.depth + 1 > limits.maxDepth) throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.DEPTH_LIMIT))
+            if (parent.childCount >= limits.maxChildren) throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.CHILD_LIMIT))
+            val treeSize = execQuery("SELECT COUNT(*) FROM selfdev_orders") { it.getInt(1) }.single()
+            if (treeSize >= limits.maxTree) throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.TREE_LIMIT))
+            if (orderBudgetJpy > parent.orderBudgetJpy - parent.allocatedJpy) {
+                throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.BUDGET_EXCEEDS_PARENT))
+            }
+
+            val childId = Ulid.generate(clock)
+            val lifetimeEnd = minOf(now.plus(orderTtl), parent.expiresAt)
+            execUpdate(
+                """
+                INSERT INTO selfdev_orders (order_id, parent_order_id, depth, root_slot, title, policy, target_repo, max_cycles,
+                    cycles_started, consecutive_failed_cycles, state, expires_at, created_by, version, created_at, updated_at,
+                    order_budget_jpy, allocated_jpy, child_count, idempotency_key)
+                VALUES (?, ?, ?, NULL, ?, ?, ?, 1, 0, 0, 'ACTIVE', ?, ?, 0, ?, ?, ?, 0, 0, ?)
+                """.trimIndent(),
+                childId, parentId, parent.depth + 1, title, policy, parent.targetRepo, lifetimeEnd, createdBy, now, now,
+                orderBudgetJpy, idempotencyKey,
+            )
+            val changed = execUpdate(
+                """
+                UPDATE selfdev_orders SET allocated_jpy = allocated_jpy + ?, child_count = child_count + 1, version = version + 1,
+                    updated_at = ? WHERE order_id = ? AND version = ?
+                """.trimIndent(),
+                orderBudgetJpy, now, parentId, parent.version,
+            )
+            check(changed == 1) { "parent order changed under its row lock" }
+            execUpdate(
+                """
+                INSERT INTO selfdev_order_events (event_id, order_id, cycle_no, kind, from_state, to_state, reason_code, actor_kind, actor_ref,
+                    request_id, occurred_at, parent_order_id, depth, amount_jpy)
+                VALUES (?, ?, NULL, 'CHILD_CREATED', NULL, 'ACTIVE', NULL, ?, ?, NULL, ?, ?, ?, ?)
+                """.trimIndent(),
+                Ulid.generate(clock), childId, OrderActor.HUMAN.name, actorRef(createdBy), now, parentId, parent.depth + 1, orderBudgetJpy,
+            )
+            ChildCreateResult.Created(getIn(childId) ?: error("child order vanished after insert"))
+        }
+    } catch (r: ChildRollback) {
+        r.outcome
+    } catch (e: Exception) {
+        if (!e.hasUniqueViolation()) throw e
+        ChildCreateResult.KeyConflict
     }
 
     // ---- pause and resume --------------------------------------------------------------------------------------------------------
@@ -616,15 +714,36 @@ class SelfDevOrderRepository(
     private fun Transaction.getRequestIn(requestId: String): SelfDevOrderStopRequest? =
         execQuery("SELECT $REQUEST_COLUMNS FROM selfdev_order_stop_requests WHERE request_id = ?", requestId) { it.toRequest() }.firstOrNull()
 
+    private fun Transaction.findChildByKey(parentId: String, idempotencyKey: String): SelfDevOrder? =
+        execQuery(
+            "SELECT $ORDER_COLUMNS FROM selfdev_orders WHERE parent_order_id = ? AND idempotency_key = ?",
+            parentId, idempotencyKey,
+        ) { it.toOrder() }.firstOrNull()
+
+    /** True when every ancestor of [order] is ACTIVE (its effective state, ADR 0015 section 2.4). Reads the rows without locking them. */
+    private fun Transaction.ancestorsActive(order: SelfDevOrder): Boolean {
+        var next = order.parentOrderId
+        while (next != null) {
+            val ancestor = getIn(next) ?: return false
+            if (ancestor.state != OrderState.ACTIVE) return false
+            next = ancestor.parentOrderId
+        }
+        return true
+    }
+
     /**
      * Carries a refusal out of a transaction. The transaction rolls back, so no write made before the throw survives. The caller turns the
      * result back into the return value with [result].
      */
     private class Rollback(val outcome: OrderResult<Nothing>) : RuntimeException(null, null, false, false)
 
+    /** The same, for a child creation. */
+    private class ChildRollback(val outcome: ChildCreateResult) : RuntimeException(null, null, false, false)
+
     private companion object {
         const val ORDER_COLUMNS = "order_id, parent_order_id, depth, title, policy, target_repo, max_cycles, cycles_started, " +
-            "current_goal_id, consecutive_failed_cycles, state, state_reason, expires_at, created_by, version, created_at, updated_at"
+            "current_goal_id, consecutive_failed_cycles, state, state_reason, expires_at, created_by, version, created_at, updated_at, " +
+            "order_budget_jpy, allocated_jpy, child_count"
         const val REQUEST_COLUMNS = "request_id, order_id, requested_by, requester_kind, reason_code, order_version, digest, state, " +
             "decided_by, expires_at, created_at"
 
@@ -658,6 +777,9 @@ private fun java.sql.ResultSet.toOrder() = SelfDevOrder(
     version = getLong(15),
     createdAt = getObject(16, LocalDateTime::class.java),
     updatedAt = getObject(17, LocalDateTime::class.java),
+    orderBudgetJpy = getLong(18),
+    allocatedJpy = getLong(19),
+    childCount = getInt(20),
 )
 
 private fun java.sql.ResultSet.toRequest() = SelfDevOrderStopRequest(

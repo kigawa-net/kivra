@@ -46,6 +46,8 @@ class SelfDevOrderRouteDeps(
     val operators: OperatorAuthenticator,
     val autopilot: AutopilotSettings,
     val orderSettings: OrderSettings,
+    /** The AI principal's owner key (`KIVRA_SELFDEV_AI_PRINCIPAL`), or null when it is not configured. Read whatever the order switch says. */
+    val aiPrincipal: String?,
     /** `owner/repo` of the target. Stored with the order at creation (fixed). */
     val targetRepo: String?,
     val orders: SelfDevOrderRepository,
@@ -332,7 +334,7 @@ private suspend fun SelfDevOrderRouteDeps.caller(call: ApplicationCall): OrderCa
     when (val auth = operators.authenticate(call.request.headers)) {
         is OperatorAuth.Authenticated -> OrderCaller(
             auth.principal,
-            if (auth.principal == orderSettings.aiPrincipal) OrderActor.AI else OrderActor.HUMAN,
+            if (auth.principal == aiPrincipal) OrderActor.AI else OrderActor.HUMAN,
         )
         OperatorAuth.Unauthenticated -> {
             call.respond(HttpStatusCode.Unauthorized, OrderError("unauthorized"))

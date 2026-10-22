@@ -1286,7 +1286,7 @@ dev での有効化の手順は §7.5。
 
 - HTTP: `POST /api/selfdev/goals`(`{"title", "body"?, "idempotencyKey"}`。ほかの項目は 400)。202 は新規、200 は既に受け付け済み、409 は同じ投入キーで別の内容。
 - 本文は、一覧には出ない。詳細(`GET /api/selfdev/goals/{id}`)でだけ見える。
-- AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL` の owner key)は、Goal の書き込み(投入、計画の承認、replan、中止、タスクの承認と見送り)を 403 `forbidden` で拒否される(ADR 0019。拒否の前に本文は読まれず、何も保存されない)。読み取り(`GET`)は AI の主体にも許す。`KIVRA_SELFDEV_AI_PRINCIPAL` は order の有効化(`KIVRA_SELFDEV_ORDERS_ENABLED=true`)のときだけ読まれる。未設定、または order を無効にしたままのときは、この拒否は効かない。
+- AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL` の owner key)は、Goal の書き込み(投入、計画の承認、replan、中止、タスクの承認と見送り)と、オートパイロットの制御(一時停止 `pause`、再開 `resume`、ブレーカーのリセット `reset-breaker`)を 403 `forbidden` で拒否される(ADR 0019。拒否の前に本文は読まれず、何も保存されない)。読み取り(`GET`)は AI の主体にも許す。`KIVRA_SELFDEV_AI_PRINCIPAL` は order の有効化(`KIVRA_SELFDEV_ORDERS_ENABLED`)と独立に読まれる(#311)。order を無効にしたままでも、Goal の REST と Goal の MCP ツールの拒否は効く。未設定のときは、この拒否は効かない(従来どおり)。不正な形式は、order が無効でも起動に失敗する。
 
 **計画の承認**: `計画の承認待ち` の Goal の詳細で、Plan(計画)と各タスクを確かめ、「この Plan を承認」を押す(`POST .../approve-plan`、`{"version": n}`)。
 承認すると、Goal は `承認済み` になる。計画の承認は、個々のタスクの承認を代わりに行わない(`requiresApproval` のタスクは、タスクごとの承認が要る)。`auto` のときは、段階 2 の条件に当たる低リスクのタスクだけが、計画の承認の後に投入の対象になる。
@@ -1445,7 +1445,7 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 | `KIVRA_SELFDEV_ORDERS_ENABLED` | ○ | `true` で有効。`false` か未設定で無効(既定)。`true` / `false` 以外は起動に失敗する。オートパイロットが無効のときは、この変数も他の order の変数も読まれず、order は無効(ルートも作られず、ルートの API は 404)。 |
 | `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true` | ○(有効時) | order の周は、オートパイロットの Planner と Dispatcher が回す。オートパイロットが無効なら起動に失敗する。 |
 | `KIVRA_SELFDEV_ROOT_APPROVER` | ○(有効時) | ルートの停止を承認できる唯一の主体の owner key(`<長さ>:<issuer>:<sub>`)。kigawa の値を入れる。コードには固定しない。ログには出さない。 |
-| `KIVRA_SELFDEV_AI_PRINCIPAL` | 任意 | AI の主体の owner key(AI 専用の Keycloak ユーザー。ADR 0015 の U-28)。停止の要求と読み取りだけ許す。承認者と同じ値は起動に失敗する。 |
+| `KIVRA_SELFDEV_AI_PRINCIPAL` | 任意 | AI の主体の owner key(AI 専用の Keycloak ユーザー。ADR 0015 の U-28)。停止の要求と読み取りだけ許す。承認者と同じ値は起動に失敗する。order が無効のときも読まれ、Goal の書き込みと autopilot の制御(pause、resume、reset-breaker)を拒否する。形式が不正なら order の有無にかかわらず起動に失敗する。 |
 
 有効化の順序: dev で有効化し、E2E を確かめる。有効化の後の起動では、既存の `ACTIVE` の order はすべて `PAUSED`(理由 `STARTUP_HOLD`)になる(U-14)。運用者が再開するまで、周は始まらない。
 

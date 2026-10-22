@@ -41,8 +41,9 @@ import org.slf4j.LoggerFactory
  * Changing calls take `{"version": n}`, the version the caller read, so a stale view is a 409 (compare and set). Errors use fixed text
  * and never echo a request value. Goal, plan and task text is returned only by the detail view, never logged.
  *
- * The AI principal (`KIVRA_SELFDEV_AI_PRINCIPAL`) may read, and may not change a goal or a task: every write to a goal, a plan or a task
- * answers 403 `forbidden` for it (ADR 0019; the same rule as the order routes, ADR 0015 section 4.6). Its reads are unchanged.
+ * The AI principal (`KIVRA_SELFDEV_AI_PRINCIPAL`) may read, and may not change a goal, a task or the autopilot's control (pause, resume, the
+ * breaker reset): every such write answers 403 `forbidden` for it, before the body is read (ADR 0019; the same rule as the order routes,
+ * ADR 0015 section 4.6). Its reads are unchanged.
  */
 class SelfDevGoalRouteDeps(
     val operators: OperatorAuthenticator,
@@ -204,7 +205,9 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
 
     post("/api/selfdev/autopilot/pause") {
         val principal = deps.requireOperator(call) ?: return@post
-        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call) || !call.readEmptyBody()) return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "AUTOPILOT_PAUSE")) return@post
+        if (!call.readEmptyBody()) return@post
         deps.control.setPaused(true, principal)
         operatorLog.info("autopilot operator action: action=PAUSE actor={} result=PAUSED", operatorTag(principal))
         call.respond(HttpStatusCode.OK, mapOf("paused" to true))
@@ -212,7 +215,9 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
 
     post("/api/selfdev/autopilot/resume") {
         val principal = deps.requireOperator(call) ?: return@post
-        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call) || !call.readEmptyBody()) return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "AUTOPILOT_RESUME")) return@post
+        if (!call.readEmptyBody()) return@post
         deps.control.setPaused(false, principal)
         operatorLog.info("autopilot operator action: action=RESUME actor={} result=RESUMED", operatorTag(principal))
         call.respond(HttpStatusCode.OK, mapOf("paused" to false))
@@ -220,7 +225,9 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
 
     post("/api/selfdev/autopilot/reset-breaker") {
         val principal = deps.requireOperator(call) ?: return@post
-        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call) || !call.readEmptyBody()) return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "AUTOPILOT_RESET_BREAKER")) return@post
+        if (!call.readEmptyBody()) return@post
         deps.control.resetBreaker()
         operatorLog.info("autopilot operator action: action=RESET_BREAKER actor={} reason={}", operatorTag(principal), AutopilotReason.OPERATOR_RESUMED)
         call.respond(HttpStatusCode.OK, mapOf("breakerOpen" to false))

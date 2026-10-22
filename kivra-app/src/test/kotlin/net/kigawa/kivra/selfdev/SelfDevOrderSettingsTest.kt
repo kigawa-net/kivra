@@ -132,6 +132,67 @@ class SelfDevOrderSettingsTest {
         }
     }
 
+    // ---- child limits (ADR 0015 section 2.7, stage 2) ----------------------------------------------------------------------
+
+    private val onEnv = mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to approver)
+
+    @Test
+    fun `the child limits default to no children (depth 0), 5 per parent and 15 per tree`() {
+        val settings = OrderSettings.fromEnv(onEnv, enabledAutopilot, null)
+        assertEquals(0, settings.maxDepth)
+        assertEquals(5, settings.maxChildren)
+        assertEquals(15, settings.maxTree)
+    }
+
+    @Test
+    fun `the child limits are read when the orders are on, within their ranges`() {
+        val settings = OrderSettings.fromEnv(
+            onEnv + mapOf(
+                OrderSettings.ENV_MAX_DEPTH to "2",
+                OrderSettings.ENV_MAX_CHILDREN to "20",
+                OrderSettings.ENV_MAX_TREE to "100",
+            ),
+            enabledAutopilot,
+            null,
+        )
+        assertEquals(2, settings.maxDepth)
+        assertEquals(20, settings.maxChildren)
+        assertEquals(100, settings.maxTree)
+    }
+
+    @Test
+    fun `a child limit out of its range or not an integer is a startup failure, and the failure never shows the value`() {
+        val outOfRange = listOf(
+            OrderSettings.ENV_MAX_DEPTH to listOf("-1", "3", "not-a-number"),
+            OrderSettings.ENV_MAX_CHILDREN to listOf("0", "21", "not-a-number"),
+            OrderSettings.ENV_MAX_TREE to listOf("0", "101", "not-a-number"),
+        )
+        for ((name, values) in outOfRange) {
+            for (bad in values) {
+                val e = assertFailsWith<IllegalStateException> {
+                    OrderSettings.fromEnv(onEnv + (name to bad), enabledAutopilot, null)
+                }
+                assertTrue(e.message!!.contains(name))
+            }
+        }
+        // The value itself is never in the message. (A short number can be in the range text, so only a word is checked here.)
+        val secret = assertFailsWith<IllegalStateException> {
+            OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_MAX_TREE to "tree-secret-value"), enabledAutopilot, null)
+        }
+        assertFalse(secret.message!!.contains("tree-secret-value"))
+    }
+
+    @Test
+    fun `the child limits are not read while the orders are off`() {
+        val off = OrderSettings.fromEnv(
+            mapOf(OrderSettings.ENV_ENABLED to "false", OrderSettings.ENV_MAX_DEPTH to "not-a-number", OrderSettings.ENV_MAX_TREE to "0"),
+            enabledAutopilot,
+            null,
+        )
+        assertFalse(off.enabled)
+        assertEquals(0, off.maxDepth)
+    }
+
     private fun selfDev(): SelfDevSettings = SelfDevSettings.fromEnv(
         mapOf(
             "KIVRA_SELFDEV_ENABLED" to "true",

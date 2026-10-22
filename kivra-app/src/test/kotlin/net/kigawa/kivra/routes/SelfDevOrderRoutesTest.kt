@@ -14,6 +14,7 @@ import io.ktor.http.Headers
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
+import io.ktor.http.isSuccess
 import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.routing.routing
@@ -78,9 +79,9 @@ class SelfDevOrderRoutesTest {
 
     private val clock = MovableClock(START)
 
-    private fun ApplicationTestBuilder.setUp(db: TestDb, enabled: Boolean = true) {
+    private fun ApplicationTestBuilder.setUp(db: TestDb, enabled: Boolean = true, extraOrderEnv: Map<String, String> = emptyMap()) {
         val autopilot = if (enabled) AutopilotSettings.fromEnv(autopilotEnv(), cliSelfDev) else AutopilotSettings.disabled()
-        val orderSettings = if (enabled) OrderSettings.fromEnv(orderEnv(), autopilot, AI_PRINCIPAL) else OrderSettings.disabled()
+        val orderSettings = if (enabled) OrderSettings.fromEnv(orderEnv() + extraOrderEnv, autopilot, AI_PRINCIPAL) else OrderSettings.disabled()
         val deps = SelfDevOrderRouteDeps(
             operators = StubAuth,
             autopilot = autopilot,
@@ -318,6 +319,114 @@ class SelfDevOrderRoutesTest {
 
     private suspend fun ApplicationTestBuilder.orderState(id: String): String =
         send(HttpMethod.Get, "/api/selfdev/orders/$id", null).json().getValue("order").jsonObject.getValue("state").jsonPrimitive.content
+
+    // ---- child orders (ADR 0015 section 2.7, stage 2 PR 3a) ----------------------------------------------------------------
+
+    private val depth2 = mapOf(OrderSettings.ENV_MAX_DEPTH to "2")
+    private val missingId = "01" + "Z".repeat(24)
+
+    private suspend fun ApplicationTestBuilder.createChild(
+        parent: String,
+        budget: Long = 1_000,
+        key: String = "k-1",
+        principal: String = ROOT_APPROVER,
+        title: String = TITLE_MARKER,
+    ): HttpResponse = send(
+        HttpMethod.Post,
+        "/api/selfdev/orders/$parent/children",
+        """{"title":"$title","policy":"$POLICY_MARKER","orderBudgetJpy":$budget,"idempotencyKey":"$key"}""",
+        principal,
+    )
+
+    @Test
+    fun `children are disabled by default, and the create answers 409 CHILDREN_DISABLED`() = testApplication {
+        val db = TestDb()
+        setUp(db)
+        createRoot()
+        val response = createChild(rootId())
+        assertEquals(HttpStatusCode.Conflict, response.status)
+        assertEquals("CHILDREN_DISABLED", response.json().getValue("code").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `the operator creates a child, a replay answers 200 with the same child, and another content under the key is 409`() = testApplication {
+        val db = TestDb()
+        setUp(db, extraOrderEnv = depth2)
+        createRoot()
+        val id = rootId()
+        val created = createChild(id)
+        assertEquals(HttpStatusCode.Created, created.status)
+        val childId = created.json().getValue("orderId").jsonPrimitive.content
+        assertEquals(id, created.json().getValue("parentOrderId").jsonPrimitive.content)
+        assertEquals("1", created.json().getValue("depth").jsonPrimitive.content)
+        assertEquals(HttpStatusCode.OK, createChild(id).status)
+        assertEquals(childId, createChild(id).json().getValue("orderId").jsonPrimitive.content)
+        assertEquals(HttpStatusCode.Conflict, createChild(id, title = "another title").status)
+        val parent = send(HttpMethod.Get, "/api/selfdev/orders/$id", null).json().getValue("order").jsonObject
+        assertEquals("1000", parent.getValue("allocatedJpy").jsonPrimitive.content)
+        assertEquals("1", parent.getValue("childCount").jsonPrimitive.content)
+        // The list carries the counts and never the title.
+        val list = Json.parseToJsonElement(send(HttpMethod.Get, "/api/selfdev/orders", null).bodyAsText()).jsonArray
+        assertFalse(list.first().jsonObject.containsKey("title"))
+    }
+
+    @Test
+    fun `the AI principal is refused with 403 before the body is read, and a parent that is not active is 409`() = testApplication {
+        val db = TestDb()
+        setUp(db, extraOrderEnv = depth2)
+        createRoot()
+        val id = rootId()
+        val byAi = send(HttpMethod.Post, "/api/selfdev/orders/$id/children", "not json at all", AI_PRINCIPAL)
+        assertEquals(HttpStatusCode.Forbidden, byAi.status)
+        assertEquals("forbidden", byAi.json().getValue("error").jsonPrimitive.content)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/orders/$id/pause", """{"version":${orderVersion(id)}}""").status)
+        val paused = createChild(id)
+        assertEquals(HttpStatusCode.Conflict, paused.status)
+        assertEquals("PARENT_NOT_ACTIVE", paused.json().getValue("code").jsonPrimitive.content)
+        assertEquals("PARENT_NOT_ACTIVE", createChild(missingId).json().getValue("code").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `a child's title, policy, key and budget are checked, and a bidi control in the policy is refused for the root too`() = testApplication {
+        val db = TestDb()
+        setUp(db, extraOrderEnv = depth2)
+        createRoot()
+        val id = rootId()
+        assertEquals(HttpStatusCode.BadRequest, createChild(id, budget = 0).status)
+        assertEquals(HttpStatusCode.BadRequest, createChild(id, budget = 1_000_000_000_000).status)
+        assertEquals(HttpStatusCode.BadRequest, createChild(id, title = "  ").status)
+        assertEquals(HttpStatusCode.BadRequest, createChild(id, key = " ").status)
+        val bidi = "{\"title\":\"t\",\"policy\":\"a\u202Eb\",\"orderBudgetJpy\":1000,\"idempotencyKey\":\"k\"}"
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/orders/$id/children", bidi).status)
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/orders", "{\"title\":\"t\",\"policy\":\"a\u202Eb\"}").status)
+        assertEquals(
+            HttpStatusCode.BadRequest,
+            send(HttpMethod.Post, "/api/selfdev/orders/$id/children", """{"title":"t","policy":"p","orderBudgetJpy":1000}""").status,
+        )
+        assertEquals(
+            HttpStatusCode.BadRequest,
+            send(HttpMethod.Post, "/api/selfdev/orders/$id/children", """{"title":"t","policy":"p","orderBudgetJpy":1000,"idempotencyKey":"k","x":1}""").status,
+        )
+    }
+
+    @Test
+    fun `no route changes a child's parent`() = testApplication {
+        val db = TestDb()
+        setUp(db, extraOrderEnv = depth2)
+        createRoot()
+        val id = rootId()
+        val childId = createChild(id).json().getValue("orderId").jsonPrimitive.content
+        val body = """{"parentOrderId":"$childId"}"""
+        for (response in listOf(
+            send(HttpMethod.Post, "/api/selfdev/orders/$childId/parent", body),
+            send(HttpMethod.Patch, "/api/selfdev/orders/$childId", body),
+            send(HttpMethod.Put, "/api/selfdev/orders/$childId", body),
+        )) {
+            assertFalse(response.status.isSuccess(), "a parent change must not be routed: ${response.status}")
+        }
+        assertEquals(id, send(HttpMethod.Get, "/api/selfdev/orders/$childId", null).json().getValue("order").jsonObject
+            .getValue("parentOrderId").jsonPrimitive.content)
+    }
 
     private val cliSelfDev: SelfDevSettings by lazy { SelfDevSettings.fromEnv(selfDevEnv()) }
 

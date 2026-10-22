@@ -48,10 +48,11 @@ internal val MIGRATION_FILES = mapOf(
     23 to "V23__selfdev_orders.sql",
     24 to "V24__selfdev_memory_quota_lock.sql",
     25 to "V25__selfdev_order_children.sql",
+    26 to "V26__selfdev_order_cycle_budget.sql",
 )
 
 /** The versions applied on the full chain. V22 is never used (reserved gap), so the list skips it. */
-internal val EXPECTED_APPLIED_VERSIONS: List<String> = (1..21).map { it.toString() } + listOf("23", "24", "25")
+internal val EXPECTED_APPLIED_VERSIONS: List<String> = (1..21).map { it.toString() } + listOf("23", "24", "25", "26")
 
 /** Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved). */
 internal val RESERVED_MIGRATION_VERSIONS: Set<Int> = setOf(22)
@@ -65,10 +66,12 @@ internal val RESERVED_MIGRATION_VERSIONS: Set<Int> = setOf(22)
 class MigrationChainTest {
 
     @Test
-    fun `empty database applies V1 to V21, V23, V24 and V25 in order and flyway validate passes`() = TestDb().use { db ->
+    fun `empty database applies V1 to V21, V23, V24, V25 and V26 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
         assertEquals(EXPECTED_APPLIED_VERSIONS, appliedVersions(db.dataSource))
+        assertEquals(1, db.columnCount("selfdev_orders", "spent_jpy"))
+        assertEquals(1, db.columnCount("selfdev_orders", "cycle_budget_jpy"))
         assertEquals(1, db.columnCount("selfdev_orders", "order_budget_jpy"))
         assertEquals(1, db.columnCount("selfdev_orders", "allocated_jpy"))
         assertEquals(1, db.columnCount("selfdev_orders", "child_count"))

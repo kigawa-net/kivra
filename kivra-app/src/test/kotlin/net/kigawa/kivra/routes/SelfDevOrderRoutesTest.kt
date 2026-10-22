@@ -43,9 +43,11 @@ import net.kigawa.kivra.db.SelfDevGoalRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.db.execUpdate
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.OrderSettings
 import net.kigawa.kivra.selfdev.SelfDevSettings
+import org.jetbrains.exposed.sql.transactions.transaction
 import org.slf4j.LoggerFactory
 
 private const val PRINCIPAL_HEADER = "X-Test-Principal"
@@ -444,6 +446,30 @@ class SelfDevOrderRoutesTest {
     }
 
     private val cliSelfDev: SelfDevSettings by lazy { SelfDevSettings.fromEnv(selfDevEnv()) }
+
+    @Test
+    fun `a cycle the budget does not cover is 409 ORDER_BUDGET with the order's ID, a child under 1,000 yen is 400, and the reads carry the budget`() = testApplication {
+        val db = newDb()
+        setUp(db, extraOrderEnv = depth2)
+        createRoot()
+        val id = rootId()
+        val childId = createChild(id, budget = 3_000).json().getValue("orderId").jsonPrimitive.content
+        transaction(db.database) { execUpdate("UPDATE selfdev_orders SET spent_jpy = ? WHERE order_id = ?", 2_001L, childId) }
+        val refused = send(HttpMethod.Post, "/api/selfdev/orders/$childId/cycles", """{"version":0}""")
+        assertEquals(HttpStatusCode.Conflict, refused.status)
+        val body = refused.json()
+        assertEquals("ORDER_BUDGET", body.getValue("code").jsonPrimitive.content)
+        assertEquals(childId, body.getValue("orderId").jsonPrimitive.content)
+        assertFalse(body.getValue("error").jsonPrimitive.content.contains(TITLE_MARKER))
+        // A child below the default cycle budget (1,000 yen) could never start a cycle, so it is refused at creation.
+        assertEquals(HttpStatusCode.BadRequest, createChild(id, budget = 999, key = "small").status)
+        val detail = send(HttpMethod.Get, "/api/selfdev/orders/$childId", null).json().getValue("order").jsonObject
+        assertEquals("2001", detail.getValue("spentJpy").jsonPrimitive.content)
+        assertEquals("1000", detail.getValue("cycleBudgetJpy").jsonPrimitive.content)
+        assertEquals("999", detail.getValue("remainingJpy").jsonPrimitive.content)
+        val list = Json.parseToJsonElement(send(HttpMethod.Get, "/api/selfdev/orders", null).bodyAsText()).jsonArray
+        assertFalse(list.first().jsonObject.containsKey("title"))
+    }
 
     private fun selfDevEnv(): Map<String, String> = mapOf(
         "KIVRA_SELFDEV_ENABLED" to "true",

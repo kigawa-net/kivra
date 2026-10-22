@@ -56,6 +56,10 @@ data class SelfDevOrder(
     val allocatedJpy: Long,
     /** The number of children. */
     val childCount: Int,
+    /** The cost counted against this order and its descendants (ADR 0015 section 2.7). Nothing writes it yet (PR 3c feeds it). */
+    val spentJpy: Long,
+    /** The most one cycle of this order may cost, in whole yen (ADR 0015 section 3.2). */
+    val cycleBudgetJpy: Long,
 )
 
 enum class StopRequestState { PENDING, CONSUMED, REJECTED, CANCELLED, EXPIRED }
@@ -83,6 +87,8 @@ enum class OrderConflict {
     TERMINAL, NO_EDGE, ACTOR_NOT_ALLOWED, REASON_NOT_ALLOWED, RESUME_NOT_ALLOWED,
     NOT_ACTIVE, CYCLE_IN_PROGRESS, CYCLE_LIMIT_REACHED, ORDER_EXPIRED, AUTOPILOT_PAUSED,
     STOP_ALREADY_PENDING, STOP_NOT_PENDING, STOP_EXPIRED, SAME_PRINCIPAL, DIGEST_MISMATCH, ORDER_CHANGED,
+    /** A cycle start: some order on the path to the root has less left than its cycle budget. [OrderResult.Refused.orderId] names it. */
+    ORDER_BUDGET,
 }
 
 sealed interface OrderResult<out T> {
@@ -90,7 +96,8 @@ sealed interface OrderResult<out T> {
     data object NotFound : OrderResult<Nothing>
     /** The expected version is not the current one. Nothing changed. */
     data object StaleVersion : OrderResult<Nothing>
-    data class Refused(val reason: OrderConflict) : OrderResult<Nothing>
+    /** [orderId] is set only for [OrderConflict.ORDER_BUDGET]: the ID of the order that does not have the budget (a fixed ID, no text). */
+    data class Refused(val reason: OrderConflict, val orderId: String? = null) : OrderResult<Nothing>
 }
 
 sealed interface CreateRootResult {
@@ -122,6 +129,9 @@ enum class StopEnd { REJECTED, CANCELLED }
 
 /** Cycles that stop being counted as failures after this many in a row (ADR 0015 section 3.2). */
 const val CYCLE_FAILURE_LIMIT = 2
+
+/** The default cost limit of one cycle, in whole yen (ADR 0015 section 3.2). The column default in V26 is the same value. */
+const val DEFAULT_CYCLE_BUDGET_JPY = 1_000L
 
 class SelfDevOrderRepository(
     private val database: Database,
@@ -361,10 +371,15 @@ class SelfDevOrderRepository(
      * Starts the next cycle: creates the goal (`order_id`, `cycle_no`) in GOAL_SUBMITTED, so the existing Planner and Dispatcher take it from
      * there, and records the cycle on the order. The order must be ACTIVE, have no cycle in progress, be under its cycle limit and its
      * lifetime, and the autopilot must not be paused for everything. The goal's text is the order's policy and title, copied as typed.
+     *
+     * The budget check (ADR 0015 section 2.7): every order on the path from this one to the root must have `order_budget_jpy - spent_jpy`
+     * at least its own `cycle_budget_jpy`. The first one that does not refuses the start with [OrderConflict.ORDER_BUDGET] and its ID; nothing
+     * is written. The path is locked from the root down (see [lockPath]).
      */
     fun startCycle(orderId: String, expectedVersion: Long, operatorKey: String): OrderResult<CycleStarted> = try {
         transaction(database) {
-            val current = lockOrder(orderId) ?: return@transaction OrderResult.NotFound
+            val path = lockPath(orderId) ?: return@transaction OrderResult.NotFound
+            val current = path.first()
             if (current.version != expectedVersion) return@transaction OrderResult.StaleVersion
             if (current.state != OrderState.ACTIVE) throw Rollback(OrderResult.Refused(OrderConflict.NOT_ACTIVE))
             if (current.currentGoalId != null) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_IN_PROGRESS))
@@ -373,6 +388,11 @@ class SelfDevOrderRepository(
             if (!current.expiresAt.isAfter(now)) throw Rollback(OrderResult.Refused(OrderConflict.ORDER_EXPIRED))
             val paused = execQuery("SELECT paused FROM selfdev_autopilot_control WHERE control_id = 1") { it.getBoolean(1) }.single()
             if (paused) throw Rollback(OrderResult.Refused(OrderConflict.AUTOPILOT_PAUSED))
+            for (order in path) {
+                if (order.orderBudgetJpy - order.spentJpy < order.cycleBudgetJpy) {
+                    throw Rollback(OrderResult.Refused(OrderConflict.ORDER_BUDGET, order.orderId))
+                }
+            }
 
             val cycleNo = current.cyclesStarted + 1
             val goalId = Ulid.generate(clock)
@@ -704,6 +724,23 @@ class SelfDevOrderRepository(
     private fun Transaction.lockOrder(orderId: String): SelfDevOrder? =
         execQuery("SELECT $ORDER_COLUMNS FROM selfdev_orders WHERE order_id = ? FOR UPDATE", orderId) { it.toOrder() }.firstOrNull()
 
+    /**
+     * Locks the order and every ancestor, and returns the rows from the order up to the root, or null when the order does not exist. The
+     * path is read without locks first; a parent never changes (ADR 0015 section 2.7), so the path is the same when it is locked. The rows
+     * are then locked from the root down, the order every child creation uses too: two transactions in one tree take the same rows in the
+     * same order, so they wait for each other and cannot deadlock.
+     */
+    private fun Transaction.lockPath(orderId: String): List<SelfDevOrder>? {
+        val ids = mutableListOf<String>()
+        var next: String? = orderId
+        while (next != null) {
+            ids += next
+            next = getIn(next)?.parentOrderId
+        }
+        val locked = ids.asReversed().map { lockOrder(it) ?: return null }
+        return locked.asReversed()
+    }
+
     private fun Transaction.lockRequest(requestId: String): SelfDevOrderStopRequest? =
         execQuery("SELECT $REQUEST_COLUMNS FROM selfdev_order_stop_requests WHERE request_id = ? FOR UPDATE", requestId) { it.toRequest() }
             .firstOrNull()
@@ -743,7 +780,7 @@ class SelfDevOrderRepository(
     private companion object {
         const val ORDER_COLUMNS = "order_id, parent_order_id, depth, title, policy, target_repo, max_cycles, cycles_started, " +
             "current_goal_id, consecutive_failed_cycles, state, state_reason, expires_at, created_by, version, created_at, updated_at, " +
-            "order_budget_jpy, allocated_jpy, child_count"
+            "order_budget_jpy, allocated_jpy, child_count, spent_jpy, cycle_budget_jpy"
         const val REQUEST_COLUMNS = "request_id, order_id, requested_by, requester_kind, reason_code, order_version, digest, state, " +
             "decided_by, expires_at, created_at"
 
@@ -780,6 +817,8 @@ private fun java.sql.ResultSet.toOrder() = SelfDevOrder(
     orderBudgetJpy = getLong(18),
     allocatedJpy = getLong(19),
     childCount = getInt(20),
+    spentJpy = getLong(21),
+    cycleBudgetJpy = getLong(22),
 )
 
 private fun java.sql.ResultSet.toRequest() = SelfDevOrderStopRequest(

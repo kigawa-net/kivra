@@ -365,6 +365,63 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - この実装では、`update-branch` に必要な権限と、App の実際の付与(GitHub 上の設定)は確認していない。有効化の前に、dev で `PUT /pulls/{n}/update-branch` が 403 にならないことを確認する。403 のときは `GITHUB_PERMISSION` で人に残り、その試行も上限に数えられる。
 - 権限の追加は共有基盤の変更であり、リポジトリ管理者の承認が要る。
 
+### 4.10 自動マージの判定ロジック(部品。未配線)
+
+ADR 0014 の第 1 の部品。`net.kigawa.kivra.selfdev.automerge` の `decideAutoMerge` は、呼び出し側が読んだ事実だけを受け取り、判定の結果(`Eligible`、`Hold(理由)`、`Refuse(理由)`)を返す純粋な関数である。I/O、ログ、DB、GitHub の読み取りとマージの呼び出しは持たない。
+
+**配線されていない。** `Application.kt`、ルート、DB、マイグレーション、環境変数の読み込み、GitHub の読み取り、マージの呼び出しは、この部品では作っていない。この判定が本番や dev の動作を変えることはない。配線は別の PR で、ADR 0014 の段階 S1(影の判定)から始める。
+
+- **条件**(ADR 0014 §2 の C1 から C9。C10 は、同じ関数を読み直した事実で呼び直すことで実現する)。
+  - C1 起源: PR の作者が bot の id、head ref が `kivra/run-<runId>`、Run が `PULL_REQUEST`、binding(repo、PR 番号、node id)が一致。
+  - C2 承認: 承認の種別が `AUTO_APPROVED`。運用者承認と、承認の無いタスクは拒否する。
+  - C3 差分: ファイル数 1 から 3、`additions + deletions` が 200 以下、`status` は `added` か `modified`、パスは安全で対象内、mode は `100644`。
+  - 対象: `kivra-*/src/test/kotlin/**/*.kt` のみ(U-1)。禁止領域(§2.1 の表)に当たるパスは、対象内でも拒否する。
+  - 禁止領域のテスト側(門番自身のテストを、自動承認の変更で弱められないように。`PATH_OUT_OF_SCOPE`): `kivra-*/src/test/kotlin/**/selfdev/automerge/**`、ファイル名に `PatchPolicy`、`AutoScope`、`PathRules`、`DiffCollector`、`DiffLimits` を含む `*.kt`、`*ArchitectureTest*.kt`、`*Invariant*Test*.kt`、`kivra-policy/src/test/**`、`kivra-github/src/test/**`、`kivra-core/src/test/kotlin/net/kigawa/kivra/core/**`、`kivra-*/src/test/kotlin/**/auth/**`、`kivra-app/src/test/kotlin/net/kigawa/kivra/selfdev/**`、`kivra-app/src/test/kotlin/net/kigawa/kivra/mcp/**`、`kivra-app/src/test/kotlin/net/kigawa/kivra/routes/**`。このため、対象に残るのは、これらに当たらないテストだけになる(例: `kivra-app/src/test/kotlin/net/kigawa/kivra/util/XTest.kt`)。
+  - C4 head: PR の head、binding の head、本文の `kivra-head-sha:` マーカーが同じ SHA。
+  - C5 チェック: 必須の名前(U-3。設定の値)がすべて、同じ head SHA で `completed` かつ `success`。欠けると拒否。`queued` と `in_progress` は保留し、60 分を超えたら拒否。
+  - C6 マージ可能: `mergeable == true` かつ `mergeable_state == "clean"`。`mergeable` が null か、state が `unknown` なら保留。draft は拒否。
+  - C7 止める手段: ラベル `kivra:hold`(大文字小文字を区別しない)が付いていれば拒否。
+  - C8 全体: 自動マージのフラグ、オートパイロットと自己開発のフラグが有効、一時停止が無い、ブレーカーが閉じている。`main` の直近の push CI が `success`(保留中と不明は保留、失敗は拒否)。
+  - C9 レート: 処理中が上限(既定 1)未満、UTC 当日の自動マージが上限(既定 3)未満。どちらも超えたら保留。
+
+- **判定の順序**: 拒否は見つけた時点で返す。保留は最初の 1 件を覚え、拒否が無ければそれを返す。拒否と保留が両方あれば拒否になる。
+
+- **理由コードの一覧**(固定の enum。名前だけを使う。PR の題名、本文、パス、内容は含まない)
+
+| 理由コード | 結果 | 条件 |
+|---|---|---|
+| `INVALID_FACTS` | 拒否 | 入力が不正(空の項目、負の件数、重複するパス、不正な設定) |
+| `NOT_BOT_AUTHOR` | 拒否 | C1 |
+| `BRANCH_NOT_RUN` | 拒否 | C1 |
+| `RUN_NOT_PULL_REQUEST` | 拒否 | C1 |
+| `BINDING_MISMATCH` | 拒否 | C1 |
+| `OPERATOR_APPROVED_TASK` | 拒否 | C2(U-8) |
+| `NOT_AUTO_APPROVED` | 拒否 | C2 |
+| `FILES_OUT_OF_RANGE` | 拒否 | C3(ファイルが 0 件) |
+| `TOO_MANY_FILES` | 拒否 | C3 |
+| `TOO_MANY_LINES` | 拒否 | C3 |
+| `STATUS_NOT_ALLOWED` | 拒否 | C3(`removed`、`renamed` など) |
+| `PATH_UNSAFE` | 拒否 | C3(`..`、`\`、先頭の `/`、空や `.` の区切り、NUL、制御文字、書式文字(双方向制御を含む)) |
+| `PATH_OUT_OF_SCOPE` | 拒否 | C3(対象外、または禁止領域) |
+| `MODE_NOT_REGULAR` | 拒否 | C3 |
+| `HEAD_MISMATCH` | 拒否 | C4 |
+| `CHECK_MISSING` | 拒否 | C5(同じ head の実行が無い。必須の名前が空の設定も含む) |
+| `CHECK_NOT_SUCCESS` | 拒否 | C5(`neutral`、`skipped`、`cancelled`、失敗、結論の無い完了) |
+| `CHECK_PENDING` | 保留 | C5 |
+| `CHECK_PENDING_TIMEOUT` | 拒否 | C5(保留が 60 分を超えた) |
+| `DRAFT` | 拒否 | C6 |
+| `NOT_MERGEABLE` | 拒否 | C6 |
+| `MERGEABLE_UNKNOWN` | 保留 | C6 |
+| `HOLD_LABEL` | 拒否 | C7 |
+| `FLAG_OFF` | 拒否 | C8 |
+| `PAUSED` | 拒否 | C8 |
+| `BREAKER_OPEN` | 拒否 | C8 |
+| `MAIN_CI_NOT_GREEN` | 保留(保留中、不明)または拒否(失敗) | C8 |
+| `CONCURRENCY_LIMIT` | 保留 | C9 |
+| `DAILY_LIMIT` | 保留 | C9 |
+
+- **テスト**: `./gradlew :kivra-app:test --tests 'net.kigawa.kivra.selfdev.automerge.*'`。各条件を 1 つずつ崩したケース、境界(3 と 4 件、200 と 201 行、60 分と 60 分 1 秒、1 日 2 件と 3 件、同時 0 件と 1 件)、パスの表、全体の停止、運用者承認の拒否、決定性を確かめる。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

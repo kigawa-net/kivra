@@ -179,6 +179,8 @@ data class PullRequest(
     val mergeCommitSha: String? = null,
     /** Numeric id of the PR author (`user.id`). Null when absent; merge verification then fails closed. */
     val authorId: Long? = null,
+    /** Label names (`labels[].name`). Null when the response did not carry the array; a reader must then fail closed. */
+    val labels: List<String>? = null,
 ) {
     fun hasMarker(runId: String): Boolean = body.lines().any { it.trim() == RunBranch.marker(runId) }
 }
@@ -193,6 +195,8 @@ data class CheckRun(
     val headSha: String,
     val status: String,
     val conclusion: CheckConclusion?,
+    /** `started_at`, or null when absent or unparseable. A pending run without it cannot be timed out by a reader. */
+    val startedAt: java.time.Instant? = null,
 )
 
 /** [complete] is false when pagination hit the safety cap, so callers must not treat the list as authoritative. */

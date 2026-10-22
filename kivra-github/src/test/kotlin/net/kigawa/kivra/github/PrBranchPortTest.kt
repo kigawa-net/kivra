@@ -272,4 +272,59 @@ class PrBranchPortTest {
         val f = BranchRemote { respond("""{"message":"Not Found"}""", HttpStatusCode.NotFound, PB_JSON) }
         assertEquals(GitHubFailureKind.NOT_FOUND, assertIs<GitHubResult.Failure>(f.adapter.getCompareFiles(PB_REPO, PB_BASE, PB_HEAD)).kind)
     }
+
+    private fun filesPage(count: Int, from: Int = 1): String = (from until from + count).joinToString(",", "[", "]") {
+        """{"filename":"kivra-app/src/test/kotlin/F$it.kt","status":"modified","additions":1,"deletions":2}"""
+    }
+
+    @Test
+    fun `the pull request files are read page by page, and a short page ends the list`() = runTest {
+        val f = BranchRemote { respond(filesPage(2), HttpStatusCode.OK, PB_JSON) }
+        val files = assertIs<GitHubResult.Success<PullRequestFiles>>(f.adapter.listPullRequestFiles(PB_REPO, 7)).value
+        assertEquals(false, files.truncated)
+        assertEquals(listOf("kivra-app/src/test/kotlin/F1.kt", "kivra-app/src/test/kotlin/F2.kt"), files.files.map { it.path })
+        assertEquals(PullRequestFile("kivra-app/src/test/kotlin/F1.kt", "modified", 1, 2), files.files[0])
+        val req = f.requests.single()
+        assertEquals("/repos/kigawa-net/kivra/pulls/7/files", req.url.encodedPath)
+        assertEquals("100", req.url.parameters["per_page"])
+    }
+
+    @Test
+    fun `a full page is followed by the next one, and reaching 300 files is truncated, never partial`() = runTest {
+        val f = BranchRemote { request ->
+            val page = request.url.parameters["page"]!!.toInt()
+            respond(filesPage(100, from = (page - 1) * 100 + 1), HttpStatusCode.OK, PB_JSON)
+        }
+        val files = assertIs<GitHubResult.Success<PullRequestFiles>>(f.adapter.listPullRequestFiles(PB_REPO, 7)).value
+        assertEquals(300, files.files.size)
+        assertEquals(true, files.truncated)
+        assertEquals(3, f.requests.size)
+    }
+
+    @Test
+    fun `a file entry without a count is a protocol failure`() = runTest {
+        val f = BranchRemote { respond("""[{"filename":"a.kt","status":"modified","deletions":1}]""", HttpStatusCode.OK, PB_JSON) }
+        assertEquals(GitHubFailureKind.PROTOCOL, assertIs<GitHubResult.Failure>(f.adapter.listPullRequestFiles(PB_REPO, 7)).kind)
+    }
+
+    @Test
+    fun `the labels of a pull request are its label names, and absent when the response has no array`() = runTest {
+        val labelled = BranchRemote { respond(prJson().replace("\"user\":{\"id\":9001}", "\"user\":{\"id\":9001},\"labels\":[{\"name\":\"kivra:hold\"}]"), HttpStatusCode.OK, PB_JSON) }
+        val view = assertIs<GitHubResult.Success<PrRebaseView>>(labelled.adapter.getPrRebaseView(PB_REPO, 7)).value
+        assertEquals(listOf("kivra:hold"), view.pullRequest.labels)
+        val unlabelled = BranchRemote { respond(prJson(), HttpStatusCode.OK, PB_JSON) }
+        val bare = assertIs<GitHubResult.Success<PrRebaseView>>(unlabelled.adapter.getPrRebaseView(PB_REPO, 7)).value
+        assertEquals(null, bare.pullRequest.labels)
+    }
+
+    @Test
+    fun `a check run carries its started_at, and an unparseable one is absent`() = runTest {
+        val checks = """{"total_count":2,"check_runs":[
+            {"id":1,"name":"test","head_sha":"$PB_HEAD","status":"in_progress","conclusion":null,"started_at":"2026-10-22T10:00:00Z"},
+            {"id":2,"name":"build","head_sha":"$PB_HEAD","status":"completed","conclusion":"success","started_at":"not-a-time"}]}"""
+        val f = BranchRemote { respond(checks, HttpStatusCode.OK, PB_JSON) }
+        val summary = assertIs<GitHubResult.Success<CheckRunsSummary>>(f.adapter.getCheckRuns(PB_REPO, PB_HEAD)).value
+        assertEquals(java.time.Instant.parse("2026-10-22T10:00:00Z"), summary.runs[0].startedAt)
+        assertEquals(null, summary.runs[1].startedAt)
+    }
 }

@@ -371,6 +371,8 @@ ADR 0014 の第 1 の部品。`net.kigawa.kivra.selfdev.automerge` の `decideAu
 
 **配線されていない。** `Application.kt`、ルート、DB、マイグレーション、環境変数の読み込み、GitHub の読み取り、マージの呼び出しは、この部品では作っていない。この判定が本番や dev の動作を変えることはない。配線は別の PR で、ADR 0014 の段階 S1(影の判定)から始める。
 
+**S1 で影の判定として配線された(§4.11)。** 判定は監査に記録するだけで、マージは呼ばない。マージの配線(S2)は、まだ無い。
+
 - **条件**(ADR 0014 §2 の C1 から C9。C10 は、同じ関数を読み直した事実で呼び直すことで実現する)。
   - C1 起源: PR の作者が bot の id、head ref が `kivra/run-<runId>`、Run が `PULL_REQUEST`、binding(repo、PR 番号、node id)が一致。
   - C2 承認: 承認の種別が `AUTO_APPROVED`。運用者承認と、承認の無いタスクは拒否する。
@@ -421,6 +423,36 @@ ADR 0014 の第 1 の部品。`net.kigawa.kivra.selfdev.automerge` の `decideAu
 | `DAILY_LIMIT` | 保留 | C9 |
 
 - **テスト**: `./gradlew :kivra-app:test --tests 'net.kigawa.kivra.selfdev.automerge.*'`。各条件を 1 つずつ崩したケース、境界(3 と 4 件、200 と 201 行、60 分と 60 分 1 秒、1 日 2 件と 3 件、同時 0 件と 1 件)、パスの表、全体の停止、運用者承認の拒否、決定性を確かめる。
+
+### 4.11 自動マージの影の判定(S1、ADR 0014、既定は無効)
+
+ADR 0014 の段階 S1。オートパイロットが有効なとき、`AutoMergeShadowWatch` が 60 秒ごとに、PULL_REQUEST の Run の PR を §4.10 の `decideAutoMerge` で判定し、結果を監査(`audit_events`)に記録する。**マージ、ラベル、コメント、ブランチの更新は、どれも行わない。** GitHub への書き込みの呼び出しは、この経路のコードに無い(アーキテクチャテストで固定)。
+
+- **有効化**: 次の 2 つが必要。どちらも無ければ、ワーカーは起動せず、判定の変数も読まない。
+  - `KIVRA_SELFDEV_AUTOPILOT_ENABLED=true`(オートパイロットの有効化の前提。§7.5)
+  - `KIVRA_SELFDEV_AUTOMERGE_SHADOW_ENABLED=true`(既定は `false`。`true` と `false` 以外の値は起動に失敗する。空は `false`)
+- **必須チェックの名前**: `KIVRA_SELFDEV_AUTOMERGE_REQUIRED_CHECKS`(既定 `test,build,boot`。カンマ区切りで 1 から 10 件、名前は重複しない。名前に使えるのは英数字、空白、`._()/-`)。空白は名前の中に入れられる(例: `deploy to dev`)。このフラグが `false` のときは読まない。
+- **読み取りの上限**: 1 周に最大 5 件の PR(古い順)。1 周の GitHub の読み取りは最大 40 回(port の呼び出し数。HTTP の要求数ではない)。上限を超えた読み取りは、読めなかったものとして扱われ、判定は保留か拒否になる。
+- **`checks:read` が必要**: 必須チェックの読み取り(`commits/{sha}/check-runs`)と、`main` の CI の読み取りには、GitHub App の `checks:read` の権限が要る。権限が無いと 403 になり、チェックを読めなかったとして扱われる。その場合の判定は、必ず `REFUSE`(`CHECK_MISSING`)か `HOLD`(`MAIN_CI_NOT_GREEN`)になり、`ELIGIBLE` にはならない。この権限の追加は共有基盤の変更で、運用者が後で行う(ADR 0014 U-4)。
+- **判定の中身**: 事実は GitHub の PR の値と、DB の Run、タスクの承認の種別、全体の一時停止とブレーカーから組み立てる。`main` の CI は、`main` の head コミットの必須チェックから導く(`PENDING` と `UNKNOWN` は保留、`FAILURE` は拒否)。PR の本文は、`kivra-head-sha:` の行(40 桁の 16 進)だけを読み、それ以外は使わない。本文は保存も記録もしない。
+- **自動マージの一時停止(S1 では効果なし)**: `auto_merge_paused`(ADR 0014 U-10)は、S1 では作らない。判定の「自動マージのフラグ」は S1 では常に有効として計算する。
+- **監査**: 行動 `AUTO_MERGE_JUDGED`、Run の id、結果(`ELIGIBLE`、`HOLD`、`REFUSE`)。`payload` には次の項目だけを入れる。
+  - `prNumber`、`headSha`、`verdict`、`reason`(§4.10 の理由コード。`PR_NOT_OPEN` などの読み取りの理由は別)、`files`(件数)、`lines`(`additions + deletions` の合計)、`checks`(判定の対象の名前)、`readFailures`(読めなかったものの固定コード)。
+  - **記録しない**: PR の題名と本文、Goal と Task の題名と本文、パス、ファイルの内容、チェックの出力、プロバイダーの応答、トークン。
+- **重複の抑止**: 同じ Run の (head SHA、判定の結果、理由) が前回と同じなら記録しない。判定が変わったとき、または head が変わったときだけ記録する。メモリ上の値なので、再起動の直後に 1 回だけ重複して記録されることがある。
+- **確認**: 監査の行を見る(読み取りだけ)。
+
+```sql
+SELECT occurred_at, run_id, result, payload
+  FROM audit_events
+ WHERE action = 'AUTO_MERGE_JUDGED'
+ ORDER BY occurred_at DESC
+ LIMIT 50;
+```
+- **止め方**: `KIVRA_SELFDEV_AUTOMERGE_SHADOW_ENABLED=false` にして再起動する(判定の記録が止まる)。オートパイロットを止めれば、判定も止まる。記録は消さない(監査は追記のみ)。
+- **マージしないこと**: この段階は、PR をマージしない。判定の結果が `ELIGIBLE` でも、PR は人がマージする。S1 の進む条件は ADR 0014 §6 の S1 の欄による(判定が 20 件以上、そのうち「マージ可能」と判定した件数のうち人が問題と判断した件数が 0)。
+- **ダッシュボード**: 判定の一覧の画面は、部品 C の仕事で、この段階には無い。
+
 
 ## 5. 動作確認
 

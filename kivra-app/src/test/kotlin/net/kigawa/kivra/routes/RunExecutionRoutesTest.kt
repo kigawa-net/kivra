@@ -55,6 +55,7 @@ import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.db.execUpdate
 import net.kigawa.kivra.auth.TaskApiIdentity
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.junit.jupiter.api.AfterAll
 import org.slf4j.LoggerFactory
 
 private const val AGENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -76,7 +77,15 @@ class RunExecutionRoutesTest {
          * One H2 database for the class. A [TestDb] stays in memory for the life of the test JVM (`DB_CLOSE_DELAY=-1`), so one per test
          * exhausted the test heap of the whole suite. Each test works on its own Runs and attempts, so they do not share state.
          */
-        private val sharedDb: TestDb by lazy { TestDb() }
+        private val sharedDbLazy = lazy { TestDb() }
+        private val sharedDb: TestDb by sharedDbLazy
+
+        /** Closes the class's pool (and its MariaDB schema) when the class ends; the TestDb is created only if a test used it. */
+        @JvmStatic
+        @AfterAll
+        fun closeSharedDb() {
+            if (sharedDbLazy.isInitialized()) sharedDbLazy.value.close()
+        }
     }
 
     private val issuer = OidcTestTokens.ISSUER

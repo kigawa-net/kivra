@@ -842,6 +842,26 @@ test('while a stop is in flight the send and cancel buttons are disabled, and th
   assert.equal(dom.byId('stop-cancel').disabled, false, 'cancel is enabled again after the answer');
 });
 
+test('a stop reason that is blank, longer than 500 characters or has a control character cannot be sent', async () => {
+  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 4 });
+  const s = apState({ goals: [goal], detail: detailOf(goal, [taskOf({ version: 0 })]) });
+  const dom = load(apResponder(s));
+  await flush();
+  buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(dom.byId('plans-list'), '中止…').fire('click');
+
+  for (const reason of ['', '   ', 'x'.repeat(501), 'あ'.repeat(500) + 'い', 'やめる\u0007']) {
+    dom.byId('stop-reason').value = reason;
+    dom.byId('stop-reason').fire('input');
+    assert.equal(dom.byId('stop-submit').disabled, true, `${JSON.stringify(reason).slice(0, 20)}: cannot send`);
+    dom.byId('stop-submit').fire('click');
+    await flush();
+    assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 0, `${JSON.stringify(reason).slice(0, 20)}: no request`);
+  }
+  assert.equal(dom.byId('stop-dialog').open, true, 'the dialog stays open');
+});
+
 test('pause and resume post an empty JSON object; the breaker button shows only while the breaker is open', async () => {
   const s = apState();
   s.autopilotStatus = { ...AP_STATUS, breakerOpen: true, consecutiveFailures: 3 };

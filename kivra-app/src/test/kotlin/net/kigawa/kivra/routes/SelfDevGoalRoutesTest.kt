@@ -439,6 +439,56 @@ class SelfDevGoalRoutesTest {
         }
     }
 
+    @Test
+    fun `the AI principal is refused pause, resume and the breaker reset with 403 before the body is read, and the control does not change`() {
+        TestDb().use { db ->
+            val control = SelfDevAutopilotControlRepository(db.database)
+            testApplication {
+                setUp(db, aiPrincipal = AI_PRINCIPAL)
+                // A malformed body is still a 403: the refusal comes before the body is read.
+                val pause = post("/api/selfdev/autopilot/pause", """{"x":1}""", AI_PRINCIPAL)
+                assertEquals(HttpStatusCode.Forbidden, pause.status)
+                assertEquals("""{"error":"forbidden"}""", text(pause))
+                assertEquals(false, control.read().paused)
+
+                // The operator pauses; the AI principal cannot resume it.
+                assertEquals(HttpStatusCode.OK, post("/api/selfdev/autopilot/pause", "{}").status)
+                val resume = post("/api/selfdev/autopilot/resume", "{}", AI_PRINCIPAL)
+                assertEquals(HttpStatusCode.Forbidden, resume.status)
+                assertEquals("""{"error":"forbidden"}""", text(resume))
+                assertEquals(true, control.read().paused)
+
+                // The breaker stays open for the AI principal, and the reset is refused with nothing changed.
+                control.recordRunOutcome(succeeded = false, maxConsecutiveFailures = 1)
+                val reset = post("/api/selfdev/autopilot/reset-breaker", "{}", AI_PRINCIPAL)
+                assertEquals(HttpStatusCode.Forbidden, reset.status)
+                assertEquals("""{"error":"forbidden"}""", text(reset))
+                assertEquals(true, control.read().breakerOpen)
+
+                // The AI principal may still read the status, and the operator may still resume and reset as before.
+                assertEquals(HttpStatusCode.OK, send(HttpMethod.Get, "/api/selfdev/autopilot", null, principal = AI_PRINCIPAL).status)
+                assertEquals(HttpStatusCode.OK, post("/api/selfdev/autopilot/resume", "{}").status)
+                assertEquals(false, control.read().paused)
+                assertEquals(HttpStatusCode.OK, post("/api/selfdev/autopilot/reset-breaker", "{}").status)
+                assertEquals(false, control.read().breakerOpen)
+            }
+        }
+    }
+
+    @Test
+    fun `with no AI principal configured, the pause, resume and breaker reset of that owner key are the operator's as before`() {
+        TestDb().use { db ->
+            val control = SelfDevAutopilotControlRepository(db.database)
+            testApplication {
+                setUp(db, aiPrincipal = null)
+                assertEquals(HttpStatusCode.OK, post("/api/selfdev/autopilot/pause", "{}", AI_PRINCIPAL).status)
+                assertEquals(true, control.read().paused)
+                assertEquals(HttpStatusCode.OK, post("/api/selfdev/autopilot/resume", "{}", AI_PRINCIPAL).status)
+                assertEquals(false, control.read().paused)
+            }
+        }
+    }
+
     // ---- stop and replan -----------------------------------------------------------------------------------------------
 
     @Test

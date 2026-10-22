@@ -1251,7 +1251,7 @@ dev での有効化の手順は §7.5。
 ### 7.2d 自己開発の記憶(ADR 0016 P1: 保存のみ、影)
 
 - 状態: 段階 P1(保存のみ)。記録は書くだけで、**読まない**。Planner のプロンプト、`PlanValidator`、承認と投入の判断は、記録に依存しない。
-  運用者のメモの入力 API、閲覧、削除の API は、まだ無い(P2 以降)。
+  閲覧と削除の API と画面は P2 で入った(7.2e)。運用者のメモの入力 API は、まだ無い。
 - 環境変数: `KIVRA_SELFDEV_MEMORY_ENABLED`。既定は `false`。`true` と `false` 以外は起動に失敗する(変数名だけを出す)。
   オートパイロット(`KIVRA_SELFDEV_AUTOPILOT_ENABLED=true`)が無効のときは、この変数を読まない(記録を書く流れが無いため)。
 - 記録する事実(固定のコードと件数だけ。文章は下の題名だけ):
@@ -1267,7 +1267,7 @@ dev での有効化の手順は §7.5。
   書けなかった・拒否されたときは、固定コードのログ(`selfdev memory refused: kind=... code=...` / `selfdev memory write failed:
   exception=<例外の型名>`)だけを出し、流れは止めない。例外の文言はログに出ない。
 - 止め方: `KIVRA_SELFDEV_MEMORY_ENABLED=false` にして再起動する。記録の書き込みも、保持ジョブも止まる。既に書かれた記録は残る
-  (消すのは保持期間の後。手で消す手段は P2 まで無い)。
+  (消すのは保持期間の後。手で消す手段は P2 で入った。7.2e)。
 - 保持期間(ADR 0016 section 9): 文章(`GOAL_TITLE` を含む)180 日、削除された文章の墓標 30 日、事実 365 日、監査 365 日。
   保持ジョブは 1 時間ごとに動く。期間は `created_at` からの経過で判定する。
 - 確認(件数の集計。本文は出ない):
@@ -1276,6 +1276,40 @@ dev での有効化の手順は §7.5。
   SELECT kind, code, COUNT(*) FROM selfdev_memory_events GROUP BY kind, code;
   ```
 - 未実装(P1 の範囲外): `ATTEMPT_FACT`、`COST_FACT`、`PLAN_RATIONALE`、`FAILURE_EXPLANATION`、`CYCLE_REVIEW`、運用者のメモの API。
+
+### 7.2e 自己開発の記憶の閲覧と削除(ADR 0016 P2)
+
+- 状態: P2(閲覧と削除)。既定は無効。環境変数 `KIVRA_SELFDEV_MEMORY_ENABLED` が `true` のときだけ、API と画面が動く
+  (オートパイロットが有効なときだけ読む。7.2d の規則のまま)。`false` のとき、API は 503(`memory is disabled`)を返し、何も読まない。
+  画面の「記憶」の欄は、一覧の API が 200 を返したときだけ出る(503、403、404 のときは出ない)。
+- 権限: 運用者だけ(運用者の役割。エージェントのトークンは 403)。AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL`)は、この API の全項目で 403 `forbidden`。
+- HTTP:
+  - `GET /api/selfdev/memory?kind=&source=&tier=&goalId=&createdAfter=&createdBefore=&limit=&offset=`: 一覧。
+    `limit` は 1〜100(既定 20)、`offset` は 0〜100000。種類と出所と信頼は、列挙の名前(例: `OPERATOR_NOTE`、`TRUSTED_OPERATOR`)。
+    日時は `2026-10-01T00:00:00` の書式(UTC)。応答は `items`、`total`(条件に合う有効な記録の件数)、`limit`、`offset`、
+    `tombstones`(削除された文章の墓標の件数)、`deletionAudit`(削除の監査の件数の合計)。
+  - `POST /api/selfdev/memory/{id}/delete` と `{"reason": "..."}`: 個別の削除。200 `{"recordId", "deleted": true}`。該当が無ければ 404。
+  - `POST /api/selfdev/memory/delete-by-condition` と `{kind?, source?, tier?, goalId?, createdAfter?, createdBefore?, dryRun?, reason?}`:
+    条件の削除。`dryRun` の既定は `true`(件数だけを返し、何も消さない)。`dryRun: false` のときは `reason` が必須。
+    条件が 1 つも無いと 400。該当が 500 件を超えると 409(`matched` を返し、何も消さない。条件を絞って繰り返す)。
+    応答は `{matched, deleted, dryRun}`。
+- 返す項目: 記録の ID、種類、出所、信頼の段階、Goal の ID、件数、理由コード(固定の列挙だけ)、作成時刻。
+  TRUSTED の文章(`OPERATOR_NOTE`、`GOAL_TITLE`、`REJECTION_REASON`)の本文は返す。
+- 返さない項目:
+  - UNTRUSTED の文章(モデルや系統が書いた文。`PLAN_RATIONALE` など)の本文。代わりに `bodyWithheld: true` を返す(ADR 0016 U-1)。
+  - 削除の理由の文。理由は形を検査した後に捨てる。監査は文章を持たない(ADR 0016 4.2)。したがって、理由は画面の確認にだけ使われ、保存されない。
+  - 拒否された文章、生の運用者の ID(記録の作成者はハッシュの先頭 12 文字だけ)。
+- 画面(`/ui` の「記憶」の欄): 種類と信頼で絞り込み、20 件ずつ表示する。個別の削除は、理由(1〜500 文字、制御文字なし)を入れた
+  確認ダイアログの後にだけ送る。条件の削除は、先に「該当の件数を確認」で件数を出す。同じ条件のまま件数が 1 以上のときだけ
+  「この条件で削除」が有効になる。失敗は固定の文だけを出し、サーバーの文は出さない。
+- 削除の手順:
+  1. 条件を絞り、`dryRun: true` で件数を確認する(画面の「該当の件数を確認」、または API)。
+  2. 件数が想定どおりなら、理由を付けて削除する(`dryRun: false`)。
+  3. 一覧の下の墓標と監査の件数が、削除した文章の数だけ増えたことを確認する。
+- 削除の後の扱い: 削除は次の読み出しから効き、一覧にも Planner の入力にも出ない(P2 の条件。Planner は P4 まで記録を読まない)。
+  進行中の Planner の呼び出しには、最大 240 秒の遅れがありうる(ADR 0016 8.4)。バックアップには、保持の期限まで削除前の内容が残る(U-4)。
+- 保持: 墓標は削除の後 30 日で物理的に消える。監査は 365 日。削除の監査の件数は、墓標が消えた後も残るため、
+  墓標の件数と一致しなくなる(これは正常)。
 
 ### 7.4 運用手順(PR D: 画面と HTTP)
 

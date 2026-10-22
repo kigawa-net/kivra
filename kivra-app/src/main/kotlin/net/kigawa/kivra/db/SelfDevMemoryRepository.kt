@@ -48,10 +48,15 @@ data class MemoryFilter(
     val kind: MemoryKind? = null,
     val source: MemorySource? = null,
     val tier: MemoryTier? = null,
+    val createdAfter: LocalDateTime? = null,
     val createdBefore: LocalDateTime? = null,
 ) {
-    fun isEmpty(): Boolean = goalId == null && kind == null && source == null && tier == null && createdBefore == null
+    fun isEmpty(): Boolean =
+        goalId == null && kind == null && source == null && tier == null && createdAfter == null && createdBefore == null
 }
+
+/** Counts for the operator's view (ADR 0016 P2). [tombstones] are the DELETED notes; [deletionAudit] sums the DELETED audit rows. */
+data class MemoryAuditSummary(val tombstones: Int, val deletionAudit: Int)
 
 sealed interface MemorySaveResult {
     data class Written(val recordId: String) : MemorySaveResult
@@ -123,16 +128,20 @@ class SelfDevMemoryRepository(
         }
     }
 
-    /** ACTIVE records that match [filter], newest first, at most [limit]. A tombstone and a deleted fact never appear. */
-    fun search(filter: MemoryFilter, limit: Int): List<MemoryRecordView> {
+    /**
+     * ACTIVE records that match [filter], newest first, at most [limit], after the first [offset]. A tombstone and a deleted fact
+     * never appear.
+     */
+    fun search(filter: MemoryFilter, limit: Int, offset: Int = 0): List<MemoryRecordView> {
         require(limit in 1..MAX_SEARCH_LIMIT) { "limit must be from 1 to $MAX_SEARCH_LIMIT" }
+        require(offset >= 0) { "offset must not be negative" }
         if (!enabled) return emptyList()
         return transaction(database) {
             val where = filterSql(filter)
             execQuery(
                 "SELECT record_id, kind, source_kind, trust_tier, goal_id, body, code, count_value, created_at " +
-                    "FROM selfdev_memory_records WHERE status = 'ACTIVE'${where.sql} ORDER BY created_at DESC, record_id DESC LIMIT ?",
-                *(where.params + listOf<Any?>(limit)).toTypedArray(),
+                    "FROM selfdev_memory_records WHERE status = 'ACTIVE'${where.sql} ORDER BY created_at DESC, record_id DESC LIMIT ? OFFSET ?",
+                *(where.params + listOf<Any?>(limit, offset)).toTypedArray(),
             ) { rs ->
                 MemoryRecordView(
                     recordId = rs.getString(1), kind = rs.getString(2), source = rs.getString(3), tier = rs.getString(4),
@@ -140,6 +149,26 @@ class SelfDevMemoryRepository(
                     countValue = rs.getObject(8)?.let { (it as Number).toInt() }, createdAt = rs.getTimestamp(9).toLocalDateTime(),
                 )
             }
+        }
+    }
+
+    /** How many ACTIVE records match [filter]. Read-only. */
+    fun count(filter: MemoryFilter): Int {
+        if (!enabled) return 0
+        return transaction(database) {
+            val where = filterSql(filter)
+            countOf("SELECT COUNT(*) FROM selfdev_memory_records WHERE status = 'ACTIVE'${where.sql}", *where.params.toTypedArray())
+        }
+    }
+
+    /** The tombstone count and the deletion audit's sum (ADR 0016 P2). Read-only; holds no text. */
+    fun auditSummary(): MemoryAuditSummary {
+        if (!enabled) return MemoryAuditSummary(0, 0)
+        return transaction(database) {
+            MemoryAuditSummary(
+                tombstones = countOf("SELECT COUNT(*) FROM selfdev_memory_records WHERE status = 'DELETED'"),
+                deletionAudit = countOf("SELECT COALESCE(SUM(count_value), 0) FROM selfdev_memory_events WHERE kind = ?", EVENT_DELETED),
+            )
         }
     }
 
@@ -399,6 +428,7 @@ class SelfDevMemoryRepository(
         f.kind?.let { sb.append(" AND kind = ?"); params += it.name }
         f.source?.let { sb.append(" AND source_kind = ?"); params += it.name }
         f.tier?.let { sb.append(" AND trust_tier = ?"); params += it.name }
+        f.createdAfter?.let { sb.append(" AND created_at >= ?"); params += it }
         f.createdBefore?.let { sb.append(" AND created_at < ?"); params += it }
         return Where(sb.toString(), params)
     }
@@ -409,6 +439,7 @@ class SelfDevMemoryRepository(
             if (f.kind != null) add("kind")
             if (f.source != null) add("source")
             if (f.tier != null) add("tier")
+            if (f.createdAfter != null) add("created_after")
             if (f.createdBefore != null) add("created_before")
         }
         return "$SCOPE_CONDITION:${fields.joinToString("+")}"

@@ -38,6 +38,10 @@ import net.kigawa.kivra.db.SubmitResult
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.selfdev.memory.MemoryCandidate
+import net.kigawa.kivra.selfdev.AutopilotSettings
+import net.kigawa.kivra.selfdev.OrderSettings
+import net.kigawa.kivra.selfdev.SelfDevSettings
+import net.kigawa.kivra.selfdev.aiPrincipalFromEnv
 import net.kigawa.kivra.selfdev.memory.MemoryChannel
 import org.jetbrains.exposed.sql.transactions.transaction
 
@@ -151,6 +155,39 @@ class SelfDevMemoryRoutesTest {
                 send(HttpMethod.Post, "/api/selfdev/memory/delete-by-condition", """{"kind":"OPERATOR_NOTE","dryRun":false,"reason":"x"}""", principal = AI_PRINCIPAL).status,
             )
             assertEquals(HttpStatusCode.OK, send(HttpMethod.Get, "/api/selfdev/memory").status, "the operator reads")
+        }
+        assertEquals(1, db.count("selfdev_memory_records", "status = 'ACTIVE'"), "the AI principal deleted nothing")
+    }
+
+    @Test
+    fun `the AI principal read at startup is refused by the memory API even while the orders are off`() = TestDb().use { db ->
+        // The same path Application.kt takes: the AI principal is read once, from the environment, while the autopilot is on.
+        val env = mapOf(
+            "KIVRA_SELFDEV_ENABLED" to "true",
+            "KIVRA_AUTH_MODE" to "oidc-jwt",
+            "KIVRA_SELFDEV_GITHUB_TOKEN" to "test-token-not-used",
+            "KIVRA_SELFDEV_ANTHROPIC_API_KEY" to "test-key-not-used",
+            "KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID" to "1",
+            "KIVRA_SELFDEV_MODEL_REGISTRY_PATH" to "/nonexistent/registry.json",
+            "KIVRA_FX_USD_JPY" to "150",
+            "KIVRA_FX_AS_OF" to "2026-10-18",
+            "KIVRA_SELFDEV_RUNTIME" to "cli",
+            "KIVRA_AGENT_API_ENABLED" to "true",
+            AutopilotSettings.ENV_ENABLED to "true",
+            OrderSettings.ENV_ENABLED to "false",
+            OrderSettings.ENV_AI_PRINCIPAL to AI_PRINCIPAL,
+        )
+        val autopilot = AutopilotSettings.fromEnv(env, SelfDevSettings.fromEnv(env))
+        val aiPrincipal = aiPrincipalFromEnv(env, autopilot)
+        assertEquals(AI_PRINCIPAL, aiPrincipal)
+        assertFalse(OrderSettings.fromEnv(env, autopilot, aiPrincipal).enabled, "the orders are off")
+        val r = repo(db)
+        val id = (r.save(note("覚え書き")) as MemorySaveResult.Written).recordId
+        testApplication {
+            setUp(memory = r, aiPrincipal = aiPrincipal)
+            assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Get, "/api/selfdev/memory", principal = AI_PRINCIPAL).status)
+            assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, "/api/selfdev/memory/$id/delete", """{"reason":"x"}""", principal = AI_PRINCIPAL).status)
+            assertEquals(HttpStatusCode.OK, send(HttpMethod.Get, "/api/selfdev/memory").status, "the operator still reads")
         }
         assertEquals(1, db.count("selfdev_memory_records", "status = 'ACTIVE'"), "the AI principal deleted nothing")
     }

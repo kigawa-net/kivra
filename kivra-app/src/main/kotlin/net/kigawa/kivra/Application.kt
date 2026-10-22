@@ -179,7 +179,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     // The memory's operator routes (ADR 0016 P2). Registered with the operator check; the repository is null while the memory switch is off,
     // and then every endpoint answers 503.
     val memoryRoutes = operatorVerifier?.let { verifier ->
-        SelfDevMemoryRouteDeps(operators = verifier, memory = memoryRepo, aiPrincipal = orderSettings.aiPrincipal)
+        SelfDevMemoryRouteDeps(operators = verifier, memory = memoryRepo, aiPrincipal = aiPrincipal)
     }
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
     val orderRoutes = if (orderRepo != null && operatorVerifier != null) {

@@ -113,6 +113,36 @@
       <ul id="approval-list" class="run-list" aria-label="保留中の停止の要求"></ul>
     </section>
 
+    <!-- Self-development memory (operator, ADR 0016 P2). Hidden unless GET /api/selfdev/memory answers 200. Only text is written into it. -->
+    <section class="card" id="memory-section" aria-labelledby="h-memory" hidden>
+      <div class="card-head">
+        <h2 id="h-memory">記憶（ADR 0016、運用者向け）</h2>
+        <button type="button" id="memory-refresh" class="secondary">今すぐ更新</button>
+      </div>
+      <p class="meta" role="note">記録は、運用者の覚え書きと、系統が書いた事実です。モデルや系統が書いた文章（未検証）の本文は、この画面には表示しません。削除は取り消せません。</p>
+      <div class="scope">
+        <label>種類 <select id="memory-kind" aria-label="種類で絞り込む"></select></label>
+        <label>信頼 <select id="memory-tier" aria-label="信頼で絞り込む"></select></label>
+        <button type="button" id="memory-apply" class="secondary">絞り込む</button>
+      </div>
+      <p id="memory-msg" class="result" role="status"></p>
+      <p id="memory-status" class="meta" role="status">未取得</p>
+      <p id="memory-counts" class="meta" role="status"></p>
+      <ul id="memory-list" class="run-list" aria-label="記録の一覧"></ul>
+      <p id="memory-page" class="meta" role="status"></p>
+      <div class="detail-actions">
+        <button type="button" id="memory-prev" class="secondary">前の 20 件</button>
+        <button type="button" id="memory-next" class="secondary">次の 20 件</button>
+      </div>
+      <h3>条件で削除（運用者）</h3>
+      <p class="meta">上で選んだ条件に該当する記録を削除します。先に件数を確認してください。1 回の上限は 500 件です。</p>
+      <div class="detail-actions">
+        <button type="button" id="memory-dryrun" class="secondary">該当の件数を確認</button>
+        <button type="button" id="memory-cond-delete" class="secondary" disabled>この条件で削除</button>
+      </div>
+      <p id="memory-dryrun-result" class="meta" role="status"></p>
+    </section>
+
     <section class="card" aria-labelledby="h-runs">
       <div class="card-head">
         <h2 id="h-runs">Run の一覧</h2>
@@ -191,6 +221,21 @@
     <div class="dialog-actions">
       <button type="button" class="secondary" id="stop-cancel" autofocus>キャンセル</button>
       <button type="button" id="stop-submit" disabled>中止する</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="memory-dialog" aria-labelledby="memory-title">
+  <div class="release-body">
+    <h2 id="memory-title">記録の削除</h2>
+    <p id="memory-explain"></p>
+    <label for="memory-reason">理由（必須、1〜500 文字）</label>
+    <input id="memory-reason" type="text" autocomplete="off">
+    <div class="counter" id="memory-count">0 / 500</div>
+    <p class="error" id="memory-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="memory-cancel" autofocus>キャンセル</button>
+      <button type="button" id="memory-submit" disabled>削除する</button>
     </div>
   </div>
 </dialog>

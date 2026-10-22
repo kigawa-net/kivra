@@ -2026,3 +2026,239 @@ test('an approval with an unknown requester kind or reason shows unknown with th
   dom.byId('approval-list').walk((n) => tags.push(n.tagName));
   assert.equal(tags.includes('B'), false, 'no element is made from a response value');
 });
+
+// ---- Self-development memory (ADR 0016 P2, operator): the card, the list, the filters, the deletions ----
+
+const MEM_ID1 = '01MEMORY' + 'A'.repeat(18);
+const MEM_ID2 = '01MEMORY' + 'B'.repeat(18);
+const MEM_ID3 = '01MEMORY' + 'C'.repeat(18);
+
+function memOf(over = {}) {
+  return {
+    recordId: MEM_ID1, kind: 'OPERATOR_NOTE', source: 'OPERATOR', tier: 'TRUSTED_OPERATOR', goalId: null,
+    body: '覚え書き', bodyWithheld: false, code: null, countValue: null, createdAt: '2026-10-20T10:00:00Z', ...over,
+  };
+}
+
+function memList(items, over = {}) {
+  return { status: 200, data: { items, total: items.length, limit: 20, offset: 0, tombstones: 0, deletionAudit: 0, ...over } };
+}
+
+/** The memory routes. `m.list` is a response or a function of the path; `m.cond` and `m.one` answer the deletions. */
+function memLoad(m, over = {}) {
+  const s = apState(over);
+  s.other = (p, init) => {
+    if (p.startsWith('/api/selfdev/memory?') && init.method === 'GET') return typeof m.list === 'function' ? m.list(p) : m.list;
+    if (p === '/api/selfdev/memory/delete-by-condition' && init.method === 'POST') {
+      return m.cond ? m.cond(init) : { status: 200, data: { matched: 0, deleted: 0, dryRun: true } };
+    }
+    const one = /^\/api\/selfdev\/memory\/([0-9A-Z]{26})\/delete$/.exec(p);
+    if (one && init.method === 'POST') return m.one ? m.one(one[1], init) : { status: 200, data: { recordId: one[1], deleted: true } };
+    return null;
+  };
+  return load(apResponder(s));
+}
+
+test('the memory card stays hidden on 503, 404 and 403, and while the autopilot is off; on a 200 it shows and is read once', async () => {
+  const hidden = [{ status: 503, data: { error: 'x' } }, { status: 404, data: { error: 'x' } }, { status: 403, data: { error: 'forbidden' } }];
+  for (const r of hidden) {
+    const dom = memLoad({ list: r });
+    await flush();
+    assert.equal(dom.byId('memory-section').hidden, true, 'hidden on ' + r.status);
+  }
+  let dom = memLoad({ list: memList([memOf()]) }, { autopilot: 503 });
+  await flush();
+  assert.equal(dom.byId('memory-section').hidden, true, 'the autopilot is off: no card');
+  assert.equal(dom.calls.filter((c) => c.path.startsWith('/api/selfdev/memory')).length, 0, 'nothing is read while the autopilot is off');
+
+  dom = memLoad({ list: memList([memOf()]) });
+  await flush();
+  assert.equal(dom.byId('memory-section').hidden, false, 'an operator sees the card');
+  assert.equal(dom.calls.filter((c) => c.path.startsWith('/api/selfdev/memory?')).length, 1, 'read once when the autopilot is first seen on');
+});
+
+test('the memory list shows fixed labels, withholds an UNTRUSTED text, shows an unknown kind as unknown, and never makes markup', async () => {
+  const dom = memLoad({
+    list: memList(
+      [
+        memOf({ recordId: MEM_ID1, kind: 'OPERATOR_NOTE', body: EVIL }),
+        memOf({ recordId: MEM_ID2, kind: 'PLAN_RATIONALE', tier: 'UNTRUSTED', body: null, bodyWithheld: true }),
+        memOf({ recordId: MEM_ID3, kind: 'WEIRD<img src=x onerror=alert(1)>', code: 'NEW<img>', countValue: null }),
+      ],
+      { tombstones: 2, deletionAudit: 2 },
+    ),
+  });
+  await flush();
+  const text = dom.byId('memory-list').textContent;
+  assert.match(text, /運用者の覚え書き/);
+  assert.match(text, /計画の理由（モデル、未検証）/);
+  assert.match(text, /本文は表示しません（未検証の文章）/);
+  assert.match(text, /不明/, 'an unknown kind and an unknown code show as unknown');
+  assert.equal(text.includes('WEIRD'), false, 'an unknown kind is not shown');
+  assert.equal(text.includes('NEW<'), false, 'an unknown code is not shown');
+  assert.equal(text.includes(EVIL), true, 'an operator text is shown as text, character for character');
+  const tags = [];
+  dom.byId('memory-list').walk((n) => tags.push(n.tagName));
+  assert.equal(tags.includes('IMG'), false, 'no image is made from a value');
+  assert.equal(tags.includes('SCRIPT'), false, 'no script is made from a value');
+  assert.equal(dom.byId('memory-counts').textContent, '墓標（削除された文章）: 2 件、削除の監査: 2 件');
+});
+
+test('the filter sends the chosen kind and tier, and the paging moves by 20 within the total', async () => {
+  const m = {
+    list: (p) => (p.includes('offset=20')
+      ? memList([memOf({ recordId: MEM_ID2 })], { total: 21, offset: 20 })
+      : memList([memOf()], { total: 21 })),
+  };
+  const dom = memLoad(m);
+  await flush();
+  assert.equal(dom.byId('memory-prev').disabled, true, 'the first page: prev is off');
+  assert.equal(dom.byId('memory-next').disabled, false, 'more records: next is on');
+  dom.byId('memory-next').fire('click');
+  await flush();
+  assert.equal(dom.calls.some((c) => c.path.includes('offset=20')), true, 'the next page is read with offset 20');
+  assert.equal(dom.byId('memory-next').disabled, true, 'the last page: next is off');
+  assert.equal(dom.byId('memory-prev').disabled, false);
+
+  dom.byId('memory-kind').value = 'OPERATOR_NOTE';
+  dom.byId('memory-tier').value = 'TRUSTED_OPERATOR';
+  dom.byId('memory-apply').fire('click');
+  await flush();
+  const applied = dom.calls.filter((c) => c.path.startsWith('/api/selfdev/memory?')).pop();
+  assert.match(applied.path, /kind=OPERATOR_NOTE/);
+  assert.match(applied.path, /tier=TRUSTED_OPERATOR/);
+  assert.match(applied.path, /offset=0/, 'a new filter starts at the first page');
+
+  dom.byId('memory-kind').value = 'NOT_A_KIND';
+  dom.byId('memory-tier').value = '';
+  dom.byId('memory-apply').fire('click');
+  await flush();
+  const unknown = dom.calls.filter((c) => c.path.startsWith('/api/selfdev/memory?')).pop();
+  assert.equal(unknown.path.includes('kind='), false, 'a value that is not in the list is not sent');
+});
+
+test('a deletion asks first: nothing is sent until a reason is entered and confirmed; then the list is read again', async () => {
+  let posted = null;
+  const m = {
+    list: memList([memOf()]),
+    one: (id, init) => {
+      posted = { id, body: JSON.parse(init.body) };
+      return { status: 200, data: { recordId: id, deleted: true } };
+    },
+  };
+  const dom = memLoad(m);
+  await flush();
+  dom.byId('memory-list').buttons()[0].fire('click');
+  await flush();
+  assert.equal(dom.byId('memory-dialog').open, true, 'the confirmation opens');
+  assert.equal(posted, null, 'nothing is sent before the confirmation');
+  assert.equal(dom.byId('memory-submit').disabled, true, 'no reason, no submit');
+  dom.byId('memory-reason').value = '  誤って書いた  ';
+  dom.byId('memory-reason').fire('input');
+  assert.equal(dom.byId('memory-submit').disabled, false);
+  dom.byId('memory-submit').fire('click');
+  await flush();
+  assert.deepEqual(posted, { id: MEM_ID1, body: { reason: '誤って書いた' } }, 'the reason is sent trimmed');
+  assert.equal(dom.byId('memory-dialog').open, false, 'the dialog closes on success');
+  assert.equal(dom.calls.filter((c) => c.path.startsWith('/api/selfdev/memory?')).length >= 2, true, 'the list is read again');
+});
+
+test('a second confirm while a deletion is in flight sends nothing more', async () => {
+  let count = 0;
+  let release = null;
+  const m = {
+    list: memList([memOf()]),
+    one: () => {
+      count += 1;
+      return new Promise((resolve) => { release = resolve; });
+    },
+  };
+  const dom = memLoad(m);
+  await flush();
+  dom.byId('memory-list').buttons()[0].fire('click');
+  await flush();
+  dom.byId('memory-reason').value = 'x';
+  dom.byId('memory-reason').fire('input');
+  dom.byId('memory-submit').fire('click');
+  dom.byId('memory-submit').fire('click');
+  await flush();
+  assert.equal(count, 1, 'one request for two confirms');
+  release({ status: 200, data: { recordId: MEM_ID1, deleted: true } });
+  await flush();
+});
+
+test('a failure shows a fixed text and never the server text; a 404 reads the list again and keeps the dialog open', async () => {
+  const m = {
+    list: memList([memOf()]),
+    one: () => ({ status: 404, data: { error: 'SERVER-SECRET-TEXT' } }),
+  };
+  const dom = memLoad(m);
+  await flush();
+  dom.byId('memory-list').buttons()[0].fire('click');
+  await flush();
+  dom.byId('memory-reason').value = 'x';
+  dom.byId('memory-reason').fire('input');
+  dom.byId('memory-submit').fire('click');
+  await flush();
+  assert.equal(dom.byId('memory-dialog').open, true, 'the dialog stays open on failure');
+  assert.equal(dom.byId('memory-error').hidden, false);
+  assert.equal(dom.byId('memory-error').textContent, '記録が見つかりませんでした（削除済みの可能性があります）。一覧を読み直しました。');
+  assert.equal(dom.byId('memory-error').textContent.includes('SERVER'), false, 'the server text is never shown');
+  assert.equal(dom.calls.filter((c) => c.path.startsWith('/api/selfdev/memory?')).length >= 2, true, 'the list is read again');
+});
+
+test('the conditional deletion: a dry run needs a condition, shows the count, and enables the delete only for that filter; a real one sends the filter and the reason', async () => {
+  const bodies = [];
+  const m = {
+    list: memList([memOf()]),
+    cond: (init) => {
+      const b = JSON.parse(init.body);
+      bodies.push(b);
+      return { status: 200, data: b.dryRun ? { matched: 4, deleted: 0, dryRun: true } : { matched: 4, deleted: 4, dryRun: false } };
+    },
+  };
+  const dom = memLoad(m);
+  await flush();
+  assert.equal(dom.byId('memory-cond-delete').disabled, true, 'no dry run yet: the delete is off');
+
+  dom.byId('memory-dryrun').fire('click');
+  await flush();
+  assert.equal(bodies.length, 0, 'no condition: nothing is sent');
+  assert.match(dom.byId('memory-dryrun-result').textContent, /条件を 1 つ以上/);
+
+  dom.byId('memory-kind').value = 'OPERATOR_NOTE';
+  dom.byId('memory-apply').fire('click');
+  await flush();
+  dom.byId('memory-dryrun').fire('click');
+  await flush();
+  assert.deepEqual(bodies[0], { kind: 'OPERATOR_NOTE', dryRun: true }, 'the dry run sends the condition only');
+  assert.match(dom.byId('memory-dryrun-result').textContent, /該当: 4 件/);
+  assert.equal(dom.byId('memory-cond-delete').disabled, false, 'the same filter with a count of 1 or more: the delete is on');
+
+  dom.byId('memory-cond-delete').fire('click');
+  assert.equal(dom.byId('memory-dialog').open, true, 'the confirmation opens');
+  dom.byId('memory-reason').value = '整理';
+  dom.byId('memory-reason').fire('input');
+  dom.byId('memory-submit').fire('click');
+  await flush();
+  assert.deepEqual(bodies[1], { kind: 'OPERATOR_NOTE', dryRun: false, reason: '整理' });
+  assert.equal(dom.byId('memory-dialog').open, false);
+});
+
+test('the reason must be 1 to 500 characters without control characters, and its length is shown', async () => {
+  const dom = memLoad({ list: memList([memOf()]) });
+  await flush();
+  dom.byId('memory-list').buttons()[0].fire('click');
+  await flush();
+  const input = dom.byId('memory-reason');
+  input.value = 'a\u0001b';
+  input.fire('input');
+  assert.equal(dom.byId('memory-submit').disabled, true, 'a control character disables the submit');
+  input.value = 'a'.repeat(501);
+  input.fire('input');
+  assert.equal(dom.byId('memory-submit').disabled, true, '501 characters disable the submit');
+  input.value = 'a'.repeat(500);
+  input.fire('input');
+  assert.equal(dom.byId('memory-submit').disabled, false, '500 characters are allowed');
+  assert.equal(dom.byId('memory-count').textContent, '500 / 500');
+});

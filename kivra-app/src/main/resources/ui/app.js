@@ -1592,6 +1592,7 @@
         if (firstTime) refreshGoals();
         refreshPromotion();
         if (firstTime) refreshOrders();
+        if (firstTime) refreshMemory();
       } else {
         state.autopilotEnabled = false;
         state.autopilot = null;
@@ -1608,6 +1609,9 @@
     $('goal-section').hidden = !on;
     $('plans-section').hidden = !on;
     if (!on) {
+      MEMS.enabled = false;
+      MEMS.data = null;
+      renderMemory();
       state.goals = null;
       state.openGoalId = null;
       state.detail = null;
@@ -1981,6 +1985,327 @@
     }
     var msg = r.kind === 'network' ? AP.network : (r.status === 400 ? AP.reasonInvalid : (r.status === 409 ? AP.stale : (r.status === 404 ? AP.notFound : AP.unknown)));
     showStopError(msg);
+  }
+
+  // ---- Self-development memory (ADR 0016 P2, operator): the list, the filters, one deletion and the conditional deletion ----
+  // Shown only when GET /api/selfdev/memory answers 200. A 503 (the memory or the autopilot is off), 403, 404 or any other answer
+  // hides the card. Only fixed labels and checked values enter the page, all through textContent. The server withholds the text of
+  // an UNTRUSTED note (ADR 0016 U-1), so none is shown here either.
+  var MEM = {
+    LIMIT: 20,
+    REASON_MAX: 500,
+    KIND: {
+      OPERATOR_NOTE: '運用者の覚え書き',
+      GOAL_TITLE: 'Goal の題名（運用者）',
+      REJECTION_REASON: '却下の理由（運用者）',
+      PLAN_RATIONALE: '計画の理由（モデル、未検証）',
+      FAILURE_EXPLANATION: '失敗の説明（系統、未検証）',
+      CYCLE_REVIEW: 'order の周の振り返り（系統、未検証）',
+      PLAN_FACT: '計画の事実',
+      TASK_FACT: 'タスクの事実',
+      RUN_FACT: 'Run の事実',
+      ATTEMPT_FACT: '試行の事実',
+      COST_FACT: '費用の事実',
+      GOAL_FACT: 'Goal の事実'
+    },
+    TIER: {
+      TRUSTED_OPERATOR: '運用者の文章（信頼）',
+      UNTRUSTED: '未検証（モデルや系統が書いた）'
+    },
+    MSG: {
+      network: '通信に失敗しました。時間をおいて再度お試しください。',
+      session: 'セッションが切れました。画面を再読み込みしてください。',
+      notFound: '記録が見つかりませんでした（削除済みの可能性があります）。一覧を読み直しました。',
+      reasonInvalid: '理由は 1 から 500 文字で、制御文字を含めないでください。',
+      limit: '該当が多すぎます（1 回の上限は 500 件です）。条件を絞ってください。',
+      needFilter: '条件を 1 つ以上選んでから確認してください（種類か信頼）。',
+      withheld: '本文は表示しません（未検証の文章）',
+      deleted: '記録を削除しました。',
+      unknown: '処理できませんでした。時間をおいて再度お試しください。'
+    }
+  };
+
+  var MEMS = {
+    enabled: false,
+    loading: false,
+    busy: false,
+    okAt: 0,
+    data: null,
+    offset: 0,
+    filter: { kind: '', tier: '' },
+    dry: null,
+    action: null
+  };
+
+  function memCount(v) {
+    return typeof v === 'number' && isFinite(v) && Math.floor(v) === v && v >= 0;
+  }
+
+  function memValidList(d) {
+    return d !== null && typeof d === 'object' && Array.isArray(d.items) && memCount(d.total) &&
+      memCount(d.tombstones) && memCount(d.deletionAudit);
+  }
+
+  function memValidItem(it) {
+    return it !== null && typeof it === 'object' && typeof it.recordId === 'string' && /^[0-9A-Z]{26}$/.test(it.recordId);
+  }
+
+  function memLabel(table, key) {
+    return typeof key === 'string' && has(table, key) ? table[key] : '不明';
+  }
+
+  function memCodeText(code) {
+    return typeof code === 'string' && /^[A-Z_]{1,64}$/.test(code) ? code : '不明';
+  }
+
+  function memFilterQuery() {
+    var parts = ['limit=' + MEM.LIMIT, 'offset=' + MEMS.offset];
+    if (MEMS.filter.kind) parts.push('kind=' + encodeURIComponent(MEMS.filter.kind));
+    if (MEMS.filter.tier) parts.push('tier=' + encodeURIComponent(MEMS.filter.tier));
+    return parts.join('&');
+  }
+
+  /** The applied filter as a request body for the conditional deletion, or null when no condition is chosen. */
+  function memFilterBody() {
+    var f = {};
+    if (MEMS.filter.kind) f.kind = MEMS.filter.kind;
+    if (MEMS.filter.tier) f.tier = MEMS.filter.tier;
+    return f.kind || f.tier ? f : null;
+  }
+
+  function memFilterKey() {
+    return JSON.stringify([MEMS.filter.kind, MEMS.filter.tier]);
+  }
+
+  function memFailText(r) {
+    if (r.kind === 'network') return MEM.MSG.network;
+    if (r.kind === 'session') return MEM.MSG.session;
+    if (r.status === 400) return MEM.MSG.reasonInvalid;
+    if (r.status === 404) return MEM.MSG.notFound;
+    if (r.status === 409) return MEM.MSG.limit;
+    return MEM.MSG.unknown;
+  }
+
+  function memFillSelects() {
+    var kind = $('memory-kind');
+    var tier = $('memory-tier');
+    clear(kind);
+    clear(tier);
+    var all = h('option', { text: 'すべての種類' });
+    all.value = '';
+    kind.appendChild(all);
+    Object.keys(MEM.KIND).forEach(function (k) {
+      var o = h('option', { text: MEM.KIND[k] });
+      o.value = k;
+      kind.appendChild(o);
+    });
+    var anyTier = h('option', { text: 'すべての信頼' });
+    anyTier.value = '';
+    tier.appendChild(anyTier);
+    Object.keys(MEM.TIER).forEach(function (k) {
+      var o = h('option', { text: MEM.TIER[k] });
+      o.value = k;
+      tier.appendChild(o);
+    });
+  }
+
+  async function refreshMemory() {
+    if (MEMS.loading || state.sessionExpired) return;
+    if (!state.autopilotEnabled) {
+      MEMS.enabled = false;
+      MEMS.data = null;
+      renderMemory();
+      return;
+    }
+    MEMS.loading = true;
+    try {
+      var r = await apiFetch('/api/selfdev/memory?' + memFilterQuery(), 'GET');
+      if (r.ok && memValidList(r.data)) {
+        MEMS.enabled = true;
+        MEMS.okAt = Date.now();
+        MEMS.data = {
+          items: r.data.items.filter(memValidItem),
+          total: r.data.total,
+          tombstones: r.data.tombstones,
+          deletionAudit: r.data.deletionAudit
+        };
+      } else {
+        MEMS.enabled = false;
+        MEMS.data = null;
+      }
+    } finally {
+      MEMS.loading = false;
+      renderMemory();
+    }
+  }
+
+  function renderMemory() {
+    var on = MEMS.enabled === true && state.autopilotEnabled === true && MEMS.data !== null;
+    $('memory-section').hidden = !on;
+    var blocked = MEMS.busy || MEMS.loading || state.sessionExpired;
+    $('memory-refresh').disabled = blocked;
+    $('memory-apply').disabled = blocked;
+    $('memory-dryrun').disabled = blocked;
+    var dryOk = MEMS.dry !== null && MEMS.dry.key === memFilterKey() && MEMS.dry.matched >= 1;
+    $('memory-cond-delete').disabled = blocked || !dryOk;
+    if (!on) {
+      clear($('memory-list'));
+      return;
+    }
+    var d = MEMS.data;
+    $('memory-status').textContent = state.sessionExpired
+      ? 'セッション切れのため、一覧を更新できません'
+      : '最終取得: ' + fmtLocal(MEMS.okAt) + '（該当 ' + d.total + ' 件）';
+    $('memory-counts').textContent = '墓標（削除された文章）: ' + d.tombstones + ' 件、削除の監査: ' + d.deletionAudit + ' 件';
+    var last = MEMS.offset + d.items.length;
+    $('memory-page').textContent = d.items.length === 0 ? '' : (MEMS.offset + 1) + ' から ' + last + ' 件目を表示しています';
+    $('memory-prev').disabled = blocked || MEMS.offset === 0;
+    $('memory-next').disabled = blocked || last >= d.total;
+    var ul = $('memory-list');
+    clear(ul);
+    if (d.items.length === 0) {
+      ul.appendChild(h('li', { className: 'empty', text: '該当する記録はありません。' }));
+      return;
+    }
+    d.items.forEach(function (it) { ul.appendChild(memRow(it, blocked)); });
+  }
+
+  function memRow(it, blocked) {
+    var kids = [
+      h('div', { className: 'run-head' }, [
+        h('span', { className: 'run-title', text: memLabel(MEM.KIND, it.kind) }),
+        h('span', { className: 'badge', text: memLabel(MEM.TIER, it.tier) })
+      ]),
+      h('div', { className: 'run-meta' }, [
+        h('span', { className: 'time', text: '作成: ' + ordTime(it.createdAt) }),
+        memCount(it.countValue) ? h('span', { className: 'time', text: '件数: ' + it.countValue }) : null,
+        it.code ? h('span', { className: 'reason', text: '理由コード: ' + memCodeText(it.code) }) : null
+      ])
+    ];
+    if (typeof it.body === 'string') {
+      kids.push(h('p', { className: 'memory-text', text: it.body }));
+    } else if (it.bodyWithheld === true) {
+      kids.push(h('p', { className: 'meta', text: MEM.MSG.withheld }));
+    }
+    var del = h('button', { type: 'button', className: 'secondary', text: 'この記録を削除' });
+    del.disabled = blocked;
+    del.addEventListener('click', function () { openMemoryDelete(it.recordId); });
+    kids.push(del);
+    return h('li', { className: 'run-item' }, kids);
+  }
+
+  function showMemoryError(text) {
+    var el = $('memory-error');
+    el.textContent = text;
+    el.hidden = text === '';
+  }
+
+  function updateMemoryCount() {
+    $('memory-count').textContent = Array.from($('memory-reason').value).length + ' / ' + MEM.REASON_MAX;
+  }
+
+  function openMemoryDelete(recordId) {
+    if (MEMS.busy || state.sessionExpired) return;
+    MEMS.action = { type: 'one', recordId: recordId };
+    $('memory-title').textContent = '記録の削除';
+    $('memory-explain').textContent = 'この記録を削除します。文章は消え、墓標（ID と種類と時刻だけ）と監査が残ります。取り消せません。';
+    showMemoryError('');
+    updateMemoryCount();
+    openReasonDialog({
+      dialog: 'memory-dialog', input: 'memory-reason', submit: 'memory-submit', cancel: 'memory-cancel',
+      max: MEM.REASON_MAX, send: submitMemoryDelete
+    });
+  }
+
+  function openMemoryConditionDelete() {
+    if (MEMS.busy || state.sessionExpired || !MEMS.dry || MEMS.dry.key !== memFilterKey()) return;
+    MEMS.action = { type: 'cond', filter: memFilterBody() };
+    $('memory-title').textContent = '条件での削除';
+    $('memory-explain').textContent = '表示中の条件に該当する ' + MEMS.dry.matched + ' 件を削除します。文章は消え、墓標と監査が残ります。取り消せません。';
+    showMemoryError('');
+    updateMemoryCount();
+    openReasonDialog({
+      dialog: 'memory-dialog', input: 'memory-reason', submit: 'memory-submit', cancel: 'memory-cancel',
+      max: MEM.REASON_MAX, send: submitMemoryDelete
+    });
+  }
+
+  /** Sends the deletion (the reason was checked by openReasonDialog). The dialog stays open on failure. */
+  async function submitMemoryDelete(reason) {
+    var a = MEMS.action;
+    if (!a || MEMS.busy || state.sessionExpired) return;
+    showMemoryError('');
+    MEMS.busy = true;
+    renderMemory();
+    var r;
+    try {
+      if (a.type === 'one') {
+        r = await apiFetch('/api/selfdev/memory/' + encodeURIComponent(a.recordId) + '/delete', 'POST', { reason: reason });
+      } else {
+        r = await apiFetch('/api/selfdev/memory/delete-by-condition', 'POST', Object.assign({}, a.filter, { dryRun: false, reason: reason }));
+      }
+    } finally {
+      MEMS.busy = false;
+    }
+    if (r.ok) {
+      MEMS.action = null;
+      MEMS.dry = null;
+      $('memory-dialog').close();
+      $('memory-msg').textContent = MEM.MSG.deleted;
+      $('memory-msg').className = 'result ok';
+      refreshMemory();
+      return;
+    }
+    showMemoryError(memFailText(r));
+    if (r.status === 404) refreshMemory();
+    renderMemory();
+  }
+
+  async function onMemoryDryRun() {
+    if (MEMS.busy || state.sessionExpired) return;
+    var body = memFilterBody();
+    if (body === null) {
+      $('memory-dryrun-result').textContent = MEM.MSG.needFilter;
+      return;
+    }
+    MEMS.busy = true;
+    renderMemory();
+    var r;
+    try {
+      r = await apiFetch('/api/selfdev/memory/delete-by-condition', 'POST', Object.assign({}, body, { dryRun: true }));
+    } finally {
+      MEMS.busy = false;
+    }
+    if (r.ok && r.data && memCount(r.data.matched)) {
+      MEMS.dry = { key: memFilterKey(), matched: r.data.matched };
+      $('memory-dryrun-result').textContent = '該当: ' + r.data.matched + ' 件（1 回の上限は 500 件）';
+    } else {
+      MEMS.dry = null;
+      $('memory-dryrun-result').textContent = r.status === 409 ? MEM.MSG.limit : memFailText(r);
+    }
+    renderMemory();
+  }
+
+  function onMemoryApply() {
+    if (MEMS.loading || MEMS.busy) return;
+    var kind = $('memory-kind').value;
+    var tier = $('memory-tier').value;
+    MEMS.filter = {
+      kind: has(MEM.KIND, kind) ? kind : '',
+      tier: has(MEM.TIER, tier) ? tier : ''
+    };
+    MEMS.offset = 0;
+    MEMS.dry = null;
+    $('memory-dryrun-result').textContent = '';
+    refreshMemory();
+  }
+
+  function onMemoryPage(delta) {
+    if (MEMS.loading || MEMS.busy || !MEMS.data) return;
+    var next = MEMS.offset + delta * MEM.LIMIT;
+    if (next < 0) return;
+    MEMS.offset = next;
+    refreshMemory();
   }
 
   // ---- Global pause and the breaker ----------------------------------------
@@ -2930,6 +3255,14 @@
     $('goal-title').addEventListener('input', function () { updateGoalCounters(); updateGoalControls(); });
     $('goal-body').addEventListener('input', function () { updateGoalCounters(); updateGoalControls(); });
     $('plans-refresh').addEventListener('click', function () { refreshAutopilot(); refreshGoals(); });
+    $('memory-refresh').addEventListener('click', function () { refreshMemory(); });
+    $('memory-apply').addEventListener('click', onMemoryApply);
+    $('memory-prev').addEventListener('click', function () { onMemoryPage(-1); });
+    $('memory-next').addEventListener('click', function () { onMemoryPage(1); });
+    $('memory-dryrun').addEventListener('click', onMemoryDryRun);
+    $('memory-cond-delete').addEventListener('click', openMemoryConditionDelete);
+    $('memory-reason').addEventListener('input', updateMemoryCount);
+    memFillSelects();
     $('autopilot-toggle').addEventListener('click', onAutopilotToggle);
     $('breaker-reset').addEventListener('click', onBreakerReset);
     initBudget();

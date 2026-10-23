@@ -298,6 +298,19 @@
   </div>
 </dialog>
 
+<dialog id="order-stop-dialog" aria-labelledby="order-stop-title">
+  <div class="release-body">
+    <h2 id="order-stop-title">停止の要求</h2>
+    <p id="order-stop-text"></p>
+    <p class="meta" id="order-stop-target"></p>
+    <label>理由 <select id="order-stop-reason"></select></label>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="order-stop-cancel" autofocus>キャンセル</button>
+      <button type="button" id="order-stop-submit" disabled>停止を要求する</button>
+    </div>
+  </div>
+</dialog>
+
 <footer class="legend">
   <p><span class="badge">シミュレーション</span> SIMULATED の Run です。AI や GitHub は呼ばれません。</p>
   <p><span class="badge kind-self">自己開発（PR を作成）</span> SELF_DEV の Run です。GitHub に PR を作成します。kivra は PR をマージしません。タイトルは、投入した本人と運用者にだけ表示します。</p>

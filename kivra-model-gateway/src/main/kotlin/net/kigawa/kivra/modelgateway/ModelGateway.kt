@@ -176,7 +176,7 @@ class ModelGateway(
                     var retries = 0
                     while (true) {
                         val attemptId = "${req.requestId}-a${++attemptNo}"
-                        val key = "${req.requestId}/$attemptId"
+                        val key = ledgerKey(req.requestId, attemptNo)
                         val denied = budget.reserve(key, req.budgetScopes, reservation(req, target))
                         if (denied is ReserveResult.Denied) {
                             lastError = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = denied.code)
@@ -297,7 +297,7 @@ class ModelGateway(
             var retries = 0
             while (true) {
                 val attemptId = "${req.requestId}-a${++attemptNo}"
-                val key = "${req.requestId}/$attemptId"
+                val key = ledgerKey(req.requestId, attemptNo)
                 val denied = budget.reserve(key, req.budgetScopes, reservation(req, target))
                 if (denied is ReserveResult.Denied) {
                     last = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = denied.code, costReason = denied.costReason)
@@ -418,4 +418,9 @@ class ModelGateway(
                        cost: Cost?, latencyMs: Long, finish: FinishReason?, err: GatewayError?) =
         AuditRecord(clock.instant(), req.requestId, attemptId, req.taskId, req.executionId, req.principal, req.purpose,
             req.dataClass, ref, d.decisionId, usage, cost, latencyMs, finish, err?.kind, err?.code)
+
+    companion object {
+        /** The budget ledger key of one call attempt: `<requestId>/<requestId>-a<n>`. Read by the cost contract test. */
+        fun ledgerKey(requestId: String, attemptNo: Int): String = "$requestId/$requestId-a$attemptNo"
+    }
 }

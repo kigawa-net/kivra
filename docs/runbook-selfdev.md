@@ -1666,9 +1666,11 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 - **スイッチ**: `KIVRA_SELFDEV_ORDER_SPEND_ENABLED`。既定は `false`。`true` と `false` 以外は起動に失敗し、値は表示されない。order が無効のときは読まれない。`false` のときは段が何もしない。**dev で有効にするのは運用者の承認の後**(k8s の PR)。
 - **対象**: `selfdev_order_cycle_spend.final = FALSE` の周と、表の行がまだ無く `selfdev_goals.order_id` を持つ周(初回の計上)。order の状態では絞らない。停止された order の周も、`final` になるまで計上する。1 回の tick で最大 50 件(`BATCH`)。
 - **周ごとの処理(1 transaction)**: 経路を根から下へロック(`lockPath`)→ 表の行を `FOR UPDATE`(無ければ作る)→ 台帳を読み直す → `counted = ceil(合計マイクロ円 / 1,000,000)`(周ごとに 1 回だけ切り上げ)→ `delta = counted - 前の counted`。`delta` が 0 でなければ、経路上の全 order の `spent_jpy` に `delta` を足す(0 を下回らない)。テナントの budget 行は読むだけで、ロックしない。
-- **合計に含む状態**: `COMMITTED`、`ACKNOWLEDGED`、`LAPSED`、`RESERVED`、`UNPRICED`(安全側で見積もりの額)。`RELEASED` は含めない。追補 §B と §C.2 は `RESERVED` を含めていないが、本段階は含める(予約の解放で合計が減る経路を持たせるため。ADR との差は報告に書いた)。
+- **合計に含む状態**: `COMMITTED`、`ACKNOWLEDGED`、`LAPSED`、`RESERVED`、`UNPRICED`(安全側で見積もりの額)。`RELEASED` は含めない。追補 §B と §C.2 は `RESERVED` を含めていないが、本段階は含める(予約の解放で合計が減る経路を持たせるため。ADR 追補 J.1 で、この差を訂正した)。
 - **冪等**: 加算は「前に計上した額との差」。同じ台帳の値で何度 tick しても `spent_jpy` は増えない。台帳の合計が減ると(予約の解放など)`spent_jpy` も減る。
-- **`final`**: 周の Goal が `DONE` か `STOPPED`、その周の attempt が全て非活性、`RESERVED` と `LAPSED` の額が 0、未確認の `UNPRICED` が無い、のすべてを満たすとき。`final` の周は以後の tick で対象にしない(行も書かない)。
+- **`final`**: 周の Goal が `DONE` か `STOPPED`、その周の attempt が全て非活性、`RESERVED` と `LAPSED` の**行**が無い、未確認の `UNPRICED` が無い、のすべてを満たすとき。判定は金額でなく行の有無で行う(ADR 0015 追補 K.2。3g' で変更)。金額が 0 円の `RESERVED`/`LAPSED` の行も `final` を妨げる。その行は後で true-up により金額を持ちうるため、早く `final` にすると、以後の再計数の対象から外れて過少計上になるためである。`final` の周は以後の tick で対象にしない(行も書かない)。
+- **0 円の行の扱い**: 0 円の `RESERVED`/`LAPSED` の行がある周は、金額が 0 でも `final` にならず、tick で再計数される。行が金額を持ったときは `spent_jpy` に加算される。0 円の行が無い周の挙動は変わらない。
+- **`spent_jpy` の基礎(現状。案 A)**: `spent_jpy` は、周の「確定 + `LAPSED` + `UNPRICED` + 予約中(前回の tick の時点の `RESERVED`)」の合計である。予約中の額は、tick の間に生じた予約を含まない(最大 `INTERVAL` の 60 秒のずれ。U-40)。
 - **同時実行**: 同じ木の処理は、根の行ロックで直列化される。ロックの順序は order の行(根から下)→ 表の行 で、budget の行には触らない(`SelfDevBudgetLockOrderTest` で固定)。
 - **監査**: `delta` が 0 でないとき、周の order に `SPEND_COUNTED` を 1 件(`amount_jpy` = `delta` の円、`reason_code` = `FINAL` は `final` のときだけ)。題名、方針、台帳のキー、パスは入らない。`delta` が 0 のときは書かない。
 - **失敗**: 周ごとに隔離される。失敗した周は飛ばし、他の周と tick は続く。ログは `order spend: failed code=SPEND_FAILED orderId=... exception=...`(例外の文言は出さない)。

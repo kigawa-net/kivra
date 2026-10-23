@@ -235,6 +235,58 @@ class SelfDevOrderSpendTest {
     }
 
     @Test
+    fun `a zero-yen RESERVED row keeps the cycle open, and when the row later gets an amount the cost is counted`() = withFixture { f ->
+        val (cycle, run) = f.cycleWithRun(f.root)
+        f.endGoal(cycle.goalId)
+        val key = f.ledgerKeyOf(f.attempt(run, "FAILED"))
+        f.ledger(key, DbBudgetStore.RESERVED, 0)
+
+        f.watch().tick()
+        assertEquals(false, f.spendRow(f.root.orderId, cycle.cycleNo)!!["final"], "a RESERVED row keeps the cycle open, even at zero yen")
+        assertEquals(0L, f.spentOf(f.root.orderId))
+
+        // The row is settled with 1,000,000 micro-yen: the cycle is counted again, so the cost is not lost (true-up of a zero-yen row).
+        f.exec("UPDATE budget_reservations SET state = ?, amount_micro_yen = ? WHERE reservation_key = ?", DbBudgetStore.COMMITTED, 1_000_000L, key)
+        f.watch().tick()
+        assertEquals(1L, f.spentOf(f.root.orderId))
+        assertEquals(1L, f.spendRow(f.root.orderId, cycle.cycleNo)!!["counted"])
+        assertEquals(true, f.spendRow(f.root.orderId, cycle.cycleNo)!!["final"])
+    }
+
+    @Test
+    fun `a zero-yen LAPSED row keeps the cycle open, and when its true-up adds an amount the cost is counted`() = withFixture { f ->
+        val (cycle, run) = f.cycleWithRun(f.root)
+        f.endGoal(cycle.goalId)
+        val key = f.ledgerKeyOf(f.attempt(run, "FAILED"))
+        f.ledger(key, DbBudgetStore.LAPSED, 0)
+
+        f.watch().tick()
+        assertEquals(false, f.spendRow(f.root.orderId, cycle.cycleNo)!!["final"], "a LAPSED row keeps the cycle open, even at zero yen")
+
+        f.exec("UPDATE budget_reservations SET amount_micro_yen = ? WHERE reservation_key = ?", 1_000_000L, key)
+        f.watch().tick()
+        assertEquals(1L, f.spentOf(f.root.orderId))
+        assertEquals(false, f.spendRow(f.root.orderId, cycle.cycleNo)!!["final"], "still LAPSED: the cycle stays open")
+
+        f.setLedgerState(key, DbBudgetStore.ACKNOWLEDGED)
+        f.watch().tick()
+        assertEquals(1L, f.spentOf(f.root.orderId))
+        assertEquals(true, f.spendRow(f.root.orderId, cycle.cycleNo)!!["final"])
+    }
+
+    @Test
+    fun `a cycle with no RESERVED or LAPSED row is final once the goal has ended`() = withFixture { f ->
+        val (cycle, run) = f.cycleWithRun(f.root)
+        f.endGoal(cycle.goalId)
+        f.ledger(f.ledgerKeyOf(f.attempt(run, "RESULT_RECEIVED")), DbBudgetStore.COMMITTED, 1_000_000)
+
+        f.watch().tick()
+
+        assertEquals(1L, f.spentOf(f.root.orderId))
+        assertEquals(true, f.spendRow(f.root.orderId, cycle.cycleNo)!!["final"])
+    }
+
+    @Test
     fun `a STOPPED goal is final too, and a stopped order's cycle is still counted (U-38)`() = withFixture { f ->
         val child = f.child(f.root)
         val (cycle, run) = f.cycleWithRun(child)

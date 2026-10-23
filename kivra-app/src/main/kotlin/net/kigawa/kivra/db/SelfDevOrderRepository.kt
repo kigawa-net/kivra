@@ -593,13 +593,15 @@ class SelfDevOrderRepository(
     }
 
     /**
-     * A cycle is final when its goal has ended, no attempt of it is active, and the ledger holds nothing that can still change (no RESERVED
-     * or LAPSED amount) and no UNPRICED row waiting for an operator (section C.2). Until then the cycle is counted again on every tick.
+     * A cycle is final when its goal has ended, no attempt of it is active, and the ledger holds no RESERVED or LAPSED row that can still
+     * change, and no UNPRICED row waiting for an operator (section C.2). The rows are counted, not the amounts: a zero-yen RESERVED or LAPSED
+     * row can gain an amount later (true-up), so it keeps the cycle open (ADR 0015 addendum 2026-10-23, K.2). Until then the cycle is
+     * counted again on every tick.
      */
     private fun Transaction.isSpendFinal(goalId: String, spend: CycleSpend): Boolean {
         val state = execQuery("SELECT state FROM selfdev_goals WHERE goal_id = ?", goalId) { GoalState.valueOf(it.getString(1)) }.firstOrNull()
         return (state == GoalState.DONE || state == GoalState.STOPPED) &&
-            spend.attemptsActive == 0 && spend.reservedMicroYen == 0L && spend.lapsedMicroYen == 0L && !spend.hasUnconfirmedUnpriced
+            spend.attemptsActive == 0 && spend.reservedRows == 0 && spend.lapsedRows == 0 && !spend.hasUnconfirmedUnpriced
     }
 
     /** The spend row as locked: the counted yen, the last ledger total (micro-yen) and the final flag. */

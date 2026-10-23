@@ -71,6 +71,12 @@ data class PlannerConfig(
     }
 }
 
+/**
+ * The requestId of one call of a claim. The budget key starts with `planner-<goalId>-` (read by SelfDevCycleSpendReader, pinned by
+ * SelfDevCycleSpendContractTest).
+ */
+internal fun plannerRequestId(goalId: String, version: Long, attempt: Int): String = "planner-$goalId-$version-$attempt"
+
 /** What happened to one goal in one claim. Fixed codes; no text. */
 sealed interface PlanAttempt {
     /** The claim was not granted. [reason] is the repository's fixed code. */
@@ -212,7 +218,7 @@ class AutopilotPlanner(
         }
         return ModelRequest(
             // Unique per claim and attempt: the version changes with every claim, so a retried claim never reuses a request id.
-            requestId = "planner-${fence.goalId}-${fence.version}-$attempt",
+            requestId = plannerRequestId(fence.goalId, fence.version, attempt),
             principal = config.principal,
             purpose = Purpose.PLANNING,
             messages = buildList {

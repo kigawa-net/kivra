@@ -192,7 +192,7 @@ class LlmDeveloper(
     }
 
     private fun modelRequest(request: DeveloperRequest, attempt: Int, messages: List<Message>) = ModelRequest(
-        requestId = "developer-${request.runId}-$attempt",
+        requestId = requestIdOf(request.runId, attempt),
         principal = config.principal,
         purpose = Purpose.CODING,
         messages = messages,
@@ -246,6 +246,9 @@ class LlmDeveloper(
 
     companion object {
         private const val MAX_ATTEMPTS = 2
+
+        /** The requestId of one API call of a Run. Read by the cost contract test (the budget key starts with it). */
+        fun requestIdOf(runId: String, attempt: Int): String = "developer-$runId-$attempt"
         private val BUDGET_CODES = setOf(
             BudgetDenial.BUDGET,
             BudgetDenial.BUDGET_POLICY_MISSING,

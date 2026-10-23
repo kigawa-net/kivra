@@ -1651,6 +1651,15 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 - **この PR に含まれないもの**: 理由コード `CHILD_BUDGET_EXHAUSTED`、`CHILD_DUPLICATE_PLAN`、`CHILD_SCOPE_VIOLATION`。これらは、事実の仕組み(費用の自動集計、重複の検出、`scope_profile`)がまだ無いため、列挙にも入れていない。人の判断の経路の変更。
 - **dev で有効にする前の注意**: 有効化は運用者の承認の後(k8s の PR)。子は `KIVRA_SELFDEV_ORDER_MAX_DEPTH` が 1 以上のときだけ作れるため、既定では自動の停止は起きない。子の周の費用はまだ集計されない(§7.6.2c)。自動の根拠は周の失敗の回数だけである。停止は終端であり、取り消すには人が新しい子を作る。
 
+#### 7.6.2g 周の費用の記録表と台帳からの読み取り(段階 3f。挙動は変えない)
+
+- 費用の自動集計(ADR 0015 追補 2026-10-23)の段階 3f。**この PR は挙動を変えない**。`spent_jpy` は書かず、`startCycle` の検査は変えず、`OrderWatch` に段は足さない。周の費用は、まだ order に加算されない。
+- 追補の「V28」は、V28 が PR 3e(`selfdev_order_auto_stop`)で使われたため、**実装は V29** である。ADR 本文は変更していない。
+- V29 `selfdev_order_cycle_spend`(expand のみ。表は空)。主キー `(order_id, cycle_no)`、列 `goal_id`、`ledger_micro_yen`、`counted_jpy`、`final`、`updated_at`。書く経路は次の段階(3g)で作る。
+- 読み取り `SelfDevCycleSpendReader.read(orderId, cycleNo)`(`SELECT` のみ。ロックなし)。周の Goal に結ばれる台帳の行を、状態ごとに集計する。CLI は `coding:<attemptId>:<gen>` の完全一致、Planner は `planner-<goalId>-`、API の Developer は `developer-<runId>-` の前方一致(追補 C.5、C.6)。返す値は、確定(COMMITTED と ACKNOWLEDGED)、LAPSED、予約中(RESERVED)、UNPRICED の額、未確認の UNPRICED の有無、進行中の attempt 数。
+- テスト: キーの 3 形式の契約(`SelfDevCycleSpendContractTest`)。ロック順序(`SelfDevBudgetLockOrderTest`。`DbBudgetStore` は order の表を参照しない。読み取りは書き込みも行ロックもしない)。
+- 次の段階: 3g(tick での差分の加算。`spent_jpy` と `counted_jpy` の更新、`final` の判定)、3h(`startCycle` の式の実効化、未確認の UNPRICED の拒否、`CHILD_BUDGET_EXHAUSTED` の事実)。
+
 #### 7.6.3 状態
 
 | 状態 | 意味 | 解除 |
@@ -1683,7 +1692,7 @@ AI の主体ができるのは、読み取りと停止の要求だけである�
 
 #### 7.6.6 段階 1 の範囲外
 
-周の自動の開始、複数周は、後の段階である(ADR 0015 §7)。親の自動の停止は §7.6.2f(理由コードは `CHILD_CYCLE_FAILURES` だけ)。子の停止は段階 2 の PR 3d で入った(§7.6.2e)。子の作成は段階 2 の PR 3a で入った(§7.6.2b。既定では作れない)。MCP の読み取りと停止の要求は PR 2a で入った(§8.8)。子の費用の加算(`spent_jpy`)は PR 3b である。
+周の自動の開始、複数周は、後の段階である(ADR 0015 §7)。親の自動の停止は §7.6.2f(理由コードは `CHILD_CYCLE_FAILURES` だけ)。子の停止は段階 2 の PR 3d で入った(§7.6.2e)。子の作成は段階 2 の PR 3a で入った(§7.6.2b。既定では作れない)。MCP の読み取りと停止の要求は PR 2a で入った(§8.8)。子の費用の加算(`spent_jpy`)は段階 3g(tick での差分の加算。§7.6.2g の後続)であり、PR 3b は周の開始の検査だけである(§7.6.2c)。
 
 #### 7.6.7 `/ui` の画面(PR 2b)
 

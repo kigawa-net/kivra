@@ -16,10 +16,13 @@ import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.OrderReason
 import net.kigawa.kivra.core.autopilot.OrderState
 import net.kigawa.kivra.core.autopilot.StopRequestReason
+import net.kigawa.kivra.db.ChildCreateResult
+import net.kigawa.kivra.db.ChildLimits
 import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.CycleStarted
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.TaskSubmitResult
@@ -52,6 +55,9 @@ class OrderWatchTest {
         fun root(): SelfDevOrder = (repo.createRoot("1:i:kigawa", "title", "policy", "kigawa-net/kivra") as CreateRootResult.Created).order
 
         fun state(id: String): SelfDevOrder = assertNotNull(repo.get(id))
+
+        fun childOf(parentId: String, key: String, budget: Long = 1_000): SelfDevOrder =
+            (repo.createChild(parentId, "child", "child policy", budget, key, "1:i:kigawa", ChildLimits(2, 5, 15)) as ChildCreateResult.Created).order
     }
 
     private fun withFixture(block: (Fixture) -> Unit) = TestDb().use { db -> block(Fixture(db, MovableClock(START))) }
@@ -153,5 +159,39 @@ class OrderWatchTest {
         f.watch.tick()
         assertEquals(OrderState.PAUSED, f.state(root.orderId).state)
         assertEquals(OrderReason.OPERATOR_PAUSED, f.state(root.orderId).stateReason)
+    }
+
+    /** The same watch with the automatic child stop on (the switch is on). */
+    private fun Fixture.autoStopWatch(): OrderWatch =
+        OrderWatch(repo, budgetAllows = { budgetOk }, fxExpired = { fxExpired }, autoStop = AutoStopDeps(goals, SelfDevOperatorRepository(db.database, clock)))
+
+    @Test
+    fun `with the automatic child stop switch off, a tick decides nothing, even for a child with two failed cycles`() = withFixture { f ->
+        val root = f.root()
+        val child = f.childOf(root.orderId, "off-child")
+        transaction(f.db.database) { execUpdate("UPDATE selfdev_orders SET consecutive_failed_cycles = 2 WHERE order_id = ?", child.orderId) }
+        f.watch.tick()
+        assertEquals(OrderState.ACTIVE, f.state(child.orderId).state)
+    }
+
+    @Test
+    fun `with the switch on, a tick stops a child with two failed cycles, its grandchild, and the goal of its cycle, never the root`() = withFixture { f ->
+        val root = f.root()
+        val child = f.childOf(root.orderId, "on-child", budget = 3_000)
+        val grand = f.childOf(child.orderId, "on-grand", budget = 500)
+        val started = assertIs<OrderResult.Moved<CycleStarted>>(
+            f.repo.startCycle(child.orderId, f.state(child.orderId).version, "1:i:kigawa"),
+        ).value
+        transaction(f.db.database) {
+            execUpdate("UPDATE selfdev_orders SET consecutive_failed_cycles = 2 WHERE order_id = ?", child.orderId)
+            execUpdate("UPDATE selfdev_orders SET consecutive_failed_cycles = 2 WHERE order_id = ?", root.orderId)
+        }
+        f.autoStopWatch().tick()
+        assertEquals(OrderState.STOPPED, f.state(child.orderId).state)
+        assertEquals(OrderReason.PARENT_STOPPED, f.state(child.orderId).stateReason)
+        assertEquals(OrderState.STOPPED, f.state(grand.orderId).state)
+        assertEquals(OrderReason.ANCESTOR_STOPPED, f.state(grand.orderId).stateReason)
+        assertEquals(GoalState.STOPPED, assertNotNull(f.goals.get(started.goalId)).state)
+        assertEquals(OrderState.ACTIVE, f.state(root.orderId).state)
     }
 }

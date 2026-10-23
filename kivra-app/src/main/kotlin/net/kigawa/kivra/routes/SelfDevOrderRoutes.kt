@@ -12,7 +12,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.auth.OperatorAuth
 import net.kigawa.kivra.auth.OperatorAuthenticator
-import net.kigawa.kivra.core.autopilot.GoalState
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.ChildCreateResult
@@ -29,9 +28,9 @@ import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOrderStopRequest
 import net.kigawa.kivra.db.StopEnd
-import net.kigawa.kivra.db.Transition
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.OrderSettings
+import net.kigawa.kivra.selfdev.stopCycleGoalOf
 import org.slf4j.LoggerFactory
 
 /*
@@ -308,7 +307,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
         val orderId = orderIdOf(call)
         val request = decodeOr<RequestStopRequest>(call) ?: return@post
-        val reason = StopRequestReason.entries.firstOrNull { it.name == request.reasonCode }
+        val reason = StopRequestReason.REQUESTABLE.firstOrNull { it.name == request.reasonCode }
             ?: return@post call.respond(HttpStatusCode.BadRequest, OrderError(REASON_INVALID))
         if (request.version < 0) return@post call.respond(HttpStatusCode.BadRequest, OrderError(INVALID_BODY))
         if (orderId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
@@ -431,12 +430,9 @@ private fun OrderCaller.isRootApprover(deps: SelfDevOrderRouteDeps): Boolean =
  * left for the operator. Its tasks are not changed by it.
  */
 private fun SelfDevOrderRouteDeps.stopCurrentGoal(order: SelfDevOrder) {
-    val goalId = order.currentGoalId ?: return
-    val goal = goals.get(goalId) ?: return
-    if (goal.state == GoalState.DONE || goal.state == GoalState.STOPPED) return
-    when (operations.stopGoal(goalId, goal.version)) {
-        is Transition.Moved -> operatorLog.info("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=STOPPED", order.orderId)
-        else -> operatorLog.warn("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=NOT_STOPPED", order.orderId)
+    when (stopCycleGoalOf(order, goals, operations) ?: return) {
+        true -> operatorLog.info("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=STOPPED", order.orderId)
+        false -> operatorLog.warn("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=NOT_STOPPED", order.orderId)
     }
 }
 

@@ -199,7 +199,7 @@ class McpGoalTools(private val deps: McpGoalDeps) {
             },
             "reason" to buildJsonObject {
                 put("type", "string")
-                putJsonArray("enum") { StopRequestReason.entries.forEach { add(JsonPrimitive(it.name)) } }
+                putJsonArray("enum") { StopRequestReason.REQUESTABLE.forEach { add(JsonPrimitive(it.name)) } }
             },
             required = listOf("goal_id", "version", "reason"),
         ),
@@ -295,7 +295,7 @@ class McpGoalTools(private val deps: McpGoalDeps) {
         val id = args.requiredString("goal_id", GOAL_ID_SHAPE)
         val version = args.requiredVersion()
         val reason = args.requiredString("reason").let { raw ->
-            StopRequestReason.entries.firstOrNull { it.name == raw }
+            StopRequestReason.REQUESTABLE.firstOrNull { it.name == raw }
                 ?: throw InvalidParamsException("reason is not one of the fixed codes")
         }
         return when (val r = deps.operations.stopGoal(id, version)) {

@@ -193,6 +193,34 @@ class SelfDevOrderSettingsTest {
         assertEquals(0, off.maxDepth)
     }
 
+    @Test
+    fun `the automatic child stop is off by default, and on only with exactly true`() {
+        assertFalse(OrderSettings.fromEnv(onEnv, enabledAutopilot, null).autoStopEnabled)
+        assertFalse(OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_AUTO_STOP to "false"), enabledAutopilot, null).autoStopEnabled)
+        assertTrue(OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_AUTO_STOP to "true"), enabledAutopilot, null).autoStopEnabled)
+    }
+
+    @Test
+    fun `an automatic child stop switch other than true or false is a startup failure, and the failure never shows the value`() {
+        for (bad in listOf("yes", "1", "", "TRUE", "auto-stop-secret-value")) {
+            val e = assertFailsWith<IllegalStateException> {
+                OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_AUTO_STOP to bad), enabledAutopilot, null)
+            }
+            assertTrue(e.message!!.contains(OrderSettings.ENV_AUTO_STOP))
+            assertFalse(e.message!!.contains("auto-stop-secret-value"))
+        }
+    }
+
+    @Test
+    fun `the automatic child stop switch is not read while the orders are off`() {
+        val off = OrderSettings.fromEnv(
+            mapOf(OrderSettings.ENV_ENABLED to "false", OrderSettings.ENV_AUTO_STOP to "not-a-switch"),
+            enabledAutopilot,
+            null,
+        )
+        assertFalse(off.autoStopEnabled)
+    }
+
     private fun selfDev(): SelfDevSettings = SelfDevSettings.fromEnv(
         mapOf(
             "KIVRA_SELFDEV_ENABLED" to "true",

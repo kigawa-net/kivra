@@ -13,6 +13,7 @@ import net.kigawa.kivra.core.autopilot.OrderState
 import net.kigawa.kivra.core.autopilot.OrderTransitionDecision
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.core.autopilot.STOP_REQUEST_TTL_HOURS
+import net.kigawa.kivra.core.autopilot.checkAutomaticStop
 import net.kigawa.kivra.core.autopilot.checkOrderTransition
 import net.kigawa.kivra.core.autopilot.checkSubtreeStop
 import net.kigawa.kivra.core.autopilot.orderStopDigest
@@ -137,6 +138,23 @@ data class ChildLimits(val maxDepth: Int, val maxChildren: Int, val maxTree: Int
 
 /** A stop request is ended by a rejection (by the approver) or a cancellation (by the requester or the approver). */
 enum class StopEnd { REJECTED, CANCELLED }
+
+/** Why the automatic child stop does not decide (ADR 0015 section 4.4). Fixed codes; nothing is written for them. */
+enum class AutoStopSkip { NOT_FOUND, IS_ROOT, CHILD_NOT_STOPPABLE, PARENT_NOT_ACTIVE, CYCLE_FAILURES_BELOW_LIMIT, PENDING_REQUEST }
+
+sealed interface AutoStopResult {
+    /** The child and its descendants are STOPPED, in one transaction. [order] is the child as it is now. */
+    data class Stopped(val order: SelfDevOrder) : AutoStopResult
+    data class NotDecided(val reason: AutoStopSkip) : AutoStopResult
+    /**
+     * The frequency limit (section 4.4 (4)) held the decision back. Nothing stopped. [recorded] is true when the AUTO_STOP_RATE_LIMITED event
+     * was written, which happens once per child per UTC day, so a tick does not write one every minute.
+     */
+    data class RateLimited(val parentOrderId: String, val recorded: Boolean) : AutoStopResult
+}
+
+/** The requester and the decider of an automatic stop: a fixed system principal, never a person's owner key (ADR 0015 section 4.4). */
+const val AUTO_STOP_PRINCIPAL = "system:order-auto-stop"
 
 /** Cycles that stop being counted as failures after this many in a row (ADR 0015 section 3.2). */
 const val CYCLE_FAILURE_LIMIT = 2
@@ -511,6 +529,8 @@ class SelfDevOrderRepository(
         requesterKind: OrderActor,
         reason: StopRequestReason,
     ): OrderResult<SelfDevOrderStopRequest> = try {
+        // The automatic reason is decided by the parent's loop only (autoStopChild), never requested.
+        require(reason != StopRequestReason.CHILD_CYCLE_FAILURES) { "the automatic stop reason is not requestable" }
         transaction(database) {
             // The path is locked from the root down, and then the descendants: the same order as a cycle start and a child creation.
             val path = lockPath(orderId) ?: return@transaction OrderResult.NotFound
@@ -714,6 +734,121 @@ class SelfDevOrderRepository(
         }
     }
 
+    // ---- automatic child stop (ADR 0015 section 4.4) -----------------------------------------------------------------------------
+
+    /** The children that may be stopped automatically now: not root, ACTIVE or PAUSED, failures at the limit. [autoStopChild] checks each again. */
+    fun autoStopCandidates(limit: Int): List<String> = transaction(database) {
+        execQuery(
+            """
+            SELECT order_id FROM selfdev_orders
+             WHERE parent_order_id IS NOT NULL AND state IN ('ACTIVE', 'PAUSED') AND consecutive_failed_cycles >= ?
+             ORDER BY updated_at, order_id LIMIT ?
+            """.trimIndent(),
+            CYCLE_FAILURE_LIMIT, limit,
+        ) { it.getString(1) }
+    }
+
+    /**
+     * Decides, for one child, the automatic stop of ADR 0015 section 4.4, under the tree's locks (the path from the root, then every order below
+     * the root). The child and its descendants are STOPPED only when every condition holds: the child is not the root, it is ACTIVE or PAUSED,
+     * its direct parent is effectively ACTIVE (the parent and its ancestors), its failures are at [CYCLE_FAILURE_LIMIT], no stop request of the
+     * tree is PENDING (a person's request is not taken over), and the frequency limit allows it (one per parent per UTC day, two per tree).
+     * A condition that does not hold writes nothing. The decision is one transaction: the request row (CONSUMED, decided by the parent), the
+     * events, and the stop of the part. Its events name the parent and the depth.
+     */
+    fun autoStopChild(childId: String): AutoStopResult = transaction(database) {
+        val path = lockPath(childId) ?: return@transaction AutoStopResult.NotDecided(AutoStopSkip.NOT_FOUND)
+        val child = path.first()
+        val parent = path.getOrNull(1) ?: return@transaction AutoStopResult.NotDecided(AutoStopSkip.IS_ROOT)
+        val root = path.last()
+        if (child.state != OrderState.ACTIVE && child.state != OrderState.PAUSED) {
+            return@transaction AutoStopResult.NotDecided(AutoStopSkip.CHILD_NOT_STOPPABLE)
+        }
+        if (firstStoppingAncestor(path.drop(1)) != null) return@transaction AutoStopResult.NotDecided(AutoStopSkip.PARENT_NOT_ACTIVE)
+        if (child.consecutiveFailedCycles < CYCLE_FAILURE_LIMIT) {
+            return@transaction AutoStopResult.NotDecided(AutoStopSkip.CYCLE_FAILURES_BELOW_LIMIT)
+        }
+
+        val tree = lockDescendants(root.orderId)
+        val treeIds = listOf(root.orderId) + tree.map { it.orderId }
+        val inTree = treeIds.joinToString(",") { "?" }
+        val pending = execQuery(
+            "SELECT COUNT(*) FROM selfdev_order_stop_requests WHERE state = 'PENDING' AND order_id IN ($inTree)",
+            *treeIds.toTypedArray(),
+        ) { it.getInt(1) }.single()
+        if (pending > 0) return@transaction AutoStopResult.NotDecided(AutoStopSkip.PENDING_REQUEST)
+
+        // The part to stop: the child and its descendants that are not STOPPED yet (a descendant stopped by an earlier approval is final).
+        val below = ordersBelow(child.orderId, tree)
+        val toStop = below.filter { it.state != OrderState.STOPPED }
+        val targetDecision = checkAutomaticStop(child.state, OrderReason.PARENT_STOPPED)
+        if (targetDecision is OrderTransitionDecision.Refused ||
+            toStop.any { checkAutomaticStop(it.state, OrderReason.ANCESTOR_STOPPED) is OrderTransitionDecision.Refused }
+        ) {
+            return@transaction AutoStopResult.NotDecided(AutoStopSkip.CHILD_NOT_STOPPABLE)
+        }
+
+        val now = utcNow(clock)
+        val dayStart = now.toLocalDate().atStartOfDay()
+        val dayEnd = dayStart.plusDays(1)
+        val byParent = execQuery(
+            "SELECT COUNT(*) FROM selfdev_order_stop_requests WHERE decider_kind = 'ORDER' AND decided_at >= ? AND decided_at < ? " +
+                "AND decider_order_id = ?",
+            dayStart, dayEnd, parent.orderId,
+        ) { it.getInt(1) }.single()
+        val byTree = execQuery(
+            "SELECT COUNT(*) FROM selfdev_order_stop_requests WHERE decider_kind = 'ORDER' AND decided_at >= ? AND decided_at < ? " +
+                "AND order_id IN ($inTree)",
+            dayStart, dayEnd, *treeIds.toTypedArray(),
+        ) { it.getInt(1) }.single()
+        if (byParent >= 1 || byTree >= 2) {
+            // The operator is told once per child per day (the tick runs every minute). Nothing is stopped.
+            val recorded = execQuery(
+                "SELECT COUNT(*) FROM selfdev_order_events WHERE order_id = ? AND kind = 'AUTO_STOP_RATE_LIMITED' AND occurred_at >= ?",
+                child.orderId, dayStart,
+            ) { it.getInt(1) }.single() == 0
+            if (recorded) {
+                appendEvent(
+                    child.orderId, null, "AUTO_STOP_RATE_LIMITED", child.state, child.state, StopRequestReason.CHILD_CYCLE_FAILURES.name,
+                    OrderActor.SYSTEM, null, null, now, parentOrderId = parent.orderId, depth = child.depth,
+                )
+            }
+            return@transaction AutoStopResult.RateLimited(parent.orderId, recorded)
+        }
+
+        val requestId = Ulid.generate(clock)
+        // The stopped part as it is before this change: the child and the descendants that will stop, at their current versions.
+        val subtree = listOf(child.orderId to child.version) + toStop.map { it.orderId to it.version }
+        execUpdate(
+            """
+            INSERT INTO selfdev_order_stop_requests (request_id, order_id, requested_by, requester_kind, reason_code, order_version,
+                digest, state, active_key, decided_by, decider_kind, decider_order_id, decided_at, expires_at, created_at, target_is_root)
+            VALUES (?, ?, ?, 'SYSTEM', ?, ?, ?, 'CONSUMED', NULL, ?, 'ORDER', ?, ?, ?, ?, 0)
+            """.trimIndent(),
+            requestId, child.orderId, AUTO_STOP_PRINCIPAL, StopRequestReason.CHILD_CYCLE_FAILURES.name, child.version,
+            orderStopDigest(requestId, child.orderId, subtree, StopRequestReason.CHILD_CYCLE_FAILURES),
+            AUTO_STOP_PRINCIPAL, parent.orderId, now, now.plus(stopTtl), now,
+        )
+        // The versions were read under the locks, so a conditional UPDATE that misses means a bug: the check throws and the whole decision rolls back.
+        check(updateState(child.orderId, child.version, OrderState.STOPPED, OrderReason.PARENT_STOPPED, now)) { "child moved under its lock" }
+        appendEvent(
+            child.orderId, child.cyclesStarted.takeIf { it > 0 }, "STOP_APPROVED", child.state, OrderState.STOPPED,
+            StopRequestReason.CHILD_CYCLE_FAILURES.name, OrderActor.SYSTEM, null, requestId, now, parentOrderId = parent.orderId, depth = child.depth,
+        )
+        appendEvent(
+            child.orderId, child.cyclesStarted.takeIf { it > 0 }, "STOPPED", child.state, OrderState.STOPPED,
+            StopRequestReason.CHILD_CYCLE_FAILURES.name, OrderActor.SYSTEM, null, requestId, now, parentOrderId = parent.orderId, depth = child.depth,
+        )
+        // The descendants, level by level, as an approved stop stops them (ANCESTOR_STOPPED).
+        for (descendant in toStop) {
+            check(updateState(descendant.orderId, descendant.version, OrderState.STOPPED, OrderReason.ANCESTOR_STOPPED, now)) {
+                "descendant moved under its lock"
+            }
+            appendTreeEvent(descendant, "STOPPED", descendant.state, OrderState.STOPPED, OrderReason.ANCESTOR_STOPPED.name, OrderActor.SYSTEM, null, requestId, now)
+        }
+        AutoStopResult.Stopped(getIn(child.orderId) ?: error("child vanished after the automatic stop"))
+    }
+
     // ---- shared helpers ----------------------------------------------------------------------------------------------------------
 
     /** A generic guarded move for operator transitions (pause, resume). The state rule is checked before the write. */
@@ -851,6 +986,12 @@ class SelfDevOrderRepository(
             level = next.map { it.orderId }
         }
         return locked
+    }
+
+    /** The orders below [rootId] in [tree] (the locked descendants of the root, parents before children). */
+    private fun ordersBelow(rootId: String, tree: List<SelfDevOrder>): List<SelfDevOrder> {
+        val inside = hashSetOf(rootId)
+        return tree.filter { it.parentOrderId in inside && inside.add(it.orderId) }
     }
 
     private fun Transaction.lockRequest(requestId: String): SelfDevOrderStopRequest? =

@@ -7,9 +7,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.core.autopilot.OrderReason
+import net.kigawa.kivra.db.AutoStopResult
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.SelfDevOrderRepository
+import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevOperatorRepository
 import org.slf4j.LoggerFactory
+
+/** What the automatic child stop needs beyond the order repository: the goals of the stopped part, stopped after the decision. */
+class AutoStopDeps(val goals: SelfDevGoalRepository, val operations: SelfDevOperatorRepository)
 
 /**
  * The periodic guard of the self-development orders (ADR 0015 stage 1). One pass, in a fixed order:
@@ -21,7 +27,8 @@ import org.slf4j.LoggerFactory
  *    (BUDGET_HOLD), the FX rate (FX_EXPIRED), an UNKNOWN Run of the current cycle (UNKNOWN_RUN).
  *
  * Every pause here is a SYSTEM pause: it needs no approval, it never stops an order, and nothing resumes it by itself (an operator resumes it).
- * A stop is never done here; it needs the root approver's approval in the HTTP path.
+ * A stop is done here only as the automatic child stop (ADR 0015 section 4.4, behind its switch, after the cycle evaluation): a parent's
+ * decision on one of its children, never the root. A stop of anything else needs an approval in the HTTP path.
  *
  * Logs carry fixed codes and counts only. No title, policy or request text is logged.
  */
@@ -31,6 +38,8 @@ class OrderWatch(
     private val budgetAllows: () -> Boolean,
     /** True when the FX rate is expired, so a cost cannot be converted. Read once per tick. */
     private val fxExpired: () -> Boolean,
+    /** The automatic child stop (ADR 0015 section 4.4). Null when the switch is off, and then the step does nothing. */
+    private val autoStop: AutoStopDeps? = null,
 ) {
 
     /** One pass. Blocking (database calls only). Each step is contained: a failure in one step does not stop the next. */
@@ -38,7 +47,34 @@ class OrderWatch(
         step("stop request expiry") { orders.expireDueStopRequests(BATCH) }
         step("order expiry") { orders.expireDueOrders(BATCH) }
         step("cycle evaluation") { orders.evaluateEndedCycles(BATCH) }
+        autoStop?.let { deps -> step("automatic child stop") { stopChildrenAutomatically(deps) } }
         step("safety guards") { guardActiveOrders() }
+    }
+
+    /**
+     * The parent's automatic decision for each child whose cycles failed (ADR 0015 section 4.4). The decision and its checks are in the
+     * repository, under the locks; the goals of the stopped part are stopped after it, as an approved stop does.
+     */
+    private fun stopChildrenAutomatically(deps: AutoStopDeps): Int {
+        var stopped = 0
+        for (childId in orders.autoStopCandidates(BATCH)) {
+            when (val r = orders.autoStopChild(childId)) {
+                is AutoStopResult.Stopped -> {
+                    logger.info("order auto-stop: code=CHILD_CYCLE_FAILURES orderId={} parentId={}", r.order.orderId, r.order.parentOrderId)
+                    orders.subtreeOf(r.order.orderId).forEach { order ->
+                        if (stopCycleGoalOf(order, deps.goals, deps.operations) == false) {
+                            logger.warn("order auto-stop: goal not stopped, orderId={}", order.orderId)
+                        }
+                    }
+                    stopped++
+                }
+                is AutoStopResult.RateLimited -> if (r.recorded) {
+                    logger.info("order auto-stop: code=AUTO_STOP_RATE_LIMITED orderId={} parentId={}", childId, r.parentOrderId)
+                }
+                is AutoStopResult.NotDecided -> Unit
+            }
+        }
+        return stopped
     }
 
     /** Runs [tick] every [INTERVAL] in [scope]. It stops when the scope is cancelled. */

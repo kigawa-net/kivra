@@ -683,3 +683,117 @@ PR 3e は既存の表記で §4.4(親の自動の決定)に使われている。
 - キーの形式を変えたとき(契約テストが落ちる。U-36)。
 - 突き合わせで、どの鎖にも結ばれない台帳行が 1 件でも出たとき。
 - `spent_jpy` と台帳の再計算の差が 1 件でも出たとき。
+
+## 追記(2026-10-23): 費用の自動集計の 3h の設計の訂正
+
+- ステータス: 提案(Proposed)。設計の訂正のみで、コード、マイグレーション、設定は変えない。本文(§1〜§13)と、上の追記(A〜I)は変えず、末尾に追加する。
+- 関連: 上の追記「order の費用の自動集計」(§B、§C.2、§C.4、§C.7、§D、§F)、Issue #273、PR #341(段階 3f)、PR #342(段階 3g)、runbook の §7.6.2g、§7.6.2h。
+
+### J. 訂正の理由(実装の事実)
+
+3g の実装は、上の追記と 2 点で食い違う。3h に進む前に、設計を訂正する。
+
+1. **RESERVED を合計に含めるか**
+   - 追記 §B は「キー単位の費用は `COMMITTED`、`UNPRICED`、`ACKNOWLEDGED`、`LAPSED` の `amount_micro_yen` の合計。`RESERVED` は進行中」と書く。§C.2 の加算も、この合計を前提にする。
+   - 3g の `SelfDevOrderRepository.countCycleSpend`(`kivra-app/src/main/kotlin/net/kigawa/kivra/db/SelfDevOrderRepository.kt`)は、`total = committedMicroYen + lapsedMicroYen + reservedMicroYen + unpricedMicroYen` で `RESERVED` を含め、`counted = ceilYen(total)` とする(`RELEASED` は含めない)。
+   - `RESERVED` を含めるのは、追記の §B、§C.2 には無い。3g で運用者の依頼により入った。runbook の §7.6.2h は、これを ADR との差として記録している。`SelfDevOrderSpendTest` は、`RESERVED` 2,000,000 マイクロ円の周で `spent_jpy` が 4 円になることを検査している(3g の挙動として固定済み)。
+   - 追記 §C.7 は、3h の開始の検査で「`spent_jpy` に加えて、経路上の各 order の進行中の予約(`RESERVED`)を足す」と書く。`spent_jpy` は既に `RESERVED` を含むので、3h でこれを行うと `RESERVED` が二重に計上される。runbook の §7.6.2h も、この警告を書いている。
+   - §C.7 の「その order の周のキーのもの」という限定も、子孫の進行中の予約を拾えない。周の費用は、tick で経路上の全 order(周の order から根まで)の `spent_jpy` に加算される(§C.2)。子孫の予約は、祖先の `spent_jpy` に入って初めて見える。
+
+2. **`final` の判定は、金額か行か**
+   - 追記 §C.2 は、`final` の条件を「台帳に当該キーの `RESERVED` と `LAPSED` の**行**が無いとき」と書く(行の有無)。
+   - 3g の `isSpendFinal`(同ファイル)は、`spend.reservedMicroYen == 0L && spend.lapsedMicroYen == 0L`(金額)で判定する。`UNPRICED` だけは `!spend.hasUnconfirmedUnpriced`(行の有無)で判定する。基準が 2 つ混ざっている。
+   - 金額が 0 円の `RESERVED` または `LAPSED` の行があると、行が残っていても `final` になる。`final` の周は `unfinishedSpendCycles`(条件 `s.final = FALSE`)と `countCycleSpend`(`if (before?.final == true) return`)の対象から外れ、再計数されない。その後その行が金額を持つ `LAPSED` になっても `spent_jpy` に載らず、過少計上になる。0 円の `RESERVED` 行が実際に作られうるかは、未確認である。
+   - 3f の `CycleSpend`(`kivra-app/src/main/kotlin/net/kigawa/kivra/db/SelfDevCycleSpendReader.kt`)は、状態ごとの金額だけを返し、行数を返さない。ただし `LEDGER_SQL` は台帳の行を 1 行ずつ返す(`SELECT r.state, r.amount_micro_yen` の semi-join)ので、行数は Kotlin 側で数えられ、SQL の変更は要らない。
+
+その他の食い違い(訂正の対象に含める):
+- 追記 §C.2 は V28 の表と書くが、実際は V29(`V29__selfdev_order_cycle_spend.sql`)。V28 は親の自動の停止(`V28__selfdev_order_auto_stop.sql`)である。
+- 追記 §F の順序(3f → 3g → 3h → 3e)は、現状と合わない。親の自動の停止(3e)のうち理由コード `CHILD_CYCLE_FAILURES` だけは既に入っている(runbook の §7.6.2f。`OrderWatch` の `stopChildrenAutomatically`)。`CHILD_BUDGET_EXHAUSTED` と `ORDER_UNPRICED` は、コードに無い(`git grep` で確認。ADR の文字列だけ)。
+
+### K. 訂正した設計
+
+#### K.1 RESERVED の扱い: 案 (A) を推奨する
+
+- **(A) `spent_jpy` に `RESERVED` を含める(3g の現状)。開始の検査は `spent_jpy` だけを見る(上乗せしない)。推奨。**
+- (B) `spent_jpy` から `RESERVED` を除き(確定 + LAPSED + UNPRICED だけ)、開始の検査で進行中の予約を上乗せする(追記 §C.7 の元の案)。却下(理由は下)。
+- (C) 開始の直前に、木全体の周を再計数してから検査する。木全体のロックが要り、3g の `lockPath`(経路)の順序の設計を超える。当面は採らない(U-40 の代替案)。
+
+(A) を推奨する理由(事実):
+1. 3g の変更が要らない。3b の検査(`SelfDevOrderRepository.startCycle` の `order.orderBudgetJpy - order.spentJpy < order.cycleBudgetJpy`)は、3g を有効にすると、`RESERVED` を含んだ額で既に働く。
+2. 祖先の `spent_jpy` は、子孫の周の `RESERVED` を、その周の tick で含む(§C.2)。(B) は子孫の進行中の予約を、経路の検査から外す。
+3. (B) では、予約が `COMMITTED` に変わった後、次の tick までの間、その額は `RESERVED` から外れ、まだ `spent_jpy` にも入らない。(A) では、前回の tick で計上された額は、確定までの間も `counted` に残るので、この窓は生じない。
+4. (B) は、3g の合計の式、`SelfDevOrderSpendTest` の検査、runbook の §7.6.2g、§7.6.2h の記述を、すべて書き換える。影響が大きい。
+5. (A) の誤りは過大計上の側に出る(安全側)。
+
+(A) の欠点: `spent_jpy` の意味が「確定 + LAPSED + UNPRICED + 予約中(前回の tick 時点)」になる。API の `spentJpy` と `remainingJpy`(`orderBudgetJpy - spentJpy`。`SelfDevOrderRoutes.kt`)は、予約中を含んだ値を返す。名前は変えず、意味を runbook に明記する(U-42)。
+
+`CHILD_BUDGET_EXHAUSTED` の判定(§4.4 の 2)は、(A) では次のように書き直す。
+- 「X の `spent_jpy` が `order_budget_jpy` に達し、X の部分木(X と子孫)のすべての周について `selfdev_order_cycle_spend.final = TRUE` で、周の行が無い goal が無く、X の部分木に非終端の Run が無い」。
+- `spent_jpy` が予約中を含むため、予約が終わって確定するまで、この理由は成立しない。3g を有効にしない限り `final` の行は作られず、この理由は成立しない(安全側)。
+- 理由コードの判定は、3e の残りで入れる(3h の範囲。§L)。
+
+#### K.2 `final` の判定: 行数で判定する(3g')
+
+- `CycleSpend` に `reservedRows: Int = 0` と `lapsedRows: Int = 0` を足す。既定値を付けるので、既存の位置引数の呼び出し(`SelfDevCycleSpendReaderTest` の `CycleSpend(0, 0, 0, 0, ...)`)は変えない。`spendOf` で、行ごとに数える。
+- `isSpendFinal` を `spend.reservedRows == 0 && spend.lapsedRows == 0 && !spend.hasUnconfirmedUnpriced` に変える。`counted` の計算は変えない(金額は合計に残る)。
+- SQL は変えない。読み取りだけなので、書き込みもロックの順序も変わらない(`SelfDevBudgetLockOrderTest` に影響しない)。`SelfDevCycleSpendContractTest`(キーの 3 形式)にも影響しない。
+- 追加する検査: 金額 0 の `RESERVED` 行があるとき `final = FALSE` になること。その行が後に金額を持つ `LAPSED` になったとき、周が再計数され `spent_jpy` に載ること。
+
+### L. 3h の範囲の再定義
+
+訂正後は、次の順に小さな PR に分ける。
+
+- **3g'(修正。3h より前)**: K.2 の行数の判定と、その検査。`spent_jpy` の計算(合計)は変えない。runbook の §7.6.2h の「ADR との差」の記述を、本追記 K で訂正済みと書き換える。
+- **3h(検査の実効化。範囲を絞る)**:
+  1. `startCycle` の式は変えない(`order_budget_jpy - spent_jpy >= cycle_budget_jpy` のまま)。`RESERVED` を足す変更は入れない(§C.7 は撤回する)。
+  2. `ORDER_UNPRICED`(U-35): 経路上の order に、未確認の `UNPRICED` 行を持つ未 final の周があれば、開始を拒否する。`OrderConflict` に理由を足し、`SelfDevOrderRoutes.kt` の文言と、§5.2 の表に行を足す。判定は `SelfDevCycleSpendReader.spendOf`(読み取りのみ)を、`startCycle` の transaction 内で使う。ロックの順序は order → budget のまま。
+  3. `CHILD_BUDGET_EXHAUSTED` の事実を取る読み取り関数(K.1 の条件の集計)。書き込みはしない。
+- **3e の残り**: `CHILD_BUDGET_EXHAUSTED` を、`OrderWatch` の自動の停止の理由に加える(上限は既存の 1 日 1 件、木で 2 件)。
+- 有効化の順序: `KIVRA_SELFDEV_ORDER_SPEND_ENABLED`(既定 `false`。`SelfDevOrderSettings.kt`)を dev で有効にするのは、3g' の後にする。3g' の前に有効にすると、0 円の行による早すぎる `final` が、検査の入力に入る。
+
+### M. 脅威と緩和
+
+| 脅威 | 形 | (A) での扱い | 緩和 |
+|---|---|---|---|
+| 過大計上(不当に止まる) | 見積もりの `RESERVED` が実額より大きい。予約が解放されるまで | 一時的。解放や確定の後の tick で減る(§C.2) | 確定の後の tick で戻ることを、runbook に書く |
+| 過少計上(予算を超えて走る) | (1) 前回の tick から後の予約(最大 `INTERVAL` の 60 秒。`OrderWatch.kt`)。(2) 0 円の `RESERVED`/`LAPSED` による早すぎる `final`(3g の現状。3g' で直す)。(3) CLI の実行中の額(U-37)。(4) 子孫の周が未 final の間の `CHILD_BUDGET_EXHAUSTED` の誤判定 | (1) は残る(U-40)。(2) は 3g' で直す。(3) は残る。(4) は K.1 の条件で防ぐ | 上の各項。3h の前に 3g' を入れる |
+
+(B) で起きる過少計上: 予約が `COMMITTED` に変わってから次の tick までの窓(K.1 の 3)。(A) は過大計上の側に倒れ、(B) は過少計上の側に倒れる。
+
+### N. 未決の点
+
+- **U-40 開始の検査の鮮度**。推奨: 3h では tick の遅れ(最大 60 秒)を受け入れ、runbook に明記する。開始の直前に木全体を再計数する案(K.1 の (C))は、木全体のロックが要るため、今は採らない。見直しの条件は、この窓で予算超過が実測されたとき。
+- **U-41 `CHILD_BUDGET_EXHAUSTED` の確定の条件**。推奨: K.1 の条件(部分木のすべての周が `final = TRUE`、周の行が無い goal が無い)を使う。
+- **U-42 `spentJpy` の意味**。推奨: JSON の名前は変えず、`spent_jpy` が予約中を含むことを runbook に書く。`remainingJpy` も同じ意味になる。UI の表示は未確認。
+- **U-43 段階の順序**。推奨: 追記 §F を「3f、3g、3g'、3h、3e の残り」に読み替える。ADR の段階の番号は変えない。3e の一部(`CHILD_CYCLE_FAILURES`)は既に入っている。
+- **U-44 `ORDER_UNPRICED` の範囲**。推奨: 経路上の order の未 final の周のうち、子孫の周も含める(子孫の費用は、経路上の `spent_jpy` に入るため)。ただし、0 円の `UNPRICED` の行数の上限は、未確認。
+
+### O. 確認したこと、確認できなかったこと
+
+確認したこと(文書の作成時に、`git grep` と読み取りで確認。テストは実行していない):
+- `SelfDevCycleSpendReader.kt`: `CycleSpend`、`spendOf`、`LEDGER_SQL`(行単位)、`ACTIVE_ATTEMPTS_SQL`(`a.active_flag = 1`)。
+- `SelfDevOrderRepository.kt`: `startCycle`(`ORDER_BUDGET` の検査)、`countCycleSpend`(`total`、`ceilYen`、`delta`、`SPEND_COUNTED`)、`isSpendFinal`、`unfinishedSpendCycles`、`lockPath`、`firstStoppingAncestor`、`ceilYen`。
+- `DbBudgetStore.kt`: `RESERVED`、`LAPSED`、`UNPRICED` の定数、`UNPRICED_IN_SCOPE`。
+- `OrderWatch.kt`: `countSpendOfCycles`、`INTERVAL` の 60 秒、`stopChildrenAutomatically`(理由は `CHILD_CYCLE_FAILURES`)。
+- `SelfDevOrderSettings.kt`: `KIVRA_SELFDEV_ORDER_SPEND_ENABLED`(既定 `false`)。
+- `SelfDevOrderRoutes.kt`: `spentJpy`、`remainingJpy = orderBudgetJpy - spentJpy`。
+- `V26`(`spent_jpy`、`cycle_budget_jpy`)、`V28`(自動の停止)、`V29`(`selfdev_order_cycle_spend`)。
+- `CHILD_BUDGET_EXHAUSTED` と `ORDER_UNPRICED` は、コードに無い(ADR の文字列だけ)。
+- テスト: `SelfDevOrderSpendTest`(`RESERVED` 2,000,000 の検査、`final` の検査は金額 1,000,000 と 500,000 だけ。0 円の場合は無い)、`SelfDevCycleSpendReaderTest`(位置引数の `CycleSpend`)、`SelfDevCycleSpendContractTest`、`SelfDevBudgetLockOrderTest`。
+- runbook の §7.6.2f、§7.6.2g、§7.6.2h。
+
+確認できなかったこと(未確認):
+- 0 円の `RESERVED` や `LAPSED` の行が、実際に作られうるか(FX の換算の経路を含む)。
+- 3g が本番や dev で有効か。
+- 3g、3f のテストの全件の通過(この文書の作成では実行していない)。
+- MariaDB での `LEDGER_SQL` の実行計画(追補 H の未確認を継承)。
+- UI(`/ui`)が `spentJpy` をどう表示するか。
+- 60 秒の tick の遅れが、実際の予算超過に至るか。
+
+### P. 見直しの条件
+
+- 0 円の `RESERVED` や `LAPSED` の行が実際に作られると分かったとき(3g' の必要性が確定する)。
+- tick の遅れによる予算超過が、dev で 1 件でも実測されたとき(U-40)。
+- `spentJpy` の予約中を含む意味が、運用者の判断を誤らせたとき(U-42)。
+- 台帳に order の列が必要になったとき(§C.3 の (B))。
+- 子孫の周の `final` が長く保留され、`CHILD_BUDGET_EXHAUSTED` が止まったままになったとき。

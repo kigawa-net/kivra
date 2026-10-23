@@ -272,6 +272,8 @@ internal fun Application.appModule(env: Map<String, String>) {
                 } else {
                     null
                 },
+                // The cost counting into spent_jpy (ADR 0015 addendum, stage 3g). Off unless its switch is on.
+                countSpend = orderSettings.spendEnabled,
             ).start(this)
         }
     }

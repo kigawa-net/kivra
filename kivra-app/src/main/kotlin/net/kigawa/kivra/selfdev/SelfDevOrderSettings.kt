@@ -29,6 +29,11 @@ class OrderSettings private constructor(
      * [enabled].
      */
     val autoStopEnabled: Boolean = false,
+    /**
+     * The cost counting of the cycles into the orders' `spent_jpy` (ADR 0015 addendum 2026-10-23, stage 3g). Off by default. Present only when
+     * [enabled].
+     */
+    val spendEnabled: Boolean = false,
 ) {
     override fun toString(): String = "OrderSettings(enabled=$enabled)"
 
@@ -40,6 +45,7 @@ class OrderSettings private constructor(
         const val ENV_MAX_CHILDREN = "KIVRA_SELFDEV_ORDER_MAX_CHILDREN"
         const val ENV_MAX_TREE = "KIVRA_SELFDEV_ORDER_MAX_TREE"
         const val ENV_AUTO_STOP = "KIVRA_SELFDEV_ORDER_AUTO_STOP_ENABLED"
+        const val ENV_SPEND = "KIVRA_SELFDEV_ORDER_SPEND_ENABLED"
         const val DEFAULT_MAX_CHILDREN = 5
         const val DEFAULT_MAX_TREE = 15
 
@@ -71,6 +77,7 @@ class OrderSettings private constructor(
                 maxChildren = boundedInt(env, ENV_MAX_CHILDREN, default = DEFAULT_MAX_CHILDREN, range = 1..20),
                 maxTree = boundedInt(env, ENV_MAX_TREE, default = DEFAULT_MAX_TREE, range = 1..100),
                 autoStopEnabled = boolFlag(env, ENV_AUTO_STOP, default = false),
+                spendEnabled = boolFlag(env, ENV_SPEND, default = false),
             )
         }
     }

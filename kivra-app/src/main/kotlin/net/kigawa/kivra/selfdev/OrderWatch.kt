@@ -40,6 +40,11 @@ class OrderWatch(
     private val fxExpired: () -> Boolean,
     /** The automatic child stop (ADR 0015 section 4.4). Null when the switch is off, and then the step does nothing. */
     private val autoStop: AutoStopDeps? = null,
+    /**
+     * Counts each cycle's cost into the orders' `spent_jpy` (ADR 0015 addendum, stage 3g). Off by default, and then the step does nothing.
+     * Its switch is `KIVRA_SELFDEV_ORDER_SPEND_ENABLED`.
+     */
+    private val countSpend: Boolean = false,
 ) {
 
     /** One pass. Blocking (database calls only). Each step is contained: a failure in one step does not stop the next. */
@@ -47,8 +52,27 @@ class OrderWatch(
         step("stop request expiry") { orders.expireDueStopRequests(BATCH) }
         step("order expiry") { orders.expireDueOrders(BATCH) }
         step("cycle evaluation") { orders.evaluateEndedCycles(BATCH) }
+        if (countSpend) step("order spend") { countSpendOfCycles() }
         autoStop?.let { deps -> step("automatic child stop") { stopChildrenAutomatically(deps) } }
         step("safety guards") { guardActiveOrders() }
+    }
+
+    /**
+     * Counts the cost of each unfinished cycle (ADR 0015 addendum, stage 3g). A cycle that fails is logged with a fixed code and skipped; the
+     * other cycles and the tick go on. Returns the number of cycles that were written.
+     */
+    private fun countSpendOfCycles(): Int {
+        var written = 0
+        for (cycle in orders.unfinishedSpendCycles(BATCH)) {
+            try {
+                if (orders.countCycleSpend(cycle)) written++
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logger.warn("order spend: failed code=SPEND_FAILED orderId={} exception={}", cycle.orderId, e.javaClass.simpleName)
+            }
+        }
+        return written
     }
 
     /**

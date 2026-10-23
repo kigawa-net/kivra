@@ -221,6 +221,30 @@ class SelfDevOrderSettingsTest {
         assertFalse(off.autoStopEnabled)
     }
 
+    @Test
+    fun `the cost counting switch is off by default and accepts only true or false`() {
+        assertFalse(OrderSettings.fromEnv(onEnv, enabledAutopilot, null).spendEnabled)
+        assertFalse(OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_SPEND to "false"), enabledAutopilot, null).spendEnabled)
+        assertTrue(OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_SPEND to "true"), enabledAutopilot, null).spendEnabled)
+        for (bad in listOf("yes", "1", "", "TRUE", "spend-secret-value")) {
+            val e = assertFailsWith<IllegalStateException> {
+                OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_SPEND to bad), enabledAutopilot, null)
+            }
+            assertTrue(e.message!!.contains(OrderSettings.ENV_SPEND))
+            assertFalse(e.message!!.contains("spend-secret-value"))
+        }
+    }
+
+    @Test
+    fun `the cost counting switch is not read while the orders are off`() {
+        val off = OrderSettings.fromEnv(
+            mapOf(OrderSettings.ENV_ENABLED to "false", OrderSettings.ENV_SPEND to "not-a-switch"),
+            enabledAutopilot,
+            null,
+        )
+        assertFalse(off.spendEnabled)
+    }
+
     private fun selfDev(): SelfDevSettings = SelfDevSettings.fromEnv(
         mapOf(
             "KIVRA_SELFDEV_ENABLED" to "true",

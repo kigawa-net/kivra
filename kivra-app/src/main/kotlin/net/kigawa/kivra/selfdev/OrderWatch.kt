@@ -7,6 +7,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.core.autopilot.OrderReason
+import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.AutoStopResult
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.SelfDevOrderRepository
@@ -27,7 +28,8 @@ class AutoStopDeps(val goals: SelfDevGoalRepository, val operations: SelfDevOper
  *    (BUDGET_HOLD), the FX rate (FX_EXPIRED), an UNKNOWN Run of the current cycle (UNKNOWN_RUN).
  *
  * Every pause here is a SYSTEM pause: it needs no approval, it never stops an order, and nothing resumes it by itself (an operator resumes it).
- * A stop is done here only as the automatic child stop (ADR 0015 section 4.4, behind its switch, after the cycle evaluation): a parent's
+ * A stop is done here only as the automatic child stop (ADR 0015 section 4.4, behind its switch, after the cycle evaluation; the reasons
+ * CHILD_CYCLE_FAILURES and CHILD_BUDGET_EXHAUSTED): a parent's
  * decision on one of its children, never the root. A stop of anything else needs an approval in the HTTP path.
  *
  * Logs carry fixed codes and counts only. No title, policy or request text is logged.
@@ -76,15 +78,18 @@ class OrderWatch(
     }
 
     /**
-     * The parent's automatic decision for each child whose cycles failed (ADR 0015 section 4.4). The decision and its checks are in the
-     * repository, under the locks; the goals of the stopped part are stopped after it, as an approved stop does.
+     * The parent's automatic decision for each child whose cycles failed (CHILD_CYCLE_FAILURES) or whose budget is used up
+     * (CHILD_BUDGET_EXHAUSTED) (ADR 0015 section 4.4). The decision and its checks are in the repository, under the locks; the goals of the
+     * stopped part are stopped after it, as an approved stop does. A child that is both is decided once, by its cycle failures.
      */
     private fun stopChildrenAutomatically(deps: AutoStopDeps): Int {
         var stopped = 0
-        for (childId in orders.autoStopCandidates(BATCH)) {
-            when (val r = orders.autoStopChild(childId)) {
+        val candidates = orders.autoStopCandidates(BATCH).map { it to StopRequestReason.CHILD_CYCLE_FAILURES } +
+            orders.budgetExhaustedCandidates(BATCH).map { it to StopRequestReason.CHILD_BUDGET_EXHAUSTED }
+        for ((childId, reason) in candidates.distinctBy { it.first }) {
+            when (val r = orders.autoStopChild(childId, reason)) {
                 is AutoStopResult.Stopped -> {
-                    logger.info("order auto-stop: code=CHILD_CYCLE_FAILURES orderId={} parentId={}", r.order.orderId, r.order.parentOrderId)
+                    logger.info("order auto-stop: code={} orderId={} parentId={}", reason.name, r.order.orderId, r.order.parentOrderId)
                     orders.subtreeOf(r.order.orderId).forEach { order ->
                         if (stopCycleGoalOf(order, deps.goals, deps.operations) == false) {
                             logger.warn("order auto-stop: goal not stopped, orderId={}", order.orderId)

@@ -146,7 +146,26 @@ data class ChildLimits(val maxDepth: Int, val maxChildren: Int, val maxTree: Int
 enum class StopEnd { REJECTED, CANCELLED }
 
 /** Why the automatic child stop does not decide (ADR 0015 section 4.4). Fixed codes; nothing is written for them. */
-enum class AutoStopSkip { NOT_FOUND, IS_ROOT, CHILD_NOT_STOPPABLE, PARENT_NOT_ACTIVE, CYCLE_FAILURES_BELOW_LIMIT, PENDING_REQUEST }
+enum class AutoStopSkip {
+    NOT_FOUND, IS_ROOT, CHILD_NOT_STOPPABLE, PARENT_NOT_ACTIVE, CYCLE_FAILURES_BELOW_LIMIT, PENDING_REQUEST,
+    /** CHILD_BUDGET_EXHAUSTED: the facts ([BudgetExhaustedFacts.exhausted]) do not hold under the lock. */
+    BUDGET_NOT_EXHAUSTED,
+}
+
+/**
+ * The facts of CHILD_BUDGET_EXHAUSTED (ADR 0015 section 4.4 (2), addendum K.1) for one order X: the cost counted against X (`spent_jpy`,
+ * which includes the RESERVED amounts, K.1 (A)), X's budget, the cycles of X's part (X and its descendants) that are not final yet (a cycle
+ * with a goal and no spend row counts as not final), and the Runs of the part that are not terminal. Read only; nothing is written.
+ */
+data class BudgetExhaustedFacts(
+    val spentJpy: Long,
+    val orderBudgetJpy: Long,
+    val unfinishedCycles: Int,
+    val nonTerminalRuns: Int,
+) {
+    /** The reason holds when the budget is reached (>=), every cycle of the part is final, and no Run of the part is open. */
+    val exhausted: Boolean get() = spentJpy >= orderBudgetJpy && unfinishedCycles == 0 && nonTerminalRuns == 0
+}
 
 sealed interface AutoStopResult {
     /** The child and its descendants are STOPPED, in one transaction. [order] is the child as it is now. */
@@ -647,7 +666,7 @@ class SelfDevOrderRepository(
         reason: StopRequestReason,
     ): OrderResult<SelfDevOrderStopRequest> = try {
         // The automatic reason is decided by the parent's loop only (autoStopChild), never requested.
-        require(reason != StopRequestReason.CHILD_CYCLE_FAILURES) { "the automatic stop reason is not requestable" }
+        require(reason !in StopRequestReason.AUTOMATIC) { "the automatic stop reason is not requestable" }
         transaction(database) {
             // The path is locked from the root down, and then the descendants: the same order as a cycle start and a child creation.
             val path = lockPath(orderId) ?: return@transaction OrderResult.NotFound
@@ -757,8 +776,11 @@ class SelfDevOrderRepository(
     }
 
     /** The order and its descendants, read without locks (the order first, then level by level). Read after an approval, when the stopped part is final. */
-    fun subtreeOf(orderId: String): List<SelfDevOrder> = transaction(database) {
-        val root = getIn(orderId) ?: return@transaction emptyList()
+    fun subtreeOf(orderId: String): List<SelfDevOrder> = transaction(database) { subtreeIn(orderId) }
+
+    /** The order and its descendants, in the caller's transaction. Empty when the order does not exist. */
+    private fun Transaction.subtreeIn(orderId: String): List<SelfDevOrder> {
+        val root = getIn(orderId) ?: return emptyList()
         val out = mutableListOf(root)
         var level = listOf(orderId)
         while (level.isNotEmpty()) {
@@ -768,7 +790,7 @@ class SelfDevOrderRepository(
             out += children
             level = children.map { it.orderId }
         }
-        out
+        return out
     }
 
     /**
@@ -853,6 +875,28 @@ class SelfDevOrderRepository(
 
     // ---- automatic child stop (ADR 0015 section 4.4) -----------------------------------------------------------------------------
 
+    /**
+     * The facts of CHILD_BUDGET_EXHAUSTED for [orderId] (ADR 0015 addendum K.1). Read only: no lock, no write. Null when the order does not exist.
+     * The automatic decision reads the same facts under the tree's locks ([autoStopChild]).
+     */
+    fun budgetExhaustedFacts(orderId: String): BudgetExhaustedFacts? = transaction(database) {
+        val order = getIn(orderId) ?: return@transaction null
+        val part = subtreeIn(orderId).map { it.orderId }
+        budgetFactsIn(order, part)
+    }
+
+    /** The children whose cost reached their budget, the cheap first filter of CHILD_BUDGET_EXHAUSTED. The facts are checked under the lock. */
+    fun budgetExhaustedCandidates(limit: Int): List<String> = transaction(database) {
+        execQuery(
+            """
+            SELECT order_id FROM selfdev_orders
+             WHERE parent_order_id IS NOT NULL AND state IN ('ACTIVE', 'PAUSED') AND spent_jpy >= order_budget_jpy
+             ORDER BY updated_at, order_id LIMIT ?
+            """.trimIndent(),
+            limit,
+        ) { it.getString(1) }
+    }
+
     /** The children that may be stopped automatically now: not root, ACTIVE or PAUSED, failures at the limit. [autoStopChild] checks each again. */
     fun autoStopCandidates(limit: Int): List<String> = transaction(database) {
         execQuery(
@@ -873,7 +917,8 @@ class SelfDevOrderRepository(
      * A condition that does not hold writes nothing. The decision is one transaction: the request row (CONSUMED, decided by the parent), the
      * events, and the stop of the part. Its events name the parent and the depth.
      */
-    fun autoStopChild(childId: String): AutoStopResult = transaction(database) {
+    fun autoStopChild(childId: String, reason: StopRequestReason = StopRequestReason.CHILD_CYCLE_FAILURES): AutoStopResult = transaction(database) {
+        require(reason in StopRequestReason.AUTOMATIC) { "the reason is not an automatic child stop reason" }
         val path = lockPath(childId) ?: return@transaction AutoStopResult.NotDecided(AutoStopSkip.NOT_FOUND)
         val child = path.first()
         val parent = path.getOrNull(1) ?: return@transaction AutoStopResult.NotDecided(AutoStopSkip.IS_ROOT)
@@ -882,7 +927,7 @@ class SelfDevOrderRepository(
             return@transaction AutoStopResult.NotDecided(AutoStopSkip.CHILD_NOT_STOPPABLE)
         }
         if (firstStoppingAncestor(path.drop(1)) != null) return@transaction AutoStopResult.NotDecided(AutoStopSkip.PARENT_NOT_ACTIVE)
-        if (child.consecutiveFailedCycles < CYCLE_FAILURE_LIMIT) {
+        if (reason == StopRequestReason.CHILD_CYCLE_FAILURES && child.consecutiveFailedCycles < CYCLE_FAILURE_LIMIT) {
             return@transaction AutoStopResult.NotDecided(AutoStopSkip.CYCLE_FAILURES_BELOW_LIMIT)
         }
 
@@ -897,6 +942,10 @@ class SelfDevOrderRepository(
 
         // The part to stop: the child and its descendants that are not STOPPED yet (a descendant stopped by an earlier approval is final).
         val below = ordersBelow(child.orderId, tree)
+        if (reason == StopRequestReason.CHILD_BUDGET_EXHAUSTED) {
+            val facts = budgetFactsIn(child, listOf(child.orderId) + below.map { it.orderId })
+            if (!facts.exhausted) return@transaction AutoStopResult.NotDecided(AutoStopSkip.BUDGET_NOT_EXHAUSTED)
+        }
         val toStop = below.filter { it.state != OrderState.STOPPED }
         val targetDecision = checkAutomaticStop(child.state, OrderReason.PARENT_STOPPED)
         if (targetDecision is OrderTransitionDecision.Refused ||
@@ -926,7 +975,7 @@ class SelfDevOrderRepository(
             ) { it.getInt(1) }.single() == 0
             if (recorded) {
                 appendEvent(
-                    child.orderId, null, "AUTO_STOP_RATE_LIMITED", child.state, child.state, StopRequestReason.CHILD_CYCLE_FAILURES.name,
+                    child.orderId, null, "AUTO_STOP_RATE_LIMITED", child.state, child.state, reason.name,
                     OrderActor.SYSTEM, null, null, now, parentOrderId = parent.orderId, depth = child.depth,
                 )
             }
@@ -942,19 +991,19 @@ class SelfDevOrderRepository(
                 digest, state, active_key, decided_by, decider_kind, decider_order_id, decided_at, expires_at, created_at, target_is_root)
             VALUES (?, ?, ?, 'SYSTEM', ?, ?, ?, 'CONSUMED', NULL, ?, 'ORDER', ?, ?, ?, ?, 0)
             """.trimIndent(),
-            requestId, child.orderId, AUTO_STOP_PRINCIPAL, StopRequestReason.CHILD_CYCLE_FAILURES.name, child.version,
-            orderStopDigest(requestId, child.orderId, subtree, StopRequestReason.CHILD_CYCLE_FAILURES),
+            requestId, child.orderId, AUTO_STOP_PRINCIPAL, reason.name, child.version,
+            orderStopDigest(requestId, child.orderId, subtree, reason),
             AUTO_STOP_PRINCIPAL, parent.orderId, now, now.plus(stopTtl), now,
         )
         // The versions were read under the locks, so a conditional UPDATE that misses means a bug: the check throws and the whole decision rolls back.
         check(updateState(child.orderId, child.version, OrderState.STOPPED, OrderReason.PARENT_STOPPED, now)) { "child moved under its lock" }
         appendEvent(
             child.orderId, child.cyclesStarted.takeIf { it > 0 }, "STOP_APPROVED", child.state, OrderState.STOPPED,
-            StopRequestReason.CHILD_CYCLE_FAILURES.name, OrderActor.SYSTEM, null, requestId, now, parentOrderId = parent.orderId, depth = child.depth,
+            reason.name, OrderActor.SYSTEM, null, requestId, now, parentOrderId = parent.orderId, depth = child.depth,
         )
         appendEvent(
             child.orderId, child.cyclesStarted.takeIf { it > 0 }, "STOPPED", child.state, OrderState.STOPPED,
-            StopRequestReason.CHILD_CYCLE_FAILURES.name, OrderActor.SYSTEM, null, requestId, now, parentOrderId = parent.orderId, depth = child.depth,
+            reason.name, OrderActor.SYSTEM, null, requestId, now, parentOrderId = parent.orderId, depth = child.depth,
         )
         // The descendants, level by level, as an approved stop stops them (ANCESTOR_STOPPED).
         for (descendant in toStop) {
@@ -964,6 +1013,34 @@ class SelfDevOrderRepository(
             appendTreeEvent(descendant, "STOPPED", descendant.state, OrderState.STOPPED, OrderReason.ANCESTOR_STOPPED.name, OrderActor.SYSTEM, null, requestId, now)
         }
         AutoStopResult.Stopped(getIn(child.orderId) ?: error("child vanished after the automatic stop"))
+    }
+
+    /** The facts of CHILD_BUDGET_EXHAUSTED for [order], whose part is [partIds] (the order and its descendants). Read only. */
+    private fun Transaction.budgetFactsIn(order: SelfDevOrder, partIds: List<String>): BudgetExhaustedFacts {
+        val inList = partIds.joinToString(",") { "?" }
+        val unfinished = execQuery(
+            """
+            SELECT COUNT(*) FROM selfdev_goals g
+              LEFT JOIN selfdev_order_cycle_spend s ON s.order_id = g.order_id AND s.cycle_no = g.cycle_no
+             WHERE g.order_id IN ($inList) AND (s.order_id IS NULL OR s.final = FALSE)
+            """.trimIndent(),
+            *partIds.toTypedArray(),
+        ) { it.getInt(1) }.single()
+        // A Run is open when its state is not terminal, or when one of its CLI attempts is active (coding_attempts.active_flag).
+        val openRuns = execQuery(
+            """
+            SELECT COUNT(*) FROM development_runs r
+             WHERE r.run_id IN (
+                   SELECT t.run_id FROM selfdev_goals g
+                     JOIN selfdev_plans p ON p.goal_id = g.goal_id
+                     JOIN selfdev_plan_tasks t ON t.plan_id = p.plan_id
+                    WHERE g.order_id IN ($inList) AND t.run_id IS NOT NULL)
+               AND (r.state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                    OR EXISTS (SELECT 1 FROM coding_attempts a WHERE a.run_id = r.run_id AND a.active_flag = 1))
+            """.trimIndent(),
+            *partIds.toTypedArray(),
+        ) { it.getInt(1) }.single()
+        return BudgetExhaustedFacts(order.spentJpy, order.orderBudgetJpy, unfinished, openRuns)
     }
 
     // ---- shared helpers ----------------------------------------------------------------------------------------------------------

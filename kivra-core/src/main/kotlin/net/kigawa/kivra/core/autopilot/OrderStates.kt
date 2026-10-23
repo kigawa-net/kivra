@@ -49,16 +49,22 @@ enum class OrderReason {
 
 /**
  * The reason codes of a stop. A request from a person or the AI principal carries one of [REQUESTABLE] (U-31). Free text is never accepted.
- * [CHILD_CYCLE_FAILURES] is the reason of the automatic child stop only (ADR 0015 section 4.4 (2)); no request may carry it.
+ * [CHILD_CYCLE_FAILURES] and [CHILD_BUDGET_EXHAUSTED] are the reasons of the automatic child stop only ([AUTOMATIC], ADR 0015 section 4.4
+ * (2)); no request may carry them.
  */
 enum class StopRequestReason {
     OPERATOR_REQUEST, RUNAWAY_SUSPECTED, BUDGET_CONCERN, SCOPE_CONCERN,
     /** A child whose cycles failed twice in a row is stopped by its parent's automatic decision (ADR 0015 section 4.4). */
-    CHILD_CYCLE_FAILURES;
+    CHILD_CYCLE_FAILURES,
+    /** A child whose budget is used up, with every cycle of its part final and no Run left open, is stopped by its parent (section 4.4 (2)). */
+    CHILD_BUDGET_EXHAUSTED;
 
     companion object {
-        /** The codes a person or the AI principal may request a stop with: every code but the automatic one. */
-        val REQUESTABLE: List<StopRequestReason> = entries.filter { it != CHILD_CYCLE_FAILURES }
+        /** The reasons of the automatic child stop only. */
+        val AUTOMATIC: List<StopRequestReason> = listOf(CHILD_CYCLE_FAILURES, CHILD_BUDGET_EXHAUSTED)
+
+        /** The codes a person or the AI principal may request a stop with: every code but the automatic ones. */
+        val REQUESTABLE: List<StopRequestReason> = entries.filter { it !in AUTOMATIC }
     }
 }
 

@@ -194,4 +194,37 @@ class OrderWatchTest {
         assertEquals(GoalState.STOPPED, assertNotNull(f.goals.get(started.goalId)).state)
         assertEquals(OrderState.ACTIVE, f.state(root.orderId).state)
     }
+
+    @Test
+    fun `with the switch on, a tick stops a child whose budget is used up and whose cycle is final, with CHILD_BUDGET_EXHAUSTED`() = withFixture { f ->
+        val root = f.root()
+        val child = f.childOf(root.orderId, "budget-child")
+        val started = assertIs<OrderResult.Moved<CycleStarted>>(
+            f.repo.startCycle(child.orderId, f.state(child.orderId).version, "1:i:kigawa"),
+        ).value
+        transaction(f.db.database) {
+            execUpdate("UPDATE selfdev_goals SET state = 'DONE', state_reason = 'ALL_TASKS_COMPLETED' WHERE goal_id = ?", started.goalId)
+            execUpdate("UPDATE selfdev_orders SET spent_jpy = order_budget_jpy WHERE order_id = ?", child.orderId)
+        }
+        f.repo.countCycleSpend(SelfDevOrderRepository.SpendCycle(started.goalId, child.orderId, started.cycleNo))
+        f.autoStopWatch().tick()
+        assertEquals(OrderState.STOPPED, f.state(child.orderId).state)
+        assertEquals(OrderReason.PARENT_STOPPED, f.state(child.orderId).stateReason)
+        assertEquals(OrderState.ACTIVE, f.state(root.orderId).state)
+    }
+
+    @Test
+    fun `with the switch on, a tick does not stop a child whose budget is used up while its cycle is not final`() = withFixture { f ->
+        val root = f.root()
+        val child = f.childOf(root.orderId, "budget-open")
+        val started = assertIs<OrderResult.Moved<CycleStarted>>(
+            f.repo.startCycle(child.orderId, f.state(child.orderId).version, "1:i:kigawa"),
+        ).value
+        transaction(f.db.database) {
+            execUpdate("UPDATE selfdev_orders SET spent_jpy = order_budget_jpy WHERE order_id = ?", child.orderId)
+        }
+        f.autoStopWatch().tick()
+        assertEquals(OrderState.ACTIVE, f.state(child.orderId).state)
+        assertNotNull(f.goals.get(started.goalId))
+    }
 }

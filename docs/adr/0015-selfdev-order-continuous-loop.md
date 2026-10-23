@@ -319,6 +319,7 @@ order の方針、範囲、上限、親は、作成後に変えない。承認�
 | 14 | 有効化された後の起動 | 起動時に `ACTIVE` の order がある | 全 `ACTIVE` を `PAUSED` にする(U-14) | `STARTUP_HOLD` | 人の再開 | 人 | 不要 |
 | 15 | 停止要求の未承認 | 却下、取り消し、期限切れ | `PAUSED` に戻す | `STOP_NOT_APPROVED` | 人の再開 | 人 | 不要 |
 | 16 | 祖先の一時停止 | 祖先が `PAUSED` または `STOP_REQUESTED` | 子孫の周を止める(子の状態は変えない) | `ANCESTOR_PAUSED` | 祖先の再開(自動で子に戻る) | 祖先の解除に従う | 不要 |
+| 17 | 未確認の UNPRICED(0 円を含む) | 経路上の order(自分と祖先)の未 final の周に、未確認の `UNPRICED` 行がある(段階 3h-A。追記 §L、U-35) | 周を始めない(拒否のみ。order の状態は変えない) | `ORDER_UNPRICED` | 運用者が UNPRICED 行を確認する(`POST /api/admin/budget/acknowledge`)と、周が final になった後の tick で解ける | 人 | 不要 |
 
 補足:
 

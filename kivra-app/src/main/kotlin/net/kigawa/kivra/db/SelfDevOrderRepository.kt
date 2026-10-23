@@ -101,6 +101,12 @@ enum class OrderConflict {
      * ACTIVE (ADR 0015 section 2.4). [OrderResult.Refused.orderId] names the nearest such ancestor (a fixed ID, no text).
      */
     ANCESTOR_NOT_ACTIVE,
+    /**
+     * A cycle start: some order on the path to the root (itself and its ancestors) has a cycle that is not final and holds an unconfirmed
+     * UNPRICED row, zero yen included (ADR 0015 addendum 2026-10-23, C.4 and U-35). Nothing is written; the order's state is not changed.
+     * [OrderResult.Refused.orderId] is null for this reason.
+     */
+    ORDER_UNPRICED,
 }
 
 sealed interface OrderResult<out T> {
@@ -447,6 +453,7 @@ class SelfDevOrderRepository(
                     throw Rollback(OrderResult.Refused(OrderConflict.ORDER_BUDGET, order.orderId))
                 }
             }
+            if (path.any { unpricedCycleOf(it.orderId) }) throw Rollback(OrderResult.Refused(OrderConflict.ORDER_UNPRICED))
 
             val cycleNo = current.cyclesStarted + 1
             val goalId = Ulid.generate(clock)
@@ -472,6 +479,24 @@ class SelfDevOrderRepository(
         }
     } catch (r: Rollback) {
         r.outcome
+    }
+
+    /**
+     * True when a cycle of [orderId] is not final and its ledger holds an unconfirmed UNPRICED row (ADR 0015 addendum 2026-10-23, C.4 and
+     * U-35). Only the cycles with a spend row are read (the tick creates the row, and only when the spend switch is on), so with the switch
+     * off nothing is refused. Read only: the ledger is read under the order locks of the caller, and nothing is locked here.
+     */
+    private fun Transaction.unpricedCycleOf(orderId: String): Boolean {
+        val cycleNos = execQuery(
+            """
+            SELECT g.cycle_no
+              FROM selfdev_goals g
+              JOIN selfdev_order_cycle_spend s ON s.order_id = g.order_id AND s.cycle_no = g.cycle_no
+             WHERE g.order_id = ? AND s.final = FALSE
+            """.trimIndent(),
+            orderId,
+        ) { it.getInt(1) }
+        return cycleNos.any { cycleNo -> with(spendReader) { spendOf(orderId, cycleNo).hasUnconfirmedUnpriced } }
     }
 
     /**

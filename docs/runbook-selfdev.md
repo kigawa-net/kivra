@@ -1640,7 +1640,7 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 
 #### 7.6.2f 親の自動の停止(段階 2 の PR 3e。既定では無効)
 
-- **範囲**: 親 order の自動のループ(`OrderWatch` の tick)が、直接の子を止められる。理由コードは `CHILD_CYCLE_FAILURES`(子の `consecutive_failed_cycles` が 2 以上)。`CHILD_BUDGET_EXHAUSTED` は §7.6.2i で加わった(ADR 0015 §4.4)。HTTP の経路は無く、MCP にも無い。ルートは対象にならない。
+- **範囲**: 親 order の自動のループ(`OrderWatch` の tick)が、直接の子を止められる。理由コードは `CHILD_CYCLE_FAILURES`(子の `consecutive_failed_cycles` が 2 以上)。`CHILD_BUDGET_EXHAUSTED` は §7.6.2j で加わった(ADR 0015 §4.4)。HTTP の経路は無く、MCP にも無い。ルートは対象にならない。
 - **条件(すべて満たすときだけ)**: 対象は親の直接の子で、`ACTIVE` か `PAUSED`。親と全祖先が `ACTIVE`(有効な状態)。失敗が 2 回続いている。木に `PENDING` の停止要求が無い(人の要求を横取りしない)。頻度の上限の内。
 - **頻度の上限(UTC の日)**: 同じ親が決める子の停止は 1 日 1 件。木全体で 1 日 2 件。超えたら決めず、`selfdev_order_events` に `AUTO_STOP_RATE_LIMITED` を残す(子ごとに 1 日 1 回。tick が毎分回っても増えない)。ログは `order auto-stop: code=AUTO_STOP_RATE_LIMITED orderId=... parentId=...`。数えるのは `decider_kind = ORDER` の行の `decided_at`。
 - **決定の行**: `selfdev_order_stop_requests` に `state = CONSUMED`、`decider_kind = ORDER`、`decider_order_id` = 決めた親、`requested_by` と `decided_by` は固定の `system:order-auto-stop`、`requester_kind = SYSTEM`、`target_is_root = 0`。要求の段階は無い(要求なしで決める)。
@@ -1679,7 +1679,15 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 - **dev で有効にする前の注意**: `spent_jpy` は台帳から導く値である。手で書き換えない(次の tick が台帳の値に合わせ直す)。有効化すると `spent_jpy` が実際に増えるため、既存の order の周の開始が `ORDER_BUDGET` で止まりうる。
 - **この PR に含まれないもの(3h)**: `startCycle` の式(進行中の予約を足す)、未確認の UNPRICED の拒否(`ORDER_UNPRICED`)、`CHILD_BUDGET_EXHAUSTED` の事実。3h で予約を足すときは、`RESERVED` が既に `spent_jpy` に入っているため、二重に数えないこと。
 
-#### 7.6.2i 親の自動の停止の理由 CHILD_BUDGET_EXHAUSTED(段階 3e の残り。既定では無効)
+#### 7.6.2i 未確認の UNPRICED による周の開始の拒否(段階 3h-A。既定では無効)
+
+- 周を始める(`POST .../cycles`)とき、経路上の order(自分と祖先)のどれかに、**未 final の周**で**未確認の `UNPRICED` 行**(0 円を含む)があれば、409 `ORDER_UNPRICED` で、何も書かない(`cycles_started` も進まない)。応答の `orderId` は付かない。`ORDER_BUDGET` の検査の後に行う。
+- 判定の対象は、費用の行(`selfdev_order_cycle_spend`)がある周だけである。行は、スイッチ `KIVRA_SELFDEV_ORDER_SPEND_ENABLED` が有効なときの tick が作る。無効のときは行が無いため、この検査は何も拒否しない(挙動は変わらない)。
+- 解除: 運用者が台帳の `UNPRICED` 行を確認する(`POST /api/admin/budget/acknowledge`)。次の tick で周が final になると、開始できる。order の状態は変わらないため、再開の操作は要らない。承認は要らない。
+- 拒否の文言は固定で、題名や方針は含まない。読み取りだけで、ロックの順序(order → budget)は変えない。
+- 範囲: 自分と祖先の周だけを見る。子孫の未確認の周は、この order の周の開始を止めない(ADR 0015 追補の U-44 は未決)。
+
+#### 7.6.2j 親の自動の停止の理由 CHILD_BUDGET_EXHAUSTED(段階 3e の残り。既定では無効)
 
 - **範囲**: 親の自動のループ(`OrderWatch` の tick)が、直接の子を理由 `CHILD_BUDGET_EXHAUSTED` で止められる。スイッチは §7.6.2f と同じ `KIVRA_SELFDEV_ORDER_AUTO_STOP_ENABLED`(既定 `false`)。同じ経路と同じ上限(親 1 日 1 件、木 1 日 2 件。理由ごとに上限を分けない)。ルートは対象にならない。HTTP にも MCP にも経路は無い。
 - **条件**(ADR 0015 §4.4 の 2、追補 K.1、U-41)。子 X について次がすべてそろうとき。(1) X の `spent_jpy` が `order_budget_jpy` 以上。(2) X の部分木(X と子孫)のすべての周の `selfdev_order_cycle_spend.final` が `TRUE`、かつ、部分木に周の行の無い goal が無い。(3) X の部分木に非終端の Run が無い。Run が非終端とは、`development_runs.state` が `COMPLETED`、`FAILED`、`CANCELLED` 以外であること、または、その Run に `coding_attempts.active_flag = 1` の attempt があること。

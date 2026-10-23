@@ -253,7 +253,7 @@ order の方針、範囲、上限、親は、作成後に変えない。承認�
 
 推奨の理由: 理由コードが固定で、事実だけを条件にするため、AI の判断で止めない。頻度の上限は、誤判定や乗っ取られた親が子を一斉に止めることを抑える。停止は終端であり、誤った停止は人が新しい子を作って直す(§2.7 の作成は人だけ)。
 
-**実装の状況(2026-10-23。追補 K.1 と L の「3e の残り」)**: `CHILD_BUDGET_EXHAUSTED` は `OrderWatch` の自動の停止に入った。事実は `SelfDevOrderRepository.budgetExhaustedFacts` が読み取り専用で集計し(`spent_jpy`、`order_budget_jpy`、部分木の非 final の周の数、非終端の Run の数)、`autoStopChild(childId, CHILD_BUDGET_EXHAUSTED)` は決定の前に、木のロックの下で同じ条件を確かめる。上限は `CHILD_CYCLE_FAILURES` と共通。理由コードは要求に使えない(`StopRequestReason.REQUESTABLE` に入らない)。DB の移行は不要(`reason_code` に CHECK が無い)。運用上の注意は runbook §7.6.2i。
+**実装の状況(2026-10-23。追補 K.1 と L の「3e の残り」)**: `CHILD_BUDGET_EXHAUSTED` は `OrderWatch` の自動の停止に入った。事実は `SelfDevOrderRepository.budgetExhaustedFacts` が読み取り専用で集計し(`spent_jpy`、`order_budget_jpy`、部分木の非 final の周の数、非終端の Run の数)、`autoStopChild(childId, CHILD_BUDGET_EXHAUSTED)` は決定の前に、木のロックの下で同じ条件を確かめる。上限は `CHILD_CYCLE_FAILURES` と共通。理由コードは要求に使えない(`StopRequestReason.REQUESTABLE` に入らない)。DB の移行は不要(`reason_code` に CHECK が無い)。運用上の注意は runbook §7.6.2j。
 
 #### 4.5 停止の影響(子、孫、進行中の Run と PR)
 

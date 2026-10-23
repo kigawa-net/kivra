@@ -2465,3 +2465,207 @@ test('the title and policy counters count code points, not UTF-16 units', async 
   dom.byId('order-policy').fire('input');
   assert.equal(dom.byId('order-policy-count').textContent, '5 / 2000');
 });
+
+// ---- Stop request and cancel (ADR 0015, docs/runbook-selfdev.md §7.6.7): the request is sent with the version read and a requestable code ----
+
+const STOP_REQ_PATH = '/api/selfdev/orders/' + O1 + '/stop-requests';
+const CANCEL_PATH = '/api/selfdev/stop-requests/' + R1 + '/cancel';
+const STOP_REQ_SECRET = 'STOP-REQUEST-SECRET-BODY';
+
+async function openStopDialog(dom) {
+  buttonIn(dom.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(dom.byId('orders-list'), '停止を要求').fire('click');
+}
+
+test('the stop request button appears only for ACTIVE or PAUSED with no waiting request; the cancel button only when one waits', async () => {
+  for (const over of [{ state: 'ACTIVE' }, { state: 'PAUSED', stateReason: 'OPERATOR_PAUSED' }]) {
+    const dom = ordLoad(ordState({ orderDetail: { status: 200, data: orderDetailOf(over) } }));
+    await flush();
+    buttonIn(dom.byId('orders-list'), '詳細').fire('click');
+    await flush();
+    assert.equal(hasButton(dom.byId('orders-list'), '停止を要求'), true, `${over.state}: the request button`);
+    assert.equal(hasButton(dom.byId('orders-list'), '要求を取り消す'), false, `${over.state}: no cancel without a request`);
+  }
+
+  const withPending = ordLoad(ordState({
+    orderDetail: { status: 200, data: orderDetailOf({ state: 'STOP_REQUESTED', stateReason: 'STOP_REQUESTED', version: 4 }, stopRequestOf()) },
+  }));
+  await flush();
+  buttonIn(withPending.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  assert.equal(hasButton(withPending.byId('orders-list'), '停止を要求'), false, 'a waiting request: no second request');
+  assert.equal(hasButton(withPending.byId('orders-list'), '要求を取り消す'), true, 'a waiting request: the cancel is offered');
+
+  const stopped = ordLoad(ordState({ orderDetail: { status: 200, data: orderDetailOf({ state: 'STOPPED', stateReason: 'OPERATOR_STOPPED' }) } }));
+  await flush();
+  buttonIn(stopped.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  assert.equal(hasButton(stopped.byId('orders-list'), '停止を要求'), false, 'STOPPED: no request');
+});
+
+test('the request dialog offers only the requestable codes; nothing is sent until a code is chosen and confirmed; then the detail and the list are read again', async () => {
+  let requestCount = 0;
+  const s = ordState({
+    orderPost: (p, init) => {
+      if (p !== STOP_REQ_PATH) return null;
+      requestCount++;
+      return { status: 201, data: { requestId: R1, orderId: O1, state: 'PENDING' } };
+    },
+  });
+  const dom = ordLoad(s);
+  await flush();
+  await openStopDialog(dom);
+  assert.equal(dom.byId('order-stop-dialog').open, true, 'the dialog opens');
+  assert.equal(dom.byId('order-stop-submit').disabled, true, 'no code chosen: confirm is disabled');
+  const options = dom.byId('order-stop-reason').children.map((o) => o.value);
+  assert.deepEqual(options, ['', 'OPERATOR_REQUEST', 'RUNAWAY_SUSPECTED', 'BUDGET_CONCERN', 'SCOPE_CONCERN'], 'the requestable codes only');
+  assert.equal(options.includes('CHILD_CYCLE_FAILURES') || options.includes('CHILD_BUDGET_EXHAUSTED'), false, 'the automatic codes are not offered');
+  assert.equal(requestCount, 0, 'nothing sent before a choice');
+
+  const readsBefore = dom.calls.filter((c) => c.path === '/api/selfdev/orders' && c.method === 'GET').length;
+  dom.byId('order-stop-reason').value = 'BUDGET_CONCERN';
+  dom.byId('order-stop-reason').fire('change');
+  assert.equal(dom.byId('order-stop-submit').disabled, false, 'a code is chosen: confirm is enabled');
+  assert.equal(requestCount, 0, 'choosing sends nothing');
+
+  dom.byId('order-stop-submit').fire('click');
+  await flush();
+  assert.equal(requestCount, 1);
+  const sent = postsTo(dom.calls, STOP_REQ_PATH);
+  assert.deepEqual(sent[0].body, { version: 3, reasonCode: 'BUDGET_CONCERN' }, 'the body is the version read and the code, and nothing else');
+  assert.equal(dom.byId('order-stop-dialog').open, false, 'the dialog closes on success');
+  assert.match(dom.byId('orders-msg').textContent, /停止を要求しました/);
+  const readsAfter = dom.calls.filter((c) => c.path === '/api/selfdev/orders' && c.method === 'GET').length;
+  assert.equal(readsAfter > readsBefore, true, 'the list is read again');
+});
+
+test('cancelling the request dialog sends nothing', async () => {
+  let requestCount = 0;
+  const dom = ordLoad(ordState({
+    orderPost: (p) => { if (p === STOP_REQ_PATH) requestCount++; return null; },
+  }));
+  await flush();
+  await openStopDialog(dom);
+  dom.byId('order-stop-reason').value = 'SCOPE_CONCERN';
+  dom.byId('order-stop-reason').fire('change');
+  dom.byId('order-stop-cancel').fire('click');
+  await flush();
+  assert.equal(dom.byId('order-stop-dialog').open, false);
+  assert.equal(requestCount, 0);
+});
+
+test('cancel sends the waiting request id with an empty JSON object, and the detail is read again', async () => {
+  let cancelCount = 0;
+  const s = ordState({
+    orderDetail: { status: 200, data: orderDetailOf({ state: 'STOP_REQUESTED', stateReason: 'STOP_REQUESTED', version: 4 }, stopRequestOf()) },
+    orderPost: (p) => {
+      if (p !== CANCEL_PATH) return null;
+      cancelCount++;
+      return { status: 200, data: orderOf({ state: 'PAUSED', stateReason: 'STOP_NOT_APPROVED', version: 5 }) };
+    },
+  });
+  const dom = ordLoad(s);
+  await flush();
+  buttonIn(dom.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(dom.byId('orders-list'), '要求を取り消す').fire('click');
+  await flush();
+  assert.equal(cancelCount, 1);
+  const sent = postsTo(dom.calls, CANCEL_PATH);
+  assert.deepEqual(sent[0].body, {}, 'the body is an empty JSON object');
+  assert.match(dom.byId('orders-msg').textContent, /停止の要求を取り消しました/);
+  assert.equal(dom.calls.filter((c) => c.path === '/api/selfdev/orders/' + O1 && c.method === 'GET').length >= 2, true, 'the detail is read again');
+});
+
+test('a refused request or cancel shows a fixed text, never the server text, the title or the policy', async () => {
+  const cases = [
+    { path: STOP_REQ_PATH, status: 409, text: /状態が変わっていました/ },
+    { path: STOP_REQ_PATH, status: 403, text: /権限では行えません/ },
+    { path: STOP_REQ_PATH, status: 503, text: /今は無効です/ },
+    { path: STOP_REQ_PATH, status: 400, text: /入力を確認できませんでした/ },
+  ];
+  for (const c of cases) {
+    const dom = ordLoad(ordState({
+      orderPost: (p) => (p === c.path ? { status: c.status, data: { error: STOP_REQ_SECRET + ' ' + SECRET_TITLE, code: 'X' } } : null),
+    }));
+    await flush();
+    await openStopDialog(dom);
+    dom.byId('order-stop-reason').value = 'OPERATOR_REQUEST';
+    dom.byId('order-stop-reason').fire('change');
+    dom.byId('order-stop-submit').fire('click');
+    await flush();
+    const msg = dom.byId('orders-msg').textContent;
+    assert.match(msg, c.text, `${c.status}: the fixed text`);
+    for (const secret of [STOP_REQ_SECRET, SECRET_TITLE, SECRET_POLICY, 'X']) {
+      assert.equal(msg.includes(secret), false, `${c.status}: not shown: ${secret}`);
+    }
+    assert.equal(dom.byId('order-stop-dialog').open, false, `${c.status}: the dialog closes`);
+  }
+
+  const cancelDenied = ordLoad(ordState({
+    orderDetail: { status: 200, data: orderDetailOf({ state: 'STOP_REQUESTED', stateReason: 'STOP_REQUESTED', version: 4 }, stopRequestOf()) },
+    orderPost: (p) => (p === CANCEL_PATH ? { status: 403, data: { error: STOP_REQ_SECRET, code: 'FORBIDDEN' } } : null),
+  }));
+  await flush();
+  buttonIn(cancelDenied.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(cancelDenied.byId('orders-list'), '要求を取り消す').fire('click');
+  await flush();
+  const msg = cancelDenied.byId('orders-msg').textContent;
+  assert.match(msg, /権限では行えません/, 'cancel 403: the fixed text');
+  assert.equal(msg.includes(STOP_REQ_SECRET), false, 'cancel 403: the server text is not shown');
+  assert.equal(attrsOf(cancelDenied.byId('orders-list')).includes(STOP_REQ_SECRET), false, 'not in an attribute');
+});
+
+test('while a request is in flight a second confirm sends nothing, and the controls are disabled', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let requestCount = 0;
+  const dom = ordLoad(ordState({
+    orderPost: (p) => {
+      if (p !== STOP_REQ_PATH) return null;
+      requestCount++;
+      return gate.then(() => ({ status: 201, data: { requestId: R1, orderId: O1, state: 'PENDING' } }));
+    },
+  }));
+  await flush();
+  await openStopDialog(dom);
+  dom.byId('order-stop-reason').value = 'RUNAWAY_SUSPECTED';
+  dom.byId('order-stop-reason').fire('change');
+  dom.byId('order-stop-submit').fire('click');
+  dom.byId('order-stop-submit').fire('click');
+  await flush();
+  assert.equal(requestCount, 1, 'one request while in flight');
+  assert.equal(dom.byId('order-stop-submit').disabled, true, 'confirm is disabled while in flight');
+  assert.equal(dom.byId('order-stop-reason').disabled, true, 'the reason is disabled while in flight');
+  release();
+  await flush();
+  assert.equal(requestCount, 1, 'still one request after the answer');
+});
+
+test('while a cancel is in flight a second click sends nothing', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let cancelCount = 0;
+  const dom = ordLoad(ordState({
+    orderDetail: { status: 200, data: orderDetailOf({ state: 'STOP_REQUESTED', stateReason: 'STOP_REQUESTED', version: 4 }, stopRequestOf()) },
+    orderPost: (p) => {
+      if (p !== CANCEL_PATH) return null;
+      cancelCount++;
+      return gate.then(() => ({ status: 200, data: orderOf({ state: 'PAUSED', version: 5 }) }));
+    },
+  }));
+  await flush();
+  buttonIn(dom.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(dom.byId('orders-list'), '要求を取り消す').fire('click');
+  await flush();
+  assert.equal(buttonIn(dom.byId('orders-list'), '要求を取り消す').disabled, true, 'the cancel button is disabled while in flight');
+  buttonIn(dom.byId('orders-list'), '要求を取り消す').fire('click');
+  await flush();
+  assert.equal(cancelCount, 1, 'one cancel while in flight');
+  release();
+  await flush();
+  assert.equal(cancelCount, 1, 'still one cancel after the answer');
+});

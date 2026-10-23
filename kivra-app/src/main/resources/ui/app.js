@@ -2846,6 +2846,8 @@
   };
 
   var REQUESTER_KINDS = { AI: 'AI の主体', HUMAN: '人（運用者）' };
+  // The codes a person may request a stop with: StopRequestReason.REQUESTABLE on the server (the automatic child codes are not offered).
+  var STOP_REQUEST_REASONS = ['OPERATOR_REQUEST', 'RUNAWAY_SUSPECTED', 'BUDGET_CONCERN', 'SCOPE_CONCERN'];
   // A paused order with one of these reasons is not resumed by an operator (ADR 0015, U-11).
   var NOT_RESUMABLE_REASONS = ['LIMIT_REACHED', 'EXPIRED'];
 
@@ -2855,6 +2857,9 @@
     rejected: '停止の要求を却下しました。order は一時停止中になります（自動では再開しません）。',
     paused: 'order を一時停止しました。',
     resumed: 'order を再開しました。',
+    stopConfirm: 'この order の停止を要求します。承認者が承認するまで、order は停止しません。',
+    requested: '停止を要求しました。承認されるまで、order は停止しません。',
+    cancelled: '停止の要求を取り消しました。order は一時停止中になります（自動では再開しません）。',
     stale: '状態が変わっていました。一覧と詳細を読み直してから、もう一度操作してください。',
     forbidden: 'この操作は、あなたの権限では行えません。',
     notFound: '見つかりません（既に消えたか、状態が変わりました）。',
@@ -2879,7 +2884,8 @@
     detailLoading: false,
     detailSeq: 0,
     busy: false,
-    pendingApprove: null
+    pendingApprove: null,
+    pendingStop: null
   };
 
   /** A fixed code as text: the explanation and the code. A code outside the table is shown as unknown (with the code, if it has the code shape). */
@@ -2955,6 +2961,7 @@
     var blocked = ORD.busy || state.sessionExpired;
     $('orders-refresh').disabled = state.sessionExpired;
     $('order-approve-submit').disabled = blocked || ORD.pendingApprove === null;
+    updateStopControls();
     renderOrderList();
     renderApprovals();
     updateOrderCreate();
@@ -3205,6 +3212,14 @@
     if (versionOk && o.state === 'PAUSED' && NOT_RESUMABLE_REASONS.indexOf(str(o.stateReason)) === -1) {
       actions.push(actionButton('再開', function () { ordResume(d); }));
     }
+    // A stop is requested from ACTIVE or PAUSED, and only when no request waits. The server decides the rest.
+    if (versionOk && (o.state === 'ACTIVE' || o.state === 'PAUSED') && !d.pending) {
+      actions.push(actionButton('停止を要求', function () { ordOpenStop(d); }, 'secondary'));
+    }
+    // The pending request's requester is not in the response, so any waiting request offers the cancel. The server answers 403 when it is not allowed.
+    if (ordCancellable(d)) {
+      actions.push(actionButton('要求を取り消す', function () { ordCancelStop(d); }, 'secondary'));
+    }
     actions.forEach(function (b) { b.disabled = ORD.busy || state.sessionExpired; });
     if (actions.length) box.appendChild(h('div', { className: 'detail-actions' }, actions));
   }
@@ -3355,7 +3370,85 @@
     ordAfterWrite(req.orderId);
   }
 
+  function ordCancellable(d) {
+    return !!d.pending && ordValidRequest(d.pending);
+  }
+
+  function ordOption(value, text) {
+    var o = document.createElement('option');
+    o.value = value;
+    o.textContent = text;
+    return o;
+  }
+
+  /** The stop request dialog: the reason code is chosen from the fixed list; the request body is the version read and the code. */
+  function ordOpenStop(d) {
+    if (ORD.busy || state.sessionExpired || typeof d.order.version !== 'number') return;
+    ORD.pendingStop = { orderId: d.orderId, version: d.order.version };
+    $('order-stop-text').textContent = ORDER_MSG.stopConfirm;
+    $('order-stop-target').textContent = '対象の order: ' + d.orderId;
+    $('order-stop-reason').value = '';
+    updateStopControls();
+    $('order-stop-dialog').showModal();
+  }
+
+  function updateStopControls() {
+    var sel = $('order-stop-reason');
+    var blocked = ORD.busy || state.sessionExpired;
+    var chosen = STOP_REQUEST_REASONS.indexOf(sel.value) !== -1;
+    sel.disabled = blocked;
+    $('order-stop-cancel').disabled = ORD.busy;
+    $('order-stop-submit').disabled = blocked || ORD.pendingStop === null || !chosen;
+  }
+
+  async function ordSubmitStop() {
+    var req = ORD.pendingStop;
+    var reason = $('order-stop-reason').value;
+    if (!req || ORD.busy || state.sessionExpired || STOP_REQUEST_REASONS.indexOf(reason) === -1) return;
+    ORD.busy = true;
+    updateOrderControls();
+    var r;
+    try {
+      r = await apiFetch('/api/selfdev/orders/' + encodeURIComponent(req.orderId) + '/stop-requests', 'POST', { version: req.version, reasonCode: reason });
+    } finally {
+      ORD.busy = false;
+    }
+    ORD.pendingStop = null;
+    $('order-stop-dialog').close();
+    ordSetMsg('orders-msg', r.ok ? ORDER_MSG.requested : ordFailText(r), r.ok ? 'ok' : 'error');
+    ordAfterWrite(req.orderId);
+  }
+
+  /** Cancels the waiting request. The body is an empty JSON object, as for reject. */
+  async function ordCancelStop(d) {
+    if (ORD.busy || state.sessionExpired || !ordCancellable(d)) return;
+    ORD.busy = true;
+    updateOrderControls();
+    var r;
+    try {
+      r = await apiFetch('/api/selfdev/stop-requests/' + encodeURIComponent(d.pending.requestId) + '/cancel', 'POST', {});
+    } finally {
+      ORD.busy = false;
+    }
+    ordSetMsg('orders-msg', r.ok ? ORDER_MSG.cancelled : ordFailText(r), r.ok ? 'ok' : 'error');
+    ordAfterWrite(d.orderId);
+  }
+
   function initOrders() {
+    var reasonSel = $('order-stop-reason');
+    reasonSel.appendChild(ordOption('', '理由を選んでください'));
+    STOP_REQUEST_REASONS.forEach(function (c) { reasonSel.appendChild(ordOption(c, STOP_REASONS[c])); });
+    reasonSel.addEventListener('change', updateStopControls);
+    $('order-stop-cancel').addEventListener('click', function () {
+      ORD.pendingStop = null;
+      $('order-stop-dialog').close();
+      updateOrderControls();
+    });
+    $('order-stop-submit').addEventListener('click', ordSubmitStop);
+    $('order-stop-dialog').addEventListener('close', function () {
+      ORD.pendingStop = null;
+      updateOrderControls();
+    });
     $('orders-refresh').addEventListener('click', function () { refreshOrders(); });
     $('order-title').addEventListener('input', updateOrderCreate);
     $('order-policy').addEventListener('input', updateOrderCreate);

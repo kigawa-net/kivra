@@ -280,7 +280,13 @@ class SelfDevMemoryRepositoryTest {
     fun `no log line carries a note text, a secret or a refusal's text`() = TestDb().use { db ->
         val root = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
         val previous = root.level
-        val appender = ListAppender<ILoggingEvent>().also { it.start(); root.addAppender(it) }
+        // The root logger receives events from every thread (for example the Hikari pool's background threads at TRACE), while the test
+        // reads the list. ListAppender's default ArrayList is not thread-safe, so the list is swapped for a concurrent one before use.
+        val appender = ListAppender<ILoggingEvent>().also {
+            it.list = java.util.concurrent.CopyOnWriteArrayList()
+            it.start()
+            root.addAppender(it)
+        }
         root.level = Level.TRACE
         try {
             val r = repo(db)

@@ -50,10 +50,11 @@ internal val MIGRATION_FILES = mapOf(
     25 to "V25__selfdev_order_children.sql",
     26 to "V26__selfdev_order_cycle_budget.sql",
     27 to "V27__selfdev_order_child_stop.sql",
+    28 to "V28__selfdev_order_auto_stop.sql",
 )
 
 /** The versions applied on the full chain. V22 is never used (reserved gap), so the list skips it. */
-internal val EXPECTED_APPLIED_VERSIONS: List<String> = (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27")
+internal val EXPECTED_APPLIED_VERSIONS: List<String> = (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28")
 
 /** Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved). */
 internal val RESERVED_MIGRATION_VERSIONS: Set<Int> = setOf(22)

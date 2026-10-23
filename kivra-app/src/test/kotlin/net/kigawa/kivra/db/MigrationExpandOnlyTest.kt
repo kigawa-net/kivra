@@ -110,6 +110,12 @@ class MigrationExpandOnlyTest {
                 "V27 replaces the separation CHECK with one that is equal for every row an old Writer can write: an old Writer does not " +
                 "name target_is_root, so the column is 1 (the root), and the new CHECK then reads the same as the old one. No Contract " +
                 "step is needed for this change. It is listed so the scan accepts exactly this statement; a later DROP is still refused.",
+            "V28:DROP (ALTER TABLE SELFDEV_ORDER_STOP_REQUESTS DROP CONSTRAINT CK_SELFDEV_ORDER_STOP_DECIDER)" to
+                "V28 replaces the decider CHECK with one that accepts every value the old one did (HUMAN and NULL) and adds ORDER. An old " +
+                "Writer never writes ORDER, so its rows pass the new CHECK as they passed the old one. No Contract step is needed.",
+            "V28:DROP (ALTER TABLE SELFDEV_ORDER_STOP_REQUESTS DROP CONSTRAINT CK_SELFDEV_ORDER_STOP_REQUESTER)" to
+                "V28 replaces the requester CHECK with one that accepts HUMAN and AI (as before) and adds SYSTEM. An old Writer never writes " +
+                "SYSTEM, so its rows pass the new CHECK as they passed the old one. No Contract step is needed.",
         )
     }
 }

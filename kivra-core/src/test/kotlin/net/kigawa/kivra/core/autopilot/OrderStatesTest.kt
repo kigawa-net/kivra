@@ -180,4 +180,27 @@ class OrderStatesTest {
         assertEquals(OrderTransitionDecision.Refused(OrderRefusal.NO_EDGE), checkSubtreeStop(OrderState.STOP_REQUESTED, OrderActor.HUMAN))
         assertEquals(OrderTransitionDecision.Refused(OrderRefusal.TERMINAL), checkSubtreeStop(OrderState.STOPPED, OrderActor.HUMAN))
     }
+
+    @Test
+    fun `an automatic stop is allowed only for an ACTIVE or PAUSED order, with the parent-stop or ancestor-stop reason`() {
+        for (from in listOf(OrderState.ACTIVE, OrderState.PAUSED)) {
+            for (reason in listOf(OrderReason.PARENT_STOPPED, OrderReason.ANCESTOR_STOPPED)) {
+                assertEquals(OrderTransitionDecision.Allowed, checkAutomaticStop(from, reason))
+            }
+            assertEquals(
+                OrderTransitionDecision.Refused(OrderRefusal.REASON_NOT_ALLOWED),
+                checkAutomaticStop(from, OrderReason.OPERATOR_STOPPED),
+            )
+        }
+        assertEquals(OrderTransitionDecision.Refused(OrderRefusal.NO_EDGE), checkAutomaticStop(OrderState.STOP_REQUESTED, OrderReason.PARENT_STOPPED))
+        assertEquals(OrderTransitionDecision.Refused(OrderRefusal.TERMINAL), checkAutomaticStop(OrderState.STOPPED, OrderReason.ANCESTOR_STOPPED))
+    }
+
+    @Test
+    fun `the automatic child stop reason is never requestable, and the requestable ones are the four of the request`() {
+        assertEquals(
+            listOf("OPERATOR_REQUEST", "RUNAWAY_SUSPECTED", "BUDGET_CONCERN", "SCOPE_CONCERN"),
+            StopRequestReason.REQUESTABLE.map { it.name },
+        )
+    }
 }

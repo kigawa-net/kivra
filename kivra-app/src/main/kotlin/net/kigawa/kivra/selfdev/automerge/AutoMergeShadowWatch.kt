@@ -44,10 +44,13 @@ class AutoMergeShadowWatch(
      * A failure in one Run is logged by code and does not stop the others.
      */
     suspend fun tick(): Int {
-        val meter = ShadowReadMeter(MAX_READS_PER_TICK)
-        val main = assembler.mainCi(meter)
         val global = store.globalSnapshot()
         val runIds = store.pullRequestRunIds(MAX_PRS_PER_TICK)
+        // While the automatic merge is paused (ADR 0014 U-10) the pass judges nothing and reads nothing from GitHub. It records one
+        // skip per Run and per change of state, so the audit shows the pause without a record for every tick.
+        if (global.autoMergePaused) return recordPaused(runIds)
+        val meter = ShadowReadMeter(MAX_READS_PER_TICK)
+        val main = assembler.mainCi(meter)
         var recorded = 0
         for (runId in runIds) {
             try {
@@ -82,6 +85,25 @@ class AutoMergeShadowWatch(
         }
     }
 
+    private fun recordPaused(runIds: List<RunId>): Int {
+        var recorded = 0
+        for (runId in runIds) {
+            try {
+                if (lastRecorded[runId] == PAUSED_KEY) continue
+                store.recordPaused(runId)
+                lastRecorded[runId] = PAUSED_KEY
+                recorded++
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logger.warn("automerge shadow: paused record failed, exception={}", e.javaClass.simpleName)
+            }
+        }
+        lastRecorded.keys.retainAll(runIds.toSet())
+        if (recorded > 0) logger.info("automerge shadow: paused, recorded count={}", recorded)
+        return recorded
+    }
+
     private fun ShadowJudgement.payload(): String = buildJsonObject {
         put("prNumber", prNumber)
         put("headSha", headSha)
@@ -95,6 +117,9 @@ class AutoMergeShadowWatch(
 
     companion object {
         private val logger = LoggerFactory.getLogger(AutoMergeShadowWatch::class.java)
+
+        /** The memory of a paused record, in the same shape as a judgement's (head SHA, code). No judgement has this code. */
+        private val PAUSED_KEY = "" to "PAUSED"
 
         /** ADR 0014 S1: one judgement pass a minute. */
         val INTERVAL: Duration = Duration.ofSeconds(60)

@@ -116,11 +116,12 @@ internal class AutoMergeFactsAssembler(
             checks = checks,
             global = AutoMergeGlobalFacts(
                 // The shadow runs only when self-development and the autopilot are on (see buildAutoMergeShadowWatch). Its own switch
-                // is on, because the judgement is what the switch is for. ADR 0014 U-10 (the per-feature pause) is not in S1, so false.
+                // is on, because the judgement is what the switch is for. The watch skips the judgement while the per-feature pause
+                // is on (ADR 0014 U-10), so this is false whenever a judgement is made.
                 selfDevEnabled = true,
                 autopilotEnabled = true,
                 autoMergeEnabled = true,
-                autoMergePaused = false,
+                autoMergePaused = global.autoMergePaused,
                 selfDevPaused = global.selfDevPaused,
                 breakerOpen = global.breakerOpen,
                 mainCi = main.result,

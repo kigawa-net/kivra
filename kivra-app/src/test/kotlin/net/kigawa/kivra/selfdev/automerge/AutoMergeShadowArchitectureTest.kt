@@ -30,14 +30,14 @@ class AutoMergeShadowArchitectureTest {
     }
 
     @Test
-    fun `the watch exposes only tick and start, and the store's only write is the judgement record`() {
+    fun `the watch exposes only tick and start, and the store's only writes are the judgement and the paused records`() {
         assertEquals(setOf("tick", "start"), publicMethods(AutoMergeShadowWatch::class.java))
         assertEquals(
-            setOf("pullRequestRunIds", "runSnapshot", "globalSnapshot", "recordJudgement"),
+            setOf("pullRequestRunIds", "runSnapshot", "globalSnapshot", "recordJudgement", "recordPaused"),
             publicMethods(AutoMergeShadowStore::class.java),
         )
         assertEquals(
-            setOf("pullRequestRunIds", "runSnapshot", "globalSnapshot", "recordJudgement"),
+            setOf("pullRequestRunIds", "runSnapshot", "globalSnapshot", "recordJudgement", "recordPaused"),
             publicMethods(DbAutoMergeShadowStore::class.java),
         )
     }

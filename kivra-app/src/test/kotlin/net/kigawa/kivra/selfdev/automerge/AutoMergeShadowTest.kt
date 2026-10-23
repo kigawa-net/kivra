@@ -120,6 +120,7 @@ private class FakeShadowStore : AutoMergeShadowStore {
     val snapshots = mutableMapOf<RunId, ShadowRunSnapshot>()
     var global = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = false)
     val recorded = mutableListOf<Recorded>()
+    val pausedRecords = mutableListOf<RunId>()
 
     override fun pullRequestRunIds(limit: Int): List<RunId> = prRuns.take(limit)
 
@@ -129,6 +130,10 @@ private class FakeShadowStore : AutoMergeShadowStore {
 
     override fun recordJudgement(runId: RunId, verdict: String, payload: String) {
         recorded += Recorded(runId, verdict, payload)
+    }
+
+    override fun recordPaused(runId: RunId) {
+        pausedRecords += runId
     }
 }
 
@@ -168,6 +173,33 @@ private class Harness {
 }
 
 class AutoMergeShadowTest {
+
+    @Test
+    fun `while the automatic merge is paused the pass judges nothing, reads nothing, and records one skip per Run`() = runBlocking {
+        val h = Harness()
+        h.store.global = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = false, autoMergePaused = true)
+        assertEquals(1, h.tick())
+        assertEquals(0, h.tick())
+        assertEquals(listOf(RUN_ID), h.store.pausedRecords)
+        assertTrue(h.store.recorded.isEmpty())
+        assertTrue(h.port.calls.isEmpty(), "a paused pass makes no GitHub read: ${h.port.calls}")
+    }
+
+    @Test
+    fun `after the pause is lifted the next pass judges again, even when the verdict is the one before the pause`() = runBlocking {
+        val h = Harness()
+        assertEquals(1, h.tick())
+        h.store.global = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = false, autoMergePaused = true)
+        assertEquals(1, h.tick())
+        assertEquals(1, h.store.pausedRecords.size)
+        assertEquals(1, h.store.recorded.size)
+
+        h.store.global = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = false, autoMergePaused = false)
+        assertEquals(1, h.tick())
+        assertEquals(2, h.store.recorded.size)
+        assertEquals("ELIGIBLE", h.store.recorded.last().verdict)
+        assertEquals(1, h.store.pausedRecords.size)
+    }
 
     @Test
     fun `a satisfying PR is ELIGIBLE, recorded once, and the second pass writes nothing new`() = runBlocking {

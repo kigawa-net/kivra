@@ -140,6 +140,7 @@ class AutoMergeShadowSettingsTest {
         override fun runSnapshot(runId: RunId): ShadowRunSnapshot? = null
         override fun globalSnapshot(): ShadowGlobalSnapshot = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = false)
         override fun recordJudgement(runId: RunId, verdict: String, payload: String) = Unit
+        override fun recordPaused(runId: RunId) = Unit
     }
 
     private object NoPort : AutoMergeShadowPort {

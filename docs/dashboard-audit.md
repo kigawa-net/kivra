@@ -97,7 +97,7 @@
 
 ### 9. テストの確認範囲
 
-`ui-behavior.test.js` は約 1000 行の 1 ファイルで、振る舞いごとのテストが並ぶ。Goal、解放、予算の各機能のテストがあることは確認した。`.github/workflows/ci.yml` に Node や npm の手順は見当たらず、README の CI 説明も `./gradlew test` と MariaDB のテストだけに触れている。この JS テストが CI で実行されているかは確認できていない。
+`ui-behavior.test.js` は約 1000 行の 1 ファイルで、振る舞いごとのテストが並ぶ。Goal、解放、予算の各機能のテストがあることは確認した。この JS テストは、Kotlin のテスト `UiBehaviorTest`(`kivra-app/src/test/kotlin/net/kigawa/kivra/routes/UiBehaviorTest.kt`)が `node --test` で起動する。そのため、`ci.yml` に Node の手順が無くても、`./gradlew test` の一部として CI で実行される(runner に node 18 以上が要る)。
 
 ## 整理の優先順位（提案）
 
@@ -111,7 +111,6 @@
 
 - 画面が呼ぶ `/api/*` のエンドポイントと、そのレスポンスの形
 - `app.css` の重複セレクタと未使用ルール
-- JS テストの CI 実行の有無（ci.yml を読んだ範囲では見当たらない）
 
 ## 追記: セクション構成の再確認と整理方針（2026-10-22）
 
@@ -203,7 +202,7 @@
 - **課題 7（固定文字列）**: `環境: dev` は固定（`index.html` 13 行目）。`#mode-note` の初期文言（23 行目）は変わっていない。
 - **整理後の並び順の残り**: Goal の送信フォームと一覧は別のカード（69 行目と 86 行目）のまま。昇格条件（102 行目）は `#plans-section` の中にある。運用者向けの節（112〜171 行目）は見出しをまとめていない。
 - **重複の整理**: 「今すぐ更新」は 5 件（`index.html` の 55、89、124、136、162 行目）、「未取得」は 7 件（64、103、107、116、128、138、171 行目）のまま。SIMULATED と SELF_DEV の説明は、種別ラベル（32〜33 行目）、`#kind-note`（35 行目。`renderKindNote` 421 行目）、凡例（285〜286 行目）の 3 か所に残る。「PR のマージは人が行う」は Goal の説明（71 行目）に残り、凡例は「kivra は PR をマージしません」（286 行目）になっている。
-- **課題 9（JS テストの CI）**: `.github/workflows/`（`cd.yml`、`ci.yml`、`fx-refresh.yml`、`local-boot-smoke.yml`）と Gradle の `*.kts` に、`ui-behavior.test.js`、`src/test/js`、`node` の参照は見当たらない。JS テストが CI で走っていない可能性が高い。ただし、別のスクリプトから呼ばれているかは確認していない。
+- **課題 9（JS テストの CI）**: 解消済みの懸念。`UiBehaviorTest` が `node --test` で `ui-behavior.test.js` を起動するため、`./gradlew test` で実行される。以前の CI の失敗(stub DOM の不備、#317 で修正)も、この経路で検出された。
 
 ## 未確認事項（追加）
 

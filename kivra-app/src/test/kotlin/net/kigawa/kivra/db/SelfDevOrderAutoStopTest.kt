@@ -261,4 +261,27 @@ class SelfDevOrderAutoStopTest {
         )
         assertEquals(OrderState.ACTIVE, f.now(a.orderId).state)
     }
+
+    @Test
+    fun `children of a PAUSED parent do not fill the batch ahead of an eligible child, so the eligible one is a candidate`() = withFixture { f ->
+        val root = f.root()
+        val paused = f.child(root.orderId, "cand-paused")
+        val wide = ChildLimits(maxDepth = 2, maxChildren = 100, maxTree = 500)
+        val crowd = (1..55).map { i ->
+            (f.repo.createChild(paused.orderId, TITLE_MARKER, POLICY_MARKER, 1, "cand-crowd-$i", OPERATOR, wide) as ChildCreateResult.Created)
+                .order.orderId
+        }
+        f.clock.now = START.plusSeconds(1)
+        val eligible = (f.repo.createChild(root.orderId, TITLE_MARKER, POLICY_MARKER, 1, "cand-eligible", OPERATOR, wide) as ChildCreateResult.Created)
+            .order
+        f.setState(paused.orderId, OrderState.PAUSED)
+        crowd.forEach { f.failures(it, CYCLE_FAILURE_LIMIT) }
+        f.failures(eligible.orderId, CYCLE_FAILURE_LIMIT)
+
+        // The crowd is older (updated_at) and sits under a parent that is not ACTIVE: autoStopChild would answer PARENT_NOT_ACTIVE for each.
+        assertEquals(listOf(eligible.orderId), f.repo.autoStopCandidates(50))
+        assertIs<AutoStopResult.NotDecided>(f.repo.autoStopChild(crowd.first()))
+        assertEquals(OrderState.ACTIVE, f.now(crowd.first()).state)
+        assertEquals(OrderState.STOPPED, f.stopped(eligible.orderId).state)
+    }
 }

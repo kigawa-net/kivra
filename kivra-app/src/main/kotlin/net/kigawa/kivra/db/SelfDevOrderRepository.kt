@@ -744,7 +744,9 @@ class SelfDevOrderRepository(
             if (decision is OrderTransitionDecision.Refused) {
                 throw Rollback(OrderResult.Refused(OrderConflict.valueOf(decision.reason.name)))
             }
-            for (descendant in descendants) {
+            // A descendant already STOPPED is final and is skipped, as autoStopChild skips it: the digest above still covers it.
+            val live = descendants.filter { it.state != OrderState.STOPPED }
+            for (descendant in live) {
                 val sub = checkSubtreeStop(descendant.state, OrderActor.HUMAN)
                 if (sub is OrderTransitionDecision.Refused) throw Rollback(OrderResult.Refused(OrderConflict.valueOf(sub.reason.name)))
             }
@@ -763,7 +765,7 @@ class SelfDevOrderRepository(
             appendTreeEvent(order, "STOP_APPROVED", OrderState.STOP_REQUESTED, OrderState.STOP_REQUESTED, null, OrderActor.HUMAN, approverKey, requestId, now)
             appendTreeEvent(order, "STOPPED", OrderState.STOP_REQUESTED, OrderState.STOPPED, reason.name, OrderActor.HUMAN, approverKey, requestId, now)
             // The descendants, level by level (the order of the locks). Their version was checked above and is current under the locks.
-            for (descendant in descendants) {
+            for (descendant in live) {
                 if (!updateState(descendant.orderId, descendant.version, OrderState.STOPPED, OrderReason.ANCESTOR_STOPPED, now)) {
                     throw Rollback(OrderResult.StaleVersion)
                 }
@@ -885,25 +887,34 @@ class SelfDevOrderRepository(
         budgetFactsIn(order, part)
     }
 
-    /** The children whose cost reached their budget, the cheap first filter of CHILD_BUDGET_EXHAUSTED. The facts are checked under the lock. */
+    /**
+     * The children whose cost reached their budget, the cheap first filter of CHILD_BUDGET_EXHAUSTED. The facts are checked under the lock.
+     * The parent must be ACTIVE: [autoStopChild] answers PARENT_NOT_ACTIVE for any other parent without writing, so such a child would only
+     * hold a place in the LIMIT, ahead of the candidates behind it.
+     */
     fun budgetExhaustedCandidates(limit: Int): List<String> = transaction(database) {
         execQuery(
             """
-            SELECT order_id FROM selfdev_orders
-             WHERE parent_order_id IS NOT NULL AND state IN ('ACTIVE', 'PAUSED') AND spent_jpy >= order_budget_jpy
-             ORDER BY updated_at, order_id LIMIT ?
+            SELECT o.order_id FROM selfdev_orders o JOIN selfdev_orders p ON p.order_id = o.parent_order_id
+             WHERE o.parent_order_id IS NOT NULL AND o.state IN ('ACTIVE', 'PAUSED') AND o.spent_jpy >= o.order_budget_jpy
+               AND p.state = 'ACTIVE'
+             ORDER BY o.updated_at, o.order_id LIMIT ?
             """.trimIndent(),
             limit,
         ) { it.getString(1) }
     }
 
-    /** The children that may be stopped automatically now: not root, ACTIVE or PAUSED, failures at the limit. [autoStopChild] checks each again. */
+    /**
+     * The children that may be stopped automatically now: not root, ACTIVE or PAUSED, failures at the limit, and a direct parent that is ACTIVE
+     * (the same first filter as [budgetExhaustedCandidates]). [autoStopChild] checks each again.
+     */
     fun autoStopCandidates(limit: Int): List<String> = transaction(database) {
         execQuery(
             """
-            SELECT order_id FROM selfdev_orders
-             WHERE parent_order_id IS NOT NULL AND state IN ('ACTIVE', 'PAUSED') AND consecutive_failed_cycles >= ?
-             ORDER BY updated_at, order_id LIMIT ?
+            SELECT o.order_id FROM selfdev_orders o JOIN selfdev_orders p ON p.order_id = o.parent_order_id
+             WHERE o.parent_order_id IS NOT NULL AND o.state IN ('ACTIVE', 'PAUSED') AND o.consecutive_failed_cycles >= ?
+               AND p.state = 'ACTIVE'
+             ORDER BY o.updated_at, o.order_id LIMIT ?
             """.trimIndent(),
             CYCLE_FAILURE_LIMIT, limit,
         ) { it.getString(1) }

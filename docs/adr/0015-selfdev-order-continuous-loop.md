@@ -255,6 +255,8 @@ order の方針、範囲、上限、親は、作成後に変えない。承認�
 
 **実装の状況(2026-10-23。追補 K.1 と L の「3e の残り」)**: `CHILD_BUDGET_EXHAUSTED` は `OrderWatch` の自動の停止に入った。事実は `SelfDevOrderRepository.budgetExhaustedFacts` が読み取り専用で集計し(`spent_jpy`、`order_budget_jpy`、部分木の非 final の周の数、非終端の Run の数)、`autoStopChild(childId, CHILD_BUDGET_EXHAUSTED)` は決定の前に、木のロックの下で同じ条件を確かめる。上限は `CHILD_CYCLE_FAILURES` と共通。理由コードは要求に使えない(`StopRequestReason.REQUESTABLE` に入らない)。DB の移行は不要(`reason_code` に CHECK が無い)。運用上の注意は runbook §7.6.2j。
 
+**承認経路との整合(2026-10-23、問題の修正)**: 人の停止の承認(`approveStop`)は、部分木に既に `STOPPED` の子孫があっても拒否せず、その子孫を飛ばして残りを止める(自動の停止と同じ。終端の子孫の監査行は書き直さない。部分木のダイジェストは従来どおり全子孫の版を含む)。自動の停止の候補の検索は、直接の親が `ACTIVE` の子だけを返す(親が有効に `ACTIVE` でない子は、どのみち `PARENT_NOT_ACTIVE` で決められないため)。
+
 #### 4.5 停止の影響(子、孫、進行中の Run と PR)
 
 - **孫以下**: 子を停止すると、子孫は同じ transaction で `STOPPED`(`ANCESTOR_STOPPED`)になる。子孫ごとに別の決定を要求しない。孤児は作らない(§2.7)。

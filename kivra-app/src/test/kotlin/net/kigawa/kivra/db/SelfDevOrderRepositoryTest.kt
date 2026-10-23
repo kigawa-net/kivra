@@ -867,6 +867,27 @@ class SelfDevOrderRepositoryTest {
     }
 
     @Test
+    fun `a child's approval skips a descendant that is already STOPPED, as the automatic stop does, and leaves that descendant as it was`() = withFixture { f ->
+        val (_, child, grand) = f.tree()
+        val grandRequest = f.requestStop(grand)
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.approveStop(grandRequest.requestId, OPERATOR, grandRequest.digest))
+        val grandBefore = f.now(grand.orderId)
+        assertEquals(OrderState.STOPPED, grandBefore.state)
+        val grandStoppedEvents = "SELECT COUNT(*) FROM selfdev_order_events WHERE kind = 'STOPPED' AND order_id = '${grand.orderId}'"
+        assertEquals(1, f.count(grandStoppedEvents))
+
+        val childRequest = f.requestStop(child)
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.approveStop(childRequest.requestId, OPERATOR, childRequest.digest))
+        assertEquals(OrderState.STOPPED, f.now(child.orderId).state)
+        val grandAfter = f.now(grand.orderId)
+        assertEquals(OrderState.STOPPED, grandAfter.state)
+        assertEquals(grandBefore.stateReason, grandAfter.stateReason)
+        assertEquals(grandBefore.version, grandAfter.version)
+        assertEquals(1, f.count(grandStoppedEvents))
+        assertTrue(f.orphans().isEmpty())
+    }
+
+    @Test
     fun `an expired child request pauses the child only, and nothing is resumed by itself`() = withFixture { f ->
         val (_, child, grand) = f.tree()
         val request = f.requestStop(child)

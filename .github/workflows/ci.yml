@@ -44,6 +44,12 @@ jobs:
 
   test-mariadb:
     runs-on: ubuntu-latest
+    # 3 シャード(KIVRA_TEST_SHARD)に分けて並列に走らせる。対象は kivra-app/build.gradle.kts を参照。
+    # 各シャードは独立したジョブ(独立した MariaDB サービス)。ジョブ名 test-mariadb の結果は、全シャードが success のときだけ success。
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     services:
       mariadb:
         image: mariadb:11
@@ -69,19 +75,20 @@ jobs:
       # MariaDB 11: the same suite, including Flyway migration, unique / lease / transaction / Outbox concurrency.
       # Each test creates and drops its own schema (see TestDb).
       # --rerun: test タスクだけを必ず再実行する(UP-TO-DATE で飛ばさない)。
-      - name: Test (MariaDB 11, migrations and concurrency)
+      - name: Test (MariaDB 11, migrations and concurrency, shard ${{ matrix.shard }})
         env:
           KIVRA_TEST_DB: mariadb
           KIVRA_TEST_MARIADB_URL: jdbc:mariadb://127.0.0.1:3306/
           KIVRA_TEST_MARIADB_USER: root
           KIVRA_TEST_MARIADB_PASSWORD: test
+          KIVRA_TEST_SHARD: ${{ matrix.shard }}
         run: ./gradlew :kivra-app:test --rerun --no-daemon
 
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-reports-mariadb
+          name: test-reports-mariadb-shard-${{ matrix.shard }}
           path: "**/build/reports/tests/"
 
   # 必須チェック用の最終ジョブ。needs の結果が 1 つでも success 以外なら失敗にする。

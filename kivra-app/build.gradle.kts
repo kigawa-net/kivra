@@ -8,6 +8,26 @@ application {
     mainClass.set("io.ktor.server.netty.EngineMain")
 }
 
+// CI の test-mariadb を 3 シャード(並列ジョブ)に分ける。KIVRA_TEST_SHARD が未設定なら全テスト(既定、ローカルと test-h2 は従来どおり)。
+// 1: db.*  2: selfdev.* と mcp.*  3: 上の 1 と 2 を除く残りすべて(新しいパッケージは自動で 3 に入る)。
+val kivraTestShardPackages = mapOf(
+    "1" to listOf("net.kigawa.kivra.db.*"),
+    "2" to listOf("net.kigawa.kivra.selfdev.*", "net.kigawa.kivra.mcp.*"),
+)
+tasks.named<Test>("test") {
+    val shard = System.getenv("KIVRA_TEST_SHARD")?.trim()?.takeIf { it.isNotEmpty() }
+    when (shard) {
+        null -> Unit
+        "1", "2" -> filter {
+            kivraTestShardPackages.getValue(shard).forEach { includeTestsMatching(it) }
+        }
+        "3" -> filter {
+            kivraTestShardPackages.values.flatten().forEach { excludeTestsMatching(it) }
+        }
+        else -> throw GradleException("KIVRA_TEST_SHARD は 1, 2, 3 のいずれか、または未設定(全テスト)です: '$shard'")
+    }
+}
+
 dependencies {
     implementation(project(":kivra-core"))
     implementation(project(":kivra-observability"))

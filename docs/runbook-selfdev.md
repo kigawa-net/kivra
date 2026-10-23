@@ -1679,6 +1679,14 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 - **dev で有効にする前の注意**: `spent_jpy` は台帳から導く値である。手で書き換えない(次の tick が台帳の値に合わせ直す)。有効化すると `spent_jpy` が実際に増えるため、既存の order の周の開始が `ORDER_BUDGET` で止まりうる。
 - **この PR に含まれないもの(3h)**: `startCycle` の式(進行中の予約を足す)、未確認の UNPRICED の拒否(`ORDER_UNPRICED`)、`CHILD_BUDGET_EXHAUSTED` の事実。3h で予約を足すときは、`RESERVED` が既に `spent_jpy` に入っているため、二重に数えないこと。
 
+#### 7.6.2i 未確認の UNPRICED による周の開始の拒否(段階 3h-A。既定では無効)
+
+- 周を始める(`POST .../cycles`)とき、経路上の order(自分と祖先)のどれかに、**未 final の周**で**未確認の `UNPRICED` 行**(0 円を含む)があれば、409 `ORDER_UNPRICED` で、何も書かない(`cycles_started` も進まない)。応答の `orderId` は付かない。`ORDER_BUDGET` の検査の後に行う。
+- 判定の対象は、費用の行(`selfdev_order_cycle_spend`)がある周だけである。行は、スイッチ `KIVRA_SELFDEV_ORDER_SPEND_ENABLED` が有効なときの tick が作る。無効のときは行が無いため、この検査は何も拒否しない(挙動は変わらない)。
+- 解除: 運用者が台帳の `UNPRICED` 行を確認する(`POST /api/admin/budget/acknowledge`)。次の tick で周が final になると、開始できる。order の状態は変わらないため、再開の操作は要らない。承認は要らない。
+- 拒否の文言は固定で、題名や方針は含まない。読み取りだけで、ロックの順序(order → budget)は変えない。
+- 範囲: 自分と祖先の周だけを見る。子孫の未確認の周は、この order の周の開始を止めない(ADR 0015 追補の U-44 は未決)。
+
 #### 7.6.3 状態
 
 | 状態 | 意味 | 解除 |

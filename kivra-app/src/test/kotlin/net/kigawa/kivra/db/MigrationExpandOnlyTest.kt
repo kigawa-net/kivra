@@ -106,6 +106,10 @@ class MigrationExpandOnlyTest {
                 "NOT NULL without DEFAULT. A pre-V2 Writer INSERT into development_runs does not name this column, so on MariaDB " +
                 "(strict mode) it fails with ERROR 1364 once V2 is applied. The old Writer must be drained before V2, or the column " +
                 "needs a DEFAULT (V2 is the one unmerged migration that is edited in place, so this is still open).",
+            "V27:DROP (ALTER TABLE SELFDEV_ORDER_STOP_REQUESTS DROP CONSTRAINT CK_SELFDEV_ORDER_STOP_SEPARATION)" to
+                "V27 replaces the separation CHECK with one that is equal for every row an old Writer can write: an old Writer does not " +
+                "name target_is_root, so the column is 1 (the root), and the new CHECK then reads the same as the old one. No Contract " +
+                "step is needed for this change. It is listed so the scan accepts exactly this statement; a later DROP is still refused.",
         )
     }
 }

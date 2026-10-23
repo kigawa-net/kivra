@@ -14,6 +14,7 @@ import net.kigawa.kivra.core.autopilot.OrderTransitionDecision
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.core.autopilot.STOP_REQUEST_TTL_HOURS
 import net.kigawa.kivra.core.autopilot.checkOrderTransition
+import net.kigawa.kivra.core.autopilot.checkSubtreeStop
 import net.kigawa.kivra.core.autopilot.orderStopDigest
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.Transaction
@@ -77,6 +78,11 @@ data class SelfDevOrderStopRequest(
     val decidedBy: String?,
     val expiresAt: LocalDateTime,
     val createdAt: LocalDateTime,
+    /**
+     * True for a request to stop the root (the requester and the decider must differ). False for a child: its direct parent decides it,
+     * which is the root approver, so the requester may be the decider (ADR 0015 section 4.2 (a)).
+     */
+    val targetIsRoot: Boolean,
 )
 
 /** One goal of an order: the cycle number, the goal, and its state. */
@@ -506,7 +512,9 @@ class SelfDevOrderRepository(
         reason: StopRequestReason,
     ): OrderResult<SelfDevOrderStopRequest> = try {
         transaction(database) {
-            val current = lockOrder(orderId) ?: return@transaction OrderResult.NotFound
+            // The path is locked from the root down, and then the descendants: the same order as a cycle start and a child creation.
+            val path = lockPath(orderId) ?: return@transaction OrderResult.NotFound
+            val current = path.first()
             if (current.version != expectedVersion) return@transaction OrderResult.StaleVersion
             // A request is already waiting on this tree: that is the answer, not a generic transition refusal.
             if (current.state == OrderState.STOP_REQUESTED) throw Rollback(OrderResult.Refused(OrderConflict.STOP_ALREADY_PENDING))
@@ -519,17 +527,20 @@ class SelfDevOrderRepository(
                 throw Rollback(OrderResult.StaleVersion)
             }
             val newVersion = expectedVersion + 1
+            // The stopped part at the request's time: the target at its new version, and each descendant at its current version.
+            val descendants = lockDescendants(orderId)
+            val subtree = listOf(orderId to newVersion) + descendants.map { it.orderId to it.version }
             val requestId = Ulid.generate(clock)
             execUpdate(
                 """
                 INSERT INTO selfdev_order_stop_requests (request_id, order_id, requested_by, requester_kind, reason_code, order_version,
-                    digest, state, active_key, decided_by, decider_kind, decided_at, expires_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, NULL, NULL, NULL, ?, ?)
+                    digest, state, active_key, decided_by, decider_kind, decided_at, expires_at, created_at, target_is_root)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, NULL, NULL, NULL, ?, ?, ?)
                 """.trimIndent(),
                 requestId, orderId, requestedBy, requesterKind.name, reason.name, newVersion,
-                orderStopDigest(requestId, orderId, newVersion, reason), now.plus(stopTtl), now,
+                orderStopDigest(requestId, orderId, subtree, reason), now.plus(stopTtl), now, if (current.parentOrderId == null) 1 else 0,
             )
-            appendEvent(orderId, current.cyclesStarted.takeIf { it > 0 }, "STOP_REQUESTED", current.state, OrderState.STOP_REQUESTED, OrderReason.STOP_REQUESTED.name, requesterKind, requestedBy, requestId, now)
+            appendTreeEvent(current, "STOP_REQUESTED", current.state, OrderState.STOP_REQUESTED, OrderReason.STOP_REQUESTED.name, requesterKind, requestedBy, requestId, now)
             OrderResult.Moved(getRequestIn(requestId) ?: error("stop request vanished after insert"))
         }
     } catch (r: Rollback) {
@@ -540,10 +551,15 @@ class SelfDevOrderRepository(
     }
 
     /**
-     * Approves a PENDING stop request: the request is CONSUMED and the order is STOPPED, in one transaction. The caller has checked that
-     * [approverKey] is the root approver. Refused, with nothing written, when the approver is the requester, the digest does not match, the
-     * request is not pending, the order has changed since the request, or the request has expired (the expiry itself is then recorded).
-     * Only one of two concurrent approvals of the same request can succeed: the conditional UPDATE of the request decides it.
+     * Approves a PENDING stop request: the request is CONSUMED and the stopped part of the tree is STOPPED, in one transaction. The target
+     * goes to STOPPED with OPERATOR_STOPPED (the root) or PARENT_STOPPED (a child), and each descendant goes to STOPPED with ANCESTOR_STOPPED
+     * (ADR 0015 section 4.2 (a), (c) 2). The caller has checked that [approverKey] is the root approver.
+     *
+     * For the root the requester must differ from the approver (`target_is_root`, also checked by the CHECK in the schema). A child's stop is
+     * the parent's decision, so the requester may decide it. Refused, with nothing written, when the digest does not match, the request is not
+     * pending, the target or any descendant has changed since the request (the digest of the locked part is recomputed), or the request has
+     * expired (the expiry itself is then recorded). Only one of two concurrent approvals of the same request can succeed: the conditional
+     * UPDATE of the request decides it.
      */
     fun approveStop(requestId: String, approverKey: String, digest: String): OrderResult<SelfDevOrder> = try {
         transaction(database) {
@@ -554,15 +570,27 @@ class SelfDevOrderRepository(
                 expireLocked(request, now)
                 return@transaction OrderResult.Refused(OrderConflict.STOP_EXPIRED)
             }
-            if (request.requestedBy == approverKey) return@transaction OrderResult.Refused(OrderConflict.SAME_PRINCIPAL)
+            if (request.targetIsRoot && request.requestedBy == approverKey) return@transaction OrderResult.Refused(OrderConflict.SAME_PRINCIPAL)
             if (request.digest != digest) return@transaction OrderResult.Refused(OrderConflict.DIGEST_MISMATCH)
-            val order = lockOrder(request.orderId) ?: return@transaction OrderResult.NotFound
+            val path = lockPath(request.orderId) ?: return@transaction OrderResult.NotFound
+            val order = path.first()
             if (order.state != OrderState.STOP_REQUESTED || order.version != request.orderVersion) {
                 return@transaction OrderResult.Refused(OrderConflict.ORDER_CHANGED)
             }
-            val decision = checkOrderTransition(order.state, OrderState.STOPPED, OrderReason.OPERATOR_STOPPED, OrderActor.HUMAN, order.stateReason)
+            val descendants = lockDescendants(order.orderId)
+            // The stored digest binds the stopped part as it was at the request. Any change in it since then (a descendant's version) refuses.
+            val subtree = listOf(order.orderId to order.version) + descendants.map { it.orderId to it.version }
+            if (orderStopDigest(request.requestId, order.orderId, subtree, request.reasonCode) != request.digest) {
+                return@transaction OrderResult.Refused(OrderConflict.ORDER_CHANGED)
+            }
+            val reason = if (request.targetIsRoot) OrderReason.OPERATOR_STOPPED else OrderReason.PARENT_STOPPED
+            val decision = checkOrderTransition(order.state, OrderState.STOPPED, reason, OrderActor.HUMAN, order.stateReason)
             if (decision is OrderTransitionDecision.Refused) {
                 throw Rollback(OrderResult.Refused(OrderConflict.valueOf(decision.reason.name)))
+            }
+            for (descendant in descendants) {
+                val sub = checkSubtreeStop(descendant.state, OrderActor.HUMAN)
+                if (sub is OrderTransitionDecision.Refused) throw Rollback(OrderResult.Refused(OrderConflict.valueOf(sub.reason.name)))
             }
 
             val consumed = execUpdate(
@@ -573,15 +601,37 @@ class SelfDevOrderRepository(
                 approverKey, now, requestId,
             )
             if (consumed != 1) throw Rollback(OrderResult.Refused(OrderConflict.STOP_NOT_PENDING))
-            if (!updateState(order.orderId, order.version, OrderState.STOPPED, OrderReason.OPERATOR_STOPPED, now)) {
+            if (!updateState(order.orderId, order.version, OrderState.STOPPED, reason, now)) {
                 throw Rollback(OrderResult.StaleVersion)
             }
-            appendEvent(order.orderId, order.cyclesStarted.takeIf { it > 0 }, "STOP_APPROVED", OrderState.STOP_REQUESTED, OrderState.STOP_REQUESTED, null, OrderActor.HUMAN, approverKey, requestId, now)
-            appendEvent(order.orderId, order.cyclesStarted.takeIf { it > 0 }, "STOPPED", OrderState.STOP_REQUESTED, OrderState.STOPPED, OrderReason.OPERATOR_STOPPED.name, OrderActor.HUMAN, approverKey, requestId, now)
+            appendTreeEvent(order, "STOP_APPROVED", OrderState.STOP_REQUESTED, OrderState.STOP_REQUESTED, null, OrderActor.HUMAN, approverKey, requestId, now)
+            appendTreeEvent(order, "STOPPED", OrderState.STOP_REQUESTED, OrderState.STOPPED, reason.name, OrderActor.HUMAN, approverKey, requestId, now)
+            // The descendants, level by level (the order of the locks). Their version was checked above and is current under the locks.
+            for (descendant in descendants) {
+                if (!updateState(descendant.orderId, descendant.version, OrderState.STOPPED, OrderReason.ANCESTOR_STOPPED, now)) {
+                    throw Rollback(OrderResult.StaleVersion)
+                }
+                appendTreeEvent(descendant, "STOPPED", descendant.state, OrderState.STOPPED, OrderReason.ANCESTOR_STOPPED.name, OrderActor.HUMAN, approverKey, requestId, now)
+            }
             OrderResult.Moved(getIn(order.orderId) ?: error("order vanished after stop"))
         }
     } catch (r: Rollback) {
         r.outcome
+    }
+
+    /** The order and its descendants, read without locks (the order first, then level by level). Read after an approval, when the stopped part is final. */
+    fun subtreeOf(orderId: String): List<SelfDevOrder> = transaction(database) {
+        val root = getIn(orderId) ?: return@transaction emptyList()
+        val out = mutableListOf(root)
+        var level = listOf(orderId)
+        while (level.isNotEmpty()) {
+            val children = level.flatMap { parent ->
+                execQuery("SELECT $ORDER_COLUMNS FROM selfdev_orders WHERE parent_order_id = ? ORDER BY order_id", parent) { it.toOrder() }
+            }
+            out += children
+            level = children.map { it.orderId }
+        }
+        out
     }
 
     /**
@@ -598,7 +648,9 @@ class SelfDevOrderRepository(
                 expireLocked(request, now)
                 return@transaction OrderResult.Refused(OrderConflict.STOP_EXPIRED)
             }
-            if (end == StopEnd.REJECTED && request.requestedBy == actorKey) return@transaction OrderResult.Refused(OrderConflict.SAME_PRINCIPAL)
+            if (end == StopEnd.REJECTED && request.targetIsRoot && request.requestedBy == actorKey) {
+                return@transaction OrderResult.Refused(OrderConflict.SAME_PRINCIPAL)
+            }
             val order = lockOrder(request.orderId) ?: return@transaction OrderResult.NotFound
             if (order.state != OrderState.STOP_REQUESTED || order.version != request.orderVersion) {
                 return@transaction OrderResult.Refused(OrderConflict.ORDER_CHANGED)
@@ -727,14 +779,39 @@ class SelfDevOrderRepository(
         actorKey: String?,
         requestId: String?,
         now: LocalDateTime,
+        parentOrderId: String? = null,
+        depth: Int? = null,
     ) {
         execUpdate(
             """
             INSERT INTO selfdev_order_events (event_id, order_id, cycle_no, kind, from_state, to_state, reason_code, actor_kind, actor_ref,
-                request_id, occurred_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                request_id, occurred_at, parent_order_id, depth)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             Ulid.generate(clock), orderId, cycleNo, kind, from?.name, to?.name, reason, actor.name, actorKey?.let(::actorRef), requestId, now,
+            parentOrderId, depth,
+        )
+    }
+
+    /**
+     * An event of an order in a tree. A child's event names its parent and depth (ADR 0015 section 4.3: the parent who decided, the depth);
+     * a root's event leaves both NULL, as before.
+     */
+    private fun Transaction.appendTreeEvent(
+        order: SelfDevOrder,
+        kind: String,
+        from: OrderState?,
+        to: OrderState?,
+        reason: String?,
+        actor: OrderActor,
+        actorKey: String?,
+        requestId: String?,
+        now: LocalDateTime,
+    ) {
+        val child = order.parentOrderId != null
+        appendEvent(
+            order.orderId, order.cyclesStarted.takeIf { it > 0 }, kind, from, to, reason, actor, actorKey, requestId, now,
+            parentOrderId = order.parentOrderId.takeIf { child }, depth = order.depth.takeIf { child },
         )
     }
 
@@ -756,6 +833,24 @@ class SelfDevOrderRepository(
         }
         val locked = ids.asReversed().map { lockOrder(it) ?: return null }
         return locked.asReversed()
+    }
+
+    /**
+     * Locks every descendant of [rootId] (not the root itself), level by level, and each level in ID order. The caller holds the root's path
+     * already ([lockPath]), so the tree's child set cannot change under these locks (a child creation locks the root first).
+     */
+    private fun Transaction.lockDescendants(rootId: String): List<SelfDevOrder> {
+        val locked = mutableListOf<SelfDevOrder>()
+        var level = listOf(rootId)
+        while (level.isNotEmpty()) {
+            val children = level.flatMap { parent ->
+                execQuery("SELECT order_id FROM selfdev_orders WHERE parent_order_id = ?", parent) { it.getString(1) }
+            }.sorted()
+            val next = children.map { id -> lockOrder(id) ?: error("child order vanished under its row lock") }
+            locked += next
+            level = next.map { it.orderId }
+        }
+        return locked
     }
 
     private fun Transaction.lockRequest(requestId: String): SelfDevOrderStopRequest? =
@@ -794,7 +889,7 @@ class SelfDevOrderRepository(
             "current_goal_id, consecutive_failed_cycles, state, state_reason, expires_at, created_by, version, created_at, updated_at, " +
             "order_budget_jpy, allocated_jpy, child_count, spent_jpy, cycle_budget_jpy"
         const val REQUEST_COLUMNS = "request_id, order_id, requested_by, requester_kind, reason_code, order_version, digest, state, " +
-            "decided_by, expires_at, created_at"
+            "decided_by, expires_at, created_at, target_is_root"
 
         fun actorRef(key: String): String =
             MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it) }
@@ -845,4 +940,5 @@ private fun java.sql.ResultSet.toRequest() = SelfDevOrderStopRequest(
     decidedBy = getString(9),
     expiresAt = getObject(10, LocalDateTime::class.java),
     createdAt = getObject(11, LocalDateTime::class.java),
+    targetIsRoot = getInt(12) == 1,
 )

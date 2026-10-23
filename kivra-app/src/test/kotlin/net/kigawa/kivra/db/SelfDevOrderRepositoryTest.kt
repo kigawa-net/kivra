@@ -634,7 +634,13 @@ class SelfDevOrderRepositoryTest {
         val childRequest = requestByAi(f, f.repo.get(child.orderId)!!)
         assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.approveStop(childRequest.requestId, OPERATOR, childRequest.digest))
         assertEquals(OrderState.STOPPED, f.repo.get(child.orderId)!!.state)
-        assertEquals(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, child.orderId), f.repo.startCycle(grand.orderId, grand.version, OPERATOR))
+        // The stop wrote the grandchild too: it is STOPPED (ANCESTOR_STOPPED), not an ACTIVE orphan under a stopped child (ADR 0015 section 2.7).
+        assertEquals(OrderState.STOPPED, f.repo.get(grand.orderId)!!.state)
+        assertEquals(OrderReason.ANCESTOR_STOPPED, f.repo.get(grand.orderId)!!.stateReason)
+        assertEquals(
+            OrderResult.Refused(OrderConflict.NOT_ACTIVE),
+            f.repo.startCycle(grand.orderId, f.repo.get(grand.orderId)!!.version, OPERATOR),
+        )
     }
 
     @Test
@@ -712,6 +718,207 @@ class SelfDevOrderRepositoryTest {
                 assertEquals(0, f.goalsOf(grand.orderId))
             }
         }
+    }
+
+    // ---- the child stop: the parent's decision approves it (ADR 0015 section 4.2 (a), (c) 2, stage 2 PR 3d) ----------------------------
+
+    /** The order as it is now (after the tree's writes). */
+    private fun Fixture.now(orderId: String): SelfDevOrder = assertNotNull(repo.get(orderId))
+
+    /** The orders above [orderId], its parent first, read from the table. */
+    private fun Fixture.ancestorsOf(orderId: String): List<SelfDevOrder> {
+        val out = mutableListOf<SelfDevOrder>()
+        var next = now(orderId).parentOrderId
+        while (next != null) {
+            val parent = now(next)
+            out += parent
+            next = parent.parentOrderId
+        }
+        return out
+    }
+
+    /** The orders that are not STOPPED while an ancestor is: the orphans that ADR 0015 section 2.7 forbids. */
+    private fun Fixture.orphans(): List<String> = repo.list(100)
+        .filter { it.state != OrderState.STOPPED && ancestorsOf(it.orderId).any { a -> a.state == OrderState.STOPPED } }
+        .map { it.orderId }
+
+    /** The operator asks to stop [order] (a child or the root), at its current version. */
+    private fun Fixture.requestStop(order: SelfDevOrder, requester: String = OPERATOR, kind: OrderActor = OrderActor.HUMAN): SelfDevOrderStopRequest =
+        assertIs<OrderResult.Moved<SelfDevOrderStopRequest>>(
+            repo.requestStop(order.orderId, now(order.orderId).version, requester, kind, StopRequestReason.OPERATOR_REQUEST),
+        ).value
+
+    @Test
+    fun `the schema keeps the root's two-principal rule, and lets a child row name the same principal as requester and decider`() = withFixture { f ->
+        val (root, child, _) = f.tree()
+        fun insertDecided(orderId: String, targetIsRoot: Int) {
+            f.exec(
+                "INSERT INTO selfdev_order_stop_requests (request_id, order_id, requested_by, requester_kind, reason_code, order_version, " +
+                    "digest, state, active_key, decided_by, decider_kind, decided_at, expires_at, created_at, target_is_root) " +
+                    "VALUES (?, ?, ?, 'HUMAN', 'OPERATOR_REQUEST', 1, ?, 'CONSUMED', NULL, ?, 'HUMAN', NOW(6), NOW(6), NOW(6), ?)",
+                Ulid.generate(), orderId, OPERATOR, "0".repeat(64), OPERATOR, targetIsRoot,
+            )
+        }
+        assertFailsWith<SQLException> { insertDecided(root.orderId, 1) }
+        insertDecided(child.orderId, 0)
+        assertEquals(1, f.count("SELECT COUNT(*) FROM selfdev_order_stop_requests WHERE target_is_root = 0 AND decided_by = requested_by"))
+    }
+
+    @Test
+    fun `an existing root request is stored as a root request, with the same digest as before children existed`() = withFixture { f ->
+        val root = f.root()
+        val request = requestByAi(f, root)
+        assertTrue(request.targetIsRoot)
+        assertEquals(
+            orderStopDigest(request.requestId, root.orderId, request.orderVersion, StopRequestReason.OPERATOR_REQUEST),
+            request.digest,
+        )
+    }
+
+    @Test
+    fun `the operator requests a child's stop and decides it, and only the child and its grandchild stop`() = withFixture { f ->
+        val (root, child, grand) = f.tree()
+        val sibling = f.created(f.child(root.orderId, budget = 1_000, key = "sibling-stop"))
+        val request = f.requestStop(child)
+        assertFalse(request.targetIsRoot)
+        // The requester is the approver too: a child's stop is the parent's decision, so the same principal may make it.
+        val stopped = assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.approveStop(request.requestId, OPERATOR, request.digest)).value
+        assertEquals(OrderState.STOPPED, stopped.state)
+        assertEquals(OrderReason.PARENT_STOPPED, stopped.stateReason)
+        assertEquals(OrderState.STOPPED, f.now(grand.orderId).state)
+        assertEquals(OrderReason.ANCESTOR_STOPPED, f.now(grand.orderId).stateReason)
+        assertEquals(OrderState.ACTIVE, f.now(root.orderId).state)
+        assertEquals(OrderState.ACTIVE, f.now(sibling.orderId).state)
+        assertEquals(StopRequestState.CONSUMED, f.repo.stopRequest(request.requestId)!!.state)
+        assertEquals(OPERATOR, f.repo.stopRequest(request.requestId)!!.decidedBy)
+        // The events name the parent who decided, and the depth. The grandchild's name its own parent (the child).
+        assertEquals(
+            1,
+            f.count(
+                "SELECT COUNT(*) FROM selfdev_order_events WHERE kind = 'STOPPED' AND order_id = '${child.orderId}' " +
+                    "AND reason_code = 'PARENT_STOPPED' AND parent_order_id = '${root.orderId}' AND depth = 1",
+            ),
+        )
+        assertEquals(
+            1,
+            f.count(
+                "SELECT COUNT(*) FROM selfdev_order_events WHERE kind = 'STOPPED' AND order_id = '${grand.orderId}' " +
+                    "AND reason_code = 'ANCESTOR_STOPPED' AND parent_order_id = '${child.orderId}' AND depth = 2",
+            ),
+        )
+        assertTrue(f.orphans().isEmpty())
+    }
+
+    @Test
+    fun `an AI request on a child is a child request that binds every version of the stopped part`() = withFixture { f ->
+        val (_, child, grand) = f.tree()
+        val childVersion = f.now(child.orderId).version
+        val grandVersion = f.now(grand.orderId).version
+        val request = assertIs<OrderResult.Moved<SelfDevOrderStopRequest>>(
+            f.repo.requestStop(child.orderId, childVersion, AI, OrderActor.AI, StopRequestReason.RUNAWAY_SUSPECTED),
+        ).value
+        assertFalse(request.targetIsRoot)
+        assertEquals(OrderActor.AI, request.requesterKind)
+        assertEquals(OrderState.STOP_REQUESTED, f.now(child.orderId).state)
+        // The digest covers the child (at its new version) and the grandchild (at its current one), sorted by ID.
+        assertEquals(
+            orderStopDigest(
+                request.requestId, child.orderId,
+                listOf(child.orderId to childVersion + 1, grand.orderId to grandVersion),
+                StopRequestReason.RUNAWAY_SUSPECTED,
+            ),
+            request.digest,
+        )
+        // The AI's request does not decide: the child is still waiting, and the grandchild is untouched.
+        assertEquals(OrderState.ACTIVE, f.now(grand.orderId).state)
+    }
+
+    @Test
+    fun `a change in the stopped part after the request refuses the child's approval, and nothing is written`() = withFixture { f ->
+        val (_, child, grand) = f.tree()
+        val request = f.requestStop(child)
+        f.exec("UPDATE selfdev_orders SET version = version + 1 WHERE order_id = ?", grand.orderId)
+        assertEquals(OrderResult.Refused(OrderConflict.ORDER_CHANGED), f.repo.approveStop(request.requestId, OPERATOR, request.digest))
+        assertEquals(OrderState.STOP_REQUESTED, f.now(child.orderId).state)
+        assertEquals(OrderState.ACTIVE, f.now(grand.orderId).state)
+        assertEquals(StopRequestState.PENDING, f.repo.stopRequest(request.requestId)!!.state)
+    }
+
+    @Test
+    fun `a change outside the stopped part does not refuse the child's approval`() = withFixture { f ->
+        val (root, child, _) = f.tree()
+        val sibling = f.created(f.child(root.orderId, budget = 1_000, key = "outside"))
+        val request = f.requestStop(child)
+        f.exec("UPDATE selfdev_orders SET version = version + 1 WHERE order_id = ?", sibling.orderId)
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.approveStop(request.requestId, OPERATOR, request.digest))
+        assertEquals(OrderState.STOPPED, f.now(child.orderId).state)
+    }
+
+    @Test
+    fun `a child's approval is consumed once, and a stopped child cannot be requested again`() = withFixture { f ->
+        val (_, child, _) = f.tree()
+        val request = f.requestStop(child)
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.approveStop(request.requestId, OPERATOR, request.digest))
+        assertEquals(OrderResult.Refused(OrderConflict.STOP_NOT_PENDING), f.repo.approveStop(request.requestId, OPERATOR, request.digest))
+        assertEquals(
+            OrderResult.Refused(OrderConflict.TERMINAL),
+            f.repo.requestStop(child.orderId, f.now(child.orderId).version, OPERATOR, OrderActor.HUMAN, StopRequestReason.OPERATOR_REQUEST),
+        )
+    }
+
+    @Test
+    fun `an expired child request pauses the child only, and nothing is resumed by itself`() = withFixture { f ->
+        val (_, child, grand) = f.tree()
+        val request = f.requestStop(child)
+        f.clock.now = START.plus(Duration.ofHours(25))
+        assertEquals(OrderResult.Refused(OrderConflict.STOP_EXPIRED), f.repo.approveStop(request.requestId, OPERATOR, request.digest))
+        assertEquals(OrderState.PAUSED, f.now(child.orderId).state)
+        assertEquals(OrderReason.STOP_NOT_APPROVED, f.now(child.orderId).stateReason)
+        assertEquals(OrderState.ACTIVE, f.now(grand.orderId).state)
+    }
+
+    @Test
+    fun `a rejection of a child's request by the root approver pauses the child, though the requester is the same`() = withFixture { f ->
+        val (_, child, _) = f.tree()
+        val request = f.requestStop(child)
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.endStopRequest(request.requestId, StopEnd.REJECTED, OPERATOR, OrderActor.HUMAN))
+        assertEquals(OrderState.PAUSED, f.now(child.orderId).state)
+        assertEquals(StopRequestState.REJECTED, f.repo.stopRequest(request.requestId)!!.state)
+    }
+
+    @Test
+    fun `a root stop with children stops the children too, so no orphan is left`() = withFixture { f ->
+        val (root, child, grand) = f.tree()
+        val request = requestByAi(f, root)
+        assertIs<OrderResult.Moved<SelfDevOrder>>(f.repo.approveStop(request.requestId, OPERATOR, request.digest))
+        assertEquals(OrderState.STOPPED, f.now(root.orderId).state)
+        assertEquals(OrderReason.ANCESTOR_STOPPED, f.now(child.orderId).stateReason)
+        assertEquals(OrderState.STOPPED, f.now(child.orderId).state)
+        assertEquals(OrderState.STOPPED, f.now(grand.orderId).state)
+        assertTrue(f.orphans().isEmpty())
+    }
+
+    @Test
+    fun `a child's approval and a cycle start on a sibling at the same time both finish, without a deadlock`() = withFixture { f ->
+        val (root, child, _) = f.tree()
+        val sibling = f.created(f.child(root.orderId, budget = 2_000, key = "stop-and-start"))
+        val request = f.requestStop(child)
+        val siblingVersion = f.now(sibling.orderId).version
+        val next = java.util.concurrent.atomic.AtomicInteger()
+        val approval = java.util.concurrent.atomic.AtomicReference<OrderResult<SelfDevOrder>>()
+        val start = java.util.concurrent.atomic.AtomicReference<OrderResult<CycleStarted>>()
+        concurrently(2) {
+            if (next.getAndIncrement() == 0) {
+                approval.set(f.repo.approveStop(request.requestId, OPERATOR, request.digest))
+            } else {
+                start.set(f.repo.startCycle(sibling.orderId, siblingVersion, OPERATOR))
+            }
+        }
+        assertIs<OrderResult.Moved<SelfDevOrder>>(approval.get())
+        // The sibling is outside the stopped part, so its start is not refused whichever of the two came first.
+        assertIs<OrderResult.Moved<CycleStarted>>(start.get())
+        assertEquals(OrderState.STOPPED, f.now(child.orderId).state)
+        assertEquals(OrderState.ACTIVE, f.now(sibling.orderId).state)
     }
 
     private fun requestByAi(f: Fixture, root: SelfDevOrder): SelfDevOrderStopRequest =

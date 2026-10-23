@@ -39,8 +39,12 @@ enum class OrderReason {
     STOP_REQUESTED,
     /** STOP_REQUESTED -> PAUSED after a rejection, a cancellation or an expiry. Resumable by an operator. */
     STOP_NOT_APPROVED,
-    /** STOP_REQUESTED -> STOPPED after the root approver's approval. */
+    /** STOP_REQUESTED -> STOPPED after the root approver's approval of the root. */
     OPERATOR_STOPPED,
+    /** STOP_REQUESTED -> STOPPED after a child's stop is decided by its direct parent (the root approver's decision, for the tree). */
+    PARENT_STOPPED,
+    /** ACTIVE or PAUSED -> STOPPED: a descendant of an order whose stop was approved, in the same transaction. */
+    ANCESTOR_STOPPED,
 }
 
 /** The reason codes a stop request may carry (U-31). Free text is never accepted. */
@@ -75,9 +79,11 @@ private val NOT_RESUMABLE = setOf(OrderReason.LIMIT_REACHED, OrderReason.EXPIRED
  * - ACTIVE -> PAUSED: an operator's pause, or a system guard's pause (see [SYSTEM_PAUSE_REASONS]).
  * - PAUSED -> ACTIVE: an operator's resume only, and not after a limit or an expiry.
  * - ACTIVE or PAUSED -> STOP_REQUESTED: a stop request, by an operator or by the AI principal.
- * - STOP_REQUESTED -> STOPPED: the approval, by an operator only (the approver's identity is checked by the caller).
+ * - STOP_REQUESTED -> STOPPED: the approval, by an operator only (the approver's identity is checked by the caller). The reason is
+ *   OPERATOR_STOPPED for the root and PARENT_STOPPED for a child.
  * - STOP_REQUESTED -> PAUSED: a rejection, a cancellation or an expiry (STOP_NOT_APPROVED), by an operator or the system.
- * - STOPPED is terminal. There is no edge from ACTIVE or PAUSED to STOPPED: a stop always goes through a request.
+ * - STOPPED is terminal. There is no edge from ACTIVE or PAUSED to STOPPED here: a stop always goes through a request. The one exception,
+ *   a descendant of an approved stop, is decided by [checkSubtreeStop] inside the approval's transaction.
  */
 fun checkOrderTransition(
     from: OrderState,
@@ -107,7 +113,7 @@ fun checkOrderTransition(
             else -> allowed()
         }
         from == OrderState.STOP_REQUESTED && to == OrderState.STOPPED -> when {
-            reason != OrderReason.OPERATOR_STOPPED -> refused(OrderRefusal.REASON_NOT_ALLOWED)
+            reason != OrderReason.OPERATOR_STOPPED && reason != OrderReason.PARENT_STOPPED -> refused(OrderRefusal.REASON_NOT_ALLOWED)
             actor != OrderActor.HUMAN -> refused(OrderRefusal.ACTOR_NOT_ALLOWED)
             else -> allowed()
         }
@@ -120,6 +126,18 @@ fun checkOrderTransition(
     }
 }
 
+/**
+ * Decides the stop of a descendant of an order whose stop was approved (ADR 0015 section 4.2 (c) 2, section 2.7). It runs in the approval's
+ * transaction, after the approver (the root approver, a human) has been checked. Only ACTIVE and PAUSED descendants may stop; a
+ * STOP_REQUESTED one cannot exist while the tree has one pending request, and is refused here.
+ */
+fun checkSubtreeStop(from: OrderState, actor: OrderActor): OrderTransitionDecision = when {
+    from == OrderState.STOPPED -> refused(OrderRefusal.TERMINAL)
+    from != OrderState.ACTIVE && from != OrderState.PAUSED -> refused(OrderRefusal.NO_EDGE)
+    actor != OrderActor.HUMAN -> refused(OrderRefusal.ACTOR_NOT_ALLOWED)
+    else -> allowed()
+}
+
 private fun allowed() = OrderTransitionDecision.Allowed
 private fun refused(reason: OrderRefusal) = OrderTransitionDecision.Refused(reason)
 
@@ -128,15 +146,25 @@ const val STOP_REQUEST_TTL_HOURS = 24L
 
 /**
  * The digest of a stop request (ADR 0015 section 4.2): SHA-256 of the canonical JSON
- * `{"action":"ORDER_STOP","target_order_id","subtree","request_id","reason_code"}`, where `subtree` lists each order in the stopped tree with its
- * version. Stage 1 has one order, so the subtree is the target itself. The fields are IDs and fixed codes, so no escaping is needed.
+ * `{"action":"ORDER_STOP","target_order_id","subtree","request_id","reason_code"}`. `subtree` lists each order of the stopped part of the tree
+ * (the target and its descendants) with its version, sorted by order ID. A target without children has a one-entry subtree, so its
+ * canonical text is the same as before children existed. The fields are IDs and fixed codes, so no escaping is needed.
  */
-fun orderStopDigest(requestId: String, targetOrderId: String, orderVersion: Long, reason: StopRequestReason): String {
+fun orderStopDigest(requestId: String, targetOrderId: String, subtree: List<Pair<String, Long>>, reason: StopRequestReason): String {
     val canonical = buildString {
         append("{\"action\":\"ORDER_STOP\",\"target_order_id\":\"").append(targetOrderId).append('"')
-        append(",\"subtree\":[{\"order_id\":\"").append(targetOrderId).append("\",\"version\":").append(orderVersion).append("}]")
+        append(",\"subtree\":[")
+        subtree.sortedBy { it.first }.forEachIndexed { i, (id, version) ->
+            if (i > 0) append(',')
+            append("{\"order_id\":\"").append(id).append("\",\"version\":").append(version).append('}')
+        }
+        append(']')
         append(",\"request_id\":\"").append(requestId).append('"')
         append(",\"reason_code\":\"").append(reason.name).append("\"}")
     }
     return MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 }
+
+/** The digest when the stopped part is the target alone (no children): the stage 1 form, with the same canonical text. */
+fun orderStopDigest(requestId: String, targetOrderId: String, orderVersion: Long, reason: StopRequestReason): String =
+    orderStopDigest(requestId, targetOrderId, listOf(targetOrderId to orderVersion), reason)

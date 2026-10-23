@@ -10,6 +10,7 @@
   var TICK_MS = 1000;
   var MAX_TITLE = 200;
   var MAX_BODY = 8000;
+  var MAX_POLICY = 2000;
   var CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
   // The body may have line breaks and tabs; every other control character is refused (as in the title).
   var BODY_CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
@@ -168,6 +169,7 @@
     budgetFx: null,
     budgetDialog: null,
     budgetSubmitting: false,
+    orderSubmitting: false,
     exec: null
   };
 
@@ -2955,6 +2957,89 @@
     $('order-approve-submit').disabled = blocked || ORD.pendingApprove === null;
     renderOrderList();
     renderApprovals();
+    updateOrderCreate();
+  }
+
+  // ---- Order create (ADR 0015): the title and the policy go to POST /api/selfdev/orders. Neither is ever shown back:
+  // the result, the log and the errors use only the fixed texts below. The server checks the length and the characters too.
+
+  var ORDER_CREATE_MSG = {
+    saved: 'order を作成しました。',
+    bad: '題名は 1〜200 文字、方針は 1〜2000 文字で入力してください（制御文字は使えません）',
+    rootExists: 'ルートの order は既にあります',
+    invalid: '題名/方針が不正です（長さ、制御文字）',
+    forbidden: 'この操作は許可されていません',
+    disabled: 'order は無効です',
+    failed: '作成に失敗しました',
+    sending: '送信中です…'
+  };
+
+  function orderCreateFormState() {
+    var title = $('order-title').value.trim();
+    var policy = $('order-policy').value.trim();
+    var nTitle = Array.from(title).length;
+    var nPolicy = Array.from(policy).length;
+    var ok = nTitle >= 1 && nTitle <= MAX_TITLE && !CONTROL_CHARS.test(title) &&
+      nPolicy >= 1 && nPolicy <= MAX_POLICY && !BODY_CONTROL_CHARS.test(policy);
+    return { title: title, policy: policy, ok: ok };
+  }
+
+  function updateOrderCreate() {
+    $('order-title-count').textContent = Array.from($('order-title').value).length + ' / ' + MAX_TITLE;
+    $('order-policy-count').textContent = Array.from($('order-policy').value).length + ' / ' + MAX_POLICY;
+    var blocked = state.orderSubmitting || state.sessionExpired;
+    $('order-title').disabled = blocked;
+    $('order-policy').disabled = blocked;
+    $('order-create-submit').disabled = blocked;
+  }
+
+  function showOrderCreateResult(text, cls) {
+    var el = $('order-create-result');
+    el.textContent = text;
+    el.className = 'result' + (cls ? ' ' + cls : '');
+  }
+
+  /** The fixed text for a failed create. The response body is never shown. */
+  function orderCreateFailText(r) {
+    if (r.kind === 'session') return MESSAGES.session;
+    if (r.status === 409 && r.code === 'ROOT_EXISTS') return ORDER_CREATE_MSG.rootExists;
+    if (r.status === 400) return ORDER_CREATE_MSG.invalid;
+    if (r.status === 403) return ORDER_CREATE_MSG.forbidden;
+    if (r.status === 503) return ORDER_CREATE_MSG.disabled;
+    return ORDER_CREATE_MSG.failed;
+  }
+
+  async function onOrderCreateSubmit(ev) {
+    ev.preventDefault();
+    if (state.orderSubmitting || state.sessionExpired || !ORD.enabled) {
+      updateOrderCreate();
+      return;
+    }
+    var f = orderCreateFormState();
+    if (!f.ok) {
+      showOrderCreateResult(ORDER_CREATE_MSG.bad, 'error');
+      return;
+    }
+    state.orderSubmitting = true;
+    updateOrderCreate();
+    showOrderCreateResult(ORDER_CREATE_MSG.sending, '');
+    var r;
+    try {
+      r = await apiFetch('/api/selfdev/orders', 'POST', { title: f.title, policy: f.policy });
+    } finally {
+      state.orderSubmitting = false;
+      updateOrderCreate();
+    }
+    if (r.ok) {
+      $('order-title').value = '';
+      $('order-policy').value = '';
+      updateOrderCreate();
+      showOrderCreateResult(ORDER_CREATE_MSG.saved, 'ok');
+      refreshOrders();
+      return;
+    }
+    showOrderCreateResult(orderCreateFailText(r), 'error');
+    if (r.status === 409) refreshOrders();
   }
 
   function renderOrderSection() {
@@ -3272,6 +3357,9 @@
 
   function initOrders() {
     $('orders-refresh').addEventListener('click', function () { refreshOrders(); });
+    $('order-title').addEventListener('input', updateOrderCreate);
+    $('order-policy').addEventListener('input', updateOrderCreate);
+    $('order-create-form').addEventListener('submit', onOrderCreateSubmit);
     $('order-approve-cancel').addEventListener('click', function () {
       ORD.pendingApprove = null;
       $('order-approve-dialog').close();

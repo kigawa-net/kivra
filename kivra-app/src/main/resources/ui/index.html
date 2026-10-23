@@ -128,6 +128,22 @@
       <p id="orders-msg" class="result" role="status"></p>
       <p id="orders-status" class="meta" role="status">未取得</p>
       <ul id="orders-list" class="run-list" aria-label="order の一覧"></ul>
+      <details id="order-create">
+        <summary>order を作る</summary>
+        <form id="order-create-form">
+          <p class="meta" role="note">order の作成は、ルートの order を 1 件作る操作です。</p>
+          <label for="order-title">題名（1〜200 文字）</label>
+          <input id="order-title" name="order-title" type="text" maxlength="200" required autocomplete="off">
+          <div class="counter" id="order-title-count">0 / 200</div>
+          <label for="order-policy">方針（1〜2000 文字）</label>
+          <textarea id="order-policy" name="order-policy" rows="6" maxlength="2000" required></textarea>
+          <div class="counter" id="order-policy-count">0 / 2000</div>
+          <div>
+            <button type="submit" id="order-create-submit">order を作る</button>
+          </div>
+        </form>
+        <p id="order-create-result" class="result" role="status"></p>
+      </details>
     </section>
 
     <!-- Budget (operator). Hidden unless GET /api/admin/budget/status answers 200 to this user. Only text is written into it. -->

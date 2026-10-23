@@ -2323,3 +2323,145 @@ test('the list and the run detail are shown one at a time, and the hash switches
   assert.equal(dom.byId('view-list').hidden, false, 'back to no hash: the list is shown again');
   assert.equal(dom.byId('view-detail').hidden, true, 'back to no hash: the detail is hidden again');
 });
+
+// ---- Order create (ADR 0015): the form on the order section posts the title and the policy; neither is shown back ----
+
+const ORDER_TITLE = 'ROOT-TITLE-SECRET';
+const ORDER_POLICY = 'ROOT-POLICY-SECRET-TEXT';
+const ORDER_CREATE_MSG_SAVED = 'order を作成しました。';
+
+/** Answers the order create POST with `post(init)`; every other route is left to the order routes. */
+function orderCreateState(post) {
+  return ordState({
+    orderPost: (p, init) => (p === '/api/selfdev/orders' && init.method === 'POST' ? post(init) : null),
+  });
+}
+
+function orderCreateSubmit(dom) {
+  dom.byId('order-create-form').fire('submit', { preventDefault() {} });
+  return flush();
+}
+
+function fillOrderCreate(dom, title, policy) {
+  dom.byId('order-title').value = title;
+  dom.byId('order-policy').value = policy;
+}
+
+function orderCreatePosts(dom) { return postsTo(dom.calls, '/api/selfdev/orders'); }
+
+test('a create posts the trimmed title and policy as JSON, clears the inputs, and reads the order list again', async () => {
+  const s = orderCreateState(() => ({ status: 201, data: orderOf({ orderId: O2 }) }));
+  const dom = ordLoad(s);
+  await flush();
+  const listReadsBefore = dom.calls.filter((c) => c.method === 'GET' && c.path === '/api/selfdev/orders').length;
+  fillOrderCreate(dom, '  ' + ORDER_TITLE + '  ', '\n' + ORDER_POLICY + '\n');
+  await orderCreateSubmit(dom);
+  const sent = orderCreatePosts(dom);
+  assert.equal(sent.length, 1, 'one POST');
+  assert.deepEqual(sent[0].body, { title: ORDER_TITLE, policy: ORDER_POLICY }, 'the trimmed title and policy, and no other field');
+  assert.equal(dom.byId('order-title').value, '', 'the title is cleared after success');
+  assert.equal(dom.byId('order-policy').value, '', 'the policy is cleared after success');
+  assert.equal(dom.byId('order-create-result').textContent, ORDER_CREATE_MSG_SAVED);
+  assert.equal(dom.byId('order-create-result').className.includes('ok'), true);
+  const listReadsAfter = dom.calls.filter((c) => c.method === 'GET' && c.path === '/api/selfdev/orders').length;
+  assert.equal(listReadsAfter > listReadsBefore, true, 'the list is read again');
+});
+
+test('409 ROOT_EXISTS, 400, 403 and 503 give the fixed texts, and a server text or code is never shown', async () => {
+  const cases = [
+    [409, { error: 'the root order already exists', code: 'ROOT_EXISTS' }, /^ルートの order は既にあります$/],
+    [400, { error: 'policy must be 1-2000 characters', code: 'POLICY_INVALID' }, /^題名\/方針が不正です（長さ、制御文字）$/],
+    [403, { error: 'the AI principal cannot create an order' }, /^この操作は許可されていません$/],
+    [503, { error: 'orders are disabled' }, /^order は無効です$/],
+    [500, { error: 'boom' }, /^作成に失敗しました$/],
+  ];
+  for (const [status, data, expected] of cases) {
+    const dom = ordLoad(orderCreateState(() => ({ status, data })));
+    await flush();
+    fillOrderCreate(dom, ORDER_TITLE, ORDER_POLICY);
+    await orderCreateSubmit(dom);
+    const msg = dom.byId('order-create-result').textContent;
+    assert.match(msg, expected, 'status ' + status);
+    assert.equal(msg.includes('boom'), false, 'the server text is not shown');
+    assert.equal(msg.includes('ROOT_EXISTS') || msg.includes('POLICY_INVALID'), false, 'no fixed code is shown');
+    assert.equal(dom.byId('order-title').value, ORDER_TITLE, 'a failed create keeps the title for a retry');
+  }
+});
+
+test('a create never shows the title or the policy in the result, the errors or the list, on success or failure', async () => {
+  for (const post of [
+    () => ({ status: 201, data: orderOf({ orderId: O2 }) }),
+    () => ({ status: 400, data: { error: 'title ' + ORDER_TITLE + ' ' + ORDER_POLICY } }),
+    () => ({ status: 409, data: { error: ORDER_TITLE, code: 'ROOT_EXISTS' } }),
+  ]) {
+    const dom = ordLoad(orderCreateState(post));
+    await flush();
+    fillOrderCreate(dom, ORDER_TITLE, ORDER_POLICY);
+    await orderCreateSubmit(dom);
+    const shown = dom.byId('order-create-result').textContent + dom.byId('orders-msg').textContent + dom.byId('orders-status').textContent;
+    assert.equal(shown.includes(ORDER_TITLE), false, 'the title is not shown');
+    assert.equal(shown.includes(ORDER_POLICY), false, 'the policy is not shown');
+  }
+});
+
+test('a double submit while a create is in flight sends one request and disables the controls', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const s = orderCreateState(() => gate.then(() => ({ status: 201, data: orderOf({ orderId: O2 }) })));
+  const dom = ordLoad(s);
+  await flush();
+  fillOrderCreate(dom, ORDER_TITLE, ORDER_POLICY);
+  dom.byId('order-create-form').fire('submit', { preventDefault() {} });
+  dom.byId('order-create-form').fire('submit', { preventDefault() {} });
+  await flush();
+  assert.equal(orderCreatePosts(dom).length, 1, 'one request while in flight');
+  assert.equal(dom.byId('order-create-submit').disabled, true, 'the submit button is disabled while in flight');
+  assert.equal(dom.byId('order-title').disabled, true, 'the title is read-only while in flight');
+  release();
+  await flush();
+  assert.equal(orderCreatePosts(dom).length, 1, 'still one request after the answer');
+  assert.equal(dom.byId('order-create-submit').disabled, false, 'enabled again after the answer');
+});
+
+test('a control character, an empty title or an over-long policy is refused before any request', async () => {
+  const dom = ordLoad(orderCreateState(() => ({ status: 201, data: orderOf({ orderId: O2 }) })));
+  await flush();
+  fillOrderCreate(dom, 'a\u0007b', ORDER_POLICY);
+  await orderCreateSubmit(dom);
+  assert.equal(orderCreatePosts(dom).length, 0, 'a control character in the title sends nothing');
+  assert.equal(dom.byId('order-create-result').textContent.includes('a\u0007b'), false, 'the title is not shown');
+
+  fillOrderCreate(dom, '   ', ORDER_POLICY);
+  await orderCreateSubmit(dom);
+  assert.equal(orderCreatePosts(dom).length, 0, 'a blank title sends nothing');
+
+  fillOrderCreate(dom, ORDER_TITLE, 'x'.repeat(2001));
+  await orderCreateSubmit(dom);
+  assert.equal(orderCreatePosts(dom).length, 0, 'a policy over 2000 characters sends nothing');
+
+  fillOrderCreate(dom, ORDER_TITLE, 'line one\n\tline two\u0000');
+  await orderCreateSubmit(dom);
+  assert.equal(orderCreatePosts(dom).length, 0, 'a NUL in the policy sends nothing; a line break and a tab would be allowed');
+  assert.match(dom.byId('order-create-result').textContent, /制御文字は使えません/);
+});
+
+test('the create is not sent while the order list is hidden (autopilot off)', async () => {
+  const dom = ordLoad(ordState({ autopilot: 503, orderPost: (p, init) => (p === '/api/selfdev/orders' && init.method === 'POST' ? { status: 201, data: orderOf({ orderId: O2 }) } : null) }));
+  await flush();
+  assert.equal(dom.byId('orders-section').hidden, true, 'autopilot off: the section is hidden');
+  fillOrderCreate(dom, ORDER_TITLE, ORDER_POLICY);
+  dom.byId('order-create-form').fire('submit', { preventDefault() {} });
+  await flush();
+  assert.equal(orderCreatePosts(dom).length, 0);
+});
+
+test('the title and policy counters count code points, not UTF-16 units', async () => {
+  const dom = ordLoad(orderCreateState(() => ({ status: 201, data: orderOf({ orderId: O2 }) })));
+  await flush();
+  dom.byId('order-title').value = '𠮷a';
+  dom.byId('order-title').fire('input');
+  assert.equal(dom.byId('order-title-count').textContent, '2 / 200');
+  dom.byId('order-policy').value = 'あ'.repeat(5);
+  dom.byId('order-policy').fire('input');
+  assert.equal(dom.byId('order-policy-count').textContent, '5 / 2000');
+});

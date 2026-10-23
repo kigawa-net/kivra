@@ -126,8 +126,34 @@ class SelfDevCycleSpendReaderTest {
                 unpricedMicroYen = 50,
                 hasUnconfirmedUnpriced = true,
                 attemptsActive = 1,
+                reservedRows = 1,
+                lapsedRows = 1,
             ),
             spend,
+        )
+    }
+
+    @Test
+    fun `RESERVED and LAPSED rows are counted by row, zero yen included`() = withFixture { f ->
+        val cycle = f.startCycle(f.root)
+        val run = f.newRun()
+        f.task(f.newPlan(cycle.goalId), 1, run)
+        f.ledger(DbCodingCostLedger.reservationKey(f.attempt(run, 1, "FAILED", 1), 1), DbBudgetStore.RESERVED, 0)
+        f.ledger(DbCodingCostLedger.reservationKey(f.attempt(run, 2, "RUNNING", 1), 1), DbBudgetStore.RESERVED, 30)
+        f.ledger(DbCodingCostLedger.reservationKey(f.attempt(run, 3, "FAILED", 1), 1), DbBudgetStore.LAPSED, 0)
+
+        assertEquals(
+            CycleSpend(
+                committedMicroYen = 0,
+                lapsedMicroYen = 0,
+                reservedMicroYen = 30,
+                unpricedMicroYen = 0,
+                hasUnconfirmedUnpriced = false,
+                attemptsActive = 1,
+                reservedRows = 2,
+                lapsedRows = 1,
+            ),
+            f.reader.read(f.root.orderId, 1),
         )
     }
 

@@ -21,6 +21,10 @@ data class CycleSpend(
     val hasUnconfirmedUnpriced: Boolean,
     /** Attempts of the cycle that are QUEUED, CLAIMED or RUNNING. Their cost is not in the ledger yet (C.7, U-37). */
     val attemptsActive: Int,
+    /** Number of RESERVED rows, zero yen included. A cycle with one is not final (ADR 0015 addendum 2026-10-23, K.2). */
+    val reservedRows: Int = 0,
+    /** Number of LAPSED rows, zero yen included. A cycle with one is not final (ADR 0015 addendum 2026-10-23, K.2). */
+    val lapsedRows: Int = 0,
 )
 
 /**
@@ -43,13 +47,21 @@ class SelfDevCycleSpendReader(private val database: Database) {
         var reserved = 0L
         var unpriced = 0L
         var hasUnpriced = false
+        var reservedRows = 0
+        var lapsedRows = 0
         execQuery(LEDGER_SQL, orderId, cycleNo, orderId, cycleNo, PLANNER_PREFIX, orderId, cycleNo, DEVELOPER_PREFIX) { rs ->
             rs.getString(1) to rs.getLong(2)
         }.forEach { (state, amount) ->
             when (state) {
                 DbBudgetStore.COMMITTED, DbBudgetStore.ACKNOWLEDGED -> committed += amount
-                DbBudgetStore.LAPSED -> lapsed += amount
-                DbBudgetStore.RESERVED -> reserved += amount
+                DbBudgetStore.LAPSED -> {
+                    lapsed += amount
+                    lapsedRows++
+                }
+                DbBudgetStore.RESERVED -> {
+                    reserved += amount
+                    reservedRows++
+                }
                 DbBudgetStore.UNPRICED -> {
                     unpriced += amount
                     hasUnpriced = true
@@ -67,6 +79,8 @@ class SelfDevCycleSpendReader(private val database: Database) {
             unpricedMicroYen = unpriced,
             hasUnconfirmedUnpriced = hasUnpriced,
             attemptsActive = attempts,
+            reservedRows = reservedRows,
+            lapsedRows = lapsedRows,
         )
     }
 

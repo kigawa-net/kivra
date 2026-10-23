@@ -1,6 +1,7 @@
 package net.kigawa.kivra.db
 
 import org.jetbrains.exposed.sql.Database
+import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
 
 /**
@@ -33,7 +34,10 @@ data class CycleSpend(
  */
 class SelfDevCycleSpendReader(private val database: Database) {
 
-    fun read(orderId: String, cycleNo: Int): CycleSpend = transaction(database) {
+    fun read(orderId: String, cycleNo: Int): CycleSpend = transaction(database) { spendOf(orderId, cycleNo) }
+
+    /** The same read inside the caller's transaction (stage 3g reads the ledger again under the order locks). Same SQL as [read]. */
+    fun Transaction.spendOf(orderId: String, cycleNo: Int): CycleSpend {
         var committed = 0L
         var lapsed = 0L
         var reserved = 0L
@@ -56,7 +60,7 @@ class SelfDevCycleSpendReader(private val database: Database) {
             }
         }
         val attempts = execQuery(ACTIVE_ATTEMPTS_SQL, orderId, cycleNo) { it.getInt(1) }.single()
-        CycleSpend(
+        return CycleSpend(
             committedMicroYen = committed,
             lapsedMicroYen = lapsed,
             reservedMicroYen = reserved,

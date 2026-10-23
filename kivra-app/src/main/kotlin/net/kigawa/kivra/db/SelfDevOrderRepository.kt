@@ -515,6 +515,96 @@ class SelfDevOrderRepository(
         OrderResult.Moved(getIn(orderId) ?: error("order vanished after cycle evaluation"))
     }
 
+    // ---- cycle spend (ADR 0015 addendum 2026-10-23, stage 3g) --------------------------------------------------------------------
+
+    /** One cycle whose cost is still to be counted: its goal, its order and its number. */
+    data class SpendCycle(val goalId: String, val orderId: String, val cycleNo: Int)
+
+    private val spendReader = SelfDevCycleSpendReader(database)
+
+    /**
+     * The cycles to count (section F, 3g): every cycle whose spend row is not final, and every cycle that has a goal but no spend row yet
+     * (its first count). Not filtered by the order's state, so the cost of a stopped order's cycle is still counted until it is final (U-38).
+     */
+    fun unfinishedSpendCycles(limit: Int): List<SpendCycle> = transaction(database) {
+        execQuery(
+            """
+            SELECT g.goal_id, g.order_id, g.cycle_no
+              FROM selfdev_goals g
+              LEFT JOIN selfdev_order_cycle_spend s ON s.order_id = g.order_id AND s.cycle_no = g.cycle_no
+             WHERE g.order_id IS NOT NULL AND (s.order_id IS NULL OR s.final = FALSE)
+             ORDER BY g.created_at, g.goal_id LIMIT ?
+            """.trimIndent(),
+            limit,
+        ) { SpendCycle(it.getString(1), it.getString(2), it.getInt(3)) }
+    }
+
+    /**
+     * Counts the cost of one cycle (section C.2), in one transaction: the order path is locked from the root down, the cycle's spend row is
+     * locked (or created), the ledger is read again under those locks, and the difference between the new and the counted total is added to
+     * the `spent_jpy` of every order on the path. Adding the difference (not the total) makes a second run with the same ledger a no-op.
+     * A spend row whose cycle is final is left alone. Returns true when something was written. Throws on a failure; nothing is written then.
+     */
+    fun countCycleSpend(cycle: SpendCycle): Boolean = transaction(database) {
+        val path = lockPath(cycle.orderId) ?: return@transaction false
+        val order = path.first()
+        val now = utcNow(clock)
+        val before = execQuery(
+            "SELECT counted_jpy, ledger_micro_yen, final FROM selfdev_order_cycle_spend WHERE order_id = ? AND cycle_no = ? FOR UPDATE",
+            cycle.orderId, cycle.cycleNo,
+        ) { rs -> SpendRow(rs.getLong(1), rs.getLong(2), rs.getBoolean(3)) }.firstOrNull()
+        if (before?.final == true) return@transaction false
+        if (before == null) {
+            execUpdate(
+                """
+                INSERT INTO selfdev_order_cycle_spend (order_id, cycle_no, goal_id, ledger_micro_yen, counted_jpy, final, updated_at)
+                VALUES (?, ?, ?, 0, 0, FALSE, ?)
+                """.trimIndent(),
+                cycle.orderId, cycle.cycleNo, cycle.goalId, now,
+            )
+        }
+        val oldCounted = before?.counted ?: 0L
+        val oldLedger = before?.ledger ?: 0L
+        val spend = with(spendReader) { spendOf(cycle.orderId, cycle.cycleNo) }
+        val total = spend.committedMicroYen + spend.lapsedMicroYen + spend.reservedMicroYen + spend.unpricedMicroYen
+        val counted = ceilYen(total)
+        val delta = counted - oldCounted
+        val final = isSpendFinal(cycle.goalId, spend)
+        if (delta == 0L && total == oldLedger && !final) return@transaction before == null
+        if (delta != 0L) {
+            for (row in path) {
+                // Never below zero: a fall larger than the total counted so far is cut off at zero (section C.2).
+                val next = if (row.spentJpy + delta < 0) 0L else row.spentJpy + delta
+                execUpdate("UPDATE selfdev_orders SET spent_jpy = ? WHERE order_id = ?", next, row.orderId)
+            }
+        }
+        execUpdate(
+            "UPDATE selfdev_order_cycle_spend SET ledger_micro_yen = ?, counted_jpy = ?, final = ?, updated_at = ? WHERE order_id = ? AND cycle_no = ?",
+            total, counted, final, now, cycle.orderId, cycle.cycleNo,
+        )
+        if (delta != 0L) {
+            val child = order.parentOrderId != null
+            appendEvent(
+                cycle.orderId, cycle.cycleNo, SPEND_COUNTED, null, null, if (final) "FINAL" else null, OrderActor.SYSTEM, null, null, now,
+                parentOrderId = order.parentOrderId, depth = order.depth.takeIf { child }, amountJpy = delta,
+            )
+        }
+        true
+    }
+
+    /**
+     * A cycle is final when its goal has ended, no attempt of it is active, and the ledger holds nothing that can still change (no RESERVED
+     * or LAPSED amount) and no UNPRICED row waiting for an operator (section C.2). Until then the cycle is counted again on every tick.
+     */
+    private fun Transaction.isSpendFinal(goalId: String, spend: CycleSpend): Boolean {
+        val state = execQuery("SELECT state FROM selfdev_goals WHERE goal_id = ?", goalId) { GoalState.valueOf(it.getString(1)) }.firstOrNull()
+        return (state == GoalState.DONE || state == GoalState.STOPPED) &&
+            spend.attemptsActive == 0 && spend.reservedMicroYen == 0L && spend.lapsedMicroYen == 0L && !spend.hasUnconfirmedUnpriced
+    }
+
+    /** The spend row as locked: the counted yen, the last ledger total (micro-yen) and the final flag. */
+    private class SpendRow(val counted: Long, val ledger: Long, val final: Boolean)
+
     // ---- stop requests -----------------------------------------------------------------------------------------------------------
 
     /**
@@ -916,15 +1006,16 @@ class SelfDevOrderRepository(
         now: LocalDateTime,
         parentOrderId: String? = null,
         depth: Int? = null,
+        amountJpy: Long? = null,
     ) {
         execUpdate(
             """
             INSERT INTO selfdev_order_events (event_id, order_id, cycle_no, kind, from_state, to_state, reason_code, actor_kind, actor_ref,
-                request_id, occurred_at, parent_order_id, depth)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                request_id, occurred_at, parent_order_id, depth, amount_jpy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             Ulid.generate(clock), orderId, cycleNo, kind, from?.name, to?.name, reason, actor.name, actorKey?.let(::actorRef), requestId, now,
-            parentOrderId, depth,
+            parentOrderId, depth, amountJpy,
         )
     }
 
@@ -1031,6 +1122,13 @@ class SelfDevOrderRepository(
             "order_budget_jpy, allocated_jpy, child_count, spent_jpy, cycle_budget_jpy"
         const val REQUEST_COLUMNS = "request_id, order_id, requested_by, requester_kind, reason_code, order_version, digest, state, " +
             "decided_by, expires_at, created_at, target_is_root"
+
+        /** The audit kind of a cost count (stage 3g). Its `amount_jpy` is the change of the counted yen. */
+        const val SPEND_COUNTED = "SPEND_COUNTED"
+        const val MICRO_YEN_PER_YEN = 1_000_000L
+
+        /** The whole yen of a micro-yen total, rounded up once per cycle (section C.2, U-33). */
+        fun ceilYen(micro: Long): Long = if (micro <= 0) 0L else (micro + MICRO_YEN_PER_YEN - 1) / MICRO_YEN_PER_YEN
 
         fun actorRef(key: String): String =
             MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it) }

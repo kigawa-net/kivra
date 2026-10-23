@@ -1660,6 +1660,23 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 - テスト: キーの 3 形式の契約(`SelfDevCycleSpendContractTest`)。ロック順序(`SelfDevBudgetLockOrderTest`。`DbBudgetStore` は order の表を参照しない。読み取りは書き込みも行ロックもしない)。
 - 次の段階: 3g(tick での差分の加算。`spent_jpy` と `counted_jpy` の更新、`final` の判定)、3h(`startCycle` の式の実効化、未確認の UNPRICED の拒否、`CHILD_BUDGET_EXHAUSTED` の事実)。
 
+#### 7.6.2h 周の費用の自動集計(段階 3g。既定では無効)
+
+- **範囲**: 監視(tick)の新しい段 `order spend`(周の評価の後)が、周ごとの費用を台帳から読み、差分を経路上の order の `spent_jpy` に加える。ADR 0015 追補の §F の 3g。`startCycle` の式は変えない(3h)。
+- **スイッチ**: `KIVRA_SELFDEV_ORDER_SPEND_ENABLED`。既定は `false`。`true` と `false` 以外は起動に失敗し、値は表示されない。order が無効のときは読まれない。`false` のときは段が何もしない。**dev で有効にするのは運用者の承認の後**(k8s の PR)。
+- **対象**: `selfdev_order_cycle_spend.final = FALSE` の周と、表の行がまだ無く `selfdev_goals.order_id` を持つ周(初回の計上)。order の状態では絞らない。停止された order の周も、`final` になるまで計上する。1 回の tick で最大 50 件(`BATCH`)。
+- **周ごとの処理(1 transaction)**: 経路を根から下へロック(`lockPath`)→ 表の行を `FOR UPDATE`(無ければ作る)→ 台帳を読み直す → `counted = ceil(合計マイクロ円 / 1,000,000)`(周ごとに 1 回だけ切り上げ)→ `delta = counted - 前の counted`。`delta` が 0 でなければ、経路上の全 order の `spent_jpy` に `delta` を足す(0 を下回らない)。テナントの budget 行は読むだけで、ロックしない。
+- **合計に含む状態**: `COMMITTED`、`ACKNOWLEDGED`、`LAPSED`、`RESERVED`、`UNPRICED`(安全側で見積もりの額)。`RELEASED` は含めない。追補 §B と §C.2 は `RESERVED` を含めていないが、本段階は含める(予約の解放で合計が減る経路を持たせるため。ADR との差は報告に書いた)。
+- **冪等**: 加算は「前に計上した額との差」。同じ台帳の値で何度 tick しても `spent_jpy` は増えない。台帳の合計が減ると(予約の解放など)`spent_jpy` も減る。
+- **`final`**: 周の Goal が `DONE` か `STOPPED`、その周の attempt が全て非活性、`RESERVED` と `LAPSED` の額が 0、未確認の `UNPRICED` が無い、のすべてを満たすとき。`final` の周は以後の tick で対象にしない(行も書かない)。
+- **同時実行**: 同じ木の処理は、根の行ロックで直列化される。ロックの順序は order の行(根から下)→ 表の行 で、budget の行には触らない(`SelfDevBudgetLockOrderTest` で固定)。
+- **監査**: `delta` が 0 でないとき、周の order に `SPEND_COUNTED` を 1 件(`amount_jpy` = `delta` の円、`reason_code` = `FINAL` は `final` のときだけ)。題名、方針、台帳のキー、パスは入らない。`delta` が 0 のときは書かない。
+- **失敗**: 周ごとに隔離される。失敗した周は飛ばし、他の周と tick は続く。ログは `order spend: failed code=SPEND_FAILED orderId=... exception=...`(例外の文言は出さない)。
+- **見えるようになるもの**: 周の費用が `spent_jpy` に載る(`GET` の一覧と詳細の `spentJpy` にも出る)。3b の周の開始の検査(`order_budget_jpy - spent_jpy >= cycle_budget_jpy`)が**実効化される**。費用が予算に届いた order は、次の周を `ORDER_BUDGET` で始められない。
+- **見えないもの**: CLI の実行中の額は、報告されるまで台帳に無いため、`spent_jpy` にも無い(U-37)。
+- **dev で有効にする前の注意**: `spent_jpy` は台帳から導く値である。手で書き換えない(次の tick が台帳の値に合わせ直す)。有効化すると `spent_jpy` が実際に増えるため、既存の order の周の開始が `ORDER_BUDGET` で止まりうる。
+- **この PR に含まれないもの(3h)**: `startCycle` の式(進行中の予約を足す)、未確認の UNPRICED の拒否(`ORDER_UNPRICED`)、`CHILD_BUDGET_EXHAUSTED` の事実。3h で予約を足すときは、`RESERVED` が既に `spent_jpy` に入っているため、二重に数えないこと。
+
 #### 7.6.3 状態
 
 | 状態 | 意味 | 解除 |

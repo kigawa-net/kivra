@@ -25,6 +25,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -33,6 +34,8 @@ import net.kigawa.kivra.auth.OidcTestTokens
 import net.kigawa.kivra.auth.oidcOwnerKey
 import net.kigawa.kivra.core.autopilot.OrderState
 import net.kigawa.kivra.core.autopilot.StopRequestReason
+import net.kigawa.kivra.db.ChildCreateResult
+import net.kigawa.kivra.db.ChildLimits
 import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.OrderConflict
 import net.kigawa.kivra.db.OrderResult
@@ -67,6 +70,7 @@ class McpOrderToolsTest {
     private val title = "TITLE-MARKER-ORDER"
     private val policy = "POLICY-MARKER-ORDER"
     private val noSuchOrder = "0".repeat(25) + "1"
+    private val CHILD_LIMITS = ChildLimits(maxDepth = 2, maxChildren = 5, maxTree = 15)
 
     private fun env(writeEnabled: Boolean, writeRate: Int = 1000): Map<String, String> = mapOf(
         "KIVRA_AUTH_MODE" to "oidc-jwt",
@@ -289,6 +293,31 @@ class McpOrderToolsTest {
     // ---- the read tools: fixed codes, IDs, dates and counts only --------------------------------------------
 
     @Test
+    fun `the read tools return the tree links, the child count and the budget of a child order, as IDs and JPY numbers`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        val root = createRoot(orders)
+        val child = (orders.createChild(root.orderId, title, policy, 700, "mcp-child-1", bobOwner, CHILD_LIMITS) as ChildCreateResult.Created).order
+        testApplication {
+            setUp(deps(db, orders))
+            val rows = callTool("kivra_order_list", "{}", readOnlyToken).structured()["orders"]!!.jsonArray.map { it.jsonObject }
+            val rootRow = rows.single { it["order_id"]!!.jsonPrimitive.content == root.orderId }
+            val childRow = rows.single { it["order_id"]!!.jsonPrimitive.content == child.orderId }
+            assertTrue(rootRow["parent_order_id"] is JsonNull, "a root has no parent")
+            assertEquals("1", rootRow["child_count"]!!.jsonPrimitive.content)
+            assertEquals(root.orderId, childRow["parent_order_id"]!!.jsonPrimitive.content)
+            assertEquals("1", childRow["depth"]!!.jsonPrimitive.content)
+            assertEquals("0", childRow["child_count"]!!.jsonPrimitive.content)
+            assertEquals("700", childRow["order_budget_jpy"]!!.jsonPrimitive.content)
+            assertEquals("0", childRow["spent_jpy"]!!.jsonPrimitive.content)
+
+            val got = callTool("kivra_order_get", """{"order_id":"${child.orderId}"}""", readOnlyToken).structured()
+            assertEquals(root.orderId, got["parent_order_id"]!!.jsonPrimitive.content)
+            assertEquals("700", got["order_budget_jpy"]!!.jsonPrimitive.content)
+            assertEquals("0", got["child_count"]!!.jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun `the read tools return the REST summary fields, the cycles, and the pending request without the digest, title or policy`() = withTestDb { db ->
         val orders = SelfDevOrderRepository(db.database)
         val root = createRoot(orders)
@@ -411,6 +440,6 @@ class McpOrderToolsTest {
 
     private val summaryKeys = setOf(
         "order_id", "parent_order_id", "depth", "state", "state_reason", "cycles_started", "max_cycles", "current_goal_id",
-        "consecutive_failed_cycles", "expires_at", "version", "created_at", "updated_at",
+        "consecutive_failed_cycles", "child_count", "order_budget_jpy", "spent_jpy", "expires_at", "version", "created_at", "updated_at",
     )
 }

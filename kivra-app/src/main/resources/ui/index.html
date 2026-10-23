@@ -124,7 +124,7 @@
         <h2 id="h-orders">order の一覧（ADR 0015）</h2>
         <button type="button" id="orders-refresh" class="secondary">今すぐ更新</button>
       </div>
-      <p class="meta" role="note">order は、Goal を周回させる長く生きる指示です。題名と方針は、この画面には表示しません。停止は、要求の後で承認者が承認したときだけ行われます。</p>
+      <p class="meta" role="note">order は、Goal を周回させる長く生きる指示です。題名と方針は、この画面には表示しません。停止は、要求の後で承認者が承認したときだけ行われます。子の order は、親の下に字下げして表示します。</p>
       <p id="orders-msg" class="result" role="status"></p>
       <p id="orders-status" class="meta" role="status">未取得</p>
       <ul id="orders-list" class="run-list" aria-label="order の一覧"></ul>

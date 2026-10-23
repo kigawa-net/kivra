@@ -431,4 +431,75 @@ class SelfDevOrderSpendTest {
         f.watch().tick()
         assertEquals(2L, f.spentOf(f.root.orderId))
     }
+
+    /** The root's cycle limit ends at its first cycle (LIMIT_REACHED pauses the order), so the new tests raise it, as the 3b test does. */
+    private fun Fixture.allowMoreCycles() = exec("UPDATE selfdev_orders SET max_cycles = 3 WHERE order_id = ?", root.orderId)
+
+    @Test
+    fun `an unconfirmed UNPRICED row in a finished cycle of the path refuses the next cycle, zero yen included (U-35)`() = withFixture { f ->
+        f.allowMoreCycles()
+        val (cycle, run) = f.cycleWithRun(f.root)
+        f.ledger(f.ledgerKeyOf(f.attempt(run, "RESULT_RECEIVED")), DbBudgetStore.UNPRICED, 0)
+        f.endGoal(cycle.goalId)
+        f.watch().tick()
+        assertEquals(false, f.spendRow(f.root.orderId, cycle.cycleNo)!!["final"], "an unconfirmed UNPRICED row keeps the cycle open")
+
+        val before = f.current(f.root)
+        val refused = f.orders.startCycle(f.root.orderId, before.version, OPERATOR)
+        assertEquals(OrderResult.Refused(OrderConflict.ORDER_UNPRICED), refused)
+        assertEquals(before.cyclesStarted, f.current(f.root).cyclesStarted, "a refused start writes nothing")
+        assertEquals(before.version, f.current(f.root).version)
+    }
+
+    @Test
+    fun `an ancestor's unconfirmed UNPRICED cycle refuses a child's cycle start, with no order ID in the answer`() = withFixture { f ->
+        f.allowMoreCycles()
+        val child = f.child(f.root, budget = 2_000)
+        val (cycle, run) = f.cycleWithRun(f.root)
+        f.ledger(f.ledgerKeyOf(f.attempt(run, "RESULT_RECEIVED")), DbBudgetStore.UNPRICED, 0)
+        f.endGoal(cycle.goalId)
+        f.watch().tick()
+
+        val refused = f.orders.startCycle(child.orderId, f.current(child).version, OPERATOR)
+        assertEquals(OrderResult.Refused(OrderConflict.ORDER_UNPRICED), refused)
+        assertEquals(0, f.current(child).cyclesStarted)
+    }
+
+    @Test
+    fun `without an unconfirmed UNPRICED row the next cycle starts, and an acknowledged UNPRICED row lets it start too`() = withFixture { f ->
+        f.allowMoreCycles()
+        val (cycle, run) = f.cycleWithRun(f.root)
+        val attempt = f.attempt(run, "RESULT_RECEIVED")
+        f.ledger(f.ledgerKeyOf(attempt), DbBudgetStore.UNPRICED, 0)
+        f.endGoal(cycle.goalId)
+        f.watch().tick()
+        assertIs<OrderResult.Refused>(f.orders.startCycle(f.root.orderId, f.current(f.root).version, OPERATOR))
+
+        f.setLedgerState(f.ledgerKeyOf(attempt), DbBudgetStore.ACKNOWLEDGED)
+        f.watch().tick()
+        assertEquals(true, f.spendRow(f.root.orderId, cycle.cycleNo)!!["final"])
+        val next = assertIs<OrderResult.Moved<CycleStarted>>(f.orders.startCycle(f.root.orderId, f.current(f.root).version, OPERATOR))
+        assertEquals(cycle.cycleNo + 1, next.value.cycleNo)
+    }
+
+    @Test
+    fun `a finished cycle with no UNPRICED row does not refuse the next cycle`() = withFixture { f ->
+        f.allowMoreCycles()
+        val (cycle, run) = f.cycleWithRun(f.root)
+        f.ledger(f.ledgerKeyOf(f.attempt(run, "RESULT_RECEIVED")), DbBudgetStore.COMMITTED, 1_000_000)
+        f.endGoal(cycle.goalId)
+        f.watch().tick()
+        assertIs<OrderResult.Moved<CycleStarted>>(f.orders.startCycle(f.root.orderId, f.current(f.root).version, OPERATOR))
+    }
+
+    @Test
+    fun `with the spend switch off no cycle row is written, so an UNPRICED row refuses nothing`() = withFixture { f ->
+        f.allowMoreCycles()
+        val (cycle, run) = f.cycleWithRun(f.root)
+        f.ledger(f.ledgerKeyOf(f.attempt(run, "RESULT_RECEIVED")), DbBudgetStore.UNPRICED, 0)
+        f.endGoal(cycle.goalId)
+        f.watch(countSpend = false).tick()
+        assertEquals(0, f.spendRowCount(), "the switch off writes no cycle row, and the check reads only the cycle rows")
+        assertIs<OrderResult.Moved<CycleStarted>>(f.orders.startCycle(f.root.orderId, f.current(f.root).version, OPERATOR))
+    }
 }

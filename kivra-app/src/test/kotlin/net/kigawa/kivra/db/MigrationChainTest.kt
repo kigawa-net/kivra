@@ -49,10 +49,11 @@ internal val MIGRATION_FILES = mapOf(
     24 to "V24__selfdev_memory_quota_lock.sql",
     25 to "V25__selfdev_order_children.sql",
     26 to "V26__selfdev_order_cycle_budget.sql",
+    27 to "V27__selfdev_order_child_stop.sql",
 )
 
 /** The versions applied on the full chain. V22 is never used (reserved gap), so the list skips it. */
-internal val EXPECTED_APPLIED_VERSIONS: List<String> = (1..21).map { it.toString() } + listOf("23", "24", "25", "26")
+internal val EXPECTED_APPLIED_VERSIONS: List<String> = (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27")
 
 /** Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved). */
 internal val RESERVED_MIGRATION_VERSIONS: Set<Int> = setOf(22)
@@ -66,10 +67,11 @@ internal val RESERVED_MIGRATION_VERSIONS: Set<Int> = setOf(22)
 class MigrationChainTest {
 
     @Test
-    fun `empty database applies V1 to V21, V23, V24, V25 and V26 in order and flyway validate passes`() = TestDb().use { db ->
+    fun `empty database applies V1 to V21, V23, V24, V25, V26 and V27 in order and flyway validate passes`() = TestDb().use { db ->
         val flyway = classpathFlyway(db.dataSource)
         flyway.validate()
         assertEquals(EXPECTED_APPLIED_VERSIONS, appliedVersions(db.dataSource))
+        assertEquals(1, db.columnCount("selfdev_order_stop_requests", "target_is_root"))
         assertEquals(1, db.columnCount("selfdev_orders", "spent_jpy"))
         assertEquals(1, db.columnCount("selfdev_orders", "cycle_budget_jpy"))
         assertEquals(1, db.columnCount("selfdev_orders", "order_budget_jpy"))
@@ -103,6 +105,49 @@ class MigrationChainTest {
         }
         for (column in listOf("task_title", "principal", "idempotency_key", "task_body", "task_source")) {
             assertEquals(1, db.columnCount("development_runs", column))
+        }
+    }
+
+    /**
+     * A stop request and its order written under V26 (before the child stop) stay root requests under V27, and the root's separation CHECK
+     * still refuses a self-approval on the upgraded schema (ADR 0015 section 4.2 (b)).
+     */
+    @Test
+    fun `a stop request written before V27 is a root request, and V27 keeps the root's separation CHECK`() {
+        val beforeV27 = (1..21).toList() + (23..26).toList()
+        TestDb { ds -> migrateOnly(ds, *beforeV27.toIntArray()) }.use { db ->
+            val orderId = "01AAAAAAAAAAAAAAAAAAAAAAAA"
+            val requestId = "01BBBBBBBBBBBBBBBBBBBBBBBB"
+            transaction(db.database) {
+                execUpdate(
+                    """
+                    INSERT INTO selfdev_orders (order_id, parent_order_id, depth, root_slot, title, policy, target_repo, max_cycles,
+                        cycles_started, consecutive_failed_cycles, state, expires_at, created_by, version, created_at, updated_at)
+                    VALUES (?, NULL, 0, 1, 't', 'p', 'r', 1, 0, 0, 'PAUSED', NOW(6), 'op', 2, NOW(6), NOW(6))
+                    """.trimIndent(),
+                    orderId,
+                )
+                execUpdate(
+                    """
+                    INSERT INTO selfdev_order_stop_requests (request_id, order_id, requested_by, requester_kind, reason_code, order_version,
+                        digest, state, active_key, decided_by, decider_kind, decided_at, expires_at, created_at)
+                    VALUES (?, ?, 'ai', 'AI', 'OPERATOR_REQUEST', 1, ?, 'CONSUMED', NULL, 'op', 'HUMAN', NOW(6), NOW(6), NOW(6))
+                    """.trimIndent(),
+                    requestId, orderId, "0".repeat(64),
+                )
+            }
+            runMigrations(db.dataSource)
+            classpathFlyway(db.dataSource).validate()
+            assertEquals(EXPECTED_APPLIED_VERSIONS, appliedVersions(db.dataSource))
+            val targetIsRoot = transaction(db.database) {
+                execQuery("SELECT target_is_root FROM selfdev_order_stop_requests WHERE request_id = ?", requestId) { it.getInt(1) }.single()
+            }
+            assertEquals(1, targetIsRoot)
+            assertFailsWith<java.sql.SQLException> {
+                transaction(db.database) {
+                    execUpdate("UPDATE selfdev_order_stop_requests SET decided_by = requested_by WHERE request_id = ?", requestId)
+                }
+            }
         }
     }
 

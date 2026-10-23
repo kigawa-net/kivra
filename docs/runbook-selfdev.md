@@ -1624,6 +1624,20 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 - **注意**: この PR より前は、祖先が `PAUSED` や `STOP_REQUESTED` でも、子の周が始まった(ADR §2.4 に反していた)。この PR の後は始まらない。ただし、この PR より前に始まった周は、そのまま進む。
 - この PR に含まれないもの: 子の停止、部分木の停止(親の停止に伴う子孫の `STOPPED`)、親の自動の決定(§4.4)、子の費用の自動集計(`spent_jpy` への加算)、`/ui` の変更、MCP の読み取りの変更。
 
+#### 7.6.2e 子の停止と部分木の停止(段階 2 の PR 3d)
+
+- **決定者**: 子の停止は、親の決定が承認を兼ねる(ADR 0015 §4.2 (a))。この PR で決定できるのは**人(ルートの承認者。`KIVRA_SELFDEV_ROOT_APPROVER`)だけ**で、対象の直接の親の名で決める。`decided_by` はその owner key、`decider_kind` は `HUMAN`。決めた親の ID は、`STOP_APPROVED` と `STOPPED` の監査の行の `parent_order_id` に残る。親 order の自動の決定(`decider_kind = ORDER`、§4.4)は PR 3e で入る。この PR には含まれない。
+- **要求**: `POST /api/selfdev/orders/{id}/stop-requests` は、ルートでも子でも同じ。運用者と AI の主体が要求できる。応答には `targetIsRoot`(ルートなら `true`、子なら `false`)が出る。MCP の `kivra_order_request_stop` も同じ経路を使うが、MCP の応答は変えていない。
+- **要求者と決定者**: ルートの停止は、要求者と承認者が別の主体でなければならない(アプリの検査と、DB の CHECK `ck_selfdev_order_stop_separation` の両方)。子の停止は、親の決定が承認を兼ねるため、同じ主体でも決められる。
+- **AI の主体**: 子の停止を要求できる。決定(承認、却下)は、入力を読む前に 403。
+- **承認の検査**: 対象が `STOP_REQUESTED`、要求が `PENDING` で期限内、`digest` が一致、対象と子孫の部分木の版が要求時と一致する。どれかが違えば、何も書かずに拒否する(版の変化は 409 `ORDER_CHANGED`)。部分木の外の変化(兄弟など)は、承認を拒否しない。
+- **部分木の停止**: 承認と同じ transaction で、対象を `STOPPED` にする(子は `PARENT_STOPPED`、ルートは `OPERATOR_STOPPED`)。対象の子孫は全て `STOPPED`(`ANCESTOR_STOPPED`)になる。兄弟と親は変わらない。周の開始の検査は、対象の自分の状態を見るので、孫が `ACTIVE` のまま残ることは無い(孤児の禁止、ADR 0015 §2.7)。これまでルートに子がいるとき、ルートの停止は子を `ACTIVE` のまま残していた。この PR で、子孫も止まるように直した。
+- **digest**: `subtree` は、対象と子孫の `order_id` と `version` の組を ID 順に並べたもの。子の無い対象(既存のルートの要求)の正規の JSON は、この PR の前と同じである。子のある木の要求の digest は変わる。この PR の前に出された、子のある木のルートの未決の要求は、承認で 409 `ORDER_CHANGED` になる(安全側。要求し直す)。
+- **ロック**: 要求と承認は、経路をルートから順に、続けて子孫を階層ごとに ID 順に `FOR UPDATE` する(周の開始と子の作成と同じ順序)。同じ木で、子の停止の承認と別の子の周の開始が並行しても、デッドロックしない(テストで確認)。
+- **監査**: `STOP_APPROVED` と `STOPPED` の行に `parent_order_id` と `depth` を入れる(子の行。ルートの行は従来どおり NULL)。停止の理由コードと、主体の SHA-256 の先頭 12 文字だけで、題名と方針は入れない。
+- **DB(V27)**: `selfdev_order_stop_requests.target_is_root TINYINT NOT NULL DEFAULT 1`(既存の行は全てルートの要求)。分離の CHECK は `target_is_root = 0 OR decided_by IS NULL OR decided_by <> requested_by` に置き換えた。ルートの要求では、アプリを迂回した SQL でも同じ主体による承認を拒否する。`ck_selfdev_order_stop_decider` は `HUMAN` のままである。
+- **この PR に含まれないもの**: 親の自動の決定(§4.4、PR 3e)、子の費用の自動集計(`spent_jpy` への加算)、`/ui` の変更、MCP の応答の変更(`targetIsRoot` は MCP に出さない)。
+
 #### 7.6.3 状態
 
 | 状態 | 意味 | 解除 |
@@ -1642,7 +1656,7 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 - **停止(承認が要る)**: 次の手順で、ルートの承認者が承認する。
   1. 要求: `POST /api/selfdev/orders/{id}/stop-requests` `{"version": n, "reasonCode": "..."}`(MCP の `kivra_order_request_stop` も同じ規則。§8.8)。理由は固定の列挙だけ(`OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN`)。自由な文は受け付けない。要求の時点で order は `STOP_REQUESTED` になり、周は始まらない。木に未決の要求は 1 件まで。
   2. 承認者が一覧を見る: `GET /api/selfdev/stop-requests?state=PENDING`(承認者だけ。`digest` を含む)。
-  3. 承認: `POST /api/selfdev/stop-requests/{id}/approve` `{"digest": "<一覧の digest>"}`。承認者は、要求した主体と同じ owner key では承認できない(409 ではなく 403)。`digest` が違えば 409。承認すると order は `STOPPED`、要求は `CONSUMED`。その周の Goal も既存の停止で止まる。投入済みの Run と PR には変更が無い(kivra は PR を閉じず、マージもしない)。
+  3. 承認: `POST /api/selfdev/stop-requests/{id}/approve` `{"digest": "<一覧の digest>"}`。承認者は、ルートの停止では要求した主体と同じ owner key では承認できない(409 ではなく 403)。子の停止は親の決定が承認を兼ねるため、同じ主体でも決められる(§7.6.2e)。`digest` が違えば 409。承認すると order は `STOPPED`、要求は `CONSUMED`。その周の Goal も既存の停止で止まる。投入済みの Run と PR には変更が無い(kivra は PR を閉じず、マージもしない)。
   4. 却下: `POST /api/selfdev/stop-requests/{id}/reject`(承認者)。取り消し: `POST /api/selfdev/stop-requests/{id}/cancel`(要求した運用者か承認者。AI の主体は取り消せない)。どちらも order は `PAUSED`(`STOP_NOT_APPROVED`)に戻り、自動では再開しない。
   5. 期限切れ: 要求から 24 時間で `EXPIRED`、order は `PAUSED`(`STOP_NOT_APPROVED`)。承認は期限切れの後は受け付けない。
 
@@ -1656,7 +1670,7 @@ AI の主体ができるのは、読み取りと停止の要求だけである�
 
 #### 7.6.6 段階 1 の範囲外
 
-子の停止、周の自動の開始、複数周は、後の段階である(ADR 0015 §7)。子の作成は段階 2 の PR 3a で入った(§7.6.2b。既定では作れない)。MCP の読み取りと停止の要求は PR 2a で入った(§8.8)。子の費用の加算(`spent_jpy`)は PR 3b である。
+周の自動の開始、複数周、親の自動の決定(§4.4、PR 3e)は、後の段階である(ADR 0015 §7)。子の停止は段階 2 の PR 3d で入った(§7.6.2e)。子の作成は段階 2 の PR 3a で入った(§7.6.2b。既定では作れない)。MCP の読み取りと停止の要求は PR 2a で入った(§8.8)。子の費用の加算(`spent_jpy`)は PR 3b である。
 
 #### 7.6.7 `/ui` の画面(PR 2b)
 

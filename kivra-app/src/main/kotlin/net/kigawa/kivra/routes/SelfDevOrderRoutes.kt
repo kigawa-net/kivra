@@ -40,8 +40,9 @@ import org.slf4j.LoggerFactory
  *
  * Two kinds of caller are told apart by their owner key: the AI principal (`KIVRA_SELFDEV_AI_PRINCIPAL`) and every other operator (a human).
  * The AI principal may read and request a stop, and nothing else (ADR 0015 section 4.6). The root approver
- * (`KIVRA_SELFDEV_ROOT_APPROVER`) is the only one who approves, rejects a stop or sees the list of pending requests, and never the
- * requester of the request it decides.
+ * (`KIVRA_SELFDEV_ROOT_APPROVER`) is the only one who approves, rejects a stop or sees the list of pending requests. For the root's stop
+ * the approver is never the requester (the repository and the schema check it); a child's stop is the parent's decision, so the root
+ * approver may decide a child's stop it requested itself (ADR 0015 section 4.2 (a)).
  *
  * Everything answers 503 while the feature is off. Errors use fixed text, and a refusal names its fixed code (an enum name); no request
  * value is echoed. A title, a policy, and a request's text are returned only by the detail view, and never logged.
@@ -119,6 +120,8 @@ data class StopRequestResponse(
     val digest: String?,
     val expiresAt: String,
     val createdAt: String,
+    /** True when the request stops the root; false for a child, which its direct parent (the root approver) decides. */
+    val targetIsRoot: Boolean,
 )
 
 @Serializable
@@ -341,7 +344,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         when (val r = deps.orders.approveStop(requestId, caller.principal, body.digest)) {
             is OrderResult.Moved -> {
                 operatorLog.info("order operator action: action=STOP_APPROVED actor={} requestId={} result=STOPPED", operatorTag(caller.principal), requestId)
-                deps.stopCurrentGoal(r.value)
+                // Every order of the stopped part: its cycle in progress, if any, is stopped too.
+                deps.orders.subtreeOf(r.value.orderId).forEach { deps.stopCurrentGoal(it) }
                 call.respond(r.value.summary())
             }
             else -> call.respondOutcome(r)
@@ -556,6 +560,7 @@ private fun SelfDevOrderStopRequest.response(approverView: Boolean) = StopReques
     digest = if (approverView) digest else null,
     expiresAt = expiresAt.utc(),
     createdAt = createdAt.utc(),
+    targetIsRoot = targetIsRoot,
 )
 
 private fun OrderCycle.response() = CycleResponse(

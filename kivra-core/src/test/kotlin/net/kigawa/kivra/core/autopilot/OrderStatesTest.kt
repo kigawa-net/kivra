@@ -36,6 +36,8 @@ class OrderStatesTest {
             add(Edge(OrderState.PAUSED, OrderState.STOP_REQUESTED, OrderReason.STOP_REQUESTED, actor))
         }
         add(Edge(OrderState.STOP_REQUESTED, OrderState.STOPPED, OrderReason.OPERATOR_STOPPED, OrderActor.HUMAN))
+        // A child's stop, decided by its parent (the root approver's decision): the same approval, with its own reason.
+        add(Edge(OrderState.STOP_REQUESTED, OrderState.STOPPED, OrderReason.PARENT_STOPPED, OrderActor.HUMAN))
         add(Edge(OrderState.STOP_REQUESTED, OrderState.PAUSED, OrderReason.STOP_NOT_APPROVED, OrderActor.HUMAN))
         add(Edge(OrderState.STOP_REQUESTED, OrderState.PAUSED, OrderReason.STOP_NOT_APPROVED, OrderActor.SYSTEM))
     }
@@ -149,5 +151,33 @@ class OrderStatesTest {
         assertNotEquals(base, orderStopDigest("01CCCCCCCCCCCCCCCCCCCCCCCC", "01BBBBBBBBBBBBBBBBBBBBBBBB", 3, StopRequestReason.OPERATOR_REQUEST))
         assertNotEquals(base, orderStopDigest("01AAAAAAAAAAAAAAAAAAAAAAAA", "01BBBBBBBBBBBBBBBBBBBBBBBB", 4, StopRequestReason.OPERATOR_REQUEST))
         assertNotEquals(base, orderStopDigest("01AAAAAAAAAAAAAAAAAAAAAAAA", "01BBBBBBBBBBBBBBBBBBBBBBBB", 3, StopRequestReason.RUNAWAY_SUSPECTED))
+    }
+
+    @Test
+    fun `the digest of a subtree binds every version of the part and does not depend on the order of the list`() {
+        val reason = StopRequestReason.OPERATOR_REQUEST
+        val target = "01BBBBBBBBBBBBBBBBBBBBBBBB"
+        val child = "01CCCCCCCCCCCCCCCCCCCCCCCC"
+        val grand = "01DDDDDDDDDDDDDDDDDDDDDDDD"
+        val req = "01AAAAAAAAAAAAAAAAAAAAAAAA"
+        val base = orderStopDigest(req, target, listOf(target to 4L, child to 2L, grand to 1L), reason)
+        assertEquals(base, orderStopDigest(req, target, listOf(grand to 1L, target to 4L, child to 2L), reason))
+        assertNotEquals(base, orderStopDigest(req, target, listOf(target to 4L, child to 3L, grand to 1L), reason))
+        assertNotEquals(base, orderStopDigest(req, target, listOf(target to 4L, child to 2L), reason))
+        // One entry is the stage 1 form: the same digest as the single-order overload.
+        assertEquals(
+            orderStopDigest(req, target, 4, reason),
+            orderStopDigest(req, target, listOf(target to 4L), reason),
+        )
+    }
+
+    @Test
+    fun `a descendant stops only from ACTIVE or PAUSED, by the human approver, as part of an approval`() {
+        assertEquals(OrderTransitionDecision.Allowed, checkSubtreeStop(OrderState.ACTIVE, OrderActor.HUMAN))
+        assertEquals(OrderTransitionDecision.Allowed, checkSubtreeStop(OrderState.PAUSED, OrderActor.HUMAN))
+        assertEquals(OrderTransitionDecision.Refused(OrderRefusal.ACTOR_NOT_ALLOWED), checkSubtreeStop(OrderState.ACTIVE, OrderActor.AI))
+        assertEquals(OrderTransitionDecision.Refused(OrderRefusal.ACTOR_NOT_ALLOWED), checkSubtreeStop(OrderState.ACTIVE, OrderActor.SYSTEM))
+        assertEquals(OrderTransitionDecision.Refused(OrderRefusal.NO_EDGE), checkSubtreeStop(OrderState.STOP_REQUESTED, OrderActor.HUMAN))
+        assertEquals(OrderTransitionDecision.Refused(OrderRefusal.TERMINAL), checkSubtreeStop(OrderState.STOPPED, OrderActor.HUMAN))
     }
 }

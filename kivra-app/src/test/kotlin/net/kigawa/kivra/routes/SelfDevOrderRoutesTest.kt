@@ -388,6 +388,53 @@ class SelfDevOrderRoutesTest {
     }
 
     @Test
+    fun `a child's stop is requested by the AI principal and decided only by the root approver, who stops the child and its grandchild`() = testApplication {
+        val db = newDb()
+        setUp(db, extraOrderEnv = depth2)
+        createRoot()
+        val id = rootId()
+        val childId = createChild(id).json().getValue("orderId").jsonPrimitive.content
+        val grandId = createChild(childId, key = "k-grand").json().getValue("orderId").jsonPrimitive.content
+        val requested = send(
+            HttpMethod.Post,
+            "/api/selfdev/orders/$childId/stop-requests",
+            """{"version":${orderVersion(childId)},"reasonCode":"RUNAWAY_SUSPECTED"}""",
+            AI_PRINCIPAL,
+        )
+        assertEquals(HttpStatusCode.Created, requested.status)
+        val requestId = requested.json().getValue("requestId").jsonPrimitive.content
+        assertEquals("false", requested.json().getValue("targetIsRoot").jsonPrimitive.content)
+        // The AI principal and another operator cannot decide it: 403, before the body is read.
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, "/api/selfdev/stop-requests/$requestId/approve", """{"digest":"${"a".repeat(64)}"}""", AI_PRINCIPAL).status)
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, "/api/selfdev/stop-requests/$requestId/approve", """{"digest":"${"a".repeat(64)}"}""", OTHER_OPERATOR).status)
+        val digest = Json.parseToJsonElement(send(HttpMethod.Get, "/api/selfdev/stop-requests?state=PENDING", null).bodyAsText())
+            .jsonArray.single().jsonObject.getValue("digest").jsonPrimitive.content
+        val approved = send(HttpMethod.Post, "/api/selfdev/stop-requests/$requestId/approve", """{"digest":"$digest"}""")
+        assertEquals(HttpStatusCode.OK, approved.status)
+        assertEquals("STOPPED", approved.json().getValue("state").jsonPrimitive.content)
+        assertEquals("STOPPED", send(HttpMethod.Get, "/api/selfdev/orders/$grandId", null).json().getValue("order").jsonObject.getValue("state").jsonPrimitive.content)
+        assertEquals("ACTIVE", send(HttpMethod.Get, "/api/selfdev/orders/$id", null).json().getValue("order").jsonObject.getValue("state").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `the root approver may request a child's stop and decide it, since the parent's decision approves it`() = testApplication {
+        val db = newDb()
+        setUp(db, extraOrderEnv = depth2)
+        createRoot()
+        val id = rootId()
+        val childId = createChild(id).json().getValue("orderId").jsonPrimitive.content
+        val requestId = send(
+            HttpMethod.Post,
+            "/api/selfdev/orders/$childId/stop-requests",
+            """{"version":${orderVersion(childId)},"reasonCode":"OPERATOR_REQUEST"}""",
+        ).json().getValue("requestId").jsonPrimitive.content
+        val digest = Json.parseToJsonElement(send(HttpMethod.Get, "/api/selfdev/stop-requests?state=PENDING", null).bodyAsText())
+            .jsonArray.single().jsonObject.getValue("digest").jsonPrimitive.content
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/stop-requests/$requestId/approve", """{"digest":"$digest"}""").status)
+        assertEquals("STOPPED", send(HttpMethod.Get, "/api/selfdev/orders/$childId", null).json().getValue("order").jsonObject.getValue("state").jsonPrimitive.content)
+    }
+
+    @Test
     fun `the AI principal is refused with 403 before the body is read, and a parent that is not active is 409`() = testApplication {
         val db = newDb()
         setUp(db, extraOrderEnv = depth2)

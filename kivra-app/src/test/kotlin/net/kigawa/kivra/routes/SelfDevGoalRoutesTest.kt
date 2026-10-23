@@ -133,6 +133,8 @@ class SelfDevGoalRoutesTest {
         Triple(HttpMethod.Post, "/api/selfdev/autopilot/pause", "{}"),
         Triple(HttpMethod.Post, "/api/selfdev/autopilot/resume", "{}"),
         Triple(HttpMethod.Post, "/api/selfdev/autopilot/reset-breaker", "{}"),
+        Triple(HttpMethod.Post, "/api/selfdev/autopilot/auto-merge/pause", "{}"),
+        Triple(HttpMethod.Post, "/api/selfdev/autopilot/auto-merge/resume", "{}"),
         Triple(HttpMethod.Post, "/api/selfdev/goals", """{"title":"t","idempotencyKey":"k"}"""),
         Triple(HttpMethod.Get, "/api/selfdev/goals", null),
         Triple(HttpMethod.Get, "/api/selfdev/goals/$ULID_NONE", null),
@@ -471,6 +473,35 @@ class SelfDevGoalRoutesTest {
                 assertEquals(false, control.read().paused)
                 assertEquals(HttpStatusCode.OK, post("/api/selfdev/autopilot/reset-breaker", "{}").status)
                 assertEquals(false, control.read().breakerOpen)
+            }
+        }
+    }
+
+    @Test
+    fun `the AI principal is refused the automatic merge pause and resume with 403, and the operator switches it without a restart`() {
+        TestDb().use { db ->
+            val control = SelfDevAutopilotControlRepository(db.database)
+            testApplication {
+                setUp(db, aiPrincipal = AI_PRINCIPAL)
+                assertEquals(false, control.read().autoMergePaused)
+
+                val pause = post("/api/selfdev/autopilot/auto-merge/pause", """{"x":1}""", AI_PRINCIPAL)
+                assertEquals(HttpStatusCode.Forbidden, pause.status)
+                assertEquals("""{"error":"forbidden"}""", text(pause))
+                assertEquals(false, control.read().autoMergePaused)
+
+                assertEquals(HttpStatusCode.OK, post("/api/selfdev/autopilot/auto-merge/pause", "{}").status)
+                assertEquals(true, control.read().autoMergePaused)
+                assertEquals(true, send(HttpMethod.Get, "/api/selfdev/autopilot", null, principal = AI_PRINCIPAL).json().getValue("autoMergePaused").jsonPrimitive.boolean)
+
+                val resume = post("/api/selfdev/autopilot/auto-merge/resume", "{}", AI_PRINCIPAL)
+                assertEquals(HttpStatusCode.Forbidden, resume.status)
+                assertEquals(true, control.read().autoMergePaused)
+
+                assertEquals(HttpStatusCode.OK, post("/api/selfdev/autopilot/auto-merge/resume", "{}").status)
+                assertEquals(false, control.read().autoMergePaused)
+                // The whole-autopilot pause is a separate switch.
+                assertEquals(false, control.read().paused)
             }
         }
     }

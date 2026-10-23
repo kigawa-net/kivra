@@ -1625,6 +1625,10 @@
       ? '全体: 一時停止中（新しい投入は止まっています。投入済みの Run は止めません）'
       : '全体: 稼働中（今日の Run ' + str(a.runsToday) + ' / ' + str(a.maxRunsPerDay) + ' 件）';
     $('autopilot-status').textContent = status;
+    // The automatic merge's own pause (ADR 0014 U-10). Shown only; the operation is served by the API, not by a button here.
+    $('auto-merge-status').textContent = a.autoMergePaused === true
+      ? '自動マージ: 一時停止中（自動マージの判定を行っていません）'
+      : '自動マージ: 一時停止していません';
     $('autopilot-toggle').textContent = a.paused ? '自律運転を再開' : '自律運転を一時停止';
     var breaker = a.breakerOpen === true;
     $('breaker-block').hidden = !breaker;

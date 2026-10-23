@@ -39,7 +39,7 @@ class DbAutoMergeShadowStore(
 
     override fun globalSnapshot(): ShadowGlobalSnapshot {
         val c = control.read()
-        return ShadowGlobalSnapshot(selfDevPaused = c.paused, breakerOpen = c.breakerOpen)
+        return ShadowGlobalSnapshot(selfDevPaused = c.paused, breakerOpen = c.breakerOpen, autoMergePaused = c.autoMergePaused)
     }
 
     override fun recordJudgement(runId: RunId, verdict: String, payload: String) {
@@ -47,6 +47,14 @@ class DbAutoMergeShadowStore(
             DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.forUpdate().firstOrNull()
                 ?: return@transaction
             audit.append(this, runId, AuditEntry(actor = ACTOR, action = AUTO_MERGE_JUDGED, result = verdict, payload = payload))
+        }
+    }
+
+    override fun recordPaused(runId: RunId) {
+        transaction(database) {
+            DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.forUpdate().firstOrNull()
+                ?: return@transaction
+            audit.append(this, runId, AuditEntry(actor = ACTOR, action = AUTO_MERGE_SHADOW_PAUSED, result = "PAUSED"))
         }
     }
 

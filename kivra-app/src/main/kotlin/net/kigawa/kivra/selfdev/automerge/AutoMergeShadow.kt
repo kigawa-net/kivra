@@ -66,11 +66,15 @@ interface AutoMergeShadowStore {
 
     /** Appends one `AUTO_MERGE_JUDGED` event to the Run's audit chain. [payload] carries fixed codes and counts only. */
     fun recordJudgement(runId: RunId, verdict: String, payload: String)
+
+    /** Appends one `AUTO_MERGE_SHADOW_PAUSED` event: the judgement was skipped because the automatic merge is paused (ADR 0014 U-10). */
+    fun recordPaused(runId: RunId)
 }
 
 data class ShadowRunSnapshot(val state: DevelopmentRunState, val binding: AutoMergeBinding?, val approval: AutoMergeTaskApproval?)
 
-data class ShadowGlobalSnapshot(val selfDevPaused: Boolean, val breakerOpen: Boolean)
+/** [autoMergePaused] is the per-feature pause (V31, ADR 0014 U-10). It defaults to false for the callers that do not read it. */
+data class ShadowGlobalSnapshot(val selfDevPaused: Boolean, val breakerOpen: Boolean, val autoMergePaused: Boolean = false)
 
 /** The settings of the shadow judgement. [requiredChecks] is the configured name list (ADR 0014 U-3). */
 data class AutoMergeShadowSettings(
@@ -82,6 +86,9 @@ data class AutoMergeShadowSettings(
 
 /** The audit action of one judgement (ADR 0014 section 4). */
 const val AUTO_MERGE_JUDGED = "AUTO_MERGE_JUDGED"
+
+/** The audit action of a Run whose judgement was skipped while the automatic merge is paused (ADR 0014 U-10). Result is `PAUSED`. */
+const val AUTO_MERGE_SHADOW_PAUSED = "AUTO_MERGE_SHADOW_PAUSED"
 
 /** The fixed codes of a read that failed. They are recorded in the audit, and they are never a GitHub message. */
 object ShadowReadCode {

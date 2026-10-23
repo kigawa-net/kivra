@@ -24,6 +24,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 internal object SelfDevAutopilotControlTable : Table("selfdev_autopilot_control") {
     val controlId = byte("control_id")
     val paused = bool("paused")
+    val autoMergePaused = bool("auto_merge_paused")
     val pausedBy = varchar("paused_by", 255).nullable()
     val pausedAt = datetime("paused_at").nullable()
     val consecutiveFailures = integer("consecutive_failures")
@@ -36,6 +37,8 @@ internal object SelfDevAutopilotControlTable : Table("selfdev_autopilot_control"
 
 data class AutopilotControl(
     val paused: Boolean,
+    /** The per-feature pause of the automatic merge (V31, ADR 0014 U-10). Independent of [paused]. */
+    val autoMergePaused: Boolean,
     val pausedBy: String?,
     val pausedAt: LocalDateTime?,
     val consecutiveFailures: Int,
@@ -55,6 +58,7 @@ class SelfDevAutopilotControlRepository(
             .single().let {
                 AutopilotControl(
                     paused = it[SelfDevAutopilotControlTable.paused],
+                    autoMergePaused = it[SelfDevAutopilotControlTable.autoMergePaused],
                     pausedBy = it[SelfDevAutopilotControlTable.pausedBy],
                     pausedAt = it[SelfDevAutopilotControlTable.pausedAt],
                     consecutiveFailures = it[SelfDevAutopilotControlTable.consecutiveFailures],
@@ -85,6 +89,21 @@ class SelfDevAutopilotControlRepository(
         )
         }
         // Read after the commit: a read inside the transaction could miss the change under REPEATABLE READ.
+        return read()
+    }
+
+    /**
+     * Sets the automatic merge's own pause (V31, ADR 0014 U-10). It does not touch [setPaused]'s record of who paused the autopilot.
+     * Returns the row after the change.
+     */
+    fun setAutoMergePaused(paused: Boolean): AutopilotControl {
+        transaction(database) {
+            execUpdate(
+                "UPDATE selfdev_autopilot_control SET auto_merge_paused = ?, version = version + 1 WHERE control_id = 1",
+                paused,
+            )
+        }
+        // Read after the commit, as in setPaused.
         return read()
     }
 

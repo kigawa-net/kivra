@@ -435,7 +435,8 @@ ADR 0014 の段階 S1。オートパイロットが有効なとき、`AutoMergeS
 - **読み取りの上限**: 1 周に最大 5 件の PR(古い順)。1 周の GitHub の読み取りは最大 40 回(port の呼び出し数。HTTP の要求数ではない)。上限を超えた読み取りは、読めなかったものとして扱われ、判定は保留か拒否になる。
 - **`checks:read` が必要**: 必須チェックの読み取り(`commits/{sha}/check-runs`)と、`main` の CI の読み取りには、GitHub App の `checks:read` の権限が要る。権限が無いと 403 になり、チェックを読めなかったとして扱われる。その場合の判定は、必ず `REFUSE`(`CHECK_MISSING`)か `HOLD`(`MAIN_CI_NOT_GREEN`)になり、`ELIGIBLE` にはならない。この権限の追加は共有基盤の変更で、運用者が後で行う(ADR 0014 U-4)。
 - **判定の中身**: 事実は GitHub の PR の値と、DB の Run、タスクの承認の種別、全体の一時停止とブレーカーから組み立てる。`main` の CI は、`main` の head コミットの必須チェックから導く(`PENDING` と `UNKNOWN` は保留、`FAILURE` は拒否)。PR の本文は、`kivra-head-sha:` の行(40 桁の 16 進)だけを読み、それ以外は使わない。本文は保存も記録もしない。
-- **自動マージの一時停止(S1 では効果なし)**: `auto_merge_paused`(ADR 0014 U-10)は、S1 では作らない。判定の「自動マージのフラグ」は S1 では常に有効として計算する。
+- **自動マージの一時停止(V31、ADR 0014 U-10)**: `selfdev_autopilot_control.auto_merge_paused`(既定 `FALSE`)が `TRUE` のあいだ、影の判定は GitHub を読まず、判定もしない。Run ごとに 1 件だけ `AUTO_MERGE_SHADOW_PAUSED`(結果 `PAUSED`)を監査に記録する(同じ状態のあいだは繰り返さない)。次の tick から効く。全体の一時停止(`/api/selfdev/autopilot/pause`)とは独立で、どちらか一方だけでも止まる。操作は §7.4 の `auto-merge/pause` と `auto-merge/resume`。AI の主体は拒否される。画面には「自動マージ: 一時停止中」と表示される。この操作はマージも有効化もしない。
+- **判定の残りは S1 のまま**: 自動マージのフラグは環境変数と DB の値を合わせて計算する対象だが、S1 の影の判定では `autoMergeEnabled` を常に true とする(フラグの有効化は k8s 側の別の作業)。
 - **監査**: 行動 `AUTO_MERGE_JUDGED`、Run の id、結果(`ELIGIBLE`、`HOLD`、`REFUSE`)。`payload` には次の項目だけを入れる。
   - `prNumber`、`headSha`、`verdict`、`reason`(§4.10 の理由コード。`PR_NOT_OPEN` などの読み取りの理由は別)、`files`(件数)、`lines`(`additions + deletions` の合計)、`checks`(判定の対象の名前)、`readFailures`(読めなかったものの固定コード)。
   - **記録しない**: PR の題名と本文、Goal と Task の題名と本文、パス、ファイルの内容、チェックの出力、プロバイダーの応答、トークン。
@@ -1409,7 +1410,7 @@ dev での有効化の手順は §7.5。
 
 - HTTP: `POST /api/selfdev/goals`(`{"title", "body"?, "idempotencyKey"}`。ほかの項目は 400)。202 は新規、200 は既に受け付け済み、409 は同じ投入キーで別の内容。
 - 本文は、一覧には出ない。詳細(`GET /api/selfdev/goals/{id}`)でだけ見える。
-- AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL` の owner key)は、Goal の書き込み(投入、計画の承認、replan、中止、タスクの承認と見送り)と、オートパイロットの制御(一時停止 `pause`、再開 `resume`、ブレーカーのリセット `reset-breaker`)を 403 `forbidden` で拒否される(ADR 0019。拒否の前に本文は読まれず、何も保存されない)。読み取り(`GET`)は AI の主体にも許す。`KIVRA_SELFDEV_AI_PRINCIPAL` は order の有効化(`KIVRA_SELFDEV_ORDERS_ENABLED`)と独立に読まれる(#311)。order を無効にしたままでも、Goal の REST と Goal の MCP ツールの拒否は効く。未設定のときは、この拒否は効かない(従来どおり)。不正な形式は、order が無効でも起動に失敗する。
+- AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL` の owner key)は、Goal の書き込み(投入、計画の承認、replan、中止、タスクの承認と見送り)と、オートパイロットの制御(一時停止 `pause`、再開 `resume`、ブレーカーのリセット `reset-breaker`、自動マージの一時停止 `auto-merge/pause`、`auto-merge/resume`)を 403 `forbidden` で拒否される(ADR 0019。拒否の前に本文は読まれず、何も保存されない)。読み取り(`GET`)は AI の主体にも許す。`KIVRA_SELFDEV_AI_PRINCIPAL` は order の有効化(`KIVRA_SELFDEV_ORDERS_ENABLED`)と独立に読まれる(#311)。order を無効にしたままでも、Goal の REST と Goal の MCP ツールの拒否は効く。未設定のときは、この拒否は効かない(従来どおり)。不正な形式は、order が無効でも起動に失敗する。
 
 **計画の承認**: `計画の承認待ち` の Goal の詳細で、Plan(計画)と各タスクを確かめ、「この Plan を承認」を押す(`POST .../approve-plan`、`{"version": n}`)。
 承認すると、Goal は `承認済み` になる。計画の承認は、個々のタスクの承認を代わりに行わない(`requiresApproval` のタスクは、タスクごとの承認が要る)。`auto` のときは、段階 2 の条件に当たる低リスクのタスクだけが、計画の承認の後に投入の対象になる。
@@ -1431,10 +1432,12 @@ dev での有効化の手順は §7.5。
 
 **全体の一時停止と再開**: 「自律運転を一時停止」(`POST /api/selfdev/autopilot/pause`)で、新しい投入と計画の作成を止める。実行中の Run は止めない。「再開」で戻す。
 
+**自動マージの一時停止と再開**: `POST /api/selfdev/autopilot/auto-merge/pause`、`POST /api/selfdev/autopilot/auto-merge/resume`(空の JSON `{}`)。自動マージの影の判定だけを止める。新しい投入や計画は止めない。次の tick から効き、再起動は要らない。AI の主体は 403 `forbidden`。再開は運用者が行う。`main` の CI が赤になったときの自動停止は、この操作とは別の作業で扱う。
+
 **サーキットブレーカーの再開**: 連続して失敗すると、自律運転は止まり、画面に「サーキットブレーカーを手動で再開」が出る(`POST /api/selfdev/autopilot/reset-breaker`)。
 押す前に、失敗の原因(UNKNOWN の Run、PR_ABANDONED、POLICY_REJECTED など)を §4 で確かめる。原因が直っていないまま再開すると、また同じ数の失敗で止まる。
 
-**見るもの**: `GET /api/selfdev/autopilot`(稼働中か一時停止か、ブレーカー、今日の Run 数、対象リポジトリ、承認の方式)。
+**見るもの**: `GET /api/selfdev/autopilot`(稼働中か一時停止か、自動マージの一時停止 `autoMergePaused`、ブレーカー、今日の Run 数、対象リポジトリ、承認の方式)。
 ログは、操作の ID と固定の理由コード、操作した運用者の短いダイジェスト(SHA-256 の先頭 12 文字)だけを出す。本文、理由、運用者の ID は出ない。
 
 **やってはいけないこと**: 作成済みの PR を、この画面の操作で閉じる、またはマージすることを期待しない。マージは人が行う(ADR 0008、ADR 0009)。

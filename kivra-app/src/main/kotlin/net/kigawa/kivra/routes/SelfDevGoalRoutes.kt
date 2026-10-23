@@ -42,7 +42,7 @@ import org.slf4j.LoggerFactory
  * and never echo a request value. Goal, plan and task text is returned only by the detail view, never logged.
  *
  * The AI principal (`KIVRA_SELFDEV_AI_PRINCIPAL`) may read, and may not change a goal, a task or the autopilot's control (pause, resume, the
- * breaker reset): every such write answers 403 `forbidden` for it, before the body is read (ADR 0019; the same rule as the order routes,
+ * breaker reset, the automatic merge's pause and resume): every such write answers 403 `forbidden` for it, before the body is read (ADR 0019; the same rule as the order routes,
  * ADR 0015 section 4.6). Its reads are unchanged.
  */
 class SelfDevGoalRouteDeps(
@@ -117,6 +117,8 @@ data class AutopilotStatusResponse(
     val enabled: Boolean,
     val targetRepo: String?,
     val paused: Boolean,
+    /** The automatic merge's own pause (ADR 0014 U-10). Read-only here; the AI principal cannot change it. */
+    val autoMergePaused: Boolean,
     val breakerOpen: Boolean,
     val consecutiveFailures: Int,
     val runsToday: Int,
@@ -180,6 +182,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
                 enabled = true,
                 targetRepo = deps.targetRepo,
                 paused = control.paused,
+                autoMergePaused = control.autoMergePaused,
                 breakerOpen = control.breakerOpen,
                 consecutiveFailures = control.consecutiveFailures,
                 runsToday = if (control.dayUtc == LocalDate.now(ZoneOffset.UTC)) control.runsToday else 0,
@@ -221,6 +224,26 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         deps.control.setPaused(false, principal)
         operatorLog.info("autopilot operator action: action=RESUME actor={} result=RESUMED", operatorTag(principal))
         call.respond(HttpStatusCode.OK, mapOf("paused" to false))
+    }
+
+    post("/api/selfdev/autopilot/auto-merge/pause") {
+        val principal = deps.requireOperator(call) ?: return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "AUTO_MERGE_PAUSE")) return@post
+        if (!call.readEmptyBody()) return@post
+        deps.control.setAutoMergePaused(true)
+        operatorLog.info("autopilot operator action: action=AUTO_MERGE_PAUSE actor={} result=PAUSED", operatorTag(principal))
+        call.respond(HttpStatusCode.OK, mapOf("autoMergePaused" to true))
+    }
+
+    post("/api/selfdev/autopilot/auto-merge/resume") {
+        val principal = deps.requireOperator(call) ?: return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.requireHuman(call, principal, "AUTO_MERGE_RESUME")) return@post
+        if (!call.readEmptyBody()) return@post
+        deps.control.setAutoMergePaused(false)
+        operatorLog.info("autopilot operator action: action=AUTO_MERGE_RESUME actor={} result=RESUMED", operatorTag(principal))
+        call.respond(HttpStatusCode.OK, mapOf("autoMergePaused" to false))
     }
 
     post("/api/selfdev/autopilot/reset-breaker") {

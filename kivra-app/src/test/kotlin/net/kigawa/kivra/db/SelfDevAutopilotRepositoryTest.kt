@@ -369,6 +369,25 @@ class SelfDevAutopilotRepositoryTest {
     }
 
     @Test
+    fun `the automatic merge pause is its own switch, starts unpaused, and does not touch the autopilot pause`() = TestDb().use { db ->
+        val control = SelfDevAutopilotControlRepository(db.database)
+        assertEquals(false, control.read().autoMergePaused)
+
+        val paused = control.setAutoMergePaused(true)
+        assertTrue(paused.autoMergePaused)
+        assertTrue(!paused.paused)
+        assertNull(paused.pausedBy)
+        assertTrue(paused.version > 0)
+
+        control.setPaused(true, "op-pauser")
+        val resumed = control.setAutoMergePaused(false)
+        assertTrue(!resumed.autoMergePaused)
+        assertTrue(resumed.paused)
+        assertEquals("op-pauser", resumed.pausedBy)
+        assertTrue(resumed.version > paused.version)
+    }
+
+    @Test
     fun `the daily Run count stops at the cap and starts again on the next UTC day`() {
         val clock = AdjustableClock()
         TestDb().use { db ->

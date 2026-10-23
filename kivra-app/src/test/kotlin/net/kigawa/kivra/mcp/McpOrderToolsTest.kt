@@ -187,7 +187,7 @@ class McpOrderToolsTest {
             assertEquals("false", schema["additionalProperties"]!!.jsonPrimitive.content)
             assertEquals(listOf("order_id", "version", "reason"), schema["required"]!!.jsonArray.map { it.jsonPrimitive.content })
             val reasons = schema["properties"]!!.jsonObject["reason"]!!.jsonObject["enum"]!!.jsonArray.map { it.jsonPrimitive.content }
-            assertEquals(StopRequestReason.entries.map { it.name }, reasons)
+            assertEquals(StopRequestReason.REQUESTABLE.map { it.name }, reasons)
             assertEquals(listOf("OPERATOR_REQUEST", "RUNAWAY_SUSPECTED", "BUDGET_CONCERN", "SCOPE_CONCERN"), reasons)
         }
     }

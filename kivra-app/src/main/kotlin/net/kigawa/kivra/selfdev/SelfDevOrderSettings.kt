@@ -24,6 +24,11 @@ class OrderSettings private constructor(
     val maxChildren: Int = DEFAULT_MAX_CHILDREN,
     /** The most orders one tree may have, the root included. Present only when [enabled]. */
     val maxTree: Int = DEFAULT_MAX_TREE,
+    /**
+     * The parent's automatic stop of a child whose cycles failed twice in a row (ADR 0015 section 4.4). Off by default. Present only when
+     * [enabled].
+     */
+    val autoStopEnabled: Boolean = false,
 ) {
     override fun toString(): String = "OrderSettings(enabled=$enabled)"
 
@@ -34,6 +39,7 @@ class OrderSettings private constructor(
         const val ENV_MAX_DEPTH = "KIVRA_SELFDEV_ORDER_MAX_DEPTH"
         const val ENV_MAX_CHILDREN = "KIVRA_SELFDEV_ORDER_MAX_CHILDREN"
         const val ENV_MAX_TREE = "KIVRA_SELFDEV_ORDER_MAX_TREE"
+        const val ENV_AUTO_STOP = "KIVRA_SELFDEV_ORDER_AUTO_STOP_ENABLED"
         const val DEFAULT_MAX_CHILDREN = 5
         const val DEFAULT_MAX_TREE = 15
 
@@ -64,6 +70,7 @@ class OrderSettings private constructor(
                 maxDepth = boundedInt(env, ENV_MAX_DEPTH, default = 0, range = 0..2),
                 maxChildren = boundedInt(env, ENV_MAX_CHILDREN, default = DEFAULT_MAX_CHILDREN, range = 1..20),
                 maxTree = boundedInt(env, ENV_MAX_TREE, default = DEFAULT_MAX_TREE, range = 1..100),
+                autoStopEnabled = boolFlag(env, ENV_AUTO_STOP, default = false),
             )
         }
     }
@@ -75,6 +82,16 @@ private fun boundedInt(env: Map<String, String>, name: String, default: Int, ran
     val value = raw.toIntOrNull()
     check(value != null && value in range) { "$name must be an integer from ${range.first} to ${range.last}" }
     return value
+}
+
+/**
+ * A switch that is exactly `true` or `false`; unset is [default]. Any other value is a startup failure, and the message never shows the value.
+ */
+private fun boolFlag(env: Map<String, String>, name: String, default: Boolean): Boolean = when (env[name]?.trim()) {
+    null -> default
+    "true" -> true
+    "false" -> false
+    else -> throw IllegalStateException("$name must be true or false")
 }
 
 /** An owner key is `<issuer byte length>:<issuer>:<subject>` (see `oidcOwnerKey`). */

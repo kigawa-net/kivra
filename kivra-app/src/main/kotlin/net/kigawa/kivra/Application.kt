@@ -66,6 +66,7 @@ import net.kigawa.kivra.routes.SelfDevOrderRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevOrderRoutes
 import net.kigawa.kivra.routes.requiredAgentRole
 import net.kigawa.kivra.routes.configureSelfDevRoutes
+import net.kigawa.kivra.selfdev.AutoStopDeps
 import net.kigawa.kivra.selfdev.AutopilotDispatcher
 import net.kigawa.kivra.selfdev.OrderSettings
 import net.kigawa.kivra.selfdev.OrderWatch
@@ -265,6 +266,12 @@ internal fun Application.appModule(env: Map<String, String>) {
                     autopilotBudgetAllows(usage.committed, usage.reserved, budgetConfig.monthlyLimitJpy, autopilot.budgetSharePercent)
                 },
                 fxExpired = { fxForGuard?.expiry(java.time.Clock.systemUTC())?.expired == true },
+                // The automatic child stop (ADR 0015 section 4.4) is off unless its switch is on. Its goals are stopped after the decision.
+                autoStop = if (orderSettings.autoStopEnabled) {
+                    AutoStopDeps(SelfDevGoalRepository(database), SelfDevOperatorRepository(database))
+                } else {
+                    null
+                },
             ).start(this)
         }
     }

@@ -108,7 +108,7 @@ class McpOrderTools(private val deps: McpOrderDeps) {
             },
             "reason" to buildJsonObject {
                 put("type", "string")
-                putJsonArray("enum") { StopRequestReason.entries.forEach { add(JsonPrimitive(it.name)) } }
+                putJsonArray("enum") { StopRequestReason.REQUESTABLE.forEach { add(JsonPrimitive(it.name)) } }
             },
             required = listOf("order_id", "version", "reason"),
         ),
@@ -121,7 +121,7 @@ class McpOrderTools(private val deps: McpOrderDeps) {
         val id = args.requiredString("order_id", ORDER_ID_SHAPE)
         val version = args.requiredVersion()
         val reason = args.requiredString("reason").let { raw ->
-            StopRequestReason.entries.firstOrNull { it.name == raw }
+            StopRequestReason.REQUESTABLE.firstOrNull { it.name == raw }
                 ?: throw InvalidParamsException("reason is not one of the fixed codes")
         }
         val kind = if (caller.principal == deps.aiPrincipal) OrderActor.AI else OrderActor.HUMAN

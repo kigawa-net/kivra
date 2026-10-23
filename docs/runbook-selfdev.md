@@ -1638,6 +1638,19 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 - **DB(V27)**: `selfdev_order_stop_requests.target_is_root TINYINT NOT NULL DEFAULT 1`(既存の行は全てルートの要求)。分離の CHECK は `target_is_root = 0 OR decided_by IS NULL OR decided_by <> requested_by` に置き換えた。ルートの要求では、アプリを迂回した SQL でも同じ主体による承認を拒否する。`ck_selfdev_order_stop_decider` は `HUMAN` のままである。
 - **この PR に含まれないもの**: 親の自動の決定(§4.4、PR 3e)、子の費用の自動集計(`spent_jpy` への加算)、`/ui` の変更、MCP の応答の変更(`targetIsRoot` は MCP に出さない)。
 
+#### 7.6.2f 親の自動の停止(段階 2 の PR 3e。既定では無効)
+
+- **範囲**: 親 order の自動のループ(`OrderWatch` の tick)が、直接の子を止められる。理由コードは `CHILD_CYCLE_FAILURES`(子の `consecutive_failed_cycles` が 2 以上)の 1 つだけ(ADR 0015 §4.4)。HTTP の経路は無く、MCP にも無い。ルートは対象にならない。
+- **条件(すべて満たすときだけ)**: 対象は親の直接の子で、`ACTIVE` か `PAUSED`。親と全祖先が `ACTIVE`(有効な状態)。失敗が 2 回続いている。木に `PENDING` の停止要求が無い(人の要求を横取りしない)。頻度の上限の内。
+- **頻度の上限(UTC の日)**: 同じ親が決める子の停止は 1 日 1 件。木全体で 1 日 2 件。超えたら決めず、`selfdev_order_events` に `AUTO_STOP_RATE_LIMITED` を残す(子ごとに 1 日 1 回。tick が毎分回っても増えない)。ログは `order auto-stop: code=AUTO_STOP_RATE_LIMITED orderId=... parentId=...`。数えるのは `decider_kind = ORDER` の行の `decided_at`。
+- **決定の行**: `selfdev_order_stop_requests` に `state = CONSUMED`、`decider_kind = ORDER`、`decider_order_id` = 決めた親、`requested_by` と `decided_by` は固定の `system:order-auto-stop`、`requester_kind = SYSTEM`、`target_is_root = 0`。要求の段階は無い(要求なしで決める)。
+- **停止の内容**: 子は `STOPPED`(`PARENT_STOPPED`)、子孫は `STOPPED`(`ANCESTOR_STOPPED`。既に `STOPPED` の子孫は変えない)。その後、部分木の各 order の周の Goal を、人の承認の場合と同じ既存の停止で止める(`stopCycleGoalOf`)。進行中の Run と PR は、§4.5 のとおり既存の経路で扱う。
+- **監査**: 子の `STOP_APPROVED` と `STOPPED` の行は、`actor_kind = SYSTEM`、`actor_ref` は空、`reason_code = CHILD_CYCLE_FAILURES`、`parent_order_id` は決めた親、`depth` を持つ。題名と方針は入らない。ログは `order auto-stop: code=CHILD_CYCLE_FAILURES orderId=... parentId=...`。
+- **ルートの保証(DB)**: V28 の CHECK `ck_selfdev_order_stop_auto_root`(`decider_kind IS NULL OR decider_kind = 'HUMAN' OR target_is_root = 0`)により、ルートの行に `ORDER` の決定は入らない。アプリの検査(`parent_order_id IS NULL` は対象外)と二重になっている。ルートの停止の承認は、従来どおり人だけが行い、要求者と承認者は別の主体でなければならない(V23 と V27 の分離の CHECK)。
+- **スイッチ**: `KIVRA_SELFDEV_ORDER_AUTO_STOP_ENABLED`。既定は `false`。`true` と `false` 以外は起動に失敗し、値は表示されない。order が無効のときは読まれない。`false` のときは、tick の step が何もしない。
+- **この PR に含まれないもの**: 理由コード `CHILD_BUDGET_EXHAUSTED`、`CHILD_DUPLICATE_PLAN`、`CHILD_SCOPE_VIOLATION`。これらは、事実の仕組み(費用の自動集計、重複の検出、`scope_profile`)がまだ無いため、列挙にも入れていない。人の判断の経路の変更。
+- **dev で有効にする前の注意**: 有効化は運用者の承認の後(k8s の PR)。子は `KIVRA_SELFDEV_ORDER_MAX_DEPTH` が 1 以上のときだけ作れるため、既定では自動の停止は起きない。子の周の費用はまだ集計されない(§7.6.2c)。自動の根拠は周の失敗の回数だけである。停止は終端であり、取り消すには人が新しい子を作る。
+
 #### 7.6.3 状態
 
 | 状態 | 意味 | 解除 |
@@ -1670,7 +1683,7 @@ AI の主体ができるのは、読み取りと停止の要求だけである�
 
 #### 7.6.6 段階 1 の範囲外
 
-周の自動の開始、複数周、親の自動の決定(§4.4、PR 3e)は、後の段階である(ADR 0015 §7)。子の停止は段階 2 の PR 3d で入った(§7.6.2e)。子の作成は段階 2 の PR 3a で入った(§7.6.2b。既定では作れない)。MCP の読み取りと停止の要求は PR 2a で入った(§8.8)。子の費用の加算(`spent_jpy`)は PR 3b である。
+周の自動の開始、複数周は、後の段階である(ADR 0015 §7)。親の自動の停止は §7.6.2f(理由コードは `CHILD_CYCLE_FAILURES` だけ)。子の停止は段階 2 の PR 3d で入った(§7.6.2e)。子の作成は段階 2 の PR 3a で入った(§7.6.2b。既定では作れない)。MCP の読み取りと停止の要求は PR 2a で入った(§8.8)。子の費用の加算(`spent_jpy`)は PR 3b である。
 
 #### 7.6.7 `/ui` の画面(PR 2b)
 

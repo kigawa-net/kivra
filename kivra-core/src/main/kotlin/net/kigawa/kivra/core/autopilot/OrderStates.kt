@@ -47,8 +47,20 @@ enum class OrderReason {
     ANCESTOR_STOPPED,
 }
 
-/** The reason codes a stop request may carry (U-31). Free text is never accepted. */
-enum class StopRequestReason { OPERATOR_REQUEST, RUNAWAY_SUSPECTED, BUDGET_CONCERN, SCOPE_CONCERN }
+/**
+ * The reason codes of a stop. A request from a person or the AI principal carries one of [REQUESTABLE] (U-31). Free text is never accepted.
+ * [CHILD_CYCLE_FAILURES] is the reason of the automatic child stop only (ADR 0015 section 4.4 (2)); no request may carry it.
+ */
+enum class StopRequestReason {
+    OPERATOR_REQUEST, RUNAWAY_SUSPECTED, BUDGET_CONCERN, SCOPE_CONCERN,
+    /** A child whose cycles failed twice in a row is stopped by its parent's automatic decision (ADR 0015 section 4.4). */
+    CHILD_CYCLE_FAILURES;
+
+    companion object {
+        /** The codes a person or the AI principal may request a stop with: every code but the automatic one. */
+        val REQUESTABLE: List<StopRequestReason> = entries.filter { it != CHILD_CYCLE_FAILURES }
+    }
+}
 
 /** Why a transition is refused. Fixed codes. */
 enum class OrderRefusal { TERMINAL, NO_EDGE, ACTOR_NOT_ALLOWED, REASON_NOT_ALLOWED, RESUME_NOT_ALLOWED }
@@ -82,8 +94,9 @@ private val NOT_RESUMABLE = setOf(OrderReason.LIMIT_REACHED, OrderReason.EXPIRED
  * - STOP_REQUESTED -> STOPPED: the approval, by an operator only (the approver's identity is checked by the caller). The reason is
  *   OPERATOR_STOPPED for the root and PARENT_STOPPED for a child.
  * - STOP_REQUESTED -> PAUSED: a rejection, a cancellation or an expiry (STOP_NOT_APPROVED), by an operator or the system.
- * - STOPPED is terminal. There is no edge from ACTIVE or PAUSED to STOPPED here: a stop always goes through a request. The one exception,
- *   a descendant of an approved stop, is decided by [checkSubtreeStop] inside the approval's transaction.
+ * - STOPPED is terminal. There is no edge from ACTIVE or PAUSED to STOPPED here for a person or the AI principal: a stop always goes through a
+ *   request. The exceptions are decided by [checkSubtreeStop] (a descendant of an approved stop) and [checkAutomaticStop] (the automatic
+ *   child stop and its descendants), each inside its own transaction.
  */
 fun checkOrderTransition(
     from: OrderState,
@@ -124,6 +137,18 @@ fun checkOrderTransition(
         }
         else -> refused(OrderRefusal.NO_EDGE)
     }
+}
+
+/**
+ * Decides an automatic stop by a parent order (ADR 0015 section 4.4), for the child itself (reason PARENT_STOPPED) or a descendant of it (reason
+ * ANCESTOR_STOPPED), in the decision's transaction. The decider is the SYSTEM (the parent's loop); the caller has checked the parent, the
+ * counts and the rule of the root. An ACTIVE or PAUSED order may stop this way; a STOP_REQUESTED one waits for its request, and STOPPED is final.
+ */
+fun checkAutomaticStop(from: OrderState, reason: OrderReason): OrderTransitionDecision = when {
+    from == OrderState.STOPPED -> refused(OrderRefusal.TERMINAL)
+    from != OrderState.ACTIVE && from != OrderState.PAUSED -> refused(OrderRefusal.NO_EDGE)
+    reason != OrderReason.PARENT_STOPPED && reason != OrderReason.ANCESTOR_STOPPED -> refused(OrderRefusal.REASON_NOT_ALLOWED)
+    else -> allowed()
 }
 
 /**

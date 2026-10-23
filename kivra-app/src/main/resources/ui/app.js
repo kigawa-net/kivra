@@ -2663,6 +2663,14 @@
     nodes.push(h('p', { className: 'meta', text: streamText(ex) }));
     body.appendChild(h('div', { className: 'exec-block' }, nodes));
 
+    renderExecWarnings(body, snap);
+    renderExecAttempts(body, snap);
+    renderExecCounts(body, snap);
+    renderExecCost(body, snap);
+    renderExecStop(body, snap);
+  }
+
+  function renderExecWarnings(body, snap) {
     var warn = [];
     if (snap.warnings > 0) warn.push('警告: ' + count(snap.warnings) + ' 件');
     if (snap.dropped > 0) warn.push('送信の取りこぼし（上限などで落とした件数）: ' + count(snap.dropped) + ' 件');
@@ -2675,7 +2683,9 @@
         h('ul', { className: 'exec-warnlist' }, warn.map(function (t) { return h('li', { text: t }); }))
       ]));
     }
+  }
 
+  function renderExecAttempts(body, snap) {
     var attemptItems = snap.attempts.map(function (a) {
       if (!a || typeof a !== 'object') return null;
       var t = '試行 #' + count(a.attemptNo) + '：' + lookup(EXEC_ATTEMPT_STATES, a.state) +
@@ -2694,7 +2704,9 @@
       progress.push(h('progress', { 'aria-label': '進み具合（不確定）' }, []));
     }
     body.appendChild(h('div', { className: 'exec-block' }, progress));
+  }
 
+  function renderExecCounts(body, snap) {
     var phase = snap.lastPhase === null || snap.lastPhase === undefined ? 'なし' : lookup(EXEC_PHASES, snap.lastPhase);
     var toolDl = h('dl', { className: 'exec-dl' }, []);
     EXEC_TOOLS.forEach(function (pair) {
@@ -2715,7 +2727,9 @@
       h('h4', { text: 'ツールの種類別の件数' }),
       toolDl
     ]));
+  }
 
+  function renderExecCost(body, snap) {
     var cost = snap.cost;
     // A failed attempt has no CLI report (confirmed 0) and its estimate is the reserve: the estimate is then not a real cost.
     var failedNoReport = snap.attempts.some(function (a) { return a && str(a.state) === 'FAILED'; }) &&
@@ -2728,7 +2742,9 @@
         h('dt', { text: '推定（予約からの見積り。確定ではありません）' }), h('dd', { className: 'exec-estimate', text: estimateText })
       ])
     ]));
+  }
 
+  function renderExecStop(body, snap) {
     var stop = snap.stop;
     body.appendChild(h('div', { className: 'exec-block' }, [
       h('h4', { text: '停止' }),

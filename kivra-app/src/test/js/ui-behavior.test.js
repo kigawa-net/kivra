@@ -2027,6 +2027,48 @@ test('an approval with an unknown requester kind or reason shows unknown with th
   assert.equal(tags.includes('B'), false, 'no element is made from a response value');
 });
 
+const C1 = '01ORDER' + 'C'.repeat(19);
+const C2 = '01ORDER' + 'D'.repeat(19);
+const ORPHAN = '01ORDER' + 'E'.repeat(19);
+const ROOT2 = '01ORDER' + 'F'.repeat(19);
+
+test('the order list is a tree: a child follows its parent with one more indent, an orphan is top-level, and no title or policy is shown', async () => {
+  // The list is in the API's order. C1 is a child of O1, C2 a child of C1, ORPHAN's parent is not in the list, ROOT2 is a second root.
+  const list = [
+    orderOf({ orderId: O1, depth: 0, childCount: 1, spentJpy: 300, orderBudgetJpy: 1000, title: SECRET_TITLE, policy: SECRET_POLICY }),
+    orderOf({ orderId: ROOT2, depth: 0, childCount: 0, spentJpy: 0, orderBudgetJpy: 500 }),
+    orderOf({ orderId: C1, parentOrderId: O1, depth: 1, childCount: 1, spentJpy: 200, orderBudgetJpy: 600 }),
+    orderOf({ orderId: C2, parentOrderId: C1, depth: 2, childCount: 0, spentJpy: 0, orderBudgetJpy: 100 }),
+    orderOf({ orderId: ORPHAN, parentOrderId: '01ORDER' + 'Z'.repeat(19), depth: 3, childCount: 0, spentJpy: 0, orderBudgetJpy: 50 }),
+  ];
+  const dom = ordLoad(ordState({ orderList: { status: 200, data: list } }));
+  await flush();
+  const items = dom.byId('orders-list').children.filter((c) => c.tagName === 'LI');
+  const ids = items.map((li) => li.textContent.match(/order (\S+?)状態/)[1]);
+  assert.deepEqual(ids, [O1, C1, C2, ROOT2, ORPHAN], 'a parent, then its children in depth-first order, then the next root');
+  const levels = items.map((li) => li.className.match(/order-level-(\d)/)[1]);
+  assert.deepEqual(levels, ['0', '1', '2', '0', '0'], 'the indent follows the tree level, and an orphan is level 0');
+  assert.match(items[0].textContent, /子の数: 1/);
+  assert.match(items[0].textContent, /使用: 300 円 \/ 予算: 1,000 円/);
+  assert.match(items[2].textContent, /深さ: 2/, 'the depth is still shown as a number');
+  const text = dom.byId('orders-list').textContent;
+  assert.equal(text.includes(SECRET_TITLE), false, 'a title is never shown');
+  assert.equal(text.includes(SECRET_POLICY), false, 'a policy is never shown');
+});
+
+test('a child stop reason shows its fixed text in the detail, and an unknown child-like code shows only the code', async () => {
+  const s = ordState({
+    orderDetail: { status: 200, data: orderDetailOf({ state: 'STOP_REQUESTED', stateReason: 'STOP_REQUESTED' }, stopRequestOf({ reasonCode: 'CHILD_BUDGET_EXHAUSTED', digest: null })) },
+  });
+  const dom = ordLoad(s);
+  await flush();
+  buttonIn(dom.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  const text = dom.byId('orders-list').textContent;
+  assert.match(text, /親が自動で停止しました（子の予算を使い切ったため）（CHILD_BUDGET_EXHAUSTED）/);
+  assert.equal(text.includes(DIGEST), false, 'the digest is never shown');
+});
+
 // ---- Self-development memory (ADR 0016 P2, operator): the card, the list, the filters, the deletions ----
 
 const MEM_ID1 = '01MEMORY' + 'A'.repeat(18);

@@ -58,8 +58,8 @@ class McpOrderTools(private val deps: McpOrderDeps) {
 
     private fun orderList() = McpTool(
         name = "kivra_order_list",
-        description = "List the self-development orders, oldest first (up to 50). Returns ids, state codes, cycle counts and timestamps. " +
-            "No title or policy text.",
+        description = "List the self-development orders, oldest first (up to 50). Returns ids, parent id and depth (the tree), child count, " +
+            "state codes, cycle counts, budget and spent amounts in JPY, and timestamps. No title or policy text.",
         inputSchema = objectSchema(),
         scope = SCOPE_RUNS_READ,
     ) { _, args ->
@@ -70,8 +70,8 @@ class McpOrderTools(private val deps: McpOrderDeps) {
 
     private fun orderGet() = McpTool(
         name = "kivra_order_get",
-        description = "Get one order by order_id: its state and reason code, its cycles (goal ids and goal states), and its pending stop request " +
-            "(if any) without the digest. No title or policy text.",
+        description = "Get one order by order_id: its parent id, depth, child count, state and reason code, budget and spent amounts in JPY, " +
+            "its cycles (goal ids and goal states), and its pending stop request (if any) without the digest. No title or policy text.",
         inputSchema = objectSchema(
             "order_id" to orderIdSchema(),
             required = listOf("order_id"),
@@ -164,6 +164,9 @@ private fun SelfDevOrder.summaryJson(): JsonObject = buildJsonObject {
     put("max_cycles", maxCycles)
     put("current_goal_id", currentGoalId)
     put("consecutive_failed_cycles", consecutiveFailedCycles)
+    put("child_count", childCount)
+    put("order_budget_jpy", orderBudgetJpy)
+    put("spent_jpy", spentJpy)
     put("expires_at", expiresAt.utc())
     put("version", version)
     put("created_at", createdAt.utc())

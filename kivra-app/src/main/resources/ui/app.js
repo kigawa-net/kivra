@@ -2838,7 +2838,9 @@
     OPERATOR_REQUEST: '運用者の要求',
     RUNAWAY_SUSPECTED: '暴走の疑い',
     BUDGET_CONCERN: '予算への懸念',
-    SCOPE_CONCERN: '範囲への懸念'
+    SCOPE_CONCERN: '範囲への懸念',
+    CHILD_CYCLE_FAILURES: '親が自動で停止しました（子の周が続けて失敗したため）',
+    CHILD_BUDGET_EXHAUSTED: '親が自動で停止しました（子の予算を使い切ったため）'
   };
 
   var REQUESTER_KINDS = { AI: 'AI の主体', HUMAN: '人（運用者）' };
@@ -2894,6 +2896,11 @@
 
   function ordNum(v) {
     return typeof v === 'number' && isFinite(v) ? String(v) : '不明';
+  }
+
+  /** A yen amount of an order (a JSON number) as text, or 不明. */
+  function ordYen(v) {
+    return typeof v === 'number' && isFinite(v) ? Number(v).toLocaleString('ja-JP') + ' 円' : '不明';
   }
 
   function ordTime(s) {
@@ -3009,10 +3016,41 @@
       ul.appendChild(h('li', { className: 'empty', text: 'まだ order はありません。' }));
       return;
     }
-    ORD.list.forEach(function (o) { ul.appendChild(ordRow(o)); });
+    ordTree(ORD.list).forEach(function (n) { ul.appendChild(ordRow(n.order, n.level)); });
   }
 
-  function ordRow(o) {
+  /**
+   * The list as a tree, in the list's order: each child comes right after its parent, one level deeper. A row whose parent is not
+   * in the list (an orphan) is top-level. Only the IDs and the parent IDs are read here, and a row is shown once.
+   */
+  function ordTree(list) {
+    var ids = {};
+    list.forEach(function (o) { ids[o.orderId] = true; });
+    var kids = {};
+    var roots = [];
+    list.forEach(function (o) {
+      var p = typeof o.parentOrderId === 'string' && ids[o.parentOrderId] && o.parentOrderId !== o.orderId ? o.parentOrderId : null;
+      if (p === null) roots.push(o);
+      else (kids[p] = kids[p] || []).push(o);
+    });
+    var out = [];
+    var seen = {};
+    function walk(o, level) {
+      if (seen[o.orderId]) return;
+      seen[o.orderId] = true;
+      out.push({ order: o, level: level });
+      (kids[o.orderId] || []).forEach(function (k) { walk(k, level + 1); });
+    }
+    roots.forEach(function (o) { walk(o, 0); });
+    // A row that no root reached (only possible with a cycle in the data) is still shown, as top-level.
+    list.forEach(function (o) { walk(o, 0); });
+    return out;
+  }
+
+  /** The indent classes exist for levels 0 to 4 (ui/app.css); a deeper row uses the last one. */
+  var ORD_MAX_LEVEL = 4;
+
+  function ordRow(o, level) {
     var id = o.orderId;
     var open = ORD.openId === id;
     var st = ordStateInfo(o.state);
@@ -3031,6 +3069,8 @@
       ]),
       h('div', { className: 'run-meta' }, [
         h('span', { className: 'time', text: '深さ: ' + ordNum(o.depth) }),
+        h('span', { className: 'time', text: '子の数: ' + ordNum(o.childCount) }),
+        h('span', { className: 'time', text: '使用: ' + ordYen(o.spentJpy) + ' / 予算: ' + ordYen(o.orderBudgetJpy) }),
         h('span', { className: 'time', text: '周: ' + ordNum(o.cyclesStarted) + ' / ' + ordNum(o.maxCycles) }),
         h('span', { className: 'time', text: '連続して失敗した周: ' + ordNum(o.consecutiveFailedCycles) }),
         h('span', { className: 'time', text: '期限: ' + ordTime(o.expiresAt) })
@@ -3041,7 +3081,8 @@
       toggle
     ];
     if (open) kids.push(ordDetailBox(id));
-    return h('li', { className: 'run-item' }, kids);
+    var lv = Math.min(Math.max(level | 0, 0), ORD_MAX_LEVEL);
+    return h('li', { className: 'run-item order-level-' + lv }, kids);
   }
 
   function ordDetailBox(id) {

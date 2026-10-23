@@ -242,6 +242,12 @@ button.secondary {
   list-style: none;
 }
 
+/* The order tree (ADR 0015): a child is indented one step per level. Levels above 4 use the level-4 indent. */
+.run-item.order-level-1 { margin-left: 1.5rem; }
+.run-item.order-level-2 { margin-left: 3rem; }
+.run-item.order-level-3 { margin-left: 4.5rem; }
+.run-item.order-level-4 { margin-left: 6rem; }
+
 .run-sub {
   display: flex;
   flex-wrap: wrap;

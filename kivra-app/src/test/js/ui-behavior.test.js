@@ -2262,3 +2262,22 @@ test('the reason must be 1 to 500 characters without control characters, and its
   assert.equal(dom.byId('memory-submit').disabled, false, '500 characters are allowed');
   assert.equal(dom.byId('memory-count').textContent, '500 / 500');
 });
+
+test('the list and the run detail are shown one at a time, and the hash switches between them', async () => {
+  const dom = load(defaults(true));
+  await flush();
+  assert.equal(dom.byId('view-list').hidden, false, 'no hash: the run list is shown');
+  assert.equal(dom.byId('view-detail').hidden, true, 'no hash: the detail is hidden');
+
+  dom.window.location.hash = '#/runs/' + SELF_RUN_ID;
+  dom.hashListeners.forEach((fn) => fn());
+  await flush();
+  assert.equal(dom.byId('view-list').hidden, true, 'a run hash hides the list');
+  assert.equal(dom.byId('view-detail').hidden, false, 'a run hash shows the detail');
+
+  dom.window.location.hash = '';
+  dom.hashListeners.forEach((fn) => fn());
+  await flush();
+  assert.equal(dom.byId('view-list').hidden, false, 'back to no hash: the list is shown again');
+  assert.equal(dom.byId('view-detail').hidden, true, 'back to no hash: the detail is hidden again');
+});

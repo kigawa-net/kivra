@@ -2048,3 +2048,24 @@ claude mcp add --transport http kivra https://kivra-dev.kigawa.net/mcp
 ```
 
 OAuth の登録方式(固定の public client、PKCE S256)は PR 2 で決める。それまでは、この行は使えない。
+
+## 9. CI のテストのシャード分割(`test-mariadb`)
+
+`.github/workflows/ci.yml` の `test-mariadb` は、`strategy.matrix.shard`(1、2、3)の 3 つの並列ジョブで走る。各ジョブは独立した MariaDB 11 のサービスコンテナを持つ。`fail-fast: false` のため、1 つが落ちても他の結果を最後まで見られる。
+
+| シャード | 対象 |
+|---|---|
+| 1 | `net.kigawa.kivra.db.*` |
+| 2 | `net.kigawa.kivra.selfdev.*` と `net.kigawa.kivra.mcp.*` |
+| 3 | 上の 1 と 2 を除くすべて(`routes`、`coding`、`agent`、`acceptance`、`reaper`、`auth` など)|
+
+- 対象は `kivra-app/build.gradle.kts` の `kivraTestShardPackages` と、シャード 3 の除外(全部から 1 と 2 を除く)で決まる。新しいパッケージは自動でシャード 3 に入る。どのシャードにも属さないテストは存在しない。
+- `KIVRA_TEST_SHARD` が未設定なら全テストを実行する(ローカルの `./gradlew test` と `test-h2` は従来どおり)。`1`、`2`、`3` 以外の値は Gradle の設定段階で失敗する。
+- レポートのアーティファクト名は `test-reports-mariadb-shard-<n>`。
+- 必須チェックの `test` は、`needs: [test-h2, test-mariadb]` のまま、`needs.test-mariadb.result` で判定する。マトリクスのどれか 1 つでも失敗すると、`test-mariadb` の結果は `success` にならず、`test` は失敗する。
+
+ローカルで 1 シャードだけ実行する(H2 でよい):
+
+```
+KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
+```

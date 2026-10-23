@@ -521,3 +521,165 @@ ADR 0011 の U-9(Goal の本文の保持と削除)は、本 ADR でも未決の�
 - 安全装置による一時停止が、承認を待たされて効かなかったとき。
 - 自動の決定(§4.4)が 1 件でも誤りと判明したとき。理由コードの条件を見直す。
 - AI の主体の要求が、承認の件数の大半を占め、人がそれを確かめずに承認し始めたとき(承認の疲労。U-30 の見直し)。
+
+## 追記(2026-10-23): order の費用の自動集計
+
+- ステータス: 提案(Proposed)。設計のみで、コード、マイグレーション、設定は変えない。本文(§1〜§13)は変えず、末尾に追加する。
+- 関連: Issue #273、ADR 0004(予算の正本は BudgetPort)、ADR 0010 追補 4(CLI の費用の計上。UNPRICED の安全側)、ADR 0011(autopilot の予算の枠)。本 ADR の §2.1(`spent_jpy`)、§2.7(予算の入れ子)、§3.2、§4.4、§7 段階 3。
+
+### A. 問題(事実)
+
+- `selfdev_orders.spent_jpy`(V26 で追加)を書く経路が、アプリケーションに無い。`git grep` で確認できた書き込みは、テストの SQL(`SelfDevOrderRepositoryTest.kt` の `setSpent`、`SelfDevOrderRoutesTest.kt`)だけである。V26 のコメントも「この変更では書かない」と明記している。
+- 影響 1: 周の開始前の予算の検査(PR 3b。`SelfDevOrderRepository.startCycle` が経路上の全 order について `order_budget_jpy - spent_jpy >= cycle_budget_jpy` を確かめる)は、`spent_jpy` が常に 0 のため、`order_budget_jpy >= cycle_budget_jpy` である限り通る。検査は実質的に効いていない。
+- 影響 2: §4.4 の `CHILD_BUDGET_EXHAUSTED` は「X の `spent_jpy` が `order_budget_jpy` に達し、…」が条件であり、その事実が得られない。§4.4 の親の自動の決定(PR 3e)は、この理由コードを実装できない。
+- 影響 3(実装と §3.2 の差): §3.2 は「投入の前に、経路上の残り予算を確かめる」としているが、実装の検査は `startCycle`(周の開始)の 1 箇所だけである。`ORDER_BUDGET` の参照も `startCycle` だけにある。投入(Dispatcher)の経路には order の予算の検査が無い。
+
+### B. 費用の流れ(実装の事実)
+
+order から費用の発生源までの鎖を、どの表のどの列で辿れるかを示す。
+
+1. **order → Goal**: `selfdev_goals.order_id`、`selfdev_goals.cycle_no`(V23)。一意: `uk_selfdev_goals_order_cycle (order_id, cycle_no)`。作るのは `startCycle` だけ。**辿れる**(列)。
+2. **Goal → Plan**: `selfdev_plans.goal_id`(V18)。**辿れる**(列)。
+3. **Plan → Task**: `selfdev_plan_tasks.plan_id`(V18)。**辿れる**(列)。
+4. **Task → Run**: `selfdev_plan_tasks.run_id`。SUBMITTED のときに設定される(`SelfDevPlanRepository.kt` の状態の更新)。QUEUED など、まだ投入されていない task は Run を持たない。**辿れる**(列)。
+5. **Run → coding attempt(CLI 経路)**: `coding_attempts.run_id`(V14)→ `attempt_id`、`lease_generation`。**辿れる**(列)。
+6. **coding attempt → 台帳(CLI 経路)**: 台帳のキーは `coding:<attemptId>:<leaseGeneration>`(`CodingCostLedger.reservationKey`、`DbBudgetStore.recordSpend`)。**キーは文字列の連結で、列ではない**。SQL では `CONCAT('coding:', attempt_id, ':', lease_generation)` の等価で結べる。`coding_attempt_usage`(V16、主キー `(attempt_id, lease_generation)`)も同じ単位で結べる。
+7. **Run → 台帳(API 経路。既定の runtime)**: `LlmDeveloper` の requestId は `developer-<runId>-<attempt>`(`kivra-developer/.../LlmDeveloper.kt`)。`ModelGateway` が台帳に使うキーは `<requestId>/<requestId>-a<n>`(`ModelGateway.kt` の `attemptId` と `key`)。**辿れない(列が無い)**。Run の ID は文字列の中にあるだけで、前方一致でしか結べない。
+8. **Planner(API 経路)→ 台帳**: requestId は `planner-<goalId>-<version>-<attempt>`(`AutopilotPlanner.kt`)。台帳のキーは同じ文字列の `/` 区切り。**辿れない(列が無い)**。Goal ID は文字列の中にだけある。`selfdev_plans.request_ledger_id` は、成功して保存された plan の requestId を持つが、費用の列は無い。失敗した呼び出し、保存されなかった plan の費用は、Goal にも order にも列で結ばれない。
+
+台帳の側(V10、V12、`DbBudgetStore`):
+- `budget_reservations`: `reservation_key`(主キー)、`amount_micro_yen`(マイクロ円)、`state`、`expires_at`、`created_at`、`settled_at`。**order の列は無い**。
+- `budget_reservation_scopes`: `(reservation_key, scope_id, period)`。`period` は JST の月(テナントの scope)。
+- `budget_periods`: `(scope_id, period)` ごとの `committed_micro_yen`、`unpriced_calls`。
+- テナントの scope だけが使われる。`Application.kt` は `DbBudgetStore(database, tenantId, tenantLimit())` と `runLimit` を渡さず、`SelfDevWiring.kt` の `budgetScopes` は `listOf(tenantId)` である。`run:` の scope は、本番の配線では作られていない。
+
+状態ごとの計上(`DbBudgetStore` の定数と処理):
+- `RESERVED`: 予約中。計上されていない。TTL(既定 5 分。`reservationTtl`)で `LAPSED` になる。
+- `LAPSED`: 見積もり額が `committed` に計上され、`unpriced` も 1 増える。後の `commit` で true-up される。
+- `COMMITTED`: 実額で計上。
+- `UNPRICED`: 実額が確定しない。見積もり額が計上され、`unpriced` が増える。`ACKNOWLEDGED` になるまで続く。
+- `ACKNOWLEDGED`: 運用者の確認後。`amount_micro_yen` が確定額になる。
+- `RELEASED`: 計上されない(`LAPSED` から来た場合は計上を戻す)。
+
+したがって、キー単位の費用は `state IN ('COMMITTED', 'UNPRICED', 'ACKNOWLEDGED', 'LAPSED')` の `amount_micro_yen` の合計である。`RESERVED` は進行中、`RELEASED` は 0 円。
+
+**辿れない・危うい箇所**(明示):
+- (a) Planner と API 経路の Developer の費用は、Goal と Run に列で結ばれない。キーの前方一致だけで結ぶ。キーの形式を変えると、費用が黙って結びつかなくなる(過少計上)。
+- (b) CLI 経路の費用は、報告(`CodingCostLedger.recordReported`)か見積もり(`recordEstimated`)の時点で初めて台帳に載る。`claimDenial` は `admission` で可否を見るだけで、予約の行を作らない。したがって、CLI の attempt が実行中の間、その費用は台帳のどこにも無い。
+- (c) FX が失効していると、金額 0 の UNPRICED として計上される(ADR 0010 追補 4)。0 円の行は合計に 0 を足すだけで、過少計上になる。その事実は `unpriced` の件数にしか表れない。
+- (d) 周の終了の後も費用は発生しうる。運用者の停止(`SelfDevOperatorRepository.stopGoal`)は、提出済みの Run を止めない(その関数のコメント、§5.4)。`evaluateEndedCycles` は、Goal が DONE または STOPPED になった後に 1 回だけ評価し、`updateCycleOutcome` で `current_goal_id` を NULL にする。その後に届く費用には、周へ結びつく参照が残らない。
+- (e) order が STOPPED または STOP_REQUESTED のとき、`evaluateEndedCycles` の対象外である(`o.state IN ('ACTIVE', 'PAUSED')`)。`SelfDevOrderRepository` の中に `selfdev_goals` を更新する文は無い(INSERT と SELECT のみ)。停止された order の周は、評価されないまま残る。
+- (f) 期間: `budget_periods` と `budget_reservation_scopes.period` は JST の月である。order の累計は全期間の合計が要る。月をまたぐ Run がありうる。
+- (g) 単位: `spent_jpy` は整数の円(`DECIMAL(12,0)`)、台帳はマイクロ円(切り上げ)である。
+
+### C. 設計の案
+
+#### C.1 正本と導出値
+
+- 正本は台帳(`budget_reservations` と `budget_reservation_scopes`。内訳は `coding_attempt_usage`)のまま。ADR 0004 の決定は変えない。
+- `selfdev_orders.spent_jpy` は導出値(キャッシュ)とし、書くのは新しい集計の経路だけにする。台帳からの再計算と突き合わせる検査を置く(§E)。二重の正本は作らない。
+
+#### C.2 推奨: 周ごとの記録表と、tick での差分の加算
+
+- 新しい表 `selfdev_order_cycle_spend`(V28。expand のみ)。
+  - 主キー `(order_id, cycle_no)`。`selfdev_goals` の `uk_selfdev_goals_order_cycle` と同じ単位。
+  - 列の案: `goal_id`、`ledger_micro_yen`(最後に読んだ台帳の合計。マイクロ円)、`counted_jpy`(祖先へ加算済みの円)、`final`(BOOLEAN)、`updated_at`。
+- 処理: `OrderWatch.tick` に、`evaluateEndedCycles` の後の新しい段を追加する。`final = FALSE` の周を対象にし、order の状態で絞らない(§B(e) の対策)。
+  1. 台帳から、その周の Goal の全 Run の鎖(§B の 5〜8)で合計を読む。読み取りだけで、ロックは取らない。
+  2. 1 つの transaction で、経路の order 行を根から下へロック(`lockPath`)し、表の行を `FOR UPDATE` でロックし、台帳の合計を読み直す(テナントの `budget_periods` 行のロックを取る)。新しい `counted_jpy` = `ceil(合計マイクロ円 / 1,000,000)`、差分 `delta = 新しい counted_jpy - 旧い counted_jpy` を、経路上の全 order の `spent_jpy` に加える。`spent_jpy` は 0 を下回らない(下限で打ち切り、差は突き合わせで出す)。
+  3. `delta` が 0 なら何もしない。
+- 冪等: 加算は「前に計上した額との差」で行う。同じ台帳の値で何度実行しても増えない。周ごとに 1 回だけ加える方式ではなく、差で合わせる方式である。
+- 確定(`final = TRUE`): Goal が DONE または STOPPED で、その Goal の Run の attempt が全て非活性(`coding_attempts.active_flag IS NULL`。V14 のコメントによる)で、台帳に当該キーの `RESERVED` と `LAPSED` の行が無いとき。`LAPSED` は後で true-up されうるため、それが消えるまで再計算を続ける。
+- 減る場合: `RESERVED` の release や、`ACKNOWLEDGED` での確定額の変更で、台帳の合計は減りうる。`delta` が負なら `spent_jpy` も減らす。
+
+ロックの順序は、order 行(根から下)→ テナントの budget 行、に固定する。`DbBudgetStore` の操作は order の行を触らないため、budget → order の逆転は起きない。この前提はテストで固定する(§F の 3f)。
+
+#### C.3 案の比較
+
+- **(A) 周の終了時に 1 回だけ加算**(`evaluateEndedCycles` に足す): 却下。§B(d)(e) のとおり、終了後の費用と、停止された order の周が漏れる。二重加算を防ぐには周の記録表が要るため、結局 C.2 の表が必要になる。
+- **(B) 台帳に `order_id` の列を足す**: 却下。台帳は正本で、`reserve`、`commit`、`release`、`recordSpend`、`acknowledgeUnpriced` の全てと、gateway の `budgetScopes`(`ModelRequest`)の型を変える必要がある。API 経路の呼び出し元(Planner、Developer)は order の ID を持っていない。影響範囲が大きい。
+- **(C) キャッシュを持たず、都度台帳から再計算**: 採らない。ただし突き合わせの検査には使う。理由: 開始の検査は `startCycle` の行ロックの中で行う必要があり、木全体の台帳の走査をその中で行うと、台帳の行ロックとの順序が逆転する危険がある。また、V26 の `spent_jpy` の設計(検査の入力)を捨てることになる。
+
+#### C.4 UNPRICED(費用が不明)の扱い
+
+- ADR 0010 追補 4 の安全側に従う。見積もり額で計上された `UNPRICED` と `LAPSED` の額は、そのまま合計に入る。
+- 例外は FX 失効による 0 円の `UNPRICED`。合計に 0 が入るため、未確認の UNPRICED 行が鎖の中にある間は、その order の周を始めない。新しい理由コード(例: `ORDER_UNPRICED`)が要る(U-35)。テナントの `admission` は既に同じ規則で止まる(`admissionDenial` の `UNPRICED_IN_SCOPE`)が、`startCycle` はそれを見ない。
+
+#### C.5 Planner の費用
+
+- 推奨: キーの前方一致(`planner-<goalId>-`)で Goal に結ぶ。Goal は列で order に結ばれる。失敗した呼び出しも結ばれる。
+- 欠点: キーの形式への依存。形式を変えると、黙って過少計上になる。緩和として、キーの形式の契約テスト(`planner-`、`developer-`、`coding:` の 3 形式)と、突き合わせ(§E の「どの鎖にも結ばれない台帳行の数」)を置く。
+- 代替(却下): Planner と Developer が呼び出しの前に `(reservation_key → goal_id / run_id)` の表を書く。書く経路が増えるため、今は採らない。キーの形式の契約テストで足りなくなったときの次の一手として残す(U-36)。
+
+#### C.6 Developer(API 経路)の費用
+
+- `developer-<runId>-<attempt>` のキーで Run に結ぶ。Run から Goal は `selfdev_plan_tasks.run_id` で結ぶ。方式は C.5 と同じ。
+
+#### C.7 周の途中の費用
+
+- 進行中の周の費用は、tick ごとに加算される(`OrderWatch.INTERVAL` は 60 秒)。`spent_jpy` は最大で 1 tick 分だけ遅れる。
+- 開始の検査では、`spent_jpy` に加えて、経路上の各 order の進行中の予約(`RESERVED` の額。その order の周のキーのもの)を足す。`RESERVED` の額は見積もりの上限であり、安全側になる。
+- CLI の実行中の額は台帳に無いため、この検査では見えない(U-37)。
+- 親の周の開始の検査は、子の周の費用を含む(子の `spent_jpy` に、tick ごとの加算が入っているため)。
+
+#### C.8 祖先への加算の原子性
+
+- 1 つの transaction で、経路上の全 order の `spent_jpy` と、表の `counted_jpy` を更新する。どれか 1 つが失敗すれば全部戻す(§2.7 の「同じ transaction」と同じ)。
+- 同時の tick: 表の行の `FOR UPDATE` で直列化する。同じ周を 2 つの tick が同時に加算することは無い。
+
+### D. 検査との関係
+
+- `startCycle` の検査(PR 3b)は、`spent_jpy` と進行中の予約(C.7)の合計を使う。式: `order_budget_jpy - (spent_jpy + 進行中の予約) >= cycle_budget_jpy`。経路上の全 order について確かめる。
+- `CHILD_BUDGET_EXHAUSTED`(§4.4 の 2)の事実: 「X の `spent_jpy` が `order_budget_jpy` 以上」と「X の部分木(深さ 2 まで)に、終端でない Run が無い」。前者は `selfdev_orders` の値、後者は `coding_attempts.active_flag` と `development_runs.state` で確かめる。`spent_jpy`、`order_budget_jpy`、周の結果を、§4.4 の記録に入れる。
+- §4.4 の自動の決定(PR 3e)は、この事実が書けるようになった後(PR 3h の後)に入れる。
+
+### E. 脅威と緩和
+
+| 脅威 | 形 | 緩和 |
+|---|---|---|
+| 過少計上(予算を超えて走る) | キーの形式の変更、0 円の UNPRICED、CLI の実行中の額、LAPSED の true-up 前の額 | キーの契約テスト。未確認の UNPRICED 行がある間は周を始めない。進行中の予約を検査に含める。どの鎖にも結ばれない台帳行の数を突き合わせで出し、0 でなければ運用者に知らせる |
+| 二重加算(不当に止まる) | tick の再実行、同時の tick | 表の主キーと `counted_jpy` による差分。表の行ロックで直列化 |
+| 台帳との不整合 | 加算の transaction の失敗。台帳が後で変わる(release、ACKNOWLEDGED) | 次の tick が差分で直す。突き合わせ: 台帳の再計算と `spent_jpy` の差が 0 であること |
+| 並行性 | budget 行と order 行のロックの順序の逆転 | 順序を order → budget に固定する。`DbBudgetStore` が order 行を触らないことをテストで固定する |
+| 検査の誤り | 進行中の額が見えない | 予約を検査に含める。CLI の実行中の額は未対応と明記する(U-37) |
+| 誤った停止 | `CHILD_BUDGET_EXHAUSTED` の誤判定 | 事実の条件を固定し、§4.4 の頻度の上限に従う |
+
+### F. 段階(3f〜3h)
+
+PR 3e は既存の表記で §4.4(親の自動の決定)に使われている。本案は 3f、3g、3h を使い、3e の番号は変えない。順序は 3f → 3g → 3h → 3e とする。各段階の進む条件の数値は暫定である。
+
+- **3f: 記録表と台帳からの読み取り(挙動は変えない)**。V28(`selfdev_order_cycle_spend`。expand のみ)、台帳から周ごとの合計を読む関数、キーの 3 形式の契約テスト、ロック順序のテスト。`spent_jpy` は書かない。
+  - 進む条件(暫定): 開発用の DB で、全 order の周について、台帳の合計と表の読み取りが一致する。どの鎖にも結ばれない台帳行が、テストの fixture 以外に 0 件。
+- **3g: tick での差分の加算**。`OrderWatch` の新しい段、`spent_jpy` と `counted_jpy` の更新、`final` の判定。
+  - 進む条件(暫定): dev で、3 件以上の周が確定まで進み、台帳の再計算と `spent_jpy` の差が 0 件。二重加算の検査が 0 件。
+- **3h: 検査の実効化と理由の事実**。`startCycle` の式(進行中の予約を含む)、未確認の UNPRICED の拒否(U-35 の決定後)、`CHILD_BUDGET_EXHAUSTED` の事実の取得(§4.4 の記録。自動の決定そのものは PR 3e)。
+  - 進む条件(暫定): dev で、予算を超える周の開始が拒否され、拒否の理由が記録される。
+- ロールバック: 3g は新しい段を止めれば、書き込みが止まる(`spent_jpy` は最後の値のまま残る)。3h は検査の式を元に戻す。
+
+### G. 未決の点
+
+- **U-33 `spent_jpy` の単位と丸め**。推奨: 周ごとに `ceil(マイクロ円 / 1,000,000)` を取り、その和を `spent_jpy` にする。周の中で 1 回だけ切り上げ、過大計上は 1 周あたり最大 1 円。代替: マイクロ円の列を足す(V26 の `DECIMAL(12,0)` と合わないため採らない)。
+- **U-34 進行中の額を検査に含めるか**。推奨: 含める(進行中の予約と、tick で加算された額)。
+- **U-35 未確認の UNPRICED(0 円を含む)の扱い**。推奨: その order の周を始めない。新しい理由コード `ORDER_UNPRICED` を §5.2 の表に足す。自動の停止ではなく一時停止の扱いとし、承認は要らない。
+- **U-36 キーの形式への依存を解く時期**。推奨: 当面は契約テストと突き合わせで対処する。`(reservation_key → goal_id / run_id)` の表は、キーの形式を変える必要が出たときに作る。
+- **U-37 CLI 経路の実行中の額**。推奨: 当面は見えないものとして扱い、`cycle_budget_jpy` の余裕で吸収する。claim の時点で予約の行を作る案は、ADR 0010 追補 4 の入場の設計を変えるため、本追記では採らない(別の ADR で決める)。
+- **U-38 停止された order の周の扱い**。推奨: `final` になるまで tick で集計し続ける。`evaluateEndedCycles` の対象は広げない(周の評価と費用の集計を分ける)。
+- **U-39 周の記録表の保持**。推奨: order の寿命と同じにし、掃除はしない。
+
+### H. 確認できなかったこと(未確認)
+
+- MariaDB で `reservation_key LIKE 'planner-<goalId>-%'` が主キーの範囲走査になるか。照合順序と実行計画は未確認(EXPLAIN は未実施)。
+- `OrderWatch` の tick が本番で動いているか。配線(`Application.kt`)は確認したが、稼働は未確認。
+- Goal が DONE または STOPPED になったとき、提出済みの Run が全て終端になっているか。`AutopilotDispatcher.dispatchGoal` は task の終端を見るが、task の状態と Run の状態の対応は未確認。
+- 停止された order の Goal が、いつ終わるか。order の停止は Goal の状態を変えず、`dispatchAllowed` が投入を止める。Goal の終端の経路は未確認。
+- CLI 経路の attempt が、Goal の終了後に報告されうるか(lease の期限と Run の状態の関係)。未確認。
+- `coding_attempts.active_flag` が QUEUED、CLAIMED、RUNNING の間だけ 1 になるか。V14 のコメントに基づく。更新の箇所は未確認。
+- 台帳の費用と実費の差の大きさ(ADR 0011 の見直しの条件の「10%」に対する実測)。未確認。
+- 同じ order の周が、木の中で同時に 2 つ進むことを防ぐ検査(§3.2 の「同時の周」)。`startCycle` は自分の `current_goal_id` だけを見ており、親と子の周の同時進行は止めていない(コードを読んだ範囲の観察。未検証)。
+
+### I. 見直しの条件
+
+- 台帳に order の列が必要になったとき(C.3 の (B))。
+- キーの形式を変えたとき(契約テストが落ちる。U-36)。
+- 突き合わせで、どの鎖にも結ばれない台帳行が 1 件でも出たとき。
+- `spent_jpy` と台帳の再計算の差が 1 件でも出たとき。

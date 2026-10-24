@@ -172,3 +172,44 @@ dev の手動検証: AI 用の Keycloak ユーザー(member ロールだけ)で�
 ## 実装状況: 起動時の初期化(`roles-bootstrap`)
 
 `ROLES_MODE` が off 以外のときだけ、`seedRoles` が、root approver(ADMIN、「root-approver」)と環境変数の AI(AI、「ai-principal」)の担当を、owner key が未紐付けのときだけ作る(降格・無効化を戻さない。AI が別のロールに紐付いていれば `ENV_AI_CONFLICT` の警告だけ)。`KIVRA_SELFDEV_ROLES_RECOVER_ADMIN=true` は、root approver の担当だけを再有効化・ADMIN に戻し・再紐付けする。enforce で root approver が未設定、または ACTIVE な ADMIN が無いと起動失敗。初期化の失敗も起動失敗。off は何も読まず、書かない。
+
+## 追補(2026-10-25): AI の担当は Keycloak を使わない
+
+ユーザーの決定(2026-10-25)。ステータス: 提案。実装は下記の PR T1〜T4 で行う(**未実装**。この追補の PR は文書だけ)。
+
+**§4「認証と認可の分離」(Keycloak の無害な member ロール `KIVRA_OIDC_MEMBER_ROLE` で AI 用ユーザーを入れる方式)は、AI の経路としては、この追補で置き換える(採用しない)。** PR 4(#365)で入った `KIVRA_OIDC_MEMBER_ROLE` の実装は、既定無効のまま残るが、AI の経路としては使わない。将来の削除は未決事項(U-6)に書く。決定 1〜7 と §1〜§3、§5 の `ROLES_MODE`・`ROLES_DEFAULT`・`RECOVER_ADMIN`、権限の表は、そのまま有効である。AI の担当は、Keycloak の資格情報を持たず、kivra の**内部だけ**で作る資格情報(担当ごとの API トークン)で入る。
+
+1. **担当ごとの API トークン**。kivra が担当ごとに発行する。形式は `kvt_` + 32 バイトの乱数の base64url(43 文字)。DB に保存するのは SHA-256 のハッシュ(`token_hash`。CHAR(64) の hex、UNIQUE)と、識別用の `token_ref`(ハッシュの先頭 16 hex)だけ。**平文は、発行のときに 1 度だけ返し**、ログにも監査にも出さない。検索は、ハッシュの一致(インデックス)で行う。
+2. **受け付ける入口は MCP だけ**(`/mcp`、`Authorization: Bearer kvt_...`)。REST は oauth2-proxy(Keycloak のセッション)の背後なので、トークンでは通さない。MCP の入口で、`kvt_` で始まる Bearer を、担当のトークンとして検証する(Keycloak の JWT とは別の経路。JWT の検証には影響しない)。トークンの主体は、合成の owner key `<utf8 長さ>:kivra-assignee:<担当 ID>`(既存の owner key の形 `<長さ>:<iss>:<sub>` に合わせる。issuer は固定の `kivra-assignee`)で、既存の `selfdev_assignee_members` に紐付ける(トークンの初回発行と同じ transaction)。
+3. **持てるロールは AI と VIEWER だけ**。ADMIN・OPERATOR・APPROVER(人が持つロール)は、Keycloak の本人確認だけで入り、トークンでは入れない。発行のときと、**検証のたび**に、担当が ACTIVE で、ロールが AI か VIEWER であることを確認する(ロールを ADMIN などに変えると、トークンは即座に無効になる)。
+4. **有効期限と数**。既定 90 日(上限 365 日)。担当ごとに、有効(未失効・未期限切れ)なトークンは最大 2 つ(ローテーションのため)。失効は即時(次のリクエストから拒否)。担当の無効化も即時。
+5. **発行・失効・一覧は、ADMIN(人、Keycloak の本人確認)だけ**。AI の担当は、トークンを発行も失効もできない(コードで固定)。一覧が返すのは、`token_ref`、期限、失効の有無、作成者の参照名だけ(トークンも、ハッシュも、返さない)。監査は `selfdev_assignee_events` に `TOKEN_ISSUED`、`TOKEN_REVOKED` を追記する(V34 で CHECK の kind を足す。入れるのは `actor_ref` と `token_ref` だけ)。
+6. **MCP での権限**。トークンの担当のロールで、既存の `PermissionGuard`(`legacyAdmin=false`)が判定する。MCP の scope は、ロールから決めた固定の集合とする(AI: `kivra.runs.read`、`kivra.selfdev.stop`、`kivra.selfdev.start`(`SPEND_START` を持つため)。VIEWER: `kivra.runs.read`)。AI の担当ができること: 読み取り、order の停止要求(`kivra_order_request_stop`)、`kivra_selfdev_start`(`SPEND_START`)。できないこと: Goal の投入・停止、承認・却下、order の作成・周の開始、予算の解除、記憶の閲覧(`READ_TEXT`)。
+7. **失敗の扱い**。不明・期限切れ・失効・無効な担当・ロール不適合のトークンは、すべて同じ 401(理由を区別して返さない)。ログは固定コードだけ(`TOKEN_UNKNOWN`、`TOKEN_EXPIRED` など。トークンの断片も出さない)。失敗の連続には、既存の MCP のレート制限に加えて、IP/ホストごとの失敗の回数制限を検討する(未決事項 U-5)。
+8. **段階**。各 PR は、`ROLES_MODE` が off(既定)のときは、挙動が変わらない。
+
+   | PR | 内容 |
+   |---|---|
+   | T1 | V34(`selfdev_assignee_tokens` 表と、イベントの kind の拡張)とトークンのリポジトリ(配線なし) |
+   | T2 | MCP の入口でのトークンの検証 |
+   | T3 | 管理 API(担当の作成、トークンの発行・失効・一覧、`GET /api/selfdev/me`) |
+   | T4 | UI の管理画面 |
+
+   各 PR はコードを含み、この追補とは別に、マージ前に diff と CI を確認する。
+9. **k8s の変更**。Keycloak の変更は不要。k8s は `ROLES_MODE` だけ(shadow → enforce)。`KIVRA_SELFDEV_AI_PRINCIPAL`(環境変数の AI)は、DB の AI の担当で足りるので不要(残してもよい)。MCP クライアント(Claude Code など)は、`--header "Authorization: Bearer <token>"` で接続する。
+10. **脅威**(上の脅威の表に、次を足す)。
+
+    | 脅威 | 緩和 |
+    |---|---|
+    | トークンの漏えい | 短い期限(既定 90 日)、即時失効、ハッシュ保存、平文は発行のときの 1 度だけ(ログ・監査・一覧に出さない)、AI と VIEWER にしか持てない(漏れても、人のロールの権限は得られない) |
+    | トークンの総当たり | 256 ビットの乱数。失敗の回数制限(U-5)と、既存の MCP のレート制限 |
+    | タイミング攻撃 | 比較ではなく、ハッシュの一致のインデックス検索で引く |
+    | ロールの昇格 | 検証のたびにロールを引く。AI と VIEWER 以外なら、トークンは無効 |
+    | 権限の昇格 | トークンの入口は MCP だけ。AI のトークンで REST に入れない。発行と失効は ADMIN(人)だけ |
+    | 監査の改ざん | `selfdev_assignee_events` は追記専用。入れるのは `actor_ref` と `token_ref` だけ |
+
+追補による未決事項の追加(U-5〜U-7):
+
+- **U-5 失敗の回数制限の方式**: IP/ホストごとの失敗の回数制限を、どこに置くか(アプリ内のメモリ、DB、oauth2-proxy や Ingress)。複数 Pod での共有と、プロキシ越しのクライアント IP の信頼(`X-Forwarded-For`)の扱いも決める。T2 の前に決める。
+- **U-6 `KIVRA_OIDC_MEMBER_ROLE` の実装の将来の削除**: AI の経路としては採用しないため、既定無効のまま残すか、削除するか。人の member ロールなど、別の用途が出るかを見て決める。
+- **U-7 VIEWER のトークンの用途**: 読み取り専用の監視や外部の連携を想定しているが、実際の用途を確認する。用途がなければ、トークンを持てるロールを AI だけにする案もある。

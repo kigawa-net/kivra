@@ -2215,7 +2215,7 @@ KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 |---|---|---|
 | `KIVRA_SELFDEV_ROLES_MODE` | `off` | `off` は現状と同じ。`shadow` は拒否せずログだけ。`enforce` は拒否する(未実装) |
 | `KIVRA_SELFDEV_ROLES_DEFAULT` | `operator`(最終的に `none`) | `admin-panel:admin` で担当に紐付けがない主体の扱い(未実装) |
-| `KIVRA_OIDC_MEMBER_ROLE` | 未設定 | 認証として受け付ける member ロール(`<client>:<role>`)。実装済み(認証のみ。認可は PR 3)。`KIVRA_OIDC_REQUIRED_ROLE`・`KIVRA_AGENT_REQUIRED_ROLE` と同じ値は起動失敗。member ロールだけのトークンは、既存の運用者向けルートと MCP では、今までどおり拒否される |
+| `KIVRA_OIDC_MEMBER_ROLE` | 未設定 | 認証として受け付ける member ロール(`<client>:<role>`)。実装済み(認証のみ。認可は PR 3)。`KIVRA_OIDC_REQUIRED_ROLE`・`KIVRA_AGENT_REQUIRED_ROLE` と同じ値は起動失敗。member ロールだけのトークンは、既存の運用者向けルートと MCP では、今までどおり拒否される。**AI の経路としては採用しない(既定無効のまま)**。AI の担当は、Keycloak を使わない内部のトークンで入る(§10.4b、ADR 0020 追補 2026-10-25) |
 | `KIVRA_SELFDEV_ROLES_RECOVER_ADMIN` | `false` | `true` / `false`。ADMIN を失ったときの一時的な復旧フラグ。`KIVRA_SELFDEV_ROLES_MODE` が `off` のときは読まない。不正な値は起動失敗(変数名だけ)。復旧後は外す(実装済み、§10.5) |
 
 `KIVRA_SELFDEV_ROOT_APPROVER` は、導入後は、起動時の初期化の入力になる(担当と紐付けが無いときだけ ADMIN の担当を作る)。ADMIN(人)は停止の承認・却下もできる。APPROVER は、承認だけを任せたい人向けのロールである。AI は承認できない。`KIVRA_SELFDEV_AI_PRINCIPAL` は、全期間を通じて維持し、常に AI として扱う。
@@ -2254,6 +2254,39 @@ Keycloak と k8s の変更(PR 7)は、ユーザーの承認と作業が要る。
 2. ADMIN(人)が、ロール AI の担当を作り、そのユーザーの `sub` を紐付ける。
 3. oauth2-proxy が `/ui` に AI を入れるように、`--allowed-role` を繰り返し指定する。
 4. AI のユーザーが、読み取りと停止要求ができ、承認・作成・解除が 403 になることを確認する。
+
+### 10.4b AI の担当の作り方(予定。未実装。PR T1〜T4 で実装)
+
+ADR 0020 の追補(2026-10-25)の方針である。**AI の担当は Keycloak を使わない**。kivra の内部だけで、担当ごとの API トークンを作る。§10.4 の Keycloak の member ロールを使う手順は、AI の経路としては採用しない(置き換え)。**このセクションの機能は、すべて未実装**で、PR T1(V34 とリポジトリ)、T2(MCP の入口の検証)、T3(管理 API)、T4(UI の管理画面)で実装する。各 PR は、`KIVRA_SELFDEV_ROLES_MODE` が `off`(既定)のときは、挙動が変わらない。
+
+仕様の要点:
+
+- トークンの形式は `kvt_` + 32 バイトの乱数の base64url(43 文字)。DB には SHA-256 のハッシュと `token_ref`(先頭 16 hex)だけを保存する。**平文は、発行のときに 1 度だけ返る**。あとから確認する手段はない(失くしたら、失効して発行し直す)。
+- 入口は MCP(`/mcp`)だけ。REST にはトークンでは入れない。
+- トークンを持てるのは、ロールが AI か VIEWER で、状態が ACTIVE の担当だけ。検証のたびに確認するので、ロールを変えるか担当を無効化すると、次のリクエストから 401 になる。
+- 有効期限は既定 90 日(上限 365 日)。担当ごとに、有効なトークンは最大 2 つ。
+- 発行・失効・一覧は、ADMIN(人、Keycloak の本人確認)だけ。AI の担当にはできない。一覧は、`token_ref`、期限、失効の有無、作成者の参照名だけを返す。
+- 監査は `selfdev_assignee_events` の `TOKEN_ISSUED`、`TOKEN_REVOKED`(`actor_ref` と `token_ref` だけ)。
+- 不明・期限切れ・失効・無効な担当・ロール不適合は、すべて同じ 401。ログは固定コード(`TOKEN_UNKNOWN`、`TOKEN_EXPIRED` など)だけで、トークンの断片は出ない。
+- AI の担当の権限: 読み取り、order の停止要求(`kivra_order_request_stop`)、`kivra_selfdev_start`。Goal の投入・停止、承認・却下、order の作成・周の開始、予算の解除、記憶の閲覧はできない。MCP の scope は、ロールから決まる固定の集合(AI: `kivra.runs.read`、`kivra.selfdev.stop`、`kivra.selfdev.start`。VIEWER: `kivra.runs.read`)。
+
+環境変数: 新しいものは無い。k8s で変えるのは `KIVRA_SELFDEV_ROLES_MODE` だけ(`shadow` → `enforce`)。Keycloak の変更は要らない。`KIVRA_SELFDEV_AI_PRINCIPAL` は、DB の AI の担当で足りるので不要になる(残してもよい)。トークンの有効期限の既定・上限は、T1〜T3 で設定を足すか固定値にするかを決める(実装時に、この表を更新する)。
+
+運用手順(予定):
+
+1. **担当を作る**(ADMIN の人、T3 の管理 API または T4 の画面)。ロールは AI(読み取り専用の用途は VIEWER)にする。
+2. **トークンを発行する**。ADMIN の人が、担当を選んで発行する。返った平文を、その場で、MCP クライアントの設定か、シークレットの保管庫に入れる。平文は、チャット、チケット、ログ、リポジトリに貼らない。
+3. **MCP クライアントを設定する**(例。`<kivra の URL>` と `<token>` は、実際の値に置き換える。値を文書やシェルの履歴に残さない)。
+
+   ```
+   claude mcp add --transport http kivra <kivra の URL>/mcp \
+     --header "Authorization: Bearer <token>"
+   ```
+
+4. **ローテーション**(期限の前に行う)。担当に、新しいトークンを発行する(有効なトークンは最大 2 つなので、新旧が並ぶ)。クライアントを新しいトークンに切り替え、動作を確認する。古いトークンを、`token_ref` を指定して失効する。
+5. **失効**(漏えいの疑い、不要になったとき)。ADMIN の人が、`token_ref` を指定して失効する。次のリクエストから拒否される。担当ごと止めたいときは、担当を無効化する(これも即時)。漏えいの疑いがあるときは、失効のあと、ログの固定コードの失敗(`TOKEN_UNKNOWN` の急増など)と、`selfdev_assignee_events` を確認する。
+6. **k8s**: `KIVRA_SELFDEV_ROLES_MODE` を `shadow`、確認のあと `enforce` にする(§10.2 と同じ。トークンの検証は、`off` では行わない)。Keycloak と oauth2-proxy は変更しない。
+7. **確認**: AI のトークンで、読み取りと `kivra_order_request_stop` が通り、`kivra_goal_submit`・`kivra_goal_stop`・`kivra_goal_get_titles` が拒否される。失効したトークン、期限切れのトークンは 401。担当のロールを ADMIN などに変えると、トークンが 401 になる。REST に `kvt_` のトークンを送っても通らない。
 
 ### 10.5 ADMIN を失った場合の復旧(予定)
 

@@ -119,6 +119,10 @@ class MigrationExpandOnlyTest {
             "V32:DROP (ALTER TABLE SELFDEV_MEMORY_EVENTS DROP CONSTRAINT CK_SELFDEV_MEMORY_EVENTS_KIND)" to
                 "V32 replaces the event kind CHECK with one that accepts every value the old one did and adds SHADOW_SUPPRESS. An old " +
                 "Writer never writes SHADOW_SUPPRESS, so its rows pass the new CHECK as they passed the old one. No Contract step is needed.",
+            "V34:DROP (ALTER TABLE SELFDEV_ASSIGNEE_EVENTS DROP CONSTRAINT CK_SELFDEV_ASSIGNEE_EVENTS_KIND)" to
+                "V34 replaces the event kind CHECK with one that accepts every value the old one did and adds TOKEN_ISSUED and " +
+                "TOKEN_REVOKED. An old Writer never writes those kinds, so its rows pass the new CHECK as they passed the old one. No " +
+                "Contract step is needed.",
         )
     }
 }

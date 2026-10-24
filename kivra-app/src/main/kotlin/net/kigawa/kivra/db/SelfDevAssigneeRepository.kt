@@ -283,6 +283,21 @@ class SelfDevAssigneeRepository(
         return Assignee(id, name, role, AssigneeState.ACTIVE, 0, actor ?: BOOTSTRAP, now, now)
     }
 
+    /** The outcome of [bindMemberIfAbsent]. */
+    internal enum class BindOutcome { BOUND, ALREADY_BOUND_HERE, BOUND_TO_OTHER }
+
+    /**
+     * Binds [ownerKey] to [assigneeId] inside the caller's transaction, with the MEMBER_BOUND event of [bindMember]. Writes nothing when the
+     * key is bound already. The caller holds the assignee row lock (the token issue does).
+     */
+    internal fun Transaction.bindMemberIfAbsent(assigneeId: String, ownerKey: String, actor: String?, now: LocalDateTime): BindOutcome {
+        val bound = boundAssigneeId(ownerKey)
+        if (bound == assigneeId) return BindOutcome.ALREADY_BOUND_HERE
+        if (bound != null) return BindOutcome.BOUND_TO_OTHER
+        insertMember(assigneeId, ownerKey, actor, now)
+        return BindOutcome.BOUND
+    }
+
     private fun Transaction.insertMember(assigneeId: String, ownerKey: String, actor: String?, now: LocalDateTime) {
         val ref = memberRef(ownerKey)
         execUpdate(

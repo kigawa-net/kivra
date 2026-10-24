@@ -17,6 +17,8 @@
     <div class="conn" id="health-status" role="status">接続: 未確認</div>
     <button type="button" class="secondary" id="refresh-all-btn">更新</button>
     <a class="badge warn" id="header-approvals" href="#/approvals" hidden></a>
+    <span class="meta" id="me-role" hidden></span>
+    <span class="meta" id="me-note" hidden></span>
     <span class="meta" id="refresh-all-at">最終更新: 未更新</span>
   </div>
 </header>
@@ -36,6 +38,7 @@
   <a href="#/approvals" id="nav-approvals" hidden>承認 <span class="badge warn" id="nav-approvals-badge" role="img" hidden></span></a>
   <a href="#/budget" id="nav-budget" hidden>予算</a>
   <a href="#/memory" id="nav-memory" hidden>記憶</a>
+  <a href="#/assignees" id="nav-assignees" hidden>担当</a>
 </nav>
 <main id="main" tabindex="-1">
   <div id="view-list">
@@ -221,13 +224,41 @@
         <button type="button" id="memory-prev" class="secondary">前の 20 件</button>
         <button type="button" id="memory-next" class="secondary">次の 20 件</button>
       </div>
-      <h3>条件で削除（運用者）</h3>
-      <p class="meta">上で選んだ条件に該当する記録を削除します。先に件数を確認してください。1 回の上限は 500 件です。</p>
-      <div class="detail-actions">
-        <button type="button" id="memory-dryrun" class="secondary">該当の件数を確認</button>
-        <button type="button" id="memory-cond-delete" class="secondary" disabled>この条件で削除</button>
+      <div id="memory-delete-block">
+        <h3>条件で削除（運用者）</h3>
+        <p class="meta">上で選んだ条件に該当する記録を削除します。先に件数を確認してください。1 回の上限は 500 件です。</p>
+        <div class="detail-actions">
+          <button type="button" id="memory-dryrun" class="secondary">該当の件数を確認</button>
+          <button type="button" id="memory-cond-delete" class="secondary" disabled>この条件で削除</button>
+        </div>
+        <p id="memory-dryrun-result" class="meta" role="status"></p>
       </div>
-      <p id="memory-dryrun-result" class="meta" role="status"></p>
+    </section>
+  </div>
+
+  <div class="page" id="page-assignees" data-page="assignees" hidden>
+    <!-- Assignees (ADR 0020 T4). Hidden unless GET /api/selfdev/me says ASSIGNEE_MANAGE and the roles are not off. Only text is written into it. -->
+    <section class="card" id="assignees-section" aria-labelledby="h-assignees" hidden>
+      <div class="card-head">
+        <h2 id="h-assignees">担当の管理（ADR 0020、管理者向け）</h2>
+      </div>
+      <p class="meta" role="note">担当は、人と AI のロールの単位です。人は Keycloak の sub で紐付け、AI と VIEWER の担当は、トークンで MCP から入ります。トークンの平文は、発行のときに 1 度だけ表示されます。Keycloak の sub と、メンバーの識別子の全体は、画面に表示しません。</p>
+      <p id="assignees-msg" class="result" role="status"></p>
+      <p id="assignees-status" class="meta" role="status"></p>
+      <ul id="assignees-list" class="run-list" aria-label="担当の一覧"></ul>
+      <details id="assignee-create">
+        <summary>担当を作る</summary>
+        <form id="assignee-create-form">
+          <label for="assignee-name">表示名（1〜64 文字）</label>
+          <input id="assignee-name" name="assignee-name" type="text" maxlength="64" required autocomplete="off">
+          <div class="counter" id="assignee-name-count">0 / 64</div>
+          <label for="assignee-role">ロール</label>
+          <select id="assignee-role"></select>
+          <div>
+            <button type="submit" id="assignee-create-submit">担当を作る</button>
+          </div>
+        </form>
+      </details>
     </section>
   </div>
 
@@ -337,6 +368,33 @@
     <div class="dialog-actions">
       <button type="button" class="secondary" id="order-stop-cancel" autofocus>キャンセル</button>
       <button type="button" id="order-stop-submit" disabled>停止を要求する</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="assignee-confirm-dialog" aria-labelledby="assignee-confirm-title">
+  <div class="release-body">
+    <h2 id="assignee-confirm-title">確認</h2>
+    <p id="assignee-confirm-text"></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="assignee-confirm-cancel" autofocus>キャンセル</button>
+      <button type="button" id="assignee-confirm-submit" disabled>実行する</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="token-dialog" aria-labelledby="token-title">
+  <div class="release-body">
+    <h2 id="token-title">発行したトークン</h2>
+    <p class="error" role="alert">このトークンは、この 1 回しか表示されません。安全な場所に保管してください。チャット、チケット、ログ、リポジトリには貼らないでください。</p>
+    <p class="meta" id="token-meta"></p>
+    <label for="token-value">トークン（読み取り専用）</label>
+    <input id="token-value" class="token-value" type="text" readonly autocomplete="off" spellcheck="false">
+    <p class="meta">コピーできない環境では、入力欄を選択して、手動でコピーしてください。</p>
+    <p class="meta" id="token-copy-note" role="status"></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="token-copy">コピー</button>
+      <button type="button" id="token-close">閉じる（二度と表示されません）</button>
     </div>
   </div>
 </dialog>

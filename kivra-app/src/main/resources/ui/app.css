@@ -695,3 +695,9 @@ textarea {
   width: 100%;
   height: 0.75rem;
 }
+
+/* Assignees (ADR 0020 T4): the token field of the token dialog is monospace. */
+.token-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  width: 100%;
+}

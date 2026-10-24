@@ -3070,3 +3070,650 @@ test('the skip link focuses the body without changing the page', async () => {
   assert.equal(dom.byId('main').focused, true);
   assert.equal(dom.window.location.hash, '#/goals');
 });
+
+// ---- Roles and the assignee page (ADR 0020 T4) --------------------------------------------------------------------------
+
+const ALL_PERMISSIONS = ['READ', 'READ_TEXT', 'GOAL_STOP', 'ORDER_MANAGE', 'STOP_REQUEST', 'STOP_DECIDE', 'GOAL_WRITE', 'SPEND_START', 'BUDGET_OVERRIDE', 'ASSIGNEE_MANAGE'];
+const OPERATOR_PERMISSIONS = ['READ', 'READ_TEXT', 'GOAL_STOP', 'ORDER_MANAGE', 'STOP_REQUEST', 'GOAL_WRITE', 'SPEND_START', 'BUDGET_OVERRIDE'];
+const ME_PATH = '/api/selfdev/me';
+
+const meOf = (mode, role, permissions) => ({ status: 200, data: { mode, role, permissions, source: 'ASSIGNEE' } });
+
+const AS_AI = '01ASSIGNEE' + 'A'.repeat(16);
+const AS_ADMIN = '01ASSIGNEE' + 'B'.repeat(16);
+const AS_VIEWER = '01ASSIGNEE' + 'C'.repeat(16);
+const AS_OPERATOR = '01ASSIGNEE' + 'D'.repeat(16);
+const MEMBER_REF = 'abcdef0123456789';
+const TOKEN_REF = '0123456789abcdef';
+const TOKEN_PLAIN = 'kvt_' + 'Qz3-'.repeat(10) + 'Qz3';
+const SUB_VALUE = 'f1e2d3c4-sub-value-1234';
+
+function assigneeOf(over = {}) {
+  return { assigneeId: AS_AI, displayName: 'claude-code', role: 'AI', state: 'ACTIVE', version: 4, memberCount: 0, activeTokenCount: 1, ...over };
+}
+
+/**
+ * Everything the roles UI touches. `s.me` answers /me (default: 404), `s.assignees` is the list, `s.members` and `s.tokens` are
+ * functions of the assignee id, and `s.write(p, init)` answers a write (return null to fall through to a 500).
+ */
+function asgLoad(s = {}, { hash = '' } = {}) {
+  const st = apState({
+    orderList: { status: 200, data: [orderOf()] },
+    orderDetail: { status: 200, data: orderDetailOf({}, s.pending || null) },
+    requestList: { status: 200, data: [stopRequestOf()] },
+    goals: [goalSummary({ state: 'PLAN_PROPOSED', version: 2 })],
+    detail: detailOf(goalSummary({ state: 'PLAN_PROPOSED', version: 2 }), [taskOf({ version: 0 })]),
+  });
+  const orders = ordersOther(st);
+  st.other = (p, init) => {
+    if (p === ME_PATH) return s.me || { status: 404, data: { error: 'not found' } };
+    if (p === '/api/selfdev/assignees' && init.method === 'GET') return s.listResponse || { status: 200, data: s.assignees || [] };
+    const sub = /^\/api\/selfdev\/assignees\/([0-9A-Z]{26})\/(members|tokens)$/.exec(p);
+    if (sub && init.method === 'GET') {
+      const fn = sub[2] === 'members' ? s.members : s.tokens;
+      return { status: 200, data: fn ? fn(sub[1]) : [] };
+    }
+    if (s.write && init.method !== 'GET') {
+      const w = s.write(p, init);
+      if (w) return w;
+    }
+    const o = orders(p, init);
+    if (o) return o;
+    if (p.startsWith('/api/selfdev/memory?') && init.method === 'GET') return memList([memOf()]);
+    if (p === BUDGET_PATH) return { status: 200, data: BUDGET_STATUS };
+    if (p === '/api/admin/budget/fx') return { status: 200, data: BUDGET_FX_OK };
+    return null;
+  };
+  const dom = load(apResponder(st), { hash });
+  dom.state = st;
+  return dom;
+}
+
+const adminMe = () => meOf('enforce', 'ADMIN', ALL_PERMISSIONS);
+
+function inputsIn(el) {
+  const out = [];
+  el.walk((n) => { if (n.tagName === 'INPUT' || n.tagName === 'SELECT') out.push(n); });
+  return out;
+}
+
+function asgOpen(dom) {
+  buttonIn(dom.byId('assignees-list'), '詳細').fire('click');
+}
+
+async function confirmDialog(dom) {
+  assert.equal(dom.byId('assignee-confirm-dialog').open, true, 'a confirmation dialog is open');
+  dom.byId('assignee-confirm-submit').fire('click');
+  await flush();
+}
+
+test('/me is read once at the start; the role is shown as text, and a 404 leaves the page as it was', async () => {
+  const dom = asgLoad({ me: meOf('enforce', 'OPERATOR', OPERATOR_PERMISSIONS) });
+  await flush();
+  assert.equal(dom.calls.filter((c) => c.path === ME_PATH).length, 1);
+  assert.equal(dom.byId('me-role').hidden, false);
+  assert.equal(dom.byId('me-role').textContent, '役割: OPERATOR');
+  assert.equal(dom.byId('me-note').hidden, true, 'enforce: no note');
+  dom.byId('refresh-all-btn').fire('click');
+  await flush();
+  assert.equal(dom.calls.filter((c) => c.path === ME_PATH).length, 1, 'not read again');
+
+  const none = asgLoad({});
+  await flush();
+  assert.equal(none.byId('me-role').hidden, true, '404: no role');
+  assert.equal(none.byId('nav-assignees').hidden, true);
+  assert.equal(none.byId('goal-form').hidden, false, '404: nothing is hidden');
+  assert.equal(none.byId('order-create').hidden, false);
+
+  const broken = asgLoad({ me: { status: 200, data: { mode: 'weird', role: 'ADMIN', permissions: ['READ'] } } });
+  await flush();
+  assert.equal(broken.byId('me-role').hidden, true, 'a malformed answer is the fallback');
+  assert.equal(broken.byId('goal-form').hidden, false);
+
+  const shadow = asgLoad({ me: meOf('shadow', 'VIEWER', ['READ']) });
+  await flush();
+  assert.equal(shadow.byId('me-role').textContent, '役割: VIEWER');
+  assert.match(shadow.byId('me-note').textContent, /判定は従来どおり（shadow）/);
+  assert.equal(shadow.byId('me-note').hidden, false);
+
+  const evil = asgLoad({ me: { status: 200, data: { mode: 'enforce', role: EVIL, permissions: ['READ'] } } });
+  await flush();
+  assert.equal(evil.byId('me-role').hidden, true, 'a role that is not a code is not shown');
+});
+
+test('the assignee page and its nav item appear only with ASSIGNEE_MANAGE and a mode that is not off', async () => {
+  const admin = asgLoad({ me: adminMe(), assignees: [assigneeOf()] }, { hash: '#/assignees' });
+  await flush();
+  assert.equal(admin.byId('nav-assignees').hidden, false);
+  assert.equal(admin.byId('assignees-section').hidden, false);
+  assert.equal(admin.byId('page-assignees').hidden, false);
+  assert.equal(admin.byId('nav-assignees').getAttribute('aria-current'), 'page');
+  assert.match(admin.byId('assignees-list').textContent, /claude-code/);
+  assert.equal(admin.document.title, 'Kivra — 担当');
+
+  const shadow = asgLoad({ me: meOf('shadow', 'ADMIN', ALL_PERMISSIONS), assignees: [assigneeOf()] });
+  await flush();
+  assert.equal(shadow.byId('nav-assignees').hidden, false, 'shadow: the admin can manage');
+
+  for (const [label, me] of [
+    ['operator', meOf('enforce', 'OPERATOR', OPERATOR_PERMISSIONS)],
+    ['off with the permission', meOf('off', 'ADMIN', ALL_PERMISSIONS)],
+    ['no /me', null],
+  ]) {
+    const dom = asgLoad({ me, assignees: [assigneeOf()] }, { hash: '#/assignees' });
+    await flush();
+    assert.equal(dom.byId('nav-assignees').hidden, true, label + ': no nav item');
+    assert.equal(dom.byId('assignees-section').hidden, true, label + ': no section');
+    assert.equal(dom.calls.filter((c) => c.path === '/api/selfdev/assignees').length, 0, label + ': the list is not read');
+    assert.deepEqual(shownPages(dom), ['tasks'], label + ': a deep link goes back to #/');
+    assert.equal(dom.window.location.hash, '#/');
+  }
+});
+
+test('the list shows the name as text, the role, the state and the counts; a display name with markup makes no element', async () => {
+  const dom = asgLoad({
+    me: adminMe(),
+    assignees: [assigneeOf({ displayName: '<script>alert(1)</script>', memberCount: 2, activeTokenCount: 1 }), assigneeOf({ assigneeId: AS_ADMIN, role: 'ADMIN', state: 'DISABLED', displayName: 'root' })],
+  });
+  await flush();
+  const list = dom.byId('assignees-list');
+  list.walk((n) => assert.ok(!['SCRIPT', 'IMG'].includes(n.tagName), 'no element from a display name'));
+  assert.ok(list.textContent.includes('<script>alert(1)</script>'), 'the name is literal text');
+  assert.match(list.textContent, /ロール: AI/);
+  assert.match(list.textContent, /メンバー: 2 人/);
+  assert.match(list.textContent, /有効なトークン: 1 個/);
+  assert.match(list.textContent, /状態: 無効/);
+});
+
+test('a create validates the name and the role, sends once, and clears the form', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const dom = asgLoad({
+    me: adminMe(),
+    write: (p) => (p === '/api/selfdev/assignees' ? gate.then(() => ({ status: 201, data: assigneeOf() })) : null),
+  });
+  await flush();
+  const form = dom.byId('assignee-create-form');
+  dom.byId('assignee-name').value = '   ';
+  dom.byId('assignee-role').value = 'AI';
+  form.fire('submit');
+  assert.match(dom.byId('assignees-msg').textContent, /表示名は 1〜64 文字/);
+  dom.byId('assignee-name').value = 'x'.repeat(65);
+  form.fire('submit');
+  assert.match(dom.byId('assignees-msg').textContent, /表示名は 1〜64 文字/);
+  dom.byId('assignee-name').value = 'a\u0007b';
+  form.fire('submit');
+  dom.byId('assignee-name').value = 'bot';
+  dom.byId('assignee-role').value = '';
+  form.fire('submit');
+  assert.match(dom.byId('assignees-msg').textContent, /ロールを選んでください/);
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/selfdev/assignees').length, 0, 'nothing is sent while the input is invalid');
+
+  dom.byId('assignee-role').value = 'AI';
+  form.fire('submit');
+  form.fire('submit');
+  await flush();
+  assert.equal(dom.byId('assignee-create-submit').disabled, true, 'disabled while in flight');
+  assert.equal(postsTo(dom.calls, '/api/selfdev/assignees').length, 1, 'one request for a double submit');
+  assert.deepEqual(postsTo(dom.calls, '/api/selfdev/assignees')[0].body, { displayName: 'bot', role: 'AI' });
+  release();
+  await flush();
+  assert.equal(dom.byId('assignee-create-submit').disabled, false);
+  assert.equal(dom.byId('assignee-name').value, '');
+  assert.equal(dom.byId('assignees-msg').textContent, '担当を作りました。');
+});
+
+test('a role change asks first, sends the version, and a stale version says to reload', async () => {
+  let reply = { status: 409, data: { error: 'LEAK-server-text', code: 'STALE_VERSION' } };
+  const dom = asgLoad({
+    me: adminMe(),
+    assignees: [assigneeOf({ version: 7 })],
+    write: (p) => (p === '/api/selfdev/assignees/' + AS_AI + '/role' ? reply : null),
+  });
+  await flush();
+  asgOpen(dom);
+  await flush();
+  const box = dom.byId('assignees-list');
+  const sel = inputsIn(box).find((n) => n.tagName === 'SELECT');
+  sel.value = 'VIEWER';
+  buttonIn(box, 'ロールを変更…').fire('click');
+  assert.equal(dom.byId('assignee-confirm-dialog').open, true);
+  assert.equal(postsTo(dom.calls, '/api/selfdev/assignees/' + AS_AI + '/role').length, 0, 'nothing is sent before the confirmation');
+  await confirmDialog(dom);
+  const posts = postsTo(dom.calls, '/api/selfdev/assignees/' + AS_AI + '/role');
+  assert.deepEqual(posts[0].body, { role: 'VIEWER', version: 7 });
+  assert.equal(dom.byId('assignees-msg').textContent, '更新されています。再読み込みしてください。');
+  assert.doesNotMatch(dom.byId('assignees-msg').textContent, /LEAK/);
+  assert.equal(dom.byId('assignee-confirm-dialog').open, false);
+
+  // The same role: no request at all.
+  const before = dom.calls.length;
+  buttonIn(dom.byId('assignees-list'), 'ロールを変更…').fire('click');
+  assert.equal(dom.byId('assignee-confirm-dialog').open, false);
+  assert.equal(dom.calls.length, before);
+
+  reply = { status: 200, data: assigneeOf({ role: 'VIEWER', version: 8 }) };
+  inputsIn(dom.byId('assignees-list')).find((n) => n.tagName === 'SELECT').value = 'VIEWER';
+  buttonIn(dom.byId('assignees-list'), 'ロールを変更…').fire('click');
+  await confirmDialog(dom);
+  assert.equal(dom.byId('assignees-msg').textContent, 'ロールを変更しました。');
+});
+
+test('the confirmation dialog is sent once while in flight, and cancel sends nothing', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const dom = asgLoad({
+    me: adminMe(),
+    assignees: [assigneeOf()],
+    write: (p) => (p === '/api/selfdev/assignees/' + AS_AI + '/disable' ? gate.then(() => ({ status: 200, data: assigneeOf({ state: 'DISABLED', version: 5 }) })) : null),
+  });
+  await flush();
+  asgOpen(dom);
+  await flush();
+  buttonIn(dom.byId('assignees-list'), '担当を無効にする…').fire('click');
+  dom.byId('assignee-confirm-cancel').fire('click');
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/selfdev/assignees/' + AS_AI + '/disable').length, 0, 'cancel sends nothing');
+  assert.equal(dom.byId('assignee-confirm-dialog').open, false);
+
+  buttonIn(dom.byId('assignees-list'), '担当を無効にする…').fire('click');
+  assert.match(dom.byId('assignee-confirm-text').textContent, /トークンは、すべて失効します/);
+  dom.byId('assignee-confirm-submit').fire('click');
+  dom.byId('assignee-confirm-submit').fire('click');
+  await flush();
+  assert.equal(dom.byId('assignee-confirm-submit').disabled, true);
+  assert.equal(dom.byId('assignee-confirm-cancel').disabled, true);
+  release();
+  await flush();
+  const posts = postsTo(dom.calls, '/api/selfdev/assignees/' + AS_AI + '/disable');
+  assert.equal(posts.length, 1, 'one request');
+  assert.deepEqual(posts[0].body, { version: 4 });
+  assert.equal(dom.byId('assignees-msg').textContent, '担当を無効にしました（トークンはすべて失効しました）。');
+});
+
+test('enable sends the version; the refusal codes each have their own fixed text and the server text is never shown', async () => {
+  const codes = {
+    LAST_ADMIN: /最後の有効な管理者/,
+    SELF_CHANGE: /自分自身の担当/,
+    STALE_VERSION: /更新されています。再読み込みしてください。/,
+    ROLE_NOT_ALLOWED: /トークンを発行できません/,
+    TOO_MANY_ACTIVE: /上限（2 つ）/,
+    OWNER_KEY_ALREADY_BOUND: /すでに担当に紐付いています/,
+    BINDING_UNAVAILABLE: /OIDC の設定が必要/,
+    ROLES_DISABLED: /今は無効/,
+    RATE_LIMITED: /操作が多すぎます/,
+    FORBIDDEN: /権限では行えません/,
+    NO_CHANGE: /変更がありません/,
+    ALREADY_REVOKED: /すでに失効/,
+  };
+  for (const [code, re] of Object.entries(codes)) {
+    const dom = asgLoad({
+      me: adminMe(),
+      assignees: [assigneeOf({ state: 'DISABLED', version: 9 })],
+      write: (p) => (p === '/api/selfdev/assignees/' + AS_AI + '/enable' ? { status: 409, data: { error: 'LEAK-' + code, code } } : null),
+    });
+    await flush();
+    asgOpen(dom);
+    await flush();
+    buttonIn(dom.byId('assignees-list'), '担当を有効にする…').fire('click');
+    await confirmDialog(dom);
+    assert.deepEqual(postsTo(dom.calls, '/api/selfdev/assignees/' + AS_AI + '/enable')[0].body, { version: 9 });
+    const text = dom.byId('assignees-msg').textContent;
+    assert.match(text, re, code);
+    assert.doesNotMatch(text, /LEAK/, code);
+    assert.equal(dom.byId('assignees-msg').className, 'result error');
+  }
+  // A code the page does not know falls back to the status, with no server text.
+  const unknown = asgLoad({
+    me: adminMe(),
+    assignees: [assigneeOf({ state: 'DISABLED' })],
+    write: () => ({ status: 409, data: { error: 'LEAK-x', code: 'NEW_CODE' } }),
+  });
+  await flush();
+  asgOpen(unknown);
+  await flush();
+  buttonIn(unknown.byId('assignees-list'), '担当を有効にする…').fire('click');
+  await confirmDialog(unknown);
+  assert.equal(unknown.byId('assignees-msg').textContent, '更新されています。再読み込みしてください。');
+});
+
+test('binding a member sends the sub and never shows it again; the list shows 8 characters of the member reference; unbind sends DELETE', async () => {
+  let bound = false;
+  const dom = asgLoad({
+    me: adminMe(),
+    assignees: [assigneeOf({ assigneeId: AS_OPERATOR, role: 'OPERATOR', displayName: 'op' })],
+    members: () => (bound ? [{ memberRef: MEMBER_REF }] : []),
+    write: (p, init) => {
+      if (p === '/api/selfdev/assignees/' + AS_OPERATOR + '/members' && init.method === 'POST') {
+        bound = true;
+        return { status: 201, data: { memberRef: MEMBER_REF } };
+      }
+      if (p === '/api/selfdev/assignees/' + AS_OPERATOR + '/members/' + MEMBER_REF && init.method === 'DELETE') {
+        bound = false;
+        return { status: 204, data: undefined };
+      }
+      return null;
+    },
+  });
+  await flush();
+  asgOpen(dom);
+  await flush();
+  const subInput = inputsIn(dom.byId('assignees-list')).find((n) => n.tagName === 'INPUT');
+  subInput.value = 'bad sub with spaces';
+  buttonIn(dom.byId('assignees-list'), '紐付ける…').fire('click');
+  assert.match(dom.byId('assignees-msg').textContent, /Keycloak の sub を/);
+  assert.equal(dom.byId('assignee-confirm-dialog').open, false, 'an invalid sub opens no dialog');
+
+  subInput.value = SUB_VALUE;
+  buttonIn(dom.byId('assignees-list'), '紐付ける…').fire('click');
+  assert.ok(!dom.byId('assignee-confirm-text').textContent.includes(SUB_VALUE), 'the sub is not in the dialog');
+  await confirmDialog(dom);
+  const bind = postsTo(dom.calls, '/api/selfdev/assignees/' + AS_OPERATOR + '/members');
+  assert.deepEqual(bind[0].body, { sub: SUB_VALUE });
+  assert.equal(dom.byId('assignees-msg').textContent, 'メンバーを紐付けました。');
+  assert.equal(subInput.value, '', 'the field is cleared');
+  let shown = '';
+  for (const id of ['assignees-list', 'assignees-msg', 'assignees-status', 'assignee-confirm-text', 'assignee-confirm-title', 'me-role', 'me-note', 'mode-note']) shown += dom.byId(id).textContent + '\n';
+  assert.ok(!shown.includes(SUB_VALUE), 'the sub is nowhere on the page');
+  assert.ok(!shown.includes(MEMBER_REF), 'the whole member reference is not shown');
+  assert.ok(shown.includes(MEMBER_REF.slice(0, 8)), 'the first 8 characters are');
+  assert.ok(!attrsOf(dom.byId('assignees-list')).includes(MEMBER_REF), 'nor in an attribute');
+
+  buttonIn(dom.byId('assignees-list'), '解除…').fire('click');
+  await confirmDialog(dom);
+  const del = dom.calls.filter((c) => c.method === 'DELETE');
+  assert.equal(del.length, 1);
+  assert.equal(del[0].path, '/api/selfdev/assignees/' + AS_OPERATOR + '/members/' + MEMBER_REF);
+  assert.deepEqual(del[0].body, {}, 'a JSON body, because the server requires the JSON content type');
+  assert.equal(dom.byId('assignees-msg').textContent, 'メンバーの紐付けを解除しました。', 'a 204 is a success, not an expired session');
+  assert.ok(!dom.byId('assignees-list').textContent.includes(MEMBER_REF.slice(0, 8)), 'the member is gone from the list');
+});
+
+test('a token is issued for an AI and a VIEWER only, never for a human role or a disabled assignee', async () => {
+  for (const [role, state, expected] of [['AI', 'ACTIVE', true], ['VIEWER', 'ACTIVE', true], ['ADMIN', 'ACTIVE', false], ['OPERATOR', 'ACTIVE', false], ['APPROVER', 'ACTIVE', false], ['AI', 'DISABLED', false]]) {
+    const dom = asgLoad({ me: adminMe(), assignees: [assigneeOf({ role, state })] });
+    await flush();
+    asgOpen(dom);
+    await flush();
+    assert.equal(hasButton(dom.byId('assignees-list'), 'トークンを発行…'), expected, role + ' ' + state);
+  }
+});
+
+test('an issued token is shown once in its own dialog, copied on request, and gone when the dialog closes', async () => {
+  const writes = [];
+  const dom = asgLoad({
+    me: adminMe(),
+    assignees: [assigneeOf()],
+    tokens: () => [
+      { tokenRef: TOKEN_REF, status: 'ACTIVE', createdBy: 'CREATOR-REF-SECRET', createdAt: '2026-10-25T00:00:00Z', expiresAt: '2027-01-23T00:00:00Z' },
+      { tokenRef: 'ffffffffffffffff', status: 'REVOKED', createdBy: 'x', createdAt: '2026-10-01T00:00:00Z', expiresAt: '2027-01-01T00:00:00Z' },
+    ],
+    write: (p, init) => {
+      writes.push(p);
+      if (p === '/api/selfdev/assignees/' + AS_AI + '/tokens' && init.method === 'POST') {
+        return { status: 201, data: { token: TOKEN_PLAIN, tokenRef: TOKEN_REF, expiresAt: '2027-01-23T00:00:00Z' } };
+      }
+      return null;
+    },
+  });
+  const stored = [];
+  const store = { setItem: (...a) => stored.push(a), getItem: () => null, removeItem() {} };
+  dom.window.localStorage = store;
+  dom.window.sessionStorage = store;
+  const replaced = [];
+  dom.window.history = { replaceState: (...a) => replaced.push(a), pushState: (...a) => replaced.push(a) };
+  const logged = [];
+  const originals = {};
+  for (const k of ['log', 'info', 'warn', 'error', 'debug']) {
+    originals[k] = console[k];
+    console[k] = (...a) => logged.push(a.join(' '));
+  }
+  try {
+    await flush();
+    asgOpen(dom);
+    await flush();
+    const list = dom.byId('assignees-list');
+    assert.match(list.textContent, new RegExp('参照: ' + TOKEN_REF.slice(0, 8)));
+    assert.match(list.textContent, /失効済み/);
+    assert.ok(!list.textContent.includes('CREATOR-REF-SECRET'), 'the creator reference is not shown');
+    assert.ok(!list.textContent.includes(TOKEN_REF), 'only 8 characters of the token reference');
+    assert.equal(list.buttons().filter((b) => b.textContent === '失効…').length, 1, 'only the active token has a revoke button');
+
+    inputsIn(list).find((n) => n.tagName === 'INPUT' && n.type === 'number').value = '30';
+    buttonIn(list, 'トークンを発行…').fire('click');
+    assert.equal(dom.byId('token-dialog').open, false, 'asks first');
+    assert.match(dom.byId('assignee-confirm-text').textContent, /30 日/);
+    await confirmDialog(dom);
+    const issue = postsTo(dom.calls, '/api/selfdev/assignees/' + AS_AI + '/tokens');
+    assert.equal(issue.length, 1);
+    assert.deepEqual(issue[0].body, { ttlDays: 30 });
+
+    assert.equal(dom.byId('token-dialog').open, true);
+    assert.equal(dom.byId('token-value').value, TOKEN_PLAIN, 'the plaintext is in the dialog field');
+    assert.equal(dom.byId('assignee-confirm-dialog').open, false);
+    assert.equal(dom.byId('assignees-msg').textContent, 'トークンを発行しました（平文は専用のダイアログに 1 度だけ表示しています）。');
+
+    // The plaintext is in no other element, attribute or request.
+    for (const [id, el] of Object.entries(dom.ids)) {
+      if (id === 'token-value') continue;
+      assert.ok(!el.textContent.includes(TOKEN_PLAIN), 'not in #' + id);
+      assert.ok(!String(el.value).includes(TOKEN_PLAIN), 'not in the value of #' + id);
+      assert.ok(!attrsOf(el).includes(TOKEN_PLAIN), 'not in the attributes of #' + id);
+    }
+    assert.equal(dom.window.location.hash.includes(TOKEN_PLAIN), false);
+    assert.equal(stored.length, 0, 'nothing in localStorage or sessionStorage');
+    assert.equal(replaced.filter((a) => JSON.stringify(a).includes(TOKEN_PLAIN)).length, 0, 'nothing in the history');
+    assert.equal(logged.filter((l) => l.includes(TOKEN_PLAIN)).length, 0, 'nothing in the console');
+    assert.equal(dom.calls.filter((c) => JSON.stringify(c.body || {}).includes(TOKEN_PLAIN)).length, 0);
+    assert.equal(dom.byId('token-value').getAttribute('type'), null, 'the field is a plain readonly input (fixed in the page)');
+
+    // The list is read again after the issue, and still holds no plaintext (a reload of the data must not bring it back).
+    await flush();
+    assert.ok(!dom.byId('assignees-list').textContent.includes(TOKEN_PLAIN));
+
+    // Copy: with a clipboard, and with a clipboard that fails, and with none (no exception either way).
+    const copied = [];
+    dom.window.navigator = { clipboard: { writeText: async (t) => { copied.push(t); } } };
+    dom.byId('token-copy').fire('click');
+    await flush();
+    assert.deepEqual(copied, [TOKEN_PLAIN]);
+    assert.equal(dom.byId('token-copy-note').textContent, 'コピーしました。');
+    dom.window.navigator = { clipboard: { writeText: async () => { throw new Error('denied'); } } };
+    dom.byId('token-copy').fire('click');
+    await flush();
+    assert.match(dom.byId('token-copy-note').textContent, /コピーできませんでした。入力欄を選択して/);
+    dom.window.navigator = { clipboard: { writeText: () => { throw new Error('sync'); } } };
+    dom.byId('token-copy').fire('click');
+    assert.match(dom.byId('token-copy-note').textContent, /コピーできませんでした/);
+    dom.window.navigator = undefined;
+    dom.byId('token-copy').fire('click');
+    assert.match(dom.byId('token-copy-note').textContent, /自動でコピーできません/);
+
+    // Closing empties the dialog.
+    dom.byId('token-close').fire('click');
+    assert.equal(dom.byId('token-dialog').open, false);
+    assert.equal(dom.byId('token-value').value, '');
+    assert.equal(dom.byId('token-meta').textContent, '');
+    assert.equal(dom.byId('token-copy-note').textContent, '');
+    copied.length = 0;
+    dom.window.navigator = { clipboard: { writeText: async (t) => { copied.push(t); } } };
+    dom.byId('token-copy').fire('click');
+    await flush();
+    assert.deepEqual(copied, [], 'nothing is left to copy');
+    for (const [id, el] of Object.entries(dom.ids)) assert.ok(!el.textContent.includes(TOKEN_PLAIN), 'not in #' + id + ' after closing');
+  } finally {
+    for (const k of Object.keys(originals)) console[k] = originals[k];
+  }
+
+  // Esc (the close event) empties it as well.
+  const esc = asgLoad({
+    me: adminMe(),
+    assignees: [assigneeOf()],
+    write: (p) => (p.endsWith('/tokens') ? { status: 201, data: { token: TOKEN_PLAIN, tokenRef: TOKEN_REF, expiresAt: '2027-01-23T00:00:00Z' } } : null),
+  });
+  await flush();
+  asgOpen(esc);
+  await flush();
+  buttonIn(esc.byId('assignees-list'), 'トークンを発行…').fire('click');
+  await confirmDialog(esc);
+  assert.equal(esc.byId('token-value').value, TOKEN_PLAIN);
+  esc.byId('token-dialog').open = false;
+  esc.byId('token-dialog').fire('close');
+  assert.equal(esc.byId('token-value').value, '');
+});
+
+test('the token field of the page is read-only, off for autocomplete, and the dialog says it is shown once', () => {
+  const html = fs.readFileSync(path.join(path.dirname(APP_JS), 'index.html'), 'utf8');
+  const field = /<input id="token-value"[^>]*>/.exec(html);
+  assert.ok(field, 'token-value is in index.html');
+  assert.match(field[0], /\breadonly\b/);
+  assert.match(field[0], /autocomplete="off"/);
+  assert.ok(html.includes('このトークンは、この 1 回しか表示されません。安全な場所に保管してください。'));
+  const js = fs.readFileSync(APP_JS, 'utf8');
+  assert.ok(!/localStorage|sessionStorage/.test(js), 'the script never touches web storage');
+});
+
+test('a failed issue, a bad TTL and a revoke use fixed texts; a revoke sends an empty JSON object', async () => {
+  let reply = { status: 409, data: { error: 'LEAK', code: 'TOO_MANY_ACTIVE' } };
+  const dom = asgLoad({
+    me: adminMe(),
+    assignees: [assigneeOf()],
+    tokens: () => [{ tokenRef: TOKEN_REF, status: 'ACTIVE', createdBy: 'x', createdAt: '2026-10-25T00:00:00Z', expiresAt: '2027-01-23T00:00:00Z' }],
+    write: (p) => (p === '/api/selfdev/assignees/' + AS_AI + '/tokens' || p === '/api/selfdev/assignees/' + AS_AI + '/tokens/' + TOKEN_REF + '/revoke' ? reply : null),
+  });
+  await flush();
+  asgOpen(dom);
+  await flush();
+  const ttl = () => inputsIn(dom.byId('assignees-list')).find((n) => n.type === 'number');
+  assert.equal(ttl().value, '90', 'the default is 90 days');
+  for (const bad of ['0', '366', '', 'abc', '1.5']) {
+    ttl().value = bad;
+    buttonIn(dom.byId('assignees-list'), 'トークンを発行…').fire('click');
+    assert.match(dom.byId('assignees-msg').textContent, /1〜365 日/, bad);
+    assert.equal(dom.byId('assignee-confirm-dialog').open, false, bad);
+  }
+  ttl().value = '365';
+  buttonIn(dom.byId('assignees-list'), 'トークンを発行…').fire('click');
+  await confirmDialog(dom);
+  assert.match(dom.byId('assignees-msg').textContent, /有効なトークンが上限（2 つ）に達しています/);
+  assert.equal(dom.byId('token-dialog').open, false, 'no token dialog on a failure');
+  assert.equal(dom.byId('token-value').value, '');
+
+  reply = { status: 204, data: undefined };
+  buttonIn(dom.byId('assignees-list'), '失効…').fire('click');
+  assert.match(dom.byId('assignee-confirm-text').textContent, /元に戻せません/);
+  await confirmDialog(dom);
+  const revoke = postsTo(dom.calls, '/api/selfdev/assignees/' + AS_AI + '/tokens/' + TOKEN_REF + '/revoke');
+  assert.equal(revoke.length, 1);
+  assert.deepEqual(revoke[0].body, {});
+  assert.equal(dom.byId('assignees-msg').textContent, 'トークンを失効しました。');
+});
+
+// What each role sees. `actions(dom)` opens the goal and the order and lists every write control that is on the page.
+async function roleActions(me, { pending = null } = {}) {
+  const dom = asgLoad({ me, pending });
+  await flush();
+  buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+  buttonIn(dom.byId('orders-list'), '詳細').fire('click');
+  await flush();
+  const texts = [];
+  for (const id of ['plans-list', 'orders-list', 'approval-list', 'budget-unpriced-list', 'memory-list']) {
+    dom.byId(id).buttons().forEach((b) => texts.push(b.textContent));
+  }
+  return {
+    dom,
+    texts,
+    goalForm: dom.byId('goal-form').hidden === false,
+    orderCreate: dom.byId('order-create').hidden === false,
+    memoryDelete: dom.byId('memory-delete-block').hidden === false,
+    toggle: dom.byId('autopilot-toggle').hidden === false,
+    memorySection: dom.byId('memory-section').hidden === false,
+  };
+}
+
+const WRITE_BUTTONS = ['この Plan を承認', 'このタスクを承認', '見送る', '中止…', '一時停止', '停止を要求', '承認', '却下', '解除…', 'この記録を削除'];
+
+test('every write button is on the page when /me is absent, or the mode is shadow or off, whatever the role', async () => {
+  for (const [label, me] of [
+    ['no /me', null],
+    ['shadow viewer', meOf('shadow', 'VIEWER', ['READ'])],
+    ['off viewer', meOf('off', 'VIEWER', ['READ'])],
+    ['enforce admin', adminMe()],
+  ]) {
+    const r = await roleActions(me);
+    for (const b of WRITE_BUTTONS) assert.ok(r.texts.includes(b), label + ': ' + b);
+    assert.equal(r.goalForm, true, label);
+    assert.equal(r.orderCreate, true, label);
+    assert.equal(r.memoryDelete, true, label);
+    assert.equal(r.toggle, true, label);
+  }
+});
+
+test('with the roles enforced, a viewer sees no write button, and the memory list needs READ_TEXT', async () => {
+  const r = await roleActions(meOf('enforce', 'VIEWER', ['READ']));
+  for (const b of WRITE_BUTTONS) assert.ok(!r.texts.includes(b), 'hidden: ' + b);
+  assert.equal(r.goalForm, false);
+  assert.equal(r.orderCreate, false);
+  assert.equal(r.memoryDelete, false);
+  assert.equal(r.toggle, false);
+  assert.equal(r.memorySection, false, 'no READ_TEXT: no memory section');
+  assert.equal(r.dom.byId('nav-memory').hidden, true);
+  assert.match(r.dom.byId('orders-list').textContent, new RegExp(O1), 'reading still works');
+});
+
+test('with the roles enforced, each permission shows exactly its own buttons', async () => {
+  const cases = [
+    ['ORDER_MANAGE', ['一時停止'], 'orderCreate'],
+    ['STOP_REQUEST', ['停止を要求'], null],
+    ['STOP_DECIDE', ['承認', '却下'], null],
+    ['GOAL_WRITE', ['この Plan を承認', 'このタスクを承認', '見送る', 'この記録を削除'], 'goalForm'],
+    ['GOAL_STOP', ['中止…'], null],
+    ['BUDGET_OVERRIDE', ['解除…'], null],
+  ];
+  for (const [perm, own, flag] of cases) {
+    const r = await roleActions(meOf('enforce', 'OPERATOR', ['READ', 'READ_TEXT', perm]));
+    for (const b of WRITE_BUTTONS) {
+      assert.equal(r.texts.includes(b), own.includes(b), perm + ': ' + b);
+    }
+    if (flag) assert.equal(r[flag], true, perm + ': ' + flag);
+    for (const f of ['goalForm', 'orderCreate']) if (f !== flag) assert.equal(r[f], false, perm + ': ' + f + ' stays hidden');
+    assert.equal(r.memorySection, true, 'READ_TEXT shows the memory list');
+  }
+  // Cancelling a waiting stop request is the stop-request permission too.
+  const pending = stopRequestOf();
+  const withPerm = await roleActions(meOf('enforce', 'AI', ['READ', 'STOP_REQUEST']), { pending });
+  assert.ok(withPerm.texts.includes('要求を取り消す'));
+  const without = await roleActions(meOf('enforce', 'VIEWER', ['READ']), { pending });
+  assert.ok(!without.texts.includes('要求を取り消す'));
+});
+
+test('text from the server never makes an element in the assignee page (names, roles, states)', async () => {
+  const dom = asgLoad({
+    me: adminMe(),
+    assignees: [assigneeOf({ displayName: EVIL, role: EVIL, state: EVIL, memberCount: EVIL, activeTokenCount: -1 })],
+  });
+  await flush();
+  dom.byId('assignees-list').walk((n) => assert.ok(!['IMG', 'SCRIPT'].includes(n.tagName), n.tagName));
+  assert.ok(dom.byId('assignees-list').textContent.includes(EVIL), 'the display name is literal text');
+  assert.match(dom.byId('assignees-list').textContent, /メンバー: 不明 人/);
+});
+
+test('the failed list says so in fixed words, and the header refresh reads the assignees only on that page', async () => {
+  const dom = asgLoad({ me: adminMe(), assignees: [assigneeOf()], listResponse: { status: 500, data: { error: 'LEAK' } } });
+  await flush();
+  assert.equal(dom.byId('assignees-section').hidden, false);
+  assert.equal(dom.byId('assignees-status').textContent, '一覧を取得できませんでした。');
+  assert.ok(!dom.byId('assignees-status').textContent.includes('LEAK'));
+
+  const where = async (hash) => {
+    const d = asgLoad({ me: adminMe(), assignees: [assigneeOf()] }, { hash });
+    await flush();
+    const from = d.calls.length;
+    d.byId('refresh-all-btn').fire('click');
+    await flush();
+    return d.calls.slice(from).filter((c) => c.path === '/api/selfdev/assignees').length;
+  };
+  assert.equal(await where('#/assignees'), 1);
+  assert.equal(await where('#/'), 0);
+});

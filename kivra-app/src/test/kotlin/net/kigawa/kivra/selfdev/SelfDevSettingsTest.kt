@@ -52,6 +52,21 @@ class SelfDevSettingsTest {
     }
 
     @Test
+    fun `the pull request read budget per tick defaults to 40, is read only when the update is on, and is bounded to 25 through 200`() {
+        val on = "KIVRA_SELFDEV_PR_REBASE_ENABLED" to "true"
+        val budget = "KIVRA_SELFDEV_PR_REBASE_MAX_READS_PER_TICK"
+        assertEquals(40, SelfDevSettings.fromEnv(enabledEnv(on)).prRebaseMaxReadsPerTick)
+        assertEquals(25, SelfDevSettings.fromEnv(enabledEnv(on, budget to "25")).prRebaseMaxReadsPerTick)
+        assertEquals(200, SelfDevSettings.fromEnv(enabledEnv(on, budget to "200")).prRebaseMaxReadsPerTick)
+        assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv(on, budget to "24")) }
+        assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv(on, budget to "201")) }
+        assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv(on, budget to "0")) }
+        assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv(on, budget to "many")) }
+        // With the update off the value is not read at all, so an invalid value does not stop the start.
+        assertEquals(40, SelfDevSettings.fromEnv(enabledEnv(budget to "many")).prRebaseMaxReadsPerTick)
+    }
+
+    @Test
     fun `unset or false keeps the feature off and reads no self-development variable`() {
         assertFalse(SelfDevSettings.fromEnv(TrapEnv(emptyMap())).enabled)
         assertFalse(SelfDevSettings.fromEnv(TrapEnv(mapOf("KIVRA_SELFDEV_ENABLED" to "false"))).enabled)

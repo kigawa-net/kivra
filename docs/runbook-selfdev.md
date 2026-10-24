@@ -313,6 +313,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - `KIVRA_SELFDEV_PR_REBASE_ENABLED=true`(既定は `false`。`true` と `false` と空以外は起動失敗)。自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)のときだけ読まれる。
 - 環境変数は起動時に一度だけ読まれるため、変更には再起動が要る。
 - 有効化の前に、「App の権限」(下記)を確認する。
+- `KIVRA_SELFDEV_PR_REBASE_MAX_READS_PER_TICK`(既定 `40`。`25` 以上 `200` 以下の整数。範囲外や整数でない値は起動失敗。有効のときだけ読まれる)。1 回の worker tick で、再束縛の経路が行う GitHub の読み取りの総数の上限で、tick の中の全 Run で共有する。上限に達した Run は、その tick では何も書かず、次の tick に回す(人に残る理由は変わらない)。予算は tick ごとに戻る。更新の要求は、そのあとの確認(観測と検証)の読み取りを残りの予算で賄えるときだけ送る。ログには `PR_REBASE_READ_BUDGET` と件数だけを出す。
 
 **止め方**
 - `KIVRA_SELFDEV_PR_REBASE_ENABLED` を `false` にして再起動する。無効のときは、この機能の経路は一切動かない(GitHub への追加の呼び出しも、監査行も無い)。

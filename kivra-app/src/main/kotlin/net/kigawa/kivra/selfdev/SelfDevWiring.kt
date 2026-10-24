@@ -162,6 +162,7 @@ internal fun buildSelfDev(
             port = github,
             github = github,
             runs = DbDevelopmentRunStore(runs),
+            settings = PrRebaseSettings(maxReadsPerTick = settings.prRebaseMaxReadsPerTick),
         )
     } else {
         null
@@ -183,6 +184,7 @@ internal fun buildSelfDev(
         activeRunIds = { runs.activeSelfDevRunIds() },
         advance = { runId -> runner.advance(runId) },
         interval = settings.advanceInterval,
+        beginTick = { prRebaser?.beginTick() },
     )
     // Built only when the autopilot is enabled. Nothing about planning exists otherwise (ADR 0011, PR B).
     val planWorker = autopilot.config?.takeIf { autopilot.enabled }?.let { autopilotConfig ->

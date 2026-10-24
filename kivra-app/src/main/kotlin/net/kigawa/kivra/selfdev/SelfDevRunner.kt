@@ -425,7 +425,8 @@ class SelfDevRunner(
         }
 
         if (pullRequest.merged) {
-            reconcileMergedHead(lease, run, pullRequest)
+            // Deferred by the read budget of the tick: the run waits, and is not completed on the old head this tick.
+            if (reconcileMergedHead(lease, run, pullRequest)) return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
             return completeMergedPullRequest(lease, run)
         }
         val abandoned = pullRequest.state == PullRequestState.CLOSED ||
@@ -437,7 +438,7 @@ class SelfDevRunner(
         val rebaser = prRebaser ?: return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
         val binding = runs.loadBinding(run.runId) ?: return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
         return when (val o = rebaser.look(lease, run, binding, pullRequest, { renewOrThrow(lease) }, { currentVersion(lease) })) {
-            PrBranchRebaser.Outcome.NoAction -> Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
+            PrBranchRebaser.Outcome.NoAction, PrBranchRebaser.Outcome.Deferred -> Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
             is PrBranchRebaser.Outcome.Held -> Waiting(WaitReason.AWAITING_HUMAN_REVIEW, o.code)
             PrBranchRebaser.Outcome.Rebound -> Waiting(WaitReason.AWAITING_HUMAN_REVIEW, REBASE_REBOUND)
         }
@@ -446,13 +447,14 @@ class SelfDevRunner(
     /**
      * A merged pull request whose head is not the recorded one (issue #276): the recorded head is moved only when the rebaser verifies the
      * new head. Nothing is written otherwise, and [completeMergedPullRequest] then refuses the head mismatch as before. Only with the
-     * feature on; without the rebaser this does nothing.
+     * feature on; without the rebaser this does nothing. Returns true when the rebaser was deferred by the read budget of the tick.
      */
-    private suspend fun reconcileMergedHead(lease: Lease, run: DevelopmentRun, pullRequest: PullRequest) {
-        val rebaser = prRebaser ?: return
-        val binding = runs.loadBinding(run.runId) ?: return
-        if (binding.headSha == pullRequest.headSha) return
-        rebaser.reconcileMergedHead(lease, run, binding, pullRequest, { renewOrThrow(lease) }, { currentVersion(lease) })
+    private suspend fun reconcileMergedHead(lease: Lease, run: DevelopmentRun, pullRequest: PullRequest): Boolean {
+        val rebaser = prRebaser ?: return false
+        val binding = runs.loadBinding(run.runId) ?: return false
+        if (binding.headSha == pullRequest.headSha) return false
+        val outcome = rebaser.reconcileMergedHead(lease, run, binding, pullRequest, { renewOrThrow(lease) }, { currentVersion(lease) })
+        return outcome == PrBranchRebaser.Outcome.Deferred
     }
 
     /**

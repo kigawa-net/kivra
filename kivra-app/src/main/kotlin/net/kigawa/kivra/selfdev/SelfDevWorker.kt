@@ -27,6 +27,8 @@ class SelfDevWorker(
     private val advance: suspend (RunId) -> AdvanceResult,
     private val interval: Duration,
     private val clock: Clock = Clock.systemUTC(),
+    /** Called once at the start of each tick, before any [advance] of that tick (the pull request read budget resets here, issue #351). */
+    private val beginTick: () -> Unit = {},
 ) {
     init {
         require(!interval.isNegative && !interval.isZero) { "interval must be positive" }
@@ -39,6 +41,7 @@ class SelfDevWorker(
 
     /** One pass over the active runs. Returns the number of runs that were given a call. */
     suspend fun tick(): Int {
+        beginTick()
         val runIds = try {
             activeRunIds()
         } catch (e: CancellationException) {

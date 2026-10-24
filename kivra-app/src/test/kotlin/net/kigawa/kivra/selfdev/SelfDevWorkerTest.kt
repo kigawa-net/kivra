@@ -33,6 +33,20 @@ class SelfDevWorkerTest {
     private val waiting = Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
 
     @Test
+    fun `each tick calls beginTick once, before the advance calls of that tick`() = runBlocking {
+        val seen = mutableListOf<String>()
+        val worker = SelfDevWorker(
+            { listOf(a, b) },
+            { seen += "advance"; waiting },
+            Duration.ofSeconds(30),
+            beginTick = { seen += "begin" },
+        )
+        worker.tick()
+        worker.tick()
+        assertEquals(listOf("begin", "advance", "advance", "begin", "advance", "advance"), seen)
+    }
+
+    @Test
     fun `one tick gives each active run exactly one advance call - in order`() = runBlocking {
         val seen = mutableListOf<RunId>()
         val worker = SelfDevWorker({ listOf(a, b) }, { seen += it; waiting }, Duration.ofSeconds(30))

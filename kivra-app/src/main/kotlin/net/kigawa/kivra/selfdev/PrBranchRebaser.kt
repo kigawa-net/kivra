@@ -28,7 +28,39 @@ data class PrRebaseSettings(
     /** How often, and how many times, the pull request is read after a successful update request, to see the new head. */
     val observePolls: Int = 5,
     val observeInterval: Duration = Duration.ofSeconds(2),
-)
+    /**
+     * The most GitHub reads one worker tick makes for the pull request branch update, across the runs of that tick (issue #351, item 3).
+     * A look that would pass this limit is deferred to the next tick, and writes nothing.
+     */
+    val maxReadsPerTick: Int = DEFAULT_MAX_READS_PER_TICK,
+) {
+    companion object {
+        const val DEFAULT_MAX_READS_PER_TICK = 40
+
+        /** One update needs up to 22 reads: 7 before the request and 15 after it (the observation polls and one verification). */
+        const val MIN_MAX_READS_PER_TICK = 25
+        const val MAX_MAX_READS_PER_TICK = 200
+    }
+}
+
+/** The GitHub reads of one worker tick (see [PrBranchRebaser.beginTick]). A read past [limit] throws [ReadBudgetExhausted]. */
+private class ReadBudget(val limit: Int) {
+    var used = 0
+        private set
+
+    /** The looks of this tick that were deferred. */
+    var deferred = 0
+
+    val remaining: Int get() = limit - used
+
+    fun charge() {
+        if (used >= limit) throw ReadBudgetExhausted()
+        used++
+    }
+}
+
+/** Thrown by a read past the tick's budget. It never leaves [PrBranchRebaser]: it ends the look as deferred. No stack trace. */
+private class ReadBudgetExhausted : RuntimeException(null, null, false, false)
 
 /**
  * Keeps a waiting self-development pull request on top of `main` (issue #276). It is called only from the pull request step, while the
@@ -72,11 +104,30 @@ class PrBranchRebaser(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, String>, Boolean>?): Boolean = size > OVERLAP_CACHE_SIZE
     }
 
-    /** What one look did. [Held] carries a fixed reason code. [Rebound] means the recorded head was moved to a verified head. */
+    /**
+     * What one look did. [Held] carries a fixed reason code. [Rebound] means the recorded head was moved to a verified head. [Deferred]
+     * means the read budget of the tick ran out: nothing was written, and the look is repeated in the next tick.
+     */
     sealed interface Outcome {
         data object NoAction : Outcome
         data class Held(val code: String) : Outcome
         data object Rebound : Outcome
+        data object Deferred : Outcome
+    }
+
+    /** The GitHub reads of the current worker tick, shared by the runs of that tick. */
+    private var budget = ReadBudget(settings.maxReadsPerTick)
+
+    /**
+     * Starts the read budget of a new worker tick. The worker calls it once before it advances the runs of a tick, so the looks of that tick
+     * share [PrRebaseSettings.maxReadsPerTick]. When the previous tick deferred any look, one line with the fixed code and the count is logged.
+     */
+    fun beginTick() {
+        val ended = budget
+        if (ended.deferred > 0) {
+            logger.info("pull request branch read budget reached: code={} limit={} deferredRuns={}", READ_BUDGET, ended.limit, ended.deferred)
+        }
+        budget = ReadBudget(settings.maxReadsPerTick)
     }
 
     /**
@@ -85,6 +136,15 @@ class PrBranchRebaser(
      * runner maps them to a skipped call.
      */
     suspend fun look(
+        lease: Lease,
+        run: DevelopmentRun,
+        binding: PullRequestBinding,
+        pullRequest: PullRequest,
+        renew: () -> Unit,
+        version: () -> Long,
+    ): Outcome = withinBudget { lookOnce(lease, run, binding, pullRequest, renew, version) }
+
+    private suspend fun lookOnce(
         lease: Lease,
         run: DevelopmentRun,
         binding: PullRequestBinding,
@@ -101,6 +161,20 @@ class PrBranchRebaser(
         return rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version)
     }
 
+    /** Runs [body]. A read past the tick's budget ends it as [Outcome.Deferred]; nothing written before that point is undone. */
+    private suspend fun withinBudget(body: suspend () -> Outcome): Outcome = try {
+        body()
+    } catch (e: ReadBudgetExhausted) {
+        budget.deferred++
+        Outcome.Deferred
+    }
+
+    /** One GitHub read, charged to the budget of the tick. Writes are not charged. */
+    private suspend fun <T> read(call: suspend () -> GitHubResult<T>): GitHubResult<T> {
+        budget.charge()
+        return call()
+    }
+
     private suspend fun updateIfBehind(
         lease: Lease,
         run: DevelopmentRun,
@@ -109,7 +183,7 @@ class PrBranchRebaser(
         renew: () -> Unit,
         version: () -> Long,
     ): Outcome {
-        val view = when (val r = port.getPrRebaseView(repo, pullRequest.number)) {
+        val view = when (val r = read { port.getPrRebaseView(repo, pullRequest.number) }) {
             is GitHubResult.Success -> r.value
             else -> return Outcome.NoAction
         }
@@ -118,7 +192,8 @@ class PrBranchRebaser(
         // not touched. A distance that cannot be read is not a reason to update.
         if (view.pullRequest.headSha != binding.headSha) return Outcome.NoAction
         if (view.mergeable != true || view.mergeableState == MERGEABLE_DIRTY) return Outcome.NoAction
-        val behindBy = (port.getBehindBy(repo, baseBranch, binding.headSha) as? GitHubResult.Success)?.value ?: return Outcome.NoAction
+        val behindBy = (read { port.getBehindBy(repo, baseBranch, binding.headSha) } as? GitHubResult.Success)?.value
+            ?: return Outcome.NoAction
         if (behindBy <= 0) return Outcome.NoAction
 
         val now = clock.instant()
@@ -131,6 +206,10 @@ class PrBranchRebaser(
         // updated. A check that cannot be read is not a reason to update.
         val overlap = overlapsMain(binding.headSha) ?: return Outcome.NoAction
         if (overlap) return held(run, OVERLAPPING_PATHS)
+
+        // The reads after the request (the observation polls and one verification) must fit in this tick's budget before the request is sent,
+        // so that a request is never left without its verification. Otherwise the look is deferred, and nothing is written.
+        if (budget.remaining < settings.observePolls + VERIFY_READS) throw ReadBudgetExhausted()
 
         // The attempt is written before the request, so a crash after the request still counts against the limit.
         renew()
@@ -155,13 +234,13 @@ class PrBranchRebaser(
      * for that pair, and the next look reads only the base head.
      */
     private suspend fun overlapsMain(headSha: String): Boolean? {
-        val mainHead = when (val r = github.getBranch(repo, baseBranch)) {
+        val mainHead = when (val r = read { github.getBranch(repo, baseBranch) }) {
             is GitHubResult.Success -> r.value?.headSha ?: return null
             else -> return null
         }
         val key = headSha to mainHead
         synchronized(overlapCache) { overlapCache[key] }?.let { return it }
-        val mergeBase = (port.mergeBaseOf(repo, headSha, mainHead) as? GitHubResult.Success)?.value ?: return null
+        val mergeBase = (read { port.mergeBaseOf(repo, headSha, mainHead) } as? GitHubResult.Success)?.value ?: return null
         val baseTree = treeOf(mergeBase) ?: return null
         val prTree = treeOf(headSha) ?: return null
         val mainTree = treeOf(mainHead) ?: return null
@@ -176,7 +255,7 @@ class PrBranchRebaser(
     private suspend fun observeNewHead(number: Int, oldHead: String): String? {
         repeat(settings.observePolls) {
             pause(settings.observeInterval)
-            val head = (github.getPullRequest(repo, number) as? GitHubResult.Success)?.value?.headSha
+            val head = (read { github.getPullRequest(repo, number) } as? GitHubResult.Success)?.value?.headSha
             if (head != null && head != oldHead) return head
         }
         return null
@@ -188,20 +267,20 @@ class PrBranchRebaser(
      */
     private suspend fun verify(oldHead: String, newHead: String): String? {
         if (newHead == oldHead) return PARENTS_MISMATCH
-        val main = when (val r = github.getBranch(repo, baseBranch)) {
+        val main = when (val r = read { github.getBranch(repo, baseBranch) }) {
             is GitHubResult.Success -> r.value?.headSha ?: return VERIFY_FAILED
             else -> return VERIFY_FAILED
         }
-        val parents = (port.getCommitParents(repo, newHead) as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
+        val parents = (read { port.getCommitParents(repo, newHead) } as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
         // (a) A merge of exactly two different commits, one of them the recorded head. The other one is the base as it was when the
         // update was made: it is the current base head or one of its ancestors (main may have moved again since then).
         if (parents.size != 2 || parents.toSet().size != 2 || oldHead !in parents) return PARENTS_MISMATCH
         val other = parents.single { it != oldHead }
-        val ahead = (port.getAheadBy(repo, main, other) as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
+        val ahead = (read { port.getAheadBy(repo, main, other) } as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
         if (ahead < 0) return VERIFY_FAILED
         if (ahead > 0) return PARENTS_MISMATCH
 
-        val base = (port.mergeBaseOf(repo, oldHead, other) as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
+        val base = (read { port.mergeBaseOf(repo, oldHead, other) } as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
         val baseTree = treeOf(base) ?: return VERIFY_FAILED
         val oldTree = treeOf(oldHead) ?: return VERIFY_FAILED
         val otherTree = treeOf(other) ?: return VERIFY_FAILED
@@ -257,7 +336,7 @@ class PrBranchRebaser(
 
     /** The compare answer of a commit pair, or null when it cannot be read. */
     private suspend fun compareFilesOf(base: String, head: String): List<ComparedFile>? =
-        (port.getCompareFiles(repo, base, head) as? GitHubResult.Success)?.value
+        (read { port.getCompareFiles(repo, base, head) } as? GitHubResult.Success)?.value
 
     /** The `+` and `-` lines of a patch, in order, and the `\ No newline` markers. Hunk headers and context lines are not part of it. */
     private fun changedLinesOf(patch: String): List<String> =
@@ -275,17 +354,17 @@ class PrBranchRebaser(
         pullRequest: PullRequest,
         renew: () -> Unit,
         version: () -> Long,
-    ): Outcome {
-        if (!pullRequest.merged) return Outcome.NoAction
-        if (pullRequest.authorId != botUserId) return Outcome.NoAction
-        if (pullRequest.headSha == binding.headSha) return Outcome.NoAction
+    ): Outcome = withinBudget {
+        if (!pullRequest.merged) return@withinBudget Outcome.NoAction
+        if (pullRequest.authorId != botUserId) return@withinBudget Outcome.NoAction
+        if (pullRequest.headSha == binding.headSha) return@withinBudget Outcome.NoAction
         val verdict = verify(binding.headSha, pullRequest.headSha)
-        if (verdict != null) return held(run, verdict)
-        return rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version)
+        if (verdict != null) return@withinBudget held(run, verdict)
+        rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version)
     }
 
     private suspend fun treeOf(commitSha: String): RepoTree? =
-        (port.listTreeAt(repo, commitSha) as? GitHubResult.Success)?.value
+        (read { port.listTreeAt(repo, commitSha) } as? GitHubResult.Success)?.value
 
     /** One file of a change set: its path, mode and blob hash after the change. An absent side is empty. */
     private data class ChangedFile(val path: String, val mode: String, val blobSha: String)
@@ -350,6 +429,12 @@ class PrBranchRebaser(
 
         /** Pairs kept by the overlap cache. A pull request's head and the base head change about once a minute at most. */
         const val OVERLAP_CACHE_SIZE = 16
+
+        /** The most reads one verification makes: base head, parents, distance, merge base, four trees and two compares. */
+        const val VERIFY_READS = 10
+
+        /** The log code of a tick whose looks were deferred by the read budget. */
+        const val READ_BUDGET = "PR_REBASE_READ_BUDGET"
 
         /** The compare API lists at most this many files; a list this long may be cut, so it is refused. */
         const val COMPARE_FILE_LIMIT = 300

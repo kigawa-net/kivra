@@ -37,6 +37,17 @@ class SelfDevMemoryRecorder private constructor(private val store: ((MemoryCandi
         MemoryCandidate(kind = "PLAN_FACT", channel = MemoryChannel.SYSTEM_AUTO, goalId = goalId, planId = planId, code = CODE_PLAN_PROPOSED, countValue = taskCount)
     }
 
+    /**
+     * One task of a stored plan (ADR 0016 section 4.3, P3). Its identity is what the suppression shadow compares with the recent plans and
+     * with the skipped tasks. Written after [planProposed]. No text: the title and the body are not passed.
+     */
+    fun taskProposed(goalId: String, task: SelfDevPlanTask) = write {
+        MemoryCandidate(
+            kind = "TASK_FACT", channel = MemoryChannel.SYSTEM_AUTO, goalId = goalId, planId = task.planId, taskOrdinal = task.ordinal,
+            code = CODE_PLAN_PROPOSED, identitySha256 = identityOf(task.targetPaths),
+        )
+    }
+
     /** The Planner blocked the goal with a planning-stage [reason] (no plan was stored). */
     fun planBlocked(goalId: String, reason: AutopilotReason) = write {
         MemoryCandidate(kind = "PLAN_FACT", channel = MemoryChannel.SYSTEM_AUTO, goalId = goalId, code = reason.name)

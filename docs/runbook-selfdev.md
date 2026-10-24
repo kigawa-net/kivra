@@ -1402,6 +1402,32 @@ dev での有効化の手順は §7.5。
 - 保持: 墓標は削除の後 30 日で物理的に消える。監査は 365 日。削除の監査の件数は、墓標が消えた後も残るため、
   墓標の件数と一致しなくなる(これは正常)。
 
+### 7.2f 自己開発の記憶の抑止の影(ADR 0016 P3、shadow)
+
+- 状態: P3 の shadow。既定は無効。**抑止はしない**。計画は変わらず、拒否も再試行もしない。数えて監査に残すだけである。
+  抑止を実際に効かせる設定は、まだ無い(2 週間の shadow の確認の後の別の変更)。
+- 有効化の前提: `KIVRA_SELFDEV_MEMORY_ENABLED=true`(7.2d)と、`KIVRA_SELFDEV_MEMORY_SUPPRESS_SHADOW_ENABLED=true` の両方。
+  前者が `false` のときは後者を読まない(後者に不正な値があっても起動は失敗しない)。後者は `true` と `false` 以外で起動に失敗する
+  (変数名だけを出す)。
+- 数える規則(固定の 3 つ。計画が確定した(保存された)ときだけ数える。確定しなかった計画は数えない):
+  - `DUPLICATE_RECENT_PLAN`: 新しい計画のタスクの identity(パスの集合の SHA-256)が、直近の計画のタスクと一致する。
+    直近の計画は、Goal をまたいで新しい方から 3 件、かつ 14 日以内。
+  - `SKIPPED_BEFORE`: 同じ identity のタスクを、運用者が 90 日以内に見送った(`OPERATOR_SKIPPED`)。
+  - `REPEATED_FAILURE`: 同じ identity の直近の 2 件の結果(計画の提案を除く)が、どちらも `AUTO_SCOPE_EXCEEDED`、かつ 14 日以内。
+  - 1 つのタスクは、上の順で最初に一致した規則で 1 回だけ数える。
+- 監査: `selfdev_memory_events` に `kind = SHADOW_SUPPRESS`、`code` が規則の名前、`count_value` が件数の行を書く(規則ごと、計画ごと。
+  件数が 0 の規則は書かない)。文章、題名、方針、理由、パスは、監査にもログにも出ない。
+- 件数の見方(SQL の例。読むだけ):
+  - 確定した計画の数: `SELECT COUNT(*) FROM selfdev_memory_records WHERE kind = 'PLAN_FACT' AND code = 'PLAN_PROPOSED' AND status = 'ACTIVE';`
+  - 規則ごとの件数: `SELECT code, COUNT(*), SUM(count_value) FROM selfdev_memory_events WHERE kind = 'SHADOW_SUPPRESS' GROUP BY code;`
+    (`COUNT(*)` は計画の数、`SUM` はタスクの数)。
+- 移行: V32 は、イベントの種類の CHECK に `SHADOW_SUPPRESS` を足すだけ(expand)。既存の行は変わらない。
+- shadow が off の間は、`TASK_FACT`(code `PLAN_PROPOSED`)も書かない。P1 の書き込みは、この PR の前と同じになる。
+- 止め方: `KIVRA_SELFDEV_MEMORY_SUPPRESS_SHADOW_ENABLED=false` にして再起動する(既定と同じ。数えるのをやめるだけで、計画には影響しない)。
+  記録の保存を止める場合は 7.2d の `KIVRA_SELFDEV_MEMORY_ENABLED=false`。
+- 確認すること(P3 の次の段階へ進む前。ADR 0016 11 節): shadow の 2 週間で、「抑止したはずの計画」を運用者が 20 件サンプルで見て、
+  誤った抑止が 0 件であること、抑止の件数が計画の 10% 以下であること。
+
 ### 7.4 運用手順(PR D: 画面と HTTP)
 
 画面は `/ui` の「開発目標(Goal)」の欄。オートパイロットが無効のとき、この欄と「Goal の一覧と承認」の欄は出ない。

@@ -11,6 +11,8 @@ import net.kigawa.kivra.selfdev.memory.MemoryTier
 import net.kigawa.kivra.selfdev.memory.MemoryVerdict
 import net.kigawa.kivra.selfdev.memory.NormalizedMemory
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryValidator
+import net.kigawa.kivra.selfdev.memory.ShadowFacts
+import net.kigawa.kivra.selfdev.memory.SuppressShadowRules
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.transactions.transaction
 
@@ -187,6 +189,65 @@ class SelfDevMemoryRepository(
                     at = rs.getTimestamp(8).toLocalDateTime(),
                 )
             }
+        }
+    }
+
+    /**
+     * The facts the suppression shadow reads for one new plan (ADR 0016 section 11, P3). Read-only. Only the identity, the fixed code and the
+     * time are selected: the text columns (`body`, the title, the summary, the task body) are never read here, which
+     * SuppressShadowArchitectureTest checks. [excludePlanId] is the new plan, which is not one of its own "recent plans".
+     */
+    fun shadowFacts(identities: Set<String>, excludePlanId: String): ShadowFacts {
+        if (!enabled || identities.isEmpty()) return ShadowFacts.EMPTY
+        return transaction(database) {
+            val now = utcNow(clock)
+            // SHADOW-READ-BEGIN
+            val recentPlans = execQuery(
+                "SELECT plan_id, MAX(created_at) AS latest FROM selfdev_memory_records WHERE status = 'ACTIVE' AND kind = 'TASK_FACT' " +
+                    "AND code = ? AND plan_id <> ? AND created_at >= ? GROUP BY plan_id ORDER BY latest DESC, plan_id DESC LIMIT ?",
+                SuppressShadowRules.PLAN_PROPOSED_CODE, excludePlanId, now.minusDays(SuppressShadowRules.RECENT_PLAN_WINDOW_DAYS),
+                SuppressShadowRules.RECENT_PLAN_COUNT,
+            ) { it.getString(1) }
+            val recentIdentities = if (recentPlans.isEmpty()) {
+                emptySet()
+            } else {
+                identitiesWhere(
+                    "SELECT DISTINCT identity_sha256 FROM selfdev_memory_records WHERE status = 'ACTIVE' AND kind = 'TASK_FACT' " +
+                        "AND code = ? AND plan_id IN (${marks(recentPlans)})",
+                    listOf<Any?>(SuppressShadowRules.PLAN_PROPOSED_CODE) + recentPlans,
+                    identities,
+                )
+            }
+            val skippedIdentities = identitiesWhere(
+                "SELECT DISTINCT identity_sha256 FROM selfdev_memory_records WHERE status = 'ACTIVE' AND kind = 'TASK_FACT' " +
+                    "AND code = ? AND created_at >= ?",
+                listOf<Any?>(SuppressShadowRules.OPERATOR_SKIPPED_CODE, now.minusDays(SuppressShadowRules.SKIP_WINDOW_DAYS)),
+                identities,
+            )
+            // The outcome facts of each identity, newest first. PLAN_PROPOSED is not an outcome, so it does not break a run.
+            val outcomes = execQuery(
+                "SELECT identity_sha256, code FROM selfdev_memory_records WHERE status = 'ACTIVE' AND kind = 'TASK_FACT' " +
+                    "AND code <> ? AND created_at >= ? AND identity_sha256 IN (${marks(identities)}) ORDER BY created_at DESC, record_id DESC",
+                *(listOf<Any?>(SuppressShadowRules.PLAN_PROPOSED_CODE, now.minusDays(SuppressShadowRules.FAILURE_WINDOW_DAYS)) + identities)
+                    .toTypedArray(),
+            ) { it.getString(1) to it.getString(2) }
+            val repeatedFailureIdentities = outcomes.groupBy({ it.first }, { it.second }).filter { (_, codes) ->
+                codes.size >= SuppressShadowRules.FAILURE_RUN &&
+                    codes.take(SuppressShadowRules.FAILURE_RUN).all { it in SuppressShadowRules.FAILURE_CODES }
+            }.keys
+            // SHADOW-READ-END
+            ShadowFacts(recentIdentities, skippedIdentities, repeatedFailureIdentities)
+        }
+    }
+
+    /**
+     * Counts a suppression that the shadow would have made (ADR 0016 section 11, P3). One audit row per rule with a count above zero. The
+     * code is the rule's name and the count is the number of tasks. Nothing else is written, and no record is created.
+     */
+    fun recordSuppressShadow(code: String, count: Int) {
+        if (!enabled || count <= 0) return
+        transaction(database) {
+            insertEvent(EVENT_SHADOW_SUPPRESS, null, code, null, null, count, null, utcNow(clock))
         }
     }
 
@@ -445,7 +506,12 @@ class SelfDevMemoryRepository(
         return "$SCOPE_CONDITION:${fields.joinToString("+")}"
     }
 
-    private fun marks(items: List<Any?>): String = items.joinToString(",") { "?" }
+    private fun marks(items: Collection<Any?>): String = items.joinToString(",") { "?" }
+
+    /** The identities among [identities] that the query returns. [sql] has no IN clause yet; [params] are its parameters. */
+    private fun org.jetbrains.exposed.sql.Transaction.identitiesWhere(sql: String, params: List<Any?>, identities: Set<String>): Set<String> =
+        execQuery("$sql AND identity_sha256 IN (${marks(identities)})", *(params + identities.toList()).toTypedArray()) { it.getString(1) }
+            .filterNotNull().toSet()
 
     private fun startOfUtcDay(now: LocalDateTime): LocalDateTime = now.toLocalDate().atStartOfDay()
 
@@ -477,5 +543,6 @@ class SelfDevMemoryRepository(
         private const val EVENT_DUPLICATE = "DUPLICATE"
         private const val EVENT_DELETED = "DELETED"
         private const val EVENT_PURGED = "PURGED"
+        private const val EVENT_SHADOW_SUPPRESS = "SHADOW_SUPPRESS"
     }
 }

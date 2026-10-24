@@ -80,6 +80,8 @@ import net.kigawa.kivra.selfdev.buildSelfDev
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRetentionWorker
 import net.kigawa.kivra.selfdev.memory.SelfDevMemorySettings
+import net.kigawa.kivra.selfdev.memory.SuppressShadow
+import net.kigawa.kivra.selfdev.memory.SuppressShadowSettings
 import net.kigawa.kivra.mcp.McpSettings
 import net.kigawa.kivra.mcp.McpGoalDeps
 import net.kigawa.kivra.mcp.McpGoalSubmitDeps
@@ -101,6 +103,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     val autopilotSettings = AutopilotSettings.fromEnv(env, selfDevSettings)
     // Fail-closed: the self-development memory's switch is read only while the autopilot is on (ADR 0016 P1). A bad value fails the startup.
     val memorySettings = SelfDevMemorySettings.fromStartupEnv(env, autopilotSettings)
+    // The suppression shadow (ADR 0016 P3) is read only while the memory is on. It counts and never acts.
+    val suppressShadowSettings = SuppressShadowSettings.fromStartupEnv(env, memorySettings)
     // The AI principal (ADR 0015 section 4.6) is read whatever the order switch says, so the Goal refusals hold with the orders off (#311).
     // It is read only while the autopilot is on, as the orders are.
     val aiPrincipal = aiPrincipalFromEnv(env, autopilotSettings)
@@ -117,6 +121,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     // The memory repository and its recorder exist only when the memory switch is on. Otherwise nothing is written, read or started.
     val memoryRepo = if (memorySettings.enabled) SelfDevMemoryRepository(database, enabled = true) else null
     val memory = memoryRepo?.let { SelfDevMemoryRecorder.of(it) } ?: SelfDevMemoryRecorder.OFF
+    // The suppression shadow exists only with the memory and its own switch on. It writes the counts of what would be refused, nothing else.
+    val suppressShadow = memoryRepo?.takeIf { suppressShadowSettings.enabled }?.let { SuppressShadow.of(it) } ?: SuppressShadow.OFF
     // Self-development installs the GitHub merge Authority later (in buildSelfDev, before the worker starts). Without it, nothing is verified.
     val deferredPrMerge = DeferredPrMergeAuthority()
     val audit = AuditRepository()
@@ -153,6 +159,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             coding = codingService?.let { CodingAttemptPatchSource(it) },
             autopilot = autopilotSettings,
             memory = memory,
+            suppress = suppressShadow,
         )
     } else {
         null

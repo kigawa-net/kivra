@@ -352,3 +352,34 @@
     したがって現時点で数えられるのは `AUTO_SCOPE_EXCEEDED` だけである(ATTEMPT_FACT を書く変更は、P3 の範囲外として残す)。
   - 規則の判定は、計画の検証(PlanValidator)の直後ではなく、確定の後に行う。確定しなかった計画を数えないため。
 - 未了(P3 の有効化の前に): 2 週間の shadow、20 件サンプルの確認、抑止の件数の割合の確認、抑止の有効化フラグ(別の PR)。
+
+## 追補(2026-10-24): request_ledger.response_json の確認
+
+4.6、8.3、確認できなかったこと、P4 の前提にある「`request_ledger.response_json` にモデルの応答が入るか」を、コードで確認した。事実は origin/main(0dc9dc7 時点)のコードに基づく。コードは変えていない。
+
+1. **事実**
+   1. **列の定義。** `kivra-app/src/main/resources/db/migration/V13__request_ledger.sql`。`request_id`(主キー)、`digest`、`state`、`response_json MEDIUMTEXT NULL`、`response_replayable`、`created_at`、`updated_at`。行は削除しない設計である(同ファイルと `DbRequestLedger.kt` の冒頭)。
+   2. **書き込みは 1 箇所。** `kivra-app/src/main/kotlin/net/kigawa/kivra/db/DbRequestLedger.kt` の `complete()`。呼び出し元は `kivra-model-gateway/src/main/kotlin/net/kigawa/kivra/modelgateway/ModelGateway.kt` の `invoke()`(149 行付近)で、`resp`(`ModelResponse` 全体)を渡す。`stream()` 経路(212 行付近)は `null` を渡すため、`response_json` は NULL になる。
+   3. **中身。** `ModelResponseCodec.encode()` は、`message`(role と parts)を含む。`Part.Text` の `text` は、モデルの応答の本文そのものである。構造化出力(`structured`)、ツール呼び出しの引数、使用量、費用、警告も入る。固定コードや使用量だけの列ではない。
+   4. **サイズの条件。** 符号化後の UTF-8 バイト数が `MAX_RESPONSE_BYTES`(256 KiB)を超えると `null`。行は `COMPLETED` になり、`response_replayable` は FALSE になる。
+   5. **Planner の経路。** `kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/AutopilotPlanner.kt` の `planGoal` が `gateway.invoke(...)`(130 行付近)を呼ぶ。Developer(`kivra-developer/src/main/kotlin/net/kigawa/kivra/developer/LlmDeveloper.kt`、93 行付近)も `invoke` である。両方とも `SelfDevWiring.kt`(138 行付近)の `ModelGateway` を通り、そこで `DbRequestLedger` を使う。よって Planner の応答は、256 KiB 以下なら入る。
+   6. **失敗した呼び出し。** 応答を受け取らなかった呼び出しは `complete()` に達しないので、この列は書かれない。`markOutcomeUnknown` と `releaseUnsent` は `state` だけを変える。
+   7. **読み取り。** `DbRequestLedger.kt` の `selectForUpdate()` と `restore()` が読む。`begin()` の結果の `LedgerClaim.Completed` を経由して、`ModelGateway.claim()`(76〜84 行)が、同じ requestId の再送に対して応答を呼び出し元へ返す(`invoke` だけ。`stream` は返さない)。復号に失敗した場合は null にして、DUPLICATE_REQUEST で拒否する。API、UI(`kivra-ui-api`)、MCP、ログには、この列を読む箇所は無い(`kivra-*/src/main` を `request_ledger` で検索して確認)。
+   8. **ログ。** `logFailure` と復号失敗のログは、操作名、requestId の先頭 8 文字、例外の種類、SQLSTATE だけを出す。`kivra-app/src/test/kotlin/net/kigawa/kivra/db/DbRequestLedgerLogTest.kt` は、保存した本文がログに出ないことを確かめている。
+   9. **削除。** `request_ledger` への DELETE、TRUNCATE、保持のジョブは無い。`purgeBefore`、`purgeRetention`、`CodingReconcileWorker` は、いずれも別の表を対象とする。外部キーは無い(他の表からの参照も無い)。記憶の削除(`SelfDevMemoryRepository.purgeRetention` を含む)は、この列に触れない。
+   10. **既存の参照。** `selfdev_plans.request_ledger_id`(V18)は requestId だけを持ち、応答の文章は持たない。
+
+2. **結論**
+   1. **(a) 入る(条件付き)。** Planner の応答の本文は、非ストリームの `invoke` が成功し、符号化後 256 KiB 以下のとき、`request_ledger.response_json` に入る。ストリームと 256 KiB 超えは NULL になる。Planner は非ストリームなので、通常の計画の応答は入る。4.6 と 8.3 の「未確認」は、「入る」と確定した。
+   2. **(b) P4 の前に必要な対応。**
+      1. 保持期間を定める。現状は無期限である。requestId の封印を保つため、行を削除してはならない。期限を置くなら、`response_json` だけを NULL にする設計になる(その場合、同じ requestId の再送は DUPLICATE_REQUEST になる。`response_replayable` の扱いも決める)。
+      2. 記憶の削除との連動を決める。8.3 の「連動しない」は、文章が残ることを意味する。記憶は requestId を持たないため、連動させるには対応の表が要る。P4 の記録に応答の文章を入れないなら、「連動しない」を維持し、その根拠を 8.3 に書く。
+      3. P4 がこの列を読まないことを、テストで確かめる(既存の SHADOW-READ の規則と同じ方法)。
+   3. **(c) 対応が要らない場合の根拠。** 該当しない。入るため。
+
+3. **未確認の点**
+   1. 本番の DB の保持、バックアップの期間、アクセス権限(リポジトリの外の運用設定)。
+   2. リポジトリ外(管理画面など)から、この表を SQL で読んでいるかどうか。`docs/` の検索では、運用の読み取り手順は見つからなかった。
+   3. 実 DB での動作。今回は読みだけで、テストは実行していない。
+   4. 実際の応答サイズの分布(256 KiB の上限に、どれだけ近いか)。
+   5. Planner の応答から作られる結果が、既存の表(`selfdev_plan_tasks` など)に書かれること。それらの保持は、本追補の対象外である。

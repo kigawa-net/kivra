@@ -1604,7 +1604,7 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 
 #### 7.6.2 ルートの作成と周の開始(運用者)
 
-- 作成: `POST /api/selfdev/orders` `{"title": "...", "policy": "..."}`。ルートは 1 件だけ(2 件目は 409)。`policy` は方針の文で、作成後は変えられない。AI の主体は作成できない(403)。
+- 作成: `POST /api/selfdev/orders` `{"title": "...", "policy": "...", "maxCycles": n}`。`maxCycles` は任意で、未指定は 1。1 以上、`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`(既定 1、最大 10)以下でなければ 400(`code` は `MAX_CYCLES_INVALID`)。作成後は変えられない(ADR 0015 §2.6)。ルートは 1 件だけ(2 件目は 409)。`policy` は方針の文で、作成後は変えられない。AI の主体は作成できない(403)。
 - 周の開始: `POST /api/selfdev/orders/{id}/cycles` `{"version": n}`。Goal が 1 件作られ(`order_id` と `cycle_no` = 1)、既存の Planner と Plan の承認に進む。進行中の周があるとき、上限(既定 1 周)に達したとき、期限切れのとき、全体の一時停止中のときは 409。
 - 状況: `GET /api/selfdev/orders/{id}`(状態、理由、周の数、保留中の停止の要求。方針と題名は運用者だけに返る)、`GET /api/selfdev/orders/{id}/cycles`。一覧 `GET /api/selfdev/orders` には題名と方針を含めない。
 
@@ -1732,6 +1732,43 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
   - 止めるのは、周が `final` になってからである。周の終わりから `final` までの遅れ(tick 1 回分、最大 60 秒など)の分だけ、止めるのが遅れる。遅れは安全側である。
   - 誤判定の件数は、停止の監査(`reason_code = CHILD_BUDGET_EXHAUSTED`)で数える。1 件でも誤りと判明したら、有効化を外し、条件を見直す(ADR 0015 §13)。
   - **承認と候補(2026-10-23)**: 人の停止の承認は、既に `STOPPED` の子孫を拒否せず飛ばす(自動の停止と同じ)。自動の停止の候補は直接の親が `ACTIVE` の子だけに絞られ、親が止まっている子が候補の上限(50 件)の枠を塞がない(頻度の上限に当たった子は、まだ先頭に残りうる。ADR 0015 §4.4)。
+
+#### 7.6.2k 周の自動の開始(段階 3 の先行実装、2026-10-24。dev のみ。既定では無効)
+
+order の tick(60 秒ごと)が、条件がそろった order の次の周を始める(ADR 0015 §3.1 の ① と ⑧、§3.2。ADR の追記「段階 3 の先行実装」)。段階 3 の関門(4 週間の運用)は、dev に限って外した。**本番(他の環境)では有効化しない**。
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` | `1` | 整数 1〜10。ルートの作成で指定できる `maxCycles` の上限で、自動の開始が 1 order で回す周の数の上限でもある。範囲外と整数でない値は起動に失敗する(メッセージに出るのは変数名だけ)。 |
+| `KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED` | `false` | `true` で自動の開始を有効にする。`true` / `false` 以外は起動に失敗する。`KIVRA_SELFDEV_ORDERS_ENABLED=true` のときだけ読まれる。 |
+
+自動の開始の条件(すべてを満たすときだけ。運用者の `POST .../cycles` と同じ検査を、同じ transaction、同じロック順序で通す):
+
+- 自分と祖先が `ACTIVE`(停止要求中は `STOP_REQUESTED` なので始まらない)、全体の一時停止なし、ブレーカー(`breaker_open`)が開いていない、進行中の周(`current_goal_id`)なし、期限内。
+- `cycles_started` が `max_cycles` 未満(`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` 未満でもあること。CAP に達した `ACTIVE` の order は `PAUSED(LIMIT_REACHED)` にする)。`consecutive_failed_cycles` が 2 未満(2 に達すると既存の `PAUSED(CYCLE_FAILURES)`。自動では再開しない)。
+- 周の最小間隔: 前の周の開始(最新の Goal の `created_at`)から 60 分以上。1 日の周の数: UTC の 1 日に 1 order で 3 周まで。どちらも運用者が始めた周を数える。専用の列は無く、`selfdev_goals` から導く(移行は無い)。
+- 木の中で同時に進む周は 1 つ。
+- 予算の検査(経路上の `order_budget_jpy - spent_jpy` が `cycle_budget_jpy` 以上、`ORDER_UNPRICED`)。
+
+1 回の tick で、order あたり最大 1 周、全体で最大 50 件(`OrderWatch.BATCH`)。保留の周(`requires_approval` のタスクが承認を待つ)は、Goal が終わるまで `current_goal_id` が残るので、次の周は始まらない。tick の順序は、期限切れ、周の結果の記録、費用の集計、親の自動の停止、安全装置の後に、自動の開始(安全装置が止めた order は同じ tick で始めない)。
+
+有効化の手順(dev。別の PR で manifest を変える。ユーザーの承認が要る):
+
+1. `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` を決める(dev の既定の運用は、まず 3 など小さい値)。`KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED=true` を足して再起動する。
+2. 再起動では `STARTUP_HOLD` で全 `ACTIVE` の order が `PAUSED` になる。order の画面か `POST /api/selfdev/orders/{id}/resume` で再開する。再開から次の tick(最大 60 秒)で、最初の周が始まる。
+3. `maxCycles` は作成時にしか決められない。既存の order(`max_cycles` = 1)は 1 周で `PAUSED(LIMIT_REACHED)` になる。複数周が要るときは、新しい order を作る(ルートは 1 件なので、先にルートを承認つきで停止する。§7.6.4)。
+
+止め方:
+
+- 一時停止: order を一時停止する(`OPERATOR_PAUSED`)か、停止要求を出す。次の tick から周は始まらない。進行中の周は止まらない(Goal の停止は §7.6.4)。
+- 全体の一時停止(`POST /api/selfdev/autopilot/pause`)とブレーカーも、自動の開始を止める。
+- ロールバック: `KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED=false`(または変数を消す)にして再起動する。order の状態は変わらず、運用者が周を始める経路はそのまま使える。
+
+監査の見方:
+
+- `selfdev_order_events` の `kind = 'CYCLE_STARTED'` で、自動の開始は `actor_kind = 'SYSTEM'`、`actor_ref` は NULL、`reason_code = 'AUTO_CYCLE_STARTED'`。運用者の開始は `actor_kind = 'HUMAN'`、`reason_code` は NULL。CAP による停止は `kind = 'PAUSED'`、`reason_code = 'LIMIT_REACHED'`、`actor_kind = 'SYSTEM'`。
+- ログは固定コードと ID だけ: `order auto-cycle: code=AUTO_CYCLE_STARTED orderId=... cycleNo=...`、`order auto-cycle: paused code=LIMIT_REACHED`、`order auto-cycle: skipped code=ORDER_BUDGET|ORDER_UNPRICED`(予算と UNPRICED だけ。他の拒否は毎分繰り返すので出さない)、`order auto-cycle: failed code=AUTO_CYCLE_FAILED`。題名と方針は出さない。
+- 自動の開始で作られる Goal の `created_by` は order の作成者の owner key(自動承認のタスクは Goal の作成者の名前で Run になる。ADR 0011 §2.6)。「誰が始めたか」は、Goal ではなく `selfdev_order_events` の `actor_kind` で見る。
 
 #### 7.6.3 状態
 

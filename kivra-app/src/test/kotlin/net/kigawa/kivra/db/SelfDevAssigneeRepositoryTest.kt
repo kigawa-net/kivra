@@ -314,6 +314,6 @@ class SelfDevAssigneeRepositoryTest {
         val columns = transaction(database) {
             execQuery("SELECT * FROM selfdev_assignee_events") { rs -> (1..rs.metaData.columnCount).map { rs.metaData.getColumnName(it).lowercase() } }
         }.first()
-        assertEquals(listOf("event_id", "assignee_id", "kind", "actor_ref", "from_role", "to_role", "member_ref", "occurred_at"), columns)
+        assertEquals(listOf("event_id", "assignee_id", "kind", "actor_ref", "from_role", "to_role", "member_ref", "occurred_at", "token_ref"), columns)
     }
 }

@@ -33,6 +33,8 @@ enum class AssigneeRefusal {
     INVALID_DISPLAY_NAME,
     /** The owner key is not of the form `<length>:<issuer>:<subject>`, or is too long. */
     INVALID_OWNER_KEY,
+    /** The owner key is the synthetic key of a token (issuer `kivra-assignee`); only the token issue may bind it. */
+    SYNTHETIC_KEY_RESERVED,
     /** The owner key already belongs to an assignee (the same one or another). */
     OWNER_KEY_ALREADY_BOUND,
     /** The owner key is not bound to this assignee. */
@@ -115,6 +117,7 @@ class SelfDevAssigneeRepository(
     fun seedIfAbsent(displayName: String, role: AssigneeRole, ownerKey: String): AssigneeResult<Assignee> {
         val name = normalizedName(displayName) ?: return AssigneeResult.Refused(AssigneeRefusal.INVALID_DISPLAY_NAME)
         if (!isOwnerKeyShape(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.INVALID_OWNER_KEY)
+        if (isSyntheticOwnerKey(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.SYNTHETIC_KEY_RESERVED)
         return try {
             transaction(database) {
                 val existing = boundAssigneeId(ownerKey)
@@ -141,6 +144,7 @@ class SelfDevAssigneeRepository(
     fun recoverAdmin(displayName: String, ownerKey: String): AssigneeResult<AdminRecovery> {
         val name = normalizedName(displayName) ?: return AssigneeResult.Refused(AssigneeRefusal.INVALID_DISPLAY_NAME)
         if (!isOwnerKeyShape(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.INVALID_OWNER_KEY)
+        if (isSyntheticOwnerKey(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.SYNTHETIC_KEY_RESERVED)
         return transaction(database) {
             lockActiveAdmins()
             var created = false
@@ -180,6 +184,7 @@ class SelfDevAssigneeRepository(
 
     fun bindMember(assigneeId: String, ownerKey: String, actorKey: String): AssigneeResult<Unit> {
         if (!isOwnerKeyShape(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.INVALID_OWNER_KEY)
+        if (isSyntheticOwnerKey(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.SYNTHETIC_KEY_RESERVED)
         return try {
             transaction(database) {
                 assigneeIn(assigneeId, lock = true) ?: throw Rollback(AssigneeResult.NotFound)
@@ -265,6 +270,9 @@ class SelfDevAssigneeRepository(
             val from = if (next.kind == "ROLE_CHANGED") current.role.name else null
             val to = if (next.kind == "ROLE_CHANGED") next.role.name else null
             appendEvent(assigneeId, next.kind, actorRef(actorKey), from, to, null, now)
+            // A disable or any role change ends the assignee's tokens in the same transaction, and enabling or changing the role back does
+            // not bring them back. AI <-> VIEWER also revokes: the safe side, as a role change is a decision about what the holder may do.
+            if (next.kind == "DISABLED" || next.kind == "ROLE_CHANGED") revokeActiveTokens(assigneeId, actorRef(actorKey), now, clock)
             AssigneeResult.Moved(assigneeIn(assigneeId, lock = false)!!)
         }
     } catch (r: Rollback) {
@@ -281,6 +289,21 @@ class SelfDevAssigneeRepository(
         )
         appendEvent(id, "CREATED", actor, null, role.name, null, now)
         return Assignee(id, name, role, AssigneeState.ACTIVE, 0, actor ?: BOOTSTRAP, now, now)
+    }
+
+    /** The outcome of [bindMemberIfAbsent]. */
+    internal enum class BindOutcome { BOUND, ALREADY_BOUND_HERE, BOUND_TO_OTHER }
+
+    /**
+     * Binds [ownerKey] to [assigneeId] inside the caller's transaction, with the MEMBER_BOUND event of [bindMember]. Writes nothing when the
+     * key is bound already. The caller holds the assignee row lock (the token issue does).
+     */
+    internal fun Transaction.bindMemberIfAbsent(assigneeId: String, ownerKey: String, actor: String?, now: LocalDateTime): BindOutcome {
+        val bound = boundAssigneeId(ownerKey)
+        if (bound == assigneeId) return BindOutcome.ALREADY_BOUND_HERE
+        if (bound != null) return BindOutcome.BOUND_TO_OTHER
+        insertMember(assigneeId, ownerKey, actor, now)
+        return BindOutcome.BOUND
     }
 
     private fun Transaction.insertMember(assigneeId: String, ownerKey: String, actor: String?, now: LocalDateTime) {
@@ -356,6 +379,10 @@ class SelfDevAssigneeRepository(
             MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
     }
 }
+
+/** True for `<n>:kivra-assignee:<id>`, the owner key of an assignee's tokens. */
+internal fun isSyntheticOwnerKey(ownerKey: String): Boolean =
+    ownerKey.startsWith("${SelfDevAssigneeTokenRepository.ISSUER.toByteArray(Charsets.UTF_8).size}:${SelfDevAssigneeTokenRepository.ISSUER}:")
 
 private fun Throwable.hasUniqueViolation(): Boolean = generateSequence(this) { it.cause }.take(5).any {
     it is SQLException && (it.sqlState == "23505" || it.errorCode == 1062 || it.errorCode == 23505)

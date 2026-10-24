@@ -95,6 +95,7 @@ import net.kigawa.kivra.mcp.McpSettings
 import net.kigawa.kivra.mcp.McpGoalDeps
 import net.kigawa.kivra.mcp.McpGoalSubmitDeps
 import net.kigawa.kivra.mcp.McpOrderDeps
+import net.kigawa.kivra.mcp.McpTokenAuth
 import net.kigawa.kivra.mcp.buildMcpRouteDeps
 import net.kigawa.kivra.mcp.registerMcpRoutes
 
@@ -243,6 +244,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     }
     val mcpDeps = buildMcpRouteDeps(
         mcpSettings, env, runs, selfDevSettings.config?.repo, guard = permissionGuard,
+        // The assignee token entrance exists only while the roles are on (ADR 0020 addendum, T2); off creates and reads nothing.
+        tokenAuth = if (rolesSettings.mode == PermissionMode.OFF) null else McpTokenAuth.forDatabase(database, rolesSettings.mode),
         selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns,
         // The order tools serve only while the orders answer (the same condition as the REST routes' requireEnabled).
         orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, aiPrincipal) },

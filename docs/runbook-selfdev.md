@@ -2207,7 +2207,7 @@ KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 
 ## 10. 担当(ロール)と権限管理(ADR 0020)
 
-**一部実装(ADR 0020 の PR 1〜7 のうち、起動時の初期化まで。加えて、追補の T1 と T3)**。このセクションの多くは予定の運用手順である。実装の前は、現行の `admin-panel:admin` と `KIVRA_SELFDEV_AI_PRINCIPAL` の拒否リストが、そのまま権限の全部である。
+**一部実装(ADR 0020 の PR 1〜7 のうち、起動時の初期化まで。加えて、追補の T1・T2・T3)**。このセクションの多くは予定の運用手順である。実装の前は、現行の `admin-panel:admin` と `KIVRA_SELFDEV_AI_PRINCIPAL` の拒否リストが、そのまま権限の全部である。
 
 ### 10.1 環境変数(すべて未実装)
 
@@ -2255,9 +2255,9 @@ Keycloak と k8s の変更(PR 7)は、ユーザーの承認と作業が要る。
 3. oauth2-proxy が `/ui` に AI を入れるように、`--allowed-role` を繰り返し指定する。
 4. AI のユーザーが、読み取りと停止要求ができ、承認・作成・解除が 403 になることを確認する。
 
-### 10.4b AI の担当の作り方(実装状況: T1 のリポジトリと T3 の管理 API が入った。T2 の MCP の入口と T4 の UI は未実装)
+### 10.4b AI の担当の作り方(実装状況: T1・T2・T3 実装済み。T4 の UI は未実装)
 
-ADR 0020 の追補(2026-10-25)の方針である。**AI の担当は Keycloak を使わない**。kivra の内部だけで、担当ごとの API トークンを作る。§10.4 の Keycloak の member ロールを使う手順は、AI の経路としては採用しない(置き換え)。実装は PR T1(V34 とリポジトリ。入った)、T2(MCP の入口の検証。**未実装。これが入るまで、発行したトークンで MCP には入れない**)、T3(管理 API と `GET /api/selfdev/me`。入った)、T4(UI の管理画面。未実装)で行う。各 PR は、`KIVRA_SELFDEV_ROLES_MODE` が `off`(既定)のときは、挙動が変わらない。
+ADR 0020 の追補(2026-10-25)の方針である。**AI の担当は Keycloak を使わない**。kivra の内部だけで、担当ごとの API トークンを作る。§10.4 の Keycloak の member ロールを使う手順は、AI の経路としては採用しない(置き換え)。**T1(V34 とリポジトリ)、T2(MCP の入口の検証)、T3(管理 API と `GET /api/selfdev/me`)は実装済み**。T4(UI の管理画面)は未実装。T2 の入口は `ROLES_MODE` が shadow か enforce のときだけ有効で、shadow ではトークンの主体は全ツール拒否(実用は enforce)。固定のロール別 scope は `TOKEN_ROLE_SCOPES`。失敗が 1 分に 30 回を超えると、その Pod は、有効なトークンも含めて、窓の終わりまで 429 + `Retry-After`。ログは固定コードだけ。各 PR は、`KIVRA_SELFDEV_ROLES_MODE` が `off`(既定)のときは、挙動が変わらない。
 
 仕様の要点:
 
@@ -2314,7 +2314,7 @@ ADR 0020 の追補(2026-10-25)の方針である。**AI の担当は Keycloak �
 
    人を ADMIN などの担当に紐付けるときは、`POST .../members` に Keycloak の `sub` を渡す。最初の ADMIN は、`KIVRA_SELFDEV_ROOT_APPROVER` の起動時の初期化が作る(§10.5)。
 
-3. **MCP クライアントを設定する**(T2 が入ってから。例。`<kivra の URL>` と `<token>` は、実際の値に置き換える。値を文書やシェルの履歴に残さない)。
+3. **MCP クライアントを設定する**(例。`<kivra の URL>` と `<token>` は、実際の値に置き換える。値を文書やシェルの履歴に残さない)。
 
    ```
    claude mcp add --transport http kivra <kivra の URL>/mcp \

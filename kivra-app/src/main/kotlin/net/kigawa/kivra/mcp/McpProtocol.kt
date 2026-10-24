@@ -51,6 +51,11 @@ class McpCaller(
     val scopes: Set<String>,
     /** Whether the caller acts as the AI under the current mode. Set by the dispatcher from the permission guard, never by the route. */
     val isAi: Boolean = false,
+    /**
+     * Whether today's rule "an authenticated operator is an admin" applies. False only for the API token of an assignee (ADR 0020 addendum):
+     * its permission comes from the assignee store alone.
+     */
+    val legacyAdmin: Boolean = true,
 )
 
 /**
@@ -217,10 +222,10 @@ class McpDispatcher(
             )
         }
         // After the scope, the input shape and the write rate limit, and before the handler reads the input: where the handlers refused the AI.
-        val access = guard.resolve(caller.principal, legacyAdmin = true, via = VIA_MCP)
+        val access = guard.resolve(caller.principal, legacyAdmin = caller.legacyAdmin, via = VIA_MCP)
         val denied = guard.check(access, tool.permission, tool.name, scopeOk = true, via = VIA_MCP)
         if (denied is GuardResult.Deny) return refused(id, tool, access, denied.code)
-        val acting = McpCaller(caller.principal, caller.scopes, access.isAi)
+        val acting = McpCaller(caller.principal, caller.scopes, access.isAi, caller.legacyAdmin)
         val outcome = try {
             tool.handler(acting, arguments)
         } catch (e: InvalidParamsException) {

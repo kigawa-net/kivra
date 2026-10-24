@@ -233,7 +233,8 @@ class RolesCoverageArchitectureTest {
      *  - the Task API routes (TaskApi, OperationApi, RunView, SelfDev, SelfDevAdmin, BudgetAdmin): `identity.principal(`.
      *  - RunExecutionRoutes: the gate of the execution routes (`identity.principal(`).
      *  - AgentApiRoutes: the agent's own identity (`identity.authenticate(`), not a member.
-     *  - McpRoutes: `verifier.authenticate(`, the MCP token (then the dispatcher's guard).
+     *  - McpRoutes: `verifier.authenticate(`, the MCP token (then the dispatcher's guard), and `tokenAuth?.authenticate(`, the API token of an
+     *    assignee (ADR 0020 addendum, PR T2: a `kvt_` Bearer, only while the roles are shadow or enforce). Two entrances, so the count is 2.
      *  - MetricsRoutes makes none: it has no member authentication.
      */
     private val AUTH_CALLS: Map<String, Int> = mapOf(
@@ -250,10 +251,10 @@ class RolesCoverageArchitectureTest {
         "routes/BudgetAdminRoutes.kt" to 3,
         "routes/RunExecutionRoutes.kt" to 1,
         "routes/AgentApiRoutes.kt" to 1,
-        "mcp/McpRoutes.kt" to 1,
+        "mcp/McpRoutes.kt" to 2,
     )
 
-    private val authCall = Regex("\\b(?:operators|identity|verifier)\\.(?:authenticate|principal)\\(")
+    private val authCall = Regex("\\b(?:operators|identity|verifier|tokenAuth\\?)\\.(?:authenticate|principal)\\(")
 
     @Test
     fun `the direct authentication calls are exactly the fixed list`() {

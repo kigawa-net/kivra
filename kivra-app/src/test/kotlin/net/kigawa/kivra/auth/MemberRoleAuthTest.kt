@@ -132,10 +132,17 @@ class MemberRoleAuthTest {
             assertEquals(true, e.message!!.contains("KIVRA_OIDC_MEMBER_ROLE"))
             assertEquals(false, e.message!!.contains(bad))
         }
-        val e = assertFailsWith<IllegalArgumentException> {
-            OidcJwtConfig.fromEnv(env + mapOf("KIVRA_OIDC_MEMBER_ROLE" to "kivra-agent:agent", "KIVRA_AGENT_REQUIRED_ROLE" to " kivra-agent:agent"))
-        }
-        assertEquals(true, e.message!!.contains("KIVRA_OIDC_MEMBER_ROLE"))
         assertFailsWith<IllegalArgumentException> { OidcJwtVerifier(OidcTestTokens.config.copy(memberRole = agentRole), OidcTestTokens.jwks(), agentRole) }
+    }
+
+    @Test
+    fun `reading the member role never reads an agent variable`() {
+        val trap = object : Map<String, String> by env + ("KIVRA_OIDC_MEMBER_ROLE" to "kivra:member") {
+            override fun get(key: String): String? {
+                if (key.startsWith("KIVRA_AGENT_")) throw AssertionError("an agent variable was read")
+                return (env + ("KIVRA_OIDC_MEMBER_ROLE" to "kivra:member"))[key]
+            }
+        }
+        assertEquals(memberRole, OidcJwtConfig.fromEnv(trap).memberRole)
     }
 }

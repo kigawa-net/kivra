@@ -21,7 +21,7 @@ import org.slf4j.LoggerFactory
  *   `resource_access.<client>.roles`.
  * - `KIVRA_OIDC_MEMBER_ROLE`: optional, `<client>:<role>`, e.g. `kivra:member`. A token with this role (and none of the operator role) is
  *   authenticated as a member ([MemberKind.MEMBER_ONLY]); it is not an operator. Authorization is decided elsewhere. It must differ from
- *   `KIVRA_OIDC_REQUIRED_ROLE` and from `KIVRA_AGENT_REQUIRED_ROLE`. Unset (the default): nothing changes.
+ *   `KIVRA_OIDC_REQUIRED_ROLE`, and (checked where the agent API reads its own variables) from `KIVRA_AGENT_REQUIRED_ROLE`. Unset (the default): nothing changes.
  */
 data class OidcJwtConfig(
     val issuer: String,
@@ -53,13 +53,6 @@ data class OidcJwtConfig(
                 ?.let { RequiredRole.parse(it, "KIVRA_OIDC_MEMBER_ROLE") }
             require(memberRole == null || memberRole != operatorRole) {
                 "KIVRA_OIDC_MEMBER_ROLE must differ from KIVRA_OIDC_REQUIRED_ROLE"
-            }
-            val agentRaw = env["KIVRA_AGENT_REQUIRED_ROLE"]?.trim()?.takeIf { it.isNotEmpty() }
-            if (memberRole != null && agentRaw != null) {
-                val agentParts = agentRaw.split(":")
-                require(!(agentParts.size == 2 && RequiredRole(agentParts[0].trim(), agentParts[1].trim()) == memberRole)) {
-                    "KIVRA_OIDC_MEMBER_ROLE must differ from KIVRA_AGENT_REQUIRED_ROLE"
-                }
             }
             return OidcJwtConfig(issuer, jwksUrl, audience, operatorRole.client, operatorRole.role, memberRole)
         }

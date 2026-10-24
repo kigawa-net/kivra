@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import net.kigawa.kivra.auth.Permission
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -20,6 +21,7 @@ class McpProtocolTest {
         description = "test",
         inputSchema = objectSchema("text" to buildJsonObject { put("type", "string") }),
         scope = "kivra.runs.read",
+        permission = Permission.READ,
     ) { _, args ->
         args.requireOnly("text")
         ToolOutcome(false, "ok", buildJsonObject { put("echo", args.requiredString("text")) }, "OK")

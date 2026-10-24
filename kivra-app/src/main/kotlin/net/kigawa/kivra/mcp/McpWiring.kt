@@ -5,6 +5,8 @@ import net.kigawa.kivra.auth.OidcJwtConfig
 import net.kigawa.kivra.auth.RefreshingJwkProvider
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.routes.PermissionGuard
+import net.kigawa.kivra.routes.legacyPermissionGuard
 
 /**
  * Builds the `/mcp` routes' dependencies. Called only when [McpSettings.enabled] is true. The OIDC settings are the REST ones
@@ -13,7 +15,8 @@ import net.kigawa.kivra.github.RepoRef
  * The write tool is registered only when [McpSettings.writeEnabled] (ADR 0013 section 5). [selfDevEnabled] is the self-development kill
  * switch: while it is off, the write tool is not listed, and a call is refused with a fixed reason. [maxActiveSelfDev] is the cap of
  * concurrent self-development runs, the same value the REST submission uses. [orders] is set only while the self-development orders are on
- * (ADR 0015); the order tools are then registered ([McpOrderTools]).
+ * (ADR 0015); the order tools are then registered ([McpOrderTools]). [guard] is the REST routes' permission guard (ADR 0020 PR 3d). Without
+ * it the roles are off: the guard of today's rules, with the AI principal of [orders] or [goals].
  */
 fun buildMcpRouteDeps(
     settings: McpSettings,
@@ -25,6 +28,7 @@ fun buildMcpRouteDeps(
     maxActiveSelfDev: Int = 1,
     orders: McpOrderDeps? = null,
     goals: McpGoalDeps? = null,
+    guard: PermissionGuard? = null,
 ): McpRouteDeps? {
     if (!settings.enabled) return null
     val oidc = OidcJwtConfig.fromEnv(env).copy(audience = checkNotNull(settings.audience))
@@ -45,7 +49,10 @@ fun buildMcpRouteDeps(
         settings = settings,
         verifier = McpJwtVerifier(oidc, jwkProvider ?: RefreshingJwkProvider(oidc.jwksUrl), settings.agentRole),
         issuer = oidc.issuer,
-        dispatcher = McpDispatcher(tools, McpRateLimiter(settings.writeRatePerMinute)),
+        dispatcher = McpDispatcher(
+            tools, McpRateLimiter(settings.writeRatePerMinute),
+            guard ?: legacyPermissionGuard(goals?.aiPrincipal ?: orders?.aiPrincipal),
+        ),
         rateLimiter = McpRateLimiter(settings.ratePerMinute),
     )
 }

@@ -22,6 +22,10 @@ import org.slf4j.LoggerFactory
  * Nothing that identifies a person is logged: no owner key, no operator tag, no display name. The fields are the permission name, a fixed
  * code, the access source, the role name and the route name (a constant of the caller).
  */
+/** The `via` of a guard log line: the entrance of the request. Fixed values only. */
+internal const val VIA_REST = "rest"
+internal const val VIA_MCP = "mcp"
+
 sealed interface GuardResult {
     data object Allow : GuardResult
 
@@ -64,7 +68,7 @@ class PermissionGuard(
     private val windows = HashMap<String, Window>()
 
     /** Looks the caller up. In OFF nothing is read. In SHADOW and ENFORCE the store is read once, and a failure is not an exception. */
-    fun resolve(ownerKey: String, legacyAdmin: Boolean): GuardAccess {
+    fun resolve(ownerKey: String, legacyAdmin: Boolean, via: String = VIA_REST): GuardAccess {
         val legacy = service.legacyAccess(ownerKey, legacyAdmin)
         if (service.mode == PermissionMode.OFF) return GuardAccess(legacy, legacy, legacy.role == Role.AI)
         val effective = try {
@@ -73,8 +77,8 @@ class PermissionGuard(
             PrincipalAccess(null, emptySet(), AccessSource.LOOKUP_FAILED)
         }
         if (effective.source == AccessSource.ENV_AI_CONFLICT || effective.source == AccessSource.LOOKUP_FAILED) {
-            throttled("anomaly|${effective.source}")?.let {
-                log.warn("permission anomaly: source=${effective.source} mode=${service.mode} via=rest suppressed=$it")
+            throttled("anomaly|${effective.source}|$via")?.let {
+                log.warn("permission anomaly: source=${effective.source} mode=${service.mode} via=$via suppressed=$it")
             }
         }
         val isAi = if (service.mode == PermissionMode.ENFORCE) effective.role == Role.AI else legacy.role == Role.AI
@@ -91,13 +95,14 @@ class PermissionGuard(
         route: String,
         scopeOk: Boolean = true,
         humanOnly: Boolean = false,
+        via: String = VIA_REST,
     ): GuardResult {
         val enforce = service.mode == PermissionMode.ENFORCE
         if (humanOnly && access.isAi) return GuardResult.Deny(DENY_PERMISSION)
         val acting = if (enforce) access.effective else access.legacy
         val decision = service.check(acting, permission, scopeOk)
         if (decision is Decision.Deny) return GuardResult.Deny(decision.code)
-        if (service.mode == PermissionMode.SHADOW) recordWouldDeny(access, permission, route, scopeOk, humanOnly)
+        if (service.mode == PermissionMode.SHADOW) recordWouldDeny(access, permission, route, scopeOk, humanOnly, via)
         return GuardResult.Allow
     }
 
@@ -111,16 +116,16 @@ class PermissionGuard(
         return service.check(acting, permission) == Decision.Allow
     }
 
-    private fun recordWouldDeny(access: GuardAccess, permission: Permission, route: String, scopeOk: Boolean, humanOnly: Boolean) {
+    private fun recordWouldDeny(access: GuardAccess, permission: Permission, route: String, scopeOk: Boolean, humanOnly: Boolean, via: String) {
         val eff = access.effective
         val serviceDeny = (service.check(eff, permission, scopeOk) as? Decision.Deny)?.code
         val code = if (humanOnly && eff.role == Role.AI) DENY_PERMISSION else serviceDeny
         if (code == null) return
-        val key = "deny|$permission|$code|${eff.source}|$route"
+        val key = "deny|$permission|$code|${eff.source}|$route|$via"
         throttled(key)?.let {
             log.info(
                 "permission shadow: wouldDeny permission=$permission code=$code source=${eff.source} role=${eff.role ?: "NONE"} " +
-                    "route=$route via=rest suppressed=$it",
+                    "route=$route via=$via suppressed=$it",
             )
         }
     }
@@ -140,8 +145,14 @@ class PermissionGuard(
 }
 
 /** The guard of a route that is not wired to the roles: OFF, no store. Today's rules, for every caller. */
-internal fun offPermissionGuard(): PermissionGuard =
-    PermissionGuard(PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, null, null, null))
+internal fun offPermissionGuard(): PermissionGuard = legacyPermissionGuard(null)
+
+/**
+ * The guard of the roles off for a caller that knows the AI principal: today's rules, in which that principal is refused what it has always
+ * been refused (the Goal and order tools of `/mcp`, ADR 0020 PR 3d). No store is read.
+ */
+internal fun legacyPermissionGuard(aiPrincipal: String?): PermissionGuard =
+    PermissionGuard(PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, aiPrincipal, null, null))
 
 /**
  * The check of a REST route that authenticates through the Task API identity (ADR 0020, PR 3c). The caller is already authenticated, so

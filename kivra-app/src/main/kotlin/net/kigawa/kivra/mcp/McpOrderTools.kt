@@ -11,6 +11,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.OrderResult
@@ -33,8 +34,8 @@ private val orderOperatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev
 
 /**
  * The order dependencies of `/mcp`. Built only while the orders are on (`KIVRA_SELFDEV_ORDERS_ENABLED`, with the autopilot), so with the orders
- * off no order tool is registered at all. [aiPrincipal] is the AI principal of the REST routes (`KIVRA_SELFDEV_AI_PRINCIPAL`): a caller with
- * that owner key is the AI actor, and every other caller is a human actor, as in `SelfDevOrderRoutes`.
+ * off no order tool is registered at all. [aiPrincipal] is the AI principal of the REST routes (`KIVRA_SELFDEV_AI_PRINCIPAL`). It only builds the default
+ * guard of [buildMcpRouteDeps] (the roles off); the actor of a stop request comes from the dispatcher's guard (`McpCaller.isAi`).
  */
 class McpOrderDeps(val orders: SelfDevOrderRepository, val aiPrincipal: String?)
 
@@ -62,6 +63,7 @@ class McpOrderTools(private val deps: McpOrderDeps) {
             "state codes, cycle counts, budget and spent amounts in JPY, and timestamps. No title or policy text.",
         inputSchema = objectSchema(),
         scope = SCOPE_RUNS_READ,
+        permission = Permission.READ,
     ) { _, args ->
         args.requireOnly()
         val orders = deps.orders.list(ORDER_LIST_LIMIT).map { it.summaryJson() }
@@ -77,6 +79,7 @@ class McpOrderTools(private val deps: McpOrderDeps) {
             required = listOf("order_id"),
         ),
         scope = SCOPE_RUNS_READ,
+        permission = Permission.READ,
     ) { _, args ->
         args.requireOnly("order_id")
         val id = args.requiredString("order_id", ORDER_ID_SHAPE)
@@ -114,6 +117,7 @@ class McpOrderTools(private val deps: McpOrderDeps) {
         ),
         scope = SCOPE_SELFDEV_STOP,
         write = true,
+        permission = Permission.STOP_REQUEST,
     ) { caller, args -> stopRequest(caller, args) }
 
     private fun stopRequest(caller: McpCaller, args: JsonObject): ToolOutcome {
@@ -124,7 +128,7 @@ class McpOrderTools(private val deps: McpOrderDeps) {
             StopRequestReason.REQUESTABLE.firstOrNull { it.name == raw }
                 ?: throw InvalidParamsException("reason is not one of the fixed codes")
         }
-        val kind = if (caller.principal == deps.aiPrincipal) OrderActor.AI else OrderActor.HUMAN
+        val kind = if (caller.isAi) OrderActor.AI else OrderActor.HUMAN
         return when (val r = deps.orders.requestStop(id, version, caller.principal, kind, reason)) {
             is OrderResult.Moved -> {
                 orderOperatorLog.info(

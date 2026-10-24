@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
@@ -47,6 +48,7 @@ class McpRunTools(
             },
         ),
         scope = SCOPE_RUNS_READ,
+        permission = Permission.READ,
     ) { caller, args ->
         args.requireOnly("limit", "cursor")
         val limit = args.optionalInt("limit", 1..MAX_LIST_LIMIT, DEFAULT_LIST_LIMIT)
@@ -76,6 +78,7 @@ class McpRunTools(
             required = listOf("run_id"),
         ),
         scope = SCOPE_RUNS_READ,
+        permission = Permission.READ,
     ) { caller, args ->
         args.requireOnly("run_id")
         val id = args.requiredString("run_id", RUN_ID_SHAPE)

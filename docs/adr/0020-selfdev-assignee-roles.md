@@ -32,6 +32,8 @@
 
 実装状況: PR 3c で、これまで権限の検査が無かった REST のルート(Task API、`/api/selfdev/*`、予算と run の解除、run の一覧と詳細、実行の監視)にも、同じ表(READ、SPEND_START、BUDGET_OVERRIDE)を適用した。`off` では AI にも開いたままで、`enforce` でだけ、AI の予算の解除と run の解除を閉じる。
 
+実装状況: PR 3d で、MCP の全 11 ツール(`kivra_run_*`、`kivra_order_*`、`kivra_goal_*`、`kivra_selfdev_start`)も、ディスパッチャが scope の検査の後(ハンドラの前)に `PermissionGuard` で権限を検査するようになり(ハンドラ内の AI principal の比較は無くなった)、`off` の結果・拒否の応答・ログ・検査の順序は不変である。あわせて、全体のアーキテクチャテスト(`RolesCoverageArchitectureTest`: ルートとツールの権限の表、AI の比較の禁止、認証の入口の固定)が入った。
+
 ### 1. データモデル(Flyway V33、expand のみ。既存の移行は編集しない)
 
 DDL のスケッチ(実装 PR 1 で確定する。型や索引は実装で調整してよい)。

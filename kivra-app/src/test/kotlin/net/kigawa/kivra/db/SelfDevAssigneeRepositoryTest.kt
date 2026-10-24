@@ -1,8 +1,13 @@
 package net.kigawa.kivra.db
 
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneId
+import java.time.ZoneOffset
 import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -21,11 +26,26 @@ private const val CAROL = "5:oidc:carol"
 private const val ROBOT = "5:oidc:robot"
 private const val NAME_MARKER = "NAME-MARKER-XYZ"
 
+/**
+ * A clock that moves forward 1 ms on every read. Event IDs are ULIDs whose ordering within one millisecond is random, so the events
+ * of one operation must not share a timestamp for `ORDER BY event_id` to give the order they were written in.
+ */
+private class SteppingClock(private val start: Instant) : Clock() {
+    private val reads = AtomicLong()
+
+    override fun getZone(): ZoneId = ZoneOffset.UTC
+    override fun withZone(zone: ZoneId?): Clock = this
+    override fun instant(): Instant = start.plusMillis(reads.getAndIncrement())
+}
+
 /** The assignee repository (V33) on H2 (MariaDB with `KIVRA_TEST_DB=mariadb`). */
 class SelfDevAssigneeRepositoryTest {
 
     private val db = TestDb()
-    private val repo = SelfDevAssigneeRepository(org.jetbrains.exposed.sql.Database.connect(db.dataSource))
+    private val repo = SelfDevAssigneeRepository(
+        org.jetbrains.exposed.sql.Database.connect(db.dataSource),
+        SteppingClock(Instant.parse("2026-01-01T00:00:00Z")),
+    )
 
     @AfterTest
     fun close() = db.close()

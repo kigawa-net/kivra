@@ -28,6 +28,8 @@
 5. **AI は許可リスト方式**。費用がかかる操作は一部だけ許す(権限表)。予算の解除・上書き系は、拒否のまま。
 6. **ADMIN にも停止の承認・却下(STOP_DECIDE)を持たせる**(ユーザーの承認、2026-10-24)。ADMIN は人だけの上位ロールである。理由: 1 つの owner key は 1 つの担当にしか属せない(UNIQUE)ので、ルートの承認者(環境変数 `KIVRA_SELFDEV_ROOT_APPROVER` の主体)を ADMIN にすると承認できず、APPROVER にすると担当の管理ができない。root approver は両方を要する。ADMIN は担当を管理でき、自分に APPROVER を付ける経路が元からあるので、承認を持たせても新しい権限昇格の経路は増えない。「要求者 ≠ 承認者」は変えない。AI には承認を与えない。APPROVER は、承認だけを任せたい人向けのロールとして残す。
 
+7. **権限の細分化: `READ_TEXT` と `GOAL_STOP`**(PR 3a)。理由: 現状の AI は、記憶の閲覧、Goal の題名の取得、Goal の停止を、拒否されている。承認済みの表(AI は読み取りと order の停止要求だけ)の「読み取り」と「停止要求」を、そのまま写すと、enforce にした時に AI の権限が**広がってしまう**。そこで、運用者の文章を含む読み取りを `READ_TEXT`、Goal の停止を `GOAL_STOP` として分け、ADMIN と OPERATOR だけに付ける(APPROVER、AI、VIEWER は持たない)。`READ`(order の一覧・詳細、run など)と、order の停止要求(`STOP_REQUEST`)は、表のままである。off のときの AI の権限(`legacyAccess`)は、今の挙動のまま(`READ_TEXT` と `GOAL_STOP` を持たない)。これは「現状の AI の拒否を保つための細分化」であり、AI に新しい権限を与えるものではない。
+
 ### 1. データモデル(Flyway V33、expand のみ。既存の移行は編集しない)
 
 DDL のスケッチ(実装 PR 1 で確定する。型や索引は実装で調整してよい)。
@@ -71,6 +73,8 @@ CREATE TABLE selfdev_assignee_events (
 | 操作 | ADMIN | OPERATOR | APPROVER | AI | VIEWER |
 |---|---|---|---|---|---|
 | 読み取り(order、Goal、run、記憶、`/me`、MCP の読み取り) | ○ | ○ | ○ | ○ | ○ |
+| 運用者の文章を含む読み取り(`READ_TEXT`: Goal の題名、記憶の閲覧) | ○ | ○ | - | - | - |
+| 実行中の Goal の停止(`GOAL_STOP`: `kivra_goal_stop`、Goal の停止ルート) | ○ | ○ | - | - | - |
 | order の作成、周の開始、一時停止、再開、設定の変更 | ○ | ○ | - | - | - |
 | 停止要求(REST と `kivra_goal_stop`) | ○ | ○ | ○ | ○ | - |
 | 停止の承認・却下(人のみ。AI は不可) | ○(人のみ) | - | ○ | - | - |

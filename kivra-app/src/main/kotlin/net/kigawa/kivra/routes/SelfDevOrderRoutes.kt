@@ -60,7 +60,12 @@ class SelfDevOrderRouteDeps(
 )
 
 @Serializable
-data class CreateOrderRequest(val title: String, val policy: String)
+data class CreateOrderRequest(
+    val title: String,
+    val policy: String,
+    /** The most cycles the order may run (ADR 0015 section 3.2). Absent means 1. Checked against 1..`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`. */
+    val maxCycles: Int? = null,
+)
 
 @Serializable
 data class OrderVersionRequest(val version: Long)
@@ -159,6 +164,8 @@ private const val DIGEST_INVALID = "digest must be 64 lowercase hex characters"
 private const val STATE_INVALID = "state must be PENDING"
 private const val CHILDREN_DISABLED = "child orders are disabled"
 private const val CHILD_FIELDS_INVALID = "title and policy as for an order, and idempotencyKey 1-128 characters without control characters"
+private const val MAX_CYCLES_INVALID = "maxCycles must be a whole number from 1 to the configured cap"
+private const val MAX_CYCLES_INVALID_CODE = "MAX_CYCLES_INVALID"
 private const val BUDGET_INVALID = "orderBudgetJpy must be a whole number of yen from 1 to 999999999999"
 private const val BUDGET_BELOW_CYCLE = "orderBudgetJpy must be at least the cycle budget of 1000 yen"
 private const val PARENT_NOT_ACTIVE = "the parent order is not active; a child needs an active parent"
@@ -182,8 +189,12 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         val policy = validatedPolicy(request.policy)
         if (title == null) return@post call.respond(HttpStatusCode.BadRequest, OrderError(TITLE_INVALID))
         if (policy == null) return@post call.respond(HttpStatusCode.BadRequest, OrderError(POLICY_INVALID))
+        val maxCycles = request.maxCycles ?: 1
+        if (maxCycles !in 1..deps.orderSettings.maxCyclesCap) {
+            return@post call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
+        }
         val repo = deps.targetRepo ?: return@post call.respond(HttpStatusCode.ServiceUnavailable, OrderError(ORDERS_DISABLED))
-        when (val created = deps.orders.createRoot(caller.principal, title, policy, repo)) {
+        when (val created = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles)) {
             is CreateRootResult.Created -> {
                 operatorLog.info("order operator action: action=ORDER_CREATED actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), created.order.orderId)
                 call.respond(HttpStatusCode.Created, created.order.summary())

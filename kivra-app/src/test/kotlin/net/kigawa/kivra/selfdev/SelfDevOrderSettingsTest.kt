@@ -245,6 +245,54 @@ class SelfDevOrderSettingsTest {
         assertFalse(off.spendEnabled)
     }
 
+    @Test
+    fun `the cycle cap defaults to 1 and accepts 1 to 10`() {
+        assertEquals(1, OrderSettings.fromEnv(onEnv, enabledAutopilot, null).maxCyclesCap)
+        for (ok in listOf(1, 3, 10)) {
+            assertEquals(ok, OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_MAX_CYCLES_CAP to "$ok"), enabledAutopilot, null).maxCyclesCap)
+        }
+    }
+
+    @Test
+    fun `a cycle cap out of range or not an integer is a startup failure naming only the variable`() {
+        for (bad in listOf("0", "11", "-1", "abc", "2.5", "cap-secret-value")) {
+            val e = assertFailsWith<IllegalStateException> {
+                OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_MAX_CYCLES_CAP to bad), enabledAutopilot, null)
+            }
+            assertTrue(e.message!!.contains(OrderSettings.ENV_MAX_CYCLES_CAP))
+            assertFalse(e.message!!.contains("cap-secret-value"))
+        }
+    }
+
+    @Test
+    fun `the automatic cycle start is off by default and accepts only true or false`() {
+        assertFalse(OrderSettings.fromEnv(onEnv, enabledAutopilot, null).autoCycleEnabled)
+        assertFalse(OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_AUTO_CYCLE to "false"), enabledAutopilot, null).autoCycleEnabled)
+        assertTrue(OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_AUTO_CYCLE to "true"), enabledAutopilot, null).autoCycleEnabled)
+        for (bad in listOf("yes", "1", "", "TRUE", "auto-cycle-secret-value")) {
+            val e = assertFailsWith<IllegalStateException> {
+                OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_AUTO_CYCLE to bad), enabledAutopilot, null)
+            }
+            assertTrue(e.message!!.contains(OrderSettings.ENV_AUTO_CYCLE))
+            assertFalse(e.message!!.contains("auto-cycle-secret-value"))
+        }
+    }
+
+    @Test
+    fun `the cycle cap and the automatic start are not read while the orders are off`() {
+        val off = OrderSettings.fromEnv(
+            mapOf(
+                OrderSettings.ENV_ENABLED to "false",
+                OrderSettings.ENV_MAX_CYCLES_CAP to "not-a-number",
+                OrderSettings.ENV_AUTO_CYCLE to "not-a-switch",
+            ),
+            enabledAutopilot,
+            null,
+        )
+        assertFalse(off.autoCycleEnabled)
+        assertEquals(1, off.maxCyclesCap)
+    }
+
     private fun selfDev(): SelfDevSettings = SelfDevSettings.fromEnv(
         mapOf(
             "KIVRA_SELFDEV_ENABLED" to "true",

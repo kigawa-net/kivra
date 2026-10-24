@@ -2358,13 +2358,49 @@ test('a create posts the trimmed title and policy as JSON, clears the inputs, an
   await orderCreateSubmit(dom);
   const sent = orderCreatePosts(dom);
   assert.equal(sent.length, 1, 'one POST');
-  assert.deepEqual(sent[0].body, { title: ORDER_TITLE, policy: ORDER_POLICY }, 'the trimmed title and policy, and no other field');
+  assert.deepEqual(sent[0].body, { title: ORDER_TITLE, policy: ORDER_POLICY, maxCycles: 1 }, 'the trimmed title and policy and the default cycle count, and no other field');
   assert.equal(dom.byId('order-title').value, '', 'the title is cleared after success');
   assert.equal(dom.byId('order-policy').value, '', 'the policy is cleared after success');
   assert.equal(dom.byId('order-create-result').textContent, ORDER_CREATE_MSG_SAVED);
   assert.equal(dom.byId('order-create-result').className.includes('ok'), true);
   const listReadsAfter = dom.calls.filter((c) => c.method === 'GET' && c.path === '/api/selfdev/orders').length;
   assert.equal(listReadsAfter > listReadsBefore, true, 'the list is read again');
+});
+
+test('the cycle count is sent as an integer and reset to 1 after success', async () => {
+  const dom = ordLoad(orderCreateState(() => ({ status: 201, data: orderOf({ orderId: O2 }) })));
+  await flush();
+  fillOrderCreate(dom, ORDER_TITLE, ORDER_POLICY);
+  dom.byId('order-max-cycles').value = '3';
+  await orderCreateSubmit(dom);
+  const sent = orderCreatePosts(dom);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.maxCycles, 3, 'a number, not a string');
+  assert.equal(dom.byId('order-max-cycles').value, '1', 'reset after success');
+});
+
+test('a cycle count of 0, 11, a decimal or text is refused before any request', async () => {
+  const dom = ordLoad(orderCreateState(() => ({ status: 201, data: orderOf({ orderId: O2 }) })));
+  await flush();
+  for (const bad of ['0', '11', '2.5', 'abc', '-1', '1e1']) {
+    fillOrderCreate(dom, ORDER_TITLE, ORDER_POLICY);
+    dom.byId('order-max-cycles').value = bad;
+    await orderCreateSubmit(dom);
+    assert.equal(orderCreatePosts(dom).length, 0, 'sends nothing for ' + bad);
+    assert.match(dom.byId('order-create-result').textContent, /最大の周の数/);
+  }
+});
+
+test('a 400 MAX_CYCLES_INVALID shows a fixed text and not the server text or code', async () => {
+  const dom = ordLoad(orderCreateState(() => ({ status: 400, data: { error: 'maxCycles must be a whole number from 1 to the configured cap', code: 'MAX_CYCLES_INVALID' } })));
+  await flush();
+  fillOrderCreate(dom, ORDER_TITLE, ORDER_POLICY);
+  dom.byId('order-max-cycles').value = '5';
+  await orderCreateSubmit(dom);
+  const msg = dom.byId('order-create-result').textContent;
+  assert.match(msg, /^最大の周の数は 1 以上の整数で、サーバーの上限以下にしてください$/);
+  assert.equal(msg.includes('MAX_CYCLES_INVALID') || msg.includes('configured cap'), false);
+  assert.equal(dom.byId('order-title').value, ORDER_TITLE, 'kept for a retry');
 });
 
 test('409 ROOT_EXISTS, 400, 403 and 503 give the fixed texts, and a server text or code is never shown', async () => {

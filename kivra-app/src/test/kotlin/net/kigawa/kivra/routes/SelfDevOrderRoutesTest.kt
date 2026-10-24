@@ -181,6 +181,48 @@ class SelfDevOrderRoutesTest {
         assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"p","x":1}""").status)
     }
 
+    @Test
+    fun `maxCycles defaults to 1, is accepted up to the cap, and is fixed after creation`() = testApplication {
+        val db = newDb()
+        setUp(db, extraOrderEnv = mapOf(OrderSettings.ENV_MAX_CYCLES_CAP to "3"))
+        val created = send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"p","maxCycles":3}""")
+        assertEquals(HttpStatusCode.Created, created.status)
+        assertEquals(3, created.json()["maxCycles"]!!.jsonPrimitive.content.toInt())
+        assertEquals(3, SelfDevOrderRepository(db.database, clock).list(10).single().maxCycles)
+    }
+
+    @Test
+    fun `an omitted maxCycles is 1`() = testApplication {
+        val db = newDb()
+        setUp(db, extraOrderEnv = mapOf(OrderSettings.ENV_MAX_CYCLES_CAP to "3"))
+        assertEquals(HttpStatusCode.Created, createRoot().status)
+        assertEquals(1, SelfDevOrderRepository(db.database, clock).list(10).single().maxCycles)
+    }
+
+    @Test
+    fun `a maxCycles out of range or above the cap is 400 with a fixed code, and nothing is created`() = testApplication {
+        val db = newDb()
+        setUp(db, extraOrderEnv = mapOf(OrderSettings.ENV_MAX_CYCLES_CAP to "3"))
+        for (bad in listOf("0", "4", "-1", "11", "999999999999")) {
+            val r = send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"p","maxCycles":$bad}""")
+            assertEquals(HttpStatusCode.BadRequest, r.status, bad)
+        }
+        val r = send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"p","maxCycles":4}""")
+        assertEquals("MAX_CYCLES_INVALID", r.json()["code"]!!.jsonPrimitive.content)
+        for (bad in listOf("2.5", "true", "[]")) {
+            assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"p","maxCycles":$bad}""").status, bad)
+        }
+        assertTrue(SelfDevOrderRepository(db.database, clock).list(10).isEmpty())
+    }
+
+    @Test
+    fun `with the default cap of 1 a maxCycles of 2 is 400`() = testApplication {
+        val db = newDb()
+        setUp(db)
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"p","maxCycles":2}""").status)
+        assertEquals(HttpStatusCode.Created, send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"p","maxCycles":1}""").status)
+    }
+
     // ---- the AI principal -----------------------------------------------------------------------------------------------
 
     @Test

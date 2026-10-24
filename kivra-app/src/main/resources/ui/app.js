@@ -2975,6 +2975,7 @@
     bad: '題名は 1〜200 文字、方針は 1〜2000 文字で入力してください（制御文字は使えません）',
     rootExists: 'ルートの order は既にあります',
     invalid: '題名/方針が不正です（長さ、制御文字）',
+    maxCycles: '最大の周の数は 1 以上の整数で、サーバーの上限以下にしてください',
     forbidden: 'この操作は許可されていません',
     disabled: 'order は無効です',
     failed: '作成に失敗しました',
@@ -2986,9 +2987,11 @@
     var policy = $('order-policy').value.trim();
     var nTitle = Array.from(title).length;
     var nPolicy = Array.from(policy).length;
+    var rawCycles = $('order-max-cycles').value.trim();
+    var maxCycles = rawCycles === '' ? 1 : (/^[0-9]{1,2}$/.test(rawCycles) ? parseInt(rawCycles, 10) : 0);
     var ok = nTitle >= 1 && nTitle <= MAX_TITLE && !CONTROL_CHARS.test(title) &&
       nPolicy >= 1 && nPolicy <= MAX_POLICY && !BODY_CONTROL_CHARS.test(policy);
-    return { title: title, policy: policy, ok: ok };
+    return { title: title, policy: policy, maxCycles: maxCycles, ok: ok, cyclesOk: maxCycles >= 1 && maxCycles <= 10 };
   }
 
   function updateOrderCreate() {
@@ -2997,6 +3000,7 @@
     var blocked = state.orderSubmitting || state.sessionExpired;
     $('order-title').disabled = blocked;
     $('order-policy').disabled = blocked;
+    $('order-max-cycles').disabled = blocked;
     $('order-create-submit').disabled = blocked;
   }
 
@@ -3010,6 +3014,7 @@
   function orderCreateFailText(r) {
     if (r.kind === 'session') return MESSAGES.session;
     if (r.status === 409 && r.code === 'ROOT_EXISTS') return ORDER_CREATE_MSG.rootExists;
+    if (r.status === 400 && r.code === 'MAX_CYCLES_INVALID') return ORDER_CREATE_MSG.maxCycles;
     if (r.status === 400) return ORDER_CREATE_MSG.invalid;
     if (r.status === 403) return ORDER_CREATE_MSG.forbidden;
     if (r.status === 503) return ORDER_CREATE_MSG.disabled;
@@ -3027,12 +3032,16 @@
       showOrderCreateResult(ORDER_CREATE_MSG.bad, 'error');
       return;
     }
+    if (!f.cyclesOk) {
+      showOrderCreateResult(ORDER_CREATE_MSG.maxCycles, 'error');
+      return;
+    }
     state.orderSubmitting = true;
     updateOrderCreate();
     showOrderCreateResult(ORDER_CREATE_MSG.sending, '');
     var r;
     try {
-      r = await apiFetch('/api/selfdev/orders', 'POST', { title: f.title, policy: f.policy });
+      r = await apiFetch('/api/selfdev/orders', 'POST', { title: f.title, policy: f.policy, maxCycles: f.maxCycles });
     } finally {
       state.orderSubmitting = false;
       updateOrderCreate();
@@ -3040,6 +3049,7 @@
     if (r.ok) {
       $('order-title').value = '';
       $('order-policy').value = '';
+      $('order-max-cycles').value = '1';
       updateOrderCreate();
       showOrderCreateResult(ORDER_CREATE_MSG.saved, 'ok');
       refreshOrders();

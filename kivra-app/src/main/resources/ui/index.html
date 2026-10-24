@@ -138,6 +138,8 @@
           <label for="order-policy">方針（1〜2000 文字）</label>
           <textarea id="order-policy" name="order-policy" rows="6" maxlength="2000" required></textarea>
           <div class="counter" id="order-policy-count">0 / 2000</div>
+          <label for="order-max-cycles">最大の周の数（1〜10。作成後は変えられません。サーバーの上限を超えると拒否されます）</label>
+          <input id="order-max-cycles" name="order-max-cycles" type="number" min="1" max="10" step="1" value="1" inputmode="numeric" required>
           <div>
             <button type="submit" id="order-create-submit">order を作る</button>
           </div>

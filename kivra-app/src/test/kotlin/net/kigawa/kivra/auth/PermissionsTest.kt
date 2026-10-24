@@ -36,7 +36,7 @@ class PermissionsTest {
         Permission.READ to "YYYYY",
         Permission.ORDER_MANAGE to "YYNNN",
         Permission.STOP_REQUEST to "YYYYN",
-        Permission.STOP_DECIDE to "NNYNN",
+        Permission.STOP_DECIDE to "YNYNN",
         Permission.GOAL_WRITE to "YYNNN",
         Permission.SPEND_START to "YYNYN",
         Permission.BUDGET_OVERRIDE to "YYNNN",
@@ -54,8 +54,9 @@ class PermissionsTest {
     }
 
     @Test
-    fun `admin cannot decide a stop and approver is a separate role`() {
-        assertFalse(Permission.STOP_DECIDE in ROLE_PERMISSIONS.getValue(Role.ADMIN))
+    fun `admin and approver can decide a stop, and no other role can`() {
+        assertTrue(Permission.STOP_DECIDE in ROLE_PERMISSIONS.getValue(Role.ADMIN))
+        for (r in listOf(Role.OPERATOR, Role.AI, Role.VIEWER)) assertFalse(Permission.STOP_DECIDE in ROLE_PERMISSIONS.getValue(r), "$r")
         assertEquals(
             setOf(Permission.READ, Permission.STOP_REQUEST, Permission.STOP_DECIDE),
             ROLE_PERMISSIONS.getValue(Role.APPROVER),
@@ -189,8 +190,9 @@ class PermissionsTest {
 
     @Test
     fun `the root approver has no special power in enforce`() {
+        assertFalse(allowed(svc(PermissionMode.ENFORCE), approver, Permission.STOP_DECIDE))
         val s = svc(PermissionMode.ENFORCE, Fake(mapOf(approver to AssigneeAccess(Role.ADMIN, true))))
-        assertFalse(allowed(s, approver, Permission.STOP_DECIDE))
+        assertTrue(allowed(s, approver, Permission.STOP_DECIDE))
     }
 
     @Test

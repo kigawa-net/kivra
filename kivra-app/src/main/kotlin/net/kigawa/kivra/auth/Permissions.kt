@@ -20,7 +20,7 @@ enum class Permission {
     /** Request a stop (REST and `kivra_goal_stop`). */
     STOP_REQUEST,
 
-    /** Approve or reject a stop request. Only the APPROVER role has it. */
+    /** Approve or reject a stop request. ADMIN (a human) and APPROVER have it; the requester must still differ from the approver. */
     STOP_DECIDE,
 
     /** Submit a goal, approve a plan or task, write memory. */
@@ -47,7 +47,7 @@ private val OPERATOR_PERMISSIONS = setOf(
 
 /** The fixed table. The database holds only assignees, roles and bindings, never this. */
 val ROLE_PERMISSIONS: Map<Role, Set<Permission>> = mapOf(
-    Role.ADMIN to (OPERATOR_PERMISSIONS + Permission.ASSIGNEE_MANAGE),
+    Role.ADMIN to (OPERATOR_PERMISSIONS + Permission.STOP_DECIDE + Permission.ASSIGNEE_MANAGE),
     Role.OPERATOR to OPERATOR_PERMISSIONS,
     Role.APPROVER to setOf(Permission.READ, Permission.STOP_REQUEST, Permission.STOP_DECIDE),
     Role.AI to setOf(Permission.READ, Permission.STOP_REQUEST, Permission.SPEND_START),

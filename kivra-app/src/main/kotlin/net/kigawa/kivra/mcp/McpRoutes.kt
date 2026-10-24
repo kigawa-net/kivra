@@ -29,6 +29,8 @@ class McpRouteDeps(
     val issuer: String,
     val dispatcher: McpDispatcher,
     val rateLimiter: McpRateLimiter,
+    /** The entrance for the API token of an assignee (`kvt_`). Null (the default) is off: such a Bearer is verified as a JWT, and refused. */
+    val tokenAuth: McpTokenAuth? = null,
 )
 
 /** RFC 9728 protected resource metadata. Explicit fields, so no key is added or dropped by the serializer. */
@@ -71,7 +73,23 @@ internal fun Route.configureMcpRoutes(deps: McpRouteDeps) {
 
     post("/mcp") {
         if (!call.guardHostAndOrigin(deps)) return@post
-        val caller = when (val auth = deps.verifier.authenticate(call.request.headers)) {
+        // A `kvt_` Bearer is an assignee's API token, only while the token entrance exists (the roles are shadow or enforce). Any other
+        // Bearer, and every request while the entrance is absent, goes to the JWT verifier below, unchanged.
+        val tokenCaller: McpCaller? = when (val token = deps.tokenAuth?.authenticate(call.request.headers)) {
+            null -> null
+            is McpTokenResult.Authenticated -> McpCaller(token.principal, token.scopes, legacyAdmin = false)
+            McpTokenResult.Invalid -> {
+                call.challenge(metadataUrl, error = null)
+                call.respondJsonRpc(HttpStatusCode.Unauthorized, rpcError(null, RpcCode.UNAUTHORIZED, "invalid or missing token"))
+                return@post
+            }
+            is McpTokenResult.Throttled -> {
+                call.response.headers.append(HttpHeaders.RetryAfter, token.retryAfterSeconds.toString())
+                call.respondJsonRpc(HttpStatusCode.TooManyRequests, rpcError(null, RpcCode.RATE_LIMITED, "rate limit exceeded"))
+                return@post
+            }
+        }
+        val caller = tokenCaller ?: when (val auth = deps.verifier.authenticate(call.request.headers)) {
             is McpAuth.Authenticated -> McpCaller(auth.principal, auth.scopes)
             McpAuth.Unauthenticated -> {
                 call.challenge(metadataUrl, error = null)

@@ -66,6 +66,12 @@ data class Assignee(
     val updatedAt: LocalDateTime,
 )
 
+/**
+ * An assignee with the two counts the admin API shows. [memberCount] counts the people (owner keys of a Keycloak `sub`), not the synthetic
+ * key of the tokens; [activeTokenCount] counts the tokens that are not revoked and not expired.
+ */
+data class AssigneeSummary(val assignee: Assignee, val memberCount: Int, val activeTokenCount: Int)
+
 /** What an owner key may do: the assignee it belongs to, its role and its state (a DISABLED assignee is returned as DISABLED). */
 data class AssigneeAccess(val assigneeId: String, val role: AssigneeRole, val state: AssigneeState)
 
@@ -80,6 +86,23 @@ class SelfDevAssigneeRepository(
 
     fun list(): List<Assignee> = transaction(database) {
         execQuery("SELECT $COLUMNS FROM selfdev_assignees ORDER BY created_at, assignee_id") { it.toAssignee() }
+    }
+
+    fun listSummaries(): List<AssigneeSummary> = transaction(database) {
+        val at = utcNow(clock)
+        execQuery("SELECT $COLUMNS FROM selfdev_assignees ORDER BY created_at, assignee_id") { it.toAssignee() }.map { summaryIn(it, at) }
+    }
+
+    fun summaryOf(assigneeId: String): AssigneeSummary? = transaction(database) {
+        assigneeIn(assigneeId, lock = false)?.let { summaryIn(it, utcNow(clock)) }
+    }
+
+    /** The hashed references of the people (not the synthetic key of the tokens) bound to an assignee. Never the keys. */
+    fun humanMemberRefs(assigneeId: String): List<String> = transaction(database) {
+        execQuery(
+            "SELECT member_ref FROM selfdev_assignee_members WHERE assignee_id = ? AND owner_key NOT LIKE ? ORDER BY member_ref",
+            assigneeId, SYNTHETIC_LIKE,
+        ) { it.getString(1) }
     }
 
     /** The hashed references of the owner keys bound to an assignee (never the keys). */
@@ -222,6 +245,20 @@ class SelfDevAssigneeRepository(
         }
     }
 
+    /**
+     * [unbindMember] for a caller that knows the hashed reference of the member, not the key (the admin API never holds an owner key).
+     * The synthetic key of the tokens cannot be unbound this way. [AssigneeRefusal.NOT_BOUND] when the assignee has no such member.
+     */
+    fun unbindMemberByRef(assigneeId: String, memberRef: String, actorKey: String): AssigneeResult<Unit> {
+        val ownerKey = transaction(database) {
+            execQuery(
+                "SELECT owner_key FROM selfdev_assignee_members WHERE assignee_id = ? AND member_ref = ?", assigneeId, memberRef,
+            ) { it.getString(1) }.firstOrNull()
+        } ?: return if (find(assigneeId) == null) AssigneeResult.NotFound else AssigneeResult.Refused(AssigneeRefusal.NOT_BOUND)
+        if (isSyntheticOwnerKey(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.SYNTHETIC_KEY_RESERVED)
+        return unbindMember(assigneeId, ownerKey, actorKey)
+    }
+
     fun changeRole(assigneeId: String, newRole: AssigneeRole, expectedVersion: Long, actorKey: String): AssigneeResult<Assignee> =
         change(assigneeId, expectedVersion, actorKey) { current ->
             if (current.role == newRole) return@change Change.Refuse(AssigneeRefusal.NO_CHANGE)
@@ -344,6 +381,16 @@ class SelfDevAssigneeRepository(
         "SELECT assignee_id FROM selfdev_assignee_members WHERE member_ref = ? AND owner_key = ?", memberRef(ownerKey), ownerKey,
     ) { it.getString(1) }.firstOrNull()
 
+    private fun Transaction.summaryIn(a: Assignee, at: LocalDateTime): AssigneeSummary {
+        val people = execQuery(
+            "SELECT COUNT(*) FROM selfdev_assignee_members WHERE assignee_id = ? AND owner_key NOT LIKE ?", a.assigneeId, SYNTHETIC_LIKE,
+        ) { it.getInt(1) }.first()
+        val tokens = execQuery(
+            "SELECT COUNT(*) FROM selfdev_assignee_tokens WHERE assignee_id = ? AND revoked_at IS NULL AND expires_at > ?", a.assigneeId, at,
+        ) { it.getInt(1) }.first()
+        return AssigneeSummary(a, people, tokens)
+    }
+
     private fun Transaction.memberCount(assigneeId: String): Int =
         execQuery("SELECT COUNT(*) FROM selfdev_assignee_members WHERE assignee_id = ?", assigneeId) { it.getInt(1) }.first()
 
@@ -363,6 +410,9 @@ class SelfDevAssigneeRepository(
     companion object {
         const val MAX_DISPLAY_NAME_CODE_POINTS = 64
         const val BOOTSTRAP = "bootstrap"
+        /** The LIKE pattern of the synthetic owner keys of the tokens (`<n>:kivra-assignee:<id>`). The issuer has no LIKE wildcard. */
+        private val SYNTHETIC_LIKE =
+            "${SelfDevAssigneeTokenRepository.ISSUER.toByteArray(Charsets.UTF_8).size}:${SelfDevAssigneeTokenRepository.ISSUER}:%"
         private const val COLUMNS = "assignee_id, display_name, role, state, version, created_by, created_at, updated_at"
 
         /** NFC, then trim and the shared text rule: 1..64 code points, no control or bidi control character. Null when refused. */

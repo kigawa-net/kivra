@@ -102,4 +102,53 @@ class McpJwtVerifierTest {
         assertEquals(emptySet(), McpJwtVerifier.scopesOf(""))
         assertEquals(emptySet(), McpJwtVerifier.scopesOf(null))
     }
+
+    private val memberRole = RequiredRole("kivra", "member")
+    private val memberAware = McpJwtVerifier(
+        McpTestTokens.config.copy(memberRole = memberRole), OidcTestTokens.jwks(), RequiredRole("kivra-agent", "agent"),
+    )
+    private val memberOnly = McpTestTokens.token(resourceAccess = mapOf("kivra" to mapOf("roles" to listOf("member"))))
+
+    private fun memberAuth(headers: Headers, v: McpJwtVerifier = memberAware): McpAuth = runBlocking { v.authenticateMember(headers) }
+
+    @Test
+    fun `a member-only token is rejected by authenticate and is MEMBER_ONLY for authenticateMember`() {
+        assertIs<McpAuth.Unauthenticated>(auth(bearer(memberOnly), memberAware))
+        val ok = assertIs<McpAuth.Authenticated>(memberAuth(bearer(memberOnly)))
+        assertEquals(net.kigawa.kivra.auth.MemberKind.MEMBER_ONLY, ok.kind)
+        assertEquals(McpTestTokens.aliceOwner, ok.principal)
+    }
+
+    @Test
+    fun `an operator token is LEGACY_ADMIN as before`() {
+        val ok = assertIs<McpAuth.Authenticated>(auth(bearer(McpTestTokens.token()), memberAware))
+        assertEquals(net.kigawa.kivra.auth.MemberKind.LEGACY_ADMIN, ok.kind)
+    }
+
+    @Test
+    fun `without a member role setting a member-only token is rejected by both`() {
+        assertIs<McpAuth.Unauthenticated>(auth(bearer(memberOnly), agentAwareVerifier))
+        assertIs<McpAuth.Unauthenticated>(memberAuth(bearer(memberOnly), agentAwareVerifier))
+    }
+
+    @Test
+    fun `an agent token with the member role is refused as an agent by both`() {
+        val both = McpTestTokens.token(
+            resourceAccess = mapOf(
+                "kivra" to mapOf("roles" to listOf("member")),
+                "kivra-agent" to mapOf("roles" to listOf("agent")),
+            ),
+        )
+        assertIs<McpAuth.AgentRefused>(auth(bearer(both), memberAware))
+        assertIs<McpAuth.AgentRefused>(memberAuth(bearer(both)))
+    }
+
+    @Test
+    fun `a bad aud, iss, exp or subject is rejected even with the member role`() {
+        val ra = mapOf("kivra" to mapOf("roles" to listOf("member")))
+        assertIs<McpAuth.Unauthenticated>(memberAuth(bearer(McpTestTokens.token(audience = "other", resourceAccess = ra))))
+        assertIs<McpAuth.Unauthenticated>(memberAuth(bearer(McpTestTokens.token(issuer = "https://evil.example", resourceAccess = ra))))
+        assertIs<McpAuth.Unauthenticated>(memberAuth(bearer(McpTestTokens.token(expiresInSeconds = -3600, resourceAccess = ra))))
+        assertIs<McpAuth.Unauthenticated>(memberAuth(bearer(McpTestTokens.token(subject = "", resourceAccess = ra))))
+    }
 }

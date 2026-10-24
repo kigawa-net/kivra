@@ -19,6 +19,9 @@ import org.slf4j.LoggerFactory
  * - `KIVRA_OIDC_AUDIENCE`: the `aud` a token must contain, e.g. `kivra-dev`.
  * - `KIVRA_OIDC_REQUIRED_ROLE`: `<client>:<role>`, e.g. `admin-panel:admin`. The token must list the role in
  *   `resource_access.<client>.roles`.
+ * - `KIVRA_OIDC_MEMBER_ROLE`: optional, `<client>:<role>`, e.g. `kivra:member`. A token with this role (and none of the operator role) is
+ *   authenticated as a member ([MemberKind.MEMBER_ONLY]); it is not an operator. Authorization is decided elsewhere. It must differ from
+ *   `KIVRA_OIDC_REQUIRED_ROLE` and from `KIVRA_AGENT_REQUIRED_ROLE`. Unset (the default): nothing changes.
  */
 data class OidcJwtConfig(
     val issuer: String,
@@ -26,7 +29,14 @@ data class OidcJwtConfig(
     val audience: String,
     val requiredClient: String,
     val requiredRole: String,
+    val memberRole: RequiredRole? = null,
 ) {
+    init {
+        require(memberRole == null || memberRole != RequiredRole(requiredClient, requiredRole)) {
+            "KIVRA_OIDC_MEMBER_ROLE must differ from KIVRA_OIDC_REQUIRED_ROLE"
+        }
+    }
+
     companion object {
         fun fromEnv(env: Map<String, String>): OidcJwtConfig {
             val issuer = required(env, "KIVRA_OIDC_ISSUER")
@@ -38,7 +48,20 @@ data class OidcJwtConfig(
             require(parts.size == 2 && parts.all { it.isNotBlank() }) {
                 "KIVRA_OIDC_REQUIRED_ROLE must be <client>:<role>"
             }
-            return OidcJwtConfig(issuer, jwksUrl, audience, parts[0].trim(), parts[1].trim())
+            val operatorRole = RequiredRole(parts[0].trim(), parts[1].trim())
+            val memberRole = env["KIVRA_OIDC_MEMBER_ROLE"]?.trim()?.takeIf { it.isNotEmpty() }
+                ?.let { RequiredRole.parse(it, "KIVRA_OIDC_MEMBER_ROLE") }
+            require(memberRole == null || memberRole != operatorRole) {
+                "KIVRA_OIDC_MEMBER_ROLE must differ from KIVRA_OIDC_REQUIRED_ROLE"
+            }
+            val agentRaw = env["KIVRA_AGENT_REQUIRED_ROLE"]?.trim()?.takeIf { it.isNotEmpty() }
+            if (memberRole != null && agentRaw != null) {
+                val agentParts = agentRaw.split(":")
+                require(!(agentParts.size == 2 && RequiredRole(agentParts[0].trim(), agentParts[1].trim()) == memberRole)) {
+                    "KIVRA_OIDC_MEMBER_ROLE must differ from KIVRA_AGENT_REQUIRED_ROLE"
+                }
+            }
+            return OidcJwtConfig(issuer, jwksUrl, audience, operatorRole.client, operatorRole.role, memberRole)
         }
 
         private fun required(env: Map<String, String>, name: String): String =
@@ -61,11 +84,21 @@ internal fun oidcOwnerKey(issuer: String, subject: String?): String? {
 }
 
 /**
- * What a verified request carries (see [OidcJwtVerifier.caller]). [Member] is any valid token with its owner key; [operator] tells whether it
- * also has the required operator role. [AgentRefused] is a token with the agent role. [Unauthenticated] is everything else.
+ * Which authenticating role a verified token carries. [LEGACY_ADMIN]: the operator role (`KIVRA_OIDC_REQUIRED_ROLE`, `admin-panel:admin`).
+ * [MEMBER_ONLY]: only the optional member role (`KIVRA_OIDC_MEMBER_ROLE`), no operator role. [NONE]: neither (a valid token without a role).
+ * Having the operator role wins when both are present. An agent token is never any of these (it is refused first).
+ */
+enum class MemberKind { LEGACY_ADMIN, MEMBER_ONLY, NONE }
+
+/**
+ * What a verified request carries (see [OidcJwtVerifier.caller]). [Member] is any valid token with its owner key; [kind] tells which role it
+ * has ([operator] is true only for [MemberKind.LEGACY_ADMIN], so a member-only token is not an operator). [AgentRefused] is a token with the
+ * agent role. [Unauthenticated] is everything else.
  */
 sealed interface TaskCaller {
-    data class Member(val principal: String, val operator: Boolean) : TaskCaller
+    data class Member(val principal: String, val kind: MemberKind) : TaskCaller {
+        val operator: Boolean get() = kind == MemberKind.LEGACY_ADMIN
+    }
     data object AgentRefused : TaskCaller
     data object Unauthenticated : TaskCaller
 }
@@ -96,6 +129,10 @@ class OidcJwtVerifier(
      */
     private val agentRole: RequiredRole? = null,
 ) : OperatorAuthenticator {
+    init {
+        require(agentRole == null || agentRole != config.memberRole) { "KIVRA_OIDC_MEMBER_ROLE must differ from KIVRA_AGENT_REQUIRED_ROLE" }
+    }
+
     private val logger = LoggerFactory.getLogger(OidcJwtVerifier::class.java)
 
     fun asIdentity(): TaskApiIdentity = TaskApiIdentity { headers -> principal(headers) }
@@ -116,6 +153,23 @@ class OidcJwtVerifier(
             }
         TaskCaller.AgentRefused -> OperatorAuth.AgentRefused
         TaskCaller.Unauthenticated -> OperatorAuth.Unauthenticated
+    }
+
+    /**
+     * Authenticates a member request: an operator token ([MemberKind.LEGACY_ADMIN]) or a token with only the member role
+     * ([MemberKind.MEMBER_ONLY]). A token with neither role is [MemberAuth.Unauthenticated]; an agent token is [MemberAuth.AgentRefused], even
+     * when it also carries the member role. Authorization is not decided here. No route calls this yet (wired by the permission PR).
+     */
+    suspend fun authenticateMember(headers: Headers): MemberAuth = when (val caller = caller(headers)) {
+        is TaskCaller.Member ->
+            if (caller.kind == MemberKind.NONE) {
+                logRejection("RequiredRoleMissing")
+                MemberAuth.Unauthenticated
+            } else {
+                MemberAuth.Authenticated(caller.principal, caller.kind)
+            }
+        TaskCaller.AgentRefused -> MemberAuth.AgentRefused
+        TaskCaller.Unauthenticated -> MemberAuth.Unauthenticated
     }
 
     /**
@@ -186,18 +240,12 @@ class OidcJwtVerifier(
             logRejection("AgentRoleRefused")
             return TaskCaller.AgentRefused
         }
-        val operator = hasRole(resourceAccess, RequiredRole(config.requiredClient, config.requiredRole))
+        val kind = memberKindOf(resourceAccess, config)
 
         val subject = verified.subject
         if (subject == null) return reject("MissingSubject")
         val principal = oidcOwnerKey(config.issuer, subject) ?: return reject("InvalidSubject")
-        return TaskCaller.Member(principal, operator)
-    }
-
-    private fun hasRole(resourceAccess: Map<String, Any?>?, role: RequiredRole): Boolean {
-        val client = resourceAccess?.get(role.client) as? Map<*, *> ?: return false
-        val roles = client["roles"] as? List<*> ?: return false
-        return role.role in roles
+        return TaskCaller.Member(principal, kind)
     }
 
     companion object {

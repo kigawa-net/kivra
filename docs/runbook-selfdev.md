@@ -2215,7 +2215,7 @@ KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 |---|---|---|
 | `KIVRA_SELFDEV_ROLES_MODE` | `off` | `off` は現状と同じ。`shadow` は拒否せずログだけ。`enforce` は拒否する(未実装) |
 | `KIVRA_SELFDEV_ROLES_DEFAULT` | `operator`(最終的に `none`) | `admin-panel:admin` で担当に紐付けがない主体の扱い(未実装) |
-| `KIVRA_OIDC_MEMBER_ROLE` | 未設定 | 認証として受け付ける member ロール(`<client>:<role>`)(未実装) |
+| `KIVRA_OIDC_MEMBER_ROLE` | 未設定 | 認証として受け付ける member ロール(`<client>:<role>`)。実装済み(認証のみ。認可は PR 3)。`KIVRA_OIDC_REQUIRED_ROLE`・`KIVRA_AGENT_REQUIRED_ROLE` と同じ値は起動失敗。member ロールだけのトークンは、既存の運用者向けルートと MCP では、今までどおり拒否される |
 | `KIVRA_SELFDEV_ROLES_RECOVER_ADMIN` | 未設定 | ADMIN を失ったときの一時的な復旧フラグ。復旧後は外す(未実装) |
 
 `KIVRA_SELFDEV_ROOT_APPROVER` は、導入後は、起動時の初期化の入力になる(担当と紐付けが無いときだけ ADMIN の担当を作る)。ADMIN(人)は停止の承認・却下もできる。APPROVER は、承認だけを任せたい人向けのロールである。AI は承認できない。`KIVRA_SELFDEV_AI_PRINCIPAL` は、全期間を通じて維持し、常に AI として扱う。

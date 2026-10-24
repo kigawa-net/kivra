@@ -8,6 +8,7 @@ import io.ktor.server.sse.SSE
 import io.ktor.server.routing.routing
 import net.kigawa.kivra.auth.AgentApiSettings
 import net.kigawa.kivra.auth.AgentIdentity
+import net.kigawa.kivra.auth.PermissionMode
 import net.kigawa.kivra.auth.RefreshingJwkProvider
 import net.kigawa.kivra.auth.RequiredRole
 import net.kigawa.kivra.auth.resolveOperatorVerifier
@@ -17,6 +18,7 @@ import net.kigawa.kivra.coding.CodingRuntimeService
 import net.kigawa.kivra.coding.buildCodingCostLedger
 import net.kigawa.kivra.coding.CodingTaskSource
 import net.kigawa.kivra.coding.DbCodingRunPort
+import net.kigawa.kivra.db.AssigneeStoreLookup
 import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.DbCodingResultStore
@@ -26,6 +28,7 @@ import net.kigawa.kivra.config.KivraConfig
 import net.kigawa.kivra.db.DbBudgetStore
 import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.SelfDevAssigneeRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevGoalRepository
 import net.kigawa.kivra.db.SelfDevMemoryRepository
@@ -57,6 +60,7 @@ import net.kigawa.kivra.routes.configureOperationApiRoutes
 import net.kigawa.kivra.routes.readOnlyOperationJournal
 import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
+import net.kigawa.kivra.routes.PermissionGuard
 import net.kigawa.kivra.routes.SelfDevGoalRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.SelfDevMemoryRouteDeps
@@ -70,6 +74,7 @@ import net.kigawa.kivra.selfdev.AutoStopDeps
 import net.kigawa.kivra.selfdev.AutopilotDispatcher
 import net.kigawa.kivra.selfdev.OrderSettings
 import net.kigawa.kivra.selfdev.OrderWatch
+import net.kigawa.kivra.selfdev.RolesSettings
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
@@ -189,6 +194,15 @@ internal fun Application.appModule(env: Map<String, String>) {
     val memoryRoutes = operatorVerifier?.let { verifier ->
         SelfDevMemoryRouteDeps(operators = verifier, memory = memoryRepo, aiPrincipal = aiPrincipal)
     }
+    // The roles (ADR 0020, PR 3a): off by default, and then the assignee store is not created or read. Only the order routes use the guard so far.
+    val rolesSettings = RolesSettings.fromEnv(env, orderSettings, aiPrincipal)
+    val permissionGuard = PermissionGuard(
+        rolesSettings.service(
+            orderSettings,
+            aiPrincipal,
+            if (rolesSettings.mode == PermissionMode.OFF) null else AssigneeStoreLookup(SelfDevAssigneeRepository(database)),
+        ),
+    )
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
     val orderRoutes = if (orderRepo != null && operatorVerifier != null) {
         SelfDevOrderRouteDeps(
@@ -200,6 +214,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             orders = orderRepo,
             goals = SelfDevGoalRepository(database),
             operations = SelfDevOperatorRepository(database),
+            guard = permissionGuard,
         )
     } else {
         null

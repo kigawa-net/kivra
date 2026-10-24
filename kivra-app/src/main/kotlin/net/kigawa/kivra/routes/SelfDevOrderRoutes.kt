@@ -12,6 +12,10 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.auth.OperatorAuth
 import net.kigawa.kivra.auth.OperatorAuthenticator
+import net.kigawa.kivra.auth.Permission
+import net.kigawa.kivra.auth.PermissionMode
+import net.kigawa.kivra.auth.PermissionService
+import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.ChildCreateResult
@@ -37,9 +41,10 @@ import org.slf4j.LoggerFactory
  * The self-development orders' API (ADR 0015 stage 1, Issue #273). Authentication is the operator's, as for the autopilot routes
  * ([OperatorAuthenticator]: the OIDC token with the required role, and an agent token is refused).
  *
- * Two kinds of caller are told apart by their owner key: the AI principal (`KIVRA_SELFDEV_AI_PRINCIPAL`) and every other operator (a human).
- * The AI principal may read and request a stop, and nothing else (ADR 0015 section 4.6). The root approver
- * (`KIVRA_SELFDEV_ROOT_APPROVER`) is the only one who approves, rejects a stop or sees the list of pending requests. For the root's stop
+ * Two kinds of caller are told apart by [PermissionGuard] (ADR 0020, PR 3a): the AI and every other operator (a human). With the roles off
+ * (the default) the guard applies today's rules: the AI principal (`KIVRA_SELFDEV_AI_PRINCIPAL`) may read and request a stop, and nothing
+ * else (ADR 0015 section 4.6), and the root approver (`KIVRA_SELFDEV_ROOT_APPROVER`) is the only one who approves, rejects a stop or sees
+ * the list of pending requests. With the roles on, the role table decides. For the root's stop
  * the approver is never the requester (the repository and the schema check it); a child's stop is the parent's decision, so the root
  * approver may decide a child's stop it requested itself (ADR 0015 section 4.2 (a)).
  *
@@ -57,6 +62,10 @@ class SelfDevOrderRouteDeps(
     val orders: SelfDevOrderRepository,
     val goals: SelfDevGoalRepository,
     val operations: SelfDevOperatorRepository,
+    /** The permission entrance. The default is the roles off and no store: today's rules, from [aiPrincipal] and the root approver. */
+    val guard: PermissionGuard = PermissionGuard(
+        PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, aiPrincipal, orderSettings.rootApprover, null),
+    ),
 )
 
 @Serializable
@@ -137,8 +146,10 @@ data class CycleStartedResponse(val orderId: String, val goalId: String, val cyc
 @Serializable
 private data class OrderError(val error: String, val code: String? = null, val orderId: String? = null)
 
-/** Who is calling: the owner key and whether it is the AI principal. */
-private data class OrderCaller(val principal: String, val kind: OrderActor)
+/** Who is calling: the owner key and its access (looked up once). */
+private class OrderCaller(val principal: String, val access: GuardAccess) {
+    val kind: OrderActor get() = if (access.isAi) OrderActor.AI else OrderActor.HUMAN
+}
 
 private val strictJson = Json { ignoreUnknownKeys = false }
 private val ORDER_ID_SHAPE = Regex("[0-9A-Z]{26}")
@@ -175,15 +186,16 @@ private val operatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.orde
 
 internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     get("/api/selfdev/orders") {
-        if (deps.caller(call) == null) return@get
+        val caller = deps.caller(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
+        if (!deps.permit(call, caller, Permission.READ, "order.list")) return@get
         call.respond(deps.orders.list(LIST_LIMIT).map { it.summary() })
     }
 
     post("/api/selfdev/orders") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (caller.kind == OrderActor.AI) return@post call.respond(HttpStatusCode.Forbidden, OrderError(FORBIDDEN))
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create")) return@post
         val request = decodeOr<CreateOrderRequest>(call) ?: return@post
         val title = validatedText(request.title, MAX_TITLE_CODE_POINTS)
         val policy = validatedPolicy(request.policy)
@@ -206,6 +218,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     get("/api/selfdev/orders/{id}") {
         val caller = deps.caller(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
+        if (!deps.permit(call, caller, Permission.READ, "order.detail")) return@get
         val order = orderIdOf(call)?.let { deps.orders.get(it) }
         if (order == null) return@get call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
         val pending = deps.orders.pendingStopRequestOf(order.orderId)
@@ -215,14 +228,15 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
                 order = order.summary(),
                 title = order.title,
                 policy = order.policy,
-                pendingStopRequest = pending?.response(caller.isRootApprover(deps)),
+                pendingStopRequest = pending?.response(deps.guard.can(caller.access, Permission.STOP_DECIDE)),
             ),
         )
     }
 
     get("/api/selfdev/orders/{id}/cycles") {
-        if (deps.caller(call) == null) return@get
+        val caller = deps.caller(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
+        if (!deps.permit(call, caller, Permission.READ, "order.cycles")) return@get
         val order = orderIdOf(call)?.let { deps.orders.get(it) }
         if (order == null) return@get call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
         call.respond(deps.orders.cyclesOf(order.orderId).map { it.response() })
@@ -231,7 +245,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     post("/api/selfdev/orders/{id}/cycles") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!caller.isHuman(call)) return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.cycle.start")) return@post
         val orderId = orderIdOf(call)
         val version = call.readVersion() ?: return@post
         if (orderId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
@@ -251,7 +265,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
         // Only the operator creates a child (ADR 0015 U-19). The AI principal is refused before the body is read.
-        if (!caller.isHuman(call)) return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.child.create")) return@post
         if (deps.orderSettings.maxDepth < 1) return@post call.respond(HttpStatusCode.Conflict, OrderError(CHILDREN_DISABLED, "CHILDREN_DISABLED"))
         val request = decodeOr<CreateChildRequest>(call) ?: return@post
         val title = validatedText(request.title, MAX_TITLE_CODE_POINTS)
@@ -284,7 +298,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     post("/api/selfdev/orders/{id}/pause") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!caller.isHuman(call)) return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.pause")) return@post
         val orderId = orderIdOf(call)
         val version = call.readVersion() ?: return@post
         if (orderId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
@@ -300,7 +314,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     post("/api/selfdev/orders/{id}/resume") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!caller.isHuman(call)) return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.resume")) return@post
         val orderId = orderIdOf(call)
         val version = call.readVersion() ?: return@post
         if (orderId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
@@ -316,6 +330,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     post("/api/selfdev/orders/{id}/stop-requests") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        if (!deps.permit(call, caller, Permission.STOP_REQUEST, "order.stop.request")) return@post
         val orderId = orderIdOf(call)
         val request = decodeOr<RequestStopRequest>(call) ?: return@post
         val reason = StopRequestReason.REQUESTABLE.firstOrNull { it.name == request.reasonCode }
@@ -328,7 +343,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
                     "order operator action: action=STOP_REQUESTED actor={} orderId={} reason={} result=STOP_REQUESTED",
                     operatorTag(caller.principal), orderId, reason.name,
                 )
-                call.respond(HttpStatusCode.Created, r.value.response(caller.isRootApprover(deps)))
+                call.respond(HttpStatusCode.Created, r.value.response(deps.guard.can(caller.access, Permission.STOP_DECIDE)))
             }
             else -> call.respondOutcome(r)
         }
@@ -337,7 +352,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     get("/api/selfdev/stop-requests") {
         val caller = deps.caller(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
-        if (!caller.isRootApprover(deps)) return@get call.respond(HttpStatusCode.Forbidden, OrderError(FORBIDDEN))
+        if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.list")) return@get
         val state = call.request.queryParameters["state"]
         if (state != "PENDING") return@get call.respond(HttpStatusCode.BadRequest, OrderError(STATE_INVALID))
         call.respond(deps.orders.pendingStopRequests(LIST_LIMIT).map { it.response(true) })
@@ -346,7 +361,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     post("/api/selfdev/stop-requests/{id}/approve") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!caller.isRootApprover(deps)) return@post call.respond(HttpStatusCode.Forbidden, OrderError(FORBIDDEN))
+        if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.approve")) return@post
         val requestId = requestIdOf(call)
         val body = decodeOr<ApproveStopRequest>(call) ?: return@post
         if (!DIGEST_SHAPE.matches(body.digest)) return@post call.respond(HttpStatusCode.BadRequest, OrderError(DIGEST_INVALID))
@@ -365,7 +380,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     post("/api/selfdev/stop-requests/{id}/reject") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!caller.isRootApprover(deps)) return@post call.respond(HttpStatusCode.Forbidden, OrderError(FORBIDDEN))
+        if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.reject")) return@post
         val requestId = requestIdOf(call)
         if (!call.readEmptyBody()) return@post
         if (requestId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(REQUEST_NOT_FOUND))
@@ -381,15 +396,16 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     post("/api/selfdev/stop-requests/{id}/cancel") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        // The AI principal may not cancel: it may only request (ADR 0015 section 4.6).
-        if (!caller.isHuman(call)) return@post
+        // The AI may not cancel: it may only request (ADR 0015 section 4.6). Anyone else needs the stop-request permission, and is then
+        // the requester, or holds the permission to decide (below).
+        if (!deps.permit(call, caller, Permission.STOP_REQUEST, "order.stop.cancel", humanOnly = true)) return@post
         val requestId = requestIdOf(call)
         if (!call.readEmptyBody()) return@post
         if (requestId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(REQUEST_NOT_FOUND))
         val request = deps.orders.stopRequest(requestId)
         if (request == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(REQUEST_NOT_FOUND))
-        if (request.requestedBy != caller.principal && !caller.isRootApprover(deps)) {
-            return@post call.respond(HttpStatusCode.Forbidden, OrderError(FORBIDDEN))
+        if (request.requestedBy != caller.principal && !deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.cancel.other")) {
+            return@post
         }
         when (val r = deps.orders.endStopRequest(requestId, StopEnd.CANCELLED, caller.principal, OrderActor.HUMAN)) {
             is OrderResult.Moved -> {
@@ -404,10 +420,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
 /** Authenticates the caller. Responds 401 (no valid operator token) or 403 (an agent token), and returns the caller otherwise. */
 private suspend fun SelfDevOrderRouteDeps.caller(call: ApplicationCall): OrderCaller? =
     when (val auth = operators.authenticate(call.request.headers)) {
-        is OperatorAuth.Authenticated -> OrderCaller(
-            auth.principal,
-            if (auth.principal == aiPrincipal) OrderActor.AI else OrderActor.HUMAN,
-        )
+        // The authenticator accepts operators only, so the caller is an operator by today's rule (legacyAdmin).
+        is OperatorAuth.Authenticated -> OrderCaller(auth.principal, guard.resolve(auth.principal, legacyAdmin = true))
         OperatorAuth.Unauthenticated -> {
             call.respond(HttpStatusCode.Unauthorized, OrderError("unauthorized"))
             null
@@ -425,15 +439,18 @@ private suspend fun SelfDevOrderRouteDeps.requireEnabled(call: ApplicationCall):
     return false
 }
 
-/** Only a human operator may change an order. The AI principal gets 403, and the response has nothing else in it. */
-private suspend fun OrderCaller.isHuman(call: ApplicationCall): Boolean {
-    if (kind == OrderActor.HUMAN) return true
+/** The permission check. Responds 403 with the fixed body and returns false when refused. The check's order in each route is the old one. */
+private suspend fun SelfDevOrderRouteDeps.permit(
+    call: ApplicationCall,
+    caller: OrderCaller,
+    permission: Permission,
+    route: String,
+    humanOnly: Boolean = false,
+): Boolean {
+    if (guard.check(caller.access, permission, route, humanOnly = humanOnly) is GuardResult.Allow) return true
     call.respond(HttpStatusCode.Forbidden, OrderError(FORBIDDEN))
     return false
 }
-
-private fun OrderCaller.isRootApprover(deps: SelfDevOrderRouteDeps): Boolean =
-    kind == OrderActor.HUMAN && principal == deps.orderSettings.rootApprover
 
 /**
  * After the root order's stop is approved, the goal of the cycle in progress is stopped too, through the existing goal stop (ADR 0015

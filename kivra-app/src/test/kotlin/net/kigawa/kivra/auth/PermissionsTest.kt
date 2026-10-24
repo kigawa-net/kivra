@@ -34,6 +34,8 @@ class PermissionsTest {
     // The plan's table, one row per permission, columns ADMIN OPERATOR APPROVER AI VIEWER.
     private val table: Map<Permission, String> = mapOf(
         Permission.READ to "YYYYY",
+        Permission.READ_TEXT to "YYNNN",
+        Permission.GOAL_STOP to "YYNNN",
         Permission.ORDER_MANAGE to "YYNNN",
         Permission.STOP_REQUEST to "YYYYN",
         Permission.STOP_DECIDE to "YNYNN",

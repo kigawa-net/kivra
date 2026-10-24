@@ -2220,6 +2220,19 @@ KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 
 `KIVRA_SELFDEV_ROOT_APPROVER` は、導入後は、起動時の初期化の入力になる(担当と紐付けが無いときだけ ADMIN の担当を作る)。ADMIN(人)は停止の承認・却下もできる。APPROVER は、承認だけを任せたい人向けのロールである。AI は承認できない。`KIVRA_SELFDEV_AI_PRINCIPAL` は、全期間を通じて維持し、常に AI として扱う。
 
+### 10.1b 権限の表(抜粋。全体は ADR 0020 §2)
+
+| 権限 | ADMIN | OPERATOR | APPROVER | AI | VIEWER |
+|---|---|---|---|---|---|
+| `READ`(order の一覧・詳細、run) | ○ | ○ | ○ | ○ | ○ |
+| `READ_TEXT`(Goal の題名、記憶の閲覧) | ○ | ○ | - | - | - |
+| `GOAL_STOP`(Goal の停止) | ○ | ○ | - | - | - |
+| `ORDER_MANAGE`(order の作成、周、一時停止、再開) | ○ | ○ | - | - | - |
+| `STOP_REQUEST`(order の停止要求) | ○ | ○ | ○ | ○ | - |
+| `STOP_DECIDE`(停止の承認・却下) | ○ | - | ○ | - | - |
+
+`READ_TEXT` と `GOAL_STOP` は、現状の AI の拒否を保つために分けた権限である(ADR 0020 決定 7)。order のルートは、PR 3a で、この表(`KIVRA_SELFDEV_ROLES_MODE` が `shadow` か `enforce` のとき)に従う。`off` では今までと同じ判定である。
+
 ### 10.2 有効化の順序(予定)
 
 1. PR 1〜6 をマージし、`KIVRA_SELFDEV_ROLES_MODE` を設定しないまま(`off`)デプロイする。挙動は変わらないことを確認する。

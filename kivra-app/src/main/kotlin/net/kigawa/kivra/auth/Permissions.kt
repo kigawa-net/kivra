@@ -4,7 +4,7 @@ package net.kigawa.kivra.auth
  * Roles and permissions of the operator side (plan "assignees and permissions", PR 2). This file is pure: it depends on neither the
  * database package nor Ktor. The assignee store is reached only through [AssigneeLookup], which a later PR implements.
  *
- * It is not wired into any route yet. Until then nothing calls it, so behaviour does not change.
+ * The routes reach it through `PermissionGuard` (routes package), which also does the logging this file must not do.
  *
  * Nothing here logs. The [PrincipalAccess.source] and [Decision.Deny.code] values are fixed codes, never an owner key or a display name.
  */
@@ -13,6 +13,15 @@ enum class Role { ADMIN, OPERATOR, APPROVER, AI, VIEWER }
 enum class Permission {
     /** Orders, goals, runs, memory, `/me`, MCP reads. */
     READ,
+
+    /**
+     * Reads that carry the operators' own text: a Goal's title, the memory. Split from [READ] so that an AI, which cannot read them today,
+     * does not gain them when the table is enforced (ADR 0020, "why the split").
+     */
+    READ_TEXT,
+
+    /** Stop a running Goal (`kivra_goal_stop`, the Goal stop route). An AI is refused today, so only ADMIN and OPERATOR have it. */
+    GOAL_STOP,
 
     /** Create an order, start a cycle, pause, resume, change settings. */
     ORDER_MANAGE,
@@ -38,6 +47,8 @@ enum class Permission {
 
 private val OPERATOR_PERMISSIONS = setOf(
     Permission.READ,
+    Permission.READ_TEXT,
+    Permission.GOAL_STOP,
     Permission.ORDER_MANAGE,
     Permission.STOP_REQUEST,
     Permission.GOAL_WRITE,

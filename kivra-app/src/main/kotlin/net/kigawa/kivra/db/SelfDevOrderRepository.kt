@@ -181,6 +181,9 @@ sealed interface AutoStopResult {
 /** The requester and the decider of an automatic stop: a fixed system principal, never a person's owner key (ADR 0015 section 4.4). */
 const val AUTO_STOP_PRINCIPAL = "system:order-auto-stop"
 
+/** The most cycles an order may have (the schema's CHECK, V23). The configured cap is at most this. */
+const val MAX_CYCLES_LIMIT = 10
+
 /** Cycles that stop being counted as failures after this many in a row (ADR 0015 section 3.2). */
 const val CYCLE_FAILURE_LIMIT = 2
 
@@ -268,7 +271,8 @@ class SelfDevOrderRepository(
      * Creates the root order, ACTIVE, with no cycle yet. The tree has one root: the UNIQUE `root_slot` refuses a second one, and that
      * refusal is returned as [CreateRootResult.RootExists].
      */
-    fun createRoot(createdBy: String, title: String, policy: String, targetRepo: String): CreateRootResult = try {
+    fun createRoot(createdBy: String, title: String, policy: String, targetRepo: String, maxCycles: Int = 1): CreateRootResult = try {
+        require(maxCycles in 1..MAX_CYCLES_LIMIT) { "maxCycles must be 1 to $MAX_CYCLES_LIMIT" }
         transaction(database) {
             val now = utcNow(clock)
             val orderId = Ulid.generate(clock)
@@ -276,9 +280,9 @@ class SelfDevOrderRepository(
                 """
                 INSERT INTO selfdev_orders (order_id, parent_order_id, depth, root_slot, title, policy, target_repo, max_cycles,
                     cycles_started, consecutive_failed_cycles, state, expires_at, created_by, version, created_at, updated_at)
-                VALUES (?, NULL, 0, 1, ?, ?, ?, 1, 0, 0, 'ACTIVE', ?, ?, 0, ?, ?)
+                VALUES (?, NULL, 0, 1, ?, ?, ?, ?, 0, 0, 'ACTIVE', ?, ?, 0, ?, ?)
                 """.trimIndent(),
-                orderId, title, policy, targetRepo, now.plus(orderTtl), createdBy, now, now,
+                orderId, title, policy, targetRepo, maxCycles, now.plus(orderTtl), createdBy, now, now,
             )
             appendEvent(orderId, null, "ORDER_CREATED", null, OrderState.ACTIVE, null, OrderActor.HUMAN, createdBy, null, now)
             CreateRootResult.Created(getIn(orderId) ?: error("order vanished after insert"))

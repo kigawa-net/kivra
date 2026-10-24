@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body>
+<a class="skip-link" id="skip-link" href="#main">本文へ移動</a>
 <header class="app-header">
   <div class="brand">
     <h1>Kivra</h1>
@@ -15,6 +16,7 @@
   <div class="header-actions">
     <div class="conn" id="health-status" role="status">接続: 未確認</div>
     <button type="button" class="secondary" id="refresh-all-btn">更新</button>
+    <a class="badge warn" id="header-approvals" href="#/approvals" hidden></a>
     <span class="meta" id="refresh-all-at">最終更新: 未更新</span>
   </div>
 </header>
@@ -26,8 +28,18 @@
 
 <p class="sim-banner" id="mode-note" role="note">自己開発の設定を確認しています…</p>
 
-<main>
+<div class="layout">
+<nav class="side-nav" id="side-nav" aria-label="主要なページ">
+  <a href="#/" id="nav-tasks">タスク</a>
+  <a href="#/goals" id="nav-goals" hidden>開発目標</a>
+  <a href="#/orders" id="nav-orders" hidden>order</a>
+  <a href="#/approvals" id="nav-approvals" hidden>承認 <span class="badge warn" id="nav-approvals-badge" role="img" hidden></span></a>
+  <a href="#/budget" id="nav-budget" hidden>予算</a>
+  <a href="#/memory" id="nav-memory" hidden>記憶</a>
+</nav>
+<main id="main" tabindex="-1">
   <div id="view-list">
+  <div class="page" id="page-tasks" data-page="tasks">
     <section class="card" aria-labelledby="h-submit">
       <h2 id="h-submit">Task を投入</h2>
       <form id="submit-form">
@@ -56,7 +68,6 @@
     <section class="card" aria-labelledby="h-runs">
       <div class="card-head">
         <h2 id="h-runs">Run の一覧</h2>
-        <button type="button" id="refresh-btn" class="secondary">今すぐ更新</button>
       </div>
       <form id="scope-form" class="scope">
         <fieldset>
@@ -69,6 +80,9 @@
       <ul id="runs-list" class="run-list"></ul>
     </section>
 
+  </div>
+
+  <div class="page" id="page-goals" data-page="goals" hidden>
     <!-- Autopilot (ADR 0011). Hidden unless GET /api/selfdev/autopilot answers 200 with the autopilot enabled. -->
     <section class="card" id="goal-section" aria-labelledby="h-goal" hidden>
       <h2 id="h-goal">開発目標（Goal）</h2>
@@ -90,7 +104,6 @@
     <section class="card" id="plans-section" aria-labelledby="h-plans" hidden>
       <div class="card-head">
         <h2 id="h-plans">Goal の一覧と承認</h2>
-        <button type="button" id="plans-refresh" class="secondary">今すぐ更新</button>
       </div>
       <div class="autopilot-control" aria-live="polite">
         <p class="meta" id="autopilot-status" role="status">自律運転の状態を取得しています…</p>
@@ -113,6 +126,9 @@
       <ul id="plans-list" class="run-list" aria-label="Goal の一覧"></ul>
     </section>
 
+  </div>
+
+  <div class="page" id="page-approvals" data-page="approvals" hidden>
     <!-- Stop approval (the root approver only). Hidden unless GET /api/selfdev/stop-requests?state=PENDING answers 200. -->
     <section class="card" id="approval-section" aria-labelledby="h-approval" hidden>
       <h2 id="h-approval">停止の承認（承認者だけ）</h2>
@@ -122,11 +138,13 @@
       <ul id="approval-list" class="run-list" aria-label="保留中の停止の要求"></ul>
     </section>
 
+  </div>
+
+  <div class="page" id="page-orders" data-page="orders" hidden>
     <!-- Self-development orders (ADR 0015 stage 1, PR 2b). Hidden unless GET /api/selfdev/orders answers 200 (the autopilot is on). -->
     <section class="card" id="orders-section" aria-labelledby="h-orders" hidden>
       <div class="card-head">
         <h2 id="h-orders">order の一覧（ADR 0015）</h2>
-        <button type="button" id="orders-refresh" class="secondary">今すぐ更新</button>
       </div>
       <p class="meta" role="note">order は、Goal を周回させる長く生きる指示です。題名と方針は、この画面には表示しません。停止は、要求の後で承認者が承認したときだけ行われます。子の order は、親の下に字下げして表示します。</p>
       <p id="orders-msg" class="result" role="status"></p>
@@ -152,11 +170,13 @@
       </details>
     </section>
 
+  </div>
+
+  <div class="page" id="page-budget" data-page="budget" hidden>
     <!-- Budget (operator). Hidden unless GET /api/admin/budget/status answers 200 to this user. Only text is written into it. -->
     <section class="card" id="budget-section" aria-labelledby="h-budget" hidden>
       <div class="card-head">
         <h2 id="h-budget">予算（運用者向け）</h2>
-        <button type="button" id="budget-refresh" class="secondary">今すぐ更新</button>
       </div>
       <p id="budget-status" class="meta" role="status"></p>
       <p id="budget-msg" class="result" role="status"></p>
@@ -178,11 +198,13 @@
         <p id="budget-unpriced-note" class="meta" hidden></p>
       </div>
     </section>
+  </div>
+
+  <div class="page" id="page-memory" data-page="memory" hidden>
     <!-- Self-development memory (operator, ADR 0016 P2). Hidden unless GET /api/selfdev/memory answers 200. Only text is written into it. -->
     <section class="card" id="memory-section" aria-labelledby="h-memory" hidden>
       <div class="card-head">
         <h2 id="h-memory">記憶（ADR 0016、運用者向け）</h2>
-        <button type="button" id="memory-refresh" class="secondary">今すぐ更新</button>
       </div>
       <p class="meta" role="note">記録は、運用者の覚え書きと、系統が書いた事実です。モデルや系統が書いた文章（未検証）の本文は、この画面には表示しません。削除は取り消せません。</p>
       <div class="scope">
@@ -207,6 +229,7 @@
       </div>
       <p id="memory-dryrun-result" class="meta" role="status"></p>
     </section>
+  </div>
 
   </div>
 
@@ -217,6 +240,7 @@
     <div id="detail-body" aria-live="polite"></div>
   </section>
 </main>
+</div>
 
 <dialog id="release-dialog" aria-labelledby="release-title">
   <div class="release-body">

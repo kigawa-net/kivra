@@ -16,7 +16,8 @@ import net.kigawa.kivra.routes.legacyPermissionGuard
  * switch: while it is off, the write tool is not listed, and a call is refused with a fixed reason. [maxActiveSelfDev] is the cap of
  * concurrent self-development runs, the same value the REST submission uses. [orders] is set only while the self-development orders are on
  * (ADR 0015); the order tools are then registered ([McpOrderTools]). [guard] is the REST routes' permission guard (ADR 0020 PR 3d). Without
- * it the roles are off: the guard of today's rules, with the AI principal of [orders] or [goals].
+ * it the roles are off: the guard of today's rules, with the AI principal of [orders] or [goals]. [tokenAuth] is the entrance for
+ * an assignee's API token (ADR 0020 addendum, T2); null (the default) leaves it off.
  */
 fun buildMcpRouteDeps(
     settings: McpSettings,
@@ -29,6 +30,7 @@ fun buildMcpRouteDeps(
     orders: McpOrderDeps? = null,
     goals: McpGoalDeps? = null,
     guard: PermissionGuard? = null,
+    tokenAuth: McpTokenAuth? = null,
 ): McpRouteDeps? {
     if (!settings.enabled) return null
     val oidc = OidcJwtConfig.fromEnv(env).copy(audience = checkNotNull(settings.audience))
@@ -54,6 +56,7 @@ fun buildMcpRouteDeps(
             guard ?: legacyPermissionGuard(goals?.aiPrincipal ?: orders?.aiPrincipal),
         ),
         rateLimiter = McpRateLimiter(settings.ratePerMinute),
+        tokenAuth = tokenAuth,
     )
 }
 

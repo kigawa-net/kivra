@@ -53,6 +53,7 @@ import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.autopilot.GoalState
 import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
+import net.kigawa.kivra.selfdev.memory.SuppressShadow
 import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingAttemptResult
 import net.kigawa.kivra.db.DbCodingResultStore
@@ -282,6 +283,8 @@ internal class E2eWorld(
     private val maxActive: Int = 1,
     /** The self-development memory's recorder (ADR 0016 P1). Off unless a test passes one. */
     val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
+    /** The suppression shadow (ADR 0016 P3). Off unless a test passes one. */
+    val suppress: SuppressShadow = SuppressShadow.OFF,
 ) {
     val goals = SelfDevGoalRepository(db.database)
     val plans = SelfDevPlanRepository(db.database)
@@ -315,6 +318,7 @@ internal class E2eWorld(
         config = PlannerConfig(budgetScopes = listOf(TENANT), autopilot = config),
         nonceSource = { NONCE },
         memory = memory,
+        suppress = suppress,
     )
     private val plannerWorker = PlannerWorker(goals, planner, Duration.ofSeconds(30))
 

@@ -334,3 +334,21 @@
 - 開いている PR(#271 など)が、V21 のマイグレーションを使うかどうか。main の最後は V20 である。
 - 提案中の ADR 0015 が採られるかどうか(本 ADR の (d) と U-8 は、その結果で変わる)。
 - `coding_monitor_events` の保持期間(V20 のテーブルに、期間の定義は無い)。
+
+## 実装状況(2026-10-24、P3 の shadow)
+
+- 実装: 決定的な規則の**影**(抑止はしない)。計画が確定したあとに、(a) 直近の計画との identity の重複、(b) 運用者が見送った identity
+  (`OPERATOR_SKIPPED`、90 日)、(c) 同じ identity の直近 2 件の結果が `AUTO_SCOPE_EXCEEDED`(14 日)を数え、件数だけを
+  `selfdev_memory_events`(`kind = SHADOW_SUPPRESS`、`code` は規則名、`count_value` は件数)に残す。計画は変えない・拒否しない・再試行しない。
+  環境変数 `KIVRA_SELFDEV_MEMORY_SUPPRESS_SHADOW_ENABLED`(既定 `false`。記録の有効化の下でだけ読む)。有効化の抑止のフラグは作らない。
+- 移行: V32(expand のみ。イベントの種類の CHECK に `SHADOW_SUPPRESS` を足す)。
+- 読むもの: identity と固定の code と時刻だけ(`SHADOW-READ` の範囲に、文章の列を書かない。アーキテクチャテストで検査)。
+- 実装の決めたこと(ADR の記述の補足):
+  - (a) の「直近の計画」は、同じ Goal の計画ではなく、Goal をまたいで新しい方から 3 件、14 日以内とした(ADR は範囲を定めていない。
+    同じ Goal の計画は、ブロックからの再計画でしか複数にならないため)。
+  - (a) と (b) の比較のために、P1 の書き込みに 1 つ足した: 確定した計画の各タスクに、`TASK_FACT` の `PLAN_PROPOSED`(identity つき)を書く。
+    4.4 の「1 Goal あたりの事実 60 件(Plan 3 回 × タスク 8 件)」は、この行を見込んでいた。
+  - (c) の「EMPTY_PATCH」は数えていない。`EMPTY_PATCH` は attempt の結果(`ATTEMPT_FACT`)にあり、P1 は `ATTEMPT_FACT` を書かない。
+    したがって現時点で数えられるのは `AUTO_SCOPE_EXCEEDED` だけである(ATTEMPT_FACT を書く変更は、P3 の範囲外として残す)。
+  - 規則の判定は、計画の検証(PlanValidator)の直後ではなく、確定の後に行う。確定しなかった計画を数えないため。
+- 未了(P3 の有効化の前に): 2 週間の shadow、20 件サンプルの確認、抑止の件数の割合の確認、抑止の有効化フラグ(別の PR)。

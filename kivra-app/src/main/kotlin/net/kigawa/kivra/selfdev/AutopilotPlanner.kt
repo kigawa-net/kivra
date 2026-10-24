@@ -35,6 +35,7 @@ import net.kigawa.kivra.modelgateway.ResponseFormat
 import net.kigawa.kivra.modelgateway.Role
 import net.kigawa.kivra.modelgateway.ThinkingMode
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
+import net.kigawa.kivra.selfdev.memory.SuppressShadow
 import kotlin.time.toKotlinDuration
 import org.slf4j.LoggerFactory
 
@@ -105,6 +106,8 @@ class AutopilotPlanner(
     private val repoFiles: PlannerRepoFiles? = null,
     /** The shadow record of the self-development memory (ADR 0016 P1). Written after the plan or the block is stored. Never read. */
     private val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
+    /** The suppression shadow (ADR 0016 P3). Counts after a plan is stored; never changes the plan. */
+    private val suppress: SuppressShadow = SuppressShadow.OFF,
 ) {
 
     suspend fun planGoal(goalId: String): PlanAttempt {
@@ -179,7 +182,10 @@ class AutopilotPlanner(
                     goalId, result.plan.planId, result.plan.revision, result.tasks.size, queued,
                     digest.take(DIGEST_PREFIX), response.cost.amount.toPlainString(), response.cost.currency,
                 )
+                // The shadow runs first, so the new plan's own facts are not among the "recent plans" it compares with.
+                suppress.planStored(goalId, result.plan.planId, check.tasks.map { SelfDevMemoryRecorder.identityOf(it.targetPaths) })
                 memory.planProposed(goalId, result.plan.planId, result.tasks.size)
+                result.tasks.forEach { memory.taskProposed(goalId, it) }
                 PlanAttempt.Proposed(result.tasks.size, queued)
             }
         }

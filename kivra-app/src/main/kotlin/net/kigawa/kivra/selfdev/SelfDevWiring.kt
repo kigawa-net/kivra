@@ -45,6 +45,7 @@ import net.kigawa.kivra.selfdev.automerge.DbAutoMergeShadowStore
 import net.kigawa.kivra.selfdev.automerge.GitHubAutoMergeShadowPort
 import net.kigawa.kivra.selfdev.automerge.buildAutoMergeShadowWatch
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
+import net.kigawa.kivra.selfdev.memory.SuppressShadow
 import org.jetbrains.exposed.sql.Database
 
 /** The self-development components built by [buildSelfDev]. Built only when [SelfDevSettings.enabled] is true. */
@@ -90,6 +91,8 @@ internal fun buildSelfDev(
     autopilot: AutopilotSettings = AutopilotSettings.disabled(),
     /** The shadow record of the self-development memory (ADR 0016 P1). Used by the Planner only. */
     memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
+    /** The suppression shadow (ADR 0016 P3). Used by the Planner only. */
+    suppress: SuppressShadow = SuppressShadow.OFF,
 ): SelfDevParts {
     val config = checkNotNull(settings.config) { "self-development settings are not enabled" }
     val auth = checkNotNull(settings.githubAuth) { "self-development GitHub authentication is missing" }
@@ -188,7 +191,7 @@ internal fun buildSelfDev(
     val planWorker = autopilot.config?.takeIf { autopilot.enabled }?.let { autopilotConfig ->
         // The Planner's file list reads the same GitHub adapter, on the configured base branch (Issue #293). Off when the switch is off.
         val repoFiles = if (autopilotConfig.plannerRepoTree) PlannerRepoFiles(github, config.repo, config.baseBranch) else null
-        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevGoalRepository(database), tenantId, repoFiles, memory)
+        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevGoalRepository(database), tenantId, repoFiles, memory, suppress)
     }
     // ADR 0014 S1: the shadow judgement. Built only with the autopilot and its shadow switch on; it reads GitHub and writes the audit only.
     val autoMergeShadow = buildAutoMergeShadowWatch(
@@ -221,6 +224,7 @@ private fun buildPlanWorker(
     tenantId: String,
     repoFiles: PlannerRepoFiles?,
     memory: SelfDevMemoryRecorder,
+    suppress: SuppressShadow,
 ): PlannerWorker {
     check(registry.models.any { it.id == PLANNER_MODEL_ID && it.lifecycle == Lifecycle.ACTIVE }) {
         "the autopilot planner model is not an active model in the registry"
@@ -231,6 +235,7 @@ private fun buildPlanWorker(
         config = PlannerConfig(budgetScopes = listOf(tenantId), autopilot = config),
         repoFiles = repoFiles,
         memory = memory,
+        suppress = suppress,
     )
     return PlannerWorker(goals, planner, Duration.ofSeconds(config.planIntervalSeconds))
 }

@@ -116,6 +116,9 @@ class MigrationExpandOnlyTest {
             "V28:DROP (ALTER TABLE SELFDEV_ORDER_STOP_REQUESTS DROP CONSTRAINT CK_SELFDEV_ORDER_STOP_REQUESTER)" to
                 "V28 replaces the requester CHECK with one that accepts HUMAN and AI (as before) and adds SYSTEM. An old Writer never writes " +
                 "SYSTEM, so its rows pass the new CHECK as they passed the old one. No Contract step is needed.",
+            "V32:DROP (ALTER TABLE SELFDEV_MEMORY_EVENTS DROP CONSTRAINT CK_SELFDEV_MEMORY_EVENTS_KIND)" to
+                "V32 replaces the event kind CHECK with one that accepts every value the old one did and adds SHADOW_SUPPRESS. An old " +
+                "Writer never writes SHADOW_SUPPRESS, so its rows pass the new CHECK as they passed the old one. No Contract step is needed.",
         )
     }
 }

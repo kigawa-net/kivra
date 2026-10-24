@@ -121,7 +121,7 @@ private fun boolFlag(env: Map<String, String>, name: String, default: Boolean): 
 private val OWNER_KEY_SHAPE = Regex("[0-9]{1,4}:.+:.+")
 private const val MAX_OWNER_KEY_LENGTH = 255
 
-private fun isOwnerKeyShape(value: String): Boolean =
+internal fun isOwnerKeyShape(value: String): Boolean =
     value.length <= MAX_OWNER_KEY_LENGTH && OWNER_KEY_SHAPE.matches(value) && value.none { it.isISOControl() }
 
 /**

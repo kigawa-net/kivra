@@ -26,6 +26,7 @@
 3. **導入は off / shadow / enforce の 3 段**(既定 off)。
 4. **承認者はロール(複数人)**。ADR 0015 の「承認者は 1 人」を変更する(追補を参照)。
 5. **AI は許可リスト方式**。費用がかかる操作は一部だけ許す(権限表)。予算の解除・上書き系は、拒否のまま。
+6. **ADMIN にも停止の承認・却下(STOP_DECIDE)を持たせる**(ユーザーの承認、2026-10-24)。ADMIN は人だけの上位ロールである。理由: 1 つの owner key は 1 つの担当にしか属せない(UNIQUE)ので、ルートの承認者(環境変数 `KIVRA_SELFDEV_ROOT_APPROVER` の主体)を ADMIN にすると承認できず、APPROVER にすると担当の管理ができない。root approver は両方を要する。ADMIN は担当を管理でき、自分に APPROVER を付ける経路が元からあるので、承認を持たせても新しい権限昇格の経路は増えない。「要求者 ≠ 承認者」は変えない。AI には承認を与えない。APPROVER は、承認だけを任せたい人向けのロールとして残す。
 
 ### 1. データモデル(Flyway V33、expand のみ。既存の移行は編集しない)
 
@@ -72,7 +73,7 @@ CREATE TABLE selfdev_assignee_events (
 | 読み取り(order、Goal、run、記憶、`/me`、MCP の読み取り) | ○ | ○ | ○ | ○ | ○ |
 | order の作成、周の開始、一時停止、再開、設定の変更 | ○ | ○ | - | - | - |
 | 停止要求(REST と `kivra_goal_stop`) | ○ | ○ | ○ | ○ | - |
-| 停止の承認・却下 | - | - | ○ | - | - |
+| 停止の承認・却下(人のみ。AI は不可) | ○(人のみ) | - | ○ | - | - |
 | Goal の投入、計画・タスクの承認、記憶の書き込み | ○ | ○ | - | - | - |
 | `kivra_selfdev_start`、Task API(費用がかかるが、既存の予算・上限に従う) | ○ | ○ | - | ○(一部許可) | - |
 | 予算の解除・為替(`BudgetAdminRoutes`)、run の解除(`SelfDevAdminRoutes`) | ○ | ○ | - | **-** | - |
@@ -83,7 +84,7 @@ CREATE TABLE selfdev_assignee_events (
 
 ### 3. 不変条件(ADR 0015 §4.6 / §8 を維持)
 
-- 承認は、APPROVER の担当に属する**人**だけ。AI は承認できない。ルートの停止は、要求者と承認者が別の owner key(DB の CHECK とアプリの検査は、そのまま)。
+- 承認は、ADMIN または APPROVER の担当に属する**人**だけ。AI は承認できない。ルートの停止は、要求者と承認者が別の owner key(DB の CHECK とアプリの検査は、そのまま)。
 - 環境変数 `KIVRA_SELFDEV_AI_PRINCIPAL` の owner key は、DB の内容にかかわらず、**常に AI として扱う**。DB に別のロールがあれば、エラーを記録して、AI のままにする。AI と承認者が同じ owner key なら、起動に失敗する。
 - APPROVER の付与は、ADMIN(人)だけ。AI の担当は、担当を管理できない(コードで固定)。1 つの owner key は 1 つの担当にだけ属する(AI と APPROVER の兼任は不可)。
 - **最後の ADMIN の削除・降格・無効化は不可**。自分自身の降格・無効化も不可。ADMIN の行を `FOR UPDATE` で読み、同じ transaction で変更する。
@@ -113,7 +114,7 @@ CREATE TABLE selfdev_assignee_events (
 
 | 脅威 | 緩和 |
 |---|---|
-| 権限昇格(AI や下位ロールが、自分や他者のロールを上げる) | 担当の管理は ADMIN(人)だけ。AI は管理不可(コードで固定)。APPROVER の付与は ADMIN の人だけ。1 owner key 1 担当。権限の表はコードで固定し、DB は編集しても表を変えられない |
+| 権限昇格(AI や下位ロールが、自分や他者のロールを上げる) | 担当の管理は ADMIN(人)だけ。AI は管理不可(コードで固定)。APPROVER の付与は ADMIN の人だけ。ADMIN の承認権限は、人に限り、要求者 ≠ 承認者の検査と AI の常時拒否に従う(昇格の経路は増えない。決定 6)。1 owner key 1 担当。権限の表はコードで固定し、DB は編集しても表を変えられない |
 | 最後の ADMIN を失う | 最後の ADMIN の削除・降格・無効化と、自分自身の降格・無効化は不可。ADMIN の行を `FOR UPDATE` で同じ transaction。起動時の初期化と復旧フラグ(runbook) |
 | TOCTOU(権限を引いた後、無効化されるまでの隙) | ロールはリクエストごとに 1 回引く。キャッシュしない。担当の変更は CAS(`version`)。無効化は次のリクエストから効く |
 | `sub` の変更・再利用(別人が同じ owner key になる、紐付けの誤り) | owner key は `iss` と `sub` から作る(`oidcOwnerKey`)。`utf8mb4_bin` で UNIQUE。紐付けの変更はイベントに残す。紐付けは ADMIN が `sub` を確認して行う(U-2) |

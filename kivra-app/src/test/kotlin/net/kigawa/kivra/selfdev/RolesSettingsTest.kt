@@ -94,4 +94,18 @@ class RolesSettingsTest {
         }
         assertEquals(PermissionMode.ENFORCE, load(mapOf(RolesSettings.ENV_MODE to "enforce", "KIVRA_AUTH_MODE" to "oidc-jwt")).mode)
     }
+
+    @Test
+    fun `RECOVER_ADMIN defaults to false, is validated, and is not read while off`() {
+        assertFalse(load(mapOf(RolesSettings.ENV_MODE to "shadow")).recoverAdmin)
+        assertTrue(load(mapOf(RolesSettings.ENV_MODE to "shadow", RolesSettings.ENV_RECOVER_ADMIN to "true")).recoverAdmin)
+        assertFalse(load(mapOf(RolesSettings.ENV_MODE to "enforce", RolesSettings.ENV_RECOVER_ADMIN to "false")).recoverAdmin)
+        val e = assertFailsWith<IllegalStateException> {
+            load(mapOf(RolesSettings.ENV_MODE to "shadow", RolesSettings.ENV_RECOVER_ADMIN to "SECRETVALUE"))
+        }
+        assertTrue(e.message!!.contains(RolesSettings.ENV_RECOVER_ADMIN))
+        assertFalse(e.message!!.contains("SECRETVALUE"))
+        // off: a bad value is not even read
+        assertEquals(PermissionMode.OFF, load(mapOf(RolesSettings.ENV_RECOVER_ADMIN to "SECRETVALUE")).mode)
+    }
 }

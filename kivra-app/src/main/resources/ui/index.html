@@ -12,7 +12,11 @@
     <h1>Kivra</h1>
     <span class="env-badge">環境: dev</span>
   </div>
-  <div class="conn" id="health-status" role="status">接続: 未確認</div>
+  <div class="header-actions">
+    <div class="conn" id="health-status" role="status">接続: 未確認</div>
+    <button type="button" class="secondary" id="refresh-all-btn">更新</button>
+    <span class="meta" id="refresh-all-at">最終更新: 未更新</span>
+  </div>
 </header>
 
 <div id="session-banner" class="session-banner" role="alert" hidden>
@@ -61,7 +65,7 @@
           <label><input type="radio" name="scope" id="scope-all" value="all"> 全員の Run（運用者向け）</label>
         </fieldset>
       </form>
-      <p id="runs-status" class="meta" role="status">未取得</p>
+      <p id="runs-status" class="meta" role="status"></p>
       <ul id="runs-list" class="run-list"></ul>
     </section>
 
@@ -101,11 +105,11 @@
       </div>
       <div class="promotion" aria-labelledby="h-promotion">
         <h3 id="h-promotion">段階 1 → 2 の昇格条件（ADR 0011 §6.3）</h3>
-        <p class="meta" id="promotion-status" role="status">未取得</p>
+        <p class="meta" id="promotion-status" role="status"></p>
         <ul id="promotion-list" class="run-list" aria-label="段階 1 → 2 の昇格条件"></ul>
       </div>
       <p id="plans-msg" class="result" role="status"></p>
-      <p id="plans-status" class="meta" role="status">未取得</p>
+      <p id="plans-status" class="meta" role="status"></p>
       <ul id="plans-list" class="run-list" aria-label="Goal の一覧"></ul>
     </section>
 
@@ -114,7 +118,7 @@
       <h2 id="h-approval">停止の承認（承認者だけ）</h2>
       <p class="meta" role="note">承認すると、対象の order は停止済みになり、元に戻せません。要求の方針や題名、要求者の ID は表示しません。</p>
       <p id="approval-msg" class="result" role="status"></p>
-      <p id="approval-status" class="meta" role="status">未取得</p>
+      <p id="approval-status" class="meta" role="status"></p>
       <ul id="approval-list" class="run-list" aria-label="保留中の停止の要求"></ul>
     </section>
 
@@ -126,7 +130,7 @@
       </div>
       <p class="meta" role="note">order は、Goal を周回させる長く生きる指示です。題名と方針は、この画面には表示しません。停止は、要求の後で承認者が承認したときだけ行われます。子の order は、親の下に字下げして表示します。</p>
       <p id="orders-msg" class="result" role="status"></p>
-      <p id="orders-status" class="meta" role="status">未取得</p>
+      <p id="orders-status" class="meta" role="status"></p>
       <ul id="orders-list" class="run-list" aria-label="order の一覧"></ul>
       <details id="order-create">
         <summary>order を作る</summary>
@@ -154,7 +158,7 @@
         <h2 id="h-budget">予算（運用者向け）</h2>
         <button type="button" id="budget-refresh" class="secondary">今すぐ更新</button>
       </div>
-      <p id="budget-status" class="meta" role="status">未取得</p>
+      <p id="budget-status" class="meta" role="status"></p>
       <p id="budget-msg" class="result" role="status"></p>
       <div id="budget-body" hidden>
         <p id="budget-month" class="meta"></p>
@@ -187,7 +191,7 @@
         <button type="button" id="memory-apply" class="secondary">絞り込む</button>
       </div>
       <p id="memory-msg" class="result" role="status"></p>
-      <p id="memory-status" class="meta" role="status">未取得</p>
+      <p id="memory-status" class="meta" role="status"></p>
       <p id="memory-counts" class="meta" role="status"></p>
       <ul id="memory-list" class="run-list" aria-label="記録の一覧"></ul>
       <p id="memory-page" class="meta" role="status"></p>

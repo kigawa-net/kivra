@@ -43,6 +43,7 @@ class El {
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); return c; }
   setAttribute(n, v) { this.attrs[n] = String(v); }
+  removeAttribute(n) { delete this.attrs[n]; }
   getAttribute(n) { return this.attrs[n] === undefined ? null : this.attrs[n]; }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   removeEventListener(type, fn) {
@@ -225,7 +226,7 @@ test('a self-development selection is dropped when the status later says disable
   await flush();
   selectKind(dom, 'SELF_DEV');
   enabled = false;
-  dom.byId('refresh-btn').fire('click');
+  dom.byId('refresh-all-btn').fire('click');
   await flush();
   assert.equal(dom.byId('kind-sim').checked, true);
   assert.equal(dom.byId('kind-self').checked, false);
@@ -1025,10 +1026,10 @@ test('the budget section stays hidden for a non-operator, and that does not end 
   const dom = await openBudget(budgetResponder({ status: { status: 401, data: { error: 'unauthorized' } }, fx: { status: 401, data: {} } }));
   assert.equal(dom.byId('budget-section').hidden, true);
   // A 401 from the operator-only budget is not an expired session: the run list still refreshes.
-  dom.byId('refresh-btn').fire('click');
+  dom.byId('refresh-all-btn').fire('click');
   await flush();
   assert.ok(dom.calls.some((c) => c.path === '/api/runs'), 'the run list is still requested');
-  assert.equal(dom.byId('refresh-btn').disabled, false);
+  assert.equal(dom.byId('refresh-all-btn').disabled, false);
   assert.equal(dom.calls.filter((c) => c.path === '/api/admin/budget/status').length, 1, 'the status is read once on load');
 });
 
@@ -2713,7 +2714,7 @@ const BUDGET_PATH = '/api/admin/budget/status';
 const isMem = (p) => p.startsWith('/api/selfdev/memory?');
 
 /** Autopilot on, the memory card on, and the budget card on unless `budget` says otherwise. `hook(p)` may throw or return a promise. */
-function allLoad({ budget = true, hook } = {}) {
+function allLoad({ budget = true, hook, hash = '' } = {}) {
   const s = apState();
   s.other = (p, init) => {
     if (hook) {
@@ -2725,13 +2726,13 @@ function allLoad({ budget = true, hook } = {}) {
     if (p === '/api/admin/budget/fx') return budget ? { status: 200, data: BUDGET_FX_OK } : { status: 404, data: {} };
     return null;
   };
-  return load(apResponder(s));
+  return load(apResponder(s), { hash });
 }
 
 const count = (dom, from, pred) => dom.calls.slice(from).filter((c) => pred(c.path)).length;
 
 test('the header refresh reads only what is shown: a hidden budget is not read, a shown memory is', async () => {
-  const dom = allLoad({ budget: false });
+  const dom = allLoad({ budget: false, hash: '#/memory' });
   await flush();
   assert.equal(dom.byId('budget-section').hidden, true);
   assert.equal(dom.byId('memory-section').hidden, false);
@@ -2742,10 +2743,10 @@ test('the header refresh reads only what is shown: a hidden budget is not read, 
   assert.equal(count(dom, from, isMem), 1, 'shown memory: read');
   assert.equal(count(dom, from, (p) => p === '/health'), 1);
   assert.equal(count(dom, from, (p) => p === '/api/selfdev/status'), 1);
-  assert.equal(count(dom, from, (p) => p === '/api/selfdev/autopilot'), 1);
-  assert.equal(count(dom, from, (p) => p === '/api/selfdev/goals'), 1);
+  assert.equal(count(dom, from, (p) => p === '/api/selfdev/autopilot'), 0, 'the memory page does not read the autopilot');
+  assert.equal(count(dom, from, (p) => p === '/api/selfdev/goals'), 0);
 
-  const shown = allLoad();
+  const shown = allLoad({ hash: '#/budget' });
   await flush();
   const from2 = shown.calls.length;
   shown.byId('refresh-all-btn').fire('click');
@@ -2757,7 +2758,7 @@ test('a double click on the header refresh does not call twice, and the button i
   let release;
   const gate = new Promise((r) => { release = r; });
   let slow = false;
-  const dom = allLoad({ hook: (p) => (slow && p === '/health' ? gate.then(() => ({ status: 200, data: { status: 'ok' } })) : null) });
+  const dom = allLoad({ hash: '#/memory', hook: (p) => (slow && p === '/health' ? gate.then(() => ({ status: 200, data: { status: 'ok' } })) : null) });
   await flush();
   const from = dom.calls.length;
   slow = true;
@@ -2775,7 +2776,7 @@ test('a double click on the header refresh does not call twice, and the button i
 
 test('one failing read does not stop the others, and the button comes back', async () => {
   let down = false;
-  const dom = allLoad({ hook: (p) => { if (down && p === '/health') throw new Error('network down'); return null; } });
+  const dom = allLoad({ hash: '#/memory', hook: (p) => { if (down && p === '/health') throw new Error('network down'); return null; } });
   await flush();
   const from = dom.calls.length;
   down = true;
@@ -2783,7 +2784,6 @@ test('one failing read does not stop the others, and the button comes back', asy
   await flush();
   assert.equal(count(dom, from, (p) => p === '/health'), 1);
   assert.equal(count(dom, from, isMem), 1, 'memory is still read');
-  assert.equal(count(dom, from, (p) => p === BUDGET_PATH), 1, 'budget is still read');
   assert.equal(dom.byId('refresh-all-btn').disabled, false);
   assert.match(dom.byId('refresh-all-at').textContent, /^最終更新: \d+:\d\d:\d\d/);
 });
@@ -2846,4 +2846,225 @@ test('the tick refreshes the budget and memory only while shown, and skips them 
   busy.tickNow();
   await flush();
   assert.equal(count(busy, from, isMem), 0, 'submission in flight: skipped');
+});
+
+// ---- The side navigation ----------------------------------------------------
+
+const PAGE_IDS = ['tasks', 'goals', 'orders', 'approvals', 'budget', 'memory'];
+const shownPages = (dom) => PAGE_IDS.filter((id) => dom.byId('page-' + id).hidden === false);
+
+/** Everything on: autopilot, orders, an approver with one pending request, budget and memory. */
+function navLoad({ hash = '', budget = true, approver = true, requests = [stopRequestOf()], autopilot = 200 } = {}) {
+  const s = ordState({
+    autopilot,
+    requestList: approver ? { status: 200, data: requests } : { status: 403, data: { error: 'forbidden' } },
+  });
+  const orders = ordersOther(s);
+  s.other = (p, init) => {
+    const o = orders(p, init);
+    if (o) return o;
+    if (isMem(p) && init.method === 'GET') return memList([memOf()]);
+    if (p === BUDGET_PATH) return budget ? { status: 200, data: BUDGET_STATUS } : { status: 404, data: {} };
+    if (p === '/api/admin/budget/fx') return budget ? { status: 200, data: BUDGET_FX_OK } : { status: 404, data: {} };
+    return null;
+  };
+  return load(apResponder(s), { hash });
+}
+
+test('each hash shows only its own page, and an unknown hash goes to #/', async () => {
+  const want = { '': 'tasks', '#/': 'tasks', '#/goals': 'goals', '#/orders': 'orders', '#/approvals': 'approvals', '#/budget': 'budget', '#/memory': 'memory' };
+  for (const [hash, page] of Object.entries(want)) {
+    const dom = navLoad({ hash });
+    await flush();
+    assert.deepEqual(shownPages(dom), [page], 'hash "' + hash + '"');
+    assert.equal(dom.byId('view-detail').hidden, true);
+    assert.equal(dom.byId('nav-' + page).getAttribute('aria-current'), 'page', 'aria-current on ' + page);
+    for (const other of PAGE_IDS.filter((id) => id !== page)) {
+      assert.equal(dom.byId('nav-' + other).getAttribute('aria-current'), null, other + ' is not current');
+    }
+  }
+  const dom = navLoad({ hash: '#/nope' });
+  await flush();
+  assert.deepEqual(shownPages(dom), ['tasks']);
+  assert.equal(dom.window.location.hash, '#/', 'the hash is rewritten');
+  dom.window.location.hash = '#/orders';
+  dom.hashListeners.forEach((fn) => fn());
+  assert.deepEqual(shownPages(dom), ['orders'], 'a hash change switches the page');
+  dom.window.location.hash = '#/zzz';
+  dom.hashListeners.forEach((fn) => fn());
+  assert.deepEqual(shownPages(dom), ['tasks']);
+});
+
+test('a run detail keeps working and selects the tasks item in the navigation', async () => {
+  const dom = navLoad({ hash: '#/runs/' + SELF_RUN_ID });
+  await flush();
+  assert.equal(dom.byId('view-list').hidden, true);
+  assert.equal(dom.byId('view-detail').hidden, false);
+  assert.equal(dom.byId('nav-tasks').getAttribute('aria-current'), 'page');
+  assert.equal(dom.byId('nav-goals').getAttribute('aria-current'), null);
+  assert.equal(dom.document.title, 'Kivra \u2014 Run \u306e\u8a73\u7d30');
+  dom.window.location.hash = '#/goals';
+  dom.hashListeners.forEach((fn) => fn());
+  assert.equal(dom.byId('view-list').hidden, false);
+  assert.equal(dom.byId('view-detail').hidden, true);
+  assert.deepEqual(shownPages(dom), ['goals']);
+});
+
+test('a nav item is shown only while its section is not hidden by the API, and a hidden current page returns to #/', async () => {
+  const on = navLoad();
+  await flush();
+  for (const id of PAGE_IDS) assert.equal(on.byId('nav-' + id).hidden, false, id + ' is shown');
+
+  const noBudget = navLoad({ budget: false });
+  await flush();
+  assert.equal(noBudget.byId('budget-section').hidden, true);
+  assert.equal(noBudget.byId('nav-budget').hidden, true);
+  assert.equal(noBudget.byId('nav-memory').hidden, false);
+
+  const noApprover = navLoad({ approver: false });
+  await flush();
+  assert.equal(noApprover.byId('nav-approvals').hidden, true);
+  assert.equal(noApprover.byId('nav-orders').hidden, false);
+
+  const off = navLoad({ autopilot: 503 });
+  await flush();
+  for (const id of ['goals', 'orders', 'approvals', 'memory']) assert.equal(off.byId('nav-' + id).hidden, true, id + ' is hidden');
+  assert.equal(off.byId('nav-tasks').hidden, false);
+
+  // A deep link to a page that is not available goes back to #/ once the answer is known.
+  const deep = navLoad({ hash: '#/budget', budget: false });
+  await flush();
+  assert.deepEqual(shownPages(deep), ['tasks']);
+  assert.equal(deep.window.location.hash, '#/');
+  assert.equal(deep.byId('nav-tasks').getAttribute('aria-current'), 'page');
+
+  // A deep link to an available page stays (it is not sent back before the answer arrives).
+  const ok = navLoad({ hash: '#/memory' });
+  await flush();
+  assert.deepEqual(shownPages(ok), ['memory']);
+
+  // The current page's section becomes unavailable later.
+  let budgetOn = true;
+  const s = apState();
+  s.other = (p) => {
+    if (p === BUDGET_PATH) return budgetOn ? { status: 200, data: BUDGET_STATUS } : { status: 404, data: {} };
+    if (p === '/api/admin/budget/fx') return budgetOn ? { status: 200, data: BUDGET_FX_OK } : { status: 404, data: {} };
+    return null;
+  };
+  const later = load(apResponder(s), { hash: '#/budget' });
+  await flush();
+  assert.deepEqual(shownPages(later), ['budget']);
+  budgetOn = false;
+  later.byId('refresh-all-btn').fire('click');
+  await flush();
+  assert.deepEqual(shownPages(later), ['tasks']);
+});
+
+test('the pending count is a badge on the approvals item and a link in the header, hidden at 0 and before it is read', async () => {
+  const dom = navLoad({ requests: [stopRequestOf(), stopRequestOf({ requestId: '01RQSTAAAAAAAAAAAAAAAAAAAB' })] });
+  await flush();
+  assert.equal(dom.byId('nav-approvals-badge').hidden, false);
+  assert.equal(dom.byId('nav-approvals-badge').textContent, '2');
+  assert.equal(dom.byId('nav-approvals-badge').getAttribute('aria-label'), '保留中の要求 2 件');
+  assert.equal(dom.byId('header-approvals').hidden, false);
+  assert.match(dom.byId('header-approvals').textContent, /2/);
+  assert.equal(dom.byId('header-approvals').getAttribute('aria-label'), '保留中の要求 2 件');
+
+  const zero = navLoad({ requests: [] });
+  await flush();
+  assert.equal(zero.byId('header-approvals').hidden, true, '0 pending: no header link');
+  assert.equal(zero.byId('nav-approvals-badge').textContent, '0');
+
+  const nonApprover = navLoad({ approver: false });
+  await flush();
+  assert.equal(nonApprover.byId('header-approvals').hidden, true);
+  assert.equal(nonApprover.byId('nav-approvals-badge').hidden, true);
+
+  const gate = new Promise(() => {});
+  const s = ordState();
+  s.other = (p, init) => (p === '/api/selfdev/stop-requests?state=PENDING' ? gate : ordersOther(s)(p, init));
+  const before = load(apResponder(s));
+  await flush();
+  assert.equal(before.byId('header-approvals').hidden, true, 'not read yet: hidden');
+  assert.equal(before.byId('nav-approvals-badge').hidden, true);
+});
+
+test('the five per-section refresh buttons are gone from the page and the script', () => {
+  const html = fs.readFileSync(path.join(path.dirname(APP_JS), 'index.html'), 'utf8');
+  const js = fs.readFileSync(APP_JS, 'utf8');
+  for (const id of ['refresh-btn', 'plans-refresh', 'orders-refresh', 'budget-refresh', 'memory-refresh']) {
+    assert.ok(!html.includes('id="' + id + '"'), id + ' is not in index.html');
+    assert.ok(!js.includes("'" + id + "'"), id + ' is not in app.js');
+  }
+  assert.ok(html.includes('id="refresh-all-btn"'));
+  assert.ok(html.includes('<nav class="side-nav" id="side-nav" aria-label="主要なページ">'));
+  assert.ok(html.includes('class="skip-link" id="skip-link" href="#main"'));
+});
+
+test('the header refresh reads the data of the page shown now', async () => {
+  const reads = (dom, from) => ({
+    goals: count(dom, from, (p) => p === '/api/selfdev/goals'),
+    autopilot: count(dom, from, (p) => p === '/api/selfdev/autopilot'),
+    orders: count(dom, from, (p) => p === '/api/selfdev/orders'),
+    requests: count(dom, from, (p) => p === '/api/selfdev/stop-requests?state=PENDING'),
+    budget: count(dom, from, (p) => p === BUDGET_PATH),
+    mem: count(dom, from, isMem),
+    runs: count(dom, from, (p) => p === '/api/runs'),
+    health: count(dom, from, (p) => p === '/health'),
+    status: count(dom, from, (p) => p === '/api/selfdev/status'),
+  });
+  const cases = {
+    '#/': { goals: 0, autopilot: 0, orders: 0, requests: 0, budget: 0, mem: 0 },
+    '#/goals': { goals: 1, autopilot: 1, orders: 0, requests: 0, budget: 0, mem: 0 },
+    '#/orders': { goals: 0, autopilot: 0, orders: 1, requests: 1, budget: 0, mem: 0 },
+    '#/approvals': { goals: 0, autopilot: 0, orders: 1, requests: 1, budget: 0, mem: 0 },
+    '#/budget': { goals: 0, autopilot: 0, orders: 0, requests: 0, budget: 1, mem: 0 },
+    '#/memory': { goals: 0, autopilot: 0, orders: 0, requests: 0, budget: 0, mem: 1 },
+  };
+  for (const [hash, want] of Object.entries(cases)) {
+    const dom = navLoad({ hash });
+    await flush();
+    const from = dom.calls.length;
+    dom.byId('refresh-all-btn').fire('click');
+    await flush();
+    const got = reads(dom, from);
+    assert.equal(got.runs, 1, hash + ': runs');
+    assert.equal(got.health, 1, hash + ': health');
+    assert.equal(got.status, 1, hash + ': status');
+    for (const k of Object.keys(want)) assert.equal(got[k], want[k], hash + ': ' + k);
+  }
+});
+
+test('the tick still refreshes what the API shows, whatever page is open (for the badge)', async () => {
+  const dom = navLoad({ hash: '#/' });
+  await flush();
+  await dom.clock.advance(31000);
+  const from = dom.calls.length;
+  dom.tickNow();
+  await flush();
+  assert.equal(count(dom, from, (p) => p === '/api/selfdev/stop-requests?state=PENDING'), 1);
+  assert.equal(count(dom, from, (p) => p === '/api/selfdev/goals'), 1);
+  assert.equal(count(dom, from, isMem), 1);
+  assert.equal(count(dom, from, (p) => p === BUDGET_PATH), 1);
+});
+
+test('document.title follows the page', async () => {
+  const dom = navLoad();
+  await flush();
+  assert.equal(dom.document.title, 'Kivra \u2014 \u30bf\u30b9\u30af');
+  for (const [hash, name] of [['#/goals', '開発目標'], ['#/orders', 'order'], ['#/approvals', '承認'], ['#/budget', '予算'], ['#/memory', '記憶']]) {
+    dom.window.location.hash = hash;
+    dom.hashListeners.forEach((fn) => fn());
+    assert.equal(dom.document.title, 'Kivra \u2014 ' + name);
+  }
+});
+
+test('the skip link focuses the body without changing the page', async () => {
+  const dom = navLoad({ hash: '#/goals' });
+  await flush();
+  let prevented = false;
+  dom.byId('skip-link').fire('click', { preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(dom.byId('main').focused, true);
+  assert.equal(dom.window.location.hash, '#/goals');
 });

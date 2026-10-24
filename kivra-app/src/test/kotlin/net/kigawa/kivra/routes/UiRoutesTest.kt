@@ -125,8 +125,8 @@ class UiRoutesTest {
         }
         // No event-handler attributes set by string, e.g. setAttribute('onclick', ...).
         assertFalse(Regex("setAttribute\\(\\s*['\"]on", RegexOption.IGNORE_CASE).containsMatchIn(appJs))
-        // Only fixed attribute names are set by the helper.
-        assertFalse(Regex("setAttribute\\(\\s*['\"](?!href['\"]|type['\"])").containsMatchIn(appJs))
+        // Only fixed attribute names are set (the navigation sets aria-current and aria-label, with fixed names too).
+        assertFalse(Regex("setAttribute\\(\\s*['\"](?!href['\"]|type['\"]|aria-current['\"]|aria-label['\"])").containsMatchIn(appJs))
         // fetch targets are same-origin paths only. Every call is checked, whatever the quote style (', ", or a template literal).
         val fetchTargets = Regex("(?<!function )apiFetch\\(\\s*([^,)]*)").findAll(appJs).map { it.groupValues[1].trim() }.toList()
         assertTrue(fetchTargets.size >= 5, "fetch calls: $fetchTargets")

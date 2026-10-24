@@ -325,7 +325,6 @@
     state.sessionExpired = true;
     stopExecution();
     $('session-banner').hidden = false;
-    $('refresh-btn').disabled = true;
     updateSubmitEnabled();
     updateGoalControls();
     renderRunsStatus(Date.now());
@@ -847,13 +846,92 @@
     }
   }
 
+  // ---- Pages (the side navigation) ---------------------------------------
+  // One page per hash. gate is the section whose own hidden (set by its render function from the API's answer) decides
+  // whether the page's nav item is shown; a page without a gate is always available.
+  var PAGES = [
+    { id: 'tasks', hash: '#/', title: 'タスク', gate: null },
+    { id: 'goals', hash: '#/goals', title: '開発目標', gate: 'plans-section' },
+    { id: 'orders', hash: '#/orders', title: 'order', gate: 'orders-section' },
+    { id: 'approvals', hash: '#/approvals', title: '承認', gate: 'approval-section' },
+    { id: 'budget', hash: '#/budget', title: '予算', gate: 'budget-section' },
+    { id: 'memory', hash: '#/memory', title: '記憶', gate: 'memory-section' }
+  ];
+  // Set once a page's API answer is known, so a deep link is not sent back to #/ before the answer arrives.
+  var NAV = { settled: {} };
+
+  /** The page id for the current hash: a run detail belongs to 'tasks'; anything unknown is null (route sends it to #/). */
+  function pageIdForHash() {
+    var h = window.location.hash;
+    if (parseRoute() !== null) return 'tasks';
+    if (h === '' || h === '#') return 'tasks';
+    for (var i = 0; i < PAGES.length; i++) {
+      if (PAGES[i].hash === h) return PAGES[i].id;
+    }
+    return null;
+  }
+
+  function currentPageId() {
+    return pageIdForHash() || 'tasks';
+  }
+
+  function replaceHash(h) {
+    if (window.history && typeof window.history.replaceState === 'function') {
+      window.history.replaceState(null, '', h);
+    } else {
+      window.location.hash = h;
+    }
+  }
+
+  function pendingCount() {
+    return ORD.enabled && ORD.approver && ORD.requests !== null ? ORD.requests.length : null;
+  }
+
+  /** The page switch, the nav items and their badge, the header's count and the title. Reads the sections' own hidden. */
+  function renderNav() {
+    var cur = currentPageId();
+    var detail = parseRoute() !== null;
+    PAGES.forEach(function (p) {
+      if (p.id !== cur || p.gate === null || detail) return;
+      if ($(p.gate).hidden && NAV.settled[p.id] === true) {
+        replaceHash('#/');
+        cur = 'tasks';
+      }
+    });
+    PAGES.forEach(function (p) {
+      var shown = p.gate === null || !$(p.gate).hidden;
+      var link = $('nav-' + p.id);
+      link.hidden = !shown;
+      if (p.id === cur) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+      $('page-' + p.id).hidden = p.id !== cur;
+    });
+    var n = pendingCount();
+    var badge = $('nav-approvals-badge');
+    badge.hidden = n === null;
+    var label = n === null ? '' : '保留中の要求 ' + n + ' 件';
+    badge.textContent = n === null ? '' : String(n);
+    if (n === null) badge.removeAttribute('aria-label');
+    else badge.setAttribute('aria-label', label);
+    var head = $('header-approvals');
+    head.hidden = n === null || n < 1;
+    head.textContent = n === null ? '' : '承認待ち ' + n + ' 件';
+    if (n === null) head.removeAttribute('aria-label');
+    else head.setAttribute('aria-label', label);
+    var title = detail ? 'Run の詳細' : PAGES.filter(function (p) { return p.id === cur; })[0].title;
+    document.title = 'Kivra \u2014 ' + title;
+  }
+
   function route() {
+    if (window.location.hash === '#main') return;
     stopExecution();
+    if (pageIdForHash() === null) replaceHash('#/');
     var r = parseRoute();
     var showDetail = r !== null;
     $('view-list').hidden = showDetail;
     $('view-detail').hidden = !showDetail;
     $('detail-notice').textContent = '';
+    renderNav();
     if (showDetail) {
       loadDetail(r.id, r.all);
     } else {
@@ -1058,7 +1136,9 @@
         : { ok: false };
     } finally {
       state.budgetLoading = false;
+      NAV.settled.budget = true;
       renderBudget();
+      renderNav();
     }
   }
 
@@ -1312,7 +1392,6 @@
   }
 
   function initBudget() {
-    $('budget-refresh').addEventListener('click', refreshBudget);
     ['budget-actual', 'budget-evidence', 'budget-reason'].forEach(function (id) {
       $(id).addEventListener('input', updateBudgetControls);
     });
@@ -1425,7 +1504,6 @@
     $('goal-title').disabled = blocked;
     $('goal-body').disabled = blocked;
     $('goal-submit').disabled = blocked;
-    $('plans-refresh').disabled = state.sessionExpired;
     $('autopilot-toggle').disabled = state.sessionExpired || !state.autopilot;
     $('breaker-reset').disabled = state.sessionExpired || !state.autopilot;
   }
@@ -1607,7 +1685,14 @@
       }
     } finally {
       state.autopilotLoading = false;
+      NAV.settled.goals = true;
+      if (!state.autopilotEnabled) {
+        NAV.settled.orders = true;
+        NAV.settled.approvals = true;
+        NAV.settled.memory = true;
+      }
       renderAutopilot();
+      renderNav();
     }
   }
 
@@ -2148,7 +2233,9 @@
       }
     } finally {
       MEMS.loading = false;
+      NAV.settled.memory = true;
       renderMemory();
+      renderNav();
     }
   }
 
@@ -2156,7 +2243,6 @@
     var on = MEMS.enabled === true && state.autopilotEnabled === true && MEMS.data !== null;
     $('memory-section').hidden = !on;
     var blocked = MEMS.busy || MEMS.loading || state.sessionExpired;
-    $('memory-refresh').disabled = blocked;
     $('memory-apply').disabled = blocked;
     $('memory-dryrun').disabled = blocked;
     var dryOk = MEMS.dry !== null && MEMS.dry.key === memFilterKey() && MEMS.dry.matched >= 1;
@@ -2801,17 +2887,21 @@
     return MEMS.busy === true || $('memory-dialog').open === true;
   }
 
-  /** The header's refresh: reads again what is on the screen now, through the same functions as each section's button. */
+  /** The header's refresh: reads again the data of the page shown now (plus the runs and the health), through the same functions the timer uses. */
   async function refreshAll() {
     if (state.refreshAllRunning) return;
     state.refreshAllRunning = true;
     var btn = $('refresh-all-btn');
     btn.disabled = true;
-    var jobs = [refreshRuns, checkHealth, refreshStatus, refreshAutopilot];
-    if (state.autopilotEnabled) jobs.push(refreshGoals);
-    if (ORD.enabled) jobs.push(refreshOrders);
-    if (state.budgetVisible) jobs.push(refreshBudget);
-    if (memoryShown()) jobs.push(refreshMemory);
+    var page = currentPageId();
+    var jobs = [refreshRuns, checkHealth, refreshStatus];
+    if (page === 'goals') {
+      jobs.push(refreshAutopilot);
+      if (state.autopilotEnabled) jobs.push(refreshGoals);
+    }
+    if ((page === 'orders' || page === 'approvals') && ORD.enabled) jobs.push(refreshOrders);
+    if (page === 'budget' && state.budgetVisible) jobs.push(refreshBudget);
+    if (page === 'memory' && memoryShown()) jobs.push(refreshMemory);
     try {
       // One failure never stops the others (each function shows its own error).
       await Promise.all(jobs.map(function (fn) {
@@ -3004,7 +3094,6 @@
 
   function updateOrderControls() {
     var blocked = ORD.busy || state.sessionExpired;
-    $('orders-refresh').disabled = state.sessionExpired;
     $('order-approve-submit').disabled = blocked || ORD.pendingApprove === null;
     updateStopControls();
     renderOrderList();
@@ -3114,6 +3203,7 @@
     }
     $('approval-status').textContent = ORD.requests === null ? NOT_FETCHED_TEXT : '保留中の要求: ' + ORD.requests.length + ' 件';
     updateOrderControls();
+    renderNav();
   }
 
   async function refreshOrders() {
@@ -3124,6 +3214,8 @@
     }
     ORD.listLoading = true;
     ORD.listLastAttemptAt = Date.now();
+    // Only an answer to a real order request settles the nav; the autopilot's own answer settles it while the autopilot is off.
+    var asked = state.autopilotEnabled === true;
     try {
       // The order API answers 503 while the autopilot is off, so nothing is read until the autopilot is known to be on.
       var r = state.autopilotEnabled ? await apiFetch('/api/selfdev/orders', 'GET') : { ok: false };
@@ -3147,6 +3239,10 @@
       }
     } finally {
       ORD.listLoading = false;
+      if (asked) {
+        NAV.settled.orders = true;
+        NAV.settled.approvals = true;
+      }
       renderOrderSection();
       if (ORD.listPending) {
         ORD.listPending = false;
@@ -3504,7 +3600,6 @@
       ORD.pendingStop = null;
       updateOrderControls();
     });
-    $('orders-refresh').addEventListener('click', function () { refreshOrders(); });
     $('order-title').addEventListener('input', updateOrderCreate);
     $('order-policy').addEventListener('input', updateOrderCreate);
     $('order-create-form').addEventListener('submit', onOrderCreateSubmit);
@@ -3526,10 +3621,10 @@
     $('title').addEventListener('input', updateCounter);
     $('body').addEventListener('input', updateBodyCounter);
     $('refresh-all-btn').addEventListener('click', refreshAll);
-    $('refresh-btn').addEventListener('click', function () {
-      refreshRuns();
-      checkHealth();
-      refreshStatus();
+    // The skip link would change the hash (and so the page); focus the body instead.
+    $('skip-link').addEventListener('click', function (ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      $('main').focus();
     });
     $('scope-form').addEventListener('change', onScopeChange);
     // Re-entering the sign-in flow is done by the browser reload; the sign-in URL is never built here.
@@ -3552,8 +3647,6 @@
     $('goal-form').addEventListener('submit', onGoalSubmit);
     $('goal-title').addEventListener('input', function () { updateGoalCounters(); updateGoalControls(); });
     $('goal-body').addEventListener('input', function () { updateGoalCounters(); updateGoalControls(); });
-    $('plans-refresh').addEventListener('click', function () { refreshAutopilot(); refreshGoals(); });
-    $('memory-refresh').addEventListener('click', function () { refreshMemory(); });
     $('memory-apply').addEventListener('click', onMemoryApply);
     $('memory-prev').addEventListener('click', function () { onMemoryPage(-1); });
     $('memory-next').addEventListener('click', function () { onMemoryPage(1); });

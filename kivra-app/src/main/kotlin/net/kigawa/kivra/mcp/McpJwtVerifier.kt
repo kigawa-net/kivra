@@ -8,15 +8,19 @@ import io.ktor.http.HttpHeaders
 import java.security.interfaces.RSAPublicKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import net.kigawa.kivra.auth.MemberKind
 import net.kigawa.kivra.auth.OidcJwtConfig
 import net.kigawa.kivra.auth.OidcJwtVerifier
 import net.kigawa.kivra.auth.RequiredRole
+import net.kigawa.kivra.auth.hasRole
+import net.kigawa.kivra.auth.memberKindOf
 import net.kigawa.kivra.auth.oidcOwnerKey
 import org.slf4j.LoggerFactory
 
 /** The result of authenticating an MCP request. Only [Authenticated] carries a principal and scopes. */
 sealed interface McpAuth {
-    data class Authenticated(val principal: String, val scopes: Set<String>) : McpAuth
+    /** [kind] is [MemberKind.LEGACY_ADMIN] for [McpJwtVerifier.authenticate]; [MemberKind.MEMBER_ONLY] only from [McpJwtVerifier.authenticateMember]. */
+    data class Authenticated(val principal: String, val scopes: Set<String>, val kind: MemberKind = MemberKind.LEGACY_ADMIN) : McpAuth
 
     /** No usable Bearer token, a wrong signature, issuer, audience, expiry, role or subject. Answered with 401. */
     data object Unauthenticated : McpAuth
@@ -42,9 +46,22 @@ class McpJwtVerifier(
     private val jwks: JwkProvider,
     private val agentRole: RequiredRole? = null,
 ) {
+    init {
+        require(agentRole == null || agentRole != config.memberRole) { "KIVRA_OIDC_MEMBER_ROLE must differ from KIVRA_AGENT_REQUIRED_ROLE" }
+    }
+
     private val logger = LoggerFactory.getLogger(McpJwtVerifier::class.java)
 
-    suspend fun authenticate(headers: Headers): McpAuth {
+    /** The operator check of every MCP tool: a member-only token is rejected here, as before the member role existed. */
+    suspend fun authenticate(headers: Headers): McpAuth = authenticate(headers, allowMemberOnly = false)
+
+    /**
+     * Like [authenticate], but a token with only the member role is [McpAuth.Authenticated] with [MemberKind.MEMBER_ONLY]. No MCP route calls this
+     * yet: the tools' permission is unchanged in this change.
+     */
+    suspend fun authenticateMember(headers: Headers): McpAuth = authenticate(headers, allowMemberOnly = true)
+
+    private suspend fun authenticate(headers: Headers, allowMemberOnly: Boolean): McpAuth {
         val token = bearerToken(headers)
         if (token == null) {
             logger.info("MCP request rejected: reason=NoBearerToken")
@@ -53,7 +70,7 @@ class McpJwtVerifier(
         // JWKS may be fetched over the network, so keep the blocking work off the Netty event loop.
         return withContext(Dispatchers.IO) {
             try {
-                verify(token)
+                verify(token, allowMemberOnly)
             } catch (e: Exception) {
                 logger.info("MCP request rejected: reason={}", e.javaClass.simpleName)
                 McpAuth.Unauthenticated
@@ -61,7 +78,7 @@ class McpJwtVerifier(
         }
     }
 
-    internal fun verify(token: String): McpAuth {
+    internal fun verify(token: String, allowMemberOnly: Boolean = false): McpAuth {
         val decoded = JWT.decode(token)
         if (decoded.algorithm != "RS256") return reject("AlgorithmNotRs256")
         val key = jwks.get(decoded.keyId).publicKey as? RSAPublicKey ?: return reject("SigningKeyNotRsa")
@@ -77,21 +94,16 @@ class McpJwtVerifier(
             logger.info("MCP request refused: reason=AgentRoleRefused")
             return McpAuth.AgentRefused
         }
-        if (!hasRole(resourceAccess, RequiredRole(config.requiredClient, config.requiredRole))) return reject("RequiredRoleMissing")
+        val kind = memberKindOf(resourceAccess, config)
+        if (kind == MemberKind.NONE || (kind == MemberKind.MEMBER_ONLY && !allowMemberOnly)) return reject("RequiredRoleMissing")
         val subject = verified.subject ?: return reject("MissingSubject")
         val principal = oidcOwnerKey(config.issuer, subject) ?: return reject("InvalidSubject")
-        return McpAuth.Authenticated(principal, scopesOf(verified.getClaim("scope").asString()))
+        return McpAuth.Authenticated(principal, scopesOf(verified.getClaim("scope").asString()), kind)
     }
 
     private fun reject(reason: String): McpAuth {
         logger.info("MCP request rejected: reason={}", reason)
         return McpAuth.Unauthenticated
-    }
-
-    private fun hasRole(resourceAccess: Map<String, Any?>?, role: RequiredRole): Boolean {
-        val client = resourceAccess?.get(role.client) as? Map<*, *> ?: return false
-        val roles = client["roles"] as? List<*> ?: return false
-        return role.role in roles
     }
 
     companion object {

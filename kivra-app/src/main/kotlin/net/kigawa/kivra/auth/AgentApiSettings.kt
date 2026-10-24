@@ -87,6 +87,10 @@ class AgentApiSettings private constructor(
             require(operatorRole == null || operatorRole != role.trim()) {
                 "KIVRA_AGENT_REQUIRED_ROLE must differ from KIVRA_OIDC_REQUIRED_ROLE"
             }
+            val memberRole = env["KIVRA_OIDC_MEMBER_ROLE"]?.trim()
+            require(memberRole == null || memberRole != role.trim()) {
+                "KIVRA_AGENT_REQUIRED_ROLE must differ from KIVRA_OIDC_MEMBER_ROLE"
+            }
             return AgentAuthConfig(
                 issuer = issuer,
                 jwksUrl = jwksUrl,

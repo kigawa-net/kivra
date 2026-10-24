@@ -21,6 +21,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.auth.OidcJwtVerifier
 import net.kigawa.kivra.auth.TaskApiIdentity
+import net.kigawa.kivra.auth.MemberKind
 import net.kigawa.kivra.auth.TaskCaller
 import net.kigawa.kivra.coding.DEFAULT_MONITOR_STALE_AFTER
 import net.kigawa.kivra.coding.ExecutionEventView
@@ -80,7 +81,7 @@ internal class DefaultRunExecutionGate(
         val caller = if (verifier != null) {
             verifier.caller(headers)
         } else {
-            identity.principal(headers)?.let { TaskCaller.Member(it, operator = false) } ?: TaskCaller.Unauthenticated
+            identity.principal(headers)?.let { TaskCaller.Member(it, MemberKind.NONE) } ?: TaskCaller.Unauthenticated
         }
         return when (caller) {
             TaskCaller.Unauthenticated -> RunAccess.Unauthenticated

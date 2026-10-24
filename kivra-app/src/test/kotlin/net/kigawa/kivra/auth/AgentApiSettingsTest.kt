@@ -100,6 +100,17 @@ class AgentApiSettingsTest {
     }
 
     @Test
+    fun `the agent role must differ from the member role, and a member role alone makes the disabled API read nothing`() {
+        val same = assertFailsWith<IllegalArgumentException> {
+            AgentApiSettings.fromEnv(valid("KIVRA_OIDC_MEMBER_ROLE" to " kivra-agent:agent"))
+        }
+        assertTrue(same.message!!.contains("KIVRA_OIDC_MEMBER_ROLE"))
+        assertFalse(same.message!!.contains("kivra-agent"))
+        assertTrue(AgentApiSettings.fromEnv(valid("KIVRA_OIDC_MEMBER_ROLE" to "kivra:member")).enabled)
+        assertFalse(AgentApiSettings.fromEnv(TrapEnv(mapOf("KIVRA_OIDC_MEMBER_ROLE" to "kivra:member"))).enabled)
+    }
+
+    @Test
     fun `the azp must be a plain identifier of bounded length`() {
         assertFailsWith<IllegalArgumentException> { AgentApiSettings.fromEnv(valid("KIVRA_AGENT_AZP" to "x".repeat(129))) }
         assertFailsWith<IllegalArgumentException> { AgentApiSettings.fromEnv(valid("KIVRA_AGENT_AZP" to "a\nb")) }

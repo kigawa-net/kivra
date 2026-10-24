@@ -31,3 +31,27 @@ sealed interface OperatorAuth {
 interface OperatorAuthenticator {
     suspend fun authenticate(headers: Headers): OperatorAuth
 }
+
+/**
+ * The result of authenticating a member request ([OidcJwtVerifier.authenticateMember]): an operator or a member-only token. Only
+ * [Authenticated] carries a principal. Authorization is a separate decision.
+ */
+sealed interface MemberAuth {
+    data class Authenticated(val principal: String, val kind: MemberKind) : MemberAuth
+    data object Unauthenticated : MemberAuth
+    data object AgentRefused : MemberAuth
+}
+
+/** Whether `resource_access.<client>.roles` lists the role. Shared by every verifier, so the rule cannot drift. */
+internal fun hasRole(resourceAccess: Map<String, Any?>?, role: RequiredRole): Boolean {
+    val client = resourceAccess?.get(role.client) as? Map<*, *> ?: return false
+    val roles = client["roles"] as? List<*> ?: return false
+    return role.role in roles
+}
+
+/** The role kind of a token's `resource_access`: the operator role wins, then the optional member role, else none. */
+internal fun memberKindOf(resourceAccess: Map<String, Any?>?, config: OidcJwtConfig): MemberKind = when {
+    hasRole(resourceAccess, RequiredRole(config.requiredClient, config.requiredRole)) -> MemberKind.LEGACY_ADMIN
+    config.memberRole != null && hasRole(resourceAccess, config.memberRole) -> MemberKind.MEMBER_ONLY
+    else -> MemberKind.NONE
+}

@@ -34,6 +34,7 @@ object McpTestTokens {
         key: KeyPair = OidcTestTokens.signingKey,
         algorithm: Algorithm? = null,
         extraClaims: Map<String, Any> = emptyMap(),
+        resourceAccess: Map<String, Map<String, List<String>>>? = null,
     ): String {
         val now = Instant.now()
         val builder = JWT.create()
@@ -42,7 +43,7 @@ object McpTestTokens {
             .withAudience(audience)
             .withSubject(subject)
             .withExpiresAt(Date.from(now.plusSeconds(expiresInSeconds)))
-            .withClaim("resource_access", mapOf(client to mapOf("roles" to roles)))
+            .withClaim("resource_access", resourceAccess ?: mapOf(client to mapOf("roles" to roles)))
         scope?.let { builder.withClaim("scope", it) }
         extraClaims.forEach { (k, v) -> builder.withClaim(k, v.toString()) }
         return builder.sign(algorithm ?: OidcTestTokens.rs256(key))

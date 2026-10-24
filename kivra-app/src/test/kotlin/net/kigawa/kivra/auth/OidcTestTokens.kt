@@ -57,6 +57,7 @@ object OidcTestTokens {
         expiresInSeconds: Long = 300,
         notBeforeInSeconds: Long? = null,
         algorithm: Algorithm? = null,
+        resourceAccess: Map<String, Map<String, List<String>>>? = null,
     ): String {
         val now = Instant.now()
         val builder = JWT.create()
@@ -69,7 +70,7 @@ object OidcTestTokens {
         email?.let { builder.withClaim("email", it) }
         emailVerified?.let { builder.withClaim("email_verified", it) }
         preferredUsername?.let { builder.withClaim("preferred_username", it) }
-        builder.withClaim("resource_access", mapOf(client to mapOf("roles" to roles)))
+        builder.withClaim("resource_access", resourceAccess ?: mapOf(client to mapOf("roles" to roles)))
         return builder.sign(algorithm ?: rs256(key))
     }
 

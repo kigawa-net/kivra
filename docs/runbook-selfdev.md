@@ -2204,3 +2204,46 @@ OAuth の登録方式(固定の public client、PKCE S256)は PR 2 で決める�
 ```
 KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 ```
+
+## 10. 担当(ロール)と権限管理(ADR 0020)
+
+**未実装(ADR 0020 の PR 1〜7 で実装)**。このセクションは予定の運用手順だけを書く。実装の前は、現行の `admin-panel:admin` と `KIVRA_SELFDEV_AI_PRINCIPAL` の拒否リストが、そのまま権限の全部である。
+
+### 10.1 環境変数(すべて未実装)
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `KIVRA_SELFDEV_ROLES_MODE` | `off` | `off` は現状と同じ。`shadow` は拒否せずログだけ。`enforce` は拒否する(未実装) |
+| `KIVRA_SELFDEV_ROLES_DEFAULT` | `operator`(最終的に `none`) | `admin-panel:admin` で担当に紐付けがない主体の扱い(未実装) |
+| `KIVRA_OIDC_MEMBER_ROLE` | 未設定 | 認証として受け付ける member ロール(`<client>:<role>`)(未実装) |
+| `KIVRA_SELFDEV_ROLES_RECOVER_ADMIN` | 未設定 | ADMIN を失ったときの一時的な復旧フラグ。復旧後は外す(未実装) |
+
+`KIVRA_SELFDEV_ROOT_APPROVER` は、導入後は、起動時の初期化の入力になる(担当と紐付けが無いときだけ ADMIN の担当を作る)。ADMIN(人)は停止の承認・却下もできる。APPROVER は、承認だけを任せたい人向けのロールである。AI は承認できない。`KIVRA_SELFDEV_AI_PRINCIPAL` は、全期間を通じて維持し、常に AI として扱う。
+
+### 10.2 有効化の順序(予定)
+
+1. PR 1〜6 をマージし、`KIVRA_SELFDEV_ROLES_MODE` を設定しないまま(`off`)デプロイする。挙動は変わらないことを確認する。
+2. 起動時の初期化で、承認者(ADMIN)と AI の担当ができていることを、`/ui` の管理画面(または担当の一覧 API)で確認する。ほかの運用者と承認者の担当を、ADMIN(人)が作り、`sub` を紐付ける。
+3. `shadow` にして再起動する。次の期間、ログの「拒否したはず」を確認する。拒否されるはずのない操作(運用者の通常の操作)が拒否されるとなっていたら、担当の紐付けを直す。
+4. 問題がなければ `enforce` にして再起動する。問題があれば `off` に戻す(再起動だけで元に戻る)。
+5. 担当の紐付けがすべて済んだら、`KIVRA_SELFDEV_ROLES_DEFAULT` を `none` にする。
+
+Keycloak と k8s の変更(PR 7)は、ユーザーの承認と作業が要る。
+
+### 10.3 shadow の確認(予定)
+
+- ログは、ロガーの固定の文言で出し、主体は参照名(ハッシュ)だけ。owner key と表示名は出ない。
+- 見るもの: 操作の種類ごとの「拒否したはず」の件数、AI の主体が許可リスト外の操作をしていないか、紐付けのない主体が操作していないか。
+
+### 10.4 AI ユーザーの作り方(概要。予定)
+
+1. Keycloak に AI 用のユーザーを作り、member ロール(`KIVRA_OIDC_MEMBER_ROLE` の値)だけを付ける。`admin-panel:admin` は付けない。
+2. ADMIN(人)が、ロール AI の担当を作り、そのユーザーの `sub` を紐付ける。
+3. oauth2-proxy が `/ui` に AI を入れるように、`--allowed-role` を繰り返し指定する。
+4. AI のユーザーが、読み取りと停止要求ができ、承認・作成・解除が 403 になることを確認する。
+
+### 10.5 ADMIN を失った場合の復旧(予定)
+
+- 担当の行が無いだけなら、再起動で、起動時の初期化が `KIVRA_SELFDEV_ROOT_APPROVER` の主体の ADMIN を作る。
+- 行が無効(DISABLED)なら、起動時に大きくエラーが出る。`KIVRA_SELFDEV_ROLES_RECOVER_ADMIN` を一時的に設定して再起動すると、初期化した主体だけが再有効化される。復旧したら、このフラグを外して再起動する。
+- どうしても戻せないときは、`KIVRA_SELFDEV_ROLES_MODE=off` で再起動すると、従来の権限(`admin-panel:admin`)に戻る。

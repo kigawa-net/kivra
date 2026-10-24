@@ -170,7 +170,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     } else {
         null
     }
-    // The roles (ADR 0020, PR 3a/3b): off by default, and then the assignee store is not created or read. The order, goal and memory routes use the guard.
+    // The roles (ADR 0020, PR 3a/3b/3c): off by default, and then the assignee store is not created or read. The order routes, the goal and memory routes (3b) and the REST routes of PR 3c (Task API, selfdev, budget and run admin, run views, execution) use the guard.
     val rolesSettings = RolesSettings.fromEnv(env, orderSettings, aiPrincipal)
     val assigneeRepo = if (rolesSettings.mode == PermissionMode.OFF) null else SelfDevAssigneeRepository(database)
     // Seeding runs before the permission service is built. A failure fails the startup: with the roles on, an unseeded store can make a stop unapprovable.
@@ -335,19 +335,19 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureDevTaskSubmitRoutes()
         }
         if (taskApiIdentity != null) {
-            configureTaskApiRoutes(runs, taskApiIdentity, selfDevSettings.config?.repo)
-            configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentity)
+            configureTaskApiRoutes(runs, taskApiIdentity, selfDevSettings.config?.repo, permissionGuard)
+            configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentity, permissionGuard)
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()
-            configureBudgetAdminRoutes(budgetStore, taskApiIdentity, fx = fxSettings, operatorView = budgetStore)
-            configureSelfDevAdminRoutes(runs, taskApiIdentity)
-            configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings)
+            configureBudgetAdminRoutes(budgetStore, taskApiIdentity, fx = fxSettings, operatorView = budgetStore, guard = permissionGuard)
+            configureSelfDevAdminRoutes(runs, taskApiIdentity, permissionGuard)
+            configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings, permissionGuard)
             if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
             if (memoryRoutes != null) configureSelfDevMemoryRoutes(memoryRoutes)
             if (orderRoutes != null) configureSelfDevOrderRoutes(orderRoutes)
-            executionDeps?.let { configureRunExecutionRoutes(it) }
+            executionDeps?.let { configureRunExecutionRoutes(it.withGuard(permissionGuard)) }
         }
-        if (selfDevParts != null) configureSelfDevRoutes(selfDevParts.routes)
+        if (selfDevParts != null) configureSelfDevRoutes(selfDevParts.routes.withGuard(permissionGuard))
         registerMcpRoutes(mcpDeps)
         if (agentParts != null) configureAgentApiRoutes(agentParts)
         configureObservabilityRoutes(metrics, config.metrics)

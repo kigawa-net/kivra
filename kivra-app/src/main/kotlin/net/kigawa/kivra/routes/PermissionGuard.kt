@@ -9,6 +9,7 @@ import net.kigawa.kivra.auth.PermissionMode
 import net.kigawa.kivra.auth.PermissionService
 import net.kigawa.kivra.auth.PrincipalAccess
 import net.kigawa.kivra.auth.Role
+import net.kigawa.kivra.auth.RolesDefault
 import org.slf4j.LoggerFactory
 
 /*
@@ -137,3 +138,14 @@ class PermissionGuard(
         }
     }
 }
+
+/** The guard of a route that is not wired to the roles: OFF, no store. Today's rules, for every caller. */
+internal fun offPermissionGuard(): PermissionGuard =
+    PermissionGuard(PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, null, null, null))
+
+/**
+ * The check of a REST route that authenticates through the Task API identity (ADR 0020, PR 3c). The caller is already authenticated, so
+ * it is an operator by today's rule (legacyAdmin). [route] is a fixed name. Call it after the authentication and before anything else.
+ */
+internal fun PermissionGuard.permits(principal: String, permission: Permission, route: String): Boolean =
+    check(principal, legacyAdmin = true, permission = permission, route = route) is GuardResult.Allow

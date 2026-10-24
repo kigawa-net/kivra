@@ -30,6 +30,8 @@
 
 7. **権限の細分化: `READ_TEXT` と `GOAL_STOP`**(PR 3a)。理由: 現状の AI は、記憶の閲覧、Goal の題名の取得、Goal の停止を、拒否されている。承認済みの表(AI は読み取りと order の停止要求だけ)の「読み取り」と「停止要求」を、そのまま写すと、enforce にした時に AI の権限が**広がってしまう**。そこで、運用者の文章を含む読み取りを `READ_TEXT`、Goal の停止を `GOAL_STOP` として分け、ADMIN と OPERATOR だけに付ける(APPROVER、AI、VIEWER は持たない)。`READ`(order の一覧・詳細、run など)と、order の停止要求(`STOP_REQUEST`)は、表のままである。off のときの AI の権限(`legacyAccess`)は、今の挙動のまま(`READ_TEXT` と `GOAL_STOP` を持たない)。これは「現状の AI の拒否を保つための細分化」であり、AI に新しい権限を与えるものではない。 実装状況: PR 3a で order のルート、PR 3b で Goal のルートと記憶のルートが `PermissionGuard` の対象になった(`off` の判定は不変)。
 
+実装状況: PR 3c で、これまで権限の検査が無かった REST のルート(Task API、`/api/selfdev/*`、予算と run の解除、run の一覧と詳細、実行の監視)にも、同じ表(READ、SPEND_START、BUDGET_OVERRIDE)を適用した。`off` では AI にも開いたままで、`enforce` でだけ、AI の予算の解除と run の解除を閉じる。
+
 ### 1. データモデル(Flyway V33、expand のみ。既存の移行は編集しない)
 
 DDL のスケッチ(実装 PR 1 で確定する。型や索引は実装で調整してよい)。

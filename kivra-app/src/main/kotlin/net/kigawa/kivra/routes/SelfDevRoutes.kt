@@ -8,6 +8,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.ActiveSelfDevLimitException
@@ -33,7 +34,11 @@ internal class SelfDevRouteDeps(
     val repo: RepoRef,
     val maxActiveRuns: Int,
     val github: GitHubPort,
-)
+    /** The permission entrance. The default is the roles off and no store: today's rules. */
+    val guard: PermissionGuard = offPermissionGuard(),
+) {
+    fun withGuard(guard: PermissionGuard) = SelfDevRouteDeps(runs, identity, repo, maxActiveRuns, github, guard)
+}
 
 /**
  * Body of `POST /api/selfdev/tasks`. Strict: any other field (`target`, `repo`, `branch`, ...) is rejected with 400 and never reflected.
@@ -81,6 +86,10 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
             call.respond(HttpStatusCode.Unauthorized, SelfDevError("unauthorized"))
             return@post
         }
+        if (!deps.guard.permits(principal, Permission.SPEND_START, "selfdev_submit")) {
+            call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
+            return@post
+        }
         if (!call.requireJsonSameOrigin()) return@post
         val request = try {
             strictJson.decodeFromString(SubmitSelfDevTaskRequest.serializer(), call.receiveText())
@@ -120,6 +129,10 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
             call.respond(HttpStatusCode.Unauthorized, SelfDevError("unauthorized"))
             return@get
         }
+        if (!deps.guard.permits(principal, Permission.READ, "selfdev_run_get")) {
+            call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
+            return@get
+        }
         val id = call.parameters["id"]?.takeIf { RUN_ID_SHAPE.matches(it) }
         val run = id?.let { deps.runs.getTask(RunId(it), principal) }?.takeIf { it.taskId.startsWith(SELF_DEV_TASK_PREFIX) }
         if (run == null) {
@@ -140,6 +153,10 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
         val principal = deps.identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, SelfDevError("unauthorized"))
+            return@get
+        }
+        if (!deps.guard.permits(principal, Permission.READ, "selfdev_run_list")) {
+            call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
             return@get
         }
         call.respond(deps.runs.listTasks(principal, limit = LIST_LIMIT, selfDev = true).map { it.toSelfDevResponse() })

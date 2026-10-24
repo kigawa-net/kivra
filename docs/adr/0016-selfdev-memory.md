@@ -341,7 +341,7 @@
   (`OPERATOR_SKIPPED`、90 日)、(c) 同じ identity の直近 2 件の結果が `AUTO_SCOPE_EXCEEDED`(14 日)を数え、件数だけを
   `selfdev_memory_events`(`kind = SHADOW_SUPPRESS`、`code` は規則名、`count_value` は件数)に残す。計画は変えない・拒否しない・再試行しない。
   環境変数 `KIVRA_SELFDEV_MEMORY_SUPPRESS_SHADOW_ENABLED`(既定 `false`。記録の有効化の下でだけ読む)。有効化の抑止のフラグは作らない。
-- 移行: V32(expand のみ。イベントの種類の CHECK に `SHADOW_SUPPRESS` を足す)。
+- 移行: V32(expand のみ。イベントの種類の CHECK に `SHADOW_SUPPRESS` を足す)。shadow が off の間は、`TASK_FACT`(code `PLAN_PROPOSED`)も書かない。
 - 読むもの: identity と固定の code と時刻だけ(`SHADOW-READ` の範囲に、文章の列を書かない。アーキテクチャテストで検査)。
 - 実装の決めたこと(ADR の記述の補足):
   - (a) の「直近の計画」は、同じ Goal の計画ではなく、Goal をまたいで新しい方から 3 件、14 日以内とした(ADR は範囲を定めていない。

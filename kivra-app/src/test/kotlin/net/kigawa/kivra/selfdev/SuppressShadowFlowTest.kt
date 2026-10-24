@@ -55,8 +55,8 @@ class SuppressShadowFlowTest {
                     listOf(it.ordinal.toString(), it.state.name, it.title, it.targetPaths.joinToString(","), it.requiresApproval.toString())
                 }
                 assertEquals(1, observed.getValue(shadowOn).size)
-                // Each stored task has one PLAN_PROPOSED fact (with its identity); the plan has its PLAN_FACT.
-                assertEquals(2, db.count("selfdev_memory_records", "kind = 'TASK_FACT' AND code = 'PLAN_PROPOSED'"))
+                // The per-task PLAN_PROPOSED facts are written only with the shadow on; the plan's PLAN_FACT is always written.
+                assertEquals(if (shadowOn) 2 else 0, db.count("selfdev_memory_records", "kind = 'TASK_FACT' AND code = 'PLAN_PROPOSED'"))
                 assertEquals(2, db.count("selfdev_memory_records", "kind = 'PLAN_FACT' AND code = 'PLAN_PROPOSED'"))
                 assertEquals(if (shadowOn) 1 else 0, shadowRows(db, "DUPLICATE_RECENT_PLAN"))
                 assertEquals(if (shadowOn) 1 else 0, db.count("selfdev_memory_events", "kind = 'SHADOW_SUPPRESS' AND count_value = 1"))

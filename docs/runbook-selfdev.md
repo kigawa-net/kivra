@@ -1421,6 +1421,7 @@ dev での有効化の手順は §7.5。
   - 規則ごとの件数: `SELECT code, COUNT(*), SUM(count_value) FROM selfdev_memory_events WHERE kind = 'SHADOW_SUPPRESS' GROUP BY code;`
     (`COUNT(*)` は計画の数、`SUM` はタスクの数)。
 - 移行: V32 は、イベントの種類の CHECK に `SHADOW_SUPPRESS` を足すだけ(expand)。既存の行は変わらない。
+- shadow が off の間は、`TASK_FACT`(code `PLAN_PROPOSED`)も書かない。P1 の書き込みは、この PR の前と同じになる。
 - 止め方: `KIVRA_SELFDEV_MEMORY_SUPPRESS_SHADOW_ENABLED=false` にして再起動する(既定と同じ。数えるのをやめるだけで、計画には影響しない)。
   記録の保存を止める場合は 7.2d の `KIVRA_SELFDEV_MEMORY_ENABLED=false`。
 - 確認すること(P3 の次の段階へ進む前。ADR 0016 11 節): shadow の 2 週間で、「抑止したはずの計画」を運用者が 20 件サンプルで見て、

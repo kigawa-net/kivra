@@ -185,7 +185,8 @@ class AutopilotPlanner(
                 // The shadow runs first, so the new plan's own facts are not among the "recent plans" it compares with.
                 suppress.planStored(goalId, result.plan.planId, check.tasks.map { SelfDevMemoryRecorder.identityOf(it.targetPaths) })
                 memory.planProposed(goalId, result.plan.planId, result.tasks.size)
-                result.tasks.forEach { memory.taskProposed(goalId, it) }
+                // Written only with the shadow on (ADR 0016 P3): with it off, the P1 writes are exactly what they were before.
+                if (suppress.enabled) result.tasks.forEach { memory.taskProposed(goalId, it) }
                 PlanAttempt.Proposed(result.tasks.size, queued)
             }
         }

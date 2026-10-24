@@ -144,7 +144,7 @@ class McpRolesTest {
 
     /** The messages of the log lines written while [block] runs, by logger name (null: every logger). */
     private fun capture(name: String? = null, block: () -> Unit): List<String> {
-        val logger = LoggerFactory.getLogger(name ?: org.slf4j.Logger.ROOT_LOGGER_NAME) as Logger
+        val logger = LoggerFactory.getLogger(name ?: KIVRA_LOGGERS) as Logger
         val appender = ListAppender<ILoggingEvent>().also { it.start() }
         logger.addAppender(appender)
         try {
@@ -425,3 +425,6 @@ class McpRolesTest {
         for (tool in tools) assertEquals(tool.name in aiRefused, denied(call(d, AI_PRINCIPAL, tool)), tool.name)
     }
 }
+
+/** The loggers of kivra itself. Library loggers (JDBC driver, Hikari, Exposed) can print parameter values at TRACE/DEBUG, so they are not scanned. */
+private const val KIVRA_LOGGERS = "net.kigawa.kivra"

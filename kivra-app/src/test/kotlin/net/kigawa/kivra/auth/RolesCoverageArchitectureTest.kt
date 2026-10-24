@@ -107,6 +107,18 @@ class RolesCoverageArchitectureTest {
         "GET /api/selfdev/memory" to Permission.READ_TEXT,
         "POST /api/selfdev/memory/{id}/delete" to Permission.GOAL_WRITE,
         "POST /api/selfdev/memory/delete-by-condition" to Permission.GOAL_WRITE,
+        // The assignee admin API (PR T3): ASSIGNEE_MANAGE, judged by the effective access in SHADOW too, and 503 with the roles off.
+        "GET /api/selfdev/assignees" to Permission.ASSIGNEE_MANAGE,
+        "POST /api/selfdev/assignees" to Permission.ASSIGNEE_MANAGE,
+        "GET /api/selfdev/assignees/{id}/members" to Permission.ASSIGNEE_MANAGE,
+        "POST /api/selfdev/assignees/{id}/role" to Permission.ASSIGNEE_MANAGE,
+        "POST /api/selfdev/assignees/{id}/disable" to Permission.ASSIGNEE_MANAGE,
+        "POST /api/selfdev/assignees/{id}/enable" to Permission.ASSIGNEE_MANAGE,
+        "POST /api/selfdev/assignees/{id}/members" to Permission.ASSIGNEE_MANAGE,
+        "DELETE /api/selfdev/assignees/{id}/members/{memberRef}" to Permission.ASSIGNEE_MANAGE,
+        "POST /api/selfdev/assignees/{id}/tokens" to Permission.ASSIGNEE_MANAGE,
+        "GET /api/selfdev/assignees/{id}/tokens" to Permission.ASSIGNEE_MANAGE,
+        "POST /api/selfdev/assignees/{id}/tokens/{tokenRef}/revoke" to Permission.ASSIGNEE_MANAGE,
     )
 
     /** Routes that need no permission, on purpose: public pages and probes, the agent's own API (its own token), and the dev-only routes. */
@@ -120,6 +132,8 @@ class RolesCoverageArchitectureTest {
             "POST /api/agent/v1/attempts/{attemptId}/events",
             "GET /api/agent/v1/attempts/{attemptId}/status",
         )) put(r, "AGENT")
+        // /me tells every authenticated operator what the UI may show (role and permissions, no identifier). It must answer with no role too.
+        put("GET /api/selfdev/me", "ME")
         for (r in listOf("GET /api/dev/tasks", "GET /api/dev/runs/preview", "POST /api/dev/tasks", "GET /api/dev/runs/{id}")) put(r, "DEV")
     }
 
@@ -227,6 +241,8 @@ class RolesCoverageArchitectureTest {
         "routes/SelfDevOrderRoutes.kt" to 1,
         "routes/SelfDevGoalRoutes.kt" to 1,
         "routes/SelfDevMemoryRoutes.kt" to 1,
+        // PR T3: the assignee admin API and /me share one `operators.authenticate(` (the roles' routes, then `guard.resolve`).
+        "routes/SelfDevAssigneeRoutes.kt" to 1,
         "routes/TaskApiRoutes.kt" to 3,
         "routes/OperationApiRoutes.kt" to 1,
         "routes/RunViewRoutes.kt" to 3,

@@ -2207,7 +2207,7 @@ KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 
 ## 10. 担当(ロール)と権限管理(ADR 0020)
 
-**一部実装(ADR 0020 の PR 1〜7 のうち、起動時の初期化まで)**。このセクションの多くは予定の運用手順である。実装の前は、現行の `admin-panel:admin` と `KIVRA_SELFDEV_AI_PRINCIPAL` の拒否リストが、そのまま権限の全部である。
+**一部実装(ADR 0020 の PR 1〜7 のうち、起動時の初期化まで。加えて、追補の T1・T2・T3)**。このセクションの多くは予定の運用手順である。実装の前は、現行の `admin-panel:admin` と `KIVRA_SELFDEV_AI_PRINCIPAL` の拒否リストが、そのまま権限の全部である。
 
 ### 10.1 環境変数(すべて未実装)
 
@@ -2255,9 +2255,9 @@ Keycloak と k8s の変更(PR 7)は、ユーザーの承認と作業が要る。
 3. oauth2-proxy が `/ui` に AI を入れるように、`--allowed-role` を繰り返し指定する。
 4. AI のユーザーが、読み取りと停止要求ができ、承認・作成・解除が 403 になることを確認する。
 
-### 10.4b AI の担当の作り方(予定。未実装。PR T1〜T4 で実装)
+### 10.4b AI の担当の作り方(実装状況: T1・T2・T3 実装済み。T4 の UI は未実装)
 
-ADR 0020 の追補(2026-10-25)の方針である。**AI の担当は Keycloak を使わない**。kivra の内部だけで、担当ごとの API トークンを作る。§10.4 の Keycloak の member ロールを使う手順は、AI の経路としては採用しない(置き換え)。**T2(MCP の入口の検証)は実装済み**(`ROLES_MODE` が shadow か enforce のときだけ有効。shadow ではトークンの主体は全ツール拒否で、実用は enforce。失敗が 1 分に 30 回を超えると、その Pod は、有効なトークンも含めて、窓の終わりまで 429 + `Retry-After`。ログは固定コードだけ)。発行・失効・一覧(T3)と UI(T4)は未実装で、PR T1(V34 とリポジトリ)、T2(MCP の入口の検証)、T3(管理 API)、T4(UI の管理画面)で実装する。各 PR は、`KIVRA_SELFDEV_ROLES_MODE` が `off`(既定)のときは、挙動が変わらない。
+ADR 0020 の追補(2026-10-25)の方針である。**AI の担当は Keycloak を使わない**。kivra の内部だけで、担当ごとの API トークンを作る。§10.4 の Keycloak の member ロールを使う手順は、AI の経路としては採用しない(置き換え)。**T1(V34 とリポジトリ)、T2(MCP の入口の検証)、T3(管理 API と `GET /api/selfdev/me`)は実装済み**。T4(UI の管理画面)は未実装。T2 の入口は `ROLES_MODE` が shadow か enforce のときだけ有効で、shadow ではトークンの主体は全ツール拒否(実用は enforce)。固定のロール別 scope は `TOKEN_ROLE_SCOPES`。失敗が 1 分に 30 回を超えると、その Pod は、有効なトークンも含めて、窓の終わりまで 429 + `Retry-After`。ログは固定コードだけ。各 PR は、`KIVRA_SELFDEV_ROLES_MODE` が `off`(既定)のときは、挙動が変わらない。
 
 仕様の要点:
 
@@ -2272,10 +2272,48 @@ ADR 0020 の追補(2026-10-25)の方針である。**AI の担当は Keycloak �
 
 環境変数: 新しいものは無い。k8s で変えるのは `KIVRA_SELFDEV_ROLES_MODE` だけ(`shadow` → `enforce`)。Keycloak の変更は要らない。`KIVRA_SELFDEV_AI_PRINCIPAL` は、DB の AI の担当で足りるので不要になる(残してもよい)。トークンの有効期限の既定・上限は、T1〜T3 で設定を足すか固定値にするかを決める(実装時に、この表を更新する)。
 
-運用手順(予定):
+### 管理 API(T3)
 
-1. **担当を作る**(ADMIN の人、T3 の管理 API または T4 の画面)。ロールは AI(読み取り専用の用途は VIEWER)にする。
-2. **トークンを発行する**。ADMIN の人が、担当を選んで発行する。返った平文を、その場で、MCP クライアントの設定か、シークレットの保管庫に入れる。平文は、チャット、チケット、ログ、リポジトリに貼らない。
+認証は既存の運用者の認証(OIDC の `admin-panel:admin`)のままで、加えて、`KIVRA_SELFDEV_ROLES_MODE` が `shadow` か `enforce` で、呼ぶ人が **ADMIN の担当に紐付いている**ことが要る(権限 `ASSIGNEE_MANAGE`)。**`shadow` でも、DB の担当の権限で判定する**(現行の規則では、`ASSIGNEE_MANAGE` を持つ人がいないので、`shadow` で最初の AI の担当を作れなくなるため)。`off` のときは 503(`ROLES_DISABLED`)で、DB は読まない。AI の担当(環境変数の AI も DB の AI も)は、常に 403。書き込みは、`Content-Type: application/json` が要り、別オリジンからは拒否される(CSRF)。書き込みは、主体ごとに 1 分 5 件まで(429、`RATE_LIMITED`)。拒否は、固定コード(`{"error":"...","code":"..."}`)。応答は、すべて `Cache-Control: no-store`。応答に owner key は出ない(人は `memberRef`(ハッシュの参照名)だけ)。ログに、表示名・`sub`・owner key・トークン・ハッシュは出ない。
+
+| メソッド・パス | 内容 |
+|---|---|
+| `GET /api/selfdev/me` | 認証済みの運用者なら誰でも(`off` でも 200)。`{"mode","role","permissions","source"}`。実効の権限(`off` は現行の規則)。担当 ID・owner key・表示名は返さない |
+| `GET /api/selfdev/assignees` | 担当の一覧(`assigneeId`、`displayName`、`role`、`state`、`version`、`memberCount`(人だけ)、`activeTokenCount`) |
+| `POST /api/selfdev/assignees` | `{"displayName","role"}`。`role` は `AI`/`VIEWER`/`OPERATOR`/`APPROVER`/`ADMIN`。201 |
+| `POST /api/selfdev/assignees/{id}/role` | `{"role","version"}`。CAS。`STALE_VERSION`(409)、`SELF_CHANGE`、`LAST_ADMIN`、`NO_CHANGE`(409)。ロール変更は、その担当のトークンを全部失効する |
+| `POST /api/selfdev/assignees/{id}/disable`、`.../enable` | `{"version"}`。無効化は、その担当のトークンを全部失効する(有効化では戻らない) |
+| `GET /api/selfdev/assignees/{id}/members` | 紐付いている人の `memberRef` の一覧 |
+| `POST /api/selfdev/assignees/{id}/members` | `{"sub"}`。Keycloak の `sub`(`[A-Za-z0-9._:-]{1,255}`)。サーバーが `KIVRA_OIDC_ISSUER` で owner key を組み立てて紐付ける。issuer が未設定なら 503(`BINDING_UNAVAILABLE`)。201 と `{"memberRef"}`。紐付け済みなら `OWNER_KEY_ALREADY_BOUND`(409) |
+| `DELETE /api/selfdev/assignees/{id}/members/{memberRef}` | 解除。204。最後の ADMIN の紐付けは `LAST_ADMIN`(409) |
+| `POST /api/selfdev/assignees/{id}/tokens` | `{"ttlDays"?}`(既定 90、1〜365。本文は空でもよい)。201 と `{"token","tokenRef","expiresAt"}`。**平文は、この応答だけ**(`Cache-Control: no-store`、`Pragma: no-cache`)。人のロール(ADMIN/OPERATOR/APPROVER)の担当は `ROLE_NOT_ALLOWED`(409)、有効なトークンが 2 つあると `TOO_MANY_ACTIVE`(409) |
+| `GET /api/selfdev/assignees/{id}/tokens` | `tokenRef`、`status`(`ACTIVE`/`REVOKED`/`EXPIRED`)、`createdBy`(参照名)、`createdAt`、`expiresAt`。トークンとハッシュは返さない |
+| `POST /api/selfdev/assignees/{id}/tokens/{tokenRef}/revoke` | 失効。204。別の担当のトークンは 404 |
+
+運用手順:
+
+1. **担当を作る**(ADMIN の人)。ロールは AI(読み取り専用の用途は VIEWER)にする。`<operator-token>` は、`admin-panel:admin` を持つ Keycloak のアクセストークン(他の運用者向け API と同じもの)、`<kivra の URL>` は実際の値に置き換える。値を文書やシェルの履歴に残さない。
+
+   ```
+   curl -sS -X POST <kivra の URL>/api/selfdev/assignees \
+     -H "Authorization: Bearer <operator-token>" -H "Content-Type: application/json" \
+     -d '{"displayName":"claude-code","role":"AI"}'
+   # => 201 {"assigneeId":"<assigneeId>", ...}
+   ```
+
+2. **トークンを発行する**。ADMIN の人が、担当を指定して発行する。返った平文を、その場で、MCP クライアントの設定か、シークレットの保管庫に入れる。平文は、チャット、チケット、ログ、リポジトリに貼らない。失くしたら、失効して発行し直す。
+
+   ```
+   curl -sS -X POST <kivra の URL>/api/selfdev/assignees/<assigneeId>/tokens \
+     -H "Authorization: Bearer <operator-token>" -H "Content-Type: application/json" \
+     -d '{"ttlDays":90}'
+   # => 201 {"token":"<token>","tokenRef":"<tokenRef>","expiresAt":"..."}
+   ```
+
+   失効は、`POST <kivra の URL>/api/selfdev/assignees/<assigneeId>/tokens/<tokenRef>/revoke`(本文は空か `{}`)。
+
+   人を ADMIN などの担当に紐付けるときは、`POST .../members` に Keycloak の `sub` を渡す。最初の ADMIN は、`KIVRA_SELFDEV_ROOT_APPROVER` の起動時の初期化が作る(§10.5)。
+
 3. **MCP クライアントを設定する**(例。`<kivra の URL>` と `<token>` は、実際の値に置き換える。値を文書やシェルの履歴に残さない)。
 
    ```

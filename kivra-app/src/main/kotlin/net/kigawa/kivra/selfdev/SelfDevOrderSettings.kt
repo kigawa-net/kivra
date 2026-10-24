@@ -110,7 +110,7 @@ private fun boundedInt(env: Map<String, String>, name: String, default: Int, ran
 /**
  * A switch that is exactly `true` or `false`; unset is [default]. Any other value is a startup failure, and the message never shows the value.
  */
-private fun boolFlag(env: Map<String, String>, name: String, default: Boolean): Boolean = when (env[name]?.trim()) {
+internal fun boolFlag(env: Map<String, String>, name: String, default: Boolean): Boolean = when (env[name]?.trim()) {
     null -> default
     "true" -> true
     "false" -> false
@@ -121,7 +121,7 @@ private fun boolFlag(env: Map<String, String>, name: String, default: Boolean): 
 private val OWNER_KEY_SHAPE = Regex("[0-9]{1,4}:.+:.+")
 private const val MAX_OWNER_KEY_LENGTH = 255
 
-private fun isOwnerKeyShape(value: String): Boolean =
+internal fun isOwnerKeyShape(value: String): Boolean =
     value.length <= MAX_OWNER_KEY_LENGTH && OWNER_KEY_SHAPE.matches(value) && value.none { it.isISOControl() }
 
 /**

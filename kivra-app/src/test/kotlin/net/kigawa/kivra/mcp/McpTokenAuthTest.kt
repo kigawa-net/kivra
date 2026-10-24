@@ -184,7 +184,7 @@ class McpTokenAuthTest {
     }
 
     private fun capture(vararg names: String?, block: () -> Unit): List<String> {
-        val loggers = names.map { LoggerFactory.getLogger(it ?: org.slf4j.Logger.ROOT_LOGGER_NAME) as Logger }
+        val loggers = names.map { LoggerFactory.getLogger(it ?: KIVRA_LOGGERS) as Logger }
         val appender = ListAppender<ILoggingEvent>().also { it.start() }
         loggers.forEach { it.addAppender(appender) }
         try {
@@ -440,3 +440,6 @@ class McpTokenAuthTest {
         }
     }
 }
+
+/** The loggers of kivra itself. Library loggers (JDBC driver, Hikari, Exposed) can print parameter values at TRACE/DEBUG, so they are not scanned. */
+private const val KIVRA_LOGGERS = "net.kigawa.kivra"

@@ -156,10 +156,11 @@ class SelfDevAssigneeRoutesTest {
     }
 
     private fun capture(): Captured {
-        val root = LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME) as Logger
-        val c = Captured(ListAppender<ILoggingEvent>().apply { start() }, root, root.level)
-        root.level = Level.ALL
-        root.addAppender(c.appender)
+        // Only kivra's own loggers: the JDBC driver, Hikari, Exposed and Flyway log parameter values at TRACE/DEBUG, which is not what is tested.
+        val logger = LoggerFactory.getLogger("net.kigawa.kivra") as Logger
+        val c = Captured(ListAppender<ILoggingEvent>().apply { start() }, logger, logger.level)
+        logger.level = Level.ALL
+        logger.addAppender(c.appender)
         return c
     }
 

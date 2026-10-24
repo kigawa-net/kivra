@@ -137,11 +137,12 @@ function load(respond, { hash = '', eventSource } = {}) {
   const clock = makeClock();
   if (eventSource) dom.window.EventSource = eventSource;
   const calls = [];
+  const intervals = [];
   const ctx = {
     document: dom.document,
     window: dom.window,
     console,
-    setInterval: () => 1,
+    setInterval: (fn) => { intervals.push(fn); return 1; },
     clearInterval() {},
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
@@ -162,7 +163,7 @@ function load(respond, { hash = '', eventSource } = {}) {
   };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(APP_JS, 'utf8'), ctx, { filename: 'app.js' });
-  return { ...dom, calls, clock };
+  return { ...dom, calls, clock, tickNow: () => intervals.forEach((fn) => fn()) };
 }
 
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
@@ -2704,4 +2705,145 @@ test('while a cancel is in flight a second click sends nothing', async () => {
   release();
   await flush();
   assert.equal(cancelCount, 1, 'still one cancel after the answer');
+});
+
+// ---- The header refresh and the budget / memory auto refresh --------------
+
+const BUDGET_PATH = '/api/admin/budget/status';
+const isMem = (p) => p.startsWith('/api/selfdev/memory?');
+
+/** Autopilot on, the memory card on, and the budget card on unless `budget` says otherwise. `hook(p)` may throw or return a promise. */
+function allLoad({ budget = true, hook } = {}) {
+  const s = apState();
+  s.other = (p, init) => {
+    if (hook) {
+      const h = hook(p);
+      if (h) return h;
+    }
+    if (isMem(p) && init.method === 'GET') return memList([memOf()]);
+    if (p === BUDGET_PATH) return budget ? { status: 200, data: BUDGET_STATUS } : { status: 404, data: {} };
+    if (p === '/api/admin/budget/fx') return budget ? { status: 200, data: BUDGET_FX_OK } : { status: 404, data: {} };
+    return null;
+  };
+  return load(apResponder(s));
+}
+
+const count = (dom, from, pred) => dom.calls.slice(from).filter((c) => pred(c.path)).length;
+
+test('the header refresh reads only what is shown: a hidden budget is not read, a shown memory is', async () => {
+  const dom = allLoad({ budget: false });
+  await flush();
+  assert.equal(dom.byId('budget-section').hidden, true);
+  assert.equal(dom.byId('memory-section').hidden, false);
+  const from = dom.calls.length;
+  dom.byId('refresh-all-btn').fire('click');
+  await flush();
+  assert.equal(count(dom, from, (p) => p === BUDGET_PATH), 0, 'hidden budget: not read');
+  assert.equal(count(dom, from, isMem), 1, 'shown memory: read');
+  assert.equal(count(dom, from, (p) => p === '/health'), 1);
+  assert.equal(count(dom, from, (p) => p === '/api/selfdev/status'), 1);
+  assert.equal(count(dom, from, (p) => p === '/api/selfdev/autopilot'), 1);
+  assert.equal(count(dom, from, (p) => p === '/api/selfdev/goals'), 1);
+
+  const shown = allLoad();
+  await flush();
+  const from2 = shown.calls.length;
+  shown.byId('refresh-all-btn').fire('click');
+  await flush();
+  assert.equal(count(shown, from2, (p) => p === BUDGET_PATH), 1, 'shown budget: read');
+});
+
+test('a double click on the header refresh does not call twice, and the button is off while it runs', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let slow = false;
+  const dom = allLoad({ hook: (p) => (slow && p === '/health' ? gate.then(() => ({ status: 200, data: { status: 'ok' } })) : null) });
+  await flush();
+  const from = dom.calls.length;
+  slow = true;
+  dom.byId('refresh-all-btn').fire('click');
+  await flush();
+  assert.equal(dom.byId('refresh-all-btn').disabled, true);
+  dom.byId('refresh-all-btn').fire('click');
+  await flush();
+  release();
+  await flush();
+  assert.equal(count(dom, from, (p) => p === '/health'), 1);
+  assert.equal(count(dom, from, isMem), 1);
+  assert.equal(dom.byId('refresh-all-btn').disabled, false);
+});
+
+test('one failing read does not stop the others, and the button comes back', async () => {
+  let down = false;
+  const dom = allLoad({ hook: (p) => { if (down && p === '/health') throw new Error('network down'); return null; } });
+  await flush();
+  const from = dom.calls.length;
+  down = true;
+  dom.byId('refresh-all-btn').fire('click');
+  await flush();
+  assert.equal(count(dom, from, (p) => p === '/health'), 1);
+  assert.equal(count(dom, from, isMem), 1, 'memory is still read');
+  assert.equal(count(dom, from, (p) => p === BUDGET_PATH), 1, 'budget is still read');
+  assert.equal(dom.byId('refresh-all-btn').disabled, false);
+  assert.match(dom.byId('refresh-all-at').textContent, /^最終更新: \d+:\d\d:\d\d/);
+});
+
+test('the last refresh time is written after a refresh and changes on the next one', async () => {
+  const dom = allLoad();
+  await flush();
+  assert.doesNotMatch(dom.byId('refresh-all-at').textContent, /\d:\d\d:\d\d/, 'not refreshed from the header yet');
+  assert.equal(dom.byId('refresh-all-at').getAttribute('role'), null);
+  dom.byId('refresh-all-btn').fire('click');
+  await flush();
+  const first = dom.byId('refresh-all-at').textContent;
+  assert.match(first, /^最終更新: \d+:\d\d:\d\d/);
+  await dom.clock.advance(5000);
+  dom.byId('refresh-all-btn').fire('click');
+  await flush();
+  assert.notEqual(dom.byId('refresh-all-at').textContent, first);
+});
+
+test('the tick refreshes the budget and memory only while shown, and skips them while a dialog or a submission is open', async () => {
+  const hiddenBudget = allLoad({ budget: false });
+  await flush();
+  await hiddenBudget.clock.advance(31000);
+  let from = hiddenBudget.calls.length;
+  hiddenBudget.tickNow();
+  await flush();
+  assert.equal(count(hiddenBudget, from, (p) => p === BUDGET_PATH), 0, 'hidden budget: no auto read');
+  assert.equal(count(hiddenBudget, from, isMem), 1, 'shown memory: auto read');
+
+  const dom = allLoad();
+  await flush();
+  await dom.clock.advance(31000);
+  from = dom.calls.length;
+  dom.tickNow();
+  await flush();
+  assert.equal(count(dom, from, (p) => p === BUDGET_PATH), 1, 'shown budget: auto read');
+  assert.equal(count(dom, from, isMem), 1);
+
+  // A dialog is open: neither is rewritten.
+  openFirstAck(dom);
+  dom.byId('memory-dialog').open = true;
+  await dom.clock.advance(31000);
+  from = dom.calls.length;
+  dom.tickNow();
+  await flush();
+  assert.equal(count(dom, from, (p) => p === BUDGET_PATH), 0, 'budget dialog open: skipped');
+  assert.equal(count(dom, from, isMem), 0, 'memory dialog open: skipped');
+
+  // A memory deletion in flight: skipped too.
+  const busy = memLoad({ list: memList([memOf()]), one: () => new Promise(() => {}) });
+  await flush();
+  busy.byId('memory-list').buttons()[0].fire('click');
+  busy.byId('memory-reason').value = '誤って書いた';
+  busy.byId('memory-reason').fire('input');
+  busy.byId('memory-submit').fire('click');
+  await flush();
+  busy.byId('memory-dialog').open = false;
+  await busy.clock.advance(31000);
+  from = busy.calls.length;
+  busy.tickNow();
+  await flush();
+  assert.equal(count(busy, from, isMem), 0, 'submission in flight: skipped');
 });

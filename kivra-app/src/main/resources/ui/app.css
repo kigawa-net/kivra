@@ -94,6 +94,13 @@ code {
   gap: 0.5rem;
 }
 
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .conn {
   font-size: 0.9rem;
   color: var(--muted);

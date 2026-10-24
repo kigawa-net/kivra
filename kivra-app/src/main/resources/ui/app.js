@@ -7,6 +7,8 @@
   'use strict';
 
   var REFRESH_MS = 30000;
+  // The text of a status line before its first fetch (every status line starts from this one text).
+  var NOT_FETCHED_TEXT = '\u672a\u53d6\u5f97';
   var TICK_MS = 1000;
   var MAX_TITLE = 200;
   var MAX_BODY = 8000;
@@ -166,6 +168,8 @@
     budgetVisible: false,
     budgetLoading: false,
     budgetCheckedAt: 0,
+    budgetLastAttemptAt: 0,
+    refreshAllRunning: false,
     budgetFx: null,
     budgetDialog: null,
     budgetSubmitting: false,
@@ -625,7 +629,7 @@
     list.classList.remove('stale');
     el.className = 'meta';
     if (state.runsOkAt === 0) {
-      el.textContent = '未取得';
+      el.textContent = NOT_FETCHED_TEXT;
     } else {
       el.textContent = '最終取得: ' + fmtLocal(state.runsOkAt) + '（' + relative(state.runsOkAt, now) + '）';
     }
@@ -1023,6 +1027,7 @@
   async function refreshBudget() {
     if (state.budgetLoading || state.sessionExpired) return;
     state.budgetLoading = true;
+    state.budgetLastAttemptAt = Date.now();
     try {
       var results = await Promise.all([
         apiFetch('/api/admin/budget/status', 'GET', undefined, true),
@@ -1553,7 +1558,7 @@
     var status = $('promotion-status');
     list.textContent = '';
     if (!state.autopilotEnabled) {
-      status.textContent = '未取得';
+      status.textContent = NOT_FETCHED_TEXT;
       return;
     }
     if (state.promotion === false) {
@@ -1561,7 +1566,7 @@
       return;
     }
     if (!Array.isArray(state.promotion)) {
-      status.textContent = '未取得';
+      status.textContent = NOT_FETCHED_TEXT;
       return;
     }
     var unmet = state.promotion.filter(function (c) { return c.measured && c.met === false; }).length;
@@ -1682,7 +1687,7 @@
       return;
     }
     el.className = 'meta';
-    el.textContent = state.goalsOkAt === 0 ? '未取得' : '最終取得: ' + fmtLocal(state.goalsOkAt) + '（' + relative(state.goalsOkAt, now) + '）';
+    el.textContent = state.goalsOkAt === 0 ? NOT_FETCHED_TEXT : '最終取得: ' + fmtLocal(state.goalsOkAt) + '（' + relative(state.goalsOkAt, now) + '）';
   }
 
   function renderGoals() {
@@ -2036,6 +2041,7 @@
     loading: false,
     busy: false,
     okAt: 0,
+    lastAttemptAt: 0,
     data: null,
     offset: 0,
     filter: { kind: '', tier: '' },
@@ -2124,6 +2130,7 @@
       return;
     }
     MEMS.loading = true;
+    MEMS.lastAttemptAt = Date.now();
     try {
       var r = await apiFetch('/api/selfdev/memory?' + memFilterQuery(), 'GET');
       if (r.ok && memValidList(r.data)) {
@@ -2782,6 +2789,41 @@
 
   // ---- Timers (stopped while the tab is hidden) --------------------------
 
+  function budgetBusy() {
+    return state.budgetSubmitting === true || state.budgetDialog !== null || $('budget-dialog').open === true;
+  }
+
+  function memoryShown() {
+    return MEMS.enabled === true && state.autopilotEnabled === true && !$('memory-section').hidden;
+  }
+
+  function memoryBusy() {
+    return MEMS.busy === true || $('memory-dialog').open === true;
+  }
+
+  /** The header's refresh: reads again what is on the screen now, through the same functions as each section's button. */
+  async function refreshAll() {
+    if (state.refreshAllRunning) return;
+    state.refreshAllRunning = true;
+    var btn = $('refresh-all-btn');
+    btn.disabled = true;
+    var jobs = [refreshRuns, checkHealth, refreshStatus, refreshAutopilot];
+    if (state.autopilotEnabled) jobs.push(refreshGoals);
+    if (ORD.enabled) jobs.push(refreshOrders);
+    if (state.budgetVisible) jobs.push(refreshBudget);
+    if (memoryShown()) jobs.push(refreshMemory);
+    try {
+      // One failure never stops the others (each function shows its own error).
+      await Promise.all(jobs.map(function (fn) {
+        return Promise.resolve().then(fn).catch(function () {});
+      }));
+    } finally {
+      state.refreshAllRunning = false;
+      btn.disabled = false;
+      $('refresh-all-at').textContent = '最終更新: ' + fmtClock(Date.now());
+    }
+  }
+
   function tick() {
     var now = Date.now();
     if (now - state.runsLastAttemptAt >= REFRESH_MS) refreshRuns();
@@ -2790,6 +2832,9 @@
     if (now - state.autopilotCheckedAt >= REFRESH_MS) refreshAutopilot();
     if (state.autopilotEnabled && now - state.goalsLastAttemptAt >= REFRESH_MS) refreshGoals();
     if (now - ORD.listLastAttemptAt >= REFRESH_MS) refreshOrders();
+    // Budget and memory refresh only while their section is shown, and never while a dialog or a submission is open.
+    if (state.budgetVisible && !budgetBusy() && now - state.budgetLastAttemptAt >= REFRESH_MS) refreshBudget();
+    if (memoryShown() && !memoryBusy() && now - MEMS.lastAttemptAt >= REFRESH_MS) refreshMemory();
     renderRunsStatus(now);
     renderGoalsStatus(now);
   }
@@ -3065,9 +3110,9 @@
     if (state.sessionExpired) {
       $('orders-status').textContent = 'セッション切れのため、一覧を更新できません';
     } else {
-      $('orders-status').textContent = ORD.listOkAt === 0 ? '未取得' : '最終取得: ' + fmtLocal(ORD.listOkAt);
+      $('orders-status').textContent = ORD.listOkAt === 0 ? NOT_FETCHED_TEXT : '最終取得: ' + fmtLocal(ORD.listOkAt);
     }
-    $('approval-status').textContent = ORD.requests === null ? '未取得' : '保留中の要求: ' + ORD.requests.length + ' 件';
+    $('approval-status').textContent = ORD.requests === null ? NOT_FETCHED_TEXT : '保留中の要求: ' + ORD.requests.length + ' 件';
     updateOrderControls();
   }
 
@@ -3480,6 +3525,7 @@
     $('submit-form').addEventListener('submit', onSubmit);
     $('title').addEventListener('input', updateCounter);
     $('body').addEventListener('input', updateBodyCounter);
+    $('refresh-all-btn').addEventListener('click', refreshAll);
     $('refresh-btn').addEventListener('click', function () {
       refreshRuns();
       checkHealth();
@@ -3517,6 +3563,8 @@
     memFillSelects();
     $('autopilot-toggle').addEventListener('click', onAutopilotToggle);
     $('breaker-reset').addEventListener('click', onBreakerReset);
+    ['runs-status', 'promotion-status', 'plans-status', 'approval-status', 'orders-status', 'budget-status', 'memory-status']
+      .forEach(function (id) { $(id).textContent = NOT_FETCHED_TEXT; });
     initBudget();
     initOrders();
     refreshBudget();

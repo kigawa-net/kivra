@@ -116,6 +116,22 @@ class PermissionGuard(
         return service.check(acting, permission) == Decision.Allow
     }
 
+    /**
+     * The assignee admin API (ADR 0020, PR T3) needs the assignees to exist, so it is off with the roles off, and in SHADOW it is judged by
+     * the permissions the store gives ([GuardAccess.effective]), not by today's rules: under today's rules nobody holds ASSIGNEE_MANAGE,
+     * and the first AI assignee could never be made while the roles are only being watched.
+     */
+    val managementEnabled: Boolean get() = service.mode != PermissionMode.OFF
+
+    /**
+     * Whether the effective access holds [permission], whatever the mode. The AI is refused whatever it holds (the environment AI, a
+     * database AI, and a caller that only is the AI under today's rules). A failed store has no role, so it is refused too. Records nothing.
+     */
+    fun permitsEffective(access: GuardAccess, permission: Permission): Boolean {
+        if (access.isAi || access.legacy.role == Role.AI || access.effective.role == Role.AI) return false
+        return service.check(access.effective, permission) == Decision.Allow
+    }
+
     private fun recordWouldDeny(access: GuardAccess, permission: Permission, route: String, scopeOk: Boolean, humanOnly: Boolean, via: String) {
         val eff = access.effective
         val serviceDeny = (service.check(eff, permission, scopeOk) as? Decision.Deny)?.code

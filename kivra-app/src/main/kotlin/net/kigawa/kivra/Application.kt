@@ -29,6 +29,7 @@ import net.kigawa.kivra.db.DbBudgetStore
 import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.SelfDevAssigneeRepository
+import net.kigawa.kivra.db.SelfDevAssigneeTokenRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevGoalRepository
 import net.kigawa.kivra.db.SelfDevMemoryRepository
@@ -66,6 +67,8 @@ import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.SelfDevMemoryRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevGoalRoutes
 import net.kigawa.kivra.routes.configureSelfDevMemoryRoutes
+import net.kigawa.kivra.routes.SelfDevAssigneeRouteDeps
+import net.kigawa.kivra.routes.configureSelfDevAssigneeRoutes
 import net.kigawa.kivra.routes.SelfDevOrderRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevOrderRoutes
 import net.kigawa.kivra.routes.requiredAgentRole
@@ -184,6 +187,16 @@ internal fun Application.appModule(env: Map<String, String>) {
         resolveOperatorVerifier(env, if (autopilotSettings.enabled) requiredAgentRole(env) else null)
     } else {
         null
+    }
+    // The assignee admin API and /me (ADR 0020 addendum, PR T3). With the roles off the repositories are null: the admin routes answer 503 and read nothing.
+    val assigneeRoutes = operatorVerifier?.let { verifier ->
+        SelfDevAssigneeRouteDeps(
+            operators = verifier,
+            guard = permissionGuard,
+            assignees = assigneeRepo,
+            tokens = assigneeRepo?.let { SelfDevAssigneeTokenRepository(database) },
+            oidcIssuer = env["KIVRA_OIDC_ISSUER"]?.trim()?.takeIf { it.isNotEmpty() },
+        )
     }
     val goalRoutes = operatorVerifier?.let { verifier ->
         SelfDevGoalRouteDeps(
@@ -345,6 +358,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
             if (memoryRoutes != null) configureSelfDevMemoryRoutes(memoryRoutes)
             if (orderRoutes != null) configureSelfDevOrderRoutes(orderRoutes)
+            if (assigneeRoutes != null) configureSelfDevAssigneeRoutes(assigneeRoutes)
             executionDeps?.let { configureRunExecutionRoutes(it.withGuard(permissionGuard)) }
         }
         if (selfDevParts != null) configureSelfDevRoutes(selfDevParts.routes.withGuard(permissionGuard))

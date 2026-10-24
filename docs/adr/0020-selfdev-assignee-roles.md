@@ -192,7 +192,7 @@ dev の手動検証: AI 用の Keycloak ユーザー(member ロールだけ)で�
    |---|---|
    | T1 | V34(`selfdev_assignee_tokens` 表と、イベントの kind の拡張)とトークンのリポジトリ(配線なし) |
    | T2 | MCP の入口でのトークンの検証 |
-   | T3 | 管理 API(担当の作成、トークンの発行・失効・一覧、`GET /api/selfdev/me`) |
+   | T3 | 管理 API(担当の作成、トークンの発行・失効・一覧、`GET /api/selfdev/me`)。**実装済み**(下の「実装状況: T3」) |
    | T4 | UI の管理画面 |
 
    各 PR はコードを含み、この追補とは別に、マージ前に diff と CI を確認する。
@@ -213,3 +213,15 @@ dev の手動検証: AI 用の Keycloak ユーザー(member ロールだけ)で�
 - **U-5 失敗の回数制限の方式**: IP/ホストごとの失敗の回数制限を、どこに置くか(アプリ内のメモリ、DB、oauth2-proxy や Ingress)。複数 Pod での共有と、プロキシ越しのクライアント IP の信頼(`X-Forwarded-For`)の扱いも決める。T2 の前に決める。
 - **U-6 `KIVRA_OIDC_MEMBER_ROLE` の実装の将来の削除**: AI の経路としては採用しないため、既定無効のまま残すか、削除するか。人の member ロールなど、別の用途が出るかを見て決める。
 - **U-7 VIEWER のトークンの用途**: 読み取り専用の監視や外部の連携を想定しているが、実際の用途を確認する。用途がなければ、トークンを持てるロールを AI だけにする案もある。
+
+## 実装状況: T3(管理 API と `GET /api/selfdev/me`)
+
+担当の管理 API(`/api/selfdev/assignees` 以下)と `GET /api/selfdev/me` が入った。一覧と手順は runbook §10.4b。
+
+- **要求する権限は `ASSIGNEE_MANAGE`**。判定は **`shadow` でも、DB の担当の実効の権限(`GuardAccess.effective`)** で行う(`PermissionGuard.permitsEffective`)。現行の規則では、`ASSIGNEE_MANAGE` を持つ主体がいない(`off` は全員拒否)ので、`shadow` の間に、最初の AI の担当を作れなくなるためである。つまり、管理 API が使えるのは、**`shadow` または `enforce` で、ADMIN の担当に紐付く人だけ**。既存の `PermissionGuard.check` の挙動は変えていない。`off` は 503(`ROLES_DISABLED`)で、担当のリポジトリは作らず、DB は読まない。
+- **AI は常に拒否**(環境変数の AI も、DB の AI も、DB で ADMIN に紐付いた環境変数の AI も)。ストアの失敗は、拒否(fail closed)。AI のトークンは MCP だけで通り、REST の運用者の認証では通らない。
+- **`GET /api/selfdev/me`** は、認証済みの運用者なら誰でも、`off` でも 200。`{mode, role, permissions, source}` だけを返し、owner key・担当 ID・表示名は返さない。`role` と `permissions` は実効の権限(`off` は現行の規則)。`shadow` では、実際の判定は現行の規則のままだが、`/me` は DB の担当の権限を見せる(UI の準備のため)。
+- **人の紐付け**: 管理者は Keycloak の `sub` を渡し(U-2 の「貼る方式」)、サーバーが `KIVRA_OIDC_ISSUER` で owner key を組み立てる(ログインと同じ `oidcOwnerKey`)。応答は `memberRef` だけ。issuer が未設定なら 503。合成の owner key(`kivra-assignee`)は `SYNTHETIC_KEY_RESERVED`。解除は `memberRef` で指定する(`unbindMemberByRef`。合成の key は解除できない)。
+- **トークン**: 平文は発行の応答に 1 度だけ(`no-store`、`Pragma: no-cache`)。応答のクラスの `toString` は平文を隠す。ログは、担当 ID と固定の動作名だけ(表示名、`sub`、owner key、ハッシュ、操作者の参照名は出さない。操作者は `selfdev_assignee_events` の `actor_ref` に残る)。
+- **書き込みの制限**: CSRF(`requireJsonSameOrigin`)と、主体ごとに 1 分 5 件(`McpRateLimiter`。権限の確認を通った呼び出しだけ数える)。拒否は固定コード。
+- **設計上の注意**: 管理 API を呼べる人は、自分自身の担当のロール変更・無効化を `SELF_CHANGE` で拒否される。また、呼び手は有効な ADMIN の担当に紐付いているので、API 経由で `LAST_ADMIN` に当たるのは、紐付けの解除だけである(ロール変更・無効化では、呼び手自身が残るため起きない)。ADMIN の担当が 2 つ以上、人が紐付いていることが、ロックアウトを避ける条件になる。

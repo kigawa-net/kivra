@@ -34,6 +34,16 @@ class OrderSettings private constructor(
      * [enabled].
      */
     val spendEnabled: Boolean = false,
+    /**
+     * The most cycles any order may be created with, and the most the automatic start runs (ADR 0015 addendum 2026-10-24, stage 3 early
+     * implementation, dev only). 1 (the default) is the stage 1 behaviour: an order has one cycle. Present only when [enabled].
+     */
+    val maxCyclesCap: Int = DEFAULT_MAX_CYCLES_CAP,
+    /**
+     * The automatic start of cycles by the tick (ADR 0015 section 3.1 steps 1 and 8, addendum 2026-10-24). Off by default. Present only when
+     * [enabled]. Its rollback is `false`.
+     */
+    val autoCycleEnabled: Boolean = false,
 ) {
     override fun toString(): String = "OrderSettings(enabled=$enabled)"
 
@@ -46,6 +56,10 @@ class OrderSettings private constructor(
         const val ENV_MAX_TREE = "KIVRA_SELFDEV_ORDER_MAX_TREE"
         const val ENV_AUTO_STOP = "KIVRA_SELFDEV_ORDER_AUTO_STOP_ENABLED"
         const val ENV_SPEND = "KIVRA_SELFDEV_ORDER_SPEND_ENABLED"
+        const val ENV_MAX_CYCLES_CAP = "KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP"
+        const val ENV_AUTO_CYCLE = "KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED"
+        const val DEFAULT_MAX_CYCLES_CAP = 1
+        const val MAX_CYCLES_CAP_LIMIT = 10
         const val DEFAULT_MAX_CHILDREN = 5
         const val DEFAULT_MAX_TREE = 15
 
@@ -78,6 +92,8 @@ class OrderSettings private constructor(
                 maxTree = boundedInt(env, ENV_MAX_TREE, default = DEFAULT_MAX_TREE, range = 1..100),
                 autoStopEnabled = boolFlag(env, ENV_AUTO_STOP, default = false),
                 spendEnabled = boolFlag(env, ENV_SPEND, default = false),
+                maxCyclesCap = boundedInt(env, ENV_MAX_CYCLES_CAP, default = DEFAULT_MAX_CYCLES_CAP, range = 1..MAX_CYCLES_CAP_LIMIT),
+                autoCycleEnabled = boolFlag(env, ENV_AUTO_CYCLE, default = false),
             )
         }
     }

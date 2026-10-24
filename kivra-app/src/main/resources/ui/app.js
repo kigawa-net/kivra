@@ -381,6 +381,8 @@
       failed.code = await fixedCode(res);
       return failed;
     }
+    // A 204 has no body by definition (the member unbind and the token revoke answer it): it is a success, not a sign-in page.
+    if (res.status === 204) return { ok: true, status: 204, data: null };
     // A 2xx that is not JSON (e.g. an HTML sign-in page served after a followed redirect) is an expired session for /api/*.
     var contentType = res.headers.get('content-type') || '';
     if (!/^application\/json(\s*;|\s*$)/i.test(contentType)) {
@@ -786,7 +788,10 @@
     });
     container.appendChild(dl);
     var releaseKind = releaseKindOf(run);
-    if (releaseKind !== null) container.appendChild(releaseActionNode(run, all, releaseKind));
+    if (releaseKind !== null) {
+      var releaseNode = releaseActionNode(run, all, releaseKind);
+      if (releaseNode !== null) container.appendChild(releaseNode);
+    }
     if (run.mode === SELF_DEV_KIND && typeof run.runId === 'string' && RUN_ID_RE.test(run.runId)) {
       container.appendChild(beginExecution(run.runId, str(run.state)));
     }
@@ -855,7 +860,8 @@
     { id: 'orders', hash: '#/orders', title: 'order', gate: 'orders-section' },
     { id: 'approvals', hash: '#/approvals', title: '承認', gate: 'approval-section' },
     { id: 'budget', hash: '#/budget', title: '予算', gate: 'budget-section' },
-    { id: 'memory', hash: '#/memory', title: '記憶', gate: 'memory-section' }
+    { id: 'memory', hash: '#/memory', title: '記憶', gate: 'memory-section' },
+    { id: 'assignees', hash: '#/assignees', title: '担当', gate: 'assignees-section' }
   ];
   // Set once a page's API answer is known, so a deep link is not sent back to #/ before the answer arrives.
   var NAV = { settled: {} };
@@ -969,6 +975,8 @@
   }
 
   function releaseActionNode(run, all, kind) {
+    // The run release needs BUDGET_OVERRIDE on the server. Hidden here only when the roles are enforced and the role lacks it.
+    if (!can('BUDGET_OVERRIDE')) return null;
     var button = h('button', { type: 'button', className: 'secondary', text: RELEASE_TEXT[kind].button });
     button.addEventListener('click', function () {
       openRelease(run, all, kind);
@@ -1223,6 +1231,7 @@
     $('budget-unpriced-count').textContent = d.unpricedCount === 0
       ? '未確定の予約はありません。'
       : '未確定の予約: ' + d.unpricedCount + ' 件。1 件でも残っている間は、新しい予約（CLI の claim を含む）が UNKNOWN_COST で止まります。';
+    var mayRelease = can('BUDGET_OVERRIDE');
     rows.forEach(function (row) {
       var button = h('button', {
         type: 'button',
@@ -1235,7 +1244,7 @@
         h('div', { className: 'run-title', text: keyLabel(row.reservationKey) + '（' + pathLabel(row.path) + '）' }),
         h('div', { className: 'meta', text: '金額 ' + moneyText(row.amountJpy) + '、期間 ' + str(row.period) + '、状態 ' + str(row.state) }),
         h('div', { className: 'meta', text: '理由: ' + (BUDGET_REASON[row.reason] || str(row.reason)) }),
-        h('div', { className: 'detail-actions' }, [button])
+        mayRelease ? h('div', { className: 'detail-actions' }, [button]) : null
       ]));
     });
     var note = $('budget-unpriced-note');
@@ -1700,6 +1709,9 @@
     var on = state.autopilotEnabled === true;
     $('goal-section').hidden = !on;
     $('plans-section').hidden = !on;
+    // The write controls follow the role (only when the roles are enforced, see can()). The server decides again on every request.
+    $('goal-form').hidden = !can('GOAL_WRITE');
+    $('goal-result').hidden = !can('GOAL_WRITE');
     if (!on) {
       MEMS.enabled = false;
       MEMS.data = null;
@@ -1722,8 +1734,9 @@
       ? '自動マージ: 一時停止中（自動マージの判定を行っていません）'
       : '自動マージ: 一時停止していません';
     $('autopilot-toggle').textContent = a.paused ? '自律運転を再開' : '自律運転を一時停止';
+    $('autopilot-toggle').hidden = !can('ORDER_MANAGE');
     var breaker = a.breakerOpen === true;
-    $('breaker-block').hidden = !breaker;
+    $('breaker-block').hidden = !breaker || !can('ORDER_MANAGE');
     $('breaker-status').hidden = !breaker;
     $('breaker-status').textContent = breaker
       ? '連続で ' + str(a.consecutiveFailures) + ' 件失敗したため、自律運転を止めています。原因を確認してから再開してください。'
@@ -1876,13 +1889,13 @@
     box.appendChild(h('p', { className: 'meta', text: '状態: ' + st.label + ' — ' + st.desc + (goal.stateReason ? '（' + goalReasonText(goal.stateReason) + '）' : '') }));
 
     var actions = [];
-    if (goal.state === 'PLAN_PROPOSED') {
+    if (goal.state === 'PLAN_PROPOSED' && can('GOAL_WRITE')) {
       actions.push(actionButton('この Plan を承認', function () { approvePlan(goal); }));
     }
-    if (goal.state === 'BLOCKED' && PLAN_BLOCK_CODES.indexOf(str(goal.stateReason)) !== -1) {
+    if (goal.state === 'BLOCKED' && PLAN_BLOCK_CODES.indexOf(str(goal.stateReason)) !== -1 && can('GOAL_WRITE')) {
       actions.push(actionButton('再計画する', function () { replanGoal(goal); }));
     }
-    if (goal.state !== 'DONE' && goal.state !== 'STOPPED') {
+    if (goal.state !== 'DONE' && goal.state !== 'STOPPED' && can('GOAL_STOP')) {
       actions.push(actionButton('中止…', function () { openStop(goal); }, 'secondary'));
     }
     if (actions.length) box.appendChild(h('div', { className: 'detail-actions' }, actions));
@@ -1925,7 +1938,7 @@
     if (task.stateReason) sub.push(h('span', { className: 'reason', text: '理由: ' + goalReasonText(task.stateReason) }));
     kids.push(h('div', { className: 'run-sub' }, sub));
     if (typeof task.body === 'string' && task.body !== '') kids.push(h('pre', { className: 'task-body', text: task.body }));
-    if (task.state === 'PENDING_APPROVAL') {
+    if (task.state === 'PENDING_APPROVAL' && can('GOAL_WRITE')) {
       var planApproved = goal.state !== 'PLAN_PROPOSED';
       var approve = actionButton('このタスクを承認', function () { approveTask(goal, task); });
       approve.disabled = !planApproved || state.sessionExpired;
@@ -2240,8 +2253,9 @@
   }
 
   function renderMemory() {
-    var on = MEMS.enabled === true && state.autopilotEnabled === true && MEMS.data !== null;
+    var on = MEMS.enabled === true && state.autopilotEnabled === true && MEMS.data !== null && can('READ_TEXT');
     $('memory-section').hidden = !on;
+    $('memory-delete-block').hidden = !can('GOAL_WRITE');
     var blocked = MEMS.busy || MEMS.loading || state.sessionExpired;
     $('memory-apply').disabled = blocked;
     $('memory-dryrun').disabled = blocked;
@@ -2286,10 +2300,12 @@
     } else if (it.bodyWithheld === true) {
       kids.push(h('p', { className: 'meta', text: MEM.MSG.withheld }));
     }
-    var del = h('button', { type: 'button', className: 'secondary', text: 'この記録を削除' });
-    del.disabled = blocked;
-    del.addEventListener('click', function () { openMemoryDelete(it.recordId); });
-    kids.push(del);
+    if (can('GOAL_WRITE')) {
+      var del = h('button', { type: 'button', className: 'secondary', text: 'この記録を削除' });
+      del.disabled = blocked;
+      del.addEventListener('click', function () { openMemoryDelete(it.recordId); });
+      kids.push(del);
+    }
     return h('li', { className: 'run-item' }, kids);
   }
 
@@ -2902,6 +2918,7 @@
     if ((page === 'orders' || page === 'approvals') && ORD.enabled) jobs.push(refreshOrders);
     if (page === 'budget' && state.budgetVisible) jobs.push(refreshBudget);
     if (page === 'memory' && memoryShown()) jobs.push(refreshMemory);
+    if (page === 'assignees' && assigneesVisible()) jobs.push(refreshAssignees);
     try {
       // One failure never stops the others (each function shows its own error).
       await Promise.all(jobs.map(function (fn) {
@@ -3098,6 +3115,7 @@
     updateStopControls();
     renderOrderList();
     renderApprovals();
+    $('order-create').hidden = !can('ORDER_MANAGE');
     updateOrderCreate();
   }
 
@@ -3358,18 +3376,20 @@
 
     var actions = [];
     var versionOk = typeof o.version === 'number' && isFinite(o.version);
-    if (versionOk && o.state === 'ACTIVE') {
+    var mayManage = can('ORDER_MANAGE');
+    var mayRequest = can('STOP_REQUEST');
+    if (versionOk && o.state === 'ACTIVE' && mayManage) {
       actions.push(actionButton('一時停止', function () { ordPause(d); }, 'secondary'));
     }
-    if (versionOk && o.state === 'PAUSED' && NOT_RESUMABLE_REASONS.indexOf(str(o.stateReason)) === -1) {
+    if (versionOk && o.state === 'PAUSED' && mayManage && NOT_RESUMABLE_REASONS.indexOf(str(o.stateReason)) === -1) {
       actions.push(actionButton('再開', function () { ordResume(d); }));
     }
     // A stop is requested from ACTIVE or PAUSED, and only when no request waits. The server decides the rest.
-    if (versionOk && (o.state === 'ACTIVE' || o.state === 'PAUSED') && !d.pending) {
+    if (versionOk && (o.state === 'ACTIVE' || o.state === 'PAUSED') && !d.pending && mayRequest) {
       actions.push(actionButton('停止を要求', function () { ordOpenStop(d); }, 'secondary'));
     }
     // The pending request's requester is not in the response, so any waiting request offers the cancel. The server answers 403 when it is not allowed.
-    if (ordCancellable(d)) {
+    if (ordCancellable(d) && mayRequest) {
       actions.push(actionButton('要求を取り消す', function () { ordCancelStop(d); }, 'secondary'));
     }
     actions.forEach(function (b) { b.disabled = ORD.busy || state.sessionExpired; });
@@ -3462,6 +3482,7 @@
     approve.disabled = ORD.busy || state.sessionExpired || !ordDigestOk(req.digest);
     var reject = actionButton('却下', function () { ordReject(req); }, 'secondary');
     reject.disabled = ORD.busy || state.sessionExpired;
+    var decide = can('STOP_DECIDE') ? h('div', { className: 'detail-actions' }, [approve, reject]) : null;
     return h('li', { className: 'run-item' }, [
       h('div', { className: 'run-head' }, [
         h('span', { className: 'run-title', text: '対象の order: ' + req.orderId }),
@@ -3475,7 +3496,7 @@
         h('span', { className: 'time', text: '要求の時刻: ' + ordTime(req.createdAt) }),
         h('span', { className: 'time', text: '期限: ' + ordTime(req.expiresAt) })
       ]),
-      h('div', { className: 'detail-actions' }, [approve, reject])
+      decide
     ]);
   }
 
@@ -3617,6 +3638,627 @@
     renderOrderSection();
   }
 
+  // ---- The role of the caller (GET /api/selfdev/me, ADR 0020 T4) --------------------------------------------------------------
+  // Read once at start. A 404, a failure or a malformed answer leaves the page as it was (nothing is hidden, no assignee page).
+  // The write buttons are hidden only when the mode is enforce and the permission is missing: the UI only saves a wrong click, the
+  // server checks every request again. In shadow the real decision is still the old one, so nothing is hidden (a note says so).
+
+  var ME = { loaded: false, mode: null, role: null, permissions: [] };
+  var ME_MODES = ['off', 'shadow', 'enforce'];
+  var ME_NAME = /^[A-Z_]{1,32}$/;
+
+  /** True unless the roles are enforced and the permission is missing. Before /me is known (or when it failed), always true. */
+  function can(permission) {
+    if (!ME.loaded || ME.mode !== 'enforce') return true;
+    return ME.permissions.indexOf(permission) !== -1;
+  }
+
+  function assigneesVisible() {
+    return ME.loaded && ME.mode !== 'off' && ME.permissions.indexOf('ASSIGNEE_MANAGE') !== -1;
+  }
+
+  async function loadMe() {
+    try {
+      var r = await apiFetch('/api/selfdev/me', 'GET', undefined, true);
+      var d = r.ok && r.data && typeof r.data === 'object' ? r.data : null;
+      if (d && ME_MODES.indexOf(d.mode) !== -1 && typeof d.role === 'string' && ME_NAME.test(d.role) &&
+          Array.isArray(d.permissions) && d.permissions.every(function (x) { return typeof x === 'string' && ME_NAME.test(x); })) {
+        ME = { loaded: true, mode: d.mode, role: d.role, permissions: d.permissions.slice() };
+      } else {
+        ME = { loaded: false, mode: null, role: null, permissions: [] };
+      }
+    } finally {
+      NAV.settled.assignees = true;
+      applyPermissions();
+    }
+  }
+
+  function renderMe() {
+    var roleEl = $('me-role');
+    var noteEl = $('me-note');
+    roleEl.hidden = !ME.loaded;
+    roleEl.textContent = ME.loaded ? '役割: ' + ME.role : '';
+    var note = '';
+    if (ME.loaded && ME.mode === 'shadow') note = '判定は従来どおり（shadow）。役割の権限はまだ強制されていません';
+    if (ME.loaded && ME.mode === 'off') note = '役割による判定は無効です（off）';
+    noteEl.hidden = note === '';
+    noteEl.textContent = note;
+  }
+
+  /** Draws everything that depends on the role again: after /me, and nowhere else (the role is read once). */
+  function applyPermissions() {
+    renderMe();
+    renderAssignees();
+    renderAutopilot();
+    renderGoals();
+    renderBudget();
+    renderMemory();
+    updateOrderControls();
+    renderNav();
+    if (assigneesVisible() && ASG.list === null) refreshAssignees();
+  }
+
+  // ---- Assignees (ADR 0020 T4): the list, the members, the tokens ---------------------------------------------------------------
+  // Shown only when /me says ASSIGNEE_MANAGE and the mode is not off. A display name enters the page through textContent only.
+  // Never written into the page: the Keycloak sub (it is sent and the field is cleared), a full memberRef (8 characters are shown;
+  // the whole one is only in the unbind request), the creator's reference of a token, and any response text. The one exception is the
+  // plaintext of a new token: it goes into the token dialog once, and the dialog is emptied when it closes.
+
+  var ASG_ID = /^[0-9A-Z]{26}$/;
+  var ASG_REF = /^[0-9a-f]{16}$/;
+  var ASG_SUB = /^[A-Za-z0-9._:-]{1,255}$/;
+  var ASG_NAME_MAX = 64;
+  var ASG_TTL_DEFAULT = 90;
+  var ASG_ROLE_LIST = ['ADMIN', 'OPERATOR', 'APPROVER', 'AI', 'VIEWER'];
+  var ASG_TOKEN_ROLES = ['AI', 'VIEWER'];
+
+  var ASG_ROLES = {
+    ADMIN: 'ADMIN（管理者。担当の管理と停止の承認もできる）',
+    OPERATOR: 'OPERATOR（運用者）',
+    APPROVER: 'APPROVER（停止の承認だけを任せる人）',
+    AI: 'AI（AI の担当。トークンで MCP から入る）',
+    VIEWER: 'VIEWER（読み取りだけ。トークンを持てる）'
+  };
+
+  var ASG_STATES = { ACTIVE: '有効', DISABLED: '無効' };
+  var ASG_TOKEN_STATES = { ACTIVE: '有効', REVOKED: '失効済み', EXPIRED: '期限切れ' };
+
+  var ASG_MSG = {
+    created: '担当を作りました。',
+    roleChanged: 'ロールを変更しました。',
+    disabled: '担当を無効にしました（トークンはすべて失効しました）。',
+    enabled: '担当を有効にしました（失効したトークンは戻りません）。',
+    bound: 'メンバーを紐付けました。',
+    unbound: 'メンバーの紐付けを解除しました。',
+    issued: 'トークンを発行しました（平文は専用のダイアログに 1 度だけ表示しています）。',
+    revoked: 'トークンを失効しました。',
+    nameBad: '表示名は 1〜64 文字で、制御文字は使えません。',
+    roleNeeded: 'ロールを選んでください。',
+    subBad: 'Keycloak の sub を、半角の英数字と . _ : - だけで、1〜255 文字で入力してください。',
+    ttlBad: '有効期限は 1〜365 日の整数で入力してください。',
+    sending: '送信中です…',
+    stale: '更新されています。再読み込みしてください。',
+    network: '通信に失敗しました。操作されたかどうかは、再読み込みして確認してください。',
+    unknown: '結果を確認できませんでした。再読み込みしてください。',
+    listFailed: '一覧を取得できませんでした。',
+    detailFailed: 'メンバーとトークンを取得できませんでした。',
+    copied: 'コピーしました。',
+    copyFailed: 'コピーできませんでした。入力欄を選択して、手動でコピーしてください。',
+    copyManual: 'この環境では自動でコピーできません。入力欄を選択して、手動でコピーしてください。',
+    tokenOnce: 'このトークンは、この 1 回しか表示されません。安全な場所に保管してください。'
+  };
+
+  // The fixed codes of the admin API (a refusal never carries anything else that is shown), each as a fixed Japanese text.
+  var ASG_CODES = {
+    LAST_ADMIN: '最後の有効な管理者（ADMIN）は、無効化・ロール変更・メンバーの解除ができません。先に別の管理者を用意してください。',
+    SELF_CHANGE: '自分自身の担当は、ここでは変更できません。別の管理者に依頼してください。',
+    STALE_VERSION: ASG_MSG.stale,
+    NO_CHANGE: '変更がありません（すでに同じ状態です）。',
+    OWNER_KEY_ALREADY_BOUND: 'この人は、すでに担当に紐付いています。',
+    NOT_BOUND: '紐付いていません。再読み込みしてください。',
+    INVALID_DISPLAY_NAME: ASG_MSG.nameBad,
+    INVALID_OWNER_KEY: ASG_MSG.subBad,
+    INVALID_SUB: ASG_MSG.subBad,
+    SYNTHETIC_KEY_RESERVED: 'この識別子は予約されているため、紐付けできません。',
+    INVALID_ROLE: 'ロールが正しくありません。',
+    INVALID_VERSION: '入力を確認できませんでした。再読み込みしてください。',
+    INVALID_BODY: '入力を確認できませんでした。再読み込みしてください。',
+    NOT_FOUND: '見つかりません。再読み込みしてください。',
+    ASSIGNEE_NOT_FOUND: '見つかりません。再読み込みしてください。',
+    ROLE_NOT_ALLOWED: 'この担当のロールには、トークンを発行できません（AI と VIEWER だけです）。',
+    TOO_MANY_ACTIVE: '有効なトークンが上限（2 つ）に達しています。不要なトークンを失効してから、発行してください。',
+    TTL_OUT_OF_RANGE: ASG_MSG.ttlBad,
+    INVALID_ACTOR: '操作した人を確認できませんでした。',
+    ALREADY_REVOKED: 'すでに失効しています。',
+    OWNER_KEY_CONFLICT: 'この担当の識別子が衝突しています。運用者に連絡してください。',
+    ROLES_DISABLED: '担当の管理は、今は無効です。',
+    BINDING_UNAVAILABLE: 'メンバーの紐付けは、このサーバーでは使えません（OIDC の設定が必要です）。',
+    FORBIDDEN: 'この操作は、あなたの権限では行えません。',
+    RATE_LIMITED: '操作が多すぎます。1 分ほど待ってから、もう一度お試しください。'
+  };
+
+  var ASG = {
+    list: null,
+    okAt: 0,
+    loading: false,
+    pending: false,
+    failed: false,
+    openId: null,
+    detail: null,
+    detailFail: null,
+    detailLoading: false,
+    detailSeq: 0,
+    busy: false,
+    confirm: null
+  };
+
+  function asgValid(a) {
+    return !!a && typeof a === 'object' && typeof a.assigneeId === 'string' && ASG_ID.test(a.assigneeId) &&
+      typeof a.version === 'number' && isFinite(a.version);
+  }
+
+  function asgLabel(table, key) {
+    var c = str(key);
+    return has(table, c) ? table[c] : (ME_NAME.test(c) ? '不明（' + c + '）' : '不明');
+  }
+
+  function asgCount(v) {
+    return typeof v === 'number' && isFinite(v) && v >= 0 ? String(Math.floor(v)) : '不明';
+  }
+
+  function asgMsg(text, cls) {
+    var el = $('assignees-msg');
+    el.textContent = text;
+    el.className = 'result' + (cls ? ' ' + cls : '');
+  }
+
+  /** The fixed text for a failed request. The response body is never shown, only its fixed code is looked up. */
+  function asgFailText(r) {
+    if (r.kind === 'session') return MESSAGES.session;
+    if (r.kind === 'network') return ASG_MSG.network;
+    if (typeof r.code === 'string' && has(ASG_CODES, r.code)) return ASG_CODES[r.code];
+    if (r.status === 409) return ASG_MSG.stale;
+    if (r.status === 403) return ASG_CODES.FORBIDDEN;
+    if (r.status === 404) return ASG_CODES.NOT_FOUND;
+    if (r.status === 429) return ASG_CODES.RATE_LIMITED;
+    if (r.status === 503) return ASG_CODES.ROLES_DISABLED;
+    if (r.status === 400) return ASG_CODES.INVALID_BODY;
+    return ASG_MSG.unknown;
+  }
+
+  function renderAssignees() {
+    var on = assigneesVisible();
+    $('assignees-section').hidden = !on;
+    if (!on) {
+      ASG.list = null;
+      ASG.openId = null;
+      ASG.detail = null;
+      clear($('assignees-list'));
+      return;
+    }
+    if (state.sessionExpired) $('assignees-status').textContent = 'セッション切れのため、一覧を更新できません';
+    else if (ASG.failed) $('assignees-status').textContent = ASG_MSG.listFailed;
+    else $('assignees-status').textContent = ASG.okAt === 0 ? NOT_FETCHED_TEXT : '最終取得: ' + fmtLocal(ASG.okAt);
+    var blocked = ASG.busy || state.sessionExpired;
+    $('assignee-name').disabled = blocked;
+    $('assignee-role').disabled = blocked;
+    $('assignee-create-submit').disabled = blocked;
+    $('assignee-name-count').textContent = Array.from($('assignee-name').value).length + ' / ' + ASG_NAME_MAX;
+    renderAssigneeList();
+  }
+
+  async function refreshAssignees() {
+    if (state.sessionExpired || !assigneesVisible()) return;
+    if (ASG.loading) {
+      ASG.pending = true;
+      return;
+    }
+    ASG.loading = true;
+    try {
+      var r = await apiFetch('/api/selfdev/assignees', 'GET');
+      if (r.ok && Array.isArray(r.data)) {
+        ASG.list = r.data.filter(asgValid);
+        ASG.okAt = Date.now();
+        ASG.failed = false;
+      } else {
+        ASG.failed = true;
+        if (!r.ok && r.kind !== 'network' && r.kind !== 'session') ASG.list = null;
+      }
+    } finally {
+      ASG.loading = false;
+      renderAssignees();
+      if (ASG.pending) {
+        ASG.pending = false;
+        refreshAssignees();
+      }
+    }
+  }
+
+  function renderAssigneeList() {
+    var ul = $('assignees-list');
+    clear(ul);
+    if (!assigneesVisible() || !ASG.list) return;
+    if (ASG.list.length === 0) {
+      ul.appendChild(h('li', { className: 'empty', text: 'まだ担当はありません。' }));
+      return;
+    }
+    ASG.list.forEach(function (a) { ul.appendChild(asgRow(a)); });
+  }
+
+  function asgRow(a) {
+    var id = a.assigneeId;
+    var open = ASG.openId === id;
+    var toggle = h('button', {
+      type: 'button',
+      className: 'secondary',
+      text: open ? '閉じる' : '詳細',
+      'aria-expanded': open ? 'true' : 'false',
+      'aria-controls': 'assignee-detail-' + id
+    });
+    toggle.addEventListener('click', function () { toggleAssignee(id); });
+    var kids = [
+      h('div', { className: 'run-head' }, [
+        h('span', { className: 'run-title', text: clip(a.displayName, ASG_NAME_MAX) }),
+        h('span', { className: 'badge', text: 'ロール: ' + str(a.role) }),
+        h('span', { className: a.state === 'ACTIVE' ? 'badge' : 'badge warn', text: '状態: ' + asgLabel(ASG_STATES, a.state) })
+      ]),
+      h('div', { className: 'run-meta' }, [
+        h('span', { className: 'time', text: 'メンバー: ' + asgCount(a.memberCount) + ' 人' }),
+        h('span', { className: 'time', text: '有効なトークン: ' + asgCount(a.activeTokenCount) + ' 個' })
+      ]),
+      toggle
+    ];
+    if (open) kids.push(asgDetailBox(a));
+    return h('li', { className: 'run-item' }, kids);
+  }
+
+  function toggleAssignee(id) {
+    if (ASG.openId === id) {
+      ASG.openId = null;
+      ASG.detail = null;
+      ASG.detailFail = null;
+      renderAssigneeList();
+      return;
+    }
+    ASG.openId = id;
+    ASG.detail = null;
+    ASG.detailFail = null;
+    renderAssigneeList();
+    loadAssigneeDetail(id);
+  }
+
+  async function loadAssigneeDetail(id) {
+    var seq = ++ASG.detailSeq;
+    ASG.detailLoading = true;
+    var m = await apiFetch('/api/selfdev/assignees/' + encodeURIComponent(id) + '/members', 'GET');
+    var t = await apiFetch('/api/selfdev/assignees/' + encodeURIComponent(id) + '/tokens', 'GET');
+    if (seq !== ASG.detailSeq) return;
+    ASG.detailLoading = false;
+    if (m.ok && Array.isArray(m.data) && t.ok && Array.isArray(t.data)) {
+      ASG.detail = {
+        id: id,
+        members: m.data.filter(function (x) { return x && typeof x.memberRef === 'string' && ASG_REF.test(x.memberRef); })
+          .map(function (x) { return x.memberRef; }),
+        tokens: t.data.filter(function (x) { return x && typeof x.tokenRef === 'string' && ASG_REF.test(x.tokenRef); })
+      };
+      ASG.detailFail = null;
+    } else {
+      ASG.detail = null;
+      ASG.detailFail = !m.ok ? asgFailText(m) : (!t.ok ? asgFailText(t) : ASG_MSG.detailFailed);
+    }
+    renderAssigneeList();
+  }
+
+  function asgDetailBox(a) {
+    var box = h('div', { className: 'goal-detail', id: 'assignee-detail-' + a.assigneeId });
+    var d = ASG.detail;
+    if (ASG.detailLoading || !d || d.id !== a.assigneeId) {
+      if (ASG.detailFail) box.appendChild(h('p', { className: 'error', text: ASG.detailFail }));
+      else box.appendChild(h('p', { className: 'empty', text: '読み込み中…' }));
+      return box;
+    }
+    var blocked = ASG.busy || state.sessionExpired;
+    var id = a.assigneeId;
+
+    // Role and state.
+    box.appendChild(h('h3', { text: 'ロールと状態' }));
+    var sel = document.createElement('select');
+    ASG_ROLE_LIST.forEach(function (r) { sel.appendChild(ordOption(r, ASG_ROLES[r])); });
+    sel.value = ASG_ROLE_LIST.indexOf(a.role) !== -1 ? a.role : 'VIEWER';
+    sel.disabled = blocked;
+    var change = actionButton('ロールを変更…', function () { asgAskRole(a, sel.value); }, 'secondary');
+    change.disabled = blocked;
+    var toggle = a.state === 'ACTIVE'
+      ? actionButton('担当を無効にする…', function () { asgAskState(a, false); }, 'secondary')
+      : actionButton('担当を有効にする…', function () { asgAskState(a, true); });
+    toggle.disabled = blocked;
+    box.appendChild(h('div', { className: 'detail-actions' }, [h('label', {}, ['ロール ', sel]), change, toggle]));
+
+    // Members.
+    box.appendChild(h('h3', { text: 'メンバー（この担当として入れる人）' }));
+    var ml = h('ul', { className: 'run-list', 'aria-label': 'メンバーの一覧' });
+    if (d.members.length === 0) ml.appendChild(h('li', { className: 'empty', text: '紐付いている人はいません。' }));
+    d.members.forEach(function (ref) {
+      var un = actionButton('解除…', function () { asgAskUnbind(a, ref); }, 'secondary');
+      un.disabled = blocked;
+      ml.appendChild(h('li', { className: 'run-item' }, [
+        h('span', { className: 'time', text: '参照: ' + ref.slice(0, 8) }),
+        un
+      ]));
+    });
+    box.appendChild(ml);
+    var sub = document.createElement('input');
+    sub.type = 'text';
+    sub.maxLength = 255;
+    sub.autocomplete = 'off';
+    sub.spellcheck = false;
+    sub.disabled = blocked;
+    var bind = actionButton('紐付ける…', function () { asgAskBind(a, sub); }, 'secondary');
+    bind.disabled = blocked;
+    box.appendChild(h('div', { className: 'detail-actions' }, [
+      h('label', {}, ['Keycloak の sub（入力した値は、送ったあとに消えます。画面には表示しません） ', sub]),
+      bind
+    ]));
+
+    // Tokens (only the roles that can hold one).
+    box.appendChild(h('h3', { text: 'トークン' }));
+    if (ASG_TOKEN_ROLES.indexOf(a.role) === -1) {
+      box.appendChild(h('p', { className: 'meta', text: 'このロールの担当は、トークンを持てません（AI と VIEWER だけです）。' }));
+    } else if (a.state !== 'ACTIVE') {
+      box.appendChild(h('p', { className: 'meta', text: '無効な担当には、トークンを発行できません。' }));
+    } else {
+      var ttl = document.createElement('input');
+      ttl.type = 'number';
+      ttl.min = '1';
+      ttl.max = '365';
+      ttl.step = '1';
+      ttl.value = String(ASG_TTL_DEFAULT);
+      ttl.disabled = blocked;
+      var issue = actionButton('トークンを発行…', function () { asgAskIssue(a, ttl); });
+      issue.disabled = blocked;
+      box.appendChild(h('div', { className: 'detail-actions' }, [h('label', {}, ['有効期限（日数、1〜365） ', ttl]), issue]));
+    }
+    var tl = h('ul', { className: 'run-list', 'aria-label': 'トークンの一覧' });
+    if (d.tokens.length === 0) tl.appendChild(h('li', { className: 'empty', text: 'トークンはありません。' }));
+    d.tokens.forEach(function (t) {
+      var kids = [
+        h('span', { className: 'time', text: '参照: ' + t.tokenRef.slice(0, 8) }),
+        h('span', { className: 'badge', text: asgLabel(ASG_TOKEN_STATES, t.status) }),
+        h('span', { className: 'time', text: '期限: ' + ordTime(t.expiresAt) })
+      ];
+      if (t.status === 'ACTIVE') {
+        var rv = actionButton('失効…', function () { asgAskRevoke(a, t.tokenRef); }, 'secondary');
+        rv.disabled = blocked;
+        kids.push(rv);
+      }
+      tl.appendChild(h('li', { className: 'run-item' }, kids));
+    });
+    box.appendChild(tl);
+    return box;
+  }
+
+  // The confirmation dialog: one dialog for every write. ASG.confirm holds what the submit runs: { send, okText, onOk }.
+  // send is a function that returns the request's promise (each apiFetch path is a literal, see the fetch-target rule in the UI test).
+
+  function asgOpenConfirm(title, text, label, send, okText, onOk) {
+    if (ASG.busy || state.sessionExpired) return;
+    ASG.confirm = { send: send, okText: okText, onOk: onOk || null };
+    $('assignee-confirm-title').textContent = title;
+    $('assignee-confirm-text').textContent = text;
+    $('assignee-confirm-submit').textContent = label;
+    asgUpdateConfirm();
+    $('assignee-confirm-dialog').showModal();
+  }
+
+  function asgUpdateConfirm() {
+    var blocked = ASG.busy || state.sessionExpired;
+    $('assignee-confirm-submit').disabled = blocked || ASG.confirm === null;
+    $('assignee-confirm-cancel').disabled = ASG.busy;
+  }
+
+  function asgCloseConfirm() {
+    ASG.confirm = null;
+    $('assignee-confirm-dialog').close();
+    asgUpdateConfirm();
+  }
+
+  async function asgSubmitConfirm() {
+    var c = ASG.confirm;
+    if (!c || ASG.busy || state.sessionExpired) return;
+    ASG.busy = true;
+    asgUpdateConfirm();
+    renderAssignees();
+    var r;
+    try {
+      r = await c.send();
+    } finally {
+      ASG.busy = false;
+    }
+    asgCloseConfirm();
+    if (r.ok) {
+      asgMsg(c.okText, 'ok');
+      if (c.onOk) c.onOk(r);
+    } else {
+      asgMsg(asgFailText(r), 'error');
+    }
+    // Drop the response (it may hold a token) before anything else runs.
+    r.data = null;
+    r = null;
+    refreshAssignees();
+    if (ASG.openId !== null) loadAssigneeDetail(ASG.openId);
+    renderAssignees();
+  }
+
+  function asgAskRole(a, role) {
+    if (ASG_ROLE_LIST.indexOf(role) === -1) {
+      asgMsg(ASG_MSG.roleNeeded, 'error');
+      return;
+    }
+    if (role === a.role) {
+      asgMsg(ASG_CODES.NO_CHANGE, 'error');
+      return;
+    }
+    asgOpenConfirm('ロールの変更', 'この担当のロールを ' + role + ' に変更します。変更すると、次の操作から新しい権限になります（AI と VIEWER でなくなると、トークンは使えなくなります）。', '変更する',
+      function () { return apiFetch('/api/selfdev/assignees/' + encodeURIComponent(a.assigneeId) + '/role', 'POST', { role: role, version: a.version }); },
+      ASG_MSG.roleChanged);
+  }
+
+  function asgAskState(a, enable) {
+    if (enable) {
+      asgOpenConfirm('担当の有効化', 'この担当を有効にします。失効したトークンは戻りません（必要なら、発行し直します）。', '有効にする',
+        function () { return apiFetch('/api/selfdev/assignees/' + encodeURIComponent(a.assigneeId) + '/enable', 'POST', { version: a.version }); },
+        ASG_MSG.enabled);
+    } else {
+      asgOpenConfirm('担当の無効化', 'この担当を無効にします。この担当のトークンは、すべて失効します（有効にしても戻りません）。人の担当は、入れなくなります。', '無効にする',
+        function () { return apiFetch('/api/selfdev/assignees/' + encodeURIComponent(a.assigneeId) + '/disable', 'POST', { version: a.version }); },
+        ASG_MSG.disabled);
+    }
+  }
+
+  function asgAskBind(a, input) {
+    var sub = input.value.trim();
+    if (!ASG_SUB.test(sub)) {
+      asgMsg(ASG_MSG.subBad, 'error');
+      return;
+    }
+    asgOpenConfirm('メンバーの紐付け', '入力した sub の人を、この担当に紐付けます。紐付いた人は、この担当のロールの権限で操作できます。', '紐付ける',
+      function () { return apiFetch('/api/selfdev/assignees/' + encodeURIComponent(a.assigneeId) + '/members', 'POST', { sub: sub }); },
+      ASG_MSG.bound,
+      function () { input.value = ''; });
+  }
+
+  function asgAskUnbind(a, ref) {
+    asgOpenConfirm('メンバーの解除', 'この人（参照 ' + ref.slice(0, 8) + '）の紐付けを解除します。その人は、この担当として入れなくなります。', '解除する',
+      function () { return apiFetch('/api/selfdev/assignees/' + encodeURIComponent(a.assigneeId) + '/members/' + encodeURIComponent(ref), 'DELETE', {}); },
+      ASG_MSG.unbound);
+  }
+
+  function asgAskIssue(a, input) {
+    var raw = input.value.trim();
+    var days = /^[0-9]{1,3}$/.test(raw) ? parseInt(raw, 10) : 0;
+    if (days < 1 || days > 365) {
+      asgMsg(ASG_MSG.ttlBad, 'error');
+      return;
+    }
+    asgOpenConfirm('トークンの発行', 'この担当のトークンを、' + days + ' 日の期限で発行します。平文は、この 1 回しか表示されません。有効なトークンは、担当ごとに最大 2 つです。', '発行する',
+      function () { return apiFetch('/api/selfdev/assignees/' + encodeURIComponent(a.assigneeId) + '/tokens', 'POST', { ttlDays: days }); },
+      ASG_MSG.issued,
+      asgShowToken);
+  }
+
+  function asgAskRevoke(a, ref) {
+    asgOpenConfirm('トークンの失効', 'このトークン（参照 ' + ref.slice(0, 8) + '）を失効します。次のリクエストから使えなくなります。元に戻せません。', '失効する',
+      function () { return apiFetch('/api/selfdev/assignees/' + encodeURIComponent(a.assigneeId) + '/tokens/' + encodeURIComponent(ref) + '/revoke', 'POST', {}); },
+      ASG_MSG.revoked);
+  }
+
+  async function onAssigneeCreateSubmit(ev) {
+    ev.preventDefault();
+    if (ASG.busy || state.sessionExpired || !assigneesVisible()) return;
+    var name = $('assignee-name').value.trim();
+    var n = Array.from(name).length;
+    if (n < 1 || n > ASG_NAME_MAX || CONTROL_CHARS.test(name)) {
+      asgMsg(ASG_MSG.nameBad, 'error');
+      return;
+    }
+    var role = $('assignee-role').value;
+    if (ASG_ROLE_LIST.indexOf(role) === -1) {
+      asgMsg(ASG_MSG.roleNeeded, 'error');
+      return;
+    }
+    ASG.busy = true;
+    renderAssignees();
+    asgMsg(ASG_MSG.sending, '');
+    var r;
+    try {
+      r = await apiFetch('/api/selfdev/assignees', 'POST', { displayName: name, role: role });
+    } finally {
+      ASG.busy = false;
+    }
+    if (r.ok) {
+      $('assignee-name').value = '';
+      $('assignee-role').value = '';
+      asgMsg(ASG_MSG.created, 'ok');
+      refreshAssignees();
+    } else {
+      asgMsg(asgFailText(r), 'error');
+    }
+    renderAssignees();
+  }
+
+  // ---- The token dialog: the plaintext of a new token is shown once, and only here ------------------------------------
+  // It goes from the response into the read-only field and nowhere else (no variable, storage, history, URL, console or other element).
+  // Closing the dialog (the button, Esc) empties the field. The copy button reads the field.
+
+  function asgShowToken(r) {
+    var d = r.data;
+    if (!d || typeof d.token !== 'string' || d.token === '' || d.token.length > 512) {
+      asgMsg(ASG_MSG.unknown, 'error');
+      return;
+    }
+    $('token-value').value = d.token;
+    $('token-meta').textContent = '参照: ' + (typeof d.tokenRef === 'string' ? d.tokenRef.slice(0, 8) : '不明') + '、期限: ' + ordTime(d.expiresAt);
+    $('token-copy-note').textContent = '';
+    $('token-dialog').showModal();
+    var field = $('token-value');
+    if (typeof field.focus === 'function') field.focus();
+    if (typeof field.select === 'function') field.select();
+  }
+
+  function asgClearToken() {
+    $('token-value').value = '';
+    $('token-meta').textContent = '';
+    $('token-copy-note').textContent = '';
+  }
+
+  function asgCloseToken() {
+    asgClearToken();
+    $('token-dialog').close();
+  }
+
+  function asgCopyToken() {
+    var note = $('token-copy-note');
+    var field = $('token-value');
+    if (field.value === '') return;
+    var nav = window.navigator;
+    var started = false;
+    try {
+      if (nav && nav.clipboard && typeof nav.clipboard.writeText === 'function') {
+        var p = nav.clipboard.writeText(field.value);
+        started = true;
+        if (p && typeof p.then === 'function') {
+          p.then(function () { note.textContent = ASG_MSG.copied; }, function () { note.textContent = ASG_MSG.copyFailed; });
+        } else {
+          note.textContent = ASG_MSG.copied;
+        }
+      }
+    } catch (e) {
+      started = true;
+      note.textContent = ASG_MSG.copyFailed;
+    }
+    if (!started) note.textContent = ASG_MSG.copyManual;
+    if (typeof field.select === 'function') field.select();
+  }
+
+  function initAssignees() {
+    var roleSel = $('assignee-role');
+    roleSel.appendChild(ordOption('', 'ロールを選んでください'));
+    ASG_ROLE_LIST.forEach(function (r) { roleSel.appendChild(ordOption(r, ASG_ROLES[r])); });
+    $('assignee-name').addEventListener('input', renderAssignees);
+    $('assignee-create-form').addEventListener('submit', onAssigneeCreateSubmit);
+    $('assignee-confirm-submit').addEventListener('click', asgSubmitConfirm);
+    $('assignee-confirm-cancel').addEventListener('click', asgCloseConfirm);
+    $('assignee-confirm-dialog').addEventListener('close', function () {
+      ASG.confirm = null;
+      asgUpdateConfirm();
+    });
+    $('token-copy').addEventListener('click', asgCopyToken);
+    $('token-close').addEventListener('click', asgCloseToken);
+    $('token-dialog').addEventListener('close', asgClearToken);
+    renderMe();
+    renderAssignees();
+  }
+
   function init() {
     $('submit-form').addEventListener('submit', onSubmit);
     $('title').addEventListener('input', updateCounter);
@@ -3661,6 +4303,8 @@
       .forEach(function (id) { $(id).textContent = NOT_FETCHED_TEXT; });
     initBudget();
     initOrders();
+    initAssignees();
+    loadMe();
     refreshBudget();
     updateGoalCounters();
     renderAutopilot();

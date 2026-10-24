@@ -193,7 +193,7 @@ dev の手動検証: AI 用の Keycloak ユーザー(member ロールだけ)で�
    | T1 | V34(`selfdev_assignee_tokens` 表と、イベントの kind の拡張)とトークンのリポジトリ(配線なし) |
    | T2 | MCP の入口でのトークンの検証(**実装済み**: `McpTokenAuth`。`kvt_` の Bearer だけを検証し、`ROLES_MODE` が off のときは入口が存在せず従来どおり 401。shadow では、トークンの主体は全ツール拒否(トークンの実用は enforce)。失敗が 1 窓(1 分)に 30 回を超えた Pod は、有効なトークンも含めて、窓の終わりまで DB を引かずに 429) |
    | T3 | 管理 API(担当の作成、トークンの発行・失効・一覧、`GET /api/selfdev/me`)。**実装済み**(下の「実装状況: T3」) |
-   | T4 | UI の管理画面 |
+   | T4 | UI の管理画面。**実装済み**(下の「実装状況: T4」) |
 
    各 PR はコードを含み、この追補とは別に、マージ前に diff と CI を確認する。
 9. **k8s の変更**。Keycloak の変更は不要。k8s は `ROLES_MODE` だけ(shadow → enforce)。`KIVRA_SELFDEV_AI_PRINCIPAL`(環境変数の AI)は、DB の AI の担当で足りるので不要(残してもよい)。MCP クライアント(Claude Code など)は、`--header "Authorization: Bearer <token>"` で接続する。
@@ -225,3 +225,14 @@ dev の手動検証: AI 用の Keycloak ユーザー(member ロールだけ)で�
 - **トークン**: 平文は発行の応答に 1 度だけ(`no-store`、`Pragma: no-cache`)。応答のクラスの `toString` は平文を隠す。ログは、担当 ID と固定の動作名だけ(表示名、`sub`、owner key、ハッシュ、操作者の参照名は出さない。操作者は `selfdev_assignee_events` の `actor_ref` に残る)。
 - **書き込みの制限**: CSRF(`requireJsonSameOrigin`)と、主体ごとに 1 分 5 件(`McpRateLimiter`。権限の確認を通った呼び出しだけ数える)。拒否は固定コード。
 - **設計上の注意**: 管理 API を呼べる人は、自分自身の担当のロール変更・無効化を `SELF_CHANGE` で拒否される。また、呼び手は有効な ADMIN の担当に紐付いているので、API 経由で `LAST_ADMIN` に当たるのは、紐付けの解除だけである(ロール変更・無効化では、呼び手自身が残るため起きない)。ADMIN の担当が 2 つ以上、人が紐付いていることが、ロックアウトを避ける条件になる。
+
+## 実装状況: T4(UI の管理画面と、役割に応じた表示)
+
+UI(`kivra-app/src/main/resources/ui/`)に、「担当」ページ(`#/assignees`)と、役割に応じた表示の制御が入った。サーバー(Kotlin)は変えていない。手順は runbook §10.4b。
+
+- **`GET /api/selfdev/me` は、起動時に 1 回だけ読む**。404・失敗・形式の不一致は、従来どおり(何も隠さず、担当のページも出さない)。ヘッダーに `役割: <ロール>` を `textContent` で出す。`shadow` では「判定は従来どおり(shadow)」、`off` では「役割による判定は無効です(off)」の注記を添える。
+- **「担当」のナビとページは、`mode` が `off` でなく、`permissions` に `ASSIGNEE_MANAGE` を含むときだけ**出る(off では API が 503 のため、呼ばない)。一覧(表示名・ロール・状態・メンバー数・有効なトークン数)、詳細(メンバーとトークン)、作成、ロール変更(`version` つき。競合は「更新されています。再読み込みしてください」)、無効化・有効化、メンバーの紐付けと解除、トークンの発行と失効。書き込みは、すべて確認のダイアログを通す。拒否の固定コード(`LAST_ADMIN`、`SELF_CHANGE`、`STALE_VERSION`、`ROLE_NOT_ALLOWED`、`TOO_MANY_ACTIVE` など)は、固定の日本語に対応づけ、サーバーの本文は出さない。
+- **画面に再表示しないもの**: Keycloak の `sub`(送信後に入力欄を空にする。確認のダイアログにも出さない)、`memberRef` の全体(先頭 8 文字だけ。解除の要求の中にだけ全体がある)、トークンの作成者の参照名。
+- **トークンの平文**: 発行の応答の `token` は、専用の `<dialog>` の読み取り専用の入力欄に 1 度だけ入る(`autocomplete="off"`)。変数、`localStorage`・`sessionStorage`、`history`、URL、コンソール、他の要素には残さない。「コピー」は `navigator.clipboard.writeText`(使えない・失敗しても例外を出さず、手動のコピーを案内する)。「閉じる」と Esc で、欄を空にする。トークンの一覧は、`tokenRef` の先頭 8 文字、状態、期限だけ。
+- **役割ごとの表示制御**: `mode` が `enforce` のときだけ、権限のない書き込みのボタンを隠す(ORDER_MANAGE: order の作成・一時停止・再開・自律運転の切替、STOP_REQUEST: 停止の要求と取り消し、STOP_DECIDE: 承認・却下、GOAL_WRITE: Goal の投入・Plan とタスクの承認・記憶の削除、GOAL_STOP: Goal の中止、BUDGET_OVERRIDE: 予算の解除と Run の解放、READ_TEXT: 記憶の一覧)。`shadow` と `off`、`/me` が使えないときは、隠さない(実際の判定は従来どおりのため)。UI は誤操作を減らすためだけで、安全性はサーバーが担う。
+- **未対応**: Task の投入(SPEND_START)のフォームは、隠さない(この PR の対象の外)。

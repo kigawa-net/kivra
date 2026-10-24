@@ -3147,7 +3147,8 @@
   /** The fixed text for a failed create. The response body is never shown. */
   function orderCreateFailText(r) {
     if (r.kind === 'session') return MESSAGES.session;
-    if (r.status === 409 && r.code === 'ROOT_EXISTS') return ORDER_CREATE_MSG.rootExists;
+    // The server answers a second root with 409 and only its error text (no code), and a create has no other conflict.
+    if (r.status === 409) return ORDER_CREATE_MSG.rootExists;
     if (r.status === 400 && r.code === 'MAX_CYCLES_INVALID') return ORDER_CREATE_MSG.maxCycles;
     if (r.status === 400) return ORDER_CREATE_MSG.invalid;
     if (r.status === 403) return ORDER_CREATE_MSG.forbidden;

@@ -130,6 +130,54 @@ class SelfDevAssigneeRepository(
         }
     }
 
+    /** What [recoverAdmin] did. Counts only; no key and no name. */
+    data class AdminRecovery(val created: Boolean, val bound: Boolean, val reenabled: Boolean, val promoted: Boolean)
+
+    /**
+     * The recovery flag (ADR 0020): makes the assignee of [ownerKey] an ACTIVE ADMIN. A DISABLED one is enabled and a demoted one is made
+     * ADMIN again. When the key is bound to nothing, it is bound to the assignee that startup seeding made for [displayName] (created_by
+     * 'bootstrap'), or to a new one. No other assignee is touched. The events have no actor ('bootstrap' rows), as in [seedIfAbsent].
+     */
+    fun recoverAdmin(displayName: String, ownerKey: String): AssigneeResult<AdminRecovery> {
+        val name = normalizedName(displayName) ?: return AssigneeResult.Refused(AssigneeRefusal.INVALID_DISPLAY_NAME)
+        if (!isOwnerKeyShape(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.INVALID_OWNER_KEY)
+        return transaction(database) {
+            lockActiveAdmins()
+            var created = false
+            var bound = false
+            var id = boundAssigneeId(ownerKey)
+            if (id == null) {
+                val seeded = execQuery(
+                    "SELECT assignee_id FROM selfdev_assignees WHERE created_by = ? AND display_name = ? ORDER BY created_at, assignee_id",
+                    BOOTSTRAP, name,
+                ) { it.getString(1) }.firstOrNull()
+                if (seeded == null) {
+                    val made = insertAssignee(name, AssigneeRole.ADMIN, null)
+                    insertMember(made.assigneeId, ownerKey, null, made.createdAt)
+                    return@transaction AssigneeResult.Moved(AdminRecovery(created = true, bound = true, reenabled = false, promoted = false))
+                }
+                insertMember(seeded, ownerKey, null, utcNow(clock))
+                id = seeded
+                bound = true
+            }
+            val current = assigneeIn(id, lock = true)!!
+            val reenable = current.state != AssigneeState.ACTIVE
+            val promote = current.role != AssigneeRole.ADMIN
+            if (reenable || promote) {
+                val now = utcNow(clock)
+                val changed = execUpdate(
+                    "UPDATE selfdev_assignees SET role = 'ADMIN', state = 'ACTIVE', version = version + 1, updated_at = ? " +
+                        "WHERE assignee_id = ? AND version = ?",
+                    now, id, current.version,
+                )
+                if (changed != 1) throw IllegalStateException("assignee recovery lost a race")
+                if (promote) appendEvent(id, "ROLE_CHANGED", null, current.role.name, AssigneeRole.ADMIN.name, null, now)
+                if (reenable) appendEvent(id, "ENABLED", null, null, null, null, now)
+            }
+            AssigneeResult.Moved(AdminRecovery(created = created, bound = bound, reenabled = reenable, promoted = promote))
+        }
+    }
+
     fun bindMember(assigneeId: String, ownerKey: String, actorKey: String): AssigneeResult<Unit> {
         if (!isOwnerKeyShape(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.INVALID_OWNER_KEY)
         return try {

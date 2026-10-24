@@ -164,3 +164,7 @@ dev の手動検証: AI 用の Keycloak ユーザー(member ロールだけ)で�
 
 - dev の Keycloak の実際の realm の設定(member ロールの作成、oauth2-proxy の `--allowed-role` の複数指定の挙動)。PR 7 で確認する。
 - 本文の DDL は、まだ実装していないスケッチである。型や制約は、PR 1 で、MariaDB と H2 の両方で確認する。
+
+## 実装状況: 起動時の初期化(`roles-bootstrap`)
+
+`ROLES_MODE` が off 以外のときだけ、`seedRoles` が、root approver(ADMIN、「root-approver」)と環境変数の AI(AI、「ai-principal」)の担当を、owner key が未紐付けのときだけ作る(降格・無効化を戻さない。AI が別のロールに紐付いていれば `ENV_AI_CONFLICT` の警告だけ)。`KIVRA_SELFDEV_ROLES_RECOVER_ADMIN=true` は、root approver の担当だけを再有効化・ADMIN に戻し・再紐付けする。enforce で root approver が未設定、または ACTIVE な ADMIN が無いと起動失敗。初期化の失敗も起動失敗。off は何も読まず、書かない。

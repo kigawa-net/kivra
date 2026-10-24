@@ -75,6 +75,7 @@ import net.kigawa.kivra.selfdev.AutopilotDispatcher
 import net.kigawa.kivra.selfdev.OrderSettings
 import net.kigawa.kivra.selfdev.OrderWatch
 import net.kigawa.kivra.selfdev.RolesSettings
+import net.kigawa.kivra.selfdev.bootstrapRolesIfEnabled
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
@@ -171,12 +172,11 @@ internal fun Application.appModule(env: Map<String, String>) {
     }
     // The roles (ADR 0020, PR 3a/3b): off by default, and then the assignee store is not created or read. The order, goal and memory routes use the guard.
     val rolesSettings = RolesSettings.fromEnv(env, orderSettings, aiPrincipal)
+    val assigneeRepo = if (rolesSettings.mode == PermissionMode.OFF) null else SelfDevAssigneeRepository(database)
+    // Seeding runs before the permission service is built. A failure fails the startup: with the roles on, an unseeded store can make a stop unapprovable.
+    bootstrapRolesIfEnabled(rolesSettings, orderSettings.rootApprover, aiPrincipal) { assigneeRepo!! }
     val permissionGuard = PermissionGuard(
-        rolesSettings.service(
-            orderSettings,
-            aiPrincipal,
-            if (rolesSettings.mode == PermissionMode.OFF) null else AssigneeStoreLookup(SelfDevAssigneeRepository(database)),
-        ),
+        rolesSettings.service(orderSettings, aiPrincipal, assigneeRepo?.let { AssigneeStoreLookup(it) }),
     )
     // The autopilot's operator API (ADR 0011 section 1). Registered with the Task API identity, so the OIDC operator role is required. Its
     // agent-role setting is read only while the autopilot is enabled. Every goal endpoint answers 503 while it is disabled.

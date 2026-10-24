@@ -2407,6 +2407,8 @@ test('a 400 MAX_CYCLES_INVALID shows a fixed text and not the server text or cod
 
 test('409 ROOT_EXISTS, 400, 403 and 503 give the fixed texts, and a server text or code is never shown', async () => {
   const cases = [
+    // The real server answers a second root with 409 and only its error text; there is no `code` field (SelfDevOrderRoutes, ROOT_EXISTS).
+    [409, { error: 'the root order already exists' }, /^ルートの order は既にあります$/],
     [409, { error: 'the root order already exists', code: 'ROOT_EXISTS' }, /^ルートの order は既にあります$/],
     [400, { error: 'policy must be 1-2000 characters', code: 'POLICY_INVALID' }, /^題名\/方針が不正です（長さ、制御文字）$/],
     [403, { error: 'the AI principal cannot create an order' }, /^この操作は許可されていません$/],

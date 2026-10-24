@@ -14,7 +14,11 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.auth.OperatorAuth
 import net.kigawa.kivra.auth.OperatorAuthenticator
+import net.kigawa.kivra.auth.Permission
+import net.kigawa.kivra.auth.PermissionMode
+import net.kigawa.kivra.auth.PermissionService
 import net.kigawa.kivra.auth.RequiredRole
+import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.core.autopilot.AutopilotReason
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevGoal
@@ -41,9 +45,11 @@ import org.slf4j.LoggerFactory
  * Changing calls take `{"version": n}`, the version the caller read, so a stale view is a 409 (compare and set). Errors use fixed text
  * and never echo a request value. Goal, plan and task text is returned only by the detail view, never logged.
  *
- * The AI principal (`KIVRA_SELFDEV_AI_PRINCIPAL`) may read, and may not change a goal, a task or the autopilot's control (pause, resume, the
- * breaker reset, the automatic merge's pause and resume): every such write answers 403 `forbidden` for it, before the body is read (ADR 0019; the same rule as the order routes,
- * ADR 0015 section 4.6). Its reads are unchanged.
+ * Who may do what is decided by [PermissionGuard] (ADR 0020, PR 3b). With the roles off (the default) the AI principal
+ * (`KIVRA_SELFDEV_AI_PRINCIPAL`) may read, and may not change a goal, a task or the autopilot's control (pause, resume, the breaker reset,
+ * the automatic merge's pause and resume): every such write answers 403 `forbidden` for it, before the body is read (ADR 0019; the same rule
+ * as the order routes, ADR 0015 section 4.6). With the roles on, the role table decides: READ for a read, ORDER_MANAGE for the control,
+ * GOAL_WRITE for a goal or a task, GOAL_STOP for the stop.
  */
 class SelfDevGoalRouteDeps(
     val operators: OperatorAuthenticator,
@@ -58,6 +64,8 @@ class SelfDevGoalRouteDeps(
     val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
     /** The AI principal's owner key (`KIVRA_SELFDEV_AI_PRINCIPAL`), or null when it is not configured. Null changes nothing. */
     val aiPrincipal: String? = null,
+    /** The permission entrance. The default is the roles off and no store: today's rules, from [aiPrincipal]. */
+    val guard: PermissionGuard = PermissionGuard(PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, aiPrincipal, null, null)),
 )
 
 @Serializable
@@ -173,8 +181,9 @@ internal fun operatorTag(principal: String): String =
 
 internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     get("/api/selfdev/autopilot") {
-        if (deps.requireOperator(call) == null) return@get
+        val caller = deps.requireOperator(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
+        if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ")) return@get
         val config = checkNotNull(deps.autopilot.config)
         val control = deps.control.read()
         call.respond(
@@ -194,8 +203,9 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     get("/api/selfdev/autopilot/promotion") {
-        if (deps.requireOperator(call) == null) return@get
+        val caller = deps.requireOperator(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
+        if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ")) return@get
         val readout = stage1ToStage2Readout(deps.plans.promotionCounts())
         call.respond(
             PromotionReadoutResponse(
@@ -207,9 +217,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/autopilot/pause") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "AUTOPILOT_PAUSE")) return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "goal.autopilot_pause", "AUTOPILOT_PAUSE")) return@post
         if (!call.readEmptyBody()) return@post
         deps.control.setPaused(true, principal)
         operatorLog.info("autopilot operator action: action=PAUSE actor={} result=PAUSED", operatorTag(principal))
@@ -217,9 +228,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/autopilot/resume") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "AUTOPILOT_RESUME")) return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "goal.autopilot_resume", "AUTOPILOT_RESUME")) return@post
         if (!call.readEmptyBody()) return@post
         deps.control.setPaused(false, principal)
         operatorLog.info("autopilot operator action: action=RESUME actor={} result=RESUMED", operatorTag(principal))
@@ -227,9 +239,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/autopilot/auto-merge/pause") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "AUTO_MERGE_PAUSE")) return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "goal.auto_merge_pause", "AUTO_MERGE_PAUSE")) return@post
         if (!call.readEmptyBody()) return@post
         deps.control.setAutoMergePaused(true)
         operatorLog.info("autopilot operator action: action=AUTO_MERGE_PAUSE actor={} result=PAUSED", operatorTag(principal))
@@ -237,9 +250,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/autopilot/auto-merge/resume") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "AUTO_MERGE_RESUME")) return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "goal.auto_merge_resume", "AUTO_MERGE_RESUME")) return@post
         if (!call.readEmptyBody()) return@post
         deps.control.setAutoMergePaused(false)
         operatorLog.info("autopilot operator action: action=AUTO_MERGE_RESUME actor={} result=RESUMED", operatorTag(principal))
@@ -247,9 +261,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/autopilot/reset-breaker") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "AUTOPILOT_RESET_BREAKER")) return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "goal.autopilot_reset_breaker", "AUTOPILOT_RESET_BREAKER")) return@post
         if (!call.readEmptyBody()) return@post
         deps.control.resetBreaker()
         operatorLog.info("autopilot operator action: action=RESET_BREAKER actor={} reason={}", operatorTag(principal), AutopilotReason.OPERATOR_RESUMED)
@@ -257,9 +272,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/goals") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "GOAL_SUBMIT")) return@post
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_submit", "GOAL_SUBMIT")) return@post
         val request = try {
             strictJson.decodeFromString(SubmitGoalRequest.serializer(), call.receiveText())
         } catch (_: Exception) {
@@ -296,14 +312,16 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     get("/api/selfdev/goals") {
-        if (deps.requireOperator(call) == null) return@get
+        val caller = deps.requireOperator(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
+        if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ")) return@get
         call.respond(deps.operations.listGoals(LIST_LIMIT).map { it.summary() })
     }
 
     get("/api/selfdev/goals/{id}") {
-        if (deps.requireOperator(call) == null) return@get
+        val caller = deps.requireOperator(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
+        if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ")) return@get
         val goal = goalIdOf(call)?.let { deps.operations.goal(it) }
         if (goal == null) {
             call.respond(HttpStatusCode.NotFound, GoalError(GOAL_NOT_FOUND))
@@ -315,9 +333,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/goals/{id}/approve-plan") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "GOAL_APPROVE_PLAN")) return@post
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_approve_plan", "GOAL_APPROVE_PLAN")) return@post
         val goalId = goalIdOf(call)
         val version = call.readVersion() ?: return@post
         if (goalId == null) {
@@ -334,9 +353,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/goals/{id}/replan") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "GOAL_REPLAN")) return@post
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_replan", "GOAL_REPLAN")) return@post
         val goalId = goalIdOf(call)
         val version = call.readVersion() ?: return@post
         if (goalId == null) {
@@ -353,9 +373,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/goals/{id}/stop") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "GOAL_STOP")) return@post
+        if (!deps.permit(call, caller, Permission.GOAL_STOP, "goal.goal_stop", "GOAL_STOP")) return@post
         val goalId = goalIdOf(call)
         val request = try {
             strictJson.decodeFromString(StopGoalRequest.serializer(), call.receiveText())
@@ -384,9 +405,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/tasks/{id}/approve") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "TASK_APPROVE")) return@post
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.task_approve", "TASK_APPROVE")) return@post
         val id = taskIdOf(call)
         val version = call.readVersion() ?: return@post
         if (id == null) {
@@ -404,9 +426,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     }
 
     post("/api/selfdev/tasks/{id}/reject") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.requireHuman(call, principal, "TASK_REJECT")) return@post
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.task_reject", "TASK_REJECT")) return@post
         val id = taskIdOf(call)
         val version = call.readVersion() ?: return@post
         if (id == null) {
@@ -440,9 +463,10 @@ private const val FORBIDDEN = "forbidden"
  * Authenticates the caller. Responds 401 (no valid operator token) or 403 (an agent token), and returns the principal otherwise.
  * It does not look at the autopilot state first, so an unauthenticated caller learns nothing about it.
  */
-private suspend fun SelfDevGoalRouteDeps.requireOperator(call: ApplicationCall): String? =
+private suspend fun SelfDevGoalRouteDeps.requireOperator(call: ApplicationCall): GoalCaller? =
     when (val auth = operators.authenticate(call.request.headers)) {
-        is OperatorAuth.Authenticated -> auth.principal
+        // The authenticator accepts operators only, so the caller is an operator by today's rule (legacyAdmin).
+        is OperatorAuth.Authenticated -> GoalCaller(auth.principal, guard.resolve(auth.principal, legacyAdmin = true))
         OperatorAuth.Unauthenticated -> {
             call.respond(HttpStatusCode.Unauthorized, GoalError("unauthorized"))
             null
@@ -461,16 +485,26 @@ private suspend fun SelfDevGoalRouteDeps.requireEnabled(call: ApplicationCall): 
 }
 
 /**
- * Only a human operator may change a goal, a plan or a task (ADR 0019). The AI principal gets 403 with the fixed code `forbidden`, and
- * nothing else; the refusal is logged with the action name and that fixed code only (no principal, title, body or reason). Returns false
- * after responding. Runs before the body is read, so a refused request stores nothing.
+ * The permission check (ADR 0020, PR 3b). Responds 403 `forbidden` and returns false when refused; runs before the body is read, so a refused
+ * request stores nothing. The refusal is logged with the action name and a fixed code only (no principal, title, body or reason): for the
+ * AI that is the line the AI refusal has always written (`actor=AI result=forbidden`).
  */
-private suspend fun SelfDevGoalRouteDeps.requireHuman(call: ApplicationCall, principal: String, action: String): Boolean {
-    if (principal != aiPrincipal) return true
-    operatorLog.info("autopilot operator refused: action={} actor=AI result={}", action, FORBIDDEN)
+private suspend fun SelfDevGoalRouteDeps.permit(
+    call: ApplicationCall,
+    caller: GoalCaller,
+    permission: Permission,
+    route: String,
+    action: String,
+): Boolean {
+    val result = guard.check(caller.access, permission, route)
+    if (result is GuardResult.Allow) return true
+    val code = (result as GuardResult.Deny).code
+    operatorLog.info("autopilot operator refused: action={} actor={} result={}", action, if (caller.access.isAi) "AI" else "OPERATOR", if (caller.access.isAi) FORBIDDEN else code)
     call.respond(HttpStatusCode.Forbidden, GoalError(FORBIDDEN))
     return false
 }
+
+private class GoalCaller(val principal: String, val access: GuardAccess)
 
 /** The goal id from the path, or null when it is not a ULID shape. */
 private fun goalIdOf(call: ApplicationCall): String? = call.parameters["id"]?.takeIf { GOAL_ID_SHAPE.matches(it) }

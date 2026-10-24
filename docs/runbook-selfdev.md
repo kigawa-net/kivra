@@ -2231,7 +2231,7 @@ KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 | `STOP_REQUEST`(order の停止要求) | ○ | ○ | ○ | ○ | - |
 | `STOP_DECIDE`(停止の承認・却下) | ○ | - | ○ | - | - |
 
-`READ_TEXT` と `GOAL_STOP` は、現状の AI の拒否を保つために分けた権限である(ADR 0020 決定 7)。order のルートは、PR 3a で、この表(`KIVRA_SELFDEV_ROLES_MODE` が `shadow` か `enforce` のとき)に従う。`off` では今までと同じ判定である。PR 3c で、これまで権限の検査が無かった REST のルート(Task API、`/api/selfdev/*`、予算と run の解除、run の一覧と詳細、実行の監視)にも、同じ表(READ、SPEND_START、BUDGET_OVERRIDE)を適用した。`off` では AI にも開いたままで、`enforce` でだけ、AI の予算の解除と run の解除を閉じる。
+`READ_TEXT` と `GOAL_STOP` は、現状の AI の拒否を保つために分けた権限である(ADR 0020 決定 7)。order のルートは PR 3a で、Goal のルート(`/api/selfdev/autopilot*`、`/goals*`、`/tasks/*`)と記憶のルート(`/api/selfdev/memory*`)は PR 3b で、この表(`KIVRA_SELFDEV_ROLES_MODE` が `shadow` か `enforce` のとき)に従う。`off` では今までと同じ判定(AI の拒否、403 の本文、拒否のログ)である。PR 3c で、これまで権限の検査が無かった REST のルート(Task API、`/api/selfdev/*`、予算と run の解除、run の一覧と詳細、実行の監視)にも、同じ表(READ、SPEND_START、BUDGET_OVERRIDE)を適用した。`off` では AI にも開いたままで、`enforce` でだけ、AI の予算の解除と run の解除を閉じる。
 
 ### 10.2 有効化の順序(予定)
 

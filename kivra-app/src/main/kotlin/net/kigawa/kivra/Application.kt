@@ -75,6 +75,7 @@ import net.kigawa.kivra.selfdev.AutopilotDispatcher
 import net.kigawa.kivra.selfdev.OrderSettings
 import net.kigawa.kivra.selfdev.OrderWatch
 import net.kigawa.kivra.selfdev.RolesSettings
+import net.kigawa.kivra.selfdev.bootstrapRolesIfEnabled
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
@@ -196,12 +197,11 @@ internal fun Application.appModule(env: Map<String, String>) {
     }
     // The roles (ADR 0020, PR 3a): off by default, and then the assignee store is not created or read. Only the order routes use the guard so far.
     val rolesSettings = RolesSettings.fromEnv(env, orderSettings, aiPrincipal)
+    val assigneeRepo = if (rolesSettings.mode == PermissionMode.OFF) null else SelfDevAssigneeRepository(database)
+    // Seeding runs before the permission service is built. A failure fails the startup: with the roles on, an unseeded store can make a stop unapprovable.
+    bootstrapRolesIfEnabled(rolesSettings, orderSettings.rootApprover, aiPrincipal) { assigneeRepo!! }
     val permissionGuard = PermissionGuard(
-        rolesSettings.service(
-            orderSettings,
-            aiPrincipal,
-            if (rolesSettings.mode == PermissionMode.OFF) null else AssigneeStoreLookup(SelfDevAssigneeRepository(database)),
-        ),
+        rolesSettings.service(orderSettings, aiPrincipal, assigneeRepo?.let { AssigneeStoreLookup(it) }),
     )
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
     val orderRoutes = if (orderRepo != null && operatorVerifier != null) {

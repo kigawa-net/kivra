@@ -2207,7 +2207,7 @@ KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 
 ## 10. 担当(ロール)と権限管理(ADR 0020)
 
-**未実装(ADR 0020 の PR 1〜7 で実装)**。このセクションは予定の運用手順だけを書く。実装の前は、現行の `admin-panel:admin` と `KIVRA_SELFDEV_AI_PRINCIPAL` の拒否リストが、そのまま権限の全部である。
+**一部実装(ADR 0020 の PR 1〜7 のうち、起動時の初期化まで)**。このセクションの多くは予定の運用手順である。実装の前は、現行の `admin-panel:admin` と `KIVRA_SELFDEV_AI_PRINCIPAL` の拒否リストが、そのまま権限の全部である。
 
 ### 10.1 環境変数(すべて未実装)
 
@@ -2216,7 +2216,7 @@ KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 | `KIVRA_SELFDEV_ROLES_MODE` | `off` | `off` は現状と同じ。`shadow` は拒否せずログだけ。`enforce` は拒否する(未実装) |
 | `KIVRA_SELFDEV_ROLES_DEFAULT` | `operator`(最終的に `none`) | `admin-panel:admin` で担当に紐付けがない主体の扱い(未実装) |
 | `KIVRA_OIDC_MEMBER_ROLE` | 未設定 | 認証として受け付ける member ロール(`<client>:<role>`)。実装済み(認証のみ。認可は PR 3)。`KIVRA_OIDC_REQUIRED_ROLE`・`KIVRA_AGENT_REQUIRED_ROLE` と同じ値は起動失敗。member ロールだけのトークンは、既存の運用者向けルートと MCP では、今までどおり拒否される |
-| `KIVRA_SELFDEV_ROLES_RECOVER_ADMIN` | 未設定 | ADMIN を失ったときの一時的な復旧フラグ。復旧後は外す(未実装) |
+| `KIVRA_SELFDEV_ROLES_RECOVER_ADMIN` | `false` | `true` / `false`。ADMIN を失ったときの一時的な復旧フラグ。`KIVRA_SELFDEV_ROLES_MODE` が `off` のときは読まない。不正な値は起動失敗(変数名だけ)。復旧後は外す(実装済み、§10.5) |
 
 `KIVRA_SELFDEV_ROOT_APPROVER` は、導入後は、起動時の初期化の入力になる(担当と紐付けが無いときだけ ADMIN の担当を作る)。ADMIN(人)は停止の承認・却下もできる。APPROVER は、承認だけを任せたい人向けのロールである。AI は承認できない。`KIVRA_SELFDEV_AI_PRINCIPAL` は、全期間を通じて維持し、常に AI として扱う。
 
@@ -2257,6 +2257,12 @@ Keycloak と k8s の変更(PR 7)は、ユーザーの承認と作業が要る。
 
 ### 10.5 ADMIN を失った場合の復旧(予定)
 
-- 担当の行が無いだけなら、再起動で、起動時の初期化が `KIVRA_SELFDEV_ROOT_APPROVER` の主体の ADMIN を作る。
-- 行が無効(DISABLED)なら、起動時に大きくエラーが出る。`KIVRA_SELFDEV_ROLES_RECOVER_ADMIN` を一時的に設定して再起動すると、初期化した主体だけが再有効化される。復旧したら、このフラグを外して再起動する。
+### 10.5 ADMIN を失った場合の復旧(実装済み: 起動時の初期化と復旧フラグ)
+
+起動時の初期化(`KIVRA_SELFDEV_ROLES_MODE` が `off` 以外のときだけ。`off` は何も読まない・書かない)は、`KIVRA_SELFDEV_ROOT_APPROVER` の主体の担当「root-approver」(ADMIN)と、`KIVRA_SELFDEV_AI_PRINCIPAL` の担当「ai-principal」(AI)を、**その owner key がどの担当にも紐付いていないときだけ**作る。すでに紐付いていれば(降格・無効化されていても)何も変えない。降格を勝手に戻さない。AI の owner key が AI 以外の担当に紐付いていると、何も変えず、警告 `ENV_AI_CONFLICT` を出す。起動ログは固定コードと件数だけ(例: `roles bootstrap: assigneesCreated=1 membersBound=1 recovered=false`)。owner key と表示名は出ない。初期化で DB の例外が出たら、起動が失敗する。
+
+起動時の検査: `enforce` で `KIVRA_SELFDEV_ROOT_APPROVER` が未設定、または、初期化後に、紐付けのある ACTIVE な ADMIN が 1 つもないと、起動が失敗する(メッセージは固定)。`shadow` は警告のログだけ。
+
+- 担当の行が無いだけなら、再起動で、起動時の初期化が root approver の ADMIN を作る。
+- root approver の担当が無効化された、ADMIN でなくなった、または紐付けが外れたときは、`KIVRA_SELFDEV_ROLES_RECOVER_ADMIN=true` を一時的に設定して再起動する。**root approver の担当だけ**が、再有効化され、ADMIN に戻され、紐付けが外れていれば紐付け直される(`actor_ref` なしの `bootstrap` のイベントが残る)。ほかの担当には触れない。起動ログに `RECOVER_ADMIN_ACTIVE` が 1 行出る。復旧したら、このフラグを外して再起動する(フラグが残ると、起動のたびに root approver が ADMIN に戻される)。
 - どうしても戻せないときは、`KIVRA_SELFDEV_ROLES_MODE=off` で再起動すると、従来の権限(`admin-panel:admin`)に戻る。

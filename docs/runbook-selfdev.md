@@ -2231,7 +2231,7 @@ KIVRA_TEST_SHARD=1 ./gradlew :kivra-app:test --rerun
 | `STOP_REQUEST`(order の停止要求) | ○ | ○ | ○ | ○ | - |
 | `STOP_DECIDE`(停止の承認・却下) | ○ | - | ○ | - | - |
 
-`READ_TEXT` と `GOAL_STOP` は、現状の AI の拒否を保つために分けた権限である(ADR 0020 決定 7)。order のルートは、PR 3a で、この表(`KIVRA_SELFDEV_ROLES_MODE` が `shadow` か `enforce` のとき)に従う。`off` では今までと同じ判定である。
+`READ_TEXT` と `GOAL_STOP` は、現状の AI の拒否を保つために分けた権限である(ADR 0020 決定 7)。order のルートは PR 3a で、Goal のルート(`/api/selfdev/autopilot*`、`/goals*`、`/tasks/*`)と記憶のルート(`/api/selfdev/memory*`)は PR 3b で、この表(`KIVRA_SELFDEV_ROLES_MODE` が `shadow` か `enforce` のとき)に従う。`off` では今までと同じ判定(AI の拒否、403 の本文、拒否のログ)である。MCP とその他のルートは後続の PR。
 
 ### 10.2 有効化の順序(予定)
 

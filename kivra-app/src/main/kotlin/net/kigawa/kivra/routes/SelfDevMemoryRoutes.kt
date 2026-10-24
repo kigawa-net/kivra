@@ -13,6 +13,10 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.auth.OperatorAuth
 import net.kigawa.kivra.auth.OperatorAuthenticator
+import net.kigawa.kivra.auth.Permission
+import net.kigawa.kivra.auth.PermissionMode
+import net.kigawa.kivra.auth.PermissionService
+import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.db.MemoryConditionDeleteResult
 import net.kigawa.kivra.db.MemoryDeleteResult
 import net.kigawa.kivra.db.MemoryFilter
@@ -26,7 +30,8 @@ import org.slf4j.LoggerFactory
 /*
  * The self-development memory's operator API (ADR 0016 P2): the list, the filters, the single and the conditional deletion.
  *
- * Operator only. The OIDC operator role is checked by [OperatorAuthenticator] (401 without a token, 403 for an agent token), and the
+ * Operator only. The OIDC operator role is checked by [OperatorAuthenticator] (401 without a token, 403 for an agent token), and
+ * [PermissionGuard] decides the rest (ADR 0020, PR 3b): the list needs READ_TEXT, a deletion GOAL_WRITE. With the roles off (the default) the
  * AI principal (`KIVRA_SELFDEV_AI_PRINCIPAL`) is refused on every endpoint with 403 `forbidden`. Every POST passes
  * [requireJsonSameOrigin].
  *
@@ -40,8 +45,10 @@ class SelfDevMemoryRouteDeps(
     val operators: OperatorAuthenticator,
     /** The repository, or null while the memory switch is off. */
     val memory: SelfDevMemoryRepository?,
-    /** The AI principal's owner key (`KIVRA_SELFDEV_AI_PRINCIPAL`), or null. The AI principal is refused on every endpoint. */
+    /** The AI principal's owner key (`KIVRA_SELFDEV_AI_PRINCIPAL`), or null. Only the default [guard] reads it. */
     val aiPrincipal: String?,
+    /** The permission entrance. The default is the roles off and no store: today's rules, from [aiPrincipal]. */
+    val guard: PermissionGuard = PermissionGuard(PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, aiPrincipal, null, null)),
 )
 
 @Serializable
@@ -124,9 +131,9 @@ private val memoryLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.memory
 
 internal fun Route.configureSelfDevMemoryRoutes(deps: SelfDevMemoryRouteDeps) {
     get("/api/selfdev/memory") {
-        val principal = deps.requireOperator(call) ?: return@get
+        val caller = deps.requireOperator(call) ?: return@get
         val repo = deps.requireEnabled(call) ?: return@get
-        if (!deps.requireHuman(call, principal, ACTION_LIST)) return@get
+        if (!deps.permit(call, caller, Permission.READ_TEXT, "memory.list", ACTION_LIST)) return@get
         val params = call.request.queryParameters
         val filter = filterOf(
             kind = params["kind"],
@@ -158,10 +165,11 @@ internal fun Route.configureSelfDevMemoryRoutes(deps: SelfDevMemoryRouteDeps) {
     }
 
     post("/api/selfdev/memory/{id}/delete") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin()) return@post
         val repo = deps.requireEnabled(call) ?: return@post
-        if (!deps.requireHuman(call, principal, ACTION_DELETE)) return@post
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "memory.delete", ACTION_DELETE)) return@post
         val request = try {
             memoryJson.decodeFromString(MemoryDeleteRequest.serializer(), call.receiveText())
         } catch (_: Exception) {
@@ -187,10 +195,11 @@ internal fun Route.configureSelfDevMemoryRoutes(deps: SelfDevMemoryRouteDeps) {
     }
 
     post("/api/selfdev/memory/delete-by-condition") {
-        val principal = deps.requireOperator(call) ?: return@post
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
         if (!call.requireJsonSameOrigin()) return@post
         val repo = deps.requireEnabled(call) ?: return@post
-        if (!deps.requireHuman(call, principal, ACTION_CONDITION_DELETE)) return@post
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "memory.delete_by_condition", ACTION_CONDITION_DELETE)) return@post
         val request = try {
             memoryJson.decodeFromString(MemoryConditionRequest.serializer(), call.receiveText())
         } catch (_: Exception) {
@@ -301,9 +310,10 @@ private fun validReason(raw: String?): String? {
  * Authenticates the caller: 401 without a valid operator token, 403 for an agent token. Returns the principal otherwise.
  * It does not look at the memory switch first, so an unauthenticated caller learns nothing about it.
  */
-private suspend fun SelfDevMemoryRouteDeps.requireOperator(call: ApplicationCall): String? =
+private suspend fun SelfDevMemoryRouteDeps.requireOperator(call: ApplicationCall): MemoryCaller? =
     when (val auth = operators.authenticate(call.request.headers)) {
-        is OperatorAuth.Authenticated -> auth.principal
+        // The authenticator accepts operators only, so the caller is an operator by today's rule (legacyAdmin).
+        is OperatorAuth.Authenticated -> MemoryCaller(auth.principal, guard.resolve(auth.principal, legacyAdmin = true))
         OperatorAuth.Unauthenticated -> {
             call.respond(HttpStatusCode.Unauthorized, MemoryError("unauthorized"))
             null
@@ -321,10 +331,23 @@ private suspend fun SelfDevMemoryRouteDeps.requireEnabled(call: ApplicationCall)
     return null
 }
 
-/** The AI principal gets 403 `forbidden` on every memory endpoint. Returns false after responding. */
-private suspend fun SelfDevMemoryRouteDeps.requireHuman(call: ApplicationCall, principal: String, action: String): Boolean {
-    if (principal != aiPrincipal) return true
-    memoryLog.info("selfdev memory operator refused: action={} actor=AI result={}", action, FORBIDDEN)
+/**
+ * The permission check (ADR 0020, PR 3b). Responds 403 `forbidden` and returns false when refused. The refusal is logged with the action name
+ * and a fixed code only; for the AI that is the line it has always written (`actor=AI result=forbidden`).
+ */
+private suspend fun SelfDevMemoryRouteDeps.permit(
+    call: ApplicationCall,
+    caller: MemoryCaller,
+    permission: Permission,
+    route: String,
+    action: String,
+): Boolean {
+    val result = guard.check(caller.access, permission, route)
+    if (result is GuardResult.Allow) return true
+    val code = (result as GuardResult.Deny).code
+    memoryLog.info("selfdev memory operator refused: action={} actor={} result={}", action, if (caller.access.isAi) "AI" else "OPERATOR", if (caller.access.isAi) FORBIDDEN else code)
     call.respond(HttpStatusCode.Forbidden, MemoryError(FORBIDDEN))
     return false
 }
+
+private class MemoryCaller(val principal: String, val access: GuardAccess)

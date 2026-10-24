@@ -24,6 +24,7 @@ class PermissionsArchitectureTest {
             .map { it.relativeTo(main).invariantSeparatorsPath }.toSet()
         // PermissionGuard.kt is the routes' one entrance and does the logging Permissions.kt must not. SelfDevOrderRoutes.kt names the
         // service only to build the default guard of its deps (roles off, no store), so that a test that does not pass one gets today's rules.
+        // SelfDevGoalRoutes.kt and SelfDevMemoryRoutes.kt (PR 3b) name it for the same reason and for no other.
         // Application.kt builds it through RolesSettings and does not name the service.
         assertEquals(
             setOf(
@@ -31,6 +32,8 @@ class PermissionsArchitectureTest {
                 "net/kigawa/kivra/selfdev/RolesSettings.kt",
                 "net/kigawa/kivra/routes/PermissionGuard.kt",
                 "net/kigawa/kivra/routes/SelfDevOrderRoutes.kt",
+                "net/kigawa/kivra/routes/SelfDevGoalRoutes.kt",
+                "net/kigawa/kivra/routes/SelfDevMemoryRoutes.kt",
             ),
             users,
         )
@@ -44,5 +47,16 @@ class PermissionsArchitectureTest {
         }
         // The routes are reached only through the guard.
         assertTrue(text.contains("guard.check("))
+    }
+
+    @Test
+    fun `the goal and memory routes keep no identity rule of their own`() {
+        for (name in listOf("SelfDevGoalRoutes.kt", "SelfDevMemoryRoutes.kt")) {
+            val text = File(main, "net/kigawa/kivra/routes/$name").readText()
+            for (banned in listOf("requireHuman(", "== aiPrincipal", "aiPrincipal ==", "!= aiPrincipal", "aiPrincipal !=")) {
+                assertTrue(!text.contains(banned), "$name must not contain '$banned'; use PermissionGuard")
+            }
+            assertTrue(text.contains("guard.check("), "$name reaches the permissions only through the guard")
+        }
     }
 }

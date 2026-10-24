@@ -169,6 +169,15 @@ internal fun Application.appModule(env: Map<String, String>) {
     } else {
         null
     }
+    // The roles (ADR 0020, PR 3a/3b): off by default, and then the assignee store is not created or read. The order, goal and memory routes use the guard.
+    val rolesSettings = RolesSettings.fromEnv(env, orderSettings, aiPrincipal)
+    val permissionGuard = PermissionGuard(
+        rolesSettings.service(
+            orderSettings,
+            aiPrincipal,
+            if (rolesSettings.mode == PermissionMode.OFF) null else AssigneeStoreLookup(SelfDevAssigneeRepository(database)),
+        ),
+    )
     // The autopilot's operator API (ADR 0011 section 1). Registered with the Task API identity, so the OIDC operator role is required. Its
     // agent-role setting is read only while the autopilot is enabled. Every goal endpoint answers 503 while it is disabled.
     val operatorVerifier = if (taskApiIdentity != null) {
@@ -187,22 +196,14 @@ internal fun Application.appModule(env: Map<String, String>) {
             control = SelfDevAutopilotControlRepository(database),
             memory = memory,
             aiPrincipal = aiPrincipal,
+            guard = permissionGuard,
         )
     }
     // The memory's operator routes (ADR 0016 P2). Registered with the operator check; the repository is null while the memory switch is off,
     // and then every endpoint answers 503.
     val memoryRoutes = operatorVerifier?.let { verifier ->
-        SelfDevMemoryRouteDeps(operators = verifier, memory = memoryRepo, aiPrincipal = aiPrincipal)
+        SelfDevMemoryRouteDeps(operators = verifier, memory = memoryRepo, aiPrincipal = aiPrincipal, guard = permissionGuard)
     }
-    // The roles (ADR 0020, PR 3a): off by default, and then the assignee store is not created or read. Only the order routes use the guard so far.
-    val rolesSettings = RolesSettings.fromEnv(env, orderSettings, aiPrincipal)
-    val permissionGuard = PermissionGuard(
-        rolesSettings.service(
-            orderSettings,
-            aiPrincipal,
-            if (rolesSettings.mode == PermissionMode.OFF) null else AssigneeStoreLookup(SelfDevAssigneeRepository(database)),
-        ),
-    )
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
     val orderRoutes = if (orderRepo != null && operatorVerifier != null) {
         SelfDevOrderRouteDeps(

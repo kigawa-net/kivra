@@ -46,6 +46,7 @@ class PrBranchRebaseTest {
         val runs: DevelopmentRunRepository = db.runs,
         val clock: Clock = Clock.systemUTC(),
         val withRebaser: Boolean = true,
+        maxReads: Int = PrRebaseSettings.DEFAULT_MAX_READS_PER_TICK,
     ) {
         val github = FakeGitHub()
         val git = FakeGitObjects()
@@ -57,28 +58,40 @@ class PrBranchRebaseTest {
         }
 
         private val developer = FakeDeveloper.returning(DevFixtures.proposed("docs/a.md" to "new\n"))
-        private val rebaser = PrBranchRebaser(
+
+        private fun rebaserWith(limit: Int) = PrBranchRebaser(
             repo = repo,
             baseBranch = "main",
             botUserId = BOT_USER_ID,
             port = port,
             github = github,
             runs = DbDevelopmentRunStore(runs),
-            settings = PrRebaseSettings(),
+            settings = PrRebaseSettings(maxReadsPerTick = limit),
             clock = clock,
             pause = {},
         )
 
-        fun runner() = SelfDevRunner(
-            config = SelfDevConfig(enabled = true),
-            runs = DbDevelopmentRunStore(runs),
-            leases = db.leases,
-            developer = developer,
-            github = github,
-            repoReader = InMemoryRepoReader(files, github.baseSha),
-            taskTexts = FixedTaskTextSource(DevFixtures.taskText),
-            prRebaser = if (withRebaser) rebaser else null,
-        )
+        private var rebaser = rebaserWith(maxReads)
+
+        /** Replaces the rebaser with one whose tick budget is [limit] (a new instance, so the overlap cache starts empty). */
+        fun setReadLimit(limit: Int) {
+            rebaser = rebaserWith(limit)
+        }
+
+        /** Each runner is one worker tick here: the look of the run gets a fresh read budget, as a tick does in production. */
+        fun runner(): SelfDevRunner {
+            rebaser.beginTick()
+            return SelfDevRunner(
+                config = SelfDevConfig(enabled = true),
+                runs = DbDevelopmentRunStore(runs),
+                leases = db.leases,
+                developer = developer,
+                github = github,
+                repoReader = InMemoryRepoReader(files, github.baseSha),
+                taskTexts = FixedTaskTextSource(DevFixtures.taskText),
+                prRebaser = if (withRebaser) rebaser else null,
+            )
+        }
 
         /** Opens the pull request and registers its head commit (the recorded head) with the change to `docs/a.md`. */
         suspend fun openedRun(): RunId {
@@ -836,6 +849,104 @@ class PrBranchRebaseTest {
     }
 
     private fun Harness.lastExpected(): String? = port.lastExpectedHead
+
+    @Test
+    fun aLookWithTheMinimalReadLimitStillReboundsAsBefore() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, maxReads = PrRebaseSettings.MIN_MAX_READS_PER_TICK)
+            val runId = h.openedRun()
+            h.mainMoves()
+            h.registerMerge(MERGE, "blob-new")
+            h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_VERIFIED"), h.runner().advance(runId))
+            assertEquals(MERGE, h.binding(runId))
+            assertEquals(1, h.port.updateCalls)
+        }
+    }
+
+    @Test
+    fun aLookThatCannotFinishItsUpdateInTheTickIsDeferredAndWritesNothing() = runBlocking {
+        TestDb().use { db ->
+            // Ten reads cover the seven before the request, but not the polls and the verification that must follow it.
+            val h = Harness(db, maxReads = 10)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainMoves()
+            h.registerMerge(MERGE, "blob-new")
+            h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+            val waiting = Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
+
+            repeat(2) { assertEquals(waiting, h.runner().advance(runId)) }
+            assertEquals(0, h.port.updateCalls)
+            assertEquals(emptyList(), db.rebaseRows(runId))
+            assertEquals(old, h.binding(runId))
+            assertEquals(old, h.pr().headSha)
+        }
+    }
+
+    @Test
+    fun aDeferredLookIsDoneInALaterTickWithItsOwnBudget() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, maxReads = 10)
+            val runId = h.openedRun()
+            h.mainMoves()
+            h.registerMerge(MERGE, "blob-new")
+            h.port.onUpdate = { number, _ -> h.github.setPullHead(number, MERGE) }
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), h.runner().advance(runId))
+            assertEquals(0, h.port.updateCalls)
+
+            // The next tick has its own budget, and a budget that covers the whole update lets the same look finish it.
+            h.setReadLimit(PrRebaseSettings.MIN_MAX_READS_PER_TICK)
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_VERIFIED"), h.runner().advance(runId))
+            assertEquals(MERGE, h.binding(runId))
+            assertEquals(1, h.port.updateCalls)
+        }
+    }
+
+    @Test
+    fun aDeferredCheckOfAHeadMovedByAPersonRecordsNothingAndIsDoneLater() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, maxReads = 3)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainMoves()
+            h.registerMerge(MERGE, "blob-new", parents = listOf(old, MAIN))
+            h.github.setPullHead(h.pr().number, MERGE)
+
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), h.runner().advance(runId))
+            assertEquals(old, h.binding(runId))
+            assertEquals(emptyList(), db.rebaseRows(runId))
+
+            h.setReadLimit(PrRebaseSettings.MIN_MAX_READS_PER_TICK)
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_VERIFIED"), h.runner().advance(runId))
+            assertEquals(MERGE, h.binding(runId))
+            assertEquals(listOf(PR_REBASE_REBOUND), db.rebaseRows(runId).map { it.first })
+        }
+    }
+
+    @Test
+    fun aMergedPullRequestWhoseCheckIsDeferredWaitsAndIsCompletedInALaterTick() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, maxReads = 3)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainMoves()
+            h.registerMerge(MERGE, "blob-new", parents = listOf(old, MAIN))
+            h.github.setPullHead(h.pr().number, MERGE)
+            h.humanMerges()
+            db.prAuthority.answer = { b -> FakeTrustedPrMergeAuthority.merged(b).copy(headSha = h.pr().headSha) }
+
+            // Deferred: the run is not completed on the old head, and nothing is recorded.
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), h.runner().advance(runId))
+            assertEquals(old, h.binding(runId))
+            assertEquals(emptyList(), db.rebaseRows(runId))
+
+            h.setReadLimit(PrRebaseSettings.MIN_MAX_READS_PER_TICK)
+            assertEquals(Advanced(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.COMPLETED, "PR_MERGED"), h.runner().advance(runId))
+            assertEquals(MERGE, h.binding(runId))
+        }
+    }
 
     private fun modified(path: String, patch: String?) = ComparedFile(path, "modified", patch)
 

@@ -83,6 +83,8 @@ class SelfDevSettings private constructor(
      * when [enabled].
      */
     val prRebaseEnabled: Boolean = false,
+    /** `KIVRA_SELFDEV_PR_REBASE_MAX_READS_PER_TICK` (issue #351). Read only when [prRebaseEnabled]. */
+    val prRebaseMaxReadsPerTick: Int = PrRebaseSettings.DEFAULT_MAX_READS_PER_TICK,
 ) {
     override fun toString(): String = "SelfDevSettings(enabled=$enabled)"
 
@@ -91,6 +93,9 @@ class SelfDevSettings private constructor(
 
         /** Keeps waiting pull requests on top of the base (issue #276). Off by default. */
         const val ENV_PR_REBASE_ENABLED = "KIVRA_SELFDEV_PR_REBASE_ENABLED"
+
+        /** The GitHub read budget of one tick for the pull request branch update (issue #351). Read only when the update is on. */
+        const val ENV_PR_REBASE_MAX_READS_PER_TICK = "KIVRA_SELFDEV_PR_REBASE_MAX_READS_PER_TICK"
         const val ENV_TARGET_REPO = "KIVRA_SELFDEV_TARGET_REPO"
         const val ENV_BASE_BRANCH = "KIVRA_SELFDEV_BASE_BRANCH"
         const val ENV_GITHUB_TOKEN = "KIVRA_SELFDEV_GITHUB_TOKEN"
@@ -179,6 +184,7 @@ class SelfDevSettings private constructor(
                 contextPathPrefixes = prefixes,
                 maxContextFileBytes = contextBytes,
             )
+            val prRebase = prRebaseEnabled(env)
             return SelfDevSettings(
                 enabled = true,
                 config = config,
@@ -190,7 +196,8 @@ class SelfDevSettings private constructor(
                 githubBotUserId = Secret(botUserId),
                 modelRegistryPath = registry,
                 fx = fx,
-                prRebaseEnabled = prRebaseEnabled(env),
+                prRebaseEnabled = prRebase,
+                prRebaseMaxReadsPerTick = if (prRebase) prRebaseMaxReadsPerTick(env) else PrRebaseSettings.DEFAULT_MAX_READS_PER_TICK,
             )
         }
 
@@ -200,6 +207,18 @@ class SelfDevSettings private constructor(
                 "true" -> true
                 else -> throw IllegalStateException("$ENV_PR_REBASE_ENABLED must be true or false")
             }
+
+        /** The per-tick read budget of the pull request branch update. The message names the variable, never the value. */
+        private fun prRebaseMaxReadsPerTick(env: Map<String, String>): Int {
+            val raw = number(env, ENV_PR_REBASE_MAX_READS_PER_TICK, PrRebaseSettings.DEFAULT_MAX_READS_PER_TICK.toLong())
+            check(raw >= PrRebaseSettings.MIN_MAX_READS_PER_TICK) {
+                "$ENV_PR_REBASE_MAX_READS_PER_TICK must be at least ${PrRebaseSettings.MIN_MAX_READS_PER_TICK}"
+            }
+            check(raw <= PrRebaseSettings.MAX_MAX_READS_PER_TICK) {
+                "$ENV_PR_REBASE_MAX_READS_PER_TICK must be at most ${PrRebaseSettings.MAX_MAX_READS_PER_TICK}"
+            }
+            return raw.toInt()
+        }
 
         /**
          * `KIVRA_SELFDEV_RUNTIME`: `api` (the default, the single model call) or `cli` (the local coding agent, ADR 0010).

@@ -195,9 +195,12 @@ class RolesCoverageArchitectureTest {
             starts.forEachIndexed { i, m ->
                 val end = starts.getOrNull(i + 1)?.range?.first ?: text.length
                 val body = text.substring(m.range.first, end)
+                val permission = Regex("\\bpermission\\s*=\\s*Permission\\.([A-Z_]+)").find(body)?.groupValues?.get(1)
+                // Every McpTool( names its permission (no allow-list), whether or not it is a kivra_ tool.
+                assertTrue(permission != null, "${file.rel()}: a McpTool( without an explicit permission = Permission.X")
                 val name = Regex("name\\s*=\\s*\"(kivra_[a-z_]+)\"").find(body)?.groupValues?.get(1)
                 assertTrue(name != null, "${file.rel()}: a McpTool without a kivra_ name")
-                found[name!!] = Regex("\\bpermission\\s*=\\s*Permission\\.([A-Z_]+)").find(body)?.groupValues?.get(1)
+                found[name!!] = permission
             }
         }
         assertEquals(MCP_TOOL_PERMISSIONS.keys, found.keys, "a tool needs a row in MCP_TOOL_PERMISSIONS, and a row needs a tool")

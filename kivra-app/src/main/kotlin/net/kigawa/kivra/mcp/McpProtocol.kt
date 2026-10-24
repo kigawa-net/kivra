@@ -62,8 +62,7 @@ class ToolOutcome(val isError: Boolean, val text: String, val structured: JsonOb
 /**
  * One MCP tool. The scope, and then the [permission] (through the [PermissionGuard], ADR 0020 PR 3d), are checked by the dispatcher before
  * the handler runs; a handler never compares the caller with the AI principal.
- * - [permission]: what the caller needs. Every `kivra_` tool of the server names it (an architecture test requires it); the default is for a
- *   test tool only.
+ * - [permission]: what the caller needs. Required, with no default, so a tool that forgets it does not compile (never open by default).
  * - [refusalAction]: when set, a refusal by the permission check writes the Goal operator's refusal line with this action name.
  * - [write]: the tool changes state. Its calls count against the write rate limit of the dispatcher.
  * - [listed]: false keeps the tool out of `tools/list` while a call still reaches the handler (used for the self-development kill switch,
@@ -74,9 +73,9 @@ class McpTool(
     val description: String,
     val inputSchema: JsonObject,
     val scope: String,
+    val permission: Permission,
     val write: Boolean = false,
     val listed: Boolean = true,
-    val permission: Permission = Permission.READ,
     val refusalAction: String? = null,
     val handler: suspend (McpCaller, JsonObject) -> ToolOutcome,
 )

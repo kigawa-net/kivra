@@ -281,6 +281,8 @@ internal fun Application.appModule(env: Map<String, String>) {
                 },
                 // The cost counting into spent_jpy (ADR 0015 addendum, stage 3g). Off unless its switch is on.
                 countSpend = orderSettings.spendEnabled,
+                // The automatic cycle start (ADR 0015 addendum 2026-10-24, dev only). Off unless its switch is on.
+                autoCycleCap = orderSettings.maxCyclesCap.takeIf { orderSettings.autoCycleEnabled },
             ).start(this)
         }
     }

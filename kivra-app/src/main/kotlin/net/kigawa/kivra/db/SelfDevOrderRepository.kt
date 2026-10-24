@@ -124,6 +124,23 @@ sealed interface CreateRootResult {
     data object RootExists : CreateRootResult
 }
 
+/**
+ * Why the automatic start did not start a cycle in this pass. Each name is a fixed code. The names that are also [OrderConflict] names
+ * are the same checks as the operator's start; the others are only for the automatic start.
+ */
+enum class AutoCycleSkip {
+    NOT_ACTIVE, ANCESTOR_NOT_ACTIVE, CYCLE_IN_PROGRESS, CYCLE_LIMIT_REACHED, ORDER_EXPIRED, AUTOPILOT_PAUSED, ORDER_BUDGET, ORDER_UNPRICED,
+    BREAKER_OPEN, CYCLE_FAILURES, TREE_BUSY, TOO_SOON, DAILY_LIMIT, STALE,
+}
+
+sealed interface AutoCycleResult {
+    data class Started(val started: CycleStarted) : AutoCycleResult
+    data class Skipped(val reason: AutoCycleSkip, val orderId: String? = null) : AutoCycleResult
+    /** The order had started its [cap][SelfDevOrderRepository.startCycleAutomatically] of cycles, so it was paused with LIMIT_REACHED. */
+    data class LimitPaused(val order: SelfDevOrder) : AutoCycleResult
+    data object NotFound : AutoCycleResult
+}
+
 /** The outcome of a successful cycle start: the order and the new goal. */
 data class CycleStarted(val order: SelfDevOrder, val goalId: String, val cycleNo: Int)
 
@@ -183,6 +200,15 @@ const val AUTO_STOP_PRINCIPAL = "system:order-auto-stop"
 
 /** The most cycles an order may have (the schema's CHECK, V23). The configured cap is at most this. */
 const val MAX_CYCLES_LIMIT = 10
+
+/** The reason code of the audit event of an automatic cycle start (actor_kind SYSTEM). A fixed code, never text. */
+const val AUTO_CYCLE_STARTED = "AUTO_CYCLE_STARTED"
+
+/** The shortest time between two cycle starts of one order, for the automatic start (ADR 0015 section 3.2). */
+val AUTO_CYCLE_MIN_INTERVAL: Duration = Duration.ofMinutes(60)
+
+/** The most cycles the automatic start runs for one order in a UTC day (ADR 0015 section 3.2). */
+const val AUTO_CYCLE_DAILY_MAX = 3
 
 /** Cycles that stop being counted as failures after this many in a row (ADR 0015 section 3.2). */
 const val CYCLE_FAILURE_LIMIT = 2
@@ -442,47 +468,134 @@ class SelfDevOrderRepository(
     fun startCycle(orderId: String, expectedVersion: Long, operatorKey: String): OrderResult<CycleStarted> = try {
         transaction(database) {
             val path = lockPath(orderId) ?: return@transaction OrderResult.NotFound
-            val current = path.first()
-            if (current.version != expectedVersion) return@transaction OrderResult.StaleVersion
-            if (current.state != OrderState.ACTIVE) throw Rollback(OrderResult.Refused(OrderConflict.NOT_ACTIVE))
-            firstStoppingAncestor(path.drop(1))?.let { throw Rollback(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, it.orderId)) }
-            if (current.currentGoalId != null) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_IN_PROGRESS))
-            if (current.cyclesStarted >= current.maxCycles) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_LIMIT_REACHED))
-            val now = utcNow(clock)
-            if (!current.expiresAt.isAfter(now)) throw Rollback(OrderResult.Refused(OrderConflict.ORDER_EXPIRED))
-            val paused = execQuery("SELECT paused FROM selfdev_autopilot_control WHERE control_id = 1") { it.getBoolean(1) }.single()
-            if (paused) throw Rollback(OrderResult.Refused(OrderConflict.AUTOPILOT_PAUSED))
-            for (order in path) {
-                if (order.orderBudgetJpy - order.spentJpy < order.cycleBudgetJpy) {
-                    throw Rollback(OrderResult.Refused(OrderConflict.ORDER_BUDGET, order.orderId))
-                }
-            }
-            if (path.any { unpricedCycleOf(it.orderId) }) throw Rollback(OrderResult.Refused(OrderConflict.ORDER_UNPRICED))
-
-            val cycleNo = current.cyclesStarted + 1
-            val goalId = Ulid.generate(clock)
-            execUpdate(
-                """
-                INSERT INTO selfdev_goals (goal_id, created_by, idempotency_key, title, body, target_repo, state, revision, version,
-                    created_at, updated_at, order_id, cycle_no)
-                VALUES (?, ?, ?, ?, ?, ?, 'GOAL_SUBMITTED', 0, 0, ?, ?, ?, ?)
-                """.trimIndent(),
-                goalId, operatorKey, "order:$orderId:cycle:$cycleNo", current.title, current.policy, current.targetRepo, now, now,
-                orderId, cycleNo,
-            )
-            val changed = execUpdate(
-                """
-                UPDATE selfdev_orders SET cycles_started = cycles_started + 1, current_goal_id = ?, version = version + 1, updated_at = ?
-                 WHERE order_id = ? AND version = ?
-                """.trimIndent(),
-                goalId, now, orderId, expectedVersion,
-            )
-            if (changed != 1) throw Rollback(OrderResult.StaleVersion)
-            appendEvent(orderId, cycleNo, "CYCLE_STARTED", OrderState.ACTIVE, OrderState.ACTIVE, null, OrderActor.HUMAN, operatorKey, null, now)
-            OrderResult.Moved(CycleStarted(getIn(orderId) ?: error("order vanished after cycle start"), goalId, cycleNo))
+            startCycleIn(path, expectedVersion, CycleStarter(OrderActor.HUMAN, operatorKey, operatorKey, null, auto = false))
         }
     } catch (r: Rollback) {
         r.outcome
+    }
+
+    /**
+     * The automatic start of a cycle by the tick (ADR 0015 section 3.1 step 1 and 8, addendum 2026-10-24, behind
+     * `KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED`). The checks and the writes are those of [startCycle], in one shared function ([startCycleIn]),
+     * under the same locks (the path from the root down), plus the rules that only the automatic start has: the breaker, the failure limit,
+     * the minimum interval since the previous cycle's start, the daily cycle count, and one cycle at a time in a tree. [cap] is
+     * `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`: an ACTIVE order that has started [cap] cycles (and has more in `max_cycles`) is paused with
+     * LIMIT_REACHED, as it would be at `max_cycles`. The audit event has actor_kind SYSTEM and reason code [AUTO_CYCLE_STARTED]; the goal is
+     * created in the order creator's name, as an automatically approved task already runs as the goal's creator (ADR 0011 section 2.6).
+     * No version is expected: the order is read under its lock, so a pause or a stop that won the lock first is seen as not ACTIVE.
+     */
+    fun startCycleAutomatically(orderId: String, cap: Int): AutoCycleResult = try {
+        transaction(database) {
+            val path = lockPath(orderId) ?: return@transaction AutoCycleResult.NotFound
+            val current = path.first()
+            if (current.state == OrderState.ACTIVE && current.currentGoalId == null && current.cyclesStarted >= cap && current.cyclesStarted < current.maxCycles) {
+                val now = utcNow(clock)
+                if (!updateState(orderId, current.version, OrderState.PAUSED, OrderReason.LIMIT_REACHED, now)) throw AutoSkip(AutoCycleSkip.STALE)
+                appendEvent(orderId, current.cyclesStarted, "PAUSED", OrderState.ACTIVE, OrderState.PAUSED, OrderReason.LIMIT_REACHED.name, OrderActor.SYSTEM, null, null, now)
+                return@transaction AutoCycleResult.LimitPaused(getIn(orderId) ?: error("order vanished after the cap pause"))
+            }
+            val by = CycleStarter(OrderActor.SYSTEM, null, current.createdBy, AUTO_CYCLE_STARTED, auto = true)
+            when (val r = startCycleIn(path, null, by)) {
+                is OrderResult.Moved -> AutoCycleResult.Started(r.value)
+                is OrderResult.NotFound -> AutoCycleResult.NotFound
+                is OrderResult.StaleVersion -> AutoCycleResult.Skipped(AutoCycleSkip.STALE)
+                is OrderResult.Refused -> AutoCycleResult.Skipped(AutoCycleSkip.valueOf(r.reason.name), r.orderId)
+            }
+        }
+    } catch (r: Rollback) {
+        when (val o = r.outcome) {
+            is OrderResult.Refused -> AutoCycleResult.Skipped(AutoCycleSkip.valueOf(o.reason.name), o.orderId)
+            else -> AutoCycleResult.Skipped(AutoCycleSkip.STALE)
+        }
+    } catch (a: AutoSkip) {
+        AutoCycleResult.Skipped(a.skip, a.orderId)
+    }
+
+    /**
+     * ACTIVE orders that the automatic start may look at: no cycle in progress, under the failure limit and under `max_cycles`. The other
+     * conditions are checked under the locks in [startCycleAutomatically].
+     */
+    fun autoCycleCandidates(limit: Int): List<String> = transaction(database) {
+        execQuery(
+            """
+            SELECT order_id FROM selfdev_orders
+             WHERE state = 'ACTIVE' AND current_goal_id IS NULL AND consecutive_failed_cycles < ? AND cycles_started < max_cycles
+             ORDER BY created_at, order_id LIMIT ?
+            """.trimIndent(),
+            CYCLE_FAILURE_LIMIT, limit,
+        ) { it.getString(1) }
+    }
+
+    /** Who starts a cycle: the actor of the audit event, the creator of the goal, and whether the automatic-only rules apply. */
+    private class CycleStarter(val actor: OrderActor, val actorKey: String?, val goalCreator: String, val reasonCode: String?, val auto: Boolean)
+
+    /**
+     * The checks and the writes of a cycle start, shared by the operator's [startCycle] and the automatic [startCycleAutomatically]. [path] is
+     * the locked path (the order first, then its ancestors up to the root). [expectedVersion] is null only for the automatic start.
+     */
+    private fun Transaction.startCycleIn(path: List<SelfDevOrder>, expectedVersion: Long?, by: CycleStarter): OrderResult<CycleStarted> {
+        val current = path.first()
+        val orderId = current.orderId
+        if (expectedVersion != null && current.version != expectedVersion) return OrderResult.StaleVersion
+        if (current.state != OrderState.ACTIVE) throw Rollback(OrderResult.Refused(OrderConflict.NOT_ACTIVE))
+        firstStoppingAncestor(path.drop(1))?.let { throw Rollback(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, it.orderId)) }
+        if (current.currentGoalId != null) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_IN_PROGRESS))
+        if (current.cyclesStarted >= current.maxCycles) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_LIMIT_REACHED))
+        val now = utcNow(clock)
+        if (!current.expiresAt.isAfter(now)) throw Rollback(OrderResult.Refused(OrderConflict.ORDER_EXPIRED))
+        val control = execQuery("SELECT paused, breaker_open FROM selfdev_autopilot_control WHERE control_id = 1") { it.getBoolean(1) to it.getBoolean(2) }.single()
+        if (control.first) throw Rollback(OrderResult.Refused(OrderConflict.AUTOPILOT_PAUSED))
+        if (by.auto) checkAutomaticRules(path, control.second, now)
+        for (order in path) {
+            if (order.orderBudgetJpy - order.spentJpy < order.cycleBudgetJpy) {
+                throw Rollback(OrderResult.Refused(OrderConflict.ORDER_BUDGET, order.orderId))
+            }
+        }
+        if (path.any { unpricedCycleOf(it.orderId) }) throw Rollback(OrderResult.Refused(OrderConflict.ORDER_UNPRICED))
+
+        val cycleNo = current.cyclesStarted + 1
+        val goalId = Ulid.generate(clock)
+        execUpdate(
+            """
+            INSERT INTO selfdev_goals (goal_id, created_by, idempotency_key, title, body, target_repo, state, revision, version,
+                created_at, updated_at, order_id, cycle_no)
+            VALUES (?, ?, ?, ?, ?, ?, 'GOAL_SUBMITTED', 0, 0, ?, ?, ?, ?)
+            """.trimIndent(),
+            goalId, by.goalCreator, "order:$orderId:cycle:$cycleNo", current.title, current.policy, current.targetRepo, now, now,
+            orderId, cycleNo,
+        )
+        val changed = execUpdate(
+            """
+            UPDATE selfdev_orders SET cycles_started = cycles_started + 1, current_goal_id = ?, version = version + 1, updated_at = ?
+             WHERE order_id = ? AND version = ?
+            """.trimIndent(),
+            goalId, now, orderId, current.version,
+        )
+        if (changed != 1) throw Rollback(OrderResult.StaleVersion)
+        appendEvent(orderId, cycleNo, "CYCLE_STARTED", OrderState.ACTIVE, OrderState.ACTIVE, by.reasonCode, by.actor, by.actorKey, null, now)
+        return OrderResult.Moved(CycleStarted(getIn(orderId) ?: error("order vanished after cycle start"), goalId, cycleNo))
+    }
+
+    /**
+     * The rules that only the automatic start has (ADR 0015 section 3.2). The previous cycle's start time is the newest goal of the order
+     * (the goal is created in the same transaction as the start, so there is no separate column), and the day is the UTC day. A cycle an
+     * operator started counts too: the interval and the daily count are about the order, not about who started the cycle.
+     */
+    private fun Transaction.checkAutomaticRules(path: List<SelfDevOrder>, breakerOpen: Boolean, now: LocalDateTime) {
+        val current = path.first()
+        if (breakerOpen) throw AutoSkip(AutoCycleSkip.BREAKER_OPEN)
+        if (current.consecutiveFailedCycles >= CYCLE_FAILURE_LIMIT) throw AutoSkip(AutoCycleSkip.CYCLE_FAILURES)
+        // One cycle at a time in a tree. Every start locks the root first, so this read cannot race with another start.
+        if (subtreeIn(path.last().orderId).any { it.currentGoalId != null }) throw AutoSkip(AutoCycleSkip.TREE_BUSY)
+        val last = execQuery("SELECT MAX(created_at) FROM selfdev_goals WHERE order_id = ?", current.orderId) {
+            it.getObject(1, LocalDateTime::class.java)
+        }.firstOrNull()
+        if (last != null && now.isBefore(last.plus(AUTO_CYCLE_MIN_INTERVAL))) throw AutoSkip(AutoCycleSkip.TOO_SOON)
+        val today = execQuery(
+            "SELECT COUNT(*) FROM selfdev_goals WHERE order_id = ? AND created_at >= ?",
+            current.orderId, now.toLocalDate().atStartOfDay(),
+        ) { it.getInt(1) }.single()
+        if (today >= AUTO_CYCLE_DAILY_MAX) throw AutoSkip(AutoCycleSkip.DAILY_LIMIT)
     }
 
     /**
@@ -1230,6 +1343,9 @@ class SelfDevOrderRepository(
      * Carries a refusal out of a transaction. The transaction rolls back, so no write made before the throw survives. The caller turns the
      * result back into the return value with [result].
      */
+    /** A refusal that only the automatic start has. Thrown inside the transaction, so nothing is written. */
+    private class AutoSkip(val skip: AutoCycleSkip, val orderId: String? = null) : RuntimeException(null, null, false, false)
+
     private class Rollback(val outcome: OrderResult<Nothing>) : RuntimeException(null, null, false, false)
 
     /** The same, for a child creation. */

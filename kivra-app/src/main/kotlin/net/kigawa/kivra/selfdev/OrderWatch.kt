@@ -8,6 +8,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.core.autopilot.OrderReason
 import net.kigawa.kivra.core.autopilot.StopRequestReason
+import net.kigawa.kivra.db.AUTO_CYCLE_STARTED
+import net.kigawa.kivra.db.AutoCycleResult
+import net.kigawa.kivra.db.AutoCycleSkip
 import net.kigawa.kivra.db.AutoStopResult
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.SelfDevOrderRepository
@@ -26,6 +29,7 @@ class AutoStopDeps(val goals: SelfDevGoalRepository, val operations: SelfDevOper
  * 3. Records the outcome of every cycle whose goal has ended, which may pause the order (LIMIT_REACHED, CYCLE_FAILURES).
  * 4. For each ACTIVE order, checks the safety guards and pauses the order with the first one that holds: the monthly budget share
  *    (BUDGET_HOLD), the FX rate (FX_EXPIRED), an UNKNOWN Run of the current cycle (UNKNOWN_RUN).
+ * 5. Only behind its switch (dev only): starts the next cycle of each order that may have one (AUTO_CYCLE_STARTED), after the guards.
  *
  * Every pause here is a SYSTEM pause: it needs no approval, it never stops an order, and nothing resumes it by itself (an operator resumes it).
  * A stop is done here only as the automatic child stop (ADR 0015 section 4.4, behind its switch, after the cycle evaluation; the reasons
@@ -47,6 +51,12 @@ class OrderWatch(
      * Its switch is `KIVRA_SELFDEV_ORDER_SPEND_ENABLED`.
      */
     private val countSpend: Boolean = false,
+    /**
+     * The automatic start of cycles (ADR 0015 section 3.1 steps 1 and 8, addendum 2026-10-24, dev only). The value is the cycle cap
+     * (`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`); null (the default) means the switch `KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED` is off, and then
+     * the step does nothing.
+     */
+    private val autoCycleCap: Int? = null,
 ) {
 
     /** One pass. Blocking (database calls only). Each step is contained: a failure in one step does not stop the next. */
@@ -57,6 +67,37 @@ class OrderWatch(
         if (countSpend) step("order spend") { countSpendOfCycles() }
         autoStop?.let { deps -> step("automatic child stop") { stopChildrenAutomatically(deps) } }
         step("safety guards") { guardActiveOrders() }
+        // After the guards, so an order a guard has just paused is not started in the same pass.
+        autoCycleCap?.let { cap -> step("automatic cycle start") { startCyclesAutomatically(cap) } }
+    }
+
+    /**
+     * Starts the next cycle of each order that may have one (ADR 0015 section 3.1 step 1). The checks are in the repository, under the locks
+     * of an operator's start; at most one cycle per order and [BATCH] orders in a pass. A refusal is the normal case (an order waits for its
+     * interval, its budget, its goal's end) and is not logged, except the rarer codes below. Returns the number of cycles started.
+     */
+    private fun startCyclesAutomatically(cap: Int): Int {
+        var started = 0
+        for (orderId in orders.autoCycleCandidates(BATCH)) {
+            try {
+                when (val r = orders.startCycleAutomatically(orderId, cap)) {
+                    is AutoCycleResult.Started -> {
+                        logger.info("order auto-cycle: code={} orderId={} cycleNo={}", AUTO_CYCLE_STARTED, orderId, r.started.cycleNo)
+                        started++
+                    }
+                    is AutoCycleResult.LimitPaused -> logger.info("order auto-cycle: paused code={} orderId={}", OrderReason.LIMIT_REACHED.name, orderId)
+                    is AutoCycleResult.Skipped -> if (r.reason in LOGGED_SKIPS) {
+                        logger.info("order auto-cycle: skipped code={} orderId={}", r.reason.name, orderId)
+                    }
+                    AutoCycleResult.NotFound -> Unit
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logger.warn("order auto-cycle: failed code=AUTO_CYCLE_FAILED orderId={} exception={}", orderId, e.javaClass.simpleName)
+            }
+        }
+        return started
     }
 
     /**
@@ -154,6 +195,9 @@ class OrderWatch(
 
         /** How often the guards run (ADR 0015 stage 1). Short enough that a budget hold is seen within a minute. */
         val INTERVAL = java.time.Duration.ofSeconds(60)
+
+        /** The skips worth a log line (budget and unpriced stop the loop for a reason an operator must act on). The others repeat every minute. */
+        private val LOGGED_SKIPS = setOf(AutoCycleSkip.ORDER_BUDGET, AutoCycleSkip.ORDER_UNPRICED)
 
         /** The most rows one step handles in a pass. */
         const val BATCH = 50

@@ -48,7 +48,27 @@ sealed interface TokenResult<out T> {
 }
 
 /** The reason a token was refused, for internal logging only. It is never part of what [verify] returns. */
-enum class InvalidReason { UNKNOWN, EXPIRED, REVOKED, ASSIGNEE_DISABLED, ROLE_NOT_ALLOWED, MALFORMED }
+enum class InvalidReason { UNKNOWN, EXPIRED, REVOKED, ASSIGNEE_DISABLED, ROLE_NOT_ALLOWED, MALFORMED, OWNER_KEY_CONFLICT }
+
+/**
+ * Revokes every not yet revoked, not expired token of [assigneeId] inside the caller's transaction: `revoked_at`, `revoked_by` and one
+ * TOKEN_REVOKED event each (actor_ref and token_ref only). Returns how many. Used by the assignee repository on disable and role change.
+ */
+internal fun org.jetbrains.exposed.sql.Transaction.revokeActiveTokens(assigneeId: String, actor: String, at: LocalDateTime, clock: Clock): Int {
+    val rows = execQuery(
+        "SELECT token_id, token_ref FROM selfdev_assignee_tokens WHERE assignee_id = ? AND revoked_at IS NULL AND expires_at > ? " +
+            "ORDER BY token_id FOR UPDATE",
+        assigneeId, at,
+    ) { it.getString(1) to it.getString(2) }
+    for ((id, ref) in rows) {
+        execUpdate("UPDATE selfdev_assignee_tokens SET revoked_at = ?, revoked_by = ? WHERE token_id = ? AND revoked_at IS NULL", at, actor, id)
+        execUpdate(
+            "INSERT INTO selfdev_assignee_events (event_id, assignee_id, kind, actor_ref, token_ref, occurred_at) VALUES (?, ?, 'TOKEN_REVOKED', ?, ?, ?)",
+            Ulid.generate(clock), assigneeId, actor, ref, at,
+        )
+    }
+    return rows.size
+}
 
 /** [token] is the plaintext, shown once. [toString] hides it. */
 data class IssuedToken(val tokenId: String, val token: String, val tokenRef: String, val expiresAt: LocalDateTime) {
@@ -206,7 +226,10 @@ class SelfDevAssigneeTokenRepository(
         if (!row.expiresAt.isAfter(at)) return invalid(InvalidReason.EXPIRED)
         if (row.state != "ACTIVE") return invalid(InvalidReason.ASSIGNEE_DISABLED)
         if (!roleAllowed(row.role)) return invalid(InvalidReason.ROLE_NOT_ALLOWED)
-        return TokenVerification.Valid(row.assigneeId, ownerKeyOf(row.assigneeId), AssigneeRole.valueOf(row.role), row.ref)
+        // The owner key must still lead to this assignee: a binding moved by hand makes the token unusable.
+        val ownerKey = ownerKeyOf(row.assigneeId)
+        if (assignees.accessOf(ownerKey)?.assigneeId != row.assigneeId) return invalid(InvalidReason.OWNER_KEY_CONFLICT)
+        return TokenVerification.Valid(row.assigneeId, ownerKey, AssigneeRole.valueOf(row.role), row.ref)
     }
 
     private class VerifyRow(

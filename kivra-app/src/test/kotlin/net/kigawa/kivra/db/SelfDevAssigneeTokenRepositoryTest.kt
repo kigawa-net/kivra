@@ -67,6 +67,17 @@ class SelfDevAssigneeTokenRepositoryTest {
         }
     }
 
+    /** Binds an owner key by SQL, as a manual fix would (the public bind refuses synthetic keys). */
+    private fun bindDirectly(assigneeId: String, ownerKey: String) = transaction(db.database) {
+        execUpdate(
+            "INSERT INTO selfdev_assignee_members (owner_key, member_ref, assignee_id, created_at) VALUES (?, ?, ?, ?)",
+            ownerKey, SelfDevAssigneeRepository.memberRef(ownerKey), assigneeId, java.time.LocalDateTime.of(2026, 1, 1, 0, 0),
+        )
+    }
+
+    private fun activeCount(id: String) =
+        count("SELECT COUNT(*) FROM selfdev_assignee_tokens WHERE assignee_id = ? AND revoked_at IS NULL", id)
+
     private fun count(sql: String, vararg p: Any?): Int = transaction(db.database) { execQuery(sql, *p) { it.getInt(1) }.first() }
 
     @Test
@@ -147,19 +158,16 @@ class SelfDevAssigneeTokenRepositoryTest {
     }
 
     @Test
-    fun `a disabled assignee or a changed role makes the same token Invalid`() {
-        assignee(AssigneeRole.ADMIN, "root") // another ACTIVE ADMIN, so the token's assignee can be moved to and from ADMIN
+    fun `a token whose assignee is disabled or no longer AI or VIEWER is Invalid`() {
+        // Disable and role change revoke the tokens (tested below); this covers the check on verify itself, with the state changed by SQL.
         val a = assignee(AssigneeRole.AI)
         val t = issued(a)
         assertIs<TokenVerification.Valid>(valid(t))
-        assertIs<AssigneeResult.Moved<Assignee>>(assignees.setState(a.assigneeId, AssigneeState.DISABLED, 0, OTHER_ADMIN_KEY))
+        transaction(db.database) { execUpdate("UPDATE selfdev_assignees SET state = 'DISABLED' WHERE assignee_id = ?", a.assigneeId) }
         assertSame(TokenVerification.Invalid, valid(t))
-        assertIs<AssigneeResult.Moved<Assignee>>(assignees.setState(a.assigneeId, AssigneeState.ACTIVE, 1, OTHER_ADMIN_KEY))
-        assertIs<TokenVerification.Valid>(valid(t))
-        assertIs<AssigneeResult.Moved<Assignee>>(assignees.changeRole(a.assigneeId, AssigneeRole.ADMIN, 2, OTHER_ADMIN_KEY))
+        transaction(db.database) { execUpdate("UPDATE selfdev_assignees SET state = 'ACTIVE', role = 'ADMIN' WHERE assignee_id = ?", a.assigneeId) }
         assertSame(TokenVerification.Invalid, valid(t))
-        assertEquals(1, count("SELECT COUNT(*) FROM selfdev_assignee_tokens WHERE revoked_at IS NULL"))
-        assertIs<AssigneeResult.Moved<Assignee>>(assignees.changeRole(a.assigneeId, AssigneeRole.VIEWER, 3, OTHER_ADMIN_KEY))
+        transaction(db.database) { execUpdate("UPDATE selfdev_assignees SET role = 'VIEWER' WHERE assignee_id = ?", a.assigneeId) }
         assertEquals(AssigneeRole.VIEWER, assertIs<TokenVerification.Valid>(valid(t)).role)
         assertEquals(listOf(InvalidReason.ASSIGNEE_DISABLED, InvalidReason.ROLE_NOT_ALLOWED), seen.toList())
     }
@@ -280,7 +288,7 @@ class SelfDevAssigneeTokenRepositoryTest {
         assertEquals(0, count("SELECT COUNT(*) FROM selfdev_assignee_members"))
         // If the synthetic key is bound to another assignee, the issue is refused and writes nothing.
         val other = assignee(AssigneeRole.VIEWER, "other")
-        assertIs<AssigneeResult.Moved<Unit>>(assignees.bindMember(other.assigneeId, SelfDevAssigneeTokenRepository.ownerKeyOf(a.assigneeId), ADMIN_KEY))
+        bindDirectly(other.assigneeId, SelfDevAssigneeTokenRepository.ownerKeyOf(a.assigneeId))
         refused(tokens.issue(a.assigneeId, 90, ADMIN_KEY), TokenRefusal.OWNER_KEY_CONFLICT)
         assertEquals(0, count("SELECT COUNT(*) FROM selfdev_assignee_tokens"))
     }
@@ -336,5 +344,92 @@ class SelfDevAssigneeTokenRepositoryTest {
         )
         assertEquals(emptyList(), TokenVerification.Invalid::class.java.declaredFields.filter { !it.isSynthetic && it.name != "INSTANCE" })
         assertNotEquals(TokenVerification.Invalid.toString(), "")
+    }
+
+    @Test
+    fun `the public bind refuses the synthetic owner key`() {
+        val a = assignee(AssigneeRole.AI)
+        val key = SelfDevAssigneeTokenRepository.ownerKeyOf(a.assigneeId)
+        assertEquals(AssigneeResult.Refused(AssigneeRefusal.SYNTHETIC_KEY_RESERVED), assignees.bindMember(a.assigneeId, key, ADMIN_KEY))
+        assertEquals(AssigneeResult.Refused(AssigneeRefusal.SYNTHETIC_KEY_RESERVED), assignees.seedIfAbsent("x", AssigneeRole.AI, key))
+        assertEquals(AssigneeResult.Refused(AssigneeRefusal.SYNTHETIC_KEY_RESERVED), assignees.recoverAdmin("x", key))
+        assertEquals(0, count("SELECT COUNT(*) FROM selfdev_assignee_members"))
+        // The issue itself still binds it.
+        issued(a)
+        assertEquals(1, count("SELECT COUNT(*) FROM selfdev_assignee_members"))
+    }
+
+    @Test
+    fun `a binding moved to another assignee makes the token Invalid`() {
+        val a = assignee(AssigneeRole.AI)
+        val other = assignee(AssigneeRole.VIEWER, "other")
+        val t = issued(a)
+        assertIs<TokenVerification.Valid>(valid(t))
+        transaction(db.database) {
+            execUpdate("UPDATE selfdev_assignee_members SET assignee_id = ? WHERE assignee_id = ?", other.assigneeId, a.assigneeId)
+        }
+        assertSame(TokenVerification.Invalid, valid(t))
+        assertEquals(listOf(InvalidReason.OWNER_KEY_CONFLICT), seen.toList())
+    }
+
+    @Test
+    fun `disabling revokes the tokens and enabling does not bring them back`() {
+        assignee(AssigneeRole.ADMIN, "root")
+        val a = assignee(AssigneeRole.AI)
+        val b = assignee(AssigneeRole.AI, "bystander")
+        val t = issued(a)
+        val u = issued(a)
+        val bt = issued(b)
+        assertIs<AssigneeResult.Moved<Assignee>>(assignees.setState(a.assigneeId, AssigneeState.DISABLED, 0, OTHER_ADMIN_KEY))
+        assertEquals(0, activeCount(a.assigneeId))
+        assertEquals(1, activeCount(b.assigneeId))
+        assertIs<AssigneeResult.Moved<Assignee>>(assignees.setState(a.assigneeId, AssigneeState.ACTIVE, 1, OTHER_ADMIN_KEY))
+        assertSame(TokenVerification.Invalid, valid(t))
+        assertSame(TokenVerification.Invalid, valid(u))
+        assertIs<TokenVerification.Valid>(valid(bt))
+        assertEquals(listOf(InvalidReason.REVOKED, InvalidReason.REVOKED), seen.toList())
+        assertIs<TokenVerification.Valid>(valid(issued(a)))
+    }
+
+    @Test
+    fun `a role change revokes the tokens and changing back does not restore them`() {
+        assignee(AssigneeRole.ADMIN, "root")
+        val a = assignee(AssigneeRole.AI)
+        val v = assignee(AssigneeRole.VIEWER, "viewer")
+        val t = issued(a)
+        val vt = issued(v)
+        assertIs<AssigneeResult.Moved<Assignee>>(assignees.changeRole(a.assigneeId, AssigneeRole.ADMIN, 0, OTHER_ADMIN_KEY))
+        assertEquals(0, activeCount(a.assigneeId))
+        assertIs<AssigneeResult.Moved<Assignee>>(assignees.changeRole(a.assigneeId, AssigneeRole.AI, 1, OTHER_ADMIN_KEY))
+        assertSame(TokenVerification.Invalid, valid(t))
+        assertIs<TokenVerification.Valid>(valid(vt))
+        // AI <-> VIEWER revokes too (safe side).
+        assertIs<AssigneeResult.Moved<Assignee>>(assignees.changeRole(v.assigneeId, AssigneeRole.AI, 0, OTHER_ADMIN_KEY))
+        assertSame(TokenVerification.Invalid, valid(vt))
+        assertIs<TokenVerification.Valid>(valid(issued(v)))
+    }
+
+    @Test
+    fun `revocation events of a disable hold only the actor ref and the token ref`() {
+        assignee(AssigneeRole.ADMIN, "root")
+        val a = assignee(AssigneeRole.AI, "NAME-MARKER-QQ")
+        val t = issued(a)
+        assignees.setState(a.assigneeId, AssigneeState.DISABLED, 0, OTHER_ADMIN_KEY)
+        val rows = transaction(db.database) {
+            execQuery("SELECT * FROM selfdev_assignee_events WHERE kind = 'TOKEN_REVOKED'") { rs ->
+                (1..rs.metaData.columnCount).associate { rs.metaData.getColumnName(it).lowercase() to rs.getString(it) }
+            }
+        }
+        val e = rows.single()
+        assertEquals(SelfDevAssigneeRepository.actorRef(OTHER_ADMIN_KEY), e["actor_ref"])
+        assertEquals(t.tokenRef, e["token_ref"])
+        assertEquals(null, e["member_ref"])
+        val hash = transaction(db.database) { execQuery("SELECT token_hash FROM selfdev_assignee_tokens") { it.getString(1) } }.single()
+        val line = e.values.joinToString("|")
+        for (secret in listOf(t.token, hash, OTHER_ADMIN_KEY, ADMIN_KEY, SelfDevAssigneeTokenRepository.ownerKeyOf(a.assigneeId), "NAME-MARKER", "oidc")) {
+            assertFalse(line.contains(secret), "event leaks a secret")
+        }
+        val by = transaction(db.database) { execQuery("SELECT revoked_by FROM selfdev_assignee_tokens") { it.getString(1) } }.single()
+        assertEquals(SelfDevAssigneeRepository.actorRef(OTHER_ADMIN_KEY), by)
     }
 }

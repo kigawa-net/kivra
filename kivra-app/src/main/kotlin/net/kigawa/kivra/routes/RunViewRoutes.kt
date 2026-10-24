@@ -8,6 +8,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRunRepository
@@ -56,20 +57,33 @@ private const val DEFAULT_OPERATOR_LIMIT = 50
 private const val MAX_OPERATOR_LIMIT = 100
 private val RUN_ID_SHAPE = Regex("[0-9A-Z]{26}")
 
-internal fun Route.configureRunViewRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity, selfDev: SelfDevSettings) {
+internal fun Route.configureRunViewRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity,
+    selfDev: SelfDevSettings,
+    guard: PermissionGuard = offPermissionGuard(),
+) {
     val targetRepo = selfDev.config?.repo
 
     get("/api/selfdev/status") {
-        if (identity.principal(call.request.headers) == null) {
+        val principal = identity.principal(call.request.headers)
+        if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, RunViewError("unauthorized"))
+            return@get
+        }
+        if (!guard.permits(principal, Permission.READ, "selfdev_status")) {
+            call.respond(HttpStatusCode.Forbidden, RunViewError("forbidden"))
             return@get
         }
         call.respond(selfDevStatusBody(selfDev) { runs.activeSelfDevRunIds().size })
     }
 
     get("/api/admin/runs") {
-        if (identity.principal(call.request.headers) == null) {
+        val principal = identity.principal(call.request.headers)
+        if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, RunViewError("unauthorized"))
+            return@get
+        }
+        if (!guard.permits(principal, Permission.READ, "admin_runs")) {
+            call.respond(HttpStatusCode.Forbidden, RunViewError("forbidden"))
             return@get
         }
         val raw = call.request.queryParameters["limit"]
@@ -82,8 +96,13 @@ internal fun Route.configureRunViewRoutes(runs: DevelopmentRunRepository, identi
     }
 
     get("/api/admin/runs/{id}") {
-        if (identity.principal(call.request.headers) == null) {
+        val principal = identity.principal(call.request.headers)
+        if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, RunViewError("unauthorized"))
+            return@get
+        }
+        if (!guard.permits(principal, Permission.READ, "admin_run_get")) {
+            call.respond(HttpStatusCode.Forbidden, RunViewError("forbidden"))
             return@get
         }
         val id = call.parameters["id"]?.takeIf { RUN_ID_SHAPE.matches(it) }

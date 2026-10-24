@@ -4,6 +4,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.db.ActiveSelfDevLimitException
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
@@ -66,6 +67,7 @@ class McpWriteTools(
         scope = SCOPE_SELFDEV_START,
         write = true,
         listed = selfDevEnabled,
+        permission = Permission.SPEND_START,
     ) { caller, args -> start(caller, args) }
 
     private fun start(caller: McpCaller, args: JsonObject): ToolOutcome {

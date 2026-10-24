@@ -10,6 +10,12 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import net.kigawa.kivra.auth.Permission
+import net.kigawa.kivra.routes.GuardAccess
+import net.kigawa.kivra.routes.GuardResult
+import net.kigawa.kivra.routes.PermissionGuard
+import net.kigawa.kivra.routes.VIA_MCP
+import net.kigawa.kivra.routes.offPermissionGuard
 import org.slf4j.LoggerFactory
 
 /** The protocol versions this server speaks (ADR 0013 section 2, decided in PR 1 against the MCP specification). */
@@ -18,6 +24,9 @@ internal val MCP_SUPPORTED_VERSIONS = listOf(MCP_LATEST_VERSION, "2025-03-26")
 
 /** Upper bound on one request body in bytes. */
 const val MCP_MAX_BODY_BYTES = 64 * 1024
+
+/** The fixed code and text of a refusal by the permission check. */
+internal const val MCP_FORBIDDEN = "forbidden"
 
 /** JSON-RPC 2.0 error codes. The -32000 range carries the transport and authentication failures of this endpoint. */
 internal object RpcCode {
@@ -37,7 +46,12 @@ internal object RpcCode {
 class InvalidParamsException(message: String) : RuntimeException(message)
 
 /** The authenticated caller of one request: its owner key and the scopes its token carries. */
-class McpCaller(val principal: String, val scopes: Set<String>)
+class McpCaller(
+    val principal: String,
+    val scopes: Set<String>,
+    /** Whether the caller acts as the AI under the current mode. Set by the dispatcher from the permission guard, never by the route. */
+    val isAi: Boolean = false,
+)
 
 /**
  * A tool's answer. [code] is a fixed outcome name for the audit line (for example `OK` or `NOT_FOUND`). [runId] is set only when the
@@ -46,7 +60,11 @@ class McpCaller(val principal: String, val scopes: Set<String>)
 class ToolOutcome(val isError: Boolean, val text: String, val structured: JsonObject, val code: String, val runId: String? = null)
 
 /**
- * One MCP tool. The scope is checked by the dispatcher before the handler runs.
+ * One MCP tool. The scope, and then the [permission] (through the [PermissionGuard], ADR 0020 PR 3d), are checked by the dispatcher before
+ * the handler runs; a handler never compares the caller with the AI principal.
+ * - [permission]: what the caller needs. Every `kivra_` tool of the server names it (an architecture test requires it); the default is for a
+ *   test tool only.
+ * - [refusalAction]: when set, a refusal by the permission check writes the Goal operator's refusal line with this action name.
  * - [write]: the tool changes state. Its calls count against the write rate limit of the dispatcher.
  * - [listed]: false keeps the tool out of `tools/list` while a call still reaches the handler (used for the self-development kill switch,
  *   whose refusal has a fixed reason). A tool that is not registered at all answers `unknown tool` instead.
@@ -58,6 +76,8 @@ class McpTool(
     val scope: String,
     val write: Boolean = false,
     val listed: Boolean = true,
+    val permission: Permission = Permission.READ,
+    val refusalAction: String? = null,
     val handler: suspend (McpCaller, JsonObject) -> ToolOutcome,
 )
 
@@ -98,8 +118,15 @@ internal fun rpcError(id: JsonElement?, code: Int, message: String): JsonObject 
  * Methods: `initialize` (version negotiation), `ping`, `tools/list` (only the tools the caller holds the scope for), `tools/call`.
  * A message without `id`, or one whose method starts with `notifications/`, gets no response. An unknown method is -32601.
  */
-class McpDispatcher(private val tools: List<McpTool>, private val writeRateLimiter: McpRateLimiter? = null) {
+class McpDispatcher(
+    private val tools: List<McpTool>,
+    private val writeRateLimiter: McpRateLimiter? = null,
+    private val guard: PermissionGuard = offPermissionGuard(),
+) {
     private val logger = LoggerFactory.getLogger(McpDispatcher::class.java)
+
+    /** The Goal operator's log, the same name as the REST routes' and the Goal tools' (ADR 0020 PR 3d moved the AI refusal here). */
+    private val refusalLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.autopilot.operator")
 
     suspend fun dispatch(message: JsonObject, caller: McpCaller): McpDispatch {
         val rawId = message["id"]
@@ -190,8 +217,13 @@ class McpDispatcher(private val tools: List<McpTool>, private val writeRateLimit
                 rpcError(id, RpcCode.RATE_LIMITED, "rate limit exceeded"), "tools/call", tool.name, "rate_limited", rateLimited = true,
             )
         }
+        // After the scope, the input shape and the write rate limit, and before the handler reads the input: where the handlers refused the AI.
+        val access = guard.resolve(caller.principal, legacyAdmin = true, via = VIA_MCP)
+        val denied = guard.check(access, tool.permission, tool.name, scopeOk = true, via = VIA_MCP)
+        if (denied is GuardResult.Deny) return refused(id, tool, access, denied.code)
+        val acting = McpCaller(caller.principal, caller.scopes, access.isAi)
         val outcome = try {
-            tool.handler(caller, arguments)
+            tool.handler(acting, arguments)
         } catch (e: InvalidParamsException) {
             throw e
         } catch (e: CancellationException) {
@@ -211,6 +243,34 @@ class McpDispatcher(private val tools: List<McpTool>, private val writeRateLimit
             put("isError", outcome.isError)
         }
         return McpDispatch(rpcResult(id, result), "tools/call", tool.name, outcome.code, runId = outcome.runId)
+    }
+
+    /** The tool's refusal for a caller without the permission: the fixed `forbidden` result the Goal tools always gave the AI. */
+    private fun refused(id: JsonElement, tool: McpTool, access: GuardAccess, code: String): McpDispatch {
+        tool.refusalAction?.let { action ->
+            // For the AI that is the line its refusal has always written (`actor=AI result=forbidden`). Fixed values only.
+            refusalLog.info(
+                "autopilot operator refused: action={} via=mcp actor={} result={}",
+                action, if (access.isAi) "AI" else "OPERATOR", if (access.isAi) MCP_FORBIDDEN else code,
+            )
+        }
+        val outcome = ToolOutcome(
+            isError = true,
+            text = MCP_FORBIDDEN,
+            structured = buildJsonObject { putJsonObject("error") { put("code", MCP_FORBIDDEN) } },
+            code = MCP_FORBIDDEN,
+        )
+        val result = buildJsonObject {
+            putJsonArray("content") {
+                add(buildJsonObject {
+                    put("type", "text")
+                    put("text", outcome.text)
+                })
+            }
+            put("structuredContent", outcome.structured)
+            put("isError", true)
+        }
+        return McpDispatch(rpcResult(id, result), "tools/call", tool.name, outcome.code)
     }
 
     private fun isValidId(el: JsonElement): Boolean {

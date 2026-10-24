@@ -229,7 +229,7 @@ internal fun Application.appModule(env: Map<String, String>) {
         "${McpSettings.ENV_GOAL_SUBMIT_ENABLED}=true requires the autopilot"
     }
     val mcpDeps = buildMcpRouteDeps(
-        mcpSettings, env, runs, selfDevSettings.config?.repo,
+        mcpSettings, env, runs, selfDevSettings.config?.repo, guard = permissionGuard,
         selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns,
         // The order tools serve only while the orders answer (the same condition as the REST routes' requireEnabled).
         orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, aiPrincipal) },

@@ -8,6 +8,7 @@ import io.ktor.server.routing.Route
 import io.ktor.server.routing.post
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRunRepository
@@ -43,12 +44,20 @@ private const val INVALID_RELEASE_REQUEST = "invalid release request"
  *
  * The reason is written to the audit payload only. It is never logged or echoed. Neither route writes to GitHub.
  */
-internal fun Route.configureSelfDevAdminRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity?) {
+internal fun Route.configureSelfDevAdminRoutes(
+    runs: DevelopmentRunRepository,
+    identity: TaskApiIdentity?,
+    guard: PermissionGuard = offPermissionGuard(),
+) {
     if (identity == null) return
     post("/api/admin/selfdev/runs/{id}/release") {
         val operator = identity.principal(call.request.headers)
         if (operator == null) {
             call.respond(HttpStatusCode.Unauthorized, SelfDevAdminError("unauthorized"))
+            return@post
+        }
+        if (!guard.permits(operator, Permission.BUDGET_OVERRIDE, "selfdev_release")) {
+            call.respond(HttpStatusCode.Forbidden, SelfDevAdminError("forbidden"))
             return@post
         }
         if (!call.requireJsonSameOrigin()) return@post
@@ -71,6 +80,10 @@ internal fun Route.configureSelfDevAdminRoutes(runs: DevelopmentRunRepository, i
         val operator = identity.principal(call.request.headers)
         if (operator == null) {
             call.respond(HttpStatusCode.Unauthorized, SelfDevAdminError("unauthorized"))
+            return@post
+        }
+        if (!guard.permits(operator, Permission.BUDGET_OVERRIDE, "selfdev_release_unbound_pr")) {
+            call.respond(HttpStatusCode.Forbidden, SelfDevAdminError("forbidden"))
             return@post
         }
         if (!call.requireJsonSameOrigin()) return@post

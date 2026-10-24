@@ -10,6 +10,7 @@ import java.math.BigDecimal
 import java.time.Clock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.BudgetOperatorStatus
 import net.kigawa.kivra.db.BudgetOperatorView
@@ -105,13 +106,19 @@ internal fun Route.configureBudgetAdminRoutes(
     fx: FxConfig? = null,
     clock: Clock = Clock.systemUTC(),
     operatorView: BudgetOperatorView? = null,
+    guard: PermissionGuard = offPermissionGuard(),
 ) {
     if (identity == null) return
     if (operatorView != null) {
         // Read-only: the month's spend, the path split and the UNPRICED list. Same authentication as the routes below.
         get("/api/admin/budget/status") {
-            if (identity.principal(call.request.headers) == null) {
+            val principal = identity.principal(call.request.headers)
+            if (principal == null) {
                 call.respond(HttpStatusCode.Unauthorized, BudgetAdminError("unauthorized"))
+                return@get
+            }
+            if (!guard.permits(principal, Permission.READ, "budget_status")) {
+                call.respond(HttpStatusCode.Forbidden, BudgetAdminError("forbidden"))
                 return@get
             }
             call.respond(HttpStatusCode.OK, operatorView.operatorStatus().toBody())
@@ -119,8 +126,13 @@ internal fun Route.configureBudgetAdminRoutes(
     }
     // Read-only: the FX expiry state (for the operator's check before a rate lapses). Same authentication as the POST below.
     get("/api/admin/budget/fx") {
-        if (identity.principal(call.request.headers) == null) {
+        val principal = identity.principal(call.request.headers)
+        if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, BudgetAdminError("unauthorized"))
+            return@get
+        }
+        if (!guard.permits(principal, Permission.READ, "budget_fx")) {
+            call.respond(HttpStatusCode.Forbidden, BudgetAdminError("forbidden"))
             return@get
         }
         val expiry = fx?.expiry(clock)
@@ -131,6 +143,10 @@ internal fun Route.configureBudgetAdminRoutes(
         val operatorId = identity.principal(call.request.headers)
         if (operatorId == null) {
             call.respond(HttpStatusCode.Unauthorized, BudgetAdminError("unauthorized"))
+            return@post
+        }
+        if (!guard.permits(operatorId, Permission.BUDGET_OVERRIDE, "budget_acknowledge")) {
+            call.respond(HttpStatusCode.Forbidden, BudgetAdminError("forbidden"))
             return@post
         }
         if (!call.requireJsonSameOrigin()) return@post

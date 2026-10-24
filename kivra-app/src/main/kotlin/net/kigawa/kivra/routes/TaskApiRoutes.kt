@@ -9,6 +9,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import java.time.ZoneOffset
 import kotlinx.serialization.Serializable
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.PullRequestBinding
 import net.kigawa.kivra.core.RunId
@@ -155,11 +156,15 @@ private fun AuditTrailEntry.toRunEventResponse(): RunEventResponse = RunEventRes
     reasonCode = reasonCode,
 )
 
-internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity, targetRepo: RepoRef? = null) {
+internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity, targetRepo: RepoRef? = null, guard: PermissionGuard = offPermissionGuard()) {
     post("/api/tasks") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, TaskApiError("unauthorized"))
+            return@post
+        }
+        if (!guard.permits(principal, Permission.SPEND_START, "task_submit")) {
+            call.respond(HttpStatusCode.Forbidden, TaskApiError("forbidden"))
             return@post
         }
         if (!call.requireJsonSameOrigin()) return@post
@@ -186,6 +191,10 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.Unauthorized, TaskApiError("unauthorized"))
             return@get
         }
+        if (!guard.permits(principal, Permission.READ, "task_get")) {
+            call.respond(HttpStatusCode.Forbidden, TaskApiError("forbidden"))
+            return@get
+        }
         val run = call.parameters["id"]?.let { runs.getTask(RunId(it), principal) }
         if (run == null) call.respond(HttpStatusCode.NotFound, TaskApiError("run not found"))
         else call.respond(runs.viewOf(run, targetRepo, withEvents = true))
@@ -195,6 +204,10 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, TaskApiError("unauthorized"))
+            return@get
+        }
+        if (!guard.permits(principal, Permission.READ, "task_list")) {
+            call.respond(HttpStatusCode.Forbidden, TaskApiError("forbidden"))
             return@get
         }
         call.respond(runs.listTasks(principal, limit = 50).map { runs.viewOf(it, targetRepo) })

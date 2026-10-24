@@ -7,6 +7,7 @@ import io.ktor.server.routing.get
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.EvidenceAuthorityUnavailableException
 import net.kigawa.kivra.core.EvidenceObservationRef
@@ -109,11 +110,16 @@ internal fun Route.configureOperationApiRoutes(
     runs: DevelopmentRunRepository,
     operations: OperationJournalRepository,
     identity: TaskApiIdentity,
+    guard: PermissionGuard = offPermissionGuard(),
 ) {
     get("/api/runs/{id}/operations") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, OperationApiError("unauthorized"))
+            return@get
+        }
+        if (!guard.permits(principal, Permission.READ, "run_operations")) {
+            call.respond(HttpStatusCode.Forbidden, OperationApiError("forbidden"))
             return@get
         }
         val runId = RunId(call.parameters["id"].orEmpty())

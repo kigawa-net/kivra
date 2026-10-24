@@ -20,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.auth.OidcJwtVerifier
+import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.auth.MemberKind
 import net.kigawa.kivra.auth.TaskCaller
@@ -171,7 +172,13 @@ internal class RunExecutionDeps(
     val heartbeat: Duration = Duration.ofSeconds(15),
     val clock: Clock = Clock.systemUTC(),
     val timer: StreamTimer = StreamTimer(),
-)
+    /** The permission entrance. Checked after the gate; the gate's owner rule is not changed. The default is OFF. */
+    val guard: PermissionGuard = offPermissionGuard(),
+) {
+    fun withGuard(guard: PermissionGuard) = RunExecutionDeps(
+        runs, attempts, monitor, usage, gate, reserveUsd, staleAfter, limiter, streamTick, heartbeat, clock, timer, guard,
+    )
+}
 
 /**
  * The read API's dependencies, built from the Task API identity. With [verifier] (`oidc-jwt`) the caller is verified as a JWT and the
@@ -296,7 +303,15 @@ private suspend fun RunExecutionDeps.admit(call: ApplicationCall): RunAccess.All
         return null
     }
     return when (val access = gate.check(call.request.headers, runId)) {
-        is RunAccess.Allowed -> access
+        is RunAccess.Allowed -> {
+            // After the gate's owner rule, which is unchanged. The caller passed the gate, so it is an operator by today's rule.
+            if (guard.permits(access.principal, Permission.READ, "run_execution")) {
+                access
+            } else {
+                call.respond(HttpStatusCode.Forbidden, ExecutionError(FORBIDDEN))
+                null
+            }
+        }
         RunAccess.Unauthenticated -> {
             call.respond(HttpStatusCode.Unauthorized, ExecutionError(UNAUTHORIZED))
             null

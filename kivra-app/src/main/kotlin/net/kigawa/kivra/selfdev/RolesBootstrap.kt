@@ -61,6 +61,9 @@ fun seedRoles(repo: SelfDevAssigneeRepository, rootApprover: String?, aiPrincipa
                 is AssigneeResult.Moved -> { created++; bound++ }
                 else -> warnings += SeedWarning.SEED_REFUSED
             }
+        } else if (existing.role == AssigneeRole.AI_APPROVER) {
+            // ADR 0021 P12: the AI principal is the requester side and must never be the approver. Fixed message, no owner key.
+            throw IllegalStateException("roles bootstrap: AI_PRINCIPAL_IS_AI_APPROVER (the AI principal of the environment is bound to an AI_APPROVER assignee)")
         } else if (existing.role != AssigneeRole.AI) {
             warnings += SeedWarning.ENV_AI_CONFLICT
         }

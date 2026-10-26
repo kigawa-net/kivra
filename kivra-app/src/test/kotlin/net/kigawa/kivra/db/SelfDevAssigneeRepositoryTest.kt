@@ -25,6 +25,7 @@ private const val BOB = "3:oidc:bob"
 private const val CAROL = "5:oidc:carol"
 private const val ROBOT = "5:oidc:robot"
 private const val NAME_MARKER = "NAME-MARKER-XYZ"
+private const val ADMIN_FOR_AI_APPROVER = "6:oidc:root"
 
 /**
  * A clock that moves forward 1 ms on every read. Event IDs are ULIDs whose ordering within one millisecond is random, so the events
@@ -64,6 +65,27 @@ class SelfDevAssigneeRepositoryTest {
         val a = created(name, AssigneeRole.ADMIN, "9:seed:seed")
         moved(repo.bindMember(a.assigneeId, key, "9:seed:seed"))
         return a
+    }
+
+    @Test
+    fun `AI_APPROVER takes no person, and a person cannot be moved into it`() {
+        val approver = created("approver", AssigneeRole.AI_APPROVER, ADMIN_FOR_AI_APPROVER)
+        refused(repo.bindMember(approver.assigneeId, ALICE, ADMIN_FOR_AI_APPROVER), AssigneeRefusal.HUMAN_MEMBER_NOT_ALLOWED)
+        assertEquals(emptyList(), repo.memberRefs(approver.assigneeId))
+        refused(repo.seedIfAbsent("x", AssigneeRole.AI_APPROVER, ROBOT), AssigneeRefusal.HUMAN_MEMBER_NOT_ALLOWED)
+        assertNull(repo.accessOf(ROBOT))
+
+        val admin = admin("root", ADMIN_FOR_AI_APPROVER)
+        val person = created("person", AssigneeRole.OPERATOR)
+        moved(repo.bindMember(person.assigneeId, BOB, ADMIN_FOR_AI_APPROVER))
+        refused(repo.changeRole(person.assigneeId, AssigneeRole.AI_APPROVER, person.version, ADMIN_FOR_AI_APPROVER), AssigneeRefusal.HUMAN_MEMBER_NOT_ALLOWED)
+        assertEquals(AssigneeRole.OPERATOR, repo.find(person.assigneeId)!!.role)
+
+        // An assignee with no person can be made an AI_APPROVER, by an ADMIN's key (the caller's permission is judged by the route).
+        val empty = created("empty", AssigneeRole.AI)
+        val m = assertIs<AssigneeResult.Moved<Assignee>>(repo.changeRole(empty.assigneeId, AssigneeRole.AI_APPROVER, empty.version, ADMIN_FOR_AI_APPROVER))
+        assertEquals(AssigneeRole.AI_APPROVER, m.value.role)
+        assertNotNull(admin)
     }
 
     private fun events(): List<List<String?>> = transaction(org.jetbrains.exposed.sql.Database.connect(db.dataSource)) {

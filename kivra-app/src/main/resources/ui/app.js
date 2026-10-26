@@ -3709,7 +3709,7 @@
   var ASG_SUB = /^[A-Za-z0-9._:-]{1,255}$/;
   var ASG_NAME_MAX = 64;
   var ASG_TTL_DEFAULT = 90;
-  var ASG_ROLE_LIST = ['ADMIN', 'OPERATOR', 'APPROVER', 'AI', 'VIEWER'];
+  var ASG_ROLE_LIST = ['ADMIN', 'OPERATOR', 'APPROVER', 'AI', 'VIEWER', 'AI_APPROVER'];
   var ASG_TOKEN_ROLES = ['AI', 'VIEWER'];
 
   var ASG_ROLES = {
@@ -3717,7 +3717,8 @@
     OPERATOR: 'OPERATOR（運用者）',
     APPROVER: 'APPROVER（停止の承認だけを任せる人）',
     AI: 'AI（AI の担当。トークンで MCP から入る）',
-    VIEWER: 'VIEWER（読み取りだけ。トークンを持てる）'
+    VIEWER: 'VIEWER（読み取りだけ。トークンを持てる）',
+    AI_APPROVER: 'AI_APPROVER（サーバーの AI が停止要求を承認するための担当。トークンも、人の紐付けも持てない）'
   };
 
   var ASG_STATES = { ACTIVE: '有効', DISABLED: '無効' };
@@ -3771,6 +3772,7 @@
     INVALID_ACTOR: '操作した人を確認できませんでした。',
     ALREADY_REVOKED: 'すでに失効しています。',
     OWNER_KEY_CONFLICT: 'この担当の識別子が衝突しています。運用者に連絡してください。',
+    HUMAN_MEMBER_NOT_ALLOWED: 'AI_APPROVER の担当には、人を紐付けられません。人が紐付いている担当を AI_APPROVER にすることもできません。',
     ROLES_DISABLED: '担当の管理は、今は無効です。',
     BINDING_UNAVAILABLE: 'メンバーの紐付けは、このサーバーでは使えません（OIDC の設定が必要です）。',
     FORBIDDEN: 'この操作は、あなたの権限では行えません。',
@@ -3987,18 +3989,22 @@
       ]));
     });
     box.appendChild(ml);
-    var sub = document.createElement('input');
-    sub.type = 'text';
-    sub.maxLength = 255;
-    sub.autocomplete = 'off';
-    sub.spellcheck = false;
-    sub.disabled = blocked;
-    var bind = actionButton('紐付ける…', function () { asgAskBind(a, sub); }, 'secondary');
-    bind.disabled = blocked;
-    box.appendChild(h('div', { className: 'detail-actions' }, [
-      h('label', {}, ['Keycloak の sub（入力した値は、送ったあとに消えます。画面には表示しません） ', sub]),
-      bind
-    ]));
+    if (a.role === 'AI_APPROVER') {
+      box.appendChild(h('p', { className: 'meta', text: 'AI_APPROVER の担当には、人（Keycloak の sub）を紐付けられません。' }));
+    } else {
+      var sub = document.createElement('input');
+      sub.type = 'text';
+      sub.maxLength = 255;
+      sub.autocomplete = 'off';
+      sub.spellcheck = false;
+      sub.disabled = blocked;
+      var bind = actionButton('紐付ける…', function () { asgAskBind(a, sub); }, 'secondary');
+      bind.disabled = blocked;
+      box.appendChild(h('div', { className: 'detail-actions' }, [
+        h('label', {}, ['Keycloak の sub（入力した値は、送ったあとに消えます。画面には表示しません） ', sub]),
+        bind
+      ]));
+    }
 
     // Tokens (only the roles that can hold one).
     box.appendChild(h('h3', { text: 'トークン' }));

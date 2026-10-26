@@ -31,23 +31,24 @@ class PermissionsTest {
     private fun allowed(s: PermissionService, key: String, p: Permission, admin: Boolean = true, scopeOk: Boolean = true) =
         s.check(s.access(key, admin), p, scopeOk) == Decision.Allow
 
-    // The plan's table, one row per permission, columns ADMIN OPERATOR APPROVER AI VIEWER.
+    // The plan's table, one row per permission, columns ADMIN OPERATOR APPROVER AI VIEWER AI_APPROVER.
     private val table: Map<Permission, String> = mapOf(
-        Permission.READ to "YYYYY",
-        Permission.READ_TEXT to "YYNNN",
-        Permission.GOAL_STOP to "YYNNN",
-        Permission.ORDER_MANAGE to "YYNNN",
-        Permission.STOP_REQUEST to "YYYYN",
-        Permission.STOP_DECIDE to "YNYNN",
-        Permission.GOAL_WRITE to "YYNNN",
-        Permission.SPEND_START to "YYNYN",
-        Permission.BUDGET_OVERRIDE to "YYNNN",
-        Permission.ASSIGNEE_MANAGE to "YNNNN",
+        Permission.READ to "YYYYYY",
+        Permission.READ_TEXT to "YYNNNN",
+        Permission.GOAL_STOP to "YYNNNN",
+        Permission.ORDER_MANAGE to "YYNNNN",
+        Permission.STOP_REQUEST to "YYYYNN",
+        Permission.STOP_DECIDE to "YNYNNN",
+        Permission.GOAL_WRITE to "YYNNNN",
+        Permission.SPEND_START to "YYNYNN",
+        Permission.BUDGET_OVERRIDE to "YYNNNN",
+        Permission.ASSIGNEE_MANAGE to "YNNNNN",
+        Permission.STOP_DECIDE_AUTO to "NNNNNY",
     )
 
     @Test
     fun `the table matches the plan for every role and permission`() {
-        val roles = listOf(Role.ADMIN, Role.OPERATOR, Role.APPROVER, Role.AI, Role.VIEWER)
+        val roles = listOf(Role.ADMIN, Role.OPERATOR, Role.APPROVER, Role.AI, Role.VIEWER, Role.AI_APPROVER)
         assertEquals(Permission.entries.toSet(), table.keys)
         for ((p, row) in table) for ((i, r) in roles.withIndex()) {
             assertEquals(row[i] == 'Y', p in ROLE_PERMISSIONS.getValue(r), "$r $p")
@@ -58,11 +59,19 @@ class PermissionsTest {
     @Test
     fun `admin and approver can decide a stop, and no other role can`() {
         assertTrue(Permission.STOP_DECIDE in ROLE_PERMISSIONS.getValue(Role.ADMIN))
-        for (r in listOf(Role.OPERATOR, Role.AI, Role.VIEWER)) assertFalse(Permission.STOP_DECIDE in ROLE_PERMISSIONS.getValue(r), "$r")
+        for (r in listOf(Role.OPERATOR, Role.AI, Role.VIEWER, Role.AI_APPROVER)) assertFalse(Permission.STOP_DECIDE in ROLE_PERMISSIONS.getValue(r), "$r")
         assertEquals(
             setOf(Permission.READ, Permission.STOP_REQUEST, Permission.STOP_DECIDE),
             ROLE_PERMISSIONS.getValue(Role.APPROVER),
         )
+    }
+
+    @Test
+    fun `only AI_APPROVER has STOP_DECIDE_AUTO and it holds that and READ only`() {
+        for (r in Role.entries) {
+            assertEquals(r == Role.AI_APPROVER, Permission.STOP_DECIDE_AUTO in ROLE_PERMISSIONS.getValue(r), "$r")
+        }
+        assertEquals(setOf(Permission.STOP_DECIDE_AUTO, Permission.READ), ROLE_PERMISSIONS.getValue(Role.AI_APPROVER))
     }
 
     // ---- OFF parity: today's decisions ----
@@ -83,10 +92,11 @@ class PermissionsTest {
     @Test
     fun `off reproduces today's rules for the root approver and other operators`() {
         val s = svc(PermissionMode.OFF)
-        val approverAllowed = Permission.entries - Permission.ASSIGNEE_MANAGE
+        // STOP_DECIDE_AUTO belongs to AI_APPROVER only (ADR 0021): OFF, which reproduces today's rules, grants it to nobody.
+        val approverAllowed = Permission.entries - Permission.ASSIGNEE_MANAGE - Permission.STOP_DECIDE_AUTO
         for (p in Permission.entries) {
             assertEquals(p in approverAllowed, allowed(s, approver, p), "approver $p")
-            val human = p != Permission.STOP_DECIDE && p != Permission.ASSIGNEE_MANAGE
+            val human = p != Permission.STOP_DECIDE && p != Permission.ASSIGNEE_MANAGE && p != Permission.STOP_DECIDE_AUTO
             assertEquals(human, allowed(s, this.human, p), "operator $p")
         }
     }

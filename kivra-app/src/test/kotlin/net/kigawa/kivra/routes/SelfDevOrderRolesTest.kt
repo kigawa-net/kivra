@@ -226,7 +226,11 @@ class SelfDevOrderRolesTest {
     private fun bound(db: TestDb, role: AssigneeRole, key: String, state: AssigneeState = AssigneeState.ACTIVE): SelfDevAssigneeRepository {
         val repo = SelfDevAssigneeRepository(db.database)
         val made = assertIs<AssigneeResult.Moved<*>>(repo.create("n-$key", role, SEED)).value as net.kigawa.kivra.db.Assignee
-        assertIs<AssigneeResult.Moved<*>>(repo.bindMember(made.assigneeId, key, SEED))
+        if (role == AssigneeRole.AI_APPROVER) {
+            net.kigawa.kivra.db.bindToAiApproverForTest(db, made.assigneeId, key)
+        } else {
+            assertIs<AssigneeResult.Moved<*>>(repo.bindMember(made.assigneeId, key, SEED))
+        }
         if (state == AssigneeState.DISABLED) assertIs<AssigneeResult.Moved<*>>(repo.setState(made.assigneeId, state, made.version, SEED))
         return repo
     }

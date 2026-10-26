@@ -50,6 +50,11 @@ dependencies {
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.cio)
+    // OIDC session persistence (login session)
+    implementation(libs.ktor.server.auth)
+    implementation(libs.ktor.server.auth.jwt)
+    implementation(libs.ktor.server.sessions)
+    implementation(libs.ktor.server.call.id)
     implementation(libs.kotlinx.serialization.json)
 
     implementation(libs.exposed.core)

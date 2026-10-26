@@ -3,8 +3,11 @@ package net.kigawa.kivra
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
+import io.ktor.server.auth.Authentication
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.sse.SSE
+import io.ktor.server.sessions.Sessions
+import io.ktor.server.sessions.cookie
 import io.ktor.server.routing.routing
 import net.kigawa.kivra.auth.AgentApiSettings
 import net.kigawa.kivra.auth.AgentIdentity
@@ -73,6 +76,7 @@ import net.kigawa.kivra.routes.SelfDevOrderRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevOrderRoutes
 import net.kigawa.kivra.routes.requiredAgentRole
 import net.kigawa.kivra.routes.configureSelfDevRoutes
+import net.kigawa.kivra.routes.configureOidcSessionRoutes
 import net.kigawa.kivra.selfdev.AutoStopDeps
 import net.kigawa.kivra.selfdev.AutopilotDispatcher
 import net.kigawa.kivra.selfdev.OrderSettings
@@ -98,6 +102,9 @@ import net.kigawa.kivra.mcp.McpOrderDeps
 import net.kigawa.kivra.mcp.McpTokenAuth
 import net.kigawa.kivra.mcp.buildMcpRouteDeps
 import net.kigawa.kivra.mcp.registerMcpRoutes
+import net.kigawa.kivra.auth.OidcSessionSettings
+import net.kigawa.kivra.db.DbSessionStore
+import net.kigawa.kivra.routes.LoginSession
 
 fun Application.module() = appModule(System.getenv())
 
@@ -342,6 +349,18 @@ internal fun Application.appModule(env: Map<String, String>) {
 
     install(ContentNegotiation) { json() }
     install(SSE)
+    install(Authentication)
+
+    // OIDC session persistence: configure cookie-based session if enabled
+    val oidcSessionSettings = OidcSessionSettings.fromEnv(env)
+    val sessionStore = oidcSessionSettings?.let { DbSessionStore(database) }
+
+    if (oidcSessionSettings != null) {
+        install(Sessions) {
+            cookie<LoginSession>(oidcSessionSettings.sessionCookieName)
+        }
+    }
+
     val metrics = MetricsRegistry()
     routing {
         configureHealthRoutes()
@@ -368,5 +387,9 @@ internal fun Application.appModule(env: Map<String, String>) {
         registerMcpRoutes(mcpDeps)
         if (agentParts != null) configureAgentApiRoutes(agentParts)
         configureObservabilityRoutes(metrics, config.metrics)
+        // OIDC login session routes (login/logout/callback)
+        if (oidcSessionSettings != null && sessionStore != null) {
+            configureOidcSessionRoutes(oidcSessionSettings, sessionStore)
+        }
     }
 }

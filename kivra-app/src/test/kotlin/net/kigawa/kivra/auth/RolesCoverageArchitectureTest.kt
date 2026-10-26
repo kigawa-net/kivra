@@ -134,6 +134,8 @@ class RolesCoverageArchitectureTest {
         )) put(r, "AGENT")
         // /me tells every authenticated operator what the UI may show (role and permissions, no identifier). It must answer with no role too.
         put("GET /api/selfdev/me", "ME")
+        // OIDC session routes (login, callback, logout, and /me) are handled by cookie-based session auth, not role permissions.
+        for (r in listOf("GET /api/auth/login", "GET /api/auth/callback", "POST /api/auth/logout", "GET /api/auth/me")) put(r, "OIDC SESSION")
         for (r in listOf("GET /api/dev/tasks", "GET /api/dev/runs/preview", "POST /api/dev/tasks", "GET /api/dev/runs/{id}")) put(r, "DEV")
     }
 

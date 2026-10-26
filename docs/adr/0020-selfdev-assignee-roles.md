@@ -236,3 +236,14 @@ UI(`kivra-app/src/main/resources/ui/`)に、「担当」ページ(`#/assignees`)
 - **トークンの平文**: 発行の応答の `token` は、専用の `<dialog>` の読み取り専用の入力欄に 1 度だけ入る(`autocomplete="off"`)。変数、`localStorage`・`sessionStorage`、`history`、URL、コンソール、他の要素には残さない。「コピー」は `navigator.clipboard.writeText`(使えない・失敗しても例外を出さず、手動のコピーを案内する)。「閉じる」と Esc で、欄を空にする。トークンの一覧は、`tokenRef` の先頭 8 文字、状態、期限だけ。
 - **役割ごとの表示制御**: `mode` が `enforce` のときだけ、権限のない書き込みのボタンを隠す(ORDER_MANAGE: order の作成・一時停止・再開・自律運転の切替、STOP_REQUEST: 停止の要求と取り消し、STOP_DECIDE: 承認・却下、GOAL_WRITE: Goal の投入・Plan とタスクの承認・記憶の削除、GOAL_STOP: Goal の中止、BUDGET_OVERRIDE: 予算の解除と Run の解放、READ_TEXT: 記憶の一覧)。`shadow` と `off`、`/me` が使えないときは、隠さない(実際の判定は従来どおりのため)。UI は誤操作を減らすためだけで、安全性はサーバーが担う。
 - **未対応**: Task の投入(SPEND_START)のフォームは、隠さない(この PR の対象の外)。
+
+
+## 追補(2026-10-27、ADR 0021): `AI_APPROVER` と `STOP_DECIDE_AUTO`
+
+[ADR 0021](0021-selfdev-llm-stop-approval.md)(承認、2026-10-27)により、この ADR の次の点は、下のとおり**変わる**。上の本文は編集しない。**`KIVRA_SELFDEV_LLM_STOP_APPROVAL_ENABLED` が有効で、`ROLES_MODE=enforce` のときだけ有効**である。off の間は、本文のとおり。矛盾する場合は、有効なときに限り、ADR 0021 が優先する。
+
+- **決定 6 と §2 の権限の表(停止の承認・却下は人のみ。AI は不可)**: ロール `AI_APPROVER` と、権限 `STOP_DECIDE_AUTO`(停止の**承認のみ**)を足す。`STOP_DECIDE_AUTO` を持つのは `AI_APPROVER` だけで、ADMIN・OPERATOR・APPROVER・AI・VIEWER は持たない。却下(`STOP_DECIDE`)は `AI_APPROVER` に含まない。
+- **§1 のロールの CHECK(`ADMIN`、`OPERATOR`、`APPROVER`、`AI`、`VIEWER`)**: `AI_APPROVER` を足す(新しい移行で。expand のみ。CHECK の変え方は、実装で MariaDB と H2 の両方を確認する)。
+- **§3 の不変条件**: 「AI は承認できない」は、「AI(要求者のロール)は承認できない。`AI_APPROVER` は承認のみできる」になる。`KIVRA_SELFDEV_AI_PRINCIPAL` の owner key は常に AI のまま(`AI_APPROVER` の担当には使わない)。1 つの owner key は 1 つの担当にだけ属する(`AI_APPROVER` と他のロールの兼任も不可。合成の owner key を使う)。要求者 ≠ 承認者も維持する。
+- **追補(2026-10-25)のトークン認証**: トークンを持てるロールは AI と VIEWER だけで、**変えない**。`AI_APPROVER` は**トークンを持てない**(ADR 0021 の P12。承認は kivra 内部の呼び出しだけで、外部の入口はない)。
+- **`ROLES_MODE`**: 変えない(off / shadow / enforce)。LLM の自動承認は `enforce` のときだけ有効(P4)。`shadow` では、LLM の判断を記録だけし、承認しない。

@@ -181,6 +181,15 @@ object AuditEventsTable : Table("audit_events") {
     override val primaryKey = PrimaryKey(eventId)
 }
 
+/** OIDC login session store (V35). Backed by the session_store table. */
+object SessionStoreTable : Table("session_store") {
+    val sessionId = char("session_id", 32)
+    val principal = varchar("principal", 255)
+    val createdAt = datetime("created_at")
+    val expiresAt = datetime("expires_at")
+    override val primaryKey = PrimaryKey(sessionId)
+}
+
 /** TaskBinding (V11, Issue #26). Written only by [DbRunAdmission]. */
 object TaskBindingsTable : Table("task_bindings") {
     val provider = varchar("provider", 32)

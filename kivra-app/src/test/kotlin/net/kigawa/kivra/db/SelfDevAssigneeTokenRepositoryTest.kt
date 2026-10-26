@@ -392,6 +392,18 @@ class SelfDevAssigneeTokenRepositoryTest {
     }
 
     @Test
+    fun `an AI_APPROVER gets no token, and a token of an assignee made AI_APPROVER is revoked`() {
+        assignee(AssigneeRole.ADMIN, "root")
+        refused(tokens.issue(assignee(AssigneeRole.AI_APPROVER, "approver").assigneeId, 90, ADMIN_KEY), TokenRefusal.ROLE_NOT_ALLOWED)
+        val a = assignee(AssigneeRole.AI, "to-approver")
+        val t = issued(a)
+        assertIs<AssigneeResult.Moved<Assignee>>(assignees.changeRole(a.assigneeId, AssigneeRole.AI_APPROVER, 0, OTHER_ADMIN_KEY))
+        assertEquals(0, activeCount(a.assigneeId))
+        assertSame(TokenVerification.Invalid, valid(t))
+        refused(tokens.issue(a.assigneeId, 90, ADMIN_KEY), TokenRefusal.ROLE_NOT_ALLOWED)
+    }
+
+    @Test
     fun `a role change revokes the tokens and changing back does not restore them`() {
         assignee(AssigneeRole.ADMIN, "root")
         val a = assignee(AssigneeRole.AI)

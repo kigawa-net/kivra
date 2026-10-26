@@ -17,6 +17,7 @@ class AssigneeStoreLookup(private val repo: SelfDevAssigneeRepository) : Assigne
                     AssigneeRole.APPROVER -> Role.APPROVER
                     AssigneeRole.AI -> Role.AI
                     AssigneeRole.VIEWER -> Role.VIEWER
+                    AssigneeRole.AI_APPROVER -> Role.AI_APPROVER
                 },
                 active = it.state == AssigneeState.ACTIVE,
             )

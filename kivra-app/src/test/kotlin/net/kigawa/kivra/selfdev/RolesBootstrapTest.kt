@@ -63,6 +63,20 @@ class RolesBootstrapTest {
     }
 
     @Test
+    fun `an AI principal bound to an AI_APPROVER fails the start with a fixed message and no owner key`() {
+        val a = (repo.create("someone", AssigneeRole.OPERATOR, OTHER) as net.kigawa.kivra.db.AssigneeResult.Moved).value
+        repo.bindMember(a.assigneeId, AI, OTHER)
+        // The repository refuses to put a person into an AI_APPROVER, so a row like this can only come from outside it.
+        org.jetbrains.exposed.sql.transactions.transaction(Database.connect(db.dataSource)) {
+            exec("UPDATE selfdev_assignees SET role = 'AI_APPROVER'")
+        }
+        val e = kotlin.test.assertFailsWith<IllegalStateException> { seed(root = null) }
+        assertTrue(e.message!!.contains("AI_PRINCIPAL_IS_AI_APPROVER"))
+        assertFalse(e.message!!.contains(AI), "owner key in the message")
+        assertFalse(e.message!!.contains("secret"), "owner key in the message")
+    }
+
+    @Test
     fun `an AI key bound to another role is left alone with a warning`() {
         val a = (repo.create("someone", AssigneeRole.OPERATOR, OTHER) as net.kigawa.kivra.db.AssigneeResult.Moved).value
         repo.bindMember(a.assigneeId, AI, OTHER)

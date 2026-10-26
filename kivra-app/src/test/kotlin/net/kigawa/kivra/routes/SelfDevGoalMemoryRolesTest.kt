@@ -182,7 +182,11 @@ class SelfDevGoalMemoryRolesTest {
     private fun bound(db: TestDb, role: AssigneeRole, key: String, state: AssigneeState = AssigneeState.ACTIVE): SelfDevAssigneeRepository {
         val repo = SelfDevAssigneeRepository(db.database)
         val made = assertIs<AssigneeResult.Moved<*>>(repo.create("n-$key", role, SEED)).value as Assignee
-        assertIs<AssigneeResult.Moved<*>>(repo.bindMember(made.assigneeId, key, SEED))
+        if (role == AssigneeRole.AI_APPROVER) {
+            net.kigawa.kivra.db.bindToAiApproverForTest(db, made.assigneeId, key)
+        } else {
+            assertIs<AssigneeResult.Moved<*>>(repo.bindMember(made.assigneeId, key, SEED))
+        }
         if (state == AssigneeState.DISABLED) assertIs<AssigneeResult.Moved<*>>(repo.setState(made.assigneeId, state, made.version, SEED))
         return repo
     }
@@ -297,7 +301,7 @@ class SelfDevGoalMemoryRolesTest {
     // ---- (c) enforce: the role table ---------------------------------------------------------------------------------------
 
     @Test
-    fun `enforce - each of the five roles passes exactly the routes its permissions allow, on all routes`() = testApplication {
+    fun `enforce - each of the six roles passes exactly the routes its permissions allow, on all routes`() = testApplication {
         val db = newDb()
         AssigneeRole.entries.forEach { bound(db, it, "1:i:role-${it.name}") }
         setUp(db, enforceGuard(db))

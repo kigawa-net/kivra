@@ -138,7 +138,11 @@ class McpRolesTest {
     private fun bind(db: TestDb, role: AssigneeRole, key: String, state: AssigneeState = AssigneeState.ACTIVE) {
         val repo = SelfDevAssigneeRepository(db.database)
         val made = assertIs<AssigneeResult.Moved<*>>(repo.create("n-$key", role, SEED)).value as net.kigawa.kivra.db.Assignee
-        assertIs<AssigneeResult.Moved<*>>(repo.bindMember(made.assigneeId, key, SEED))
+        if (role == AssigneeRole.AI_APPROVER) {
+            net.kigawa.kivra.db.bindToAiApproverForTest(db, made.assigneeId, key)
+        } else {
+            assertIs<AssigneeResult.Moved<*>>(repo.bindMember(made.assigneeId, key, SEED))
+        }
         if (state == AssigneeState.DISABLED) assertIs<AssigneeResult.Moved<*>>(repo.setState(made.assigneeId, state, made.version, SEED))
     }
 
@@ -304,7 +308,7 @@ class McpRolesTest {
         assertTrue(log.lines.any { it.startsWith("permission anomaly: source=LOOKUP_FAILED") && it.contains("via=mcp") }, log.lines.toString())
     }
 
-    // ---- (c) enforce: the five roles -----------------------------------------------------------------------------------
+    // ---- (c) enforce: the six roles ------------------------------------------------------------------------------------
 
     private val reads = setOf("kivra_run_list", "kivra_run_get", "kivra_order_list", "kivra_order_get", "kivra_goal_list", "kivra_goal_get")
 
@@ -314,10 +318,11 @@ class McpRolesTest {
         Role.APPROVER to reads + "kivra_order_request_stop",
         Role.AI to reads + setOf("kivra_order_request_stop", "kivra_selfdev_start"),
         Role.VIEWER to reads,
+        Role.AI_APPROVER to reads,
     )
 
     @Test
-    fun `enforce - 5 roles x 11 tools`() {
+    fun `enforce - 6 roles x 11 tools`() {
         for (role in Role.entries) {
             withDb { db ->
                 val principal = if (role == Role.AI) AI_PRINCIPAL else "1:i:r-${role.name}"

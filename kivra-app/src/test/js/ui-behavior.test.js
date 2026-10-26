@@ -3440,6 +3440,28 @@ test('a token is issued for an AI and a VIEWER only, never for a human role or a
   }
 });
 
+test('an AI_APPROVER assignee is listed by its role, offers no token and no person binding, and the role is a choice only in the create form', async () => {
+  const dom = asgLoad({ me: adminMe(), assignees: [assigneeOf({ role: 'AI_APPROVER', activeTokenCount: 0 })] });
+  await flush();
+  assert.ok(dom.byId('assignee-role').children.some((o) => o.value === 'AI_APPROVER'), 'AI_APPROVER is a role choice');
+  assert.match(dom.byId('assignees-list').textContent, /ロール: AI_APPROVER/);
+  asgOpen(dom);
+  await flush();
+  const list = dom.byId('assignees-list');
+  assert.equal(hasButton(list, 'トークンを発行…'), false, 'no token button');
+  assert.equal(hasButton(list, '紐付ける…'), false, 'no bind button');
+  assert.ok(!list.textContent.includes('Keycloak の sub（'), 'no sub input');
+  assert.match(list.textContent, /人（Keycloak の sub）を紐付けられません/);
+  assert.match(list.textContent, /トークンを持てません/);
+  assert.equal(hasButton(list, 'ロールを変更…'), true, 'an admin can still change the role');
+});
+
+test('GET /me with the AI_APPROVER role does not break the page', async () => {
+  const dom = asgLoad({ me: meOf('enforce', 'AI_APPROVER', ['READ', 'STOP_DECIDE_AUTO']) });
+  await flush();
+  assert.equal(dom.byId('me-role').textContent, '役割: AI_APPROVER');
+});
+
 test('an issued token is shown once in its own dialog, copied on request, and gone when the dialog closes', async () => {
   const writes = [];
   const dom = asgLoad({

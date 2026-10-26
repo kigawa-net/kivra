@@ -23,7 +23,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
  * The owner key and the display name are never logged and never written to the event table; the event table has hashed references.
  */
 
-enum class AssigneeRole { ADMIN, OPERATOR, APPROVER, AI, VIEWER }
+enum class AssigneeRole { ADMIN, OPERATOR, APPROVER, AI, VIEWER, AI_APPROVER }
 
 enum class AssigneeState { ACTIVE, DISABLED }
 
@@ -45,6 +45,11 @@ enum class AssigneeRefusal {
     SELF_CHANGE,
     /** The role or state already is the requested one. */
     NO_CHANGE,
+    /**
+     * The role is AI_APPROVER (ADR 0021 P12): no person's owner key may be bound to it, and a role change to it is refused while a person
+     * is bound. Only the server's own synthetic key may ever belong to it.
+     */
+    HUMAN_MEMBER_NOT_ALLOWED,
 }
 
 sealed interface AssigneeResult<out T> {
@@ -141,6 +146,7 @@ class SelfDevAssigneeRepository(
         val name = normalizedName(displayName) ?: return AssigneeResult.Refused(AssigneeRefusal.INVALID_DISPLAY_NAME)
         if (!isOwnerKeyShape(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.INVALID_OWNER_KEY)
         if (isSyntheticOwnerKey(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.SYNTHETIC_KEY_RESERVED)
+        if (role == AssigneeRole.AI_APPROVER) return AssigneeResult.Refused(AssigneeRefusal.HUMAN_MEMBER_NOT_ALLOWED)
         return try {
             transaction(database) {
                 val existing = boundAssigneeId(ownerKey)
@@ -210,7 +216,8 @@ class SelfDevAssigneeRepository(
         if (isSyntheticOwnerKey(ownerKey)) return AssigneeResult.Refused(AssigneeRefusal.SYNTHETIC_KEY_RESERVED)
         return try {
             transaction(database) {
-                assigneeIn(assigneeId, lock = true) ?: throw Rollback(AssigneeResult.NotFound)
+                val target = assigneeIn(assigneeId, lock = true) ?: throw Rollback(AssigneeResult.NotFound)
+                if (target.role == AssigneeRole.AI_APPROVER) throw Rollback(AssigneeResult.Refused(AssigneeRefusal.HUMAN_MEMBER_NOT_ALLOWED))
                 if (boundAssigneeId(ownerKey) != null) throw Rollback(AssigneeResult.Refused(AssigneeRefusal.OWNER_KEY_ALREADY_BOUND))
                 insertMember(assigneeId, ownerKey, actorRef(actorKey), utcNow(clock))
                 AssigneeResult.Moved(Unit)
@@ -294,6 +301,12 @@ class SelfDevAssigneeRepository(
                 is Change.Apply -> d
             }
             if (boundAssigneeId(actorKey) == assigneeId) throw Rollback(AssigneeResult.Refused(AssigneeRefusal.SELF_CHANGE))
+            if (next.role == AssigneeRole.AI_APPROVER && current.role != AssigneeRole.AI_APPROVER) {
+                val people = execQuery(
+                    "SELECT 1 FROM selfdev_assignee_members WHERE assignee_id = ? AND owner_key NOT LIKE ?", assigneeId, SYNTHETIC_LIKE,
+                ) { it.getInt(1) }
+                if (people.isNotEmpty()) throw Rollback(AssigneeResult.Refused(AssigneeRefusal.HUMAN_MEMBER_NOT_ALLOWED))
+            }
             val staysActiveAdmin = next.role == AssigneeRole.ADMIN && next.state == AssigneeState.ACTIVE
             if (current.role == AssigneeRole.ADMIN && current.state == AssigneeState.ACTIVE && !staysActiveAdmin && admins.size <= 1) {
                 throw Rollback(AssigneeResult.Refused(AssigneeRefusal.LAST_ADMIN))

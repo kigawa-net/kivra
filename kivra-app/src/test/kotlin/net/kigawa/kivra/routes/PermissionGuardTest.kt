@@ -51,9 +51,9 @@ class PermissionGuardTest {
             // the AI: what it could do before (reads, a stop request, the ungated start and budget release)
             assertEquals(p in setOf(Permission.READ, Permission.STOP_REQUEST, Permission.SPEND_START, Permission.BUDGET_OVERRIDE), g.allows(ai, p), "ai $p")
             // the root approver: an operator plus the decision, but no assignee management
-            assertEquals(p != Permission.ASSIGNEE_MANAGE, g.allows(approver, p), "root $p")
+            assertEquals(p !in setOf(Permission.ASSIGNEE_MANAGE, Permission.STOP_DECIDE_AUTO), g.allows(approver, p), "root $p")
             // another operator
-            assertEquals(p !in setOf(Permission.STOP_DECIDE, Permission.ASSIGNEE_MANAGE), g.allows(human, p), "op $p")
+            assertEquals(p !in setOf(Permission.STOP_DECIDE, Permission.ASSIGNEE_MANAGE, Permission.STOP_DECIDE_AUTO), g.allows(human, p), "op $p")
             // not an admin by today's rule
             assertFalse(g.allows(human, p, admin = false), "non-admin $p")
         }

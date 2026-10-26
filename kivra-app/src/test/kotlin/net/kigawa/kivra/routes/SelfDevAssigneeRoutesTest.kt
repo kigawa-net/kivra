@@ -30,6 +30,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.auth.AssigneeLookup
 import net.kigawa.kivra.auth.OperatorAuth
@@ -572,6 +573,42 @@ class SelfDevAssigneeRoutesTest {
         val res = send(HttpMethod.Post, "/api/selfdev/assignees/$id/members", """{"sub":"$ULID"}""")
         assertEquals(HttpStatusCode.BadRequest, res.status)
         assertEquals("SYNTHETIC_KEY_RESERVED", res.obj().str("code"))
+    }
+
+    @Test
+    fun `an AI_APPROVER assignee can be created by an admin, holds no token and no person, and is never reached by the AI roles`() = testApplication {
+        val db = newDb()
+        seed(db)
+        setUp(db, PermissionMode.ENFORCE)
+        val made = create("AI_APPROVER")
+        val id = made.str("assigneeId")
+        assertEquals("AI_APPROVER", made.str("role"))
+        val token = send(HttpMethod.Post, "/api/selfdev/assignees/$id/tokens", "{}")
+        assertEquals(HttpStatusCode.Conflict, token.status)
+        assertEquals("ROLE_NOT_ALLOWED", token.obj().str("code"))
+        val bind = send(HttpMethod.Post, "/api/selfdev/assignees/$id/members", """{"sub":"abc"}""")
+        assertEquals(HttpStatusCode.Conflict, bind.status)
+        assertEquals("HUMAN_MEMBER_NOT_ALLOWED", bind.obj().str("code"))
+        assertEquals(0, Json.parseToJsonElement(send(HttpMethod.Get, "/api/selfdev/assignees/$id/members", null).bodyAsText()).jsonArray.size)
+    }
+
+    @Test
+    fun `a role change to AI_APPROVER is refused while a person is bound, and revokes the tokens of an AI`() = testApplication {
+        val db = newDb()
+        seed(db)
+        setUp(db, PermissionMode.ENFORCE)
+        val person = create("OPERATOR").str("assigneeId")
+        assertEquals(HttpStatusCode.Created, send(HttpMethod.Post, "/api/selfdev/assignees/$person/members", """{"sub":"abc"}""").status)
+        val refused = send(HttpMethod.Post, "/api/selfdev/assignees/$person/role", """{"role":"AI_APPROVER","version":0}""")
+        assertEquals(HttpStatusCode.Conflict, refused.status)
+        assertEquals("HUMAN_MEMBER_NOT_ALLOWED", refused.obj().str("code"))
+
+        val ai = create("AI").str("assigneeId")
+        assertEquals(HttpStatusCode.Created, send(HttpMethod.Post, "/api/selfdev/assignees/$ai/tokens", "{}").status)
+        val changed = send(HttpMethod.Post, "/api/selfdev/assignees/$ai/role", """{"role":"AI_APPROVER","version":0}""")
+        assertEquals(HttpStatusCode.OK, changed.status)
+        assertEquals("AI_APPROVER", changed.obj().str("role"))
+        assertEquals(0, changed.obj().let { it["activeTokenCount"]!!.jsonPrimitive.int })
     }
 
     @Test

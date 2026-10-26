@@ -123,6 +123,9 @@ class MigrationExpandOnlyTest {
                 "V34 replaces the event kind CHECK with one that accepts every value the old one did and adds TOKEN_ISSUED and " +
                 "TOKEN_REVOKED. An old Writer never writes those kinds, so its rows pass the new CHECK as they passed the old one. No " +
                 "Contract step is needed.",
+            "V35:DROP (ALTER TABLE SELFDEV_ASSIGNEES DROP CONSTRAINT CK_SELFDEV_ASSIGNEES_ROLE)" to
+                "V35 replaces the role CHECK with one that accepts every value the old one did and adds AI_APPROVER. An old Writer never " +
+                "writes AI_APPROVER, so its rows pass the new CHECK as they passed the old one. No Contract step is needed.",
         )
     }
 }

@@ -398,7 +398,8 @@ private suspend fun ApplicationCall.respondRefused(outcome: AssigneeResult<*>) {
                 AssigneeRefusal.INVALID_DISPLAY_NAME, AssigneeRefusal.INVALID_OWNER_KEY, AssigneeRefusal.SYNTHETIC_KEY_RESERVED ->
                     HttpStatusCode.BadRequest
                 AssigneeRefusal.NOT_BOUND -> HttpStatusCode.NotFound
-                AssigneeRefusal.OWNER_KEY_ALREADY_BOUND, AssigneeRefusal.LAST_ADMIN, AssigneeRefusal.SELF_CHANGE, AssigneeRefusal.NO_CHANGE ->
+                AssigneeRefusal.OWNER_KEY_ALREADY_BOUND, AssigneeRefusal.LAST_ADMIN, AssigneeRefusal.SELF_CHANGE, AssigneeRefusal.NO_CHANGE,
+                AssigneeRefusal.HUMAN_MEMBER_NOT_ALLOWED ->
                     HttpStatusCode.Conflict
             },
             outcome.reason.name,

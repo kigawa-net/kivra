@@ -8,7 +8,7 @@ package net.kigawa.kivra.auth
  *
  * Nothing here logs. The [PrincipalAccess.source] and [Decision.Deny.code] values are fixed codes, never an owner key or a display name.
  */
-enum class Role { ADMIN, OPERATOR, APPROVER, AI, VIEWER }
+enum class Role { ADMIN, OPERATOR, APPROVER, AI, VIEWER, AI_APPROVER }
 
 enum class Permission {
     /** Orders, goals, runs, memory, `/me`, MCP reads. */
@@ -31,6 +31,12 @@ enum class Permission {
 
     /** Approve or reject a stop request. ADMIN (a human) and APPROVER have it; the requester must still differ from the approver. */
     STOP_DECIDE,
+
+    /**
+     * Approve (never reject) a stop request on the server's own decision (ADR 0021 P4). Only AI_APPROVER has it; ADMIN does not. Nothing
+     * checks it yet: the caller arrives in a later stage, behind its own feature flag.
+     */
+    STOP_DECIDE_AUTO,
 
     /** Submit a goal, approve a plan or task, write memory. */
     GOAL_WRITE,
@@ -63,6 +69,7 @@ val ROLE_PERMISSIONS: Map<Role, Set<Permission>> = mapOf(
     Role.APPROVER to setOf(Permission.READ, Permission.STOP_REQUEST, Permission.STOP_DECIDE),
     Role.AI to setOf(Permission.READ, Permission.STOP_REQUEST, Permission.SPEND_START),
     Role.VIEWER to setOf(Permission.READ),
+    Role.AI_APPROVER to setOf(Permission.STOP_DECIDE_AUTO, Permission.READ),
 )
 
 /** `KIVRA_SELFDEV_ROLES_MODE`. */

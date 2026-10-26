@@ -350,17 +350,16 @@ internal fun Application.appModule(env: Map<String, String>) {
     install(ContentNegotiation) { json() }
     install(SSE)
     install(Authentication)
-    
+
     // OIDC session persistence: configure cookie-based session if enabled
     val oidcSessionSettings = OidcSessionSettings.fromEnv(env)
     val sessionStore = oidcSessionSettings?.let { DbSessionStore(database) }
-    
+
     if (oidcSessionSettings != null) {
-        install(io.ktor.server.sessions.Sessions) {
-            cookie<net.kigawa.kivra.routes.LoginSession>(oidcSessionSettings.sessionCookieName)
+        install(Sessions) {
+            cookie<LoginSession>(oidcSessionSettings.sessionCookieName)
         }
     }
-    
     val metrics = MetricsRegistry()
     routing {
         configureHealthRoutes()

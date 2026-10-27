@@ -43,6 +43,21 @@
 <main id="main" tabindex="-1">
   <div id="view-list">
   <div class="page" id="page-tasks" data-page="tasks">
+    <section class="card" aria-labelledby="h-runs">
+      <div class="card-head">
+        <h2 id="h-runs">Run の一覧</h2>
+      </div>
+      <form id="scope-form" class="scope">
+        <fieldset>
+          <legend>表示する範囲</legend>
+          <label><input type="radio" name="scope" id="scope-mine" value="mine" checked> 自分の Run</label>
+          <label><input type="radio" name="scope" id="scope-all" value="all"> 全員の Run（運用者向け）</label>
+        </fieldset>
+      </form>
+      <p id="runs-status" class="meta" role="status"></p>
+      <ul id="runs-list" class="run-list"></ul>
+    </section>
+
     <section class="card" aria-labelledby="h-submit">
       <h2 id="h-submit">Task を投入</h2>
       <form id="submit-form">
@@ -68,42 +83,10 @@
       <p id="submit-result" class="result" role="status"></p>
     </section>
 
-    <section class="card" aria-labelledby="h-runs">
-      <div class="card-head">
-        <h2 id="h-runs">Run の一覧</h2>
-      </div>
-      <form id="scope-form" class="scope">
-        <fieldset>
-          <legend>表示する範囲</legend>
-          <label><input type="radio" name="scope" id="scope-mine" value="mine" checked> 自分の Run</label>
-          <label><input type="radio" name="scope" id="scope-all" value="all"> 全員の Run（運用者向け）</label>
-        </fieldset>
-      </form>
-      <p id="runs-status" class="meta" role="status"></p>
-      <ul id="runs-list" class="run-list"></ul>
-    </section>
-
   </div>
 
   <div class="page" id="page-goals" data-page="goals" hidden>
     <!-- Autopilot (ADR 0011). Hidden unless GET /api/selfdev/autopilot answers 200 with the autopilot enabled. -->
-    <section class="card" id="goal-section" aria-labelledby="h-goal" hidden>
-      <h2 id="h-goal">開発目標（Goal）</h2>
-      <p class="meta" role="note">kivra が Goal から開発計画（Plan）を作り、承認した分だけ Run として投入します。PR のマージは人が行います。対象リポジトリ: <span id="goal-repo">-</span>（画面からは変えられません）。</p>
-      <form id="goal-form">
-        <label for="goal-title">目的（1〜200 文字）</label>
-        <input id="goal-title" name="goal-title" type="text" maxlength="200" required autocomplete="off">
-        <div class="counter" id="goal-title-count">0 / 200</div>
-        <label for="goal-body">背景・制約・受け入れ条件（任意、0〜8000 文字）</label>
-        <textarea id="goal-body" name="goal-body" rows="6" maxlength="8000"></textarea>
-        <div class="counter" id="goal-count">0 / 8000</div>
-        <div>
-          <button type="submit" id="goal-submit">Goal を送る</button>
-        </div>
-      </form>
-      <p id="goal-result" class="result" role="status"></p>
-    </section>
-
     <section class="card" id="plans-section" aria-labelledby="h-plans" hidden>
       <div class="card-head">
         <h2 id="h-plans">Goal の一覧と承認</h2>
@@ -127,6 +110,23 @@
       <p id="plans-msg" class="result" role="status"></p>
       <p id="plans-status" class="meta" role="status"></p>
       <ul id="plans-list" class="run-list" aria-label="Goal の一覧"></ul>
+    </section>
+
+    <section class="card" id="goal-section" aria-labelledby="h-goal" hidden>
+      <h2 id="h-goal">開発目標（Goal）</h2>
+      <p class="meta" role="note">kivra が Goal から開発計画（Plan）を作り、承認した分だけ Run として投入します。PR のマージは人が行います。対象リポジトリ: <span id="goal-repo">-</span>（画面からは変えられません）。</p>
+      <form id="goal-form">
+        <label for="goal-title">目的（1〜200 文字）</label>
+        <input id="goal-title" name="goal-title" type="text" maxlength="200" required autocomplete="off">
+        <div class="counter" id="goal-title-count">0 / 200</div>
+        <label for="goal-body">背景・制約・受け入れ条件（任意、0〜8000 文字）</label>
+        <textarea id="goal-body" name="goal-body" rows="6" maxlength="8000"></textarea>
+        <div class="counter" id="goal-count">0 / 8000</div>
+        <div>
+          <button type="submit" id="goal-submit">Goal を送る</button>
+        </div>
+      </form>
+      <p id="goal-result" class="result" role="status"></p>
     </section>
 
   </div>

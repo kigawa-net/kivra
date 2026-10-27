@@ -22,6 +22,7 @@ import net.kigawa.kivra.db.SelfDevOrderStopRequest
 import net.kigawa.kivra.db.StopRequestState
 import net.kigawa.kivra.db.utcNow
 import net.kigawa.kivra.selfdev.llm.JudgeDecision
+import net.kigawa.kivra.selfdev.llm.JudgeDiagnostics
 import net.kigawa.kivra.selfdev.llm.JudgeInput
 import net.kigawa.kivra.selfdev.llm.JudgeResult
 import net.kigawa.kivra.selfdev.llm.JudgeReasonCode
@@ -196,7 +197,7 @@ class LlmStopJudgeJob(
                 outcome = DecisionOutcome.WOULD_APPROVE
             }
         }
-        record(requestId, orderId, outcome, code, input.inputHash, result.usage.inputTokens, result.usage.outputTokens, cost)
+        record(requestId, orderId, outcome, code, input.inputHash, result.usage.inputTokens, result.usage.outputTokens, cost, result.diagnostics)
     }
 
     private fun record(
@@ -208,9 +209,13 @@ class LlmStopJudgeJob(
         tokensIn: Long = 0,
         tokensOut: Long = 0,
         costMilliYen: Long = 0,
+        diagnostics: JudgeDiagnostics? = null,
     ) {
         decisions.append(DecisionRecord(requestId, orderId, outcome, code, model, hash, mode, tokensIn, tokensOut, costMilliYen))
-        log.info("llm stop judge: mode={} outcome={} code={} requestId={}", mode.column, outcome.name, code, requestId)
+        log.info(
+            "llm stop judge: mode={} outcome={} code={} requestId={} stop={} shape={}",
+            mode.column, outcome.name, code, requestId, diagnostics?.stopReason?.name ?: "-", diagnostics?.shape?.name ?: "-",
+        )
     }
 
     private fun factsOf(order: SelfDevOrder, request: SelfDevOrderStopRequest): StopRequestFacts {

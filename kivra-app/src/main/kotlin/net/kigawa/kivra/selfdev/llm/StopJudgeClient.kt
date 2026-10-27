@@ -45,7 +45,7 @@ enum class JudgeErrorCode { AUTH, RATE_LIMITED, TIMEOUT, UPSTREAM, TRANSPORT, CL
 /** The result of one judgement. A failure is a value, not an exception. */
 sealed interface JudgeResult {
     /** The call worked. [judgment] is ABSTAIN with INVALID_OUTPUT when the output was refused by the parser. */
-    class Judged(val judgment: ParsedJudgment, val usage: JudgeUsage) : JudgeResult {
+    class Judged(val judgment: ParsedJudgment, val usage: JudgeUsage, val diagnostics: JudgeDiagnostics = JudgeDiagnostics.NONE) : JudgeResult {
         override fun toString(): String = "Judged(${judgment.decision}, ${judgment.reason})"
     }
 
@@ -204,6 +204,14 @@ class AnthropicStopJudgeClient(
         put("model", config.model)
         put("max_tokens", config.maxOutputTokens)
         put("system", input.systemPrompt)
+        // Haiku 5.5 thinks by default and the thinking would use the small max_tokens. Effort and sampling values stay at the default.
+        put("thinking", buildJsonObject { put("type", "disabled") })
+        put("output_config", buildJsonObject {
+            put("format", buildJsonObject {
+                put("type", "json_schema")
+                put("schema", StopJudgeOutputSchema.schema)
+            })
+        })
         put("messages", buildJsonArray {
             add(buildJsonObject {
                 put("role", "user")
@@ -225,10 +233,14 @@ class AnthropicStopJudgeClient(
         if (inTokens == null || outTokens == null || inTokens < 0 || outTokens < 0 || content == null) {
             return Attempt.Failed(JudgeErrorCode.BAD_RESPONSE, retryable = false)
         }
-        val modelText = content.mapNotNull { it as? JsonObject }
-            .filter { (it["type"] as? JsonPrimitive)?.contentOrNull == "text" }
-            .joinToString("") { (it["text"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
-        return Attempt.Done(JudgeResult.Judged(StopJudgeOutputParser.parse(modelText), JudgeUsage(inTokens, outTokens)))
+        val textBlocks = content.mapNotNull { it as? JsonObject }.filter { (it["type"] as? JsonPrimitive)?.contentOrNull == "text" }
+        val modelText = textBlocks.joinToString("") { (it["text"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
+        val judgment = StopJudgeOutputParser.parse(modelText)
+        val diagnostics = JudgeDiagnostics(
+            JudgeStopReason.of((obj["stop_reason"] as? JsonPrimitive)?.contentOrNull),
+            if (judgment == ParsedJudgment.INVALID) JudgeOutputShape.classify(textBlocks.isNotEmpty(), modelText) else null,
+        )
+        return Attempt.Done(JudgeResult.Judged(judgment, JudgeUsage(inTokens, outTokens), diagnostics))
     }
 
     private companion object {

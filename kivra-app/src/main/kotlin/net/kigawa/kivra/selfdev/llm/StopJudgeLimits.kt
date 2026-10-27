@@ -94,6 +94,20 @@ class StopJudgeLimiter(
             LimitDecision.Denied(LimitCode.LIMIT_COST)
         }
 
+    /** True when no hourly approval is left. Read only (nothing is taken): the job uses it to skip a call whose APPROVE could not be used. */
+    fun approvalsExhausted(): Boolean =
+        store.current(LimitCounter.APPROVALS, hourBucket()) >= limits.maxApprovalsPerHour.toLong()
+
+    /**
+     * Fills the month's cost counter up to the limit. [recordCost] does not add a cost that would pass the limit, so a call that cost more than
+     * what was left would otherwise leave the counter below the limit and the next call would be allowed again. Never passes the limit.
+     */
+    fun closeMonth() {
+        val bucket = monthBucket()
+        val rest = limits.maxMilliYenPerMonth - store.current(LimitCounter.COST_MILLI_YEN, bucket)
+        if (rest > 0) store.tryAdd(LimitCounter.COST_MILLI_YEN, bucket, rest, limits.maxMilliYenPerMonth)
+    }
+
     /** Before an automatic approval: one of the hourly approvals. */
     fun reserveApproval(): LimitDecision =
         if (store.tryAdd(LimitCounter.APPROVALS, hourBucket(), 1, limits.maxApprovalsPerHour.toLong())) {

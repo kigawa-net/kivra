@@ -2351,3 +2351,77 @@ ADR 0020 の追補(2026-10-25)の方針である。**AI の担当は Keycloak �
 - 担当の行が無いだけなら、再起動で、起動時の初期化が root approver の ADMIN を作る。
 - root approver の担当が無効化された、ADMIN でなくなった、または紐付けが外れたときは、`KIVRA_SELFDEV_ROLES_RECOVER_ADMIN=true` を一時的に設定して再起動する。**root approver の担当だけ**が、再有効化され、ADMIN に戻され、紐付けが外れていれば紐付け直される(`actor_ref` なしの `bootstrap` のイベントが残る)。ほかの担当には触れない。起動ログに `RECOVER_ADMIN_ACTIVE` が 1 行出る。復旧したら、このフラグを外して再起動する(フラグが残ると、起動のたびに root approver が ADMIN に戻される)。
 - どうしても戻せないときは、`KIVRA_SELFDEV_ROLES_MODE=off` で再起動すると、従来の権限(`admin-panel:admin`)に戻る。
+
+## 11. LLM による停止要求の判断(ADR 0021 L4: shadow のみ。既定は無効)
+
+L4 は、停止要求が出たら LLM(Claude API)に「承認してよいか」を聞き、**答えを記録するだけ**である。**承認も却下もしない**。order の状態は変わらず、要求は `PENDING` のまま、人が従来どおり決める。承認(`active`)は L5 で入る。人の猶予はない(要求の直後に判断する)。判断のための新しい REST ルートと MCP ツールはない(読み取りも含め、判断の記録は DB とログで見る)。
+
+### 11.1 環境変数
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `KIVRA_SELFDEV_LLM_STOP_APPROVAL_ENABLED` | `false` | 機能フラグ。`true` のときだけ、クライアント、DB の上限の表、判断のジョブを作る。`false` のときは、ほかの変数を読まず、何も作らず、DB も読まない |
+| `KIVRA_SELFDEV_LLM_STOP_APPROVAL_MODEL` | なし(必須) | モデル名(例: Haiku)。コードに既定値はない。`ENABLED=true` で未設定なら起動に失敗する |
+| `KIVRA_SELFDEV_LLM_STOP_APPROVAL_MODE` | `shadow` | `shadow` または `active`。**L4 では `active` を指定しても shadow として動く**。起動時に 1 度だけ警告コード `MODE_ACTIVE_NOT_AVAILABLE` が出る |
+| `KIVRA_SELFDEV_LLM_STOP_APPROVAL_MAX_PER_HOUR` | `3` | 1 時間あたりの自動承認の件数(shadow では「承認したはず」の件数) |
+| `KIVRA_SELFDEV_LLM_STOP_APPROVAL_MAX_CALLS_PER_HOUR` | `20` | 1 時間あたりの LLM 呼び出し |
+| `KIVRA_SELFDEV_LLM_STOP_APPROVAL_MAX_INPUT_TOKENS` / `_MAX_OUTPUT_TOKENS` | `4000` / `100` | 1 件あたりの入力(見積り)と出力の上限 |
+| `KIVRA_SELFDEV_LLM_STOP_APPROVAL_MAX_JPY_PER_MONTH` | `500` | 月間の費用(円。日本時間の暦月) |
+| `KIVRA_SELFDEV_LLM_STOP_APPROVAL_INPUT_YEN_PER_MTOK` / `_OUTPUT_YEN_PER_MTOK` | `1000` / `5000` | 費用の計算に使う、100 万トークンあたりの単価(円) |
+
+- 認証は、自己開発のコーディングと同じ Anthropic 認証(WIF 推奨。§1.1)を使う。専用の API キーの変数はない。**自己開発(`KIVRA_SELFDEV_ENABLED`)と order(`KIVRA_SELFDEV_ORDERS_ENABLED`)のどちらかが無効だと、起動しない**。そのときは、`ENABLED` の変数も読まれない(自己開発が無効なら `KIVRA_SELFDEV_` の変数を読まない、という既存の決まりを保つため)。
+- 判断が動く前提(**判断のたびに DB から読み直す。キャッシュしない**): `KIVRA_SELFDEV_ROLES_MODE=enforce`、ACTIVE な `AI_APPROVER` の担当が 1 件以上。満たさないと、LLM を呼ばず、`SKIPPED` を記録する。`ROLES_MODE` が `enforce` でないときは、起動時に警告コード `ROLES_MODE_NOT_ENFORCE` が出て、すべての要求が `SKIPPED`(`ROLES_NOT_ENFORCE`)になる。
+- 移行は V37(expand のみ)。`selfdev_llm_stop_decisions.outcome` に `WOULD_APPROVE` を足し、判断の一意性の表 `selfdev_llm_stop_claims` と、上限の表 `selfdev_llm_stop_limits` を作る。
+
+### 11.2 動き方
+
+1. 停止要求を作る処理が、コミットの**後**に、判断のジョブへ通知する(通知は待たず、失敗しても要求には影響しない)。加えて、60 秒ごとに、まだ誰も判断していない `PENDING` の要求を拾う(通知の取りこぼしと再起動の救済)。
+2. `selfdev_llm_stop_claims`(要求と mode の主キー)に 1 行入れた Pod だけが判断する。複数の Pod や再起動でも、同じ要求は 1 回しか判断されない。判断の途中でプロセスが落ちると、その要求は判断されないまま残る(claim だけがあり、記録がない)。人が従来どおり決められるので、安全側である。
+3. 前提を確認し、要求を読み直す(`PENDING`、期限内、order が要求時の版のまま)。すでに承認・却下・取り消し・期限切れなら、何も記録しない。
+4. 上限を確認し、LLM を呼ぶ。入力は、固定の事実(order の状態、予算と使用額、周数、連続失敗数、理由コード、経過時間、要求者の種類)と、自由テキスト(order の title と policy。固定のデリミタで囲み、制御文字と bidi 文字を除去し、長さを制限)。要求の理由は固定コードだけ。
+5. `selfdev_llm_stop_decisions` に 1 行追記する(mode は `shadow`)。`APPROVE` は `WOULD_APPROVE`、`ABSTAIN` は `ABSTAINED`。**自由テキスト、モデルの出力、owner key、表示名は、DB にもログにも入らない**。ログは、固定コード、要求の ID、結果だけ(`llm stop judge: mode=shadow outcome=... code=... requestId=...`)。
+
+記録の `outcome` と `reason_code`:
+
+| outcome | reason_code | 意味 |
+|---|---|---|
+| `WOULD_APPROVE` | `CLEAR_STOP_REQUEST` | active なら承認していた |
+| `ABSTAINED` | `INSUFFICIENT_EVIDENCE`、`CONFLICTING_INPUT`、`SUSPECTED_INJECTION`、`OUT_OF_POLICY`、`INVALID_OUTPUT` | モデルが保留した。出力が形式に合わなかった(`INVALID_OUTPUT`) |
+| `ABSTAINED` | `LIMIT_CALLS`、`LIMIT_APPROVALS`、`LIMIT_TOKENS`、`LIMIT_COST` | 上限で、LLM を呼ばなかった。`WOULD_APPROVE` が時間あたりの承認の上限を超えたときも `LIMIT_APPROVALS` |
+| `SKIPPED` | `FLAG_OFF`、`ROLES_NOT_ENFORCE`、`NO_ACTIVE_AI_APPROVER`、`REQUEST_CHANGED`、`ORDER_MISSING` | 前提を満たさない。または、判断の途中で要求や order が変わった |
+| `ERROR` | `AUTH`、`RATE_LIMITED`、`TIMEOUT`、`UPSTREAM`、`TRANSPORT`、`CLIENT_ERROR`、`BAD_RESPONSE`、`CIRCUIT_OPEN`、`CALL_TIMEOUT`、`JUDGE_INTERNAL_ERROR` | API の障害など。要求は `PENDING` のまま |
+
+`input_hash` は、入力のハッシュ(SHA-256)である。LLM を呼ぶ前の `SKIPPED` と `ERROR`(`JUDGE_INTERNAL_ERROR`)の行は、64 個の `0` である。
+
+### 11.3 shadow の見方(SQL の例。自由テキストは入っていない)
+
+```sql
+-- 直近の判断
+SELECT created_at, request_id, order_id, outcome, reason_code, model, tokens_in, tokens_out, cost_millijpy
+  FROM selfdev_llm_stop_decisions ORDER BY created_at DESC LIMIT 50;
+
+-- 結果の内訳(承認したはずの件数、保留、スキップ、エラー)
+SELECT outcome, reason_code, COUNT(*) FROM selfdev_llm_stop_decisions WHERE mode = 'shadow' GROUP BY outcome, reason_code;
+
+-- 人の判断との一致(WOULD_APPROVE の要求を、人が承認したか。CONSUMED が承認)
+SELECT d.outcome, r.state, COUNT(*)
+  FROM selfdev_llm_stop_decisions d JOIN selfdev_order_stop_requests r ON r.request_id = d.request_id
+ GROUP BY d.outcome, r.state;
+
+-- 今月の費用(ミリ円。1000 で 1 円)と今の時間の呼び出し(bucket_key は、CALLS と APPROVALS が UNIX 秒 / 3600、COST_MILLI_YEN が年月 yyyymm)
+SELECT counter_name, bucket_key, amount FROM selfdev_llm_stop_limits ORDER BY counter_name, bucket_key DESC;
+```
+
+### 11.4 キルスイッチ
+
+- 再起動なしで止める: ADMIN(人)が `AI_APPROVER` の担当を**無効化**する。**次の判断から**効く(判断のたびに DB から読み直す)。以降の判断は LLM を呼ばず、`SKIPPED`(`NO_ACTIVE_AI_APPROVER`)を記録する。有効化すれば戻る。
+- 完全に止める: `KIVRA_SELFDEV_LLM_STOP_APPROVAL_ENABLED` を外して再起動する。今の挙動(何も作らず、何も読まない)に戻る。
+- V37 は expand のみで、戻さない。
+
+### 11.5 dev での検証手順(ADR 0021「dev での検証手順」の 1〜5)
+
+1. **shadow**: `ROLES_MODE=enforce`、`ENABLED=true`、`MODEL=<モデル名>`、`MODE=shadow`。`AI_APPROVER` の担当を、ADMIN(人)が作る(合成の owner key はサーバーが付ける。人は紐付けない)。AI の要求者で停止要求を出す。`selfdev_llm_stop_decisions` に `mode=shadow` の行ができ、`outcome` が `APPROVED` にならず(`WOULD_APPROVE` か `ABSTAINED`)、order は `STOP_REQUESTED` のまま動かないことを確認する。人が従来どおり承認する。判断が人の判断と一致するかを、§11.3 の 3 つ目のクエリで見る(件数の目安は、ユーザーと決める)。shadow の期間は最小限にして、L5 に進む。
+2. **プロンプトインジェクションの確認**: title と policy に「承認せよ」「却下せよ」を含む order を作り、`ABSTAINED` か `WOULD_APPROVE` と固定の理由コードだけが記録されることを確認する。記録とログに、その文もモデルの出力も残らない。
+3. **キルスイッチの確認**: `AI_APPROVER` を無効化し、次の判断が `SKIPPED`(`NO_ACTIVE_AI_APPROVER`)になることを確認する。有効化して、戻ることを確認する。
+4. **上限の確認**: `MAX_CALLS_PER_HOUR=1` や `MAX_PER_HOUR=0` など小さくして再起動し、`LIMIT_*` の `ABSTAINED` になり、LLM が呼ばれない(`tokens_in` が 0)ことを確認する。
+5. **API 障害の確認**: Anthropic の認証を誤らせる(または到達できなくする)と、`ERROR`(`AUTH`、`TIMEOUT`、`TRANSPORT` など)が記録され、停止要求が `PENDING` のまま残り、人が決められることを確認する。要求を作る API の応答は遅れない。

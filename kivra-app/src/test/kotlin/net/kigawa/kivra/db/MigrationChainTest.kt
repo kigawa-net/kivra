@@ -58,11 +58,12 @@ internal val MIGRATION_FILES = mapOf(
     34 to "V34__selfdev_assignee_tokens.sql",
     35 to "V35__selfdev_ai_approver.sql",
     36 to "V36__session_store.sql",
+    37 to "V37__selfdev_llm_stop_judge.sql",
 )
 
 /** The versions applied on the full chain. V22 and V30 are never used on this branch (reserved gaps), so the list skips them. */
 internal val EXPECTED_APPLIED_VERSIONS: List<String> =
-    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36")
+    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37")
 
 /**
  * Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved; V30 is left

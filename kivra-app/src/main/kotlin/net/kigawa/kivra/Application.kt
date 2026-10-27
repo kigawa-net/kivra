@@ -90,6 +90,7 @@ import net.kigawa.kivra.selfdev.SelfDevSettings
 import net.kigawa.kivra.selfdev.aiPrincipalFromEnv
 import net.kigawa.kivra.selfdev.autopilotBudgetAllows
 import net.kigawa.kivra.selfdev.buildSelfDev
+import net.kigawa.kivra.selfdev.llmwiring.buildLlmStopJudge
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRetentionWorker
 import net.kigawa.kivra.selfdev.memory.SelfDevMemorySettings
@@ -283,6 +284,13 @@ internal fun Application.appModule(env: Map<String, String>) {
     memoryRepo?.let { repo -> SelfDevMemoryRetentionWorker({ repo.purgeRetention() }, SelfDevMemoryRetentionWorker.DEFAULT_INTERVAL).start(this) }
     // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD). Nothing runs before this.
     orderRepo?.holdActiveOnStartup()
+    // ADR 0021 L4: the shadow judgement of the LLM stop approval. Built only with its flag on (null otherwise, and nothing is read or created).
+    // It judges and records; it never approves (that is L5). It starts after the hold above, so a request cannot predate the order hold.
+    // It needs the Anthropic credential of self-development and the orders. While either is off, its flag is not even read (the fail-closed
+    // rule of those switches: no self-development variable is read while self-development is off).
+    if (selfDevParts != null && orderRepo != null) {
+        buildLlmStopJudge(env, database, orderRepo, selfDevParts.anthropic, rolesSettings.mode)?.start(this)
+    }
     // The FX expiry warning (daily). FX is read only when a USD path is on (the agent API or self-development, which need the rate);
     // otherwise nothing is read and nothing is started.
     val fxSettings = if (agentApiSettings.auth != null || selfDevSettings.enabled) fxSettingsForWarning(env) else null

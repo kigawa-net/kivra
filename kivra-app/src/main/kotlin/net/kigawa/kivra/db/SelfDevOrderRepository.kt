@@ -216,12 +216,28 @@ const val CYCLE_FAILURE_LIMIT = 2
 /** The default cost limit of one cycle, in whole yen (ADR 0015 section 3.2). The column default in V26 is the same value. */
 const val DEFAULT_CYCLE_BUDGET_JPY = 1_000L
 
+/**
+ * Told after a stop request has been created and committed (ADR 0021 L4, the shadow judgement). It must return at once and never fail the
+ * request: the repository swallows what it throws.
+ */
+fun interface StopRequestListener {
+    fun created(requestId: String)
+}
+
 class SelfDevOrderRepository(
     private val database: Database,
     private val clock: Clock = Clock.systemUTC(),
     private val orderTtl: Duration = Duration.ofDays(14),
     private val stopTtl: Duration = Duration.ofHours(STOP_REQUEST_TTL_HOURS),
 ) {
+
+    @Volatile
+    private var stopRequestListener: StopRequestListener? = null
+
+    /** Installs (or, with null, removes) the listener told after a stop request is committed. Nothing is told while none is installed. */
+    fun setStopRequestListener(listener: StopRequestListener?) {
+        stopRequestListener = listener
+    }
 
     // ---- reads -------------------------------------------------------------------------------------------------------------------
 
@@ -776,6 +792,25 @@ class SelfDevOrderRepository(
      * second one, returned as [OrderConflict.STOP_ALREADY_PENDING].
      */
     fun requestStop(
+        orderId: String,
+        expectedVersion: Long,
+        requestedBy: String,
+        requesterKind: OrderActor,
+        reason: StopRequestReason,
+    ): OrderResult<SelfDevOrderStopRequest> {
+        val result = requestStopInTransaction(orderId, expectedVersion, requestedBy, requesterKind, reason)
+        // After the commit, and contained: a listener (the shadow judgement of ADR 0021) never delays or fails the request.
+        if (result is OrderResult.Moved) {
+            try {
+                stopRequestListener?.created(result.value.requestId)
+            } catch (_: Exception) {
+                // Nothing is logged here: the periodic sweep of the judgement picks the request up.
+            }
+        }
+        return result
+    }
+
+    private fun requestStopInTransaction(
         orderId: String,
         expectedVersion: Long,
         requestedBy: String,

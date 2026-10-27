@@ -126,6 +126,10 @@ class MigrationExpandOnlyTest {
             "V35:DROP (ALTER TABLE SELFDEV_ASSIGNEES DROP CONSTRAINT CK_SELFDEV_ASSIGNEES_ROLE)" to
                 "V35 replaces the role CHECK with one that accepts every value the old one did and adds AI_APPROVER. An old Writer never " +
                 "writes AI_APPROVER, so its rows pass the new CHECK as they passed the old one. No Contract step is needed.",
+            "V37:DROP (ALTER TABLE SELFDEV_LLM_STOP_DECISIONS DROP CONSTRAINT CK_SELFDEV_LLM_STOP_DECISIONS_OUTCOME)" to
+                "V37 replaces the outcome CHECK with one that accepts every value the old one did and adds WOULD_APPROVE (a shadow APPROVE). " +
+                "Nothing wrote the table before L4, and an old Writer never writes WOULD_APPROVE, so its rows pass the new CHECK as they " +
+                "passed the old one. No Contract step is needed.",
         )
     }
 }

@@ -87,6 +87,11 @@ class SelfDevAssigneeRepository(
 
     // ---- reads -------------------------------------------------------------------------------------------------------------------
 
+    /** True when at least one AI_APPROVER assignee is ACTIVE. Read from the DB on every call, never cached (ADR 0021 P5, the kill switch). */
+    fun hasActiveAiApprover(): Boolean = transaction(database) {
+        execQuery("SELECT COUNT(*) FROM selfdev_assignees WHERE role = 'AI_APPROVER' AND state = 'ACTIVE'") { it.getLong(1) }.first() > 0L
+    }
+
     fun find(assigneeId: String): Assignee? = transaction(database) { assigneeIn(assigneeId, lock = false) }
 
     fun list(): List<Assignee> = transaction(database) {

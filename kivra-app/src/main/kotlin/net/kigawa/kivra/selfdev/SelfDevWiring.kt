@@ -56,7 +56,14 @@ internal class SelfDevParts(
     val planWorker: PlannerWorker? = null,
     /** The shadow judgement of the automatic merge (ADR 0014 S1). Non-null only with the autopilot and its shadow switch on. */
     val autoMergeShadow: AutoMergeShadowWatch? = null,
+    /** The Anthropic HTTP client and credential the developer uses. Reused by the LLM stop judgement (ADR 0021 L4); nothing else reads it. */
+    val anthropic: AnthropicHandle? = null,
 )
+
+/** The Anthropic client and its credential (Workload Identity Federation, or the bound static key), shared by the callers of the model. */
+internal class AnthropicHandle(val http: HttpClient, val auth: AnthropicAuth) {
+    override fun toString(): String = "AnthropicHandle(***)"
+}
 
 /** The principal the developer's model calls are made under. Not a user identity. */
 internal const val SELF_DEV_PRINCIPAL = "selfdev-runner"
@@ -211,6 +218,7 @@ internal fun buildSelfDev(
         routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github),
         planWorker = planWorker,
         autoMergeShadow = autoMergeShadow,
+        anthropic = AnthropicHandle(anthropicClient, anthropicAuth),
     )
 }
 

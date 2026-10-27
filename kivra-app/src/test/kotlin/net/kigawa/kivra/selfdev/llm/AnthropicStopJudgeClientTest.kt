@@ -272,6 +272,63 @@ class AnthropicStopJudgeClientTest {
         assertFalse(StopJudgeClientConfig(model = "m").toString().contains(apiKey))
     }
 
+    private fun raw(content: String, stop: String? = "end_turn") =
+        """{"content":$content,${if (stop != null) "\"stop_reason\":\"$stop\"," else ""}"usage":{"input_tokens":10,"output_tokens":5}}"""
+
+    private fun textBlock(t: String) = "[" + """{"type":"text","text":${Json.encodeToString(kotlinx.serialization.serializer<String>(), t)}}""" + "]"
+
+    @Test
+    fun `the request disables thinking, asks for the json schema and sends no sampling values or prefill`() = runBlocking {
+        val h = harness(FakeAuth()) { respond(ok(approveJson), HttpStatusCode.OK, jsonHeaders) }
+        h.client.judge(input)
+        val body = Json.parseToJsonElement(String(h.requests.single().body.toByteArray())).jsonObject
+        assertEquals("""{"type":"disabled"}""", body["thinking"].toString())
+        val format = body["output_config"]!!.jsonObject["format"]!!.jsonObject
+        assertEquals("json_schema", format["type"]!!.jsonPrimitive.content)
+        val schema = format["schema"]!!.jsonObject
+        assertEquals("object", schema["type"]!!.jsonPrimitive.content)
+        assertEquals("false", schema["additionalProperties"].toString())
+        assertEquals(listOf("decision", "reason_code"), schema["required"]!!.jsonArray.map { it.jsonPrimitive.content })
+        val props = schema["properties"]!!.jsonObject
+        assertEquals(JudgeDecision.entries.map { it.name }, props["decision"]!!.jsonObject["enum"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(
+            JudgeReasonCode.entries.filter { it.modelMayWrite }.map { it.name },
+            props["reason_code"]!!.jsonObject["enum"]!!.jsonArray.map { it.jsonPrimitive.content },
+        )
+        assertFalse(props["reason_code"].toString().contains("INVALID_OUTPUT"))
+        for (k in listOf("temperature", "top_p", "top_k", "effort", "output_format", "prefill")) assertFalse(body.containsKey(k), k)
+        val messages = body["messages"]!!.jsonArray
+        assertEquals("user", messages.last().jsonObject["role"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `stop reason and output shape are classified when the output is refused`() = runBlocking {
+        val cases = listOf(
+            Triple(raw(textBlock(""), "max_tokens"), JudgeStopReason.MAX_TOKENS, JudgeOutputShape.EMPTY),
+            Triple(raw("[]", "end_turn"), JudgeStopReason.END_TURN, JudgeOutputShape.NON_TEXT_ONLY),
+            Triple(raw("""[{"type":"thinking","thinking":"x"}]""", "refusal"), JudgeStopReason.REFUSAL, JudgeOutputShape.NON_TEXT_ONLY),
+            Triple(raw(textBlock("{\"decision\":\"APPROVE\"}"), null), JudgeStopReason.ABSENT, JudgeOutputShape.STARTS_WITH_BRACE),
+            Triple(raw(textBlock("```json\n{}\n```"), "stop_sequence"), JudgeStopReason.STOP_SEQUENCE, JudgeOutputShape.FENCED),
+            Triple(raw(textBlock("I would approve this. $modelOutputText"), "tool_use"), JudgeStopReason.TOOL_USE, JudgeOutputShape.OTHER_TEXT),
+            Triple(raw(textBlock("a".repeat(5000)), "pause_turn"), JudgeStopReason.PAUSE_TURN, JudgeOutputShape.TOO_LONG),
+            Triple(raw(textBlock("x"), "weird"), JudgeStopReason.OTHER, JudgeOutputShape.OTHER_TEXT),
+        )
+        for ((body, stop, shape) in cases) {
+            val h = harness(FakeAuth()) { respond(body, HttpStatusCode.OK, jsonHeaders) }
+            val j = assertIs<JudgeResult.Judged>(h.client.judge(input))
+            assertEquals(ParsedJudgment.INVALID, j.judgment)
+            assertEquals(JudgeDiagnostics(stop, shape), j.diagnostics)
+        }
+        assertNoLeak()
+    }
+
+    @Test
+    fun `a valid output has a stop reason and no shape`() = runBlocking {
+        val h = harness(FakeAuth()) { respond(raw(textBlock(approveJson)), HttpStatusCode.OK, jsonHeaders) }
+        val j = assertIs<JudgeResult.Judged>(h.client.judge(input))
+        assertEquals(JudgeDiagnostics(JudgeStopReason.END_TURN, null), j.diagnostics)
+    }
+
     @Test
     fun `the model is required`() {
         kotlin.test.assertFailsWith<IllegalArgumentException> { StopJudgeClientConfig(model = " ") }

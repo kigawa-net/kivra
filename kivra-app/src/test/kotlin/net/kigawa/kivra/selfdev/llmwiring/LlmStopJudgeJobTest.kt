@@ -1,6 +1,14 @@
 package net.kigawa.kivra.selfdev.llmwiring
 
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import java.time.Duration
+import org.slf4j.LoggerFactory
+import net.kigawa.kivra.selfdev.llm.JudgeDiagnostics
+import net.kigawa.kivra.selfdev.llm.JudgeOutputShape
+import net.kigawa.kivra.selfdev.llm.JudgeStopReason
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -274,6 +282,27 @@ class LlmStopJudgeJobTest {
         assertEquals(StopRequestState.PENDING, f.orders.stopRequest(d.requestId)!!.state)
         assertEquals(OrderState.STOP_REQUESTED, f.order().state)
         assertEquals(4, f.rows().size)
+    }
+
+    @Test
+    fun `the log line carries the stop reason and the shape as fixed codes and nothing of the model text`() = JudgeFixture().use { f ->
+        val logger = LoggerFactory.getLogger("net.kigawa.kivra") as Logger
+        val appender = ListAppender<ILoggingEvent>()
+        val previous = logger.level
+        logger.level = Level.ALL
+        appender.start()
+        logger.addAppender(appender)
+        try {
+            f.client.behavior = { JudgeResult.Judged(ParsedJudgment.INVALID, JudgeUsage(100, 5), JudgeDiagnostics(JudgeStopReason.MAX_TOKENS, JudgeOutputShape.EMPTY)) }
+            val r = f.newRequest()
+            runBlocking { f.job.judgeRequest(r.requestId) }
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
+            logger.level = previous
+        }
+        val line = appender.list.map { it.formattedMessage }.single { it.startsWith("llm stop judge:") }
+        assertTrue(line.contains("code=INVALID_OUTPUT") && line.contains("stop=MAX_TOKENS") && line.contains("shape=EMPTY"), line)
     }
 
     @Test

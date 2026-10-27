@@ -12,8 +12,8 @@ import java.security.MessageDigest
 /** The state of an order. [STOPPED] is terminal. */
 enum class OrderState { ACTIVE, PAUSED, STOP_REQUESTED, STOPPED }
 
-/** Who asks for a change. [SYSTEM] is a safety guard or a timer; [HUMAN] is an operator who is not the AI principal; [AI] is the AI principal. */
-enum class OrderActor { HUMAN, AI, SYSTEM }
+/** Who asks for a change. [SYSTEM] is a safety guard or a timer; [HUMAN] is an operator who is not the AI principal; [AI] is the AI principal; [LLM] is the LLM stop approver (ADR 0021 L5). */
+enum class OrderActor { HUMAN, AI, SYSTEM, LLM }
 
 /** Fixed reason codes (ADR 0015 sections 4.6 and 5.2). A reason is never free text. */
 enum class OrderReason {
@@ -41,6 +41,8 @@ enum class OrderReason {
     STOP_NOT_APPROVED,
     /** STOP_REQUESTED -> STOPPED after the root approver's approval of the root. */
     OPERATOR_STOPPED,
+    /** STOP_REQUESTED -> STOPPED after the LLM stop approver's approval (ADR 0021 L5). */
+    LLM_STOPPED,
     /** STOP_REQUESTED -> STOPPED after a child's stop is decided by its direct parent (the root approver's decision, for the tree). */
     PARENT_STOPPED,
     /** ACTIVE or PAUSED -> STOPPED: a descendant of an order whose stop was approved, in the same transaction. */
@@ -132,9 +134,11 @@ fun checkOrderTransition(
             else -> allowed()
         }
         from == OrderState.STOP_REQUESTED && to == OrderState.STOPPED -> when {
-            reason != OrderReason.OPERATOR_STOPPED && reason != OrderReason.PARENT_STOPPED -> refused(OrderRefusal.REASON_NOT_ALLOWED)
-            actor != OrderActor.HUMAN -> refused(OrderRefusal.ACTOR_NOT_ALLOWED)
-            else -> allowed()
+            reason == OrderReason.OPERATOR_STOPPED || reason == OrderReason.PARENT_STOPPED ->
+                if (actor == OrderActor.HUMAN) allowed() else refused(OrderRefusal.ACTOR_NOT_ALLOWED)
+            reason == OrderReason.LLM_STOPPED ->
+                if (actor == OrderActor.LLM) allowed() else refused(OrderRefusal.ACTOR_NOT_ALLOWED)
+            else -> refused(OrderRefusal.REASON_NOT_ALLOWED)
         }
         from == OrderState.STOP_REQUESTED && to == OrderState.PAUSED -> when {
             reason != OrderReason.STOP_NOT_APPROVED -> refused(OrderRefusal.REASON_NOT_ALLOWED)
@@ -165,7 +169,7 @@ fun checkAutomaticStop(from: OrderState, reason: OrderReason): OrderTransitionDe
 fun checkSubtreeStop(from: OrderState, actor: OrderActor): OrderTransitionDecision = when {
     from == OrderState.STOPPED -> refused(OrderRefusal.TERMINAL)
     from != OrderState.ACTIVE && from != OrderState.PAUSED -> refused(OrderRefusal.NO_EDGE)
-    actor != OrderActor.HUMAN -> refused(OrderRefusal.ACTOR_NOT_ALLOWED)
+    actor != OrderActor.HUMAN && actor != OrderActor.LLM -> refused(OrderRefusal.ACTOR_NOT_ALLOWED)
     else -> allowed()
 }
 

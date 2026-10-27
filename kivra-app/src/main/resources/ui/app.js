@@ -124,6 +124,8 @@
     keyFor: null,
     kind: SIMULATED_KIND,
     scope: 'mine',
+    projectFilter: null, // null = all; string = project id
+    projects: null,
     runs: null,
     runsOkAt: 0,
     runsFailed: false,
@@ -194,7 +196,7 @@
       // Only the fixed constants '_blank' and 'noopener noreferrer' are passed here (see prNode).
       else if (k === 'target' || k === 'rel') node[k] = v;
       // Element ids and ARIA attributes, set as attributes (values are fixed strings or ids this page built).
-      else if (k === 'id' || k === 'role' || k.indexOf('aria-') === 0) node.setAttribute(k, v);
+      else if (k === 'id' || k === 'role' || k.indexOf('aria-') === 0 || k.indexOf('data-') === 0) node.setAttribute(k, v);
       else throw new Error('unsupported prop: ' + k);
     });
     (children || []).forEach(function (c) {
@@ -591,12 +593,20 @@
     var ul = $('runs-list');
     clear(ul);
     if (!state.runs) return;
-    if (state.runs.length === 0) {
-      ul.appendChild(h('li', { className: 'empty', text: 'まだ Run はありません。上のフォームから Task を投入できます。' }));
+    var filtered = state.runs;
+    // Filter by project if a project is selected
+    if (state.projectFilter) {
+      filtered = state.runs.filter(function (run) {
+        return run && run.projectId === state.projectFilter;
+      });
+    }
+    if (filtered.length === 0) {
+      var msg = state.projectFilter ? 'このプロジェクトには Run がありません。' : 'まだ Run はありません。上のフォームから Task を投入できます。';
+      ul.appendChild(h('li', { className: 'empty', text: msg }));
       return;
     }
     var all = state.scope === 'all';
-    state.runs.forEach(function (run) {
+    filtered.forEach(function (run) {
       if (run && typeof run === 'object' && typeof run.runId === 'string') ul.appendChild(runRow(run, all));
     });
   }
@@ -680,6 +690,60 @@
     state.runsFailed = false;
     renderRuns();
     refreshRuns();
+  }
+
+  // ---- Projects (V38) ------------------------------------------------
+
+  async function loadProjects() {
+    var r = await apiFetch('/api/projects', 'GET');
+    if (r.ok && Array.isArray(r.data)) {
+      state.projects = r.data;
+      renderProjectSidebar();
+    }
+  }
+
+  function renderProjectSidebar() {
+    var container = $('side-projects');
+    var list = $('side-project-list');
+    if (!container || !list || !state.projects || state.projects.length === 0) {
+      if (container) container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+    clear(list);
+    state.projects.forEach(function (p) {
+      if (!p || typeof p !== 'object' || !p.projectId || !p.name) return;
+      var link = h('a', {
+        className: 'side-project-link',
+        href: '#/',
+        text: p.name,
+        'data-project-filter': p.projectId
+      });
+      link.addEventListener('click', function (e) {
+        e.preventDefault();
+        selectProjectFilter(p.projectId);
+      });
+      list.appendChild(link);
+    });
+    // Update active state
+    var allLink = $('nav-project-all');
+    if (allLink) {
+      allLink.setAttribute('aria-current', state.projectFilter === null ? 'page' : '');
+    }
+    list.querySelectorAll('.side-project-link').forEach(function (el) {
+      el.setAttribute('aria-current', el.getAttribute('data-project-filter') === state.projectFilter ? 'page' : '');
+    });
+  }
+
+  function selectProjectFilter(projectId) {
+    state.projectFilter = projectId;
+    // Reset "all" link
+    var allLink = $('nav-project-all');
+    if (allLink) allLink.setAttribute('aria-current', projectId === null ? 'page' : '');
+    // Re-render sidebar active state
+    renderProjectSidebar();
+    // Re-render runs with the new filter
+    renderRuns();
   }
 
   // ---- Self-development status (the banner above the list) ---------------
@@ -4276,6 +4340,14 @@
       $('main').focus();
     });
     $('scope-form').addEventListener('change', onScopeChange);
+    // Project filter: "all" link clears the filter
+    var allProjectLink = $('nav-project-all');
+    if (allProjectLink) {
+      allProjectLink.addEventListener('click', function (e) {
+        e.preventDefault();
+        selectProjectFilter(null);
+      });
+    }
     // Re-entering the sign-in flow is done by the browser reload; the sign-in URL is never built here.
     $('reload-btn').addEventListener('click', function () {
       window.location.reload();
@@ -4311,6 +4383,7 @@
     initOrders();
     initAssignees();
     loadMe();
+    loadProjects();
     refreshBudget();
     updateGoalCounters();
     renderAutopilot();

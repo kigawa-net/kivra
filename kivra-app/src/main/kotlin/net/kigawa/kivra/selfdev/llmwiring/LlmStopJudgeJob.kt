@@ -26,8 +26,10 @@ import net.kigawa.kivra.selfdev.llm.JudgeDiagnostics
 import net.kigawa.kivra.selfdev.llm.JudgeInput
 import net.kigawa.kivra.selfdev.llm.JudgeResult
 import net.kigawa.kivra.selfdev.llm.JudgeReasonCode
+import net.kigawa.kivra.selfdev.llm.JudgeUsage
 import net.kigawa.kivra.selfdev.llm.LimitCode
 import net.kigawa.kivra.selfdev.llm.LimitDecision
+import net.kigawa.kivra.selfdev.llm.LlmStopApprovalMode
 import net.kigawa.kivra.selfdev.llm.LlmStopApprovalSettings
 import net.kigawa.kivra.selfdev.llm.RequesterKind
 import net.kigawa.kivra.selfdev.llm.StopJudgeClient
@@ -38,12 +40,14 @@ import net.kigawa.kivra.selfdev.llm.StopRequestFreeText
 import org.slf4j.LoggerFactory
 
 /**
- * What the job may read of the orders. There is deliberately no approve, reject, cancel or state-change function here: the shadow
- * judgement cannot reach an approval through this port (ADR 0021 L4; the approval of L5 is a separate path).
+ * What the job may read and write of the orders. In shadow mode only the reads are used. In active mode [approveStopByLlm] performs the
+ * approval (ADR 0021 L5).
  */
 interface StopJudgeOrders {
     fun stopRequest(requestId: String): SelfDevOrderStopRequest?
     fun order(orderId: String): SelfDevOrder?
+    /** Approves a stop request by the LLM. Used only in active mode. */
+    fun approveStopByLlm(requestId: String, approverKey: String, digest: String): Boolean
 }
 
 /** The fixed codes of a SKIPPED row (nothing was asked of the model). */
@@ -53,9 +57,9 @@ enum class SkipCode { FLAG_OFF, ROLES_NOT_ENFORCE, NO_ACTIVE_AI_APPROVER, REQUES
 enum class JudgeFailureCode { CALL_TIMEOUT, JUDGE_INTERNAL_ERROR }
 
 /**
- * The shadow judgement of the LLM stop approval (ADR 0021 L4). It asks the model about a PENDING stop request and records the answer in
- * `selfdev_llm_stop_decisions` with mode `shadow`. It never approves, rejects or changes anything about the order or the request: a shadow
- * APPROVE is recorded as WOULD_APPROVE. Until L5 the mode is always shadow, whatever the settings say.
+ * The judgement job of the LLM stop approval (ADR 0021 L4/L5). It asks the model about a PENDING stop request and records the answer.
+ * In shadow mode it never approves: a shadow APPROVE is recorded as WOULD_APPROVE. In active mode it calls [StopJudgeOrders.approveStopByLlm]
+ * to approve the request (ADR 0021 L5).
  *
  * It starts from a nudge after a request is created (non blocking; the request path is never delayed or failed) and from a sweep that picks
  * up requests nobody claimed (a missed nudge, a restart). A claim row (one per request and mode) makes a judgement happen once across Pods.
@@ -73,6 +77,8 @@ class LlmStopJudgeJob(
     private val client: StopJudgeClient,
     /** True when at least one AI_APPROVER assignee is ACTIVE. Called on every judgement. */
     private val hasActiveApprover: () -> Boolean,
+    /** Returns the AI_APPROVER owner key for active approvals, or null. Called only in active mode. */
+    private val aiApproverKey: () -> String?,
     private val clock: Clock = Clock.systemUTC(),
     private val callTimeout: Duration = Duration.ofSeconds(60),
     private val sweepInterval: Duration = Duration.ofSeconds(60),
@@ -81,8 +87,11 @@ class LlmStopJudgeJob(
     private val log = LoggerFactory.getLogger(LlmStopJudgeJob::class.java)
     private val model: String = checkNotNull(settings.model) { "the model is required" }
 
-    /** Shadow only in L4: [LlmStopApprovalSettings.mode] `active` runs as shadow (the wiring warns once). */
-    private val mode = JudgeMode.SHADOW
+    /** The mode comes from settings: shadow records without approving, active approves (ADR 0021 L5). */
+    private val mode: JudgeMode = when (settings.mode) {
+        LlmStopApprovalMode.ACTIVE -> JudgeMode.ACTIVE
+        LlmStopApprovalMode.SHADOW -> JudgeMode.SHADOW
+    }
 
     private val nudges = Channel<String>(capacity = NUDGE_BUFFER, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
@@ -189,15 +198,39 @@ class LlmStopJudgeJob(
         var outcome = DecisionOutcome.ABSTAINED
         var code = result.judgment.reason.name
         if (result.judgment.decision == JudgeDecision.APPROVE && result.judgment.reason == JudgeReasonCode.CLEAR_STOP_REQUEST) {
-            // The shadow takes an hourly approval as active would, so the shadow numbers show what the limit would have done.
+            // An hourly approval is needed whether shadow or active.
             val approval = limiter.reserveApproval()
             if (approval is LimitDecision.Denied) {
                 code = approval.code.name
+            } else if (mode == JudgeMode.ACTIVE) {
+                // Active mode: attempt the real approval (ADR 0021 L5).
+                val (resultOutcome, resultCode) = tryApprove(requestId)
+                outcome = resultOutcome
+                code = if (outcome == DecisionOutcome.APPROVED) result.judgment.reason.name else resultCode
             } else {
                 outcome = DecisionOutcome.WOULD_APPROVE
             }
         }
         record(requestId, orderId, outcome, code, input.inputHash, result.usage.inputTokens, result.usage.outputTokens, cost, result.diagnostics)
+    }
+
+    /**
+     * Attempts to approve the stop request in active mode (ADR 0021 L5).
+     * Returns a pair of (outcome, code): APPROVED on success, LOST_RACE with a fixed code on failure.
+     */
+    private fun tryApprove(requestId: String): Pair<DecisionOutcome, String> {
+        val approverKey = aiApproverKey()
+        if (approverKey == null) {
+            log.warn("llm stop judge: active approval refused code=NO_ACTIVE_AI_APPROVER requestId={}", requestId)
+            return DecisionOutcome.LOST_RACE to "NO_ACTIVE_AI_APPROVER"
+        }
+        // Re-read the request to obtain the current digest.
+        val request = orders.stopRequest(requestId) ?: return DecisionOutcome.LOST_RACE to "REQUEST_CHANGED"
+        if (request.state != StopRequestState.PENDING || !request.expiresAt.isAfter(utcNow(clock))) {
+            return DecisionOutcome.LOST_RACE to "REQUEST_CHANGED"
+        }
+        val approved = orders.approveStopByLlm(requestId, approverKey, request.digest)
+        return if (approved) DecisionOutcome.APPROVED to "APPROVED" else DecisionOutcome.LOST_RACE to "LOST_RACE"
     }
 
     private fun record(

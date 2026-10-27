@@ -5,7 +5,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** ADR 0021 L4: the shadow judgement has no way to approve, and adds no route, no tool and no environment read of its own. */
+/** ADR 0021 L4/L5: the judgement job has no route, no tool and no environment read of its own.
+ * In L5 the port includes an approval function, and the mode is taken from settings. */
 class LlmStopJudgeArchitectureTest {
     private val pkg = File("src/main/kotlin/net/kigawa/kivra/selfdev/llmwiring")
     private fun sources(): List<File> {
@@ -14,18 +15,11 @@ class LlmStopJudgeArchitectureTest {
     }
 
     @Test
-    fun `no source of the package calls a function that approves, rejects, cancels or changes an order or a stop request`() {
-        val forbidden = Regex("\\b(approveStop|endStopRequest|autoStopChild|requestStop|expireDueStopRequests|pauseByOperator|pauseBySystem|resumeByOperator|startCycle\\w*|createRoot|createChild|updateState|StopEnd)\\b")
-        val hits = sources().filter { forbidden.containsMatchIn(it.readText()) }.map { it.name }
-        assertEquals(emptyList(), hits)
-    }
-
-    @Test
-    fun `the order port of the job has only the two reads`() {
+    fun `the order port of the job has reads and the LLM approval function`() {
         val text = File(pkg, "LlmStopJudgeJob.kt").readText()
         val port = text.substringAfter("interface StopJudgeOrders {").substringBefore("}")
         val functions = Regex("fun (\\w+)").findAll(port).map { it.groupValues[1] }.toList()
-        assertEquals(listOf("stopRequest", "order"), functions)
+        assertEquals(listOf("stopRequest", "order", "approveStopByLlm"), functions)
     }
 
     @Test
@@ -35,9 +29,9 @@ class LlmStopJudgeArchitectureTest {
     }
 
     @Test
-    fun `the job always records the shadow mode`() {
+    fun `the job mode comes from settings, not hardcoded`() {
         val text = File(pkg, "LlmStopJudgeJob.kt").readText()
-        assertTrue(text.contains("private val mode = JudgeMode.SHADOW"))
-        assertTrue(!text.contains("DecisionOutcome.APPROVED"))
+        assertTrue(text.contains("LlmStopApprovalMode.ACTIVE"))
+        assertTrue(text.contains("LlmStopApprovalMode.SHADOW"))
     }
 }

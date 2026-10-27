@@ -12,6 +12,7 @@ import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.selfdev.GitHubAuth
 import net.kigawa.kivra.selfdev.SelfDevSettings
 
@@ -60,6 +61,7 @@ private val RUN_ID_SHAPE = Regex("[0-9A-Z]{26}")
 internal fun Route.configureRunViewRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity,
     selfDev: SelfDevSettings,
     guard: PermissionGuard = offPermissionGuard(),
+    projectRepo: ProjectRepository? = null,
 ) {
     val targetRepo = selfDev.config?.repo
 
@@ -92,7 +94,7 @@ internal fun Route.configureRunViewRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.BadRequest, RunViewError("limit must be 1-$MAX_OPERATOR_LIMIT"))
             return@get
         }
-        call.respond(runs.listAllTasks(limit).map { runs.viewOf(it, targetRepo, createdBy = it.principal) })
+        call.respond(runs.listAllTasks(limit).map { runs.viewOf(it, targetRepo, createdBy = it.principal, projectRepo = projectRepo) })
     }
 
     get("/api/admin/runs/{id}") {
@@ -111,6 +113,6 @@ internal fun Route.configureRunViewRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.NotFound, RunViewError("run not found"))
             return@get
         }
-        call.respond(runs.viewOf(run, targetRepo, createdBy = run.principal, withEvents = true))
+        call.respond(runs.viewOf(run, targetRepo, createdBy = run.principal, withEvents = true, projectRepo = projectRepo))
     }
 }

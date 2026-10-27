@@ -130,6 +130,14 @@ class MigrationExpandOnlyTest {
                 "V37 replaces the outcome CHECK with one that accepts every value the old one did and adds WOULD_APPROVE (a shadow APPROVE). " +
                 "Nothing wrote the table before L4, and an old Writer never writes WOULD_APPROVE, so its rows pass the new CHECK as they " +
                 "passed the old one. No Contract step is needed.",
+            "V39:DROP (ALTER TABLE SELFDEV_ORDER_STOP_REQUESTS DROP CONSTRAINT CK_SELFDEV_ORDER_STOP_DECIDER)" to
+                "V39 replaces the decider CHECK. An old Writer never writes the new values, so its rows pass the new CHECK.",
+            "V39:DROP (ALTER TABLE SELFDEV_ORDER_STOP_REQUESTS DROP CONSTRAINT CK_SELFDEV_ORDER_STOP_DECIDER_REF)" to
+                "V39 replaces the decider_ref CHECK. An old Writer never writes the new values, so its rows pass the new CHECK.",
+            "V39:DROP (ALTER TABLE SELFDEV_ORDER_STOP_REQUESTS DROP CONSTRAINT CK_SELFDEV_ORDER_STOP_AUTO_ROOT)" to
+                "V39 replaces the auto_root CHECK. An old Writer never writes the new values, so its rows pass the new CHECK.",
+            "V39:DROP (ALTER TABLE SELFDEV_ORDER_EVENTS DROP CONSTRAINT CK_SELFDEV_ORDER_EVENTS_ACTOR)" to
+                "V39 replaces the actor CHECK. An old Writer never writes the new values, so its rows pass the new CHECK.",
         )
     }
 }

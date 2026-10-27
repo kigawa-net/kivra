@@ -41,6 +41,8 @@ object DevelopmentRunsTable : Table("development_runs") {
     val idempotencyKey = varchar("idempotency_key", 128).nullable()
     val completionEvidenceRef = varchar("completion_evidence_ref", 255).nullable()
     val completionObservedAt = datetime("completion_observed_at").nullable()
+    // V38: optional project grouping.
+    val projectId = char("project_id", 26).nullable()
     val version = long("version").default(0)
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at")
@@ -203,4 +205,14 @@ object TaskBindingsTable : Table("task_bindings") {
     val createdAt = datetime("created_at")
     val updatedAt = datetime("updated_at")
     override val primaryKey = PrimaryKey(provider, environment, taskId)
+}
+
+/** Projects (V38). Groups Runs by project. */
+object ProjectsTable : Table("projects") {
+    val projectId = char("project_id", 26)
+    val name = varchar("name", 128)
+    val description = varchar("description", 512).nullable()
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(projectId)
 }

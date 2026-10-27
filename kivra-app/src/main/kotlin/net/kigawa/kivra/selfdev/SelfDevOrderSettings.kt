@@ -100,7 +100,7 @@ class OrderSettings private constructor(
 }
 
 /** An integer setting with a range. Unset or blank is [default]. A value out of range or not an integer is a startup failure. */
-private fun boundedInt(env: Map<String, String>, name: String, default: Int, range: IntRange): Int {
+internal fun boundedInt(env: Map<String, String>, name: String, default: Int, range: IntRange): Int {
     val raw = env[name]?.trim()?.takeIf { it.isNotEmpty() } ?: return default
     val value = raw.toIntOrNull()
     check(value != null && value in range) { "$name must be an integer from ${range.first} to ${range.last}" }

@@ -14,9 +14,10 @@ import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.db.bindToAiApproverForTest
 import net.kigawa.kivra.db.execQuery
 
-/** The wiring of the shadow judgement (ADR 0021 L4): off creates and reads nothing; active runs as shadow with one warning code. */
+/** The wiring of the LLM stop judgement (ADR 0021 L4/L5): off creates and reads nothing; active mode runs as active. */
 class LlmStopJudgeWiringTest {
 
     /** An environment that records every key that is read. */
@@ -79,23 +80,35 @@ class LlmStopJudgeWiringTest {
     }
 
     @Test
-    fun `mode active runs as shadow and warns once with a fixed code`() = LogCapture().use { log ->
+    fun `mode active runs as active without warning`() = LogCapture().use { log ->
         JudgeFixtureDb { db ->
             val orders = SelfDevOrderRepository(db.database)
             val client = FakeClient()
+            val assignees = net.kigawa.kivra.db.SelfDevAssigneeRepository(db.database)
+            // Create AI_APPROVER and bind key BEFORE building the job.
+            val approver = (assignees.create("approver", net.kigawa.kivra.db.AssigneeRole.AI_APPROVER, ADMIN_KEY) as net.kigawa.kivra.db.AssigneeResult.Moved).value.assigneeId
+            bindToAiApproverForTest(db, approver, AI_APPROVER_KEY)
             val env = on + ("KIVRA_SELFDEV_LLM_STOP_APPROVAL_MODE" to "active")
             val job = assertNotNull(buildLlmStopJudge(env, db.database, orders, null, PermissionMode.ENFORCE, clientOverride = client))
-            val warnings = log.messages().filter { it.contains("MODE_ACTIVE_NOT_AVAILABLE") }
-            assertEquals(1, warnings.size)
-            // Judging many requests does not repeat the warning, and the rows are shadow.
-            val assignees = net.kigawa.kivra.db.SelfDevAssigneeRepository(db.database)
-            assignees.create("approver", net.kigawa.kivra.db.AssigneeRole.AI_APPROVER, ADMIN_KEY)
+            // L5: active mode runs as active, no warning.
+            assertEquals(0, log.messages().count { it.contains("MODE_ACTIVE_NOT_AVAILABLE") })
             val root = (orders.createRoot(OPERATOR, "t", "p", "kigawa-net/kivra") as CreateRootResult.Created).order
             val request = (orders.requestStop(root.orderId, root.version, AI_REQUESTER, OrderActor.AI, StopRequestReason.OPERATOR_REQUEST) as OrderResult.Moved).value
             runBlocking { job.judgeRequest(request.requestId) }
-            assertEquals(1, log.messages().count { it.contains("MODE_ACTIVE_NOT_AVAILABLE") })
-            assertEquals(listOf("shadow"), modes(db))
+            // Check all decision records, including errors.
+            val allRows = org.jetbrains.exposed.sql.transactions.transaction(db.database) {
+                execQuery("SELECT outcome, mode, reason_code FROM selfdev_llm_stop_decisions ORDER BY created_at") {
+                    "${it.getString(1)}|${it.getString(2)}|${it.getString(3)}"
+                }
+            }
+            // In active mode with APPROVE, the order is stopped and the mode column is "active".
+            assertEquals(listOf("APPROVED|active|CLEAR_STOP_REQUEST"), allRows)
             assertEquals(1, client.calls.get())
+            // Verify the order is STOPPED.
+            val orderState = org.jetbrains.exposed.sql.transactions.transaction(db.database) {
+                execQuery("SELECT state FROM selfdev_orders WHERE order_id = ?", root.orderId) { it.getString(1) }.single()
+            }
+            assertEquals("STOPPED", orderState)
         }
     }
 

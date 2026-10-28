@@ -67,6 +67,8 @@ data class DevelopmentRun(
     val taskSource: String? = null,
     /** The stage the run is in (`current_stage`), null when none. Read-only here. */
     val currentStage: String? = null,
+    /** Optional project grouping (V38). Null when the run has no project. */
+    val projectId: String? = null,
 )
 
 /** Result of [DevelopmentRunRepository.submitTask]. */
@@ -1019,6 +1021,7 @@ class DevelopmentRunRepository(
         taskBody = this[DevelopmentRunsTable.taskBody],
         taskSource = this[DevelopmentRunsTable.taskSource],
         currentStage = this[DevelopmentRunsTable.currentStage],
+        projectId = this[DevelopmentRunsTable.projectId],
     )
 }
 

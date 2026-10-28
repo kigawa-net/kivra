@@ -26,10 +26,12 @@ object LlmStopWiringCode {
     const val PREREQUISITE_MISSING = "PREREQUISITE_MISSING"
 }
 
-/** Reads the orders through [SelfDevOrderRepository]. Only the two reads: there is no approval here. */
+/** Reads the orders through [SelfDevOrderRepository]. In active mode also approves via [repo.approveStopByLlm]. */
 private class DbStopJudgeOrders(private val repo: SelfDevOrderRepository) : StopJudgeOrders {
     override fun stopRequest(requestId: String): SelfDevOrderStopRequest? = repo.stopRequest(requestId)
     override fun order(orderId: String): SelfDevOrder? = repo.get(orderId)
+    override fun approveStopByLlm(requestId: String, approverKey: String, digest: String): Boolean =
+        repo.approveStopByLlm(requestId, approverKey, digest) is net.kigawa.kivra.db.OrderResult.Moved
 }
 
 private val wiringLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.llmwiring.LlmStopJudgeWiring")
@@ -60,9 +62,6 @@ internal fun buildLlmStopJudge(
         wiringLog.warn("llm stop judge: not started code={}", LlmStopWiringCode.PREREQUISITE_MISSING)
         return null
     }
-    if (settings.mode == LlmStopApprovalMode.ACTIVE) {
-        wiringLog.warn("llm stop judge: running as shadow code={}", LlmStopWiringCode.MODE_ACTIVE_NOT_AVAILABLE)
-    }
     if (rolesMode != PermissionMode.ENFORCE) {
         wiringLog.warn("llm stop judge: every request is skipped code={}", LlmStopWiringCode.ROLES_MODE_NOT_ENFORCE)
     }
@@ -76,6 +75,7 @@ internal fun buildLlmStopJudge(
         limiter = StopJudgeLimiter(settings.limits, DbLimitsStore(database), clock),
         client = client,
         hasActiveApprover = { assignees.hasActiveAiApprover() },
+        aiApproverKey = { assignees.activeAiApproverKey() },
         clock = clock,
     )
     orders.setStopRequestListener { requestId -> job.nudge(requestId) }

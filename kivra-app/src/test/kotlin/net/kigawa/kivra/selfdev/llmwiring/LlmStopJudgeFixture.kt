@@ -25,6 +25,7 @@ import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOrderStopRequest
 import net.kigawa.kivra.db.StopEnd
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.db.bindToAiApproverForTest
 import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.execUpdate
 import net.kigawa.kivra.selfdev.llm.JudgeDecision
@@ -44,6 +45,7 @@ import org.slf4j.LoggerFactory
 
 internal const val OPERATOR = "op-owner-key-SECRET"
 internal const val AI_REQUESTER = "ai-owner-key-SECRET"
+internal const val AI_APPROVER_KEY = "11:kivra-llm-ai:approver"
 internal const val TITLE_MARKER = "TITLE-MARKER-XYZ"
 internal const val POLICY_MARKER = "POLICY-MARKER-XYZ"
 internal const val MODEL_NAME = "test-model-1"
@@ -95,7 +97,12 @@ internal class JudgeFixture(
     val assignees = SelfDevAssigneeRepository(db.database)
     val decisions = DbLlmStopDecisionStore(db.database, clock)
     val client = FakeClient()
-    val approverId: String? = if (withApprover) (assignees.create("approver", AssigneeRole.AI_APPROVER, ADMIN_KEY) as AssigneeResult.Moved).value.assigneeId else null
+    val approverId: String? = if (withApprover) {
+        val approver = (assignees.create("approver", AssigneeRole.AI_APPROVER, ADMIN_KEY) as AssigneeResult.Moved).value.assigneeId
+        // Bind the synthetic owner key so activeAiApproverKey() returns it (ADR 0021 P12).
+        bindToAiApproverForTest(db, approver, AI_APPROVER_KEY)
+        approver
+    } else null
     val settings: LlmStopApprovalSettings = settingsOverride ?: settings(limits)
     val job = LlmStopJudgeJob(
         settings = settings,
@@ -103,11 +110,14 @@ internal class JudgeFixture(
         orders = object : StopJudgeOrders {
             override fun stopRequest(requestId: String): SelfDevOrderStopRequest? = orders.stopRequest(requestId)
             override fun order(orderId: String): SelfDevOrder? = orders.get(orderId)
+            override fun approveStopByLlm(requestId: String, approverKey: String, digest: String): Boolean =
+                orders.approveStopByLlm(requestId, approverKey, digest) is OrderResult.Moved
         },
         decisions = decisions,
         limiter = StopJudgeLimiter(settings.limits, DbLimitsStore(db.database), clock),
         client = client,
         hasActiveApprover = { assignees.hasActiveAiApprover() },
+        aiApproverKey = { assignees.activeAiApproverKey() },
         clock = clock,
         callTimeout = callTimeout,
     )

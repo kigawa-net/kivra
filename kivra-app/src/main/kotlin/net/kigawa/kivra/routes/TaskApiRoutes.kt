@@ -16,6 +16,7 @@ import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.AuditTrailEntry
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SELF_DEV_TASK_PREFIX
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.github.RepoRef
@@ -59,6 +60,10 @@ data class TaskRunResponse(
     val createdBy: String? = null,
     /** Only in a detail response. The run's audit events (time, action, result, fixed codes). */
     val events: List<RunEventResponse>? = null,
+    /** The project id the run belongs to, or null when unassigned. */
+    val projectId: String? = null,
+    /** The project name the run belongs to, or null when unassigned. */
+    val projectName: String? = null,
 )
 
 /** One audit event of a run. [toState] and [reasonCode] are set only for a state transition. Actors and payloads are not shown. */
@@ -106,6 +111,7 @@ internal fun DevelopmentRun.toTaskRunResponse(
     targetRepo: RepoRef? = null,
     createdBy: String? = null,
     events: List<RunEventResponse>? = null,
+    projectName: String? = null,
 ): TaskRunResponse {
     val selfDev = isSelfDev()
     return TaskRunResponse(
@@ -125,6 +131,8 @@ internal fun DevelopmentRun.toTaskRunResponse(
         taskSource = taskSource,
         createdBy = createdBy,
         events = events,
+        projectId = projectId,
+        projectName = projectName,
     )
 }
 
@@ -141,10 +149,12 @@ internal fun DevelopmentRunRepository.viewOf(
     targetRepo: RepoRef?,
     createdBy: String? = null,
     withEvents: Boolean = false,
+    projectRepo: ProjectRepository? = null,
 ): TaskRunResponse {
     val binding = if (run.isSelfDev()) loadPullRequestBinding(run.runId) else null
     val events = if (withEvents) auditTrail(run.runId).map { it.toRunEventResponse() } else null
-    return run.toTaskRunResponse(binding, targetRepo, createdBy, events)
+    val projectName = run.projectId?.let { projectRepo?.get(it)?.name }
+    return run.toTaskRunResponse(binding, targetRepo, createdBy, events, projectName)
 }
 
 private fun AuditTrailEntry.toRunEventResponse(): RunEventResponse = RunEventResponse(
@@ -156,7 +166,7 @@ private fun AuditTrailEntry.toRunEventResponse(): RunEventResponse = RunEventRes
     reasonCode = reasonCode,
 )
 
-internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity, targetRepo: RepoRef? = null, guard: PermissionGuard = offPermissionGuard()) {
+internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identity: TaskApiIdentity, targetRepo: RepoRef? = null, guard: PermissionGuard = offPermissionGuard(), projectRepo: ProjectRepository? = null) {
     post("/api/tasks") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
@@ -179,8 +189,8 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             return@post
         }
         when (val result = runs.submitTask(principal, key, title)) {
-            is TaskSubmitResult.Created -> call.respond(HttpStatusCode.Accepted, result.run.toTaskRunResponse())
-            is TaskSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, result.run.toTaskRunResponse())
+            is TaskSubmitResult.Created -> call.respond(HttpStatusCode.Accepted, result.run.toTaskRunResponse(projectName = result.run.projectId?.let { projectRepo?.get(it)?.name }))
+            is TaskSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, result.run.toTaskRunResponse(projectName = result.run.projectId?.let { projectRepo?.get(it)?.name }))
             is TaskSubmitResult.ConflictingTitle -> call.respond(HttpStatusCode.Conflict, TaskApiError("idempotency key was already used with a different title"))
         }
     }
@@ -197,7 +207,7 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
         }
         val run = call.parameters["id"]?.let { runs.getTask(RunId(it), principal) }
         if (run == null) call.respond(HttpStatusCode.NotFound, TaskApiError("run not found"))
-        else call.respond(runs.viewOf(run, targetRepo, withEvents = true))
+        else call.respond(runs.viewOf(run, targetRepo, withEvents = true, projectRepo = projectRepo))
     }
 
     get("/api/runs") {
@@ -210,6 +220,6 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.Forbidden, TaskApiError("forbidden"))
             return@get
         }
-        call.respond(runs.listTasks(principal, limit = 50).map { runs.viewOf(it, targetRepo) })
+        call.respond(runs.listTasks(principal, limit = 50).map { runs.viewOf(it, targetRepo, projectRepo = projectRepo) })
     }
 }

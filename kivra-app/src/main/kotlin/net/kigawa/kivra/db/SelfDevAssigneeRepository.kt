@@ -92,6 +92,21 @@ class SelfDevAssigneeRepository(
         execQuery("SELECT COUNT(*) FROM selfdev_assignees WHERE role = 'AI_APPROVER' AND state = 'ACTIVE'") { it.getLong(1) }.first() > 0L
     }
 
+    /**
+     * Returns the owner key of an ACTIVE AI_APPROVER assignee, or null when none exists.
+     * AI_APPROVER holds only a synthetic owner key (ADR 0021 P12). Read from the DB on every call, never cached.
+     */
+    fun activeAiApproverKey(): String? = transaction(database) {
+        execQuery(
+            """
+            SELECT m.owner_key FROM selfdev_assignee_members m
+            JOIN selfdev_assignees a ON a.assignee_id = m.assignee_id
+            WHERE a.role = 'AI_APPROVER' AND a.state = 'ACTIVE'
+            ORDER BY a.created_at, a.assignee_id LIMIT 1
+            """.trimIndent(),
+        ) { it.getString(1) }.firstOrNull()
+    }
+
     fun find(assigneeId: String): Assignee? = transaction(database) { assigneeIn(assigneeId, lock = false) }
 
     fun list(): List<Assignee> = transaction(database) {

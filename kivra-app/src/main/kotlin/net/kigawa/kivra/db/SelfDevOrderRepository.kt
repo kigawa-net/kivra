@@ -929,6 +929,67 @@ class SelfDevOrderRepository(
         r.outcome
     }
 
+    /**
+     * Approves a PENDING stop request by the LLM stop approver (ADR 0021 L5). Same re-checks as [approveStop], but records
+     * `decider_kind = 'LLM'`, uses [OrderActor.LLM] and [OrderReason.LLM_STOPPED]. The caller has obtained the AI_APPROVER owner key.
+     */
+    fun approveStopByLlm(requestId: String, approverKey: String, digest: String): OrderResult<SelfDevOrder> = try {
+        transaction(database) {
+            val request = lockRequest(requestId) ?: return@transaction OrderResult.NotFound
+            if (request.state != StopRequestState.PENDING) return@transaction OrderResult.Refused(OrderConflict.STOP_NOT_PENDING)
+            val now = utcNow(clock)
+            if (!now.isBefore(request.expiresAt)) {
+                expireLocked(request, now)
+                return@transaction OrderResult.Refused(OrderConflict.STOP_EXPIRED)
+            }
+            if (request.targetIsRoot && request.requestedBy == approverKey) return@transaction OrderResult.Refused(OrderConflict.SAME_PRINCIPAL)
+            if (request.digest != digest) return@transaction OrderResult.Refused(OrderConflict.DIGEST_MISMATCH)
+            val path = lockPath(request.orderId) ?: return@transaction OrderResult.NotFound
+            val order = path.first()
+            if (order.state != OrderState.STOP_REQUESTED || order.version != request.orderVersion) {
+                return@transaction OrderResult.Refused(OrderConflict.ORDER_CHANGED)
+            }
+            val descendants = lockDescendants(order.orderId)
+            val subtree = listOf(order.orderId to order.version) + descendants.map { it.orderId to it.version }
+            if (orderStopDigest(request.requestId, order.orderId, subtree, request.reasonCode) != request.digest) {
+                return@transaction OrderResult.Refused(OrderConflict.ORDER_CHANGED)
+            }
+            val reason = if (request.targetIsRoot) OrderReason.LLM_STOPPED else OrderReason.PARENT_STOPPED
+            val decision = checkOrderTransition(order.state, OrderState.STOPPED, reason, OrderActor.LLM, order.stateReason)
+            if (decision is OrderTransitionDecision.Refused) {
+                throw Rollback(OrderResult.Refused(OrderConflict.valueOf(decision.reason.name)))
+            }
+            val live = descendants.filter { it.state != OrderState.STOPPED }
+            for (descendant in live) {
+                val sub = checkSubtreeStop(descendant.state, OrderActor.LLM)
+                if (sub is OrderTransitionDecision.Refused) throw Rollback(OrderResult.Refused(OrderConflict.valueOf(sub.reason.name)))
+            }
+
+            val consumed = execUpdate(
+                """
+                UPDATE selfdev_order_stop_requests SET state = 'CONSUMED', active_key = NULL, decided_by = ?, decider_kind = 'LLM', decided_at = ?
+                 WHERE request_id = ? AND state = 'PENDING'
+                """.trimIndent(),
+                approverKey, now, requestId,
+            )
+            if (consumed != 1) throw Rollback(OrderResult.Refused(OrderConflict.STOP_NOT_PENDING))
+            if (!updateState(order.orderId, order.version, OrderState.STOPPED, reason, now)) {
+                throw Rollback(OrderResult.StaleVersion)
+            }
+            appendTreeEvent(order, "STOP_APPROVED", OrderState.STOP_REQUESTED, OrderState.STOP_REQUESTED, null, OrderActor.LLM, approverKey, requestId, now)
+            appendTreeEvent(order, "STOPPED", OrderState.STOP_REQUESTED, OrderState.STOPPED, reason.name, OrderActor.LLM, approverKey, requestId, now)
+            for (descendant in live) {
+                if (!updateState(descendant.orderId, descendant.version, OrderState.STOPPED, OrderReason.ANCESTOR_STOPPED, now)) {
+                    throw Rollback(OrderResult.StaleVersion)
+                }
+                appendTreeEvent(descendant, "STOPPED", descendant.state, OrderState.STOPPED, OrderReason.ANCESTOR_STOPPED.name, OrderActor.LLM, approverKey, requestId, now)
+            }
+            OrderResult.Moved(getIn(order.orderId) ?: error("order vanished after stop"))
+        }
+    } catch (r: Rollback) {
+        r.outcome
+    }
+
     /** The order and its descendants, read without locks (the order first, then level by level). Read after an approval, when the stopped part is final. */
     fun subtreeOf(orderId: String): List<SelfDevOrder> = transaction(database) { subtreeIn(orderId) }
 

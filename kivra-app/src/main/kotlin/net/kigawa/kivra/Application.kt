@@ -41,6 +41,7 @@ import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevPlanRepository
 import net.kigawa.kivra.db.NoPrMergeAuthority
 import net.kigawa.kivra.db.OutboxRepository
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.connectDatabase
 import net.kigawa.kivra.db.createDataSource
 import net.kigawa.kivra.db.migrateDatabase
@@ -63,6 +64,7 @@ import net.kigawa.kivra.routes.configureTaskApiRoutes
 import net.kigawa.kivra.routes.configureOperationApiRoutes
 import net.kigawa.kivra.routes.readOnlyOperationJournal
 import net.kigawa.kivra.routes.configureUiRoutes
+import net.kigawa.kivra.routes.configureProjectRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
 import net.kigawa.kivra.routes.PermissionGuard
 import net.kigawa.kivra.routes.SelfDevGoalRouteDeps
@@ -150,6 +152,7 @@ internal fun Application.appModule(env: Map<String, String>) {
         audit,
         if (selfDevSettings.enabled) deferredPrMerge else NoPrMergeAuthority,
     )
+    val projectRepo = ProjectRepository(database, java.time.Clock.systemUTC())
     val budgetConfig = BudgetConfig.from(environment.config)
     val budgetStore = DbBudgetStore(database, budgetConfig.tenantId, budgetConfig.tenantLimit())
     // Built only when the agent API is enabled. Nothing about the coding runtime is created otherwise. It is shared by the agent API
@@ -377,13 +380,14 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureDevTaskSubmitRoutes()
         }
         if (taskApiIdentity != null) {
-            configureTaskApiRoutes(runs, taskApiIdentity, selfDevSettings.config?.repo, permissionGuard)
+            configureTaskApiRoutes(runs, taskApiIdentity, selfDevSettings.config?.repo, permissionGuard, projectRepo)
             configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentity, permissionGuard)
+            configureProjectRoutes(projectRepo, taskApiIdentity)
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()
             configureBudgetAdminRoutes(budgetStore, taskApiIdentity, fx = fxSettings, operatorView = budgetStore, guard = permissionGuard)
             configureSelfDevAdminRoutes(runs, taskApiIdentity, permissionGuard)
-            configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings, permissionGuard)
+            configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings, permissionGuard, projectRepo)
             if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
             if (memoryRoutes != null) configureSelfDevMemoryRoutes(memoryRoutes)
             if (orderRoutes != null) configureSelfDevOrderRoutes(orderRoutes)

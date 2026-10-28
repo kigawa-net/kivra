@@ -701,3 +701,41 @@ textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   width: 100%;
 }
+
+/* Projects sidebar (V38): project filter list in the side navigation. */
+.side-projects {
+  margin-top: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 0.15rem;
+}
+
+.side-projects-head {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 0.75rem;
+}
+
+.side-project-link {
+  display: block;
+  padding: 0.35rem 0.75rem 0.35rem 1rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.side-project-link:hover {
+  background: var(--badge-bg);
+}
+
+.side-project-link[aria-current="page"] {
+  background: var(--badge-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}

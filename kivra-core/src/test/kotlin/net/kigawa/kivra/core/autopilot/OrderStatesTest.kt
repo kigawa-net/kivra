@@ -31,15 +31,18 @@ class OrderStatesTest {
                 it != OrderReason.LIMIT_REACHED && it != OrderReason.EXPIRED
             },
         )
-        for (actor in listOf(OrderActor.HUMAN, OrderActor.AI)) {
+        for (actor in listOf(OrderActor.HUMAN, OrderActor.AI, OrderActor.LLM)) {
             add(Edge(OrderState.ACTIVE, OrderState.STOP_REQUESTED, OrderReason.STOP_REQUESTED, actor))
             add(Edge(OrderState.PAUSED, OrderState.STOP_REQUESTED, OrderReason.STOP_REQUESTED, actor))
         }
         add(Edge(OrderState.STOP_REQUESTED, OrderState.STOPPED, OrderReason.OPERATOR_STOPPED, OrderActor.HUMAN))
         // A child's stop, decided by its parent (the root approver's decision): the same approval, with its own reason.
         add(Edge(OrderState.STOP_REQUESTED, OrderState.STOPPED, OrderReason.PARENT_STOPPED, OrderActor.HUMAN))
+        // LLM stop approver's approval (ADR 0021 L5).
+        add(Edge(OrderState.STOP_REQUESTED, OrderState.STOPPED, OrderReason.LLM_STOPPED, OrderActor.LLM))
         add(Edge(OrderState.STOP_REQUESTED, OrderState.PAUSED, OrderReason.STOP_NOT_APPROVED, OrderActor.HUMAN))
         add(Edge(OrderState.STOP_REQUESTED, OrderState.PAUSED, OrderReason.STOP_NOT_APPROVED, OrderActor.SYSTEM))
+        add(Edge(OrderState.STOP_REQUESTED, OrderState.PAUSED, OrderReason.STOP_NOT_APPROVED, OrderActor.LLM))
     }
 
     @Test

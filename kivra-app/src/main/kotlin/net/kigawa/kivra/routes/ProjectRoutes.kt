@@ -12,18 +12,19 @@ import io.ktor.server.routing.route
 import kotlinx.serialization.Serializable
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.ProjectRepository
+import net.kigawa.kivra.db.ProjectRow
 
 /** Project routes (V38): CRUD for projects and Run assignment. */
 internal fun Route.configureProjectRoutes(projectRepo: ProjectRepository, identity: TaskApiIdentity) {
     route("/api/projects") {
         get {
             val projects = projectRepo.listAll()
-            call.respond(projects)
+            call.respond(projects.map { it.toResponse() })
         }
         post {
             val input = call.receive<ProjectCreateRequest>()
             val project = projectRepo.create(input.name, input.description)
-            call.respond(HttpStatusCode.Created, project)
+            call.respond(HttpStatusCode.Created, project.toResponse())
         }
     }
 
@@ -35,7 +36,7 @@ internal fun Route.configureProjectRoutes(projectRepo: ProjectRepository, identi
             if (project == null) {
                 call.respond(HttpStatusCode.NotFound)
             } else {
-                call.respond(project)
+                call.respond(project.toResponse())
             }
         }
         put {
@@ -46,7 +47,7 @@ internal fun Route.configureProjectRoutes(projectRepo: ProjectRepository, identi
             if (project == null) {
                 call.respond(HttpStatusCode.NotFound)
             } else {
-                call.respond(project)
+                call.respond(project.toResponse())
             }
         }
         delete {
@@ -94,3 +95,16 @@ data class ProjectUpdateRequest(val name: String, val description: String? = nul
 
 @Serializable
 data class ProjectAssignRequest(val projectId: String)
+
+@Serializable
+data class ProjectResponse(
+    val projectId: String,
+    val name: String,
+    val description: String?,
+)
+
+private fun ProjectRow.toResponse() = ProjectResponse(
+    projectId = projectId,
+    name = name,
+    description = description,
+)

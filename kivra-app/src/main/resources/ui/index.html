@@ -43,6 +43,20 @@
     <div class="side-projects-head">プロジェクト</div>
     <a href="#/" class="side-project-link" data-project-filter="all" id="nav-project-all">すべて</a>
     <div id="side-project-list"></div>
+    <p class="side-empty" id="side-project-empty" hidden>プロジェクトがありません。<a href="#/" id="nav-project-create">作成</a></p>
+    <form id="project-create-form" hidden>
+      <label for="project-name">名前（1〜100文字）</label>
+      <input id="project-name" type="text" maxlength="100" required autocomplete="off">
+      <div class="counter" id="project-name-count">0 / 100</div>
+      <label for="project-desc">説明（任意、0〜500文字）</label>
+      <textarea id="project-desc" rows="2" maxlength="500"></textarea>
+      <div class="counter" id="project-desc-count">0 / 500</div>
+      <div class="detail-actions">
+        <button type="button" class="secondary" id="project-create-cancel">キャンセル</button>
+        <button type="submit" id="project-create-submit">作成</button>
+      </div>
+    </form>
+    <p id="project-create-result" class="result" role="status" hidden></p>
   </div>
 </nav>
 <main id="main" tabindex="-1">

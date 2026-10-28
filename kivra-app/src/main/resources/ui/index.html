@@ -13,6 +13,15 @@
     <h1>Kivra</h1>
     <span class="env-badge">環境: dev</span>
   </div>
+  <nav class="header-tabs" id="header-tabs" aria-label="主要なページ">
+    <a href="#/" id="nav-tasks" class="header-tab">タスク</a>
+    <a href="#/goals" id="nav-goals" class="header-tab" hidden>開発目標</a>
+    <a href="#/orders" id="nav-orders" class="header-tab" hidden>order</a>
+    <a href="#/approvals" id="nav-approvals" class="header-tab" hidden>承認 <span class="badge warn" id="nav-approvals-badge" role="img" hidden></span></a>
+    <a href="#/budget" id="nav-budget" class="header-tab" hidden>予算</a>
+    <a href="#/memory" id="nav-memory" class="header-tab" hidden>記憶</a>
+    <a href="#/assignees" id="nav-assignees" class="header-tab" hidden>担当</a>
+  </nav>
   <div class="header-actions">
     <div class="conn" id="health-status" role="status">接続: 未確認</div>
     <button type="button" class="secondary" id="refresh-all-btn">更新</button>
@@ -31,14 +40,7 @@
 <p class="sim-banner" id="mode-note" role="note">自己開発の設定を確認しています…</p>
 
 <div class="layout">
-<nav class="side-nav" id="side-nav" aria-label="主要なページ">
-  <a href="#/" id="nav-tasks">タスク</a>
-  <a href="#/goals" id="nav-goals" hidden>開発目標</a>
-  <a href="#/orders" id="nav-orders" hidden>order</a>
-  <a href="#/approvals" id="nav-approvals" hidden>承認 <span class="badge warn" id="nav-approvals-badge" role="img" hidden></span></a>
-  <a href="#/budget" id="nav-budget" hidden>予算</a>
-  <a href="#/memory" id="nav-memory" hidden>記憶</a>
-  <a href="#/assignees" id="nav-assignees" hidden>担当</a>
+<nav class="side-nav" id="side-nav" aria-label="プロジェクト">
   <div class="side-projects" id="side-projects" hidden>
     <div class="side-projects-head">プロジェクト</div>
     <a href="#/" class="side-project-link" data-project-filter="all" id="nav-project-all">すべて</a>

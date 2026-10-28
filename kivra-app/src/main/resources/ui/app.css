@@ -81,9 +81,8 @@ code {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.75rem 1rem;
+  padding: 0.5rem 1rem;
   background: var(--card);
   border-bottom: 1px solid var(--border);
 }
@@ -92,6 +91,41 @@ code {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  white-space: nowrap;
+}
+
+/* Header tabs: horizontal navigation in the header */
+.header-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.25rem;
+  overflow-x: auto;
+  padding: 0;
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.header-tab {
+  display: inline-block;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  color: var(--fg);
+  text-decoration: none;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+.header-tab:hover {
+  background: var(--badge-bg);
+}
+
+.header-tab[aria-current="page"] {
+  background: var(--badge-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .header-actions {
@@ -175,17 +209,6 @@ code {
   text-decoration: none;
 }
 
-.side-nav a:hover {
-  background: var(--badge-bg);
-}
-
-.side-nav a[aria-current="page"] {
-  background: var(--badge-bg);
-  border-color: var(--accent);
-  color: var(--accent);
-  font-weight: 600;
-}
-
 main {
   max-width: 760px;
   width: 100%;
@@ -210,15 +233,23 @@ main:focus {
     display: block;
   }
 
+  .app-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .header-tabs {
+    order: -1;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.5rem;
+  }
+
   .side-nav {
     flex-direction: row;
     overflow-x: auto;
     padding: 0.5rem 1rem 0;
     border-bottom: 1px solid var(--border);
-  }
-
-  .side-nav a {
-    white-space: nowrap;
   }
 
   main {

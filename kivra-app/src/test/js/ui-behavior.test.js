@@ -2999,7 +2999,9 @@ test('the five per-section refresh buttons are gone from the page and the script
     assert.ok(!js.includes("'" + id + "'"), id + ' is not in app.js');
   }
   assert.ok(html.includes('id="refresh-all-btn"'));
-  assert.ok(html.includes('<nav class="side-nav" id="side-nav" aria-label="主要なページ">'));
+  assert.ok(html.includes('id="header-tabs"'));
+  assert.ok(html.includes('id="nav-tasks"'));
+  assert.ok(html.includes('<nav class="side-nav" id="side-nav" aria-label="プロジェクト">'));
   assert.ok(html.includes('class="skip-link" id="skip-link" href="#main"'));
 });
 

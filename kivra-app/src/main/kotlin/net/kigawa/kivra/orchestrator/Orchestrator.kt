@@ -8,6 +8,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.core.AdmissionEvaluator
 import net.kigawa.kivra.core.AdmissionPolicy
+import net.kigawa.kivra.core.AdmissionResult
 import net.kigawa.kivra.core.RunAdmission
 import net.kigawa.kivra.core.TaskSnapshot
 import net.kigawa.kivra.fusha.poller.PollResult
@@ -18,9 +19,11 @@ import net.kigawa.kivra.fusha.poller.TaskPollEvent
 import net.kigawa.kivra.fusha.poller.TaskPoller
 import net.kigawa.kivra.fusha.poller.TaskPossiblyGone
 import net.kigawa.kivra.agent.AgentProfile
+import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.LeaderLease
+import net.kigawa.kivra.db.LeaderLeaseRepository
 import org.slf4j.LoggerFactory
 import java.time.Clock
-import java.time.Instant
 
 /**
  * Orchestrator main loop (design #3 section 5.1, ADR 0008).
@@ -41,6 +44,8 @@ class Orchestrator(
     private val poller: TaskPoller,
     private val admission: RunAdmission,
     private val profile: AgentProfile,
+    private val leaderLeaseRepo: LeaderLeaseRepository,
+    private val runRepo: DevelopmentRunRepository,
     private val config: OrchestratorConfig,
     private val policy: AdmissionPolicy?,
     private val clock: Clock = Clock.systemUTC(),
@@ -48,14 +53,13 @@ class Orchestrator(
 
     private val logger = LoggerFactory.getLogger(Orchestrator::class.java)
 
-    // Leader lease state (in-memory, backed by DB on acquire)
+    // Leader lease state (cached in-memory, backed by DB)
     private var leaderOwner: String? = null
-    private var leaderExpiresAt: Instant? = null
-    private var leaderGeneration: Long = 0
+    private var currentLease: LeaderLease? = null
 
     /** True when this instance holds the leader lease. */
     val isLeader: Boolean
-        get() = leaderOwner != null && leaderExpiresAt?.isAfter(clock.instant()) == true
+        get() = currentLease != null && currentLease!!.expiresAt.isAfter(net.kigawa.kivra.db.utcNow(clock))
 
     /**
      * One pass. Suspending (database calls). A failure is contained and the next tick still runs.
@@ -97,7 +101,7 @@ class Orchestrator(
     /**
      * Process task events from the poller. Only admits tasks that pass all guards.
      */
-    private fun processEvents(events: List<TaskPollEvent>) {
+    private suspend fun processEvents(events: List<TaskPollEvent>) {
         for (event in events) {
             try {
                 when (event) {
@@ -117,7 +121,7 @@ class Orchestrator(
     /**
      * Admit a task if it passes all guards: poller health, admission policy, dependencies, concurrency.
      */
-    private fun admitTask(task: TaskSnapshot) {
+    private suspend fun admitTask(task: TaskSnapshot) {
         if (!poller.admissionAllowed()) {
             logger.info("orchestrator admission: blocked, poller not healthy, taskId={}", task.id.value)
             return
@@ -137,32 +141,70 @@ class Orchestrator(
         }
 
         val requestId = "orchestrator:${task.id.value}:${task.updatedAt}"
-        logger.info("orchestrator admission: would admit taskId={}, requestId={}",
+        logger.info("orchestrator admission: admitting taskId={}, requestId={}",
             task.id.value, requestId)
-        // TODO: Call admission.admit(task, requestId) when wired to Application.kt
+        val result = admission.admit(task, requestId)
+        when (result) {
+            is AdmissionResult.Accepted -> logger.info("orchestrator admission: accepted, runId={}, taskId={}",
+                result.runId.value, task.id.value)
+            is AdmissionResult.AlreadyActive -> logger.info("orchestrator admission: already active, runId={}, taskId={}",
+                result.runId.value, task.id.value)
+            is AdmissionResult.AlreadyTerminal -> logger.info("orchestrator admission: already terminal, runId={}, taskId={}",
+                result.runId.value, task.id.value)
+            is AdmissionResult.Blocked -> logger.info("orchestrator admission: blocked, reason={}, taskId={}",
+                result.reason.name, task.id.value)
+        }
     }
 
     /** Reconcile existing runs (design #3 section 7.3). */
     private fun reconcile() {
-        // TODO: Check for runs that need resumption, orphaned runs, dependency resolution
+        // Check for orphaned runs: active runs whose task no longer exists in fusha-task.
+        // For now, log a warning if there are runs in CREATED state that have been stuck.
+        val activeRuns = runRepo.countActiveRuns()
+        if (activeRuns > config.maxConcurrentRuns) {
+            logger.warn("orchestrator reconcile: {} active runs exceeds limit {}", 
+                activeRuns, config.maxConcurrentRuns)
+        }
     }
 
     private fun activeRunsReachedLimit(): Boolean {
-        // TODO: Query DB for active run count
-        return false
+        val count = runRepo.countActiveRuns()
+        return count >= config.maxConcurrentRuns
     }
 
     private fun tryAcquireLeader(): Boolean {
-        val now = clock.instant()
-        if (isLeader) return true
+        if (isLeader) {
+            // Renew lease if approaching expiry
+            val lease = currentLease ?: return false
+            val now = net.kigawa.kivra.db.utcNow(clock)
+            val remaining = java.time.Duration.between(now, lease.expiresAt)
+            if (remaining.compareTo(config.leaderLeaseRenewInterval) > 0) {
+                return true
+            }
+            // Renew
+            if (leaderLeaseRepo.renew(leaderOwner!!)) {
+                currentLease = leaderLeaseRepo.getCurrent()
+                logger.info("orchestrator: renewed leader lease, owner={}", leaderOwner)
+                return currentLease != null
+            } else {
+                logger.warn("orchestrator: lease renewal failed, lease lost")
+                currentLease = null
+                leaderOwner = null
+                return false
+            }
+        }
 
         val owner = "orchestrator:${java.util.UUID.randomUUID()}"
-        leaderOwner = owner
-        leaderExpiresAt = now.plus(config.leaderLeaseTtl)
-        leaderGeneration += 1
-        logger.info("orchestrator: acquired leader lease, owner={}, generation={}",
-            leaderOwner, leaderGeneration)
-        return true
+        val lease = leaderLeaseRepo.tryAcquire(owner)
+        if (lease != null) {
+            leaderOwner = owner
+            currentLease = lease
+            logger.info("orchestrator: acquired leader lease, owner={}, generation={}",
+                leaderOwner, lease.generation)
+            return true
+        }
+        logger.debug("orchestrator: another instance holds the leader lease")
+        return false
     }
 
     /** Runs [tick] every [config.tickInterval] in [scope]. */

@@ -705,26 +705,39 @@
   function renderProjectSidebar() {
     var container = $('side-projects');
     var list = $('side-project-list');
-    if (!container || !list || !state.projects || state.projects.length === 0) {
-      if (container) container.hidden = true;
+    var emptyMsg = $('side-project-empty');
+    if (!container || !list) return;
+    // Always show the section once projects have been loaded (even if empty)
+    if (state.projects === null) {
+      container.hidden = true;
       return;
     }
     container.hidden = false;
     clear(list);
-    state.projects.forEach(function (p) {
-      if (!p || typeof p !== 'object' || !p.projectId || !p.name) return;
-      var link = h('a', {
-        className: 'side-project-link',
-        href: '#/',
-        text: p.name,
-        'data-project-filter': p.projectId
+    if (state.projects.length === 0) {
+      // Show empty message, hide form
+      if (emptyMsg) emptyMsg.hidden = false;
+      var form = $('project-create-form');
+      if (form) form.hidden = true;
+      var result = $('project-create-result');
+      if (result) result.hidden = true;
+    } else {
+      if (emptyMsg) emptyMsg.hidden = true;
+      state.projects.forEach(function (p) {
+        if (!p || typeof p !== 'object' || !p.projectId || !p.name) return;
+        var link = h('a', {
+          className: 'side-project-link',
+          href: '#/',
+          text: p.name,
+          'data-project-filter': p.projectId
+        });
+        link.addEventListener('click', function (e) {
+          e.preventDefault();
+          selectProjectFilter(p.projectId);
+        });
+        list.appendChild(link);
       });
-      link.addEventListener('click', function (e) {
-        e.preventDefault();
-        selectProjectFilter(p.projectId);
-      });
-      list.appendChild(link);
-    });
+    }
     // Update active state
     var allLink = $('nav-project-all');
     if (allLink) {
@@ -733,6 +746,37 @@
     list.querySelectorAll('.side-project-link').forEach(function (el) {
       el.setAttribute('aria-current', el.getAttribute('data-project-filter') === state.projectFilter ? 'page' : '');
     });
+  }
+
+  function showProjectCreateForm() {
+    var emptyMsg = $('side-project-empty');
+    var form = $('project-create-form');
+    if (emptyMsg) emptyMsg.hidden = true;
+    if (form) form.hidden = false;
+    var nameInput = $('project-name');
+    if (nameInput) nameInput.value = '';
+    var descInput = $('project-desc');
+    if (descInput) descInput.value = '';
+    var nameCount = $('project-name-count');
+    if (nameCount) nameCount.textContent = '0 / 100';
+    var descCount = $('project-desc-count');
+    if (descCount) descCount.textContent = '0 / 500';
+    var result = $('project-create-result');
+    if (result) result.hidden = true;
+  }
+
+  function hideProjectCreateForm() {
+    var emptyMsg = $('side-project-empty');
+    var form = $('project-create-form');
+    if (emptyMsg) emptyMsg.hidden = false;
+    if (form) form.hidden = true;
+  }
+
+  async function createProject(name, description) {
+    var body = { name: name };
+    if (description) body.description = description;
+    var r = await apiFetch('/api/projects', 'POST', body);
+    return r;
   }
 
   function selectProjectFilter(projectId) {
@@ -4346,6 +4390,53 @@
       allProjectLink.addEventListener('click', function (e) {
         e.preventDefault();
         selectProjectFilter(null);
+      });
+    }
+    // Project create: show form, cancel, submit
+    var navProjectCreate = $('nav-project-create');
+    if (navProjectCreate) {
+      navProjectCreate.addEventListener('click', function (e) {
+        e.preventDefault();
+        showProjectCreateForm();
+      });
+    }
+    var projectCreateCancel = $('project-create-cancel');
+    if (projectCreateCancel) {
+      projectCreateCancel.addEventListener('click', function () {
+        hideProjectCreateForm();
+      });
+    }
+    var projectNameInput = $('project-name');
+    if (projectNameInput) {
+      projectNameInput.addEventListener('input', function () {
+        var count = $('project-name-count');
+        if (count) count.textContent = projectNameInput.value.length + ' / 100';
+      });
+    }
+    var projectDescInput = $('project-desc');
+    if (projectDescInput) {
+      projectDescInput.addEventListener('input', function () {
+        var count = $('project-desc-count');
+        if (count) count.textContent = projectDescInput.value.length + ' / 500';
+      });
+    }
+    var projectCreateForm = $('project-create-form');
+    if (projectCreateForm) {
+      projectCreateForm.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var name = projectNameInput ? projectNameInput.value.trim() : '';
+        var desc = projectDescInput ? projectDescInput.value.trim() : '';
+        if (name.length < 1) return;
+        createProject(name, desc || undefined).then(function (r) {
+          var result = $('project-create-result');
+          if (r.ok) {
+            if (result) { result.textContent = 'プロジェクトを作成しました。'; result.hidden = false; result.className = 'result ok'; }
+            hideProjectCreateForm();
+            loadProjects();
+          } else {
+            if (result) { result.textContent = 'プロジェクトの作成に失敗しました。'; result.hidden = false; result.className = 'result error'; }
+          }
+        });
       });
     }
     // Re-entering the sign-in flow is done by the browser reload; the sign-in URL is never built here.

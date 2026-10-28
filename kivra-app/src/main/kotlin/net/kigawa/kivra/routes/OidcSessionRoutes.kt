@@ -101,10 +101,11 @@ internal fun Route.configureOidcSessionRoutes(
         // Create session in database
         val sessionId = sessionStore.create(principal, settings.sessionMaxAge)
 
-        // Set session cookie (HttpOnly, Secure, SameSite=Lax)
-        call.response.cookies.append(
-            name = settings.sessionCookieName,
-            value = sessionId,
+        // Set session cookie with proper attributes (HttpOnly, Secure, SameSite=Lax, Max-Age)
+        val maxAge = settings.sessionMaxAge.seconds
+        call.response.header(
+            HttpHeaders.SetCookie,
+            "${settings.sessionCookieName}=$sessionId; Path=/; Max-Age=$maxAge; HttpOnly; Secure; SameSite=Lax"
         )
 
         // Redirect to UI

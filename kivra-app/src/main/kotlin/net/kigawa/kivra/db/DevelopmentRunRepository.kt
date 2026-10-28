@@ -309,6 +309,16 @@ class DevelopmentRunRepository(
     }
 
     /**
+     * Count all active (non-terminal) runs across all tasks. Used by the orchestrator admission guard
+     * to enforce the concurrent-run limit (design #3 section 5.5). Read-only.
+     */
+    fun countActiveRuns(): Long = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { DevelopmentRunsTable.state notInList TERMINAL_STATE_NAMES }
+            .count()
+    }
+
+    /**
      * A kind mismatch under the same (principal, idempotency key) is a conflict, never a replay of another kind of run. A different
      * body is a conflict too: the body changes what the agent is asked to do. An empty body and no body are the same.
      */

@@ -216,3 +216,13 @@ object ProjectsTable : Table("projects") {
     val updatedAt = datetime("updated_at")
     override val primaryKey = PrimaryKey(projectId)
 }
+
+/** Orchestrator leader lease (V41). Single-row table for leader election. */
+object LeaderLeasesTable : Table("orchestrator_leader_lease") {
+    val id = integer("id").default(0)
+    val owner = varchar("owner", 128)
+    val expiresAt = datetime("expires_at")
+    val generation = long("generation").default(0)
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(id)
+}

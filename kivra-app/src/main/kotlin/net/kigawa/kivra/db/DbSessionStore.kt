@@ -1,5 +1,7 @@
 package net.kigawa.kivra.db
 
+import net.kigawa.kivra.auth.SessionRecord
+import net.kigawa.kivra.auth.SessionStore
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
@@ -19,15 +21,15 @@ import java.time.ZoneOffset
 /** A persisted login session. */
 data class LoginSessionRecord(
     val sessionId: String,
-    val principal: String,
+    override val principal: String,
     val expiresAt: Instant,
-)
+) : SessionRecord
 
-/** Database-backed session store for OIDC login sessions. */
+/** Database-backed session store for OIDC login sessions. Implements [SessionStore] for the identity layer. */
 class DbSessionStore(
     private val database: Database,
     private val clock: Clock = Clock.systemUTC(),
-) {
+) : SessionStore {
     companion object {
         private val random = SecureRandom()
     }
@@ -56,7 +58,7 @@ class DbSessionStore(
     }
 
     /** Look up a session by ID. Returns null if not found or expired. */
-    fun get(sessionId: String): LoginSessionRecord? {
+    override fun get(sessionId: String): LoginSessionRecord? {
         val now = Instant.now(clock)
         val nowLocal = now.atZone(ZoneOffset.UTC).toLocalDateTime()
         return transaction(database) {

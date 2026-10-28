@@ -2,6 +2,7 @@ package net.kigawa.kivra.auth
 
 import com.auth0.jwk.JwkProvider
 import io.ktor.http.Headers
+import io.ktor.http.HttpHeaders
 
 /**
  * How the Task API (`/api/tasks`, `/api/runs`) identifies its caller. Set by `KIVRA_AUTH_MODE`.
@@ -104,4 +105,42 @@ internal fun validPrincipal(raw: String?): String? {
     if (candidate.isEmpty() || candidate.length > MAX_PRINCIPAL_LENGTH) return null
     if (candidate.any { it.isISOControl() }) return null
     return candidate
+}
+
+/**
+ * Looks up a principal from a session cookie, falling back to [delegate] when the session is absent or expired.
+ * This allows browser-based login sessions to access the same API routes as Bearer-token callers.
+ */
+fun TaskApiIdentity.withSessionCookie(
+    cookieName: String,
+    sessionStore: SessionStore,
+): TaskApiIdentity = TaskApiIdentity { headers ->
+    val sessionId = headers[HttpHeaders.Cookie]
+        ?.let { parseSessionCookieId(it, cookieName) }
+    sessionId?.let { sid ->
+        sessionStore.get(sid)?.principal?.takeIf { validPrincipal(it) != null }
+    } ?: principal(headers)
+}
+
+/** A minimal session lookup interface, so the identity layer does not depend on the database module. */
+interface SessionStore {
+    fun get(sessionId: String): SessionRecord?
+}
+
+/** A session record with a principal. */
+interface SessionRecord {
+    val principal: String
+}
+
+/** Extracts the session cookie value for [cookieName] from a raw Cookie header string. */
+private fun parseSessionCookieId(cookieHeader: String, cookieName: String): String? {
+    val pairs = cookieHeader.split(";")
+    for (pair in pairs) {
+        val kv = pair.trim().split("=", limit = 2)
+        if (kv.size == 2 && kv[0].trim() == cookieName) {
+            val value = kv[1].trim()
+            return value.takeIf { it.isNotEmpty() }
+        }
+    }
+    return null
 }

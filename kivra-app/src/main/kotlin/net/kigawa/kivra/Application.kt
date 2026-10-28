@@ -106,6 +106,8 @@ import net.kigawa.kivra.mcp.McpTokenAuth
 import net.kigawa.kivra.mcp.buildMcpRouteDeps
 import net.kigawa.kivra.mcp.registerMcpRoutes
 import net.kigawa.kivra.auth.OidcSessionSettings
+import net.kigawa.kivra.auth.TaskApiIdentity
+import net.kigawa.kivra.auth.withSessionCookie
 import net.kigawa.kivra.db.DbSessionStore
 import net.kigawa.kivra.routes.LoginSession
 
@@ -344,6 +346,20 @@ internal fun Application.appModule(env: Map<String, String>) {
             monitorRetention = agentApiSettings.monitorRetention,
         ).start(this)
     }
+    // OIDC session persistence: set up before routing so the session-aware identity is available to all API routes.
+    val oidcSessionSettings = OidcSessionSettings.fromEnv(env)
+    val sessionStore: DbSessionStore? = oidcSessionSettings?.let { DbSessionStore(database) }
+
+    // Wrap taskApiIdentity with session cookie support: a request authenticated by a valid session cookie
+    // uses the session's principal; otherwise falls back to the Bearer token (or other configured mode).
+    val taskApiIdentityWithSession: TaskApiIdentity? = taskApiIdentity?.let { identity ->
+        if (sessionStore != null) {
+            identity.withSessionCookie(oidcSessionSettings!!.sessionCookieName, sessionStore)
+        } else {
+            identity
+        }
+    }
+
     val agentParts = agentApiSettings.auth?.let { auth ->
         AgentApiDeps(
             checkNotNull(codingService),
@@ -353,7 +369,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     }
 
     // The run execution read API (ADR 0012 PR 3): read only. Its operator check reuses the Task API's verifier, with the agent role refused.
-    val executionDeps = taskApiIdentity?.let {
+    val executionDeps = taskApiIdentityWithSession?.let {
         val agentRole = agentApiSettings.auth?.let { auth -> RequiredRole(auth.requiredClient, auth.requiredRole) }
         runExecutionDeps(runs, database, it, resolveOperatorVerifier(env, agentRole), agentApiSettings.attemptReserveUsd)
     }
@@ -361,10 +377,6 @@ internal fun Application.appModule(env: Map<String, String>) {
     install(ContentNegotiation) { json() }
     install(SSE)
     install(Authentication)
-
-    // OIDC session persistence: configure cookie-based session if enabled
-    val oidcSessionSettings = OidcSessionSettings.fromEnv(env)
-    val sessionStore = oidcSessionSettings?.let { DbSessionStore(database) }
 
     if (oidcSessionSettings != null) {
         install(Sessions) {
@@ -379,15 +391,15 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureDevPreviewRoutes()
             configureDevTaskSubmitRoutes()
         }
-        if (taskApiIdentity != null) {
-            configureTaskApiRoutes(runs, taskApiIdentity, selfDevSettings.config?.repo, permissionGuard, projectRepo)
-            configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentity, permissionGuard)
-            configureProjectRoutes(projectRepo, taskApiIdentity)
+        if (taskApiIdentityWithSession != null) {
+            configureTaskApiRoutes(runs, taskApiIdentityWithSession, selfDevSettings.config?.repo, permissionGuard, projectRepo)
+            configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentityWithSession, permissionGuard)
+            configureProjectRoutes(projectRepo, taskApiIdentityWithSession)
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()
-            configureBudgetAdminRoutes(budgetStore, taskApiIdentity, fx = fxSettings, operatorView = budgetStore, guard = permissionGuard)
-            configureSelfDevAdminRoutes(runs, taskApiIdentity, permissionGuard)
-            configureRunViewRoutes(runs, taskApiIdentity, selfDevSettings, permissionGuard, projectRepo)
+            configureBudgetAdminRoutes(budgetStore, taskApiIdentityWithSession, fx = fxSettings, operatorView = budgetStore, guard = permissionGuard)
+            configureSelfDevAdminRoutes(runs, taskApiIdentityWithSession, permissionGuard)
+            configureRunViewRoutes(runs, taskApiIdentityWithSession, selfDevSettings, permissionGuard, projectRepo)
             if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
             if (memoryRoutes != null) configureSelfDevMemoryRoutes(memoryRoutes)
             if (orderRoutes != null) configureSelfDevOrderRoutes(orderRoutes)

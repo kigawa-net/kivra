@@ -123,7 +123,7 @@ class SelfDevOperatorRepositoryTest {
             assertEquals(TaskState.SUBMITTED, after.getValue(first.ordinal).state)
             assertEquals(runId, after.getValue(first.ordinal).runId)
             assertEquals(TaskState.SKIPPED, after.getValue(second.ordinal).state)
-            assertEquals(AutopilotReason.GOAL_STOPPED, after.getValue(second.ordinal).stateReason)
+            assertEquals(AutopilotReason.TASK_STOPPED, after.getValue(second.ordinal).stateReason)
 
             assertIs<Transition.Refused>(ops.stopGoal(goal.goalId, stopped.version))
         }

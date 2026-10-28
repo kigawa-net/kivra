@@ -227,18 +227,18 @@ class SelfDevOperatorRepository(
             .orderBy(SelfDevPlanTasksTable.ordinal to SortOrder.ASC)
             .map { taskOf(it) }
 
-    /** Moves every PENDING_APPROVAL and QUEUED task of the goal's Plans to SKIPPED (GOAL_STOPPED). Inside the stop's transaction. */
+    /** Moves every PENDING_APPROVAL and QUEUED task of the goal's Plans to SKIPPED (TASK_STOPPED). Inside the stop's transaction. */
     private fun Transaction.skipUnsubmittedTasks(goalId: String, now: LocalDateTime) {
         val planIds = SelfDevPlansTable.selectAll().where { SelfDevPlansTable.goalId eq goalId }.map { it[SelfDevPlansTable.planId] }
         for (planId in planIds) {
             for (task in tasksIn(planId)) {
                 if (task.state != TaskState.PENDING_APPROVAL && task.state != TaskState.QUEUED) continue
-                val decision = checkTaskTransition(task.state, TaskState.SKIPPED, AutopilotReason.GOAL_STOPPED)
+                val decision = checkTaskTransition(task.state, TaskState.SKIPPED, AutopilotReason.TASK_STOPPED)
                 check(decision is TransitionDecision.Allowed) { "a task of a stopped goal is skipped by the state machine" }
                 val changed = execUpdate(
                     """
                     UPDATE selfdev_plan_tasks
-                       SET state = 'SKIPPED', state_reason = 'GOAL_STOPPED', version = version + 1, updated_at = ?
+                       SET state = 'SKIPPED', state_reason = 'TASK_STOPPED', version = version + 1, updated_at = ?
                      WHERE plan_id = ? AND ordinal = ? AND version = ? AND state = ?
                     """.trimIndent(),
                     now, planId, task.ordinal, task.version, task.state.name,

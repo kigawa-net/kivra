@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
@@ -34,8 +35,8 @@ fun KivraApp() {
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
             Row(modifier = Modifier.fillMaxSize()) {
-                // Sidebar (Navigation Rail)
-                NavigationRail {
+                // Sidebar (Navigation Rail) - 左に寄せるために幅を固定
+                NavigationRail(modifier = Modifier.width(80.dp)) {
                     Text("Kivra", modifier = Modifier.padding(8.dp))
                     HorizontalDivider()
                     NavDestination.all.forEach { dest ->

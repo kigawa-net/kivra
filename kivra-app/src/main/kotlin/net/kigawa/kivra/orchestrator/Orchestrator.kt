@@ -18,6 +18,7 @@ import net.kigawa.kivra.fusha.poller.TaskEventSink
 import net.kigawa.kivra.fusha.poller.TaskPollEvent
 import net.kigawa.kivra.fusha.poller.TaskPoller
 import net.kigawa.kivra.fusha.poller.TaskPossiblyGone
+import net.kigawa.kivra.agent.AgentManager
 import net.kigawa.kivra.agent.AgentProfile
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.LeaderLease
@@ -50,6 +51,7 @@ class Orchestrator(
     private val config: OrchestratorConfig,
     private val policy: AdmissionPolicy?,
     private val outboxPublisher: FushaTaskOutboxPublisher?,
+    private val agentManager: AgentManager?,
     private val clock: Clock = Clock.systemUTC(),
 ) : TaskEventSink {
 
@@ -159,8 +161,21 @@ class Orchestrator(
             task.id.value, requestId)
         val result = admission.admit(task, requestId)
         when (result) {
-            is AdmissionResult.Accepted -> logger.info("orchestrator admission: accepted, runId={}, taskId={}",
-                result.runId.value, task.id.value)
+            is AdmissionResult.Accepted -> {
+                logger.info("orchestrator admission: accepted, runId={}, taskId={}",
+                    result.runId.value, task.id.value)
+                // Dispatch the newly admitted run to the Agent Manager (design #3 section 5.1)
+                agentManager?.let {
+                    try {
+                        val outcome = it.run(result.runId, profile)
+                        logger.info("orchestrator: agentManager.run outcome={}, runId={}",
+                            outcome::class.simpleName, result.runId.value)
+                    } catch (e: Exception) {
+                        logger.warn("orchestrator: agentManager.run failed, runId={} exception={}",
+                            result.runId.value, e.javaClass.simpleName)
+                    }
+                }
+            }
             is AdmissionResult.AlreadyActive -> logger.info("orchestrator admission: already active, runId={}, taskId={}",
                 result.runId.value, task.id.value)
             is AdmissionResult.AlreadyTerminal -> logger.info("orchestrator admission: already terminal, runId={}, taskId={}",

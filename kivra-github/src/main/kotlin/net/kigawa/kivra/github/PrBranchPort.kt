@@ -57,6 +57,14 @@ interface PrBranchPort {
      * [PullRequestFiles.truncated] is true when the limit was reached, so the list may be incomplete and a caller must refuse.
      */
     suspend fun listPullRequestFiles(repo: RepoRef, number: Int): GitHubResult<PullRequestFiles>
+
+    /**
+     * Squash merge a pull request (`PUT /pulls/{n}/merge?merge_method=squash`). The [expectedHeadSha] must match the current head;
+     * a mismatch is [GitHubFailureKind.CONFLICT]. A 405 (not mergeable) is [GitHubFailureKind.VALIDATION]. A 409 or 422 (conflict) is
+     * [GitHubFailureKind.CONFLICT]. A transport failure or 5xx is [GitHubResult.Unknown] and is never re-sent.
+     * The merge commit SHA is returned when the merge succeeds; null when the response does not carry it.
+     */
+    suspend fun squashMerge(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<String?>
 }
 
 /** The most files [PrBranchPort.listPullRequestFiles] reads (three pages of 100). */

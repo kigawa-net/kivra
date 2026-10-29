@@ -973,6 +973,30 @@ class HttpGitHubAdapter(
     override suspend fun listTreeAt(repo: RepoRef, commitSha: String): GitHubResult<RepoTree> =
         if (!sha40.matches(commitSha)) validation("sha") else listTree(repo, commitSha)
 
+    override suspend fun squashMerge(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<String?> {
+        if (!sha40.matches(expectedHeadSha)) return validation("expected_head_sha")
+        val body = buildJsonObject {
+            put("sha", expectedHeadSha)
+            put("merge_method", "squash")
+        }
+        val path = "${repoPath(repo)}/pulls/$number/merge?merge_method=squash"
+        return when (val m = mutate(HttpMethod.Put, "squashMerge", path, body, unprocessableIsConflict = true)) {
+            is GitHubResult.Success -> {
+                val o = parse(m.value) as? JsonObject
+                val sha = o?.str("sha")?.takeIf { sha40.matches(it) }
+                GitHubResult.Success(sha)
+            }
+            is GitHubResult.Failure -> {
+                if (m.status == 405) {
+                    GitHubResult.Failure(GitHubFailureKind.VALIDATION, GitHubFailureKind.VALIDATION.code, m.status)
+                } else {
+                    m
+                }
+            }
+            is GitHubResult.Unknown -> m
+        }
+    }
+
     override suspend fun getIssue(repo: RepoRef, number: Long): GitHubResult<GitHubIssue> {
         if (number <= 0) return validation("issue number")
         val raw = when (val g = get("${repoPath(repo)}/issues/$number", maxBodyBytes = ISSUE_MAX_RESPONSE_BYTES)) {

@@ -24,6 +24,7 @@ import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.LeaderLease
 import net.kigawa.kivra.db.LeaderLeaseRepository
 import net.kigawa.kivra.fusha.outbox.FushaTaskOutboxPublisher
+import net.kigawa.kivra.reviewer.ReviewerPipeline
 import org.slf4j.LoggerFactory
 import java.time.Clock
 
@@ -52,6 +53,7 @@ class Orchestrator(
     private val policy: AdmissionPolicy?,
     private val outboxPublisher: FushaTaskOutboxPublisher?,
     private val agentManager: AgentManager?,
+    private val reviewerPipeline: ReviewerPipeline?,
     private val clock: Clock = Clock.systemUTC(),
 ) : TaskEventSink {
 
@@ -186,13 +188,27 @@ class Orchestrator(
     }
 
     /** Reconcile existing runs (design #3 section 7.3). */
-    private fun reconcile() {
+    private suspend fun reconcile() {
         // Check for orphaned runs: active runs whose task no longer exists in fusha-task.
         // For now, log a warning if there are runs in CREATED state that have been stuck.
         val activeRuns = runRepo.countActiveRuns()
         if (activeRuns > config.maxConcurrentRuns) {
             logger.warn("orchestrator reconcile: {} active runs exceeds limit {}", 
                 activeRuns, config.maxConcurrentRuns)
+        }
+
+        // Check for runs that should enter review phase (design #3 section 4.3, C2)
+        reviewerPipeline?.let { pipeline ->
+            try {
+                val activeRunIds = runRepo.findActiveRuns().map { it.runId }
+                for (runId in activeRunIds) {
+                    if (pipeline.shouldEnterReview(runId)) {
+                        logger.info("orchestrator reconcile: runId={} should enter review phase", runId)
+                    }
+                }
+            } catch (e: Exception) {
+                logger.warn("orchestrator reconcile: review check failed, exception={}", e.javaClass.simpleName)
+            }
         }
     }
 

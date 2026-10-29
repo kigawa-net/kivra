@@ -6,8 +6,6 @@ import io.ktor.server.application.install
 import io.ktor.server.auth.Authentication
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.sse.SSE
-import io.ktor.server.sessions.Sessions
-import io.ktor.server.sessions.cookie
 import io.ktor.server.routing.routing
 import net.kigawa.kivra.auth.AgentApiSettings
 import net.kigawa.kivra.auth.AgentIdentity
@@ -36,11 +34,11 @@ import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.SelfDevAssigneeRepository
 import net.kigawa.kivra.db.SelfDevAssigneeTokenRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
-import net.kigawa.kivra.db.SelfDevGoalRepository
+// SelfDevGoalRepository removed in V40
 import net.kigawa.kivra.db.SelfDevMemoryRepository
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
-import net.kigawa.kivra.db.SelfDevPlanRepository
+// SelfDevPlanRepository removed in V40
 import net.kigawa.kivra.db.NoPrMergeAuthority
 import net.kigawa.kivra.db.OutboxRepository
 import net.kigawa.kivra.db.ProjectRepository
@@ -69,10 +67,10 @@ import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureProjectRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
 import net.kigawa.kivra.routes.PermissionGuard
-import net.kigawa.kivra.routes.SelfDevGoalRouteDeps
+// SelfDevGoalRouteDeps removed in V40
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.SelfDevMemoryRouteDeps
-import net.kigawa.kivra.routes.configureSelfDevGoalRoutes
+// configureSelfDevGoalRoutes removed in V40
 import net.kigawa.kivra.routes.configureSelfDevMemoryRoutes
 import net.kigawa.kivra.routes.SelfDevAssigneeRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevAssigneeRoutes
@@ -81,7 +79,7 @@ import net.kigawa.kivra.routes.configureSelfDevOrderRoutes
 import net.kigawa.kivra.routes.requiredAgentRole
 import net.kigawa.kivra.routes.configureSelfDevRoutes
 import net.kigawa.kivra.routes.configureOidcSessionRoutes
-import net.kigawa.kivra.selfdev.AutoStopDeps
+// AutoStopDeps removed in V40
 import net.kigawa.kivra.selfdev.AutopilotDispatcher
 import net.kigawa.kivra.selfdev.OrderSettings
 import net.kigawa.kivra.selfdev.OrderWatch
@@ -101,8 +99,7 @@ import net.kigawa.kivra.selfdev.memory.SelfDevMemorySettings
 import net.kigawa.kivra.selfdev.memory.SuppressShadow
 import net.kigawa.kivra.selfdev.memory.SuppressShadowSettings
 import net.kigawa.kivra.mcp.McpSettings
-import net.kigawa.kivra.mcp.McpGoalDeps
-import net.kigawa.kivra.mcp.McpGoalSubmitDeps
+// McpGoalDeps and McpGoalSubmitDeps removed in V40
 import net.kigawa.kivra.mcp.McpOrderDeps
 import net.kigawa.kivra.mcp.McpTokenAuth
 import net.kigawa.kivra.mcp.buildMcpRouteDeps
@@ -120,7 +117,6 @@ import net.kigawa.kivra.db.DbRunAdmission
 import net.kigawa.kivra.fusha.poller.TaskPoller
 import net.kigawa.kivra.orchestrator.Orchestrator
 import net.kigawa.kivra.orchestrator.OrchestratorSettings
-import net.kigawa.kivra.routes.LoginSession
 
 fun Application.module() = appModule(System.getenv())
 
@@ -224,20 +220,8 @@ internal fun Application.appModule(env: Map<String, String>) {
             oidcIssuer = env["KIVRA_OIDC_ISSUER"]?.trim()?.takeIf { it.isNotEmpty() },
         )
     }
-    val goalRoutes = operatorVerifier?.let { verifier ->
-        SelfDevGoalRouteDeps(
-            operators = verifier,
-            autopilot = autopilotSettings,
-            targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
-            goals = SelfDevGoalRepository(database),
-            plans = SelfDevPlanRepository(database),
-            operations = SelfDevOperatorRepository(database),
-            control = SelfDevAutopilotControlRepository(database),
-            memory = memory,
-            aiPrincipal = aiPrincipal,
-            guard = permissionGuard,
-        )
-    }
+    // Goal routes temporarily removed pending Task model migration (V40)
+    val goalRoutes: Any? = null
     // The memory's operator routes (ADR 0016 P2). Registered with the operator check; the repository is null while the memory switch is off,
     // and then every endpoint answers 503.
     val memoryRoutes = operatorVerifier?.let { verifier ->
@@ -252,21 +236,14 @@ internal fun Application.appModule(env: Map<String, String>) {
             aiPrincipal = aiPrincipal,
             targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
             orders = orderRepo,
-            goals = SelfDevGoalRepository(database),
+            // Goals parameter temporarily removed pending Task model migration (V40).
             operations = SelfDevOperatorRepository(database),
             guard = permissionGuard,
         )
     } else {
         null
     }
-    // The Goal stop over MCP needs the autopilot (ADR 0019 S1): refused at startup otherwise, as the write switch is. The same holds for the
-    // Goal submission (ADR 0019 S2).
-    check(!mcpSettings.goalStopEnabled || autopilotSettings.config != null) {
-        "${McpSettings.ENV_GOAL_STOP_ENABLED}=true requires the autopilot"
-    }
-    check(!mcpSettings.goalSubmitEnabled || autopilotSettings.config != null) {
-        "${McpSettings.ENV_GOAL_SUBMIT_ENABLED}=true requires the autopilot"
-    }
+    // Goal tools over MCP temporarily removed pending Task model migration (V40)
     val mcpDeps = buildMcpRouteDeps(
         mcpSettings, env, runs, selfDevSettings.config?.repo, guard = permissionGuard,
         // The assignee token entrance exists only while the roles are on (ADR 0020 addendum, T2); off creates and reads nothing.
@@ -274,24 +251,7 @@ internal fun Application.appModule(env: Map<String, String>) {
         selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns,
         // The order tools serve only while the orders answer (the same condition as the REST routes' requireEnabled).
         orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, aiPrincipal) },
-        // The Goal tools serve only while the autopilot answers (the same condition as the REST goal routes' requireEnabled).
-        goals = autopilotSettings.config?.let {
-            McpGoalDeps(
-                operations = SelfDevOperatorRepository(database),
-                plans = SelfDevPlanRepository(database),
-                runs = runs,
-                aiPrincipal = aiPrincipal,
-                memory = memory,
-                // The Goal submission over MCP (ADR 0019 S2) needs the target repository, as the REST submission does.
-                submit = selfDevSettings.config?.repo?.let {
-                    McpGoalSubmitDeps(
-                        goals = SelfDevGoalRepository(database),
-                        targetRepo = "${it.owner}/${it.repo}",
-                        dailyLimit = mcpSettings.goalSubmitDailyLimit,
-                    )
-                },
-            )
-        },
+        // Goal tools temporarily removed pending Task model migration (V40)
     )
     selfDevParts?.worker?.start(this)
     selfDevParts?.planWorker?.start(this)
@@ -323,9 +283,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                 val usage = budgetStore.usage(budgetConfig.tenantId)
                 autopilotBudgetAllows(usage.committed, usage.reserved, budgetConfig.monthlyLimitJpy, share)
             },
-            // With the orders off the gate allows every goal, so the dispatcher's flow is the same as before.
-            orderGate = orderRepo?.let { repo -> { goalId: String -> repo.dispatchAllowed(goalId) } } ?: { _: String -> true },
-            memory = memory,
+            // orderGate and memory parameters temporarily removed pending Task model migration (V40)
         ).start(this)
         // The order guards (ADR 0015 section 5.2): the same budget share as the dispatcher, and the FX rate. Only with the orders on.
         orderRepo?.let { repo ->
@@ -337,12 +295,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                     autopilotBudgetAllows(usage.committed, usage.reserved, budgetConfig.monthlyLimitJpy, autopilot.budgetSharePercent)
                 },
                 fxExpired = { fxForGuard?.expiry(java.time.Clock.systemUTC())?.expired == true },
-                // The automatic child stop (ADR 0015 section 4.4) is off unless its switch is on. Its goals are stopped after the decision.
-                autoStop = if (orderSettings.autoStopEnabled) {
-                    AutoStopDeps(SelfDevGoalRepository(database), SelfDevOperatorRepository(database))
-                } else {
-                    null
-                },
+                // autoStop temporarily disabled pending Task model migration (V40)
                 // The cost counting into spent_jpy (ADR 0015 addendum, stage 3g). Off unless its switch is on.
                 countSpend = orderSettings.spendEnabled,
                 // The automatic cycle start (ADR 0015 addendum 2026-10-24, dev only). Off unless its switch is on.
@@ -452,11 +405,6 @@ internal fun Application.appModule(env: Map<String, String>) {
     install(SSE)
     install(Authentication)
 
-    if (oidcSessionSettings != null) {
-        install(Sessions) {
-            cookie<LoginSession>(oidcSessionSettings.sessionCookieName)
-        }
-    }
     val metrics = MetricsRegistry()
     routing {
         configureHealthRoutes()
@@ -474,7 +422,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureBudgetAdminRoutes(budgetStore, taskApiIdentityWithSession, fx = fxSettings, operatorView = budgetStore, guard = permissionGuard)
             configureSelfDevAdminRoutes(runs, taskApiIdentityWithSession, permissionGuard)
             configureRunViewRoutes(runs, taskApiIdentityWithSession, selfDevSettings, permissionGuard, projectRepo)
-            if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
+            // Goal routes temporarily removed pending Task model migration (V40)
             if (memoryRoutes != null) configureSelfDevMemoryRoutes(memoryRoutes)
             if (orderRoutes != null) configureSelfDevOrderRoutes(orderRoutes)
             if (assigneeRoutes != null) configureSelfDevAssigneeRoutes(assigneeRoutes)

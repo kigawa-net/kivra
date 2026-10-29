@@ -319,6 +319,16 @@ class DevelopmentRunRepository(
     }
 
     /**
+     * Find all active (non-terminal) runs. Used by the orchestrator to check for runs
+     * that should enter review phase (design #3 section 4.3, C2). Read-only.
+     */
+    fun findActiveRuns(): List<DevelopmentRun> = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { DevelopmentRunsTable.state notInList TERMINAL_STATE_NAMES }
+            .mapNotNull { it.toDevelopmentRunOrNull() }
+    }
+
+    /**
      * A kind mismatch under the same (principal, idempotency key) is a conflict, never a replay of another kind of run. A different
      * body is a conflict too: the body changes what the agent is asked to do. An empty body and no body are the same.
      */

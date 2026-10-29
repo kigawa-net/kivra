@@ -167,7 +167,7 @@ class AutopilotDispatcher(
         var skipped = 0
         for (other in plans.tasksOf(task.planId)) {
             if (other.state != TaskState.PENDING_APPROVAL && other.state != TaskState.QUEUED) continue
-            if (transitionTask(goalId, other, TaskState.SKIPPED, AutopilotReason.GOAL_STOPPED) != null) skipped++
+            if (transitionTask(goalId, other, TaskState.SKIPPED, AutopilotReason.TASK_STOPPED) != null) skipped++
         }
         logger.info("autopilot dispatch: plan stopped, planId={} code={} skipped={}", task.planId, reason.name, skipped)
         return true

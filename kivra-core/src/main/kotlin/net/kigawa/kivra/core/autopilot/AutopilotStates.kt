@@ -3,37 +3,25 @@ package net.kigawa.kivra.core.autopilot
 import net.kigawa.kivra.core.StateMachine
 
 /*
- * Self-development autopilot state machines (ADR 0011 section 2.5). Pure Kotlin, no I/O. The repositories call the check
+ * Self-development autopilot state machine (V40 flat task model). Pure Kotlin, no I/O. The repositories call the check
  * functions before they write, and the conditional UPDATE is the other half of the guard (CAS on version and state).
  *
  * Every allowed edge is listed once in a table below. A transition is allowed only when its edge exists, its reason code is one
  * the edge allows (null means the edge takes no reason), and the context guard holds. Everything else is refused.
- * DONE and STOPPED (Goal), SUPERSEDED and REJECTED (Plan), COMPLETED and SKIPPED (task) have no outgoing edge.
+ * COMPLETED, SKIPPED, DONE and STOPPED have no outgoing edge (terminal states).
+ *
+ * The unified TaskState combines the former GoalState and TaskState into a single lifecycle:
+ *   TASK_SUBMITTED -> PLANNING -> PENDING_APPROVAL -> QUEUED -> SUBMITTING -> SUBMITTED -> COMPLETED/FAILED/CANCELLED
+ *   Control: BLOCKED (dispatch guard), PAUSED (operator pause), DONE (all done), STOPPED (operator stop)
  */
 
 /**
- * Goal states (`selfdev_goals.state`). PAUSED returns to the state it was paused from (see [GoalContext.resumeState]).
- * BLOCKED returns only through the dispatch guards (see [GoalContext.blockedReason]).
- */
-enum class GoalState : StateMachine<GoalState> {
-    GOAL_SUBMITTED, PLANNING, PLAN_PROPOSED, TASKS_QUEUED, RUNNING, BLOCKED, PAUSED, DONE, STOPPED;
-
-    override val next: Set<GoalState> get() = GOAL_EDGES.filter { it.from == this }.map { it.to }.toSet()
-}
-
-/** Plan states (`selfdev_plans.state`). */
-enum class PlanState : StateMachine<PlanState> {
-    PROPOSED, SUPERSEDED, REJECTED;
-
-    override val next: Set<PlanState> get() = PLAN_EDGES.filter { it.from == this }.map { it.to }.toSet()
-}
-
-/**
- * Task states (`selfdev_plan_tasks.state`). A task is a projection of its Run (ADR 0001): SUBMITTED is left only with the
- * Run's outcome, and the outcome is read from the Run, never written back to it.
+ * Unified task states (`selfdev_tasks.state`). PAUSED returns to the state it was paused from (see [TaskContext.resumeState]).
+ * BLOCKED returns only through the dispatch guards (see [TaskContext.blockedReason]).
  */
 enum class TaskState : StateMachine<TaskState> {
-    PENDING_APPROVAL, QUEUED, SUBMITTING, SUBMITTED, COMPLETED, FAILED, CANCELLED, SKIPPED;
+    TASK_SUBMITTED, PLANNING, PENDING_APPROVAL, QUEUED, SUBMITTING, SUBMITTED,
+    COMPLETED, FAILED, CANCELLED, SKIPPED, BLOCKED, PAUSED, DONE, STOPPED;
 
     override val next: Set<TaskState> get() = TASK_EDGES.filter { it.from == this }.map { it.to }.toSet()
 }
@@ -47,9 +35,9 @@ enum class AutopilotReason {
     PLAN_INVALID, PLAN_BUDGET_HOLD, PLAN_CALL_FAILED, CLAIM_EXPIRED, REPLAN_REQUESTED,
     PENDING_PR_LIMIT, DAILY_RUN_CAP, BUDGET_HOLD, CIRCUIT_OPEN, AUTO_SCOPE_EXCEEDED,
     GUARD_CLEARED, OPERATOR_PAUSED, OPERATOR_RESUMED, OPERATOR_STOPPED, ALL_TASKS_COMPLETED,
-    OPERATOR_APPROVED, AUTO_APPROVED, OPERATOR_SKIPPED, OPERATOR_REQUEUED, GOAL_STOPPED,
+    OPERATOR_APPROVED, AUTO_APPROVED, OPERATOR_SKIPPED, OPERATOR_REQUEUED, TASK_STOPPED,
     ACTIVE_RUN_LIMIT, PR_MERGED, RUN_FAILED, POLICY_REJECTED, PR_ABANDONED, RUN_RELEASED,
-    /** Every task ended (COMPLETED, FAILED or SKIPPED) and not all of them COMPLETED: the goal stops by the dispatcher (ADR 0011 section 2.8b). */
+    /** Every task ended (COMPLETED, FAILED or SKIPPED) and not all of them COMPLETED: the task stops by the dispatcher (ADR 0011 section 2.8b). */
     TASKS_INCOMPLETE,
 }
 
@@ -68,20 +56,20 @@ sealed interface TransitionDecision {
     data class Refused(val reason: TransitionRefusal) : TransitionDecision
 }
 
-/** Facts a Goal transition needs from the row. Defaults are the values a fresh row has. */
-data class GoalContext(
-    /** Plan revisions created so far (`selfdev_goals.revision`). Replanning needs fewer than [MAX_REVISIONS]. */
+/** Facts a Task transition needs from the row. Defaults are the values a fresh row has. */
+data class TaskContext(
+    /** Plan revisions created so far (`selfdev_tasks.revision`). Replanning needs fewer than [MAX_REVISIONS]. */
     val revision: Int = 0,
-    /** The `state_reason` of a BLOCKED goal. Resuming from BLOCKED needs a dispatch-guard reason. */
+    /** The `state_reason` of a BLOCKED task. Resuming from BLOCKED needs a dispatch-guard reason. */
     val blockedReason: AutopilotReason? = null,
-    /** The state a PAUSED goal returns to. A PAUSED goal may only move to this state. */
-    val resumeState: GoalState? = null,
+    /** The state a PAUSED task returns to. A PAUSED task may only move to this state. */
+    val resumeState: TaskState? = null,
 )
 
-/** A Goal has at most this many Plan revisions (ADR 0011 section 2.1). */
+/** A Task has at most this many Plan revisions (ADR 0011 section 2.1). */
 const val MAX_REVISIONS = 3
 
-/** The dispatch guards of ADR 0011 section 5.2 that block a Goal (BLOCKED). The pause and the circuit breaker are not in it. */
+/** The dispatch guards of ADR 0011 section 5.2 that block a Task (BLOCKED). The pause and the circuit breaker are not in it. */
 val DISPATCH_BLOCK_REASONS: Set<AutopilotReason> = setOf(
     AutopilotReason.PENDING_PR_LIMIT,
     AutopilotReason.DAILY_RUN_CAP,
@@ -98,7 +86,7 @@ val AUTO_CLEARABLE_REASONS: Set<AutopilotReason> = setOf(
 )
 
 /**
- * The planning-stage blocks (ADR 0011 section 2.8, U-16). Only an operator moves a goal out of them, back to GOAL_SUBMITTED, so a
+ * The planning-stage blocks (ADR 0011 section 2.8, U-16). Only an operator moves a task out of them, back to TASK_SUBMITTED, so a
  * block that the Planner made is never cleared by a dispatch guard.
  */
 val PLAN_BLOCK_REASONS: Set<AutopilotReason> = setOf(
@@ -112,73 +100,74 @@ private class Edge<S>(val from: S?, val to: S, val reasons: Set<AutopilotReason?
 
 private val NO_REASON: Set<AutopilotReason?> = setOf(null)
 
-private val GOAL_EDGES: List<Edge<GoalState>> = buildList {
-    fun edge(from: GoalState?, to: GoalState, reasons: Set<AutopilotReason?>) = add(Edge(from, to, reasons))
-    edge(null, GoalState.GOAL_SUBMITTED, NO_REASON)
-    edge(GoalState.GOAL_SUBMITTED, GoalState.PLANNING, NO_REASON)
-    edge(GoalState.PLANNING, GoalState.PLAN_PROPOSED, NO_REASON)
-    edge(GoalState.PLANNING, GoalState.BLOCKED, PLAN_BLOCK_REASONS)
-    edge(GoalState.PLANNING, GoalState.GOAL_SUBMITTED, setOf(AutopilotReason.CLAIM_EXPIRED))
-    edge(GoalState.PLAN_PROPOSED, GoalState.TASKS_QUEUED, NO_REASON)
-    edge(GoalState.PLAN_PROPOSED, GoalState.GOAL_SUBMITTED, setOf(AutopilotReason.REPLAN_REQUESTED))
-    edge(GoalState.BLOCKED, GoalState.GOAL_SUBMITTED, setOf(AutopilotReason.REPLAN_REQUESTED))
-    edge(GoalState.TASKS_QUEUED, GoalState.RUNNING, NO_REASON)
-    edge(GoalState.RUNNING, GoalState.BLOCKED, DISPATCH_BLOCK_REASONS)
-    edge(GoalState.TASKS_QUEUED, GoalState.BLOCKED, DISPATCH_BLOCK_REASONS)
-    val resume: Set<AutopilotReason?> = setOf(AutopilotReason.GUARD_CLEARED, AutopilotReason.OPERATOR_RESUMED)
-    edge(GoalState.BLOCKED, GoalState.RUNNING, resume)
-    edge(GoalState.BLOCKED, GoalState.TASKS_QUEUED, resume)
-    edge(GoalState.RUNNING, GoalState.DONE, setOf(AutopilotReason.ALL_TASKS_COMPLETED))
-    val pausable = listOf(GoalState.TASKS_QUEUED, GoalState.RUNNING, GoalState.BLOCKED)
-    for (from in pausable) edge(from, GoalState.PAUSED, setOf(AutopilotReason.OPERATOR_PAUSED))
-    for (to in pausable) edge(GoalState.PAUSED, to, setOf(AutopilotReason.OPERATOR_RESUMED))
-    val active = listOf(
-        GoalState.GOAL_SUBMITTED, GoalState.PLANNING, GoalState.PLAN_PROPOSED, GoalState.TASKS_QUEUED,
-        GoalState.RUNNING, GoalState.BLOCKED, GoalState.PAUSED,
+/**
+ * Unified task edges — combines the former GoalState and TaskState transitions into one lifecycle.
+ * Flow: TASK_SUBMITTED -> PLANNING -> PENDING_APPROVAL -> QUEUED -> SUBMITTING -> SUBMITTED -> COMPLETED/FAILED/CANCELLED
+ * Control: BLOCKED (dispatch guard), PAUSED (operator pause), DONE (all done), STOPPED (operator stop)
+ */
+private val TASK_EDGES: List<Edge<TaskState>> = buildList {
+    fun edge(from: TaskState?, to: TaskState, reasons: Set<AutopilotReason?>) = add(Edge(from, to, reasons))
+
+    // --- Submission & Planning (former GoalState flow) ---
+    edge(null, TaskState.TASK_SUBMITTED, NO_REASON)
+    edge(TaskState.TASK_SUBMITTED, TaskState.PLANNING, NO_REASON)
+    edge(TaskState.PLANNING, TaskState.PENDING_APPROVAL, NO_REASON)  // PLANNING -> PENDING_APPROVAL (plan committed)
+    edge(TaskState.PLANNING, TaskState.BLOCKED, PLAN_BLOCK_REASONS)
+    edge(TaskState.PLANNING, TaskState.TASK_SUBMITTED, setOf(AutopilotReason.CLAIM_EXPIRED))
+    edge(TaskState.BLOCKED, TaskState.TASK_SUBMITTED, setOf(AutopilotReason.REPLAN_REQUESTED))
+
+    // --- Approval & Execution (former TaskState flow) ---
+    edge(
+        TaskState.PENDING_APPROVAL, TaskState.QUEUED,
+        setOf(AutopilotReason.OPERATOR_APPROVED, AutopilotReason.AUTO_APPROVED),
     )
-    // A goal whose tasks all ended without all of them COMPLETED stops by the dispatcher (ADR 0011 section 2.8b). One edge per pair:
-    // checkEdge reads the first edge that matches, so the reasons of the two cases are listed together.
-    val dispatchEnds = setOf(GoalState.TASKS_QUEUED, GoalState.RUNNING, GoalState.BLOCKED)
+    edge(TaskState.PENDING_APPROVAL, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.TASK_STOPPED))
+    edge(TaskState.QUEUED, TaskState.SUBMITTING, NO_REASON)
+    edge(TaskState.QUEUED, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.TASK_STOPPED))
+    edge(TaskState.SUBMITTING, TaskState.SUBMITTED, NO_REASON)
+    edge(TaskState.SUBMITTING, TaskState.QUEUED, setOf(AutopilotReason.ACTIVE_RUN_LIMIT))
+    edge(TaskState.SUBMITTED, TaskState.COMPLETED, setOf(AutopilotReason.PR_MERGED))
+    edge(
+        TaskState.SUBMITTED, TaskState.FAILED,
+        setOf(AutopilotReason.RUN_FAILED, AutopilotReason.POLICY_REJECTED, AutopilotReason.PR_ABANDONED),
+    )
+    edge(TaskState.SUBMITTED, TaskState.CANCELLED, setOf(AutopilotReason.RUN_RELEASED))
+    edge(TaskState.SUBMITTED, TaskState.PENDING_APPROVAL, setOf(AutopilotReason.AUTO_SCOPE_EXCEEDED))
+    edge(TaskState.FAILED, TaskState.QUEUED, setOf(AutopilotReason.OPERATOR_REQUEUED))
+    edge(TaskState.FAILED, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED))
+    edge(TaskState.CANCELLED, TaskState.QUEUED, setOf(AutopilotReason.OPERATOR_REQUEUED))
+    edge(TaskState.CANCELLED, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED))
+
+    // --- Dispatch guards (BLOCKED from execution states) ---
+    val dispatchable = listOf(TaskState.QUEUED, TaskState.SUBMITTING, TaskState.SUBMITTED)
+    for (from in dispatchable) edge(from, TaskState.BLOCKED, DISPATCH_BLOCK_REASONS)
+    val resume: Set<AutopilotReason?> = setOf(AutopilotReason.GUARD_CLEARED, AutopilotReason.OPERATOR_RESUMED)
+    for (to in dispatchable) edge(TaskState.BLOCKED, to, resume)
+
+    // --- Completion ---
+    edge(TaskState.COMPLETED, TaskState.DONE, setOf(AutopilotReason.ALL_TASKS_COMPLETED))
+
+    // --- Pause/Resume (execution states only) ---
+    val pausable = listOf(TaskState.QUEUED, TaskState.SUBMITTING, TaskState.SUBMITTED, TaskState.BLOCKED)
+    for (from in pausable) edge(from, TaskState.PAUSED, setOf(AutopilotReason.OPERATOR_PAUSED))
+    for (to in pausable) edge(TaskState.PAUSED, to, setOf(AutopilotReason.OPERATOR_RESUMED))
+
+    // --- Stop (from any active state) ---
+    val active = listOf(
+        TaskState.TASK_SUBMITTED, TaskState.PLANNING, TaskState.PENDING_APPROVAL,
+        TaskState.QUEUED, TaskState.SUBMITTING, TaskState.SUBMITTED,
+        TaskState.BLOCKED, TaskState.PAUSED,
+    )
+    val dispatchEnds = setOf(TaskState.QUEUED, TaskState.SUBMITTING, TaskState.SUBMITTED, TaskState.BLOCKED)
     for (from in active) {
         val reasons = if (from in dispatchEnds) {
             setOf(AutopilotReason.OPERATOR_STOPPED, AutopilotReason.TASKS_INCOMPLETE)
         } else {
             setOf(AutopilotReason.OPERATOR_STOPPED)
         }
-        edge(from, GoalState.STOPPED, reasons)
+        edge(from, TaskState.STOPPED, reasons)
     }
 }
-
-private val PLAN_EDGES: List<Edge<PlanState>> = listOf(
-    Edge(null, PlanState.PROPOSED, NO_REASON),
-    Edge(null, PlanState.REJECTED, setOf(AutopilotReason.PLAN_INVALID)),
-    Edge(PlanState.PROPOSED, PlanState.SUPERSEDED, setOf(AutopilotReason.REPLAN_REQUESTED)),
-)
-
-private val TASK_EDGES: List<Edge<TaskState>> = listOf(
-    Edge(
-        TaskState.PENDING_APPROVAL, TaskState.QUEUED,
-        setOf(AutopilotReason.OPERATOR_APPROVED, AutopilotReason.AUTO_APPROVED),
-    ),
-    Edge(TaskState.PENDING_APPROVAL, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.GOAL_STOPPED)),
-    Edge(TaskState.QUEUED, TaskState.SUBMITTING, NO_REASON),
-    Edge(TaskState.QUEUED, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.GOAL_STOPPED)),
-    Edge(TaskState.SUBMITTING, TaskState.SUBMITTED, NO_REASON),
-    Edge(TaskState.SUBMITTING, TaskState.QUEUED, setOf(AutopilotReason.ACTIVE_RUN_LIMIT)),
-    Edge(TaskState.SUBMITTED, TaskState.COMPLETED, setOf(AutopilotReason.PR_MERGED)),
-    Edge(
-        TaskState.SUBMITTED, TaskState.FAILED,
-        setOf(AutopilotReason.RUN_FAILED, AutopilotReason.POLICY_REJECTED, AutopilotReason.PR_ABANDONED),
-    ),
-    Edge(TaskState.SUBMITTED, TaskState.CANCELLED, setOf(AutopilotReason.RUN_RELEASED)),
-    // ADR 0011 section 6.2: an auto-approved task whose change set is out of the stage-2 scope goes back to the operator. Its Run ends
-    // POLICY_REJECTED, and the task is not counted as a failure. The operator's approval then runs it again.
-    Edge(TaskState.SUBMITTED, TaskState.PENDING_APPROVAL, setOf(AutopilotReason.AUTO_SCOPE_EXCEEDED)),
-    Edge(TaskState.FAILED, TaskState.QUEUED, setOf(AutopilotReason.OPERATOR_REQUEUED)),
-    Edge(TaskState.FAILED, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED)),
-    Edge(TaskState.CANCELLED, TaskState.QUEUED, setOf(AutopilotReason.OPERATOR_REQUEUED)),
-    Edge(TaskState.CANCELLED, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED)),
-)
 
 private fun <S> checkEdge(edges: List<Edge<S>>, from: S?, to: S, reason: AutopilotReason?): TransitionDecision {
     val edge = edges.firstOrNull { it.from == from && it.to == to }
@@ -187,15 +176,16 @@ private fun <S> checkEdge(edges: List<Edge<S>>, from: S?, to: S, reason: Autopil
     return TransitionDecision.Allowed
 }
 
-/** Checks a Goal transition. [from] is null for the creation of the Goal. */
-fun checkGoalTransition(from: GoalState?, to: GoalState, reason: AutopilotReason?, context: GoalContext): TransitionDecision {
-    val edge = checkEdge(GOAL_EDGES, from, to, reason)
+/** Checks a Task transition. [from] is null for the creation of the Task. */
+fun checkTaskTransition(from: TaskState?, to: TaskState, reason: AutopilotReason?, context: TaskContext): TransitionDecision {
+    val edge = checkEdge(TASK_EDGES, from, to, reason)
     if (edge != TransitionDecision.Allowed) return edge
     val guardHolds = when {
-        from == GoalState.PLAN_PROPOSED && to == GoalState.GOAL_SUBMITTED -> context.revision < MAX_REVISIONS
-        from == GoalState.PAUSED -> context.resumeState == to
-        from == GoalState.BLOCKED && to == GoalState.GOAL_SUBMITTED -> context.blockedReason in PLAN_BLOCK_REASONS
-        from == GoalState.BLOCKED && to != GoalState.PAUSED && to != GoalState.STOPPED -> {
+        // Replanning: PLANNING -> TASK_SUBMITTED needs fewer than MAX_REVISIONS
+        from == TaskState.PLANNING && to == TaskState.TASK_SUBMITTED && reason == AutopilotReason.CLAIM_EXPIRED -> true
+        from == TaskState.BLOCKED && to == TaskState.TASK_SUBMITTED -> context.blockedReason in PLAN_BLOCK_REASONS
+        from == TaskState.PAUSED -> context.resumeState == to
+        from == TaskState.BLOCKED && to != TaskState.PAUSED && to != TaskState.STOPPED && to != TaskState.TASK_SUBMITTED -> {
             val blocked = context.blockedReason
             blocked in DISPATCH_BLOCK_REASONS && (reason != AutopilotReason.GUARD_CLEARED || blocked in AUTO_CLEARABLE_REASONS)
         }
@@ -203,11 +193,3 @@ fun checkGoalTransition(from: GoalState?, to: GoalState, reason: AutopilotReason
     }
     return if (guardHolds) TransitionDecision.Allowed else TransitionDecision.Refused(TransitionRefusal.GUARD_FAILED)
 }
-
-/** Checks a Plan transition. [from] is null for the creation of the Plan. */
-fun checkPlanTransition(from: PlanState?, to: PlanState, reason: AutopilotReason?): TransitionDecision =
-    checkEdge(PLAN_EDGES, from, to, reason)
-
-/** Checks a task transition. The Run that a task points to is checked by the repository, not here. */
-fun checkTaskTransition(from: TaskState, to: TaskState, reason: AutopilotReason?): TransitionDecision =
-    checkEdge(TASK_EDGES, from, to, reason)

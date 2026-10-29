@@ -113,7 +113,7 @@ class SelfDevMemoryRecorder private constructor(private val store: ((MemoryCandi
         /** The task reasons recorded as TASK_FACT: approvals, the rejection and the stop, and the outcome of the Run. */
         val TASK_REASONS: Set<AutopilotReason> = setOf(
             AutopilotReason.OPERATOR_APPROVED, AutopilotReason.AUTO_APPROVED, AutopilotReason.OPERATOR_SKIPPED,
-            AutopilotReason.GOAL_STOPPED, AutopilotReason.PR_MERGED, AutopilotReason.RUN_FAILED, AutopilotReason.POLICY_REJECTED,
+            AutopilotReason.TASK_STOPPED, AutopilotReason.PR_MERGED, AutopilotReason.RUN_FAILED, AutopilotReason.POLICY_REJECTED,
             AutopilotReason.PR_ABANDONED, AutopilotReason.RUN_RELEASED, AutopilotReason.AUTO_SCOPE_EXCEEDED,
         )
 

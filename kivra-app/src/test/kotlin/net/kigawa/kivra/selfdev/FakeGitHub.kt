@@ -11,6 +11,7 @@ import net.kigawa.kivra.github.EnsuredPullRequest
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubPort
 import net.kigawa.kivra.github.GitHubResult
+import net.kigawa.kivra.github.MergedPullRequest
 import net.kigawa.kivra.github.PullRequest
 import net.kigawa.kivra.github.PullRequestState
 import net.kigawa.kivra.github.RepoFileContent
@@ -39,7 +40,7 @@ enum class CommitFault {
 
 /**
  * In-memory GitHub double for the runner tests. It keeps branches, commits and pull requests, and records every write in [writes]
- * so that the tests can count provider side effects. There is no merge operation, as in [GitHubPort].
+ * so that the tests can count provider side effects. Supports squash merge via [mergePullRequest].
  * Any call with a repository other than [repo] returns NOT_FOUND. Shas are sequential, so runs are deterministic.
  */
 /** A lost answer to a pull request creation: the PR is created (or not) but the response is an UNKNOWN outcome. */
@@ -245,6 +246,21 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
     override suspend fun getCombinedStatus(repo: RepoRef, sha: String): GitHubResult<CombinedStatus> = unused()
 
     override suspend fun getReviews(repo: RepoRef, number: Int): GitHubResult<List<Review>> = unused()
+
+    override suspend fun mergePullRequest(repo: RepoRef, number: Int): GitHubResult<MergedPullRequest> {
+        touch("mergePullRequest")
+        if (repo != this.repo) return foreign()
+        val pr = pulls.firstOrNull { it.number == number } ?: return foreign()
+        if (pr.merged) return GitHubResult.Failure(GitHubFailureKind.CONFLICT, GitHubFailureKind.CONFLICT.code)
+        if (pr.state == PullRequestState.CLOSED) {
+            return GitHubResult.Failure(GitHubFailureKind.VALIDATION, GitHubFailureKind.VALIDATION.code)
+        }
+        val mergeSha = sha(900 + number)
+        replacePull(number) { it.copy(state = PullRequestState.CLOSED, merged = true, mergeCommitSha = mergeSha) }
+        writes += "mergePr"
+        afterWrite("mergePr")
+        return GitHubResult.Success(MergedPullRequest(repo, number, mergeSha))
+    }
 
     override suspend fun listTree(repo: RepoRef, ref: String): GitHubResult<RepoTree> = unused()
 

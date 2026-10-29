@@ -8,6 +8,7 @@ pluginManagement {
 dependencyResolutionManagement {
     repositories {
         mavenCentral()
+        google()
     }
 }
 
@@ -28,4 +29,6 @@ include(
     "kivra-ui-api",
     "kivra-developer",
     "kivra-agent",
+    "kivra-compose-ui",
+    "kivra-web",
 )

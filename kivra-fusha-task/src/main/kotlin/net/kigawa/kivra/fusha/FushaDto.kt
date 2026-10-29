@@ -16,3 +16,11 @@ internal data class FushaTaskDto(
     val nextTaskIds: List<Long> = emptyList(),
     val updatedAt: String,
 )
+
+/** PATCH body for updating customFields (design #3 section 7.2, A6). */
+@Serializable
+internal data class CustomFieldsPatch(val customFields: Map<String, JsonElement>)
+
+/** POST body for adding a comment to a task (design #3 section 7.2, A6). */
+@Serializable
+internal data class CommentBody(val body: String)

@@ -7,6 +7,9 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.parameter
+import io.ktor.client.request.patch
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -61,7 +64,9 @@ class FushaTaskAdapter(
     private val jitter: () -> Double = { Random.nextDouble() },
 ) : TaskProvider {
 
-    override val capabilities: Set<TaskCapability> = setOf(TaskCapability.GET, TaskCapability.LIST)
+    override val capabilities: Set<TaskCapability> = setOf(
+        TaskCapability.GET, TaskCapability.LIST, TaskCapability.UPDATE, TaskCapability.COMMENT,
+    )
 
     private val base = config.baseUrl.trimEnd('/')
     private val idPrefix = "fusha:${config.environment}:"
@@ -112,16 +117,129 @@ class FushaTaskAdapter(
         }
     }
 
-    override suspend fun update(id: TaskId, patch: TaskPatch, expectedUpdatedAt: Instant?): TaskWriteResult =
-        unsupported(TaskCapability.UPDATE)
+    override suspend fun update(id: TaskId, patch: TaskPatch, expectedUpdatedAt: Instant?): TaskWriteResult {
+        if (patch.fields.isEmpty()) return TaskWriteResult.Ok(null)
+        val numeric = parseId(id)
+        val current = try {
+            request("$base/tasks/$numeric")
+        } catch (e: TaskProviderException) {
+            return when (e.kind) {
+                TaskErrorKind.UNAUTHORIZED, TaskErrorKind.FORBIDDEN -> TaskWriteResult.Rejected(e.message ?: "unauthorized", e.httpStatus)
+                else -> TaskWriteResult.Rejected("failed to read task for update: ${e.message ?: "unknown"}", e.httpStatus)
+            }
+        }
+        if (current.status == HttpStatusCode.NotFound) return TaskWriteResult.Rejected("task not found", 404)
+        if (current.status.value !in 200..299) return TaskWriteResult.Rejected("failed to read task: ${current.status}", current.status.value)
+        val dto = try {
+            decode<FushaTaskDto>(current)
+        } catch (e: Exception) {
+            return TaskWriteResult.Rejected("failed to decode task: ${e.message}", null)
+        }
+        if (expectedUpdatedAt != null) {
+            val taskUpdatedAt = try { Instant.parse(dto.updatedAt) } catch (e: DateTimeParseException) {
+                return TaskWriteResult.Rejected("unparseable updatedAt", null)
+            }
+            if (taskUpdatedAt.isAfter(expectedUpdatedAt))
+                return TaskWriteResult.Rejected("task was modified after expectedUpdatedAt", null)
+        }
+        val mergedFields = dto.customFields.toMutableMap()
+        for ((key, value) in patch.fields) mergedFields[key] = kotlinx.serialization.json.JsonPrimitive(value)
+        val response = try {
+            requestPatch("$base/tasks/$numeric", CustomFieldsPatch(mergedFields))
+        } catch (e: TaskProviderException) {
+            return when (e.kind) {
+                TaskErrorKind.UNAUTHORIZED, TaskErrorKind.FORBIDDEN -> TaskWriteResult.Rejected(e.message ?: "unauthorized", e.httpStatus)
+                else -> TaskWriteResult.Rejected("PATCH failed: ${e.message ?: "unknown"}", e.httpStatus)
+            }
+        }
+        return when {
+            response.status.value in 200..299 -> {
+                val updatedDto: FushaTaskDto? = try { decode<FushaTaskDto>(response) } catch (e: Exception) { null }
+                TaskWriteResult.Ok(updatedDto?.toSnapshot())
+            }
+            else -> TaskWriteResult.Rejected("PATCH rejected: ${response.status}", response.status.value)
+        }
+    }
 
-    override suspend fun comment(id: TaskId, body: String, key: IdempotencyKey): TaskWriteResult =
-        unsupported(TaskCapability.COMMENT)
+    override suspend fun comment(id: TaskId, body: String, key: IdempotencyKey): TaskWriteResult {
+        val numeric = parseId(id)
+        val idempotencySuffix = "kivra:${key.value}"
+        val fullBody = if (body.contains(idempotencySuffix)) body else "$body\n\n---\n$idempotencySuffix"
+        val response = try {
+            requestPost("$base/tasks/$numeric/comments", CommentBody(fullBody))
+        } catch (e: TaskProviderException) {
+            return when (e.kind) {
+                TaskErrorKind.UNAUTHORIZED, TaskErrorKind.FORBIDDEN -> TaskWriteResult.Rejected(e.message ?: "unauthorized", e.httpStatus)
+                else -> TaskWriteResult.Rejected("POST comment failed: ${e.message ?: "unknown"}", e.httpStatus)
+            }
+        }
+        return when {
+            response.status.value in 200..299 -> TaskWriteResult.Ok(null)
+            else -> TaskWriteResult.Rejected("POST comment rejected: ${response.status}", response.status.value)
+        }
+    }
 
-    private fun unsupported(cap: TaskCapability) = TaskWriteResult.Unsupported(
-        cap,
-        "fusha-task writes are disabled in M1: no server-side CAS/ETag and machine auth is unverified (要確認)",
-    )
+    private suspend fun requestPatch(url: String, body: Any): HttpResponse {
+        var refreshed = false
+        var attempt = 0
+        var forceRefresh = false
+        while (true) {
+            val outcome: Result<HttpResponse> = try {
+                val token = currentToken(forceRefresh)
+                forceRefresh = false
+                Result.success(client.patch(url) {
+                    header(HttpHeaders.Authorization, "Bearer $token")
+                    header(HttpHeaders.Accept, "application/json")
+                    header(HttpHeaders.ContentType, "application/json")
+                    setBody(body)
+                })
+            } catch (e: CancellationException) { throw e }
+            catch (e: TaskProviderException) { throw e }
+            catch (e: IOException) { Result.failure(e) }
+            val response = outcome.getOrNull()
+            if (response != null) {
+                val code = response.status.value
+                if (code == 401 && !refreshed) { refreshed = true; forceRefresh = true; continue }
+                val retryable = code == 429 || code in 500..599
+                if (!retryable) return response
+                if (attempt >= config.maxRetries) throw classify(code)
+            } else if (attempt >= config.maxRetries) {
+                throw TaskProviderException(TaskErrorKind.TRANSIENT, "fusha-task unreachable", cause = outcome.exceptionOrNull())
+            }
+            sleep(backoffMillis(attempt)); attempt++
+        }
+    }
+
+    private suspend fun requestPost(url: String, body: Any): HttpResponse {
+        var refreshed = false
+        var attempt = 0
+        var forceRefresh = false
+        while (true) {
+            val outcome: Result<HttpResponse> = try {
+                val token = currentToken(forceRefresh)
+                forceRefresh = false
+                Result.success(client.post(url) {
+                    header(HttpHeaders.Authorization, "Bearer $token")
+                    header(HttpHeaders.Accept, "application/json")
+                    header(HttpHeaders.ContentType, "application/json")
+                    setBody(body)
+                })
+            } catch (e: CancellationException) { throw e }
+            catch (e: TaskProviderException) { throw e }
+            catch (e: IOException) { Result.failure(e) }
+            val response = outcome.getOrNull()
+            if (response != null) {
+                val code = response.status.value
+                if (code == 401 && !refreshed) { refreshed = true; forceRefresh = true; continue }
+                val retryable = code == 429 || code in 500..599
+                if (!retryable) return response
+                if (attempt >= config.maxRetries) throw classify(code)
+            } else if (attempt >= config.maxRetries) {
+                throw TaskProviderException(TaskErrorKind.TRANSIENT, "fusha-task unreachable", cause = outcome.exceptionOrNull())
+            }
+            sleep(backoffMillis(attempt)); attempt++
+        }
+    }
 
     private fun parseId(id: TaskId): Long {
         val v = id.value

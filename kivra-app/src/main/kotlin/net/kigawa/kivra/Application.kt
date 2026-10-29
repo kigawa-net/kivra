@@ -358,6 +358,21 @@ internal fun Application.appModule(env: Map<String, String>) {
             monitorRetention = agentApiSettings.monitorRetention,
         ).start(this)
     }
+    // The auto-recovery worker: periodically recovers RETRY_WAITING runs and reconciles UNKNOWN operations.
+    // Always started so that stuck runs can recover even without the agent API.
+    {
+        val leaseStore = SqlLeaseStore(database)
+        val journalRepo = net.kigawa.kivra.db.OperationJournalRepository(
+            database,
+            net.kigawa.kivra.db.NoOpTrustedEvidenceAuthority,
+        )
+        net.kigawa.kivra.agent.AutoRecoveryWorker(
+            runs = runs,
+            journal = journalRepo,
+            leases = leaseStore,
+            config = net.kigawa.kivra.agent.AutoRecoveryConfig(),
+        ).start(this)
+    }
     // The Orchestrator (design #3 section 5.1). Started only when explicitly enabled and fusha-task is configured.
     // It polls fusha-task for tasks, admits them through RunAdmission, and dispatches to AgentManager.
     // AgentManager is nullable: without a TrustedEvidenceAuthority, it cannot run agents, but the Orchestrator

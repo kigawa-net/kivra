@@ -125,7 +125,7 @@ class RolesCoverageArchitectureTest {
     private val OPEN_ROUTES: Map<String, String> = buildMap {
         for (r in listOf("GET /health", "GET /ready", "GET /metrics", "GET /", "GET /ui", "GET /ui/", "GET /ui/app.js", "GET /ui/app.css",
             "GET /ui/compose", "GET /ui/compose/", "GET /ui/compose/kivra-web.js",
-            "GET /ui/compose/037f170986f544477491.wasm", "GET /ui/compose/835857ff79d9577028d7.wasm")) put(r, "PUBLIC")
+            "GET /ui/compose/{wasmFile}", "GET /ui/compose/composeResources/{file}")) put(r, "PUBLIC")
         for (r in listOf(
             "POST /api/agent/v1/claim",
             "POST /api/agent/v1/attempts/{attemptId}/heartbeat",

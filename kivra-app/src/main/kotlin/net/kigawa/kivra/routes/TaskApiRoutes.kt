@@ -31,8 +31,11 @@ import net.kigawa.kivra.github.RepoRef
 @Serializable
 data class SubmitTaskRequest(val title: String, val idempotencyKey: String)
 
+@Serializable
+data class SubmitCommentRequest(val body: String, val idempotencyKey: String)
+
 /**
- * The Run snapshot returned by POST, GET /api/runs/{id}, GET /api/runs and the operator views (GET /api/admin/runs...).
+ * The Run snapshot returned by POST, GET /api/runs/{id}, GET /api/runs and the operator views (GET /api/admin/runs...),
  *
  * [title] is the task title the authenticated principal submitted, for both kinds. It is shown only to that principal and to
  * operators (ADR 0008 addendum, 2026-10-17). A self-development run (mode SELF_DEV) has no [executed] (it is not a simulation,
@@ -221,5 +224,44 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             return@get
         }
         call.respond(runs.listTasks(principal, limit = 50).map { runs.viewOf(it, targetRepo, projectRepo = projectRepo) })
+    }
+
+    post("/api/runs/{id}/comments") {
+        val principal = identity.principal(call.request.headers)
+        if (principal == null) {
+            call.respond(HttpStatusCode.Unauthorized, TaskApiError("unauthorized"))
+            return@post
+        }
+        if (!guard.permits(principal, Permission.SPEND_START, "task_comment")) {
+            call.respond(HttpStatusCode.Forbidden, TaskApiError("forbidden"))
+            return@post
+        }
+        if (!call.requireJsonSameOrigin()) return@post
+        val request = try { call.receive<SubmitCommentRequest>() } catch (_: Exception) {
+            call.respond(HttpStatusCode.BadRequest, TaskApiError("invalid request body"))
+            return@post
+        }
+        val body = validatedText(request.body, 2000)
+        val key = validatedText(request.idempotencyKey, MAX_IDEMPOTENCY_KEY_CODE_POINTS)
+        if (body == null || key == null) {
+            call.respond(HttpStatusCode.BadRequest, TaskApiError("body must be 1-2000 characters and idempotencyKey 1-128 characters, without control characters"))
+            return@post
+        }
+        val runId = call.parameters["id"]
+        if (runId == null) {
+            call.respond(HttpStatusCode.BadRequest, TaskApiError("missing run id"))
+            return@post
+        }
+        val run = runs.getTask(RunId(runId), principal)
+        if (run == null) {
+            call.respond(HttpStatusCode.NotFound, TaskApiError("run not found"))
+            return@post
+        }
+        val eventId = runs.enqueueComment(RunId(runId), principal, body)
+        if (eventId == null) {
+            call.respond(HttpStatusCode.NotFound, TaskApiError("run not found"))
+        } else {
+            call.respond(HttpStatusCode.Accepted, mapOf("eventId" to eventId))
+        }
     }
 }

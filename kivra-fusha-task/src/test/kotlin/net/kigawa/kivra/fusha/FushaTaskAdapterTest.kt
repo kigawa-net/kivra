@@ -38,6 +38,21 @@ private const val T3 = """{"id":3,"title":"Task three","description":null,"assig
 private fun MockRequestHandleScope.fakeServer(req: HttpRequestData): HttpResponseData {
     val path = req.url.encodedPath
     val tasks = mapOf(1L to ("alice" to T1), 2L to ("bob" to T2), 3L to ("alice" to T3))
+    // POST /tasks/:id/comments
+    if (req.method.value == "POST" && path.endsWith("/comments")) {
+        val id = path.substringAfter("/tasks/").substringBefore("/comments").toLongOrNull()
+        if (id == null || !tasks.containsKey(id)) {
+            return respond("""{"error":"not found"}""", HttpStatusCode.NotFound, JSON_HEADERS)
+        }
+        return respond("""{"id":1,"body":"test","author_id":"svc","created_at":"2026-10-15T00:00:00.000Z"}""", HttpStatusCode.Created, JSON_HEADERS)
+    }
+    // PATCH /tasks/:id
+    if (req.method.value == "PATCH") {
+        val id = path.substringAfterLast('/').toLongOrNull()
+        val t = tasks[id]
+        if (t == null) return respond("""{"error":"not found"}""", HttpStatusCode.NotFound, JSON_HEADERS)
+        return respond(t.second, HttpStatusCode.OK, JSON_HEADERS)
+    }
     if (path.endsWith("/tasks")) {
         val assignee = req.url.parameters["assigneeId"]
         val view = req.url.parameters["viewId"]?.toLong()

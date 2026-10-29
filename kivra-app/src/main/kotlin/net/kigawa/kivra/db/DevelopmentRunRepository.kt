@@ -966,6 +966,23 @@ class DevelopmentRunRepository(
     private fun lockRun(runId: RunId): ResultRow? =
         DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.forUpdate().firstOrNull()
 
+    /**
+     * Enqueues a comment for the run's task. The comment is delivered to fusha-task by the outbox publisher.
+     * Returns the outbox event id, or null when the run is not found.
+     */
+    fun enqueueComment(runId: RunId, actor: String, body: String): String? = transaction(database) {
+        val row = lockRun(runId) ?: return@transaction null
+        val taskId = row[DevelopmentRunsTable.taskId]
+        val version = row[DevelopmentRunsTable.version]
+        val traceId = row[DevelopmentRunsTable.traceId]
+        val payload = buildJsonObject {
+            put("taskId", taskId)
+            put("body", body)
+        }.toString()
+        audit.append(this, runId, AuditEntry(actor = actor, action = "TASK_COMMENT", result = "OK", resource = "task:$taskId", traceId = traceId, payload = payload))
+        outbox.append(this, runId, version + 1, "TaskComment", payload, traceId)
+    }
+
     private fun adminUpdate(
         runId: RunId, actor: String, action: String, eventType: String, setClause: String, vararg setParams: Any?,
         check: (DevelopmentRunState) -> Unit = {},

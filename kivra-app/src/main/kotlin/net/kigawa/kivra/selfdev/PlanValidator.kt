@@ -172,8 +172,7 @@ object PlanValidator {
                 targetPaths = raw.targetPaths,
                 sizeEstimate = raw.sizeEstimate,
                 dependsOn = dependsOn,
-                requiresApproval = requiresApproval,
-                initialState = if (autoEligible) TaskState.QUEUED else TaskState.PENDING_APPROVAL,
+                requiresApproval = requiresApproval
             )
         }
         return PlanCheck.Valid(summary.ifEmpty { null }, tasks)

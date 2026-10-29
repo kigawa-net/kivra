@@ -34,11 +34,10 @@ import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.SelfDevAssigneeRepository
 import net.kigawa.kivra.db.SelfDevAssigneeTokenRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
-import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevTaskRepository
 import net.kigawa.kivra.db.SelfDevMemoryRepository
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
-import net.kigawa.kivra.db.SelfDevPlanRepository
 import net.kigawa.kivra.db.NoPrMergeAuthority
 import net.kigawa.kivra.db.OutboxRepository
 import net.kigawa.kivra.db.ProjectRepository
@@ -67,10 +66,10 @@ import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureProjectRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
 import net.kigawa.kivra.routes.PermissionGuard
-import net.kigawa.kivra.routes.SelfDevGoalRouteDeps
+import net.kigawa.kivra.routes.SelfDevTaskRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.SelfDevMemoryRouteDeps
-import net.kigawa.kivra.routes.configureSelfDevGoalRoutes
+import net.kigawa.kivra.routes.configureSelfDevTaskRoutes
 import net.kigawa.kivra.routes.configureSelfDevMemoryRoutes
 import net.kigawa.kivra.routes.SelfDevAssigneeRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevAssigneeRoutes
@@ -213,12 +212,11 @@ internal fun Application.appModule(env: Map<String, String>) {
         )
     }
     val goalRoutes = operatorVerifier?.let { verifier ->
-        SelfDevGoalRouteDeps(
+        SelfDevTaskRouteDeps(
             operators = verifier,
             autopilot = autopilotSettings,
             targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
-            goals = SelfDevGoalRepository(database),
-            plans = SelfDevPlanRepository(database),
+            tasks = SelfDevTaskRepository(database),
             operations = SelfDevOperatorRepository(database),
             control = SelfDevAutopilotControlRepository(database),
             memory = memory,
@@ -240,7 +238,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             aiPrincipal = aiPrincipal,
             targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
             orders = orderRepo,
-            goals = SelfDevGoalRepository(database),
+            goals = SelfDevTaskRepository(database),
             operations = SelfDevOperatorRepository(database),
             guard = permissionGuard,
         )
@@ -266,14 +264,14 @@ internal fun Application.appModule(env: Map<String, String>) {
         goals = autopilotSettings.config?.let {
             McpGoalDeps(
                 operations = SelfDevOperatorRepository(database),
-                plans = SelfDevPlanRepository(database),
+                tasks = SelfDevTaskRepository(database),
                 runs = runs,
                 aiPrincipal = aiPrincipal,
                 memory = memory,
                 // The Goal submission over MCP (ADR 0019 S2) needs the target repository, as the REST submission does.
                 submit = selfDevSettings.config?.repo?.let {
                     McpGoalSubmitDeps(
-                        goals = SelfDevGoalRepository(database),
+                        tasks = SelfDevTaskRepository(database),
                         targetRepo = "${it.owner}/${it.repo}",
                         dailyLimit = mcpSettings.goalSubmitDailyLimit,
                     )
@@ -327,7 +325,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                 fxExpired = { fxForGuard?.expiry(java.time.Clock.systemUTC())?.expired == true },
                 // The automatic child stop (ADR 0015 section 4.4) is off unless its switch is on. Its goals are stopped after the decision.
                 autoStop = if (orderSettings.autoStopEnabled) {
-                    AutoStopDeps(SelfDevGoalRepository(database), SelfDevOperatorRepository(database))
+                    AutoStopDeps(SelfDevTaskRepository(database), SelfDevOperatorRepository(database))
                 } else {
                     null
                 },
@@ -400,7 +398,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureBudgetAdminRoutes(budgetStore, taskApiIdentityWithSession, fx = fxSettings, operatorView = budgetStore, guard = permissionGuard)
             configureSelfDevAdminRoutes(runs, taskApiIdentityWithSession, permissionGuard)
             configureRunViewRoutes(runs, taskApiIdentityWithSession, selfDevSettings, permissionGuard, projectRepo)
-            if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
+            if (goalRoutes != null) configureSelfDevTaskRoutes(goalRoutes)
             if (memoryRoutes != null) configureSelfDevMemoryRoutes(memoryRoutes)
             if (orderRoutes != null) configureSelfDevOrderRoutes(orderRoutes)
             if (assigneeRoutes != null) configureSelfDevAssigneeRoutes(assigneeRoutes)

@@ -1150,6 +1150,80 @@
   }
 
 
+  // ---- Merge PR (operator): merge a self-dev pull request via GitHub API ----
+  // Shown in the detail view when the run is in PULL_REQUEST state with an open PR.
+
+  var MERGE_MSG = {
+    network: '通信に失敗しました。もう一度お試しください。',
+    conflict: 'PRをマージできません（既にマージ済み、または競合があります）。',
+    badRequest: 'PRをマージできません。状態を確認してください。',
+    server: 'サーバーでエラーが起きました。時間をおいてもう一度お試しください。',
+    done: 'PRをマージしました。'
+  };
+
+  function mergeActionButton(run) {
+    var btn = h('button', { type: 'button', text: 'PR をマージする' });
+    btn.addEventListener('click', function () {
+      openMergeDialog(run);
+    });
+    return h('div', { className: 'detail-actions' }, [btn]);
+  }
+
+  function showMergeError(text) {
+    var el = $('merge-error');
+    el.textContent = text;
+    el.hidden = text === '';
+  }
+
+  function openMergeDialog(run) {
+    var repo = typeof run.pullRequestRepository === 'string' ? run.pullRequestRepository : '';
+    var num = run.pullRequestNumber;
+    $('merge-explain').textContent = 'この Run の Pull Request を GitHub で Squash merge します。';
+    $('merge-target').textContent = repo + ' #' + num;
+    showMergeError('');
+    var dialog = $('merge-dialog');
+    dialog.dataset.runId = run.runId;
+    $('merge-submit').disabled = false;
+    dialog.showModal();
+    $('merge-cancel').focus();
+  }
+
+  async function submitMerge() {
+    var dialog = $('merge-dialog');
+    var runId = dialog.dataset.runId;
+    if (!runId || state.sessionExpired) return;
+    $('merge-submit').disabled = true;
+    showMergeError('');
+    var r = await apiFetch('/api/selfdev/runs/' + encodeURIComponent(runId) + '/merge', 'POST', {});
+    if (r.ok) {
+      dialog.close();
+      $('detail-notice').textContent = MERGE_MSG.done;
+      // Reload the detail to show the updated state
+      var cur = parseRoute();
+      if (cur && cur.id === runId) loadDetail(runId, cur.all);
+      refreshRuns();
+      return;
+    }
+    var msg;
+    if (r.kind === 'network') msg = MERGE_MSG.network;
+    else if (r.status === 409) msg = MERGE_MSG.conflict;
+    else if (r.status === 400) msg = MERGE_MSG.badRequest;
+    else if (r.status === 404) msg = MESSAGES.notFound;
+    else msg = MERGE_MSG.server;
+    showMergeError(msg);
+    $('merge-submit').disabled = false;
+  }
+
+  // Wire merge dialog buttons
+  (function () {
+    var md = $('merge-dialog');
+    if (!md) return;
+    $('merge-cancel').addEventListener('click', function () { md.close(); });
+    $('merge-submit').addEventListener('click', function () { submitMerge(); });
+    md.addEventListener('cancel', function () { md.close(); });
+  })();
+
+
   // ---- Budget (operator): the month's spend, the CLI / API split, the FX warning and the UNPRICED list (ADR 0003, #230) ----
   // Shown only when GET /api/admin/budget/status answers 200 to this user. The requests are quiet: a 401 or 403 here means
   // "not for this user" and does not end the session. Only text enters the DOM (textContent, or h() with text).

@@ -7,8 +7,8 @@ import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.DevelopmentRunsTable
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
-import net.kigawa.kivra.db.SelfDevPlanRepository
-import net.kigawa.kivra.db.SelfDevPlanTask
+import net.kigawa.kivra.db.SelfDevTaskRepository
+import net.kigawa.kivra.db.SelfDevTask
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -20,7 +20,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 class DbAutoMergeShadowStore(
     private val database: Database,
     private val runs: DevelopmentRunRepository,
-    private val plans: SelfDevPlanRepository,
+    private val plans: SelfDevTaskRepository,
     private val control: SelfDevAutopilotControlRepository,
     private val audit: AuditRepository,
 ) : AutoMergeShadowStore {
@@ -65,7 +65,7 @@ class DbAutoMergeShadowStore(
          * The approval kind of a Run's task (ADR 0011 section 2.8d). An operator's approval is `approved_by`; a task the autopilot put in
          * the queue without one is AUTO_APPROVED when it does not need an approval. Anything else is null, which the judgement refuses.
          */
-        fun approvalOf(task: SelfDevPlanTask?): AutoMergeTaskApproval? = when {
+        fun approvalOf(task: SelfDevTask?): AutoMergeTaskApproval? = when {
             task == null -> null
             task.approvedBy != null -> AutoMergeTaskApproval.OPERATOR_APPROVED
             !task.requiresApproval -> AutoMergeTaskApproval.AUTO_APPROVED

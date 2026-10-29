@@ -26,7 +26,7 @@ import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.OrderConflict
 import net.kigawa.kivra.db.OrderCycle
 import net.kigawa.kivra.db.OrderResult
-import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevTaskRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
@@ -60,7 +60,7 @@ class SelfDevOrderRouteDeps(
     /** `owner/repo` of the target. Stored with the order at creation (fixed). */
     val targetRepo: String?,
     val orders: SelfDevOrderRepository,
-    val goals: SelfDevGoalRepository,
+    val goals: SelfDevTaskRepository,
     val operations: SelfDevOperatorRepository,
     /** The permission entrance. The default is the roles off and no store: today's rules, from [aiPrincipal] and the root approver. */
     val guard: PermissionGuard = PermissionGuard(
@@ -98,7 +98,7 @@ data class OrderSummaryResponse(
     val stateReason: String?,
     val cyclesStarted: Int,
     val maxCycles: Int,
-    val currentGoalId: String?,
+    val currentTaskId: String?,
     val consecutiveFailedCycles: Int,
     val expiresAt: String,
     val version: Long,
@@ -138,10 +138,10 @@ data class StopRequestResponse(
 )
 
 @Serializable
-data class CycleResponse(val cycleNo: Int, val goalId: String, val goalState: String, val stateReason: String?, val createdAt: String)
+data class CycleResponse(val cycleNo: Int, val taskId: String, val taskState: String, val stateReason: String?, val createdAt: String)
 
 @Serializable
-data class CycleStartedResponse(val orderId: String, val goalId: String, val cycleNo: Int, val version: Long)
+data class CycleStartedResponse(val orderId: String, val taskId: String, val cycleNo: Int, val version: Long)
 
 @Serializable
 private data class OrderError(val error: String, val code: String? = null, val orderId: String? = null)
@@ -254,7 +254,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
                 operatorLog.info("order operator action: action=CYCLE_STARTED actor={} orderId={} cycleNo={}", operatorTag(caller.principal), orderId, r.value.cycleNo)
                 call.respond(
                     HttpStatusCode.Created,
-                    CycleStartedResponse(orderId, r.value.goalId, r.value.cycleNo, r.value.order.version),
+                    CycleStartedResponse(orderId, r.value.taskId, r.value.cycleNo, r.value.order.version),
                 )
             }
             else -> call.respondOutcome(r)
@@ -561,7 +561,7 @@ private fun SelfDevOrder.summary() = OrderSummaryResponse(
     stateReason = stateReason?.name,
     cyclesStarted = cyclesStarted,
     maxCycles = maxCycles,
-    currentGoalId = currentGoalId,
+    currentTaskId = currentTaskId,
     consecutiveFailedCycles = consecutiveFailedCycles,
     expiresAt = expiresAt.utc(),
     version = version,
@@ -590,8 +590,8 @@ private fun SelfDevOrderStopRequest.response(approverView: Boolean) = StopReques
 
 private fun OrderCycle.response() = CycleResponse(
     cycleNo = cycleNo,
-    goalId = goalId,
-    goalState = goalState.name,
+    taskId = taskId,
+    taskState = taskState.name,
     stateReason = stateReason,
     createdAt = createdAt.utc(),
 )

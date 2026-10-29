@@ -58,8 +58,8 @@ private val CREATE = CreatePullRequest("r1", "main", "t", "b", SHA)
 
 class HttpGitHubAdapterTest {
     @Test
-    fun `port exposes no merge force push delete or ref update`() {
-        val forbidden = Regex("merge|force|push|delete|update|remove|close", RegexOption.IGNORE_CASE)
+    fun `port exposes no force push delete or ref update`() {
+        val forbidden = Regex("force|push|delete|update|remove|close", RegexOption.IGNORE_CASE)
         val names = GitHubPort::class.java.methods.map { it.name }
         assertTrue(names.none { forbidden.containsMatchIn(it) }, "forbidden operation on GitHubPort: $names")
     }

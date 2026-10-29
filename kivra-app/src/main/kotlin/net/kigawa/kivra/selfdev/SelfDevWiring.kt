@@ -9,8 +9,7 @@ import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DbRequestLedger
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
-import net.kigawa.kivra.db.SelfDevGoalRepository
-import net.kigawa.kivra.db.SelfDevPlanRepository
+import net.kigawa.kivra.db.SelfDevTaskRepository
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.developer.DeveloperConfig
 import net.kigawa.kivra.developer.LlmDeveloper
@@ -187,7 +186,7 @@ internal fun buildSelfDev(
         taskTexts = DbTaskTextSource,
         coding = coding,
         references = TaskReferenceResolvers(listOf(GitHubIssueResolver(github, config.repo))),
-        autoScope = PlanTaskAutoScopeGuard(SelfDevPlanRepository(database)),
+        autoScope = PlanTaskAutoScopeGuard(SelfDevTaskRepository(database)),
         prRebaser = prRebaser,
     )
     val worker = SelfDevWorker(
@@ -200,13 +199,13 @@ internal fun buildSelfDev(
     val planWorker = autopilot.config?.takeIf { autopilot.enabled }?.let { autopilotConfig ->
         // The Planner's file list reads the same GitHub adapter, on the configured base branch (Issue #293). Off when the switch is off.
         val repoFiles = if (autopilotConfig.plannerRepoTree) PlannerRepoFiles(github, config.repo, config.baseBranch) else null
-        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevGoalRepository(database), tenantId, repoFiles, memory, suppress)
+        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevTaskRepository(database), tenantId, repoFiles, memory, suppress)
     }
     // ADR 0014 S1: the shadow judgement. Built only with the autopilot and its shadow switch on; it reads GitHub and writes the audit only.
     val autoMergeShadow = buildAutoMergeShadowWatch(
         autopilot = autopilot,
         store = DbAutoMergeShadowStore(
-            database, runs, SelfDevPlanRepository(database), SelfDevAutopilotControlRepository(database), AuditRepository(),
+            database, runs, SelfDevTaskRepository(database), SelfDevAutopilotControlRepository(database), AuditRepository(),
         ),
         port = GitHubAutoMergeShadowPort(github, github),
         repo = config.repo,
@@ -230,7 +229,7 @@ private fun buildPlanWorker(
     config: AutopilotConfig,
     registry: ModelRegistry,
     gateway: ModelGateway,
-    goals: SelfDevGoalRepository,
+    goals: SelfDevTaskRepository,
     tenantId: String,
     repoFiles: PlannerRepoFiles?,
     memory: SelfDevMemoryRecorder,

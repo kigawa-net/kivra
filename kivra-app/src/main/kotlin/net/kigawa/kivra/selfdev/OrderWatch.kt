@@ -14,12 +14,12 @@ import net.kigawa.kivra.db.AutoCycleSkip
 import net.kigawa.kivra.db.AutoStopResult
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.SelfDevOrderRepository
-import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.SelfDevTaskRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import org.slf4j.LoggerFactory
 
-/** What the automatic child stop needs beyond the order repository: the goals of the stopped part, stopped after the decision. */
-class AutoStopDeps(val goals: SelfDevGoalRepository, val operations: SelfDevOperatorRepository)
+/** What the automatic child stop needs beyond the order repository: the tasks of the stopped part, stopped after the decision. */
+class AutoStopDeps(val tasks: SelfDevTaskRepository, val operations: SelfDevOperatorRepository)
 
 /**
  * The periodic guard of the self-development orders (ADR 0015 stage 1). One pass, in a fixed order:
@@ -120,7 +120,7 @@ class OrderWatch(
 
     /**
      * The parent's automatic decision for each child whose cycles failed (CHILD_CYCLE_FAILURES) or whose budget is used up
-     * (CHILD_BUDGET_EXHAUSTED) (ADR 0015 section 4.4). The decision and its checks are in the repository, under the locks; the goals of the
+     * (CHILD_BUDGET_EXHAUSTED) (ADR 0015 section 4.4). The decision and its checks are in the repository, under the locks; the tasks of the
      * stopped part are stopped after it, as an approved stop does. A child that is both is decided once, by its cycle failures.
      */
     private fun stopChildrenAutomatically(deps: AutoStopDeps): Int {
@@ -132,7 +132,7 @@ class OrderWatch(
                 is AutoStopResult.Stopped -> {
                     logger.info("order auto-stop: code={} orderId={} parentId={}", reason.name, r.order.orderId, r.order.parentOrderId)
                     orders.subtreeOf(r.order.orderId).forEach { order ->
-                        if (stopCycleGoalOf(order, deps.goals, deps.operations) == false) {
+                        if (stopCycleGoalOf(order, deps.tasks, deps.operations) == false) {
                             logger.warn("order auto-stop: goal not stopped, orderId={}", order.orderId)
                         }
                     }
@@ -167,7 +167,7 @@ class OrderWatch(
             val reason = when {
                 !budgetAllows() -> OrderReason.BUDGET_HOLD
                 fxExpired() -> OrderReason.FX_EXPIRED
-                order.currentGoalId != null && orders.hasUnknownRun(order.currentGoalId) -> OrderReason.UNKNOWN_RUN
+                order.currentTaskId != null && orders.hasUnknownRun(order.currentTaskId) -> OrderReason.UNKNOWN_RUN
                 else -> null
             } ?: continue
             // pauseBySystem checks the state under the row lock: an order paused or stopped meanwhile is left as it is.

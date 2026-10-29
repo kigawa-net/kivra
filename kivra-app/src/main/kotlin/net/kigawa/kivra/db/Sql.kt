@@ -7,6 +7,8 @@ import java.time.LocalDateTime
 import java.time.ZoneOffset
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Transaction
+import org.jetbrains.exposed.sql.Table
+import org.jetbrains.exposed.sql.javatime.datetime
 
 /*
  * Raw SQL helpers. Lease and fencing statements must compare against the DB clock
@@ -45,4 +47,31 @@ fun utcNow(clock: java.time.Clock): LocalDateTime =
 fun ExposedSQLException.isUniqueViolation(): Boolean {
     val sql = (cause as? SQLException) ?: return false
     return sql.sqlState == "23505" || sql.errorCode == 1062 || sql.errorCode == 23505
+}
+
+
+/** Exposed mirror of V40 `selfdev_tasks`. */
+internal object SelfDevTasksTable : Table("selfdev_tasks") {
+    val taskId = char("task_id", 26)
+    val createdBy = varchar("created_by", 255)
+    val idempotencyKey = varchar("idempotency_key", 128)
+    val title = varchar("title", 200)
+    val body = text("body").nullable()
+    val targetRepo = varchar("target_repo", 200)
+    val state = varchar("state", 32)
+    val stateReason = varchar("state_reason", 64).nullable()
+    val resumeState = varchar("resume_state", 32).nullable()
+    val resumeReason = varchar("resume_reason", 64).nullable()
+    val revision = integer("revision").default(0)
+    val claimToken = varchar("claim_token", 64).nullable()
+    val claimedUntil = datetime("claimed_until").nullable()
+    val dependencies = text("dependencies")
+    val requiresApproval = bool("requires_approval").default(false)
+    val runId = char("run_id", 26).nullable()
+    val attempts = integer("attempts").default(0)
+    val version = long("version").default(0)
+    val createdAt = datetime("created_at")
+    val updatedAt = datetime("updated_at")
+    val approvedBy = varchar("approved_by", 255).nullable()
+    override val primaryKey = PrimaryKey(taskId)
 }

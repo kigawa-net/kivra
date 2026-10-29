@@ -166,7 +166,7 @@ private fun SelfDevOrder.summaryJson(): JsonObject = buildJsonObject {
     put("state_reason", stateReason?.name)
     put("cycles_started", cyclesStarted)
     put("max_cycles", maxCycles)
-    put("current_goal_id", currentGoalId)
+    put("current_goal_id", currentTaskId)
     put("consecutive_failed_cycles", consecutiveFailedCycles)
     put("child_count", childCount)
     put("order_budget_jpy", orderBudgetJpy)
@@ -191,8 +191,8 @@ private fun SelfDevOrderStopRequest.json(): JsonObject = buildJsonObject {
 
 private fun OrderCycle.json(): JsonObject = buildJsonObject {
     put("cycle_no", cycleNo)
-    put("goal_id", goalId)
-    put("goal_state", goalState.name)
+    put("goal_id", taskId)
+    put("goal_state", taskState.name)
     put("state_reason", stateReason)
     put("created_at", createdAt.utc())
 }

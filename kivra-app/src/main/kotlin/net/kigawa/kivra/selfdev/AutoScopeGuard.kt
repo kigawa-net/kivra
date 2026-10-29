@@ -4,7 +4,7 @@ import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.patch.Delete
 import net.kigawa.kivra.core.patch.PatchSet
 import net.kigawa.kivra.core.patch.Write
-import net.kigawa.kivra.db.SelfDevPlanRepository
+import net.kigawa.kivra.db.SelfDevTaskRepository
 import org.slf4j.LoggerFactory
 
 /**
@@ -75,10 +75,10 @@ private fun lineCount(content: String): Long {
 }
 
 /** The guard backed by the plan tables. A Run with no auto-approved task is [AutoScopeVerdict.NotSubject] and costs one lookup. */
-class PlanTaskAutoScopeGuard(private val plans: SelfDevPlanRepository) : AutoScopeGuard {
+class PlanTaskAutoScopeGuard(private val tasks: SelfDevTaskRepository) : AutoScopeGuard {
 
     override fun check(runId: RunId, patch: PatchSet, sizeOf: (String) -> Long?): AutoScopeVerdict {
-        plans.autoTaskOfRun(runId.value) ?: return AutoScopeVerdict.NotSubject
+        tasks.autoTaskOfRun(runId.value) ?: return AutoScopeVerdict.NotSubject
         val verdict = autoScopeOf(patch, sizeOf)
         if (verdict is AutoScopeVerdict.OutOfScope) {
             logger.warn(
@@ -90,7 +90,7 @@ class PlanTaskAutoScopeGuard(private val plans: SelfDevPlanRepository) : AutoSco
     }
 
     override fun settle(runId: RunId) {
-        if (!plans.settleAutoScopeExceeded(runId.value)) {
+        if (!tasks.settleAutoScopeExceeded(runId.value)) {
             logger.warn("autopilot scope not settled: runId={} code={}", runId.value, REASON_CODE)
         } else {
             logger.info("autopilot scope settled: runId={} code={}", runId.value, REASON_CODE)

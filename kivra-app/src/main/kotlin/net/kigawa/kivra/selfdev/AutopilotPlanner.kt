@@ -10,12 +10,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.core.autopilot.AutopilotReason
 import net.kigawa.kivra.core.autopilot.TaskState
-import net.kigawa.kivra.db.ClaimRefusal
-import net.kigawa.kivra.db.ClaimResult
-import net.kigawa.kivra.db.CommitResult
-import net.kigawa.kivra.db.GoalClaim
-import net.kigawa.kivra.db.NewPlan
-import net.kigawa.kivra.db.SelfDevGoalRepository
+import net.kigawa.kivra.db.TaskClaimRefusal
+import net.kigawa.kivra.db.TaskClaimResult
+import net.kigawa.kivra.db.TaskCommitResult
+import net.kigawa.kivra.db.TaskClaim
+
+import net.kigawa.kivra.db.NewTaskPlan
+import net.kigawa.kivra.db.SelfDevTaskRepository
 import net.kigawa.kivra.modelgateway.BudgetDenial
 import net.kigawa.kivra.modelgateway.Capability
 import net.kigawa.kivra.modelgateway.DataClass
@@ -73,15 +74,15 @@ data class PlannerConfig(
 }
 
 /**
- * The requestId of one call of a claim. The budget key starts with `planner-<goalId>-` (read by SelfDevCycleSpendReader, pinned by
+ * The requestId of one call of a claim. The budget key starts with `planner-<taskId>-` (read by SelfDevCycleSpendReader, pinned by
  * SelfDevCycleSpendContractTest).
  */
-internal fun plannerRequestId(goalId: String, version: Long, attempt: Int): String = "planner-$goalId-$version-$attempt"
+internal fun plannerRequestId(taskId: String, version: Long, attempt: Int): String = "planner-$taskId-$version-$attempt"
 
 /** What happened to one goal in one claim. Fixed codes; no text. */
 sealed interface PlanAttempt {
     /** The claim was not granted. [reason] is the repository's fixed code. */
-    data class NotClaimed(val reason: ClaimRefusal) : PlanAttempt
+    data class NotClaimed(val reason: TaskClaimRefusal) : PlanAttempt
     data class Proposed(val taskCount: Int, val queuedCount: Int) : PlanAttempt
     data class Blocked(val reason: AutopilotReason) : PlanAttempt
     /** The fence no longer matched (the claim expired, or the goal moved). Nothing was written. */
@@ -92,13 +93,13 @@ sealed interface PlanAttempt {
  * Plans one GOAL_SUBMITTED goal (ADR 0011 section 3). Claims it, asks the model once, checks the answer, and retries the whole call
  * once when the answer is invalid. A plan is written only with the claim's fence. Budget refusals and unknown costs block the goal as
  * PLAN_BUDGET_HOLD; every other failure blocks it as PLAN_CALL_FAILED or PLAN_INVALID. An operator returns a blocked goal to planning
- * (U-16, [SelfDevGoalRepository.recoverBlockedPlan]).
+ * (U-16, [SelfDevTaskRepository.recoverBlockedPlan]).
  *
  * Logging (ADR 0011 section 7): IDs, fixed codes, counts, costs and a digest prefix only. Never the goal text, the plan, the paths, the
  * model's output, or an exception message.
  */
 class AutopilotPlanner(
-    private val goals: SelfDevGoalRepository,
+    private val goals: SelfDevTaskRepository,
     private val gateway: ModelGateway,
     private val config: PlannerConfig,
     private val nonceSource: () -> String = PlannerPrompt::newNonce,
@@ -110,16 +111,16 @@ class AutopilotPlanner(
     private val suppress: SuppressShadow = SuppressShadow.OFF,
 ) {
 
-    suspend fun planGoal(goalId: String): PlanAttempt {
-        val claimed = when (val result = goals.claim(goalId, config.claimTtl)) {
-            is ClaimResult.Refused -> {
-                logger.info("planner skipped: goalId={} reason={}", goalId, result.reason.name)
+    suspend fun planGoal(taskId: String): PlanAttempt {
+        val claimed = when (val result = goals.claim(taskId, config.claimTtl)) {
+            is TaskClaimResult.Refused -> {
+                logger.info("planner skipped: taskId={} reason={}", taskId, result.reason.name)
                 return PlanAttempt.NotClaimed(result.reason)
             }
-            is ClaimResult.Claimed -> result.goal
+            is TaskClaimResult.Claimed -> result.task
         }
-        val fence = GoalClaim(goalId, claimed.version, checkNotNull(claimed.claimToken) { "a claimed goal has a claim token" })
-        logger.info("planner claimed: goalId={}", goalId)
+        val fence = TaskClaim(taskId, claimed.version, checkNotNull(claimed.claimToken) { "a claimed task has a claim token" })
+        logger.info("planner claimed: taskId={}", taskId)
 
         // Read once per goal. A failed read gives null, and the Planner works without the list (never a stop).
         val repoList = repoFiles?.list()
@@ -131,22 +132,22 @@ class AutopilotPlanner(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: GatewayException) {
-                logCallFailure(goalId, attempt, e.error)
+                logCallFailure(taskId, attempt, e.error)
                 return block(fence, if (isBudgetRefusal(e.error)) AutopilotReason.PLAN_BUDGET_HOLD else AutopilotReason.PLAN_CALL_FAILED)
             } catch (e: Exception) {
                 // Not a classified gateway error: the call may have been sent. Never re-sent here.
-                logger.warn("planner call failed: goalId={} attempt={} exception={}", goalId, attempt, e.javaClass.simpleName)
+                logger.warn("planner call failed: taskId={} attempt={} exception={}", taskId, attempt, e.javaClass.simpleName)
                 return block(fence, AutopilotReason.PLAN_CALL_FAILED)
             }
 
             val text = response.message.parts.filterIsInstance<Part.Text>().joinToString("") { it.text }
             val digest = sha256Hex(text)
             when (val check = PlanValidator.validate(text, config.autopilot)) {
-                is PlanCheck.Valid -> return commit(goalId, fence, response, digest, check)
+                is PlanCheck.Valid -> return commit(taskId, fence, response, digest, check)
                 is PlanCheck.Invalid -> {
                     logger.warn(
-                        "planner output invalid: goalId={} attempt={} reason={} outputSha256={} finishReason={}",
-                        goalId, attempt, check.reason.name, digest.take(DIGEST_PREFIX), response.finishReason.name,
+                        "planner output invalid: taskId={} attempt={} reason={} outputSha256={} finishReason={}",
+                        taskId, attempt, check.reason.name, digest.take(DIGEST_PREFIX), response.finishReason.name,
                     )
                     // A cut answer would be cut the same way again, so it is not re-sent (as in LlmDeveloper).
                     val retry = attempt < PlannerConfig.MAX_ATTEMPTS && response.finishReason != FinishReason.LENGTH
@@ -159,53 +160,49 @@ class AutopilotPlanner(
         }
     }
 
-    private fun commit(goalId: String, fence: GoalClaim, response: ModelResponse, digest: String, check: PlanCheck.Valid): PlanAttempt {
+    private fun commit(taskId: String, fence: TaskClaim, response: ModelResponse, digest: String, check: PlanCheck.Valid): PlanAttempt {
         val result = goals.commitPlan(
             fence,
-            NewPlan(
+            NewTaskPlan(
                 summary = check.summary,
                 plannerModel = response.selected.modelId,
                 outputSha256 = digest,
                 requestLedgerId = response.requestId,
             ),
-            check.tasks,
         )
         return when (result) {
-            is CommitResult.StaleClaim -> {
-                logger.warn("planner result discarded: goalId={} reason=PLAN_DISCARDED_STALE", goalId)
+            is TaskCommitResult.StaleClaim -> {
+                logger.warn("planner result discarded: taskId={} reason=PLAN_DISCARDED_STALE", taskId)
                 PlanAttempt.Discarded
             }
-            is CommitResult.Committed -> {
-                val queued = result.tasks.count { it.state == TaskState.QUEUED }
+            is TaskCommitResult.Committed -> {
+                val taskCount = check.tasks.size
+                val queued = check.tasks.count { !it.requiresApproval }
                 logger.info(
-                    "planner proposed: goalId={} planId={} revision={} tasks={} queued={} outputSha256={} cost={} currency={}",
-                    goalId, result.plan.planId, result.plan.revision, result.tasks.size, queued,
+                    "planner proposed: taskId={} revision={} tasks={} queued={} outputSha256={} cost={} currency={}",
+                    taskId, result.task.revision, taskCount, queued,
                     digest.take(DIGEST_PREFIX), response.cost.amount.toPlainString(), response.cost.currency,
                 )
-                // The shadow runs first, so the new plan's own facts are not among the "recent plans" it compares with.
-                suppress.planStored(goalId, result.plan.planId, check.tasks.map { SelfDevMemoryRecorder.identityOf(it.targetPaths) })
-                memory.planProposed(goalId, result.plan.planId, result.tasks.size)
-                // Written only with the shadow on (ADR 0016 P3): with it off, the P1 writes are exactly what they were before.
-                if (suppress.enabled) result.tasks.forEach { memory.taskProposed(goalId, it) }
-                PlanAttempt.Proposed(result.tasks.size, queued)
+                memory.planProposed(taskId, taskCount)
+                PlanAttempt.Proposed(taskCount, queued)
             }
         }
     }
 
     /** Blocks the goal with a planning-stage reason, fenced by the claim. */
-    private fun block(fence: GoalClaim, reason: AutopilotReason): PlanAttempt {
+    private fun block(fence: TaskClaim, reason: AutopilotReason): PlanAttempt {
         return if (goals.blockPlanning(fence, reason)) {
-            logger.warn("planner blocked: goalId={} reason={}", fence.goalId, reason.name)
-            memory.planBlocked(fence.goalId, reason)
+            logger.warn("planner blocked: taskId={} reason={}", fence.taskId, reason.name)
+            memory.planBlocked(fence.taskId, reason)
             PlanAttempt.Blocked(reason)
         } else {
-            logger.warn("planner result discarded: goalId={} reason=PLAN_DISCARDED_STALE", fence.goalId)
+            logger.warn("planner result discarded: taskId={} reason=PLAN_DISCARDED_STALE", fence.taskId)
             PlanAttempt.Discarded
         }
     }
 
     private fun request(
-        fence: GoalClaim,
+        fence: TaskClaim,
         attempt: Int,
         title: String,
         body: String?,
@@ -225,7 +222,7 @@ class AutopilotPlanner(
         }
         return ModelRequest(
             // Unique per claim and attempt: the version changes with every claim, so a retried claim never reuses a request id.
-            requestId = plannerRequestId(fence.goalId, fence.version, attempt),
+            requestId = plannerRequestId(fence.taskId, fence.version, attempt),
             principal = config.principal,
             purpose = Purpose.PLANNING,
             messages = buildList {
@@ -249,10 +246,10 @@ class AutopilotPlanner(
         )
     }
 
-    private fun logCallFailure(goalId: String, attempt: Int, error: GatewayError) {
+    private fun logCallFailure(taskId: String, attempt: Int, error: GatewayError) {
         logger.warn(
-            "planner call failed: goalId={} attempt={} errorKind={} errorCode={} sendState={}",
-            goalId, attempt, error.kind.name, safeCode(error.code), error.sendState.name,
+            "planner call failed: taskId={} attempt={} errorKind={} errorCode={} sendState={}",
+            taskId, attempt, error.kind.name, safeCode(error.code), error.sendState.name,
         )
     }
 
@@ -289,7 +286,7 @@ class AutopilotPlanner(
  * contained to its goal and logged with the exception's class name only. Cancellation is never swallowed.
  */
 class PlannerWorker(
-    private val goals: SelfDevGoalRepository,
+    private val goals: SelfDevTaskRepository,
     private val planner: AutopilotPlanner,
     private val interval: Duration,
     private val batch: Int = DEFAULT_BATCH,
@@ -301,24 +298,24 @@ class PlannerWorker(
 
     /** One pass. Returns the number of goals that were given a claim attempt. */
     suspend fun tick(): Int {
-        val expired = listOrEmpty("expired claims") { goals.expiredClaimGoalIds(batch) }
-        for (goalId in expired) {
+        val expired = listOrEmpty("expired claims") { goals.expiredClaimTaskIds(batch) }
+        for (taskId in expired) {
             try {
-                if (goals.expireClaim(goalId)) logger.info("planner claim expired: goalId={} reason=CLAIM_EXPIRED", goalId)
+                if (goals.expireClaim(taskId)) logger.info("planner claim expired: taskId={} reason=CLAIM_EXPIRED", taskId)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                logger.warn("planner claim reset failed: goalId={} exception={}", goalId, e.javaClass.simpleName)
+                logger.warn("planner claim reset failed: taskId={} exception={}", taskId, e.javaClass.simpleName)
             }
         }
-        val waiting = listOrEmpty("waiting goals") { goals.submittedGoalIds(batch) }
-        for (goalId in waiting) {
+        val waiting = listOrEmpty("waiting goals") { goals.submittedTaskIds(batch) }
+        for (taskId in waiting) {
             try {
-                planner.planGoal(goalId)
+                planner.planGoal(taskId)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                logger.warn("planner step failed: goalId={} exception={}", goalId, e.javaClass.simpleName)
+                logger.warn("planner step failed: taskId={} exception={}", taskId, e.javaClass.simpleName)
             }
         }
         return waiting.size

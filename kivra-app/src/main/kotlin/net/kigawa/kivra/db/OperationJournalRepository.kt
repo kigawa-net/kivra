@@ -632,6 +632,83 @@ class OperationJournalRepository(
         evidenceContentDigest = this[ExternalOperationsTable.evidenceContentDigest],
     )
 
+    /**
+     * Operations in UNKNOWN status that have been unknown since before [cutoff], oldest first.
+     * Used by the auto-recovery worker to find operations eligible for reconciliation.
+     * Read-only, needs no lease.
+     */
+    fun getUnknownOperations(limit: Int, cutoff: LocalDateTime): List<JournalEntry> = transaction(database) {
+        ExternalOperationsTable.selectAll()
+            .where {
+                (ExternalOperationsTable.status eq OperationStatus.UNKNOWN.name) and
+                    (ExternalOperationsTable.updatedAt less cutoff)
+            }
+            .orderBy(ExternalOperationsTable.updatedAt)
+            .limit(limit)
+            .map { it.toEntry() }
+    }
+
+    /**
+     * Operations in RECONCILIATION_REQUIRED status that have been waiting since before [cutoff], oldest first.
+     * Used by the auto-recovery worker to find operations that need resolution.
+     * Read-only, needs no lease.
+     */
+    fun getReconciliationRequiredOperations(limit: Int, cutoff: LocalDateTime): List<JournalEntry> = transaction(database) {
+        ExternalOperationsTable.selectAll()
+            .where {
+                (ExternalOperationsTable.status eq OperationStatus.RECONCILIATION_REQUIRED.name) and
+                    (ExternalOperationsTable.updatedAt less cutoff)
+            }
+            .orderBy(ExternalOperationsTable.updatedAt)
+            .limit(limit)
+            .map { it.toEntry() }
+    }
+
+    /**
+     * Moves an UNKNOWN operation to RECONCILIATION_REQUIRED. Used by the auto-recovery worker.
+     * Returns true if the transition succeeded, false if the operation changed concurrently.
+     */
+    fun transitionToReconciliationRequired(runId: RunId, opId: String, expectedVersion: Long): Boolean = transaction(database) {
+        val row = ExternalOperationsTable.selectAll().where {
+            (ExternalOperationsTable.opId eq opId) and (ExternalOperationsTable.runId eq runId.value)
+        }.firstOrNull() ?: return@transaction false
+
+        val updated = ExternalOperationsTable.update({
+            (ExternalOperationsTable.opId eq opId) and
+                (ExternalOperationsTable.status eq OperationStatus.UNKNOWN.name) and
+                (ExternalOperationsTable.version eq expectedVersion)
+        }) {
+            it[status] = OperationStatus.RECONCILIATION_REQUIRED.name
+            it[version] = expectedVersion + 1
+            it[updatedAt] = utcNow(clock)
+            it[transitionReason] = "AUTO_RECONCILE"
+            it[lastErrorClass] = "NEEDS_RECONCILIATION"
+            it[lastError] = "AUTO_RECONCILE_TRIGGERED"
+        }
+        updated > 0
+    }
+
+    /**
+     * Moves a RECONCILIATION_REQUIRED operation to FAILED. Used by the auto-recovery worker when
+     * reconciliation has timed out. Returns true if the transition succeeded.
+     */
+    fun transitionToFailed(runId: RunId, opId: String, expectedVersion: Long, reason: String): Boolean = transaction(database) {
+        val updated = ExternalOperationsTable.update({
+            (ExternalOperationsTable.opId eq opId) and
+                (ExternalOperationsTable.runId eq runId.value) and
+                (ExternalOperationsTable.status eq OperationStatus.RECONCILIATION_REQUIRED.name) and
+                (ExternalOperationsTable.version eq expectedVersion)
+        }) {
+            it[status] = OperationStatus.FAILED.name
+            it[version] = expectedVersion + 1
+            it[updatedAt] = utcNow(clock)
+            it[transitionReason] = reason
+            it[lastErrorClass] = "AUTO_RECONCILE_TIMEOUT"
+            it[lastError] = "AUTO_RECONCILE_TIMEOUT"
+        }
+        updated > 0
+    }
+
     private companion object {
         val RECONCILIATION_PURPOSES = setOf(
             EvidencePurpose.RECONCILE_EXISTS, EvidencePurpose.RECONCILE_ABSENT, EvidencePurpose.RECONCILE_FAILED,

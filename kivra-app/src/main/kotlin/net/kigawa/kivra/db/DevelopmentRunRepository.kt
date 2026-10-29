@@ -1024,6 +1024,22 @@ class DevelopmentRunRepository(
         return toDevelopmentRun(state)
     }
 
+    /**
+     * Runs in RETRY_WAITING that have been waiting since before [cutoff], oldest first.
+     * Used by the auto-recovery worker to find runs eligible for automatic retry.
+     * Read-only, needs no lease.
+     */
+    fun getRetryWaitingRuns(limit: Int, cutoff: LocalDateTime): List<DevelopmentRun> = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where {
+                (DevelopmentRunsTable.state eq DevelopmentRunState.RETRY_WAITING.name) and
+                    (DevelopmentRunsTable.updatedAt less cutoff)
+            }
+            .orderBy(DevelopmentRunsTable.updatedAt to SortOrder.ASC, DevelopmentRunsTable.runId to SortOrder.ASC)
+            .limit(limit)
+            .mapNotNull { it.toDevelopmentRunOrNull() }
+    }
+
     private fun ResultRow.toDevelopmentRun(state: DevelopmentRunState) = DevelopmentRun(
         completionMode = RunCompletionMode.valueOf(this[DevelopmentRunsTable.completionMode]),
         prRepository = this[DevelopmentRunsTable.prRepository],

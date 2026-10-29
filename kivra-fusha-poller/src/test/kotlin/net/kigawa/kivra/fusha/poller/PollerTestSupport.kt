@@ -18,7 +18,9 @@ import java.time.ZoneOffset
 
 /** Scripted in-memory provider. The test controls both what is stored and what each call returns or throws. */
 internal class ScriptedProvider : TaskProvider {
-    override val capabilities: Set<TaskCapability> = setOf(TaskCapability.GET, TaskCapability.LIST)
+    override val capabilities: Set<TaskCapability> = setOf(
+        TaskCapability.GET, TaskCapability.LIST, TaskCapability.UPDATE, TaskCapability.COMMENT,
+    )
 
     /** Source of truth: tasks present here are visible in list and get; removing one simulates delete or invisibility. */
     val tasks = LinkedHashMap<TaskId, TaskSnapshot>()

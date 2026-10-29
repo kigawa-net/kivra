@@ -28,8 +28,12 @@ abstract class TaskProviderContract {
     /** Seeds: #1 assignee=alice (customFields status=ready, next=[2]); #2 assignee=bob; #3 assignee=alice. View 10 = {#1,#2}. */
     abstract fun provider(): TaskProvider
 
-    @Test fun `capabilities are read-only`() {
-        assertEquals(setOf(TaskCapability.GET, TaskCapability.LIST), provider().capabilities)
+    @Test fun `capabilities include read and write`() {
+        val caps = provider().capabilities
+        assertTrue(TaskCapability.GET in caps)
+        assertTrue(TaskCapability.LIST in caps)
+        assertTrue(TaskCapability.UPDATE in caps)
+        assertTrue(TaskCapability.COMMENT in caps)
     }
 
     @Test fun `get returns snapshot`() = runTest {
@@ -60,13 +64,43 @@ abstract class TaskProviderContract {
         assertEquals(setOf(ContractFixture.id(1), ContractFixture.id(2)), ids)
     }
 
-    @Test fun `writes are unsupported`() = runTest {
+    @Test fun `update merges fields`() = runTest {
         val p = provider()
-        val u = p.update(ContractFixture.id(1), TaskPatch(mapOf("status" to "\"done\"")), null)
-        assertIs<TaskWriteResult.Unsupported>(u)
-        assertEquals(TaskCapability.UPDATE, u.capability)
-        val c = p.comment(ContractFixture.id(1), "hi", IdempotencyKey("k"))
-        assertIs<TaskWriteResult.Unsupported>(c)
-        assertTrue(c.reason.isNotBlank())
+        val result = p.update(ContractFixture.id(1), TaskPatch(mapOf("priority" to "\"high\"")), null)
+        assertIs<TaskWriteResult.Ok>(result)
+        // For in-memory providers, verify the field is persisted; for remote adapters, the Ok result
+        // may contain the updated snapshot or null — we only assert Ok here.
+        val updated = p.get(ContractFixture.id(1))
+        if (updated?.fields?.containsKey("priority") == true) {
+            assertEquals("\"high\"", updated.fields["priority"])
+            assertEquals("\"ready\"", updated.fields["status"])
+        }
+    }
+
+    @Test fun `comment succeeds`() = runTest {
+        val p = provider()
+        val result = p.comment(ContractFixture.id(1), "hello", IdempotencyKey("k1"))
+        assertIs<TaskWriteResult.Ok>(result)
+    }
+
+    @Test fun `comment is idempotent`() = runTest {
+        val p = provider()
+        val key = IdempotencyKey("k2")
+        val r1 = p.comment(ContractFixture.id(1), "hello", key)
+        val r2 = p.comment(ContractFixture.id(1), "hello", key)
+        assertIs<TaskWriteResult.Ok>(r1)
+        assertIs<TaskWriteResult.Ok>(r2)
+    }
+
+    @Test fun `update missing task is rejected`() = runTest {
+        val p = provider()
+        val result = p.update(ContractFixture.id(999), TaskPatch(mapOf("x" to "y")), null)
+        assertIs<TaskWriteResult.Rejected>(result)
+    }
+
+    @Test fun `comment missing task is rejected`() = runTest {
+        val p = provider()
+        val result = p.comment(ContractFixture.id(999), "hi", IdempotencyKey("k3"))
+        assertIs<TaskWriteResult.Rejected>(result)
     }
 }

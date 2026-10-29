@@ -12,16 +12,19 @@ import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * In-memory [TaskProvider] for tests. Mirrors the read-only M1 contract of [FushaTaskAdapter]
- * (writes are UNSUPPORTED) so both pass the same contract tests. [viewMembers] simulates server-side views.
+ * In-memory [TaskProvider] for tests. Supports GET, LIST, UPDATE (customFields merge) and COMMENT.
+ * [viewMembers] simulates server-side views.
  */
 class FakeTaskProvider(
     tasks: Collection<TaskSnapshot> = emptyList(),
     private val viewMembers: Map<Long, Set<TaskId>> = emptyMap(),
 ) : TaskProvider {
     private val store = ConcurrentHashMap<TaskId, TaskSnapshot>().apply { tasks.forEach { put(it.id, it) } }
+    private val comments = ConcurrentHashMap.newKeySet<String>()
 
-    override val capabilities: Set<TaskCapability> = setOf(TaskCapability.GET, TaskCapability.LIST)
+    override val capabilities: Set<TaskCapability> = setOf(
+        TaskCapability.GET, TaskCapability.LIST, TaskCapability.UPDATE, TaskCapability.COMMENT,
+    )
 
     fun put(task: TaskSnapshot) { store[task.id] = task }
     fun remove(id: TaskId) { store.remove(id) }
@@ -34,9 +37,22 @@ class FakeTaskProvider(
             .filter { filter.viewId == null || viewMembers[filter.viewId]?.contains(it.id) == true }
             .sortedBy { it.id.value }
 
-    override suspend fun update(id: TaskId, patch: TaskPatch, expectedUpdatedAt: Instant?): TaskWriteResult =
-        TaskWriteResult.Unsupported(TaskCapability.UPDATE, "fake is read-only")
+    override suspend fun update(id: TaskId, patch: TaskPatch, expectedUpdatedAt: Instant?): TaskWriteResult {
+        val current = store[id] ?: return TaskWriteResult.Rejected("task not found", 404)
+        if (expectedUpdatedAt != null && current.updatedAt.isAfter(expectedUpdatedAt)) {
+            return TaskWriteResult.Rejected("task was modified after expectedUpdatedAt", null)
+        }
+        val mergedFields = current.fields.toMutableMap()
+        for ((key, value) in patch.fields) mergedFields[key] = value
+        store[id] = current.copy(fields = mergedFields)
+        return TaskWriteResult.Ok(null)
+    }
 
-    override suspend fun comment(id: TaskId, body: String, key: IdempotencyKey): TaskWriteResult =
-        TaskWriteResult.Unsupported(TaskCapability.COMMENT, "fake is read-only")
+    override suspend fun comment(id: TaskId, body: String, key: IdempotencyKey): TaskWriteResult {
+        if (store[id] == null) return TaskWriteResult.Rejected("task not found", 404)
+        val marker = "kivra:${key.value}"
+        if (comments.contains("$id:$marker")) return TaskWriteResult.Ok(null)
+        comments.add("$id:$marker")
+        return TaskWriteResult.Ok(null)
+    }
 }

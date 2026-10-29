@@ -10,6 +10,7 @@ import java.time.Duration
  * - `KIVRA_OIDC_REDIRECT_URI`: the redirect URI after login, e.g. `https://kivra.example.com/api/auth/callback`.
  * - `KIVRA_SESSION_MAX_AGE`: optional session max age in seconds (default 7 days).
  * - `KIVRA_SESSION_COOKIE_NAME`: optional cookie name (default `kivra-session`).
+ * - `KIVRA_SESSION_COOKIE_SECURE`: optional, set to `false` to disable Secure flag for HTTP development (default `true`).
  */
 data class OidcSessionSettings(
     val clientId: String,
@@ -18,6 +19,7 @@ data class OidcSessionSettings(
     val issuer: String,
     val sessionMaxAge: Duration,
     val sessionCookieName: String,
+    val cookieSecure: Boolean,
 ) {
     companion object {
         const val ENV_CLIENT_ID = "KIVRA_OIDC_CLIENT_ID"
@@ -25,8 +27,10 @@ data class OidcSessionSettings(
         const val ENV_REDIRECT_URI = "KIVRA_OIDC_REDIRECT_URI"
         const val ENV_SESSION_MAX_AGE = "KIVRA_SESSION_MAX_AGE"
         const val ENV_SESSION_COOKIE_NAME = "KIVRA_SESSION_COOKIE_NAME"
+        const val ENV_COOKIE_SECURE = "KIVRA_SESSION_COOKIE_SECURE"
         const val DEFAULT_SESSION_MAX_AGE_SECONDS = 7 * 24 * 3600L
         const val DEFAULT_COOKIE_NAME = "kivra-session"
+        const val DEFAULT_COOKIE_SECURE = true
 
         /**
          * Returns the session settings if all required environment variables are present.
@@ -42,6 +46,13 @@ data class OidcSessionSettings(
             require(maxAgeSeconds > 0) { "$ENV_SESSION_MAX_AGE must be positive" }
             val cookieName = env[ENV_SESSION_COOKIE_NAME]?.trim()?.takeIf { it.isNotEmpty() }
                 ?: DEFAULT_COOKIE_NAME
+            val cookieSecureStr = env[ENV_COOKIE_SECURE]?.trim()?.lowercase()
+            val cookieSecure = when (cookieSecureStr) {
+                null -> DEFAULT_COOKIE_SECURE
+                "true", "1", "yes" -> true
+                "false", "0", "no" -> false
+                else -> DEFAULT_COOKIE_SECURE
+            }
             return OidcSessionSettings(
                 clientId = clientId,
                 clientSecret = clientSecret,
@@ -49,6 +60,7 @@ data class OidcSessionSettings(
                 issuer = issuer,
                 sessionMaxAge = Duration.ofSeconds(maxAgeSeconds),
                 sessionCookieName = cookieName,
+                cookieSecure = cookieSecure,
             )
         }
     }

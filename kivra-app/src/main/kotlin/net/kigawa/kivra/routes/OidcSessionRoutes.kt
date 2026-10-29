@@ -103,9 +103,10 @@ internal fun Route.configureOidcSessionRoutes(
 
         // Set session cookie with proper attributes (HttpOnly, Secure, SameSite=Lax, Max-Age)
         val maxAge = settings.sessionMaxAge.seconds
+        val secureAttr = if (settings.cookieSecure) "Secure; " else ""
         call.response.header(
             HttpHeaders.SetCookie,
-            "${settings.sessionCookieName}=$sessionId; Path=/; Max-Age=$maxAge; HttpOnly; Secure; SameSite=Lax"
+            "${settings.sessionCookieName}=$sessionId; Path=/; Max-Age=$maxAge; HttpOnly; $secureAttr SameSite=Lax"
         )
 
         // Redirect to UI
@@ -117,7 +118,8 @@ internal fun Route.configureOidcSessionRoutes(
         if (sessionId != null) {
             sessionStore.delete(sessionId)
         }
-        call.response.header(HttpHeaders.SetCookie, "${settings.sessionCookieName}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
+        val secureAttr = if (settings.cookieSecure) "Secure; " else ""
+        call.response.header(HttpHeaders.SetCookie, "${settings.sessionCookieName}=; Path=/; Max-Age=0; HttpOnly; $secureAttr SameSite=Lax")
 
         // Redirect to Keycloak logout
         val host = call.request.headers[HttpHeaders.Host] ?: "localhost"

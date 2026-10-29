@@ -22,6 +22,7 @@ import net.kigawa.kivra.agent.AgentProfile
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.LeaderLease
 import net.kigawa.kivra.db.LeaderLeaseRepository
+import net.kigawa.kivra.fusha.outbox.FushaTaskOutboxPublisher
 import org.slf4j.LoggerFactory
 import java.time.Clock
 
@@ -48,6 +49,7 @@ class Orchestrator(
     private val runRepo: DevelopmentRunRepository,
     private val config: OrchestratorConfig,
     private val policy: AdmissionPolicy?,
+    private val outboxPublisher: FushaTaskOutboxPublisher?,
     private val clock: Clock = Clock.systemUTC(),
 ) : TaskEventSink {
 
@@ -90,6 +92,18 @@ class Orchestrator(
 
             // 5. Reconcile existing runs
             reconcile()
+
+            // 6. Publish outbox events to fusha-task (design #3 section 7.2, A6)
+            outboxPublisher?.let {
+                try {
+                    val published = it.publishDue()
+                    if (published > 0) {
+                        logger.info("orchestrator tick: published {} outbox events to fusha-task", published)
+                    }
+                } catch (e: Exception) {
+                    logger.warn("orchestrator tick: outbox publish failed, exception={}", e.javaClass.simpleName)
+                }
+            }
 
         } catch (e: CancellationException) {
             throw e

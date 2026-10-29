@@ -28,8 +28,8 @@ kotlin {
                 implementation(compose.runtime)
                 implementation(compose.components.resources)
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
+                // Ktor Client core (multiplatform)
                 implementation(libs.ktor.client.core.wasm)
-                implementation(libs.ktor.client.js)
                 implementation(libs.ktor.client.content.negotiation.wasm)
                 implementation(libs.ktor.serialization.kotlinx.json.wasm)
             }
@@ -42,6 +42,12 @@ kotlin {
         jvmMain {
             dependencies {
                 implementation(compose.desktop.currentOs)
+            }
+        }
+        val wasmJsMain by getting {
+            dependencies {
+                // Ktor Client engine for wasmJs
+                implementation(libs.ktor.client.js)
             }
         }
     }

@@ -16,7 +16,7 @@ import net.kigawa.kivra.ui.api.ApiRun
  * Tasks screen: Run list and Task submit form.
  */
 @Composable
-fun TasksScreen() {
+fun TasksScreen(selectedProjectId: String? = null) {
     var runs by remember { mutableStateOf<List<ApiRun>>(emptyList()) }
     var scope by remember { mutableStateOf("mine") }
     var loading by remember { mutableStateOf(true) }
@@ -28,11 +28,16 @@ fun TasksScreen() {
     
     val scopeLauncher = rememberCoroutineScope()
 
-    LaunchedEffect(scope) {
+    LaunchedEffect(scope, selectedProjectId) {
         loading = true
         error = null
         try {
-            runs = ApiClient.getRuns(scope)
+            val allRuns = ApiClient.getRuns(scope)
+            runs = if (selectedProjectId != null) {
+                allRuns.filter { it.projectId == selectedProjectId }
+            } else {
+                allRuns
+            }
         } catch (e: Exception) {
             error = e.message ?: "エラーが発生しました"
         } finally {

@@ -52,6 +52,7 @@ data class ApiOrder(
     val type: String,
     val state: String,
     val createdAt: String,
+    val projectId: String? = null,
 )
 
 @Serializable
@@ -77,4 +78,5 @@ data class ApiAssignee(
     val name: String,
     val token: String?,
     val createdAt: String,
+    val projectId: String? = null,
 )

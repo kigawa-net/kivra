@@ -74,6 +74,8 @@ data class AssigneeResponse(
     val version: Long,
     val memberCount: Int,
     val activeTokenCount: Int,
+    /** Optional project grouping (V42). Null means unassigned. */
+    val projectId: String?,
 )
 
 @Serializable
@@ -478,4 +480,5 @@ private fun AssigneeSummary.response() = AssigneeResponse(
     version = assignee.version,
     memberCount = memberCount,
     activeTokenCount = activeTokenCount,
+    projectId = assignee.projectId,
 )

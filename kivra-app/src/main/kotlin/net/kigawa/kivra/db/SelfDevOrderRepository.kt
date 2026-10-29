@@ -62,6 +62,8 @@ data class SelfDevOrder(
     val spentJpy: Long,
     /** The most one cycle of this order may cost, in whole yen (ADR 0015 section 3.2). */
     val cycleBudgetJpy: Long,
+    /** Optional project grouping (V42). Null means unassigned. */
+    val projectId: String?,
 )
 
 enum class StopRequestState { PENDING, CONSUMED, REJECTED, CANCELLED, EXPIRED }
@@ -1450,7 +1452,7 @@ class SelfDevOrderRepository(
     private companion object {
         const val ORDER_COLUMNS = "order_id, parent_order_id, depth, title, policy, target_repo, max_cycles, cycles_started, " +
             "current_goal_id, consecutive_failed_cycles, state, state_reason, expires_at, created_by, version, created_at, updated_at, " +
-            "order_budget_jpy, allocated_jpy, child_count, spent_jpy, cycle_budget_jpy"
+            "order_budget_jpy, allocated_jpy, child_count, spent_jpy, cycle_budget_jpy, project_id"
         const val REQUEST_COLUMNS = "request_id, order_id, requested_by, requester_kind, reason_code, order_version, digest, state, " +
             "decided_by, expires_at, created_at, target_is_root"
 
@@ -1496,6 +1498,7 @@ private fun java.sql.ResultSet.toOrder() = SelfDevOrder(
     childCount = getInt(20),
     spentJpy = getLong(21),
     cycleBudgetJpy = getLong(22),
+    projectId = getString(23),
 )
 
 private fun java.sql.ResultSet.toRequest() = SelfDevOrderStopRequest(

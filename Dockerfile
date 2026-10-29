@@ -24,6 +24,7 @@ COPY kivra-scheduler/build.gradle.kts kivra-scheduler/build.gradle.kts
 COPY kivra-ui-api/build.gradle.kts kivra-ui-api/build.gradle.kts
 COPY kivra-compose-ui/build.gradle.kts kivra-compose-ui/build.gradle.kts
 COPY kivra-web/build.gradle.kts kivra-web/build.gradle.kts
+COPY kotlin-js-store/ kotlin-js-store/
 
 # gradle-wrapper.properties で固定された Gradle を使うため、イメージ同梱の gradle ではなく ./gradlew を使う
 RUN chmod +x gradlew && ./gradlew :kivra-app:dependencies --configuration runtimeClasspath --no-daemon > /dev/null

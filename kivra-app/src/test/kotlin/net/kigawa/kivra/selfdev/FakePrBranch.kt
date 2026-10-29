@@ -92,6 +92,17 @@ class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjec
     var lastExpectedHead: String? = null
         private set
 
+    /** When set, the squash merge request answers with this result. */
+    var squashMergeResult: GitHubResult<String?>? = null
+
+    /** Called when a squash merge is accepted. Returns the merge commit SHA. */
+    var onSquashMerge: (Int, String) -> String = { _, _ -> "merged-sha-00000000000000000000000000000000000" }
+
+    var squashMergeCalls = 0
+        private set
+    var lastSquashMergeHead: String? = null
+        private set
+
     /** When set, the merge base read answers with this failure instead of the merge base computed from the object graph. */
     var mergeBaseFailure: GitHubFailureKind? = null
 
@@ -183,6 +194,15 @@ class FakePrBranch(private val github: FakeGitHub, private val git: FakeGitObjec
     override suspend fun listPullRequestFiles(repo: RepoRef, number: Int): GitHubResult<PullRequestFiles> {
         totalCalls++
         return GitHubResult.Failure(GitHubFailureKind.VALIDATION, "unused in self-development tests")
+    }
+
+    override suspend fun squashMerge(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<String?> {
+        totalCalls++
+        squashMergeCalls++
+        lastSquashMergeHead = expectedHeadSha
+        squashMergeResult?.let { return it }
+        val mergeSha = onSquashMerge(number, expectedHeadSha)
+        return GitHubResult.Success(mergeSha)
     }
 
     private fun <T> notFound(): GitHubResult<T> = GitHubResult.Failure(GitHubFailureKind.NOT_FOUND, GitHubFailureKind.NOT_FOUND.code)

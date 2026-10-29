@@ -27,7 +27,9 @@ import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.DbCodingResultStore
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.config.BudgetConfig
+import net.kigawa.kivra.config.FushaTaskConfigLoader
 import net.kigawa.kivra.config.KivraConfig
+import net.kigawa.kivra.config.TaskPollerConfigLoader
 import net.kigawa.kivra.db.DbBudgetStore
 import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
@@ -109,6 +111,15 @@ import net.kigawa.kivra.auth.OidcSessionSettings
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.auth.withSessionCookie
 import net.kigawa.kivra.db.DbSessionStore
+import net.kigawa.kivra.db.LeaderLeaseRepository
+import net.kigawa.kivra.fusha.FushaTaskAdapter
+import net.kigawa.kivra.fusha.StaticTokenProvider
+import net.kigawa.kivra.fusha.outbox.FushaTaskOutboxPublisher
+import net.kigawa.kivra.agent.AgentProfile
+import net.kigawa.kivra.db.DbRunAdmission
+import net.kigawa.kivra.fusha.poller.TaskPoller
+import net.kigawa.kivra.orchestrator.Orchestrator
+import net.kigawa.kivra.orchestrator.OrchestratorSettings
 import net.kigawa.kivra.routes.LoginSession
 
 fun Application.module() = appModule(System.getenv())
@@ -134,6 +145,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     val orderSettings = OrderSettings.fromEnv(env, autopilotSettings, aiPrincipal)
     // Fail-closed: when the MCP endpoint is off (the default), nothing beyond its switch is read and no /mcp route is registered (ADR 0013).
     val mcpSettings = McpSettings.fromEnv(env)
+    val orchestratorSettings = OrchestratorSettings.fromEnv(env)
     val config = KivraConfig.from(environment.config)
     val dataSource = createDataSource(config.database)
     migrateDatabase(config.database, dataSource)
@@ -346,6 +358,53 @@ internal fun Application.appModule(env: Map<String, String>) {
             monitorRetention = agentApiSettings.monitorRetention,
         ).start(this)
     }
+    // The Orchestrator (design #3 section 5.1). Started only when explicitly enabled and fusha-task is configured.
+    // It polls fusha-task for tasks, admits them through RunAdmission, and dispatches to AgentManager.
+    // AgentManager is nullable: without a TrustedEvidenceAuthority, it cannot run agents, but the Orchestrator
+    // still polls and admits tasks (they will stay in CREATED state until AgentManager is wired).
+    if (orchestratorSettings.enabled) {
+        val fushaConfig = FushaTaskConfigLoader.from(environment.config)
+        val fushaAdapter = FushaTaskAdapter(
+            config = fushaConfig,
+            client = io.ktor.client.HttpClient(),
+            tokens = requireNotNull(fushaConfig.staticToken) {
+                "Orchestrator requires KIVRA_FUSHA_TOKEN (static token)"
+            }.let(::StaticTokenProvider),
+        )
+        val pollerConfig = TaskPollerConfigLoader.from(environment.config)
+        val leaderLeaseRepo = LeaderLeaseRepository(database)
+        val runAdmission = DbRunAdmission(database, runs, audit, policy = null)
+        val defaultProfile = AgentProfile(
+            name = "default",
+            version = "1",
+            templateId = fushaConfig.environment,
+        )
+        // Outbox publisher is optional; built when fusha-task write is available.
+        val outboxPublisher = FushaTaskOutboxPublisher(
+            outbox = OutboxRepository(database),
+            adapter = fushaAdapter,
+            publisherId = "orchestrator",
+            config = net.kigawa.kivra.fusha.outbox.FushaTaskOutboxConfig(),
+        )
+        // Build Orchestrator (implements TaskEventSink for the poller).
+        // TaskPoller and Orchestrator have a circular dependency: the poller needs the sink (Orchestrator),
+        // and the Orchestrator needs the poller. Resolve it with a lateinit pattern.
+        lateinit var orchestrator: Orchestrator
+        val poller = TaskPoller(fushaAdapter, orchestrator, pollerConfig)
+        orchestrator = Orchestrator(
+            poller = poller,
+            admission = runAdmission,
+            profile = defaultProfile,
+            leaderLeaseRepo = leaderLeaseRepo,
+            runRepo = runs,
+            config = requireNotNull(orchestratorSettings.config),
+            policy = null,
+            outboxPublisher = outboxPublisher,
+            agentManager = null,
+        )
+        orchestrator.start(this)
+    }
+
     // OIDC session persistence: set up before routing so the session-aware identity is available to all API routes.
     val oidcSessionSettings = OidcSessionSettings.fromEnv(env)
     val sessionStore: DbSessionStore? = oidcSessionSettings?.let { DbSessionStore(database) }

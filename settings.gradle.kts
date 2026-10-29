@@ -32,3 +32,5 @@ include(
     "kivra-compose-ui",
     "kivra-web",
 )
+
+project(":kivra-compose-ui").projectDir = file("kivra-app/kivra-compose-ui")

@@ -41,14 +41,14 @@ fun <T> Transaction.execQuery(sql: String, vararg params: Any?, map: (ResultSet)
 fun utcNow(clock: java.time.Clock): LocalDateTime =
     LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
 
+import org.jetbrains.exposed.sql.Table
+import org.jetbrains.exposed.sql.javatime.datetime
+
 /** True for a unique / primary key violation on MariaDB (1062) or H2 (23505). */
 fun ExposedSQLException.isUniqueViolation(): Boolean {
     val sql = (cause as? SQLException) ?: return false
     return sql.sqlState == "23505" || sql.errorCode == 1062 || sql.errorCode == 23505
 }
-
-import org.jetbrains.exposed.sql.Table
-import org.jetbrains.exposed.sql.javatime.datetime
 
 /** Exposed mirror of V40 `selfdev_tasks`. */
 internal object SelfDevTasksTable : Table("selfdev_tasks") {

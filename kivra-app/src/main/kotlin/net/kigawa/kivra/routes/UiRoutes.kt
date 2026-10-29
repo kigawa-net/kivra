@@ -33,17 +33,56 @@ private val WASM_TYPE = ContentType.parse("application/wasm")
 
 private object UiResources
 
+/**
+ * Discover Compose Wasm resources dynamically.
+ * Wasm filenames change on each build, so we can't hardcode them.
+ */
+private data class ComposeResource(val path: String, val bytes: ByteArray)
+
+private fun discoverComposeResources(): List<ComposeResource> {
+    val results = mutableListOf<ComposeResource>()
+    val base = "/ui/compose"
+    
+    // Try to list resources using classpath scanning
+    // We look for known patterns: index.html, *.js, *.wasm
+    val patterns = listOf(
+        "$base/index.html" to HTML_TYPE,
+        "$base/kivra-web.js" to JS_TYPE,
+    )
+    
+    for ((path, contentType) in patterns) {
+        loadUiResourceOrNull(path)?.let { bytes ->
+            results.add(ComposeResource(path, bytes))
+        }
+    }
+    
+    // Discover wasm files by trying common patterns
+    // Since we can't list directory contents on classpath, we use a fallback approach:
+    // serve any .wasm request by checking if the resource exists
+    // The wasm files are loaded lazily on first request
+    
+    return results
+}
+
+/** Lazy cache for wasm files discovered on first request */
+private val wasmCache = mutableMapOf<String, ByteArray?>()
+
+private fun loadWasmFile(filename: String): ByteArray? {
+    return wasmCache.getOrPut(filename) {
+        loadUiResourceOrNull("compose/$filename")
+    }
+}
+
 /** Loads every file at registration, so a missing resource fails at startup instead of on the first request. */
 internal fun Route.configureUiRoutes() {
     val index = loadUiResource("index.html")
     val appJs = loadUiResource("app.js")
     val appCss = loadUiResource("app.css")
     
-    // Load Compose Wasm resources (optional, may not be present in dev)
-    val composeIndex = loadUiResourceOrNull("compose/index.html")
-    val composeJs = loadUiResourceOrNull("compose/kivra-web.js")
-    val composeWasm1 = loadUiResourceOrNull("compose/037f170986f544477491.wasm")
-    val composeWasm2 = loadUiResourceOrNull("compose/835857ff79d9577028d7.wasm")
+    // Discover Compose Wasm resources dynamically
+    val composeResources = discoverComposeResources()
+    val composeIndex = composeResources.find { it.path == "/ui/compose/index.html" }
+    val composeJs = composeResources.find { it.path == "/ui/compose/kivra-web.js" }
     
     // The site root has no page of its own. Send people to the UI (a fixed relative path, so there is no open redirect).
     get("/") {
@@ -56,18 +95,38 @@ internal fun Route.configureUiRoutes() {
     get("/ui/app.css") { call.respondUi(appCss, CSS_TYPE) }
     
     // Compose Wasm UI at /ui/compose
-    if (composeIndex != null) {
-        get("/ui/compose") { call.respondCompose(composeIndex, HTML_TYPE) }
-        get("/ui/compose/") { call.respondCompose(composeIndex, HTML_TYPE) }
+    composeIndex?.let { res ->
+        get("/ui/compose") { call.respondCompose(res.bytes, HTML_TYPE) }
+        get("/ui/compose/") { call.respondCompose(res.bytes, HTML_TYPE) }
     }
-    if (composeJs != null) {
-        get("/ui/compose/kivra-web.js") { call.respondCompose(composeJs, JS_TYPE) }
+    composeJs?.let { res ->
+        get("/ui/compose/kivra-web.js") { call.respondCompose(res.bytes, JS_TYPE) }
     }
-    if (composeWasm1 != null) {
-        get("/ui/compose/037f170986f544477491.wasm") { call.respondCompose(composeWasm1, WASM_TYPE) }
+    
+    // Serve any .wasm file under /ui/compose/ (lazy loading)
+    get("/ui/compose/{wasmFile}") {
+        val wasmFile = call.parameters["wasmFile"] ?: return@get
+        if (wasmFile.endsWith(".wasm")) {
+            val bytes = loadWasmFile(wasmFile)
+            if (bytes != null) {
+                call.respondCompose(bytes, WASM_TYPE)
+            } else {
+                call.respondBytes(byteArrayOf(), WASM_TYPE, status = HttpStatusCode.NotFound)
+            }
+        } else {
+            call.respondBytes(byteArrayOf(), ContentType.Application.OctetStream, status = HttpStatusCode.NotFound)
+        }
     }
-    if (composeWasm2 != null) {
-        get("/ui/compose/835857ff79d9577028d7.wasm") { call.respondCompose(composeWasm2, WASM_TYPE) }
+    
+    // Serve composeResources (Skiko fonts, etc.)
+    get("/ui/compose/composeResources/{file}") {
+        val file = call.parameters["file"] ?: return@get
+        val bytes = loadUiResourceOrNull("compose/composeResources/$file")
+        if (bytes != null) {
+            call.respondCompose(bytes, ContentType.Application.OctetStream)
+        } else {
+            call.respondBytes(byteArrayOf(), ContentType.Application.OctetStream, status = HttpStatusCode.NotFound)
+        }
     }
 }
 

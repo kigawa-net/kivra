@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
@@ -74,7 +75,7 @@ class PrAutoFixWorker(
         // Get active runs that have PRs
         val activeRuns = runRepo.findActiveRuns().take(config.maxPrsPerTick)
         for (run in activeRuns) {
-            if (run.state != DevelopmentRunState.DEVELOPING && run.state != DevelopmentRunState.DONE) {
+            if (run.state != DevelopmentRunState.DEVELOPING && run.state != DevelopmentRunState.PULL_REQUEST) {
                 continue
             }
 
@@ -86,7 +87,7 @@ class PrAutoFixWorker(
             } catch (e: Exception) {
                 null
             } ?: continue
-            val runId = run.runId.id
+            val runId = run.runId.value
 
             // Check if the PR has failed CI checks
             val needsFix = checkCiFailures(repo, runId) || checkReviewComments(repo, runId)
@@ -156,7 +157,7 @@ class PrAutoFixWorker(
 
     /** Attempts to fix a PR by generating a patch using DeveloperPort. */
     private suspend fun attemptFix(run: DevelopmentRun, runId: String): Boolean {
-        try {
+        return try {
             // Get the task context
             val taskTitle = run.taskTitle ?: "Fix PR issues"
             val taskDescription = buildFixDescription(run)
@@ -174,7 +175,7 @@ class PrAutoFixWorker(
 
             // Propose a fix
             val result = developer.propose(request)
-            return when (result) {
+            when (result) {
                 is DeveloperResult.Proposed -> {
                     // Patch generated successfully - in real implementation, would apply it
                     logger.info("pr-auto-fix: runId={}, patch generated", runId)

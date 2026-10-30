@@ -67,8 +67,8 @@ class ReviewerPipeline(
      * Returns true when the run is in PULL_REQUEST state, indicating the Developer
      * has completed and created a PR.
      */
-    suspend fun shouldEnterReview(runId: UUID): Boolean {
-        val run = runRepo.find(runId) ?: return false
+    suspend fun shouldEnterReview(runId: net.kigawa.kivra.core.RunId): Boolean {
+        val run = runRepo.get(runId) ?: return false
         return run.state == DevelopmentRunState.PULL_REQUEST
     }
 

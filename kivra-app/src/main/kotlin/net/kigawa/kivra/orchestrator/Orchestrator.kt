@@ -200,9 +200,9 @@ class Orchestrator(
         // Check for runs that should enter review phase (design #3 section 4.3, C2)
         reviewerPipeline?.let { pipeline ->
             try {
-                val activeRunIds = runRepo.findActiveRuns().map { it.runId }
+                val activeRunIds = runRepo.findActiveRuns().map { it.runId.value }
                 for (runId in activeRunIds) {
-                    if (pipeline.shouldEnterReview(runId)) {
+                    if (pipeline.shouldEnterReview(net.kigawa.kivra.core.RunId(runId))) {
                         logger.info("orchestrator reconcile: runId={} should enter review phase", runId)
                     }
                 }

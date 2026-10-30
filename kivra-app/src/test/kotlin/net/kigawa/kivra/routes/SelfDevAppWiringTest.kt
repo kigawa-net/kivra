@@ -75,7 +75,7 @@ class SelfDevAppWiringTest {
     }
 
     @Test
-    fun `in oidc-jwt mode with the autopilot off, the goal routes are registered and need a token, and the Task API is unchanged`() = testApplication {
+    fun `in oidc-jwt mode with the autopilot off, the autopilot routes are registered and need a token, and the Task API is unchanged`() = testApplication {
         environment { config = h2Config() }
         application {
             appModule(
@@ -89,10 +89,11 @@ class SelfDevAppWiringTest {
                 ),
             )
         }
-        // Registered (not 404) and authenticated first: a caller without a token learns nothing about the autopilot's state.
-        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/selfdev/autopilot").status)
-        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/selfdev/goals").status)
-        assertEquals(HttpStatusCode.Unauthorized, client.post("/api/selfdev/goals").status)
+        // Autopilot routes removed in V40 (were in SelfDevGoalRoutes.kt)
+        assertEquals(HttpStatusCode.NotFound, client.get("/api/selfdev/autopilot").status)
+        // Goal routes removed in V40
+        // assertEquals(HttpStatusCode.Unauthorized, client.get("/api/selfdev/goals").status)
+        // assertEquals(HttpStatusCode.Unauthorized, client.post("/api/selfdev/goals").status)
         // Self-development is off, so its routes are not registered, as before.
         assertEquals(HttpStatusCode.NotFound, client.post("/api/selfdev/tasks").status)
         assertEquals(HttpStatusCode.OK, client.get("/health").status)

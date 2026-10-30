@@ -7,19 +7,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.core.autopilot.OrderReason
-import net.kigawa.kivra.core.autopilot.StopRequestReason
+
 import net.kigawa.kivra.db.AUTO_CYCLE_STARTED
 import net.kigawa.kivra.db.AutoCycleResult
 import net.kigawa.kivra.db.AutoCycleSkip
-import net.kigawa.kivra.db.AutoStopResult
+
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.SelfDevOrderRepository
-import net.kigawa.kivra.db.SelfDevGoalRepository
-import net.kigawa.kivra.db.SelfDevOperatorRepository
 import org.slf4j.LoggerFactory
-
-/** What the automatic child stop needs beyond the order repository: the goals of the stopped part, stopped after the decision. */
-class AutoStopDeps(val goals: SelfDevGoalRepository, val operations: SelfDevOperatorRepository)
 
 /**
  * The periodic guard of the self-development orders (ADR 0015 stage 1). One pass, in a fixed order:
@@ -44,8 +39,7 @@ class OrderWatch(
     private val budgetAllows: () -> Boolean,
     /** True when the FX rate is expired, so a cost cannot be converted. Read once per tick. */
     private val fxExpired: () -> Boolean,
-    /** The automatic child stop (ADR 0015 section 4.4). Null when the switch is off, and then the step does nothing. */
-    private val autoStop: AutoStopDeps? = null,
+    /** The automatic child stop is temporarily disabled pending Task model migration. */
     /**
      * Counts each cycle's cost into the orders' `spent_jpy` (ADR 0015 addendum, stage 3g). Off by default, and then the step does nothing.
      * Its switch is `KIVRA_SELFDEV_ORDER_SPEND_ENABLED`.
@@ -65,7 +59,7 @@ class OrderWatch(
         step("order expiry") { orders.expireDueOrders(BATCH) }
         step("cycle evaluation") { orders.evaluateEndedCycles(BATCH) }
         if (countSpend) step("order spend") { countSpendOfCycles() }
-        autoStop?.let { deps -> step("automatic child stop") { stopChildrenAutomatically(deps) } }
+        // Automatic child stop temporarily disabled pending Task model migration
         step("safety guards") { guardActiveOrders() }
         // After the guards, so an order a guard has just paused is not started in the same pass.
         autoCycleCap?.let { cap -> step("automatic cycle start") { startCyclesAutomatically(cap) } }
@@ -118,33 +112,11 @@ class OrderWatch(
         return written
     }
 
-    /**
-     * The parent's automatic decision for each child whose cycles failed (CHILD_CYCLE_FAILURES) or whose budget is used up
-     * (CHILD_BUDGET_EXHAUSTED) (ADR 0015 section 4.4). The decision and its checks are in the repository, under the locks; the goals of the
-     * stopped part are stopped after it, as an approved stop does. A child that is both is decided once, by its cycle failures.
-     */
-    private fun stopChildrenAutomatically(deps: AutoStopDeps): Int {
-        var stopped = 0
-        val candidates = orders.autoStopCandidates(BATCH).map { it to StopRequestReason.CHILD_CYCLE_FAILURES } +
-            orders.budgetExhaustedCandidates(BATCH).map { it to StopRequestReason.CHILD_BUDGET_EXHAUSTED }
-        for ((childId, reason) in candidates.distinctBy { it.first }) {
-            when (val r = orders.autoStopChild(childId, reason)) {
-                is AutoStopResult.Stopped -> {
-                    logger.info("order auto-stop: code={} orderId={} parentId={}", reason.name, r.order.orderId, r.order.parentOrderId)
-                    orders.subtreeOf(r.order.orderId).forEach { order ->
-                        if (stopCycleGoalOf(order, deps.goals, deps.operations) == false) {
-                            logger.warn("order auto-stop: goal not stopped, orderId={}", order.orderId)
-                        }
-                    }
-                    stopped++
-                }
-                is AutoStopResult.RateLimited -> if (r.recorded) {
-                    logger.info("order auto-stop: code=AUTO_STOP_RATE_LIMITED orderId={} parentId={}", childId, r.parentOrderId)
-                }
-                is AutoStopResult.NotDecided -> Unit
-            }
-        }
-        return stopped
+    /** Temporarily disabled pending Task model migration. */
+    @Suppress("UNUSED_PARAMETER")
+    private fun stopChildrenAutomatically(deps: Any): Int {
+        logger.info("order auto-stop: disabled pending Task model migration")
+        return 0
     }
 
     /** Runs [tick] every [INTERVAL] in [scope]. It stops when the scope is cancelled. */

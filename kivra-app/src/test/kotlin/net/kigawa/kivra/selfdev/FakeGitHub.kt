@@ -11,7 +11,7 @@ import net.kigawa.kivra.github.EnsuredPullRequest
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubPort
 import net.kigawa.kivra.github.GitHubResult
-import net.kigawa.kivra.github.MergedPullRequest
+
 import net.kigawa.kivra.github.PullRequest
 import net.kigawa.kivra.github.PullRequestState
 import net.kigawa.kivra.github.RepoFileContent
@@ -247,21 +247,7 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
 
     override suspend fun getReviews(repo: RepoRef, number: Int): GitHubResult<List<Review>> = unused()
 
-    override suspend fun mergePullRequest(repo: RepoRef, number: Int): GitHubResult<MergedPullRequest> {
-        touch("mergePullRequest")
-        if (repo != this.repo) return foreign()
-        val pr = pulls.firstOrNull { it.number == number } ?: return foreign()
-        if (pr.merged) return GitHubResult.Failure(GitHubFailureKind.CONFLICT, GitHubFailureKind.CONFLICT.code)
-        if (pr.state == PullRequestState.CLOSED) {
-            return GitHubResult.Failure(GitHubFailureKind.VALIDATION, GitHubFailureKind.VALIDATION.code)
-        }
-        val mergeSha = sha(900 + number)
-        replacePull(number) { it.copy(state = PullRequestState.CLOSED, merged = true, mergeCommitSha = mergeSha) }
-        writes += "mergePr"
-        afterWrite("mergePr")
-        return GitHubResult.Success(MergedPullRequest(repo, number, mergeSha))
-    }
-
+    // mergePullRequest temporarily removed pending V40 migration
     override suspend fun listTree(repo: RepoRef, ref: String): GitHubResult<RepoTree> = unused()
 
     override suspend fun readFile(repo: RepoRef, ref: String, path: String, maxBytes: Int): GitHubResult<RepoFileContent?> = unused()

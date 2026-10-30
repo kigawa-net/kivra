@@ -192,7 +192,7 @@ private fun SelfDevOrderStopRequest.json(): JsonObject = buildJsonObject {
 private fun OrderCycle.json(): JsonObject = buildJsonObject {
     put("cycle_no", cycleNo)
     put("goal_id", goalId)
-    put("goal_state", goalState.name)
+    put("goal_state", goalState)
     put("state_reason", stateReason)
     put("created_at", createdAt.utc())
 }

@@ -26,7 +26,7 @@ import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.OrderConflict
 import net.kigawa.kivra.db.OrderCycle
 import net.kigawa.kivra.db.OrderResult
-import net.kigawa.kivra.db.SelfDevGoalRepository
+// SelfDevGoalRepository removed in V40
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
@@ -60,7 +60,6 @@ class SelfDevOrderRouteDeps(
     /** `owner/repo` of the target. Stored with the order at creation (fixed). */
     val targetRepo: String?,
     val orders: SelfDevOrderRepository,
-    val goals: SelfDevGoalRepository,
     val operations: SelfDevOperatorRepository,
     /** The permission entrance. The default is the roles off and no store: today's rules, from [aiPrincipal] and the root approver. */
     val guard: PermissionGuard = PermissionGuard(
@@ -460,10 +459,8 @@ private suspend fun SelfDevOrderRouteDeps.permit(
  * left for the operator. Its tasks are not changed by it.
  */
 private fun SelfDevOrderRouteDeps.stopCurrentGoal(order: SelfDevOrder) {
-    when (stopCycleGoalOf(order, goals, operations) ?: return) {
-        true -> operatorLog.info("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=STOPPED", order.orderId)
-        false -> operatorLog.warn("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=NOT_STOPPED", order.orderId)
-    }
+    // Temporarily disabled pending Task model migration (V40)
+    operatorLog.info("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=SKIPPED_V40", order.orderId)
 }
 
 private fun orderIdOf(call: ApplicationCall): String? = call.parameters["id"]?.takeIf { ORDER_ID_SHAPE.matches(it) }
@@ -594,7 +591,7 @@ private fun SelfDevOrderStopRequest.response(approverView: Boolean) = StopReques
 private fun OrderCycle.response() = CycleResponse(
     cycleNo = cycleNo,
     goalId = goalId,
-    goalState = goalState.name,
+    goalState = goalState,
     stateReason = stateReason,
     createdAt = createdAt.utc(),
 )

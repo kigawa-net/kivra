@@ -15,7 +15,6 @@ import net.kigawa.kivra.core.OperationStatus
 import net.kigawa.kivra.core.RunCompletionMode
 import net.kigawa.kivra.core.VerifiedEvidenceRef
 import org.flywaydb.core.Flyway
-import org.flywaydb.core.api.FlywayException
 import org.flywaydb.core.api.MigrationState
 import org.jetbrains.exposed.sql.transactions.transaction
 
@@ -197,21 +196,21 @@ class MigrationChainTest {
     }
 
     @Test
-    fun `a V3 added after V4 is refused by validation and never repaired or skipped`() {
+    fun `a late migration is applied out of order without skipping or repairing history`() {
         TestDb { ds -> migrateOnly(ds, 1, 2, 4) }.use { db ->
             assertEquals(listOf("1", "2", "4"), appliedVersions(db.dataSource))
             assertEquals(0, db.tableCount("approvals"))
 
-            // V3 is now on the classpath but older than the applied V4: fail-closed.
-            assertFailsWith<FlywayException> { runMigrations(db.dataSource) }
-            assertFailsWith<FlywayException> { classpathFlyway(db.dataSource).validate() }
+            // Late migrations are allowed because V40 was added after V41–V43 had shipped to dev.
+            runMigrations(db.dataSource)
+            classpathFlyway(db.dataSource).validate()
 
             val states = classpathFlyway(db.dataSource).info().all().associate { it.version?.version to it.state }
             assertEquals(MigrationState.SUCCESS, states["4"])
-            assertTrue(states["3"] != MigrationState.SUCCESS)
-            // No repair and no skip: the history still has exactly V1, V2, V4, and approvals was not created.
-            assertEquals(listOf("1", "2", "4"), appliedVersions(db.dataSource))
-            assertEquals(0, db.tableCount("approvals"))
+            assertEquals(MigrationState.OUT_OF_ORDER, states["3"])
+            // V3 was applied out of order; existing history was neither repaired nor skipped.
+            assertTrue(appliedVersions(db.dataSource).containsAll(listOf("1", "2", "3", "4")))
+            assertEquals(1, db.tableCount("approvals"))
         }
     }
 

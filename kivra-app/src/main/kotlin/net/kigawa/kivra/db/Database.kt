@@ -52,6 +52,9 @@ fun runMigrations(dataSource: DataSource) {
         .dataSource(dataSource)
         .locations("classpath:db/migration")
         .validateMigrationNaming(true)
+        // V40 was added after V41–V43 had already shipped to dev. Apply it on
+        // those databases instead of rejecting the history as out of order.
+        .outOfOrder(true)
         .load()
         .migrate()
 }

@@ -65,7 +65,7 @@ class FushaTaskAdapter(
 ) : TaskProvider {
 
     override val capabilities: Set<TaskCapability> = setOf(
-        TaskCapability.GET, TaskCapability.LIST, TaskCapability.UPDATE, TaskCapability.COMMENT,
+        TaskCapability.GET, TaskCapability.LIST, TaskCapability.UPDATE, TaskCapability.COMMENT, TaskCapability.CREATE,
     )
 
     private val base = config.baseUrl.trimEnd('/')
@@ -176,6 +176,31 @@ class FushaTaskAdapter(
         return when {
             response.status.value in 200..299 -> TaskWriteResult.Ok(null)
             else -> TaskWriteResult.Rejected("POST comment rejected: ${response.status}", response.status.value)
+        }
+    }
+
+    override suspend fun create(
+        title: String,
+        description: String?,
+        parentId: TaskId?,
+        key: IdempotencyKey,
+    ): TaskWriteResult {
+        val parentIdNumeric = parentId?.let { parseId(it) }
+        val idempotencySuffix = "kivra:${key.value}"
+        val response = try {
+            requestPost("$base/tasks", CreateTaskBody(title, description, parentIdNumeric, idempotencySuffix))
+        } catch (e: TaskProviderException) {
+            return when (e.kind) {
+                TaskErrorKind.UNAUTHORIZED, TaskErrorKind.FORBIDDEN -> TaskWriteResult.Rejected(e.message ?: "unauthorized", e.httpStatus)
+                else -> TaskWriteResult.Rejected("POST create failed: ${e.message ?: "unknown"}", e.httpStatus)
+            }
+        }
+        return when {
+            response.status.value in 200..299 -> {
+                val dto: FushaTaskDto? = try { decode<FushaTaskDto>(response) } catch (e: Exception) { null }
+                TaskWriteResult.Ok(dto?.toSnapshot())
+            }
+            else -> TaskWriteResult.Rejected("POST create rejected: ${response.status}", response.status.value)
         }
     }
 

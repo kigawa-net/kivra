@@ -23,7 +23,7 @@ class FakeTaskProvider(
     private val comments = ConcurrentHashMap.newKeySet<String>()
 
     override val capabilities: Set<TaskCapability> = setOf(
-        TaskCapability.GET, TaskCapability.LIST, TaskCapability.UPDATE, TaskCapability.COMMENT,
+        TaskCapability.GET, TaskCapability.LIST, TaskCapability.UPDATE, TaskCapability.COMMENT, TaskCapability.CREATE,
     )
 
     fun put(task: TaskSnapshot) { store[task.id] = task }
@@ -54,5 +54,40 @@ class FakeTaskProvider(
         if (comments.contains("$id:$marker")) return TaskWriteResult.Ok(null)
         comments.add("$id:$marker")
         return TaskWriteResult.Ok(null)
+    }
+
+    override suspend fun create(
+        title: String,
+        description: String?,
+        parentId: TaskId?,
+        key: IdempotencyKey,
+    ): TaskWriteResult {
+        val marker = "create:${key.value}"
+        if (comments.contains(marker)) {
+            val existingId = comments
+                .filter { it.startsWith("create_map:$marker:") }
+                .firstOrNull()
+                ?.removePrefix("create_map:$marker:")
+                ?.let { TaskId(it) }
+                ?.let { store[it] }
+                ?.let { return TaskWriteResult.Ok(it) }
+        }
+        val id = TaskId("fake:${store.size + 1}")
+        val task = TaskSnapshot(
+            id = id,
+            title = title,
+            description = description,
+            assigneeId = null,
+            dueDate = null,
+            fields = emptyMap(),
+            nextTaskIds = emptyList(),
+            relatedTaskIds = emptyList(),
+            updatedAt = Instant.now(),
+            fetchedAt = Instant.now(),
+        )
+        store[id] = task
+        comments.add(marker)
+        comments.add("create_map:$marker:${id.value}")
+        return TaskWriteResult.Ok(task)
     }
 }

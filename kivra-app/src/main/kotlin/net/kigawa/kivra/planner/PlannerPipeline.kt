@@ -185,12 +185,53 @@ class PlannerPipeline(
 
     /**
      * Create child tasks from an approved plan proposal.
-     * TODO: FushaTaskAdapter.create() is not yet implemented; this method returns emptyList until
-     * fusha-task supports task creation via API (design #3 section 5.4, C3).
+     * Returns a list of created task IDs, or an empty list if creation failed.
      */
     suspend fun createChildTasks(parentTaskId: String): List<String> {
-        logger.warn("planner pipeline: taskId={}, createChildTasks not yet supported (FushaTaskAdapter.create missing)", parentTaskId)
-        return emptyList()
+        val state = decompositionStates[parentTaskId] ?: return emptyList()
+        val proposal = state.planProposal ?: return emptyList()
+        if (!state.planApproved) {
+            logger.warn("planner pipeline: taskId={}, plan not approved, cannot create child tasks", parentTaskId)
+            return emptyList()
+        }
+        if (fushaAdapter == null) {
+            logger.warn("planner pipeline: taskId={}, fushaAdapter not available, cannot create child tasks", parentTaskId)
+            return emptyList()
+        }
+
+        val createdTaskIds = mutableListOf<String>()
+        for ((index, child) in proposal.childTasks.withIndex()) {
+            try {
+                val key = net.kigawa.kivra.core.IdempotencyKey("planner:${parentTaskId}:${index}:${java.util.UUID.randomUUID()}")
+                val result = fushaAdapter.create(
+                    title = child.title,
+                    description = child.description,
+                    parentId = net.kigawa.kivra.core.TaskId(parentTaskId),
+                    key = key,
+                )
+                when (result) {
+                    is net.kigawa.kivra.core.TaskWriteResult.Ok -> {
+                        val childTaskId = result.task?.id?.value ?: "unknown"
+                        createdTaskIds.add(childTaskId)
+                        addChildTask(parentTaskId, index, childTaskId)
+                        logger.info("planner pipeline: taskId={}, created child task {}, index={}",
+                            parentTaskId, childTaskId, index)
+                    }
+                    is net.kigawa.kivra.core.TaskWriteResult.Rejected -> {
+                        logger.warn("planner pipeline: taskId={}, child task creation rejected, index={}, reason={}",
+                            parentTaskId, index, result.reason)
+                    }
+                    is net.kigawa.kivra.core.TaskWriteResult.Unsupported -> {
+                        logger.warn("planner pipeline: taskId={}, child task creation unsupported, index={}, reason={}",
+                            parentTaskId, index, result.reason)
+                    }
+                }
+            } catch (e: Exception) {
+                logger.warn("planner pipeline: taskId={}, child task creation failed, index={}, exception={}",
+                    parentTaskId, index, e.javaClass.simpleName)
+            }
+        }
+        return createdTaskIds
     }
 
     /**

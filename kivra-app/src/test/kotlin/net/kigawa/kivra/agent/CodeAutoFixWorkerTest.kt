@@ -211,8 +211,8 @@ class FakeDeveloper(
 
 /** Fake CodeIssueScanner for testing. */
 class FakeCodeIssueScanner(
-    val compilationErrors: List<CodeIssue> = emptyList(),
-    val testFailures: List<CodeIssue> = emptyList(),
+    private val compilationErrors: List<CodeIssue> = emptyList(),
+    private val testFailures: List<CodeIssue> = emptyList(),
 ) : CodeIssueScanner {
     override fun getCompilationErrors(): List<CodeIssue> = compilationErrors
     override fun getTestFailures(): List<CodeIssue> = testFailures

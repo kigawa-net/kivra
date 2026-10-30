@@ -3,6 +3,8 @@ package net.kigawa.kivra.agent
 import java.time.Clock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -63,13 +65,16 @@ class CodeAutoFixWorker(
         var fixesSucceeded = 0
         var fixesFailed = 0
 
-        // Collect issues from scanner
-        val issues = mutableListOf<CodeIssue>()
-        if (config.scanCompilationErrors) {
-            issues.addAll(codeScanner.getCompilationErrors())
-        }
-        if (config.scanTestFailures) {
-            issues.addAll(codeScanner.getTestFailures())
+        // Collect issues from scanner. Scanners block (processes, files), so keep them off the caller's thread.
+        val issues = withContext(Dispatchers.IO) {
+            val found = mutableListOf<CodeIssue>()
+            if (config.scanCompilationErrors) {
+                found.addAll(codeScanner.getCompilationErrors())
+            }
+            if (config.scanTestFailures) {
+                found.addAll(codeScanner.getTestFailures())
+            }
+            found
         }
 
         // Process up to maxIssuesPerTick
@@ -97,8 +102,8 @@ class CodeAutoFixWorker(
             val taskDescription = buildFixDescription(issue)
 
             // Get repo context (files related to the issue)
-            val repoContext = issue.relatedFiles.map { path ->
-                RepoFile(path, codeScanner.readFileContent(path))
+            val repoContext = withContext(Dispatchers.IO) {
+                issue.relatedFiles.map { path -> RepoFile(path, codeScanner.readFileContent(path)) }
             }
 
             // Create developer request

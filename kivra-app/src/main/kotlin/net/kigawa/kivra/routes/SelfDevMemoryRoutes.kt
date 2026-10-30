@@ -7,6 +7,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
+import java.security.MessageDigest
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import kotlinx.serialization.Serializable
@@ -351,3 +352,7 @@ private suspend fun SelfDevMemoryRouteDeps.permit(
 }
 
 private class MemoryCaller(val principal: String, val access: GuardAccess)
+
+/** Hash the operator principal for audit logs (first 6 bytes of SHA-256). */
+internal fun operatorTag(principal: String): String =
+    MessageDigest.getInstance("SHA-256").digest(principal.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it) }

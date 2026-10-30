@@ -34,7 +34,7 @@ class PermissionsArchitectureTest {
                 "net/kigawa/kivra/selfdev/RolesSettings.kt",
                 "net/kigawa/kivra/routes/PermissionGuard.kt",
                 "net/kigawa/kivra/routes/SelfDevOrderRoutes.kt",
-                "net/kigawa/kivra/routes/SelfDevGoalRoutes.kt",
+                // SelfDevGoalRoutes.kt removed in V40
                 "net/kigawa/kivra/routes/SelfDevMemoryRoutes.kt",
             ),
             users,
@@ -52,8 +52,8 @@ class PermissionsArchitectureTest {
     }
 
     @Test
-    fun `the goal and memory routes keep no identity rule of their own`() {
-        for (name in listOf("SelfDevGoalRoutes.kt", "SelfDevMemoryRoutes.kt")) {
+    fun `the memory routes keep no identity rule of their own`() {
+        for (name in listOf("SelfDevMemoryRoutes.kt")) {
             val text = File(main, "net/kigawa/kivra/routes/$name").readText()
             for (banned in listOf("requireHuman(", "== aiPrincipal", "aiPrincipal ==", "!= aiPrincipal", "aiPrincipal !=")) {
                 assertTrue(!text.contains(banned), "$name must not contain '$banned'; use PermissionGuard")

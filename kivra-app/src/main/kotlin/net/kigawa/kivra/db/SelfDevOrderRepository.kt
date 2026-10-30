@@ -5,7 +5,7 @@ import java.sql.SQLException
 import java.time.Clock
 import java.time.Duration
 import java.time.LocalDateTime
-import net.kigawa.kivra.core.autopilot.GoalState
+// GoalState removed in V40; OrderCycle.goalState is now a plain String
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.OrderReason
 import net.kigawa.kivra.core.autopilot.OrderRefusal
@@ -87,7 +87,7 @@ data class SelfDevOrderStopRequest(
 )
 
 /** One goal of an order: the cycle number, the goal, and its state. */
-data class OrderCycle(val cycleNo: Int, val goalId: String, val goalState: GoalState, val stateReason: String?, val createdAt: LocalDateTime)
+data class OrderCycle(val cycleNo: Int, val goalId: String, val goalState: String, val stateReason: String?, val createdAt: LocalDateTime)
 
 /** The fixed reason a write was refused. Each name is a [OrderRefusal] or a code of this repository. */
 enum class OrderConflict {
@@ -275,7 +275,7 @@ class SelfDevOrderRepository(
             OrderCycle(
                 cycleNo = rs.getInt(1),
                 goalId = rs.getString(2),
-                goalState = GoalState.valueOf(rs.getString(3)),
+                goalState = rs.getString(3),
                 stateReason = rs.getString(4),
                 createdAt = rs.getObject(5, LocalDateTime::class.java),
             )
@@ -667,13 +667,13 @@ class SelfDevOrderRepository(
             return@transaction OrderResult.Refused(OrderConflict.NOT_ACTIVE)
         }
         val goal = execQuery("SELECT state, state_reason FROM selfdev_goals WHERE goal_id = ?", goalId) { rs ->
-            GoalState.valueOf(rs.getString(1)) to rs.getString(2)
+            rs.getString(1) to rs.getString(2)
         }.singleOrNull() ?: return@transaction OrderResult.Refused(OrderConflict.NOT_ACTIVE)
         val (goalState, goalReason) = goal
-        if (goalState != GoalState.DONE && goalState != GoalState.STOPPED) return@transaction OrderResult.Refused(OrderConflict.NOT_ACTIVE)
+        if (goalState != "DONE" && goalState != "STOPPED") return@transaction OrderResult.Refused(OrderConflict.NOT_ACTIVE)
 
         val now = utcNow(clock)
-        val failures = if (goalState == GoalState.DONE) 0 else current.consecutiveFailedCycles + 1
+        val failures = if (goalState == "DONE") 0 else current.consecutiveFailedCycles + 1
         if (!updateCycleOutcome(orderId, current.version, failures, now)) throw Rollback(OrderResult.StaleVersion)
         val cycleNo = current.cyclesStarted
         appendEvent(orderId, cycleNo, "CYCLE_EVALUATED", current.state, current.state, goalReason, OrderActor.SYSTEM, null, null, now)
@@ -776,8 +776,8 @@ class SelfDevOrderRepository(
      * counted again on every tick.
      */
     private fun Transaction.isSpendFinal(goalId: String, spend: CycleSpend): Boolean {
-        val state = execQuery("SELECT state FROM selfdev_goals WHERE goal_id = ?", goalId) { GoalState.valueOf(it.getString(1)) }.firstOrNull()
-        return (state == GoalState.DONE || state == GoalState.STOPPED) &&
+        val state = execQuery("SELECT state FROM selfdev_goals WHERE goal_id = ?", goalId) { it.getString(1) }.firstOrNull()
+        return (state == "DONE" || state == "STOPPED") &&
             spend.attemptsActive == 0 && spend.reservedRows == 0 && spend.lapsedRows == 0 && !spend.hasUnconfirmedUnpriced
     }
 

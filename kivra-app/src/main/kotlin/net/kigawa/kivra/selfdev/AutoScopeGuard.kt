@@ -4,7 +4,7 @@ import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.patch.Delete
 import net.kigawa.kivra.core.patch.PatchSet
 import net.kigawa.kivra.core.patch.Write
-import net.kigawa.kivra.db.SelfDevPlanRepository
+// SelfDevPlanRepository removed in V40
 import org.slf4j.LoggerFactory
 
 /**
@@ -74,31 +74,15 @@ private fun lineCount(content: String): Long {
     return if (content.endsWith('\n')) newlines else newlines + 1
 }
 
-/** The guard backed by the plan tables. A Run with no auto-approved task is [AutoScopeVerdict.NotSubject] and costs one lookup. */
-class PlanTaskAutoScopeGuard(private val plans: SelfDevPlanRepository) : AutoScopeGuard {
+/** The guard backed by the plan tables. Stubbed pending Task model migration (V40). */
+class PlanTaskAutoScopeGuard : AutoScopeGuard {
 
     override fun check(runId: RunId, patch: PatchSet, sizeOf: (String) -> Long?): AutoScopeVerdict {
-        plans.autoTaskOfRun(runId.value) ?: return AutoScopeVerdict.NotSubject
-        val verdict = autoScopeOf(patch, sizeOf)
-        if (verdict is AutoScopeVerdict.OutOfScope) {
-            logger.warn(
-                "autopilot scope exceeded: runId={} code={} paths={} lines={}",
-                runId.value, REASON_CODE, verdict.paths, verdict.lines,
-            )
-        }
-        return verdict
+        // Stubbed: always returns NotSubject pending Task model migration (V40)
+        return AutoScopeVerdict.NotSubject
     }
 
     override fun settle(runId: RunId) {
-        if (!plans.settleAutoScopeExceeded(runId.value)) {
-            logger.warn("autopilot scope not settled: runId={} code={}", runId.value, REASON_CODE)
-        } else {
-            logger.info("autopilot scope settled: runId={} code={}", runId.value, REASON_CODE)
-        }
-    }
-
-    private companion object {
-        val logger = LoggerFactory.getLogger(PlanTaskAutoScopeGuard::class.java)
-        const val REASON_CODE = "AUTO_SCOPE_EXCEEDED"
+        // Stubbed: no-op pending Task model migration (V40)
     }
 }

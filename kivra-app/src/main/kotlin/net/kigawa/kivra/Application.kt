@@ -313,7 +313,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     }
     // The auto-recovery worker: periodically recovers RETRY_WAITING runs and reconciles UNKNOWN operations.
     // Always started so that stuck runs can recover even without the agent API.
-    {
+    run {
         val leaseStore = SqlLeaseStore(database)
         val journalRepo = net.kigawa.kivra.db.OperationJournalRepository(
             database,
@@ -369,6 +369,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             policy = null,
             outboxPublisher = outboxPublisher,
             agentManager = null,
+            reviewerPipeline = null,
         )
         orchestrator.start(this)
     }

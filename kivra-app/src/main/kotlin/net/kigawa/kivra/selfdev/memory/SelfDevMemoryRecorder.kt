@@ -5,7 +5,7 @@ import java.text.Normalizer
 import net.kigawa.kivra.core.autopilot.AutopilotReason
 import net.kigawa.kivra.db.MemorySaveResult
 import net.kigawa.kivra.db.SelfDevMemoryRepository
-import net.kigawa.kivra.db.SelfDevPlanTask
+// SelfDevPlanTask removed in V40
 import org.slf4j.LoggerFactory
 
 /**
@@ -37,41 +37,19 @@ class SelfDevMemoryRecorder private constructor(private val store: ((MemoryCandi
         MemoryCandidate(kind = "PLAN_FACT", channel = MemoryChannel.SYSTEM_AUTO, goalId = goalId, planId = planId, code = CODE_PLAN_PROPOSED, countValue = taskCount)
     }
 
-    /**
-     * One task of a stored plan (ADR 0016 section 4.3, P3). Its identity is what the suppression shadow compares with the recent plans and
-     * with the skipped tasks. Written after [planProposed]. No text: the title and the body are not passed.
-     */
-    fun taskProposed(goalId: String, task: SelfDevPlanTask) = write {
-        MemoryCandidate(
-            kind = "TASK_FACT", channel = MemoryChannel.SYSTEM_AUTO, goalId = goalId, planId = task.planId, taskOrdinal = task.ordinal,
-            code = CODE_PLAN_PROPOSED, identitySha256 = identityOf(task.targetPaths),
-        )
-    }
+    /** Stubbed pending Task model migration (V40). */
+    // fun taskProposed removed
 
     /** The Planner blocked the goal with a planning-stage [reason] (no plan was stored). */
     fun planBlocked(goalId: String, reason: AutopilotReason) = write {
         MemoryCandidate(kind = "PLAN_FACT", channel = MemoryChannel.SYSTEM_AUTO, goalId = goalId, code = reason.name)
     }
 
-    /**
-     * A task moved with [reason]. Only the reasons in [TASK_REASONS] are recorded: the approval, the rejection, the outcome of the Run
-     * and the stop. [goalId] is read only when the write is on, so an off recorder makes no lookup.
-     */
-    fun taskFact(goalId: () -> String?, task: SelfDevPlanTask, reason: AutopilotReason?) = write {
-        if (reason == null || reason !in TASK_REASONS) return@write null
-        MemoryCandidate(
-            kind = "TASK_FACT", channel = MemoryChannel.SYSTEM_AUTO, goalId = goalId(), planId = task.planId, taskOrdinal = task.ordinal,
-            code = reason.name, identitySha256 = identityOf(task.targetPaths),
-        )
-    }
+    /** Stubbed pending Task model migration (V40). */
+    // fun taskFact removed
 
-    /** The Run of [task] ended with [code] (its state reason, or its state name). */
-    fun runFact(goalId: String, task: SelfDevPlanTask, runId: String, code: String) = write {
-        MemoryCandidate(
-            kind = "RUN_FACT", channel = MemoryChannel.SYSTEM_AUTO, goalId = goalId, planId = task.planId, taskOrdinal = task.ordinal,
-            runId = runId, code = code,
-        )
-    }
+    /** Stubbed pending Task model migration (V40). */
+    // fun runFact removed
 
     /** The Goal ended with [reason] (DONE or STOPPED). Other reasons are not recorded. */
     fun goalFact(goalId: String, reason: AutopilotReason?) = write {

@@ -7,8 +7,7 @@ import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.DevelopmentRunsTable
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
-import net.kigawa.kivra.db.SelfDevPlanRepository
-import net.kigawa.kivra.db.SelfDevPlanTask
+// SelfDevPlanRepository and SelfDevPlanTask removed in V40
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -17,10 +16,10 @@ import org.jetbrains.exposed.sql.transactions.transaction
  * The database side of the shadow judgement. The reads are read only; the one write is the audit event, appended in the Run's chain under
  * the Run's row lock (the same lock as [net.kigawa.kivra.db.DbAuditSink]).
  */
+/** Stubbed pending Task model migration (V40). */
 class DbAutoMergeShadowStore(
     private val database: Database,
     private val runs: DevelopmentRunRepository,
-    private val plans: SelfDevPlanRepository,
     private val control: SelfDevAutopilotControlRepository,
     private val audit: AuditRepository,
 ) : AutoMergeShadowStore {
@@ -34,7 +33,8 @@ class DbAutoMergeShadowStore(
                 AutoMergeBinding(repo = b.repository, prNumber = number.toInt(), nodeId = b.prNodeId, headSha = b.headSha)
             }
         }
-        return ShadowRunSnapshot(state = run.state, binding = binding, approval = approvalOf(plans.taskOfRun(runId.value)))
+        // approval stubbed pending Task model migration (V40)
+        return ShadowRunSnapshot(state = run.state, binding = binding, approval = null)
     }
 
     override fun globalSnapshot(): ShadowGlobalSnapshot {
@@ -60,16 +60,5 @@ class DbAutoMergeShadowStore(
 
     private companion object {
         const val ACTOR = "system:automerge-shadow"
-
-        /**
-         * The approval kind of a Run's task (ADR 0011 section 2.8d). An operator's approval is `approved_by`; a task the autopilot put in
-         * the queue without one is AUTO_APPROVED when it does not need an approval. Anything else is null, which the judgement refuses.
-         */
-        fun approvalOf(task: SelfDevPlanTask?): AutoMergeTaskApproval? = when {
-            task == null -> null
-            task.approvedBy != null -> AutoMergeTaskApproval.OPERATOR_APPROVED
-            !task.requiresApproval -> AutoMergeTaskApproval.AUTO_APPROVED
-            else -> null
-        }
     }
 }

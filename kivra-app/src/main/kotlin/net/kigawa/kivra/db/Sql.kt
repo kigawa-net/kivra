@@ -6,7 +6,9 @@ import java.sql.SQLException
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import org.jetbrains.exposed.exceptions.ExposedSQLException
+import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.Transaction
+import org.jetbrains.exposed.sql.javatime.datetime
 
 /*
  * Raw SQL helpers. Lease and fencing statements must compare against the DB clock
@@ -40,9 +42,6 @@ fun <T> Transaction.execQuery(sql: String, vararg params: Any?, map: (ResultSet)
 /** App-side UTC time truncated to DATETIME(6) precision so values round-trip exactly. */
 fun utcNow(clock: java.time.Clock): LocalDateTime =
     LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
-
-import org.jetbrains.exposed.sql.Table
-import org.jetbrains.exposed.sql.javatime.datetime
 
 /** True for a unique / primary key violation on MariaDB (1062) or H2 (23505). */
 fun ExposedSQLException.isUniqueViolation(): Boolean {

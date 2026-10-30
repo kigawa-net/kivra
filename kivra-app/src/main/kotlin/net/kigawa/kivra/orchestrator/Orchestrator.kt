@@ -63,6 +63,8 @@ class Orchestrator(
     private val plannerPipeline: PlannerPipeline?,
     private val reclContextSearch: ReclContextSearch?,
     private val reclSummaryWriter: ReclSummaryWriter?,
+    private val orchestratorMetrics: OrchestratorMetrics?,
+    private val killSwitch: KillSwitch?,
     private val clock: Clock = Clock.systemUTC(),
 ) : TaskEventSink, ScheduleTriggerSink {
 
@@ -80,6 +82,12 @@ class Orchestrator(
      * One pass. Suspending (database calls). A failure is contained and the next tick still runs.
      */
     suspend fun tick() {
+        // Kill Switch check (design #3 section 9, Phase C6)
+        if (killSwitch?.shouldBlockAdmission == true) {
+            orchestratorMetrics?.tickSkippedKillSwitch()
+            logger.info("orchestrator tick: kill switch is ON ({}), skipping", killSwitch.currentState)
+            return
+        }
         try {
             // 1. Leader lease check
             if (!tryAcquireLeader()) {
@@ -112,11 +120,16 @@ class Orchestrator(
                     val published = it.publishDue()
                     if (published > 0) {
                         logger.info("orchestrator tick: published {} outbox events to fusha-task", published)
+                        orchestratorMetrics?.outboxPublished()
                     }
                 } catch (e: Exception) {
                     logger.warn("orchestrator tick: outbox publish failed, exception={}", e.javaClass.simpleName)
+                    orchestratorMetrics?.outboxFailed()
                 }
             }
+
+            // Record tick completion metric (design #3 section 12, Phase C6)
+            orchestratorMetrics?.tickCompleted()
 
         } catch (e: CancellationException) {
             throw e
@@ -149,8 +162,16 @@ class Orchestrator(
      * Admit a task if it passes all guards: poller health, admission policy, dependencies, concurrency.
      */
     private suspend fun admitTask(task: TaskSnapshot) {
+        // Kill Switch check for admission (design #3 section 9, Phase C6)
+        if (killSwitch?.shouldBlockAdmission == true) {
+            logger.info("orchestrator admission: blocked by kill switch ({})", killSwitch.currentState)
+            orchestratorMetrics?.admissionDenied("kill_switch")
+            return
+        }
+
         if (!poller.admissionAllowed()) {
             logger.info("orchestrator admission: blocked, poller not healthy, taskId={}", task.id.value)
+            orchestratorMetrics?.admissionDenied("poller_unhealthy")
             return
         }
 
@@ -158,12 +179,14 @@ class Orchestrator(
         if (blockReason != null) {
             logger.info("orchestrator admission: blocked, reason={}, taskId={}",
                 blockReason.name, task.id.value)
+            orchestratorMetrics?.admissionDenied(blockReason.name)
             return
         }
 
         if (activeRunsReachedLimit()) {
             logger.info("orchestrator admission: blocked, active run limit reached, taskId={}",
                 task.id.value)
+            orchestratorMetrics?.admissionDenied("concurrency_limit")
             return
         }
 
@@ -175,6 +198,8 @@ class Orchestrator(
             is AdmissionResult.Accepted -> {
                 logger.info("orchestrator admission: accepted, runId={}, taskId={}",
                     result.runId.value, task.id.value)
+                orchestratorMetrics?.admissionAccepted()
+                orchestratorMetrics?.runStateChanged(result.runId.value, "running")
                 // Dispatch the newly admitted run to the Agent Manager (design #3 section 5.1)
                 agentManager?.let {
                     try {
@@ -187,12 +212,21 @@ class Orchestrator(
                     }
                 }
             }
-            is AdmissionResult.AlreadyActive -> logger.info("orchestrator admission: already active, runId={}, taskId={}",
-                result.runId.value, task.id.value)
-            is AdmissionResult.AlreadyTerminal -> logger.info("orchestrator admission: already terminal, runId={}, taskId={}",
-                result.runId.value, task.id.value)
-            is AdmissionResult.Blocked -> logger.info("orchestrator admission: blocked, reason={}, taskId={}",
-                result.reason.name, task.id.value)
+            is AdmissionResult.AlreadyActive -> {
+                logger.info("orchestrator admission: already active, runId={}, taskId={}",
+                    result.runId.value, task.id.value)
+                orchestratorMetrics?.admissionDenied("already_active")
+            }
+            is AdmissionResult.AlreadyTerminal -> {
+                logger.info("orchestrator admission: already terminal, runId={}, taskId={}",
+                    result.runId.value, task.id.value)
+                orchestratorMetrics?.admissionDenied("already_terminal")
+            }
+            is AdmissionResult.Blocked -> {
+                logger.info("orchestrator admission: blocked, reason={}, taskId={}",
+                    result.reason.name, task.id.value)
+                orchestratorMetrics?.admissionDenied(result.reason.name)
+            }
         }
     }
 
@@ -273,6 +307,7 @@ class Orchestrator(
                 logger.warn("orchestrator: lease renewal failed, lease lost")
                 currentLease = null
                 leaderOwner = null
+                orchestratorMetrics?.leaderLeaseLost()
                 return false
             }
         }
@@ -284,6 +319,7 @@ class Orchestrator(
             currentLease = lease
             logger.info("orchestrator: acquired leader lease, owner={}, generation={}",
                 leaderOwner, lease.generation)
+            orchestratorMetrics?.leaderLeaseAcquired()
             return true
         }
         logger.debug("orchestrator: another instance holds the leader lease")

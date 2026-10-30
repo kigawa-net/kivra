@@ -48,6 +48,8 @@ import net.kigawa.kivra.db.migrateDatabase
 import net.kigawa.kivra.fx.FxExpiryWatcher
 import net.kigawa.kivra.fx.fxSettingsForWarning
 import net.kigawa.kivra.observability.MetricsRegistry
+import net.kigawa.kivra.orchestrator.KillSwitch
+import net.kigawa.kivra.orchestrator.OrchestratorMetrics
 import net.kigawa.kivra.routes.AgentApiDeps
 import net.kigawa.kivra.routes.configureAgentApiRoutes
 import net.kigawa.kivra.routes.configureRunExecutionRoutes
@@ -59,6 +61,7 @@ import net.kigawa.kivra.routes.ReadinessChecker
 import net.kigawa.kivra.routes.configureHealthRoutes
 import net.kigawa.kivra.routes.configureReadyRoutes
 import net.kigawa.kivra.routes.isDevPreviewEnabled
+import net.kigawa.kivra.routes.configureKillSwitchRoutes
 import net.kigawa.kivra.routes.configureObservabilityRoutes
 import net.kigawa.kivra.routes.configureTaskApiRoutes
 import net.kigawa.kivra.routes.configureOperationApiRoutes
@@ -344,6 +347,9 @@ internal fun Application.appModule(env: Map<String, String>) {
             config = net.kigawa.kivra.agent.AutoRecoveryConfig(),
         ).start(this)
     }
+    // Phase C6: Kill Switch (design #3 section 9) — created before Orchestrator so it can be used in routing.
+    val killSwitch = KillSwitch(KillSwitch.initialStateFromEnv(env))
+    
     // The Orchestrator (design #3 section 5.1). Started only when explicitly enabled and fusha-task is configured.
     // It polls fusha-task for tasks, admits them through RunAdmission, and dispatches to AgentManager.
     // AgentManager is nullable: without a TrustedEvidenceAuthority, it cannot run agents, but the Orchestrator
@@ -377,6 +383,8 @@ internal fun Application.appModule(env: Map<String, String>) {
         // and the Orchestrator needs the poller. Resolve it with a lateinit pattern.
         lateinit var orchestrator: Orchestrator
         val poller = TaskPoller(fushaAdapter, orchestrator, pollerConfig)
+        val orchestratorMetrics = OrchestratorMetrics(null) // MetricsRegistry not available here; wired after routing
+        
         orchestrator = Orchestrator(
             poller = poller,
             admission = runAdmission,
@@ -396,6 +404,8 @@ internal fun Application.appModule(env: Map<String, String>) {
             ),
             reclContextSearch = ReclContextSearch(provider = null),
             reclSummaryWriter = ReclSummaryWriter(provider = null),
+            orchestratorMetrics = orchestratorMetrics,
+            killSwitch = killSwitch,
         )
         orchestrator.start(this)
 
@@ -490,6 +500,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     routing {
         configureHealthRoutes()
         configureReadyRoutes(ReadinessChecker(dataSource))
+        // Phase C6: Kill Switch API (design #3 section 9)
+        configureKillSwitchRoutes(killSwitch)
         if (devPreviewEnabled) {
             configureDevPreviewRoutes()
             configureDevTaskSubmitRoutes()

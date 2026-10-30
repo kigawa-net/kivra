@@ -23,6 +23,7 @@ import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.LeaderLease
 import net.kigawa.kivra.db.LeaderLeaseRepository
 import net.kigawa.kivra.fusha.outbox.FushaTaskOutboxPublisher
+import net.kigawa.kivra.planner.PlannerPipeline
 import org.slf4j.LoggerFactory
 import java.time.Clock
 
@@ -50,6 +51,7 @@ class Orchestrator(
     private val config: OrchestratorConfig,
     private val policy: AdmissionPolicy?,
     private val outboxPublisher: FushaTaskOutboxPublisher?,
+    private val plannerPipeline: PlannerPipeline?,
     private val clock: Clock = Clock.systemUTC(),
 ) : TaskEventSink {
 
@@ -171,13 +173,29 @@ class Orchestrator(
     }
 
     /** Reconcile existing runs (design #3 section 7.3). */
-    private fun reconcile() {
-        // Check for orphaned runs: active runs whose task no longer exists in fusha-task.
-        // For now, log a warning if there are runs in CREATED state that have been stuck.
+    private suspend fun reconcile() {
         val activeRuns = runRepo.countActiveRuns()
         if (activeRuns > config.maxConcurrentRuns) {
-            logger.warn("orchestrator reconcile: {} active runs exceeds limit {}", 
+            logger.warn("orchestrator reconcile: {} active runs exceeds limit {}",
                 activeRuns, config.maxConcurrentRuns)
+        }
+        // Check for tasks that should enter planning phase (design #3 section 5.4, C3)
+        plannerPipeline?.let { pipeline ->
+            try {
+                val activeRunIds = runRepo.findActiveRuns().map { it.taskId }
+                for (taskId in activeRunIds) {
+                    if (pipeline.shouldEnterPlanning(taskId)) {
+                        logger.info("orchestrator reconcile: taskId={} should enter planning phase", taskId)
+                    }
+                }
+                for (taskId in activeRunIds) {
+                    if (pipeline.areAllChildrenComplete(taskId)) {
+                        logger.info("orchestrator reconcile: taskId={} all children complete, ready for join", taskId)
+                    }
+                }
+            } catch (e: Exception) {
+                logger.warn("orchestrator reconcile: planner check failed, exception={}", e.javaClass.simpleName)
+            }
         }
     }
 

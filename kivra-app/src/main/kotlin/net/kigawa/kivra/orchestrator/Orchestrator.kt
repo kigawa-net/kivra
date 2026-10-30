@@ -28,6 +28,9 @@ import net.kigawa.kivra.planner.PlannerPipeline
 import net.kigawa.kivra.recl.ReclContextSearch
 import net.kigawa.kivra.recl.ReclSummaryWriter
 import net.kigawa.kivra.reviewer.ReviewerPipeline
+import net.kigawa.kivra.scheduler.ScheduleTrigger
+import net.kigawa.kivra.scheduler.ScheduleTriggerKind
+import net.kigawa.kivra.scheduler.ScheduleTriggerSink
 import org.slf4j.LoggerFactory
 import java.time.Clock
 
@@ -61,7 +64,7 @@ class Orchestrator(
     private val reclContextSearch: ReclContextSearch?,
     private val reclSummaryWriter: ReclSummaryWriter?,
     private val clock: Clock = Clock.systemUTC(),
-) : TaskEventSink {
+) : TaskEventSink, ScheduleTriggerSink {
 
     private val logger = LoggerFactory.getLogger(Orchestrator::class.java)
 
@@ -303,5 +306,22 @@ class Orchestrator(
 
     override suspend fun publish(events: List<TaskPollEvent>) {
         processEvents(events)
+    }
+
+    /**
+     * Handle external wake-up from ai-scheduler (design #3 section 11, Phase C5).
+     *
+     * ai-scheduler delivers at-least-once; the caller (ScheduleClient) is responsible for
+     * deduplication using TriggerDedupStore. This method simply runs [tick] — the tick itself
+     * is fully idempotent.
+     *
+     * - [TICK]: Run a full orchestrator tick (poll, admit, reconcile).
+     * - [DEADLINE_RESUME]: Run a tick to pick up expired approvals.
+     * - [TIMED_TASK]: Run a tick for time-specified task activation.
+     */
+    override suspend fun onTrigger(trigger: ScheduleTrigger) {
+        logger.info("orchestrator trigger: kind={}, job={}, scheduledAt={}",
+            trigger.kind.name, trigger.job.id, trigger.scheduledAt)
+        tick()
     }
 }

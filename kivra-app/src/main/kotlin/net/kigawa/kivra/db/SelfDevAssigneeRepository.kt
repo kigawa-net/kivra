@@ -69,6 +69,8 @@ data class Assignee(
     val createdBy: String,
     val createdAt: LocalDateTime,
     val updatedAt: LocalDateTime,
+    /** Optional project grouping (V42). Null means unassigned. */
+    val projectId: String?,
 )
 
 /**
@@ -358,7 +360,7 @@ class SelfDevAssigneeRepository(
             id, name, role.name, actor ?: BOOTSTRAP, now, now,
         )
         appendEvent(id, "CREATED", actor, null, role.name, null, now)
-        return Assignee(id, name, role, AssigneeState.ACTIVE, 0, actor ?: BOOTSTRAP, now, now)
+        return Assignee(id, name, role, AssigneeState.ACTIVE, 0, actor ?: BOOTSTRAP, now, now, null)
     }
 
     /** The outcome of [bindMemberIfAbsent]. */
@@ -438,6 +440,7 @@ class SelfDevAssigneeRepository(
         createdBy = getString("created_by"),
         createdAt = getObject("created_at", LocalDateTime::class.java),
         updatedAt = getObject("updated_at", LocalDateTime::class.java),
+        projectId = getString("project_id"),
     )
 
     companion object {
@@ -446,7 +449,7 @@ class SelfDevAssigneeRepository(
         /** The LIKE pattern of the synthetic owner keys of the tokens (`<n>:kivra-assignee:<id>`). The issuer has no LIKE wildcard. */
         private val SYNTHETIC_LIKE =
             "${SelfDevAssigneeTokenRepository.ISSUER.toByteArray(Charsets.UTF_8).size}:${SelfDevAssigneeTokenRepository.ISSUER}:%"
-        private const val COLUMNS = "assignee_id, display_name, role, state, version, created_by, created_at, updated_at"
+        private const val COLUMNS = "assignee_id, display_name, role, state, version, created_by, created_at, updated_at, project_id"
 
         /** NFC, then trim and the shared text rule: 1..64 code points, no control or bidi control character. Null when refused. */
         internal fun normalizedName(raw: String): String? =

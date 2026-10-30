@@ -16,14 +16,19 @@ import net.kigawa.kivra.ui.api.ApiOrder
  * Orders screen: Order list.
  */
 @Composable
-fun OrdersScreen() {
+fun OrdersScreen(selectedProjectId: String? = null) {
     var orders by remember { mutableStateOf<List<ApiOrder>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(selectedProjectId) {
         try {
-            orders = ApiClient.getOrders()
+            val allOrders = ApiClient.getOrders()
+            orders = if (selectedProjectId != null) {
+                allOrders.filter { it.projectId == selectedProjectId }
+            } else {
+                allOrders
+            }
         } catch (e: Exception) {
             error = e.message ?: "エラーが発生しました"
         } finally {
@@ -43,7 +48,7 @@ fun OrdersScreen() {
             Text("orderが見つかりません")
         } else {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(orders) { order ->
+                items(orders, key = { it.orderId }) { order ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text("タイプ: ${order.type}", style = MaterialTheme.typography.titleMedium)
@@ -64,14 +69,19 @@ fun OrdersScreen() {
  * Approvals screen: Stop approval list.
  */
 @Composable
-fun ApprovalsScreen() {
+fun ApprovalsScreen(selectedProjectId: String? = null) {
     var approvals by remember { mutableStateOf<List<ApiOrder>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(selectedProjectId) {
         try {
-            approvals = ApiClient.getApprovals()
+            val allApprovals = ApiClient.getApprovals()
+            approvals = if (selectedProjectId != null) {
+                allApprovals.filter { it.projectId == selectedProjectId }
+            } else {
+                allApprovals
+            }
         } catch (e: Exception) {
             error = e.message ?: "エラーが発生しました"
         } finally {
@@ -91,7 +101,7 @@ fun ApprovalsScreen() {
             Text("承認待ちの項目はありません")
         } else {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(approvals) { approval ->
+                items(approvals, key = { it.orderId }) { approval ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text("承認待ち", style = MaterialTheme.typography.titleMedium)

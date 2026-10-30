@@ -16,12 +16,12 @@ import net.kigawa.kivra.ui.api.ApiGoal
  * Goals screen: Goal list.
  */
 @Composable
-fun GoalsScreen() {
+fun GoalsScreen(selectedProjectId: String? = null) {
     var goals by remember { mutableStateOf<List<ApiGoal>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(selectedProjectId) {
         try {
             goals = ApiClient.getGoals()
         } catch (e: Exception) {

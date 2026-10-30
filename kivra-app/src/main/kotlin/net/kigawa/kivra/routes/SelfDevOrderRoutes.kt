@@ -111,6 +111,8 @@ data class OrderSummaryResponse(
     val cycleBudgetJpy: Long,
     /** orderBudgetJpy - spentJpy. */
     val remainingJpy: Long,
+    /** Optional project grouping (V42). Null means unassigned. */
+    val projectId: String?,
 )
 
 @Serializable
@@ -573,6 +575,7 @@ private fun SelfDevOrder.summary() = OrderSummaryResponse(
     spentJpy = spentJpy,
     cycleBudgetJpy = cycleBudgetJpy,
     remainingJpy = orderBudgetJpy - spentJpy,
+    projectId = projectId,
 )
 
 private fun SelfDevOrderStopRequest.response(approverView: Boolean) = StopRequestResponse(

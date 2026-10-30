@@ -117,14 +117,19 @@ fun MemoryScreen() {
  * Assignees screen: Assignee list.
  */
 @Composable
-fun AssigneesScreen() {
+fun AssigneesScreen(selectedProjectId: String? = null) {
     var assignees by remember { mutableStateOf<List<ApiAssignee>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(selectedProjectId) {
         try {
-            assignees = ApiClient.getAssignees()
+            val allAssignees = ApiClient.getAssignees()
+            assignees = if (selectedProjectId != null) {
+                allAssignees.filter { it.projectId == selectedProjectId }
+            } else {
+                allAssignees
+            }
         } catch (e: Exception) {
             error = e.message ?: "エラーが発生しました"
         } finally {

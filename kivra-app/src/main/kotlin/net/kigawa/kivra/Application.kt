@@ -117,12 +117,25 @@ import net.kigawa.kivra.db.DbRunAdmission
 import net.kigawa.kivra.fusha.poller.TaskPoller
 import net.kigawa.kivra.orchestrator.Orchestrator
 import net.kigawa.kivra.orchestrator.OrchestratorSettings
+import net.kigawa.kivra.orchestrator.ReaperScheduleTrigger
+import net.kigawa.kivra.orchestrator.SchedulerSettings
 import net.kigawa.kivra.planner.PlannerPipeline
 import net.kigawa.kivra.planner.PlannerPipelineConfig
 import net.kigawa.kivra.recl.ReclContextSearch
 import net.kigawa.kivra.recl.ReclSummaryWriter
+import net.kigawa.kivra.reaper.Reaper
+import net.kigawa.kivra.scheduler.AiSchedulerAdapter
+import net.kigawa.kivra.scheduler.AiSchedulerConfig
+import net.kigawa.kivra.scheduler.InMemoryTriggerDedupStore
+import net.kigawa.kivra.scheduler.JobNaming
+import net.kigawa.kivra.scheduler.ScheduleClient
+import net.kigawa.kivra.scheduler.ScheduleTriggerKind
+import net.kigawa.kivra.scheduler.aiSchedulerHttpClient
+import org.slf4j.LoggerFactory
 
 fun Application.module() = appModule(System.getenv())
+
+private val logger = LoggerFactory.getLogger("net.kigawa.kivra.Application")
 
 /** [env] is injected for tests. The auth mode is resolved before any database work, so a bad setting fails the startup. */
 internal fun Application.appModule(env: Map<String, String>) {
@@ -146,6 +159,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     // Fail-closed: when the MCP endpoint is off (the default), nothing beyond its switch is read and no /mcp route is registered (ADR 0013).
     val mcpSettings = McpSettings.fromEnv(env)
     val orchestratorSettings = OrchestratorSettings.fromEnv(env)
+    val schedulerSettings = SchedulerSettings.fromEnv(env)
     val config = KivraConfig.from(environment.config)
     val dataSource = createDataSource(config.database)
     migrateDatabase(config.database, dataSource)
@@ -384,6 +398,60 @@ internal fun Application.appModule(env: Map<String, String>) {
             reclSummaryWriter = ReclSummaryWriter(provider = null),
         )
         orchestrator.start(this)
+
+        // Wire ai-scheduler to trigger Orchestrator tick and Reaper (design #3 section 11, Phase C5).
+        // ai-scheduler is best-effort: if unavailable, the Orchestrator continues with its internal timer.
+        if (schedulerSettings.enabled) {
+            val schedConfig = AiSchedulerConfig(
+                baseUrl = requireNotNull(schedulerSettings.baseUrl),
+                allowInsecureHttp = schedulerSettings.baseUrl!!.startsWith("http://localhost")
+                    || schedulerSettings.baseUrl!!.startsWith("http://127.0.0.1"),
+                devAllowInMemoryDedup = true,
+            )
+            val schedClient = AiSchedulerAdapter(
+                client = io.ktor.client.HttpClient(),
+                config = schedConfig,
+                dedup = InMemoryTriggerDedupStore(),
+            )
+            val envName = schedulerSettings.env ?: "dev"
+
+            // Register jobs in a coroutine scope (upsertJob is suspend)
+            kotlinx.coroutines.runBlocking {
+                try {
+                    // Register Orchestrator tick job
+                    val tickJobName = JobNaming.build(envName, "orchestrator-tick")
+                    val tickSpec = net.kigawa.kivra.core.JobSpec(
+                        name = tickJobName,
+                        cron = schedulerSettings.tickCron,
+                        runAt = null,
+                    )
+                    schedClient.upsertJob(
+                        spec = tickSpec,
+                        key = net.kigawa.kivra.core.IdempotencyKey("scheduler:tick-job"),
+                        writer = net.kigawa.kivra.core.ScheduleWriterLease("orchestrator", 1),
+                    )
+                    logger.info("scheduler: registered tick job {}, cron={}", tickJobName, schedulerSettings.tickCron)
+
+                    // Register Reaper job
+                    val reaperJobName = JobNaming.build(envName, "reaper")
+                    val reaperSpec = net.kigawa.kivra.core.JobSpec(
+                        name = reaperJobName,
+                        cron = schedulerSettings.reaperCron,
+                        runAt = null,
+                    )
+                    schedClient.upsertJob(
+                        spec = reaperSpec,
+                        key = net.kigawa.kivra.core.IdempotencyKey("scheduler:reaper-job"),
+                        writer = net.kigawa.kivra.core.ScheduleWriterLease("orchestrator", 1),
+                    )
+                    logger.info("scheduler: registered reaper job {}, cron={}", reaperJobName, schedulerSettings.reaperCron)
+
+                } catch (e: Exception) {
+                    logger.warn("scheduler: failed to register jobs, ai-scheduler may be unavailable, exception={}",
+                        e.javaClass.simpleName)
+                }
+            }
+        }
     }
 
     // OIDC session persistence: set up before routing so the session-aware identity is available to all API routes.

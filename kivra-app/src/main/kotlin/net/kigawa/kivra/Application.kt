@@ -353,7 +353,14 @@ internal fun Application.appModule(env: Map<String, String>) {
     selfDevParts?.developer?.let { developer ->
         net.kigawa.kivra.agent.CodeAutoFixWorker(
             developer = developer,
-            codeScanner = net.kigawa.kivra.agent.NoOpCodeIssueScanner,
+            codeScanner = env["KIVRA_CODE_AUTOFIX_REPO_ROOT"]?.trim()?.takeIf { it.isNotEmpty() }?.let { root ->
+                // Opt-in: running the compile command is heavy, so it needs an explicit repo root.
+                net.kigawa.kivra.agent.ProcessCodeIssueScanner(
+                    repoRoot = java.nio.file.Path.of(root),
+                    compileCommand = (env["KIVRA_CODE_AUTOFIX_COMPILE_COMMAND"]?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: "./gradlew compileKotlin --console=plain --quiet").split(Regex("\\s+")),
+                )
+            } ?: net.kigawa.kivra.agent.NoOpCodeIssueScanner,
             config = net.kigawa.kivra.agent.CodeAutoFixConfig(),
         ).start(this)
     }
@@ -361,7 +368,12 @@ internal fun Application.appModule(env: Map<String, String>) {
     // and attempts to fix them automatically.
     // Always started so that config issues can be detected and resolved.
     net.kigawa.kivra.agent.ConfigAutoFixWorker(
-        configScanner = net.kigawa.kivra.agent.NoOpConfigIssueScanner,
+        configScanner = net.kigawa.kivra.agent.EnvConfigIssueScanner(
+            env = env,
+            database = config.database,
+            requiredEnvVars = env["KIVRA_CONFIG_AUTOFIX_REQUIRED_ENV"].orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() },
+            endpoints = env["KIVRA_CONFIG_AUTOFIX_ENDPOINTS"].orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() },
+        ),
         config = net.kigawa.kivra.agent.ConfigAutoFixConfig(),
     ).start(this)
     // Phase C6: Kill Switch (design #3 section 9) — created before Orchestrator so it can be used in routing.

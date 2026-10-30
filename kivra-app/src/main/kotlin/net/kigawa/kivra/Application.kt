@@ -395,13 +395,52 @@ internal fun Application.appModule(env: Map<String, String>) {
             publisherId = "orchestrator",
             config = net.kigawa.kivra.fusha.outbox.FushaTaskOutboxConfig(),
         )
+        // Build AgentManager (design #3 section 6, Phase B1).
+        // Uses NoOpTrustedEvidenceAuthority for MVP: evidence-gated transitions are not yet needed.
+        // ExkesAdapter is optional: if exkes is unavailable, AgentManager still works but cannot create Workspaces.
+        val exkesBaseUrl = env["KIVRA_EXKES_BASE_URL"]?.trim()?.takeIf { it.isNotEmpty() }
+        val agentManager: net.kigawa.kivra.agent.AgentManager? = if (exkesBaseUrl != null) {
+            val exkesAdapter = net.kigawa.kivra.exkes.ExkesAdapter(
+                client = io.ktor.client.HttpClient(),
+                config = net.kigawa.kivra.exkes.ExkesConfig(baseUrl = exkesBaseUrl),
+            )
+            val leaseStore = SqlLeaseStore(database)
+            val agentRepo = net.kigawa.kivra.db.AgentRepository(database)
+            val journalRepo = net.kigawa.kivra.db.OperationJournalRepository(
+                database,
+                net.kigawa.kivra.db.NoOpTrustedEvidenceAuthority,
+            )
+            val amConfig = net.kigawa.kivra.agent.AgentManagerConfig(
+                tenantId = budgetConfig.tenantId,
+                providerContractVersion = "1",
+            )
+            net.kigawa.kivra.agent.AgentManager(
+                workerId = "orchestrator:1",
+                port = exkesAdapter,
+                leases = leaseStore,
+                runs = runs,
+                agents = agentRepo,
+                journal = journalRepo,
+                config = amConfig,
+                authority = net.kigawa.kivra.db.NoOpTrustedEvidenceAuthority,
+            )
+        } else {
+            null
+        }
+
+        // Build ReviewerPipeline (design #3 section 4.3, Phase C2).
+        val reviewerPipeline = net.kigawa.kivra.reviewer.ReviewerPipeline(
+            runRepo = runs,
+            config = net.kigawa.kivra.reviewer.ReviewerPipelineConfig(),
+        )
+
         // Build Orchestrator (implements TaskEventSink for the poller).
         // TaskPoller and Orchestrator have a circular dependency: the poller needs the sink (Orchestrator),
         // and the Orchestrator needs the poller. Resolve it with a lateinit pattern.
         lateinit var orchestrator: Orchestrator
         val poller = TaskPoller(fushaAdapter, orchestrator, pollerConfig)
         val orchestratorMetrics = OrchestratorMetrics(null) // MetricsRegistry not available here; wired after routing
-        
+
         orchestrator = Orchestrator(
             poller = poller,
             admission = runAdmission,
@@ -411,12 +450,12 @@ internal fun Application.appModule(env: Map<String, String>) {
             config = requireNotNull(orchestratorSettings.config),
             policy = null,
             outboxPublisher = outboxPublisher,
-            agentManager = null,
-            reviewerPipeline = null,
+            agentManager = agentManager,
+            reviewerPipeline = reviewerPipeline,
             plannerPipeline = PlannerPipeline(
                 runRepo = runs,
                 fushaAdapter = fushaAdapter,
-                reviewerPipeline = null,
+                reviewerPipeline = reviewerPipeline,
                 config = PlannerPipelineConfig(),
             ),
             reclContextSearch = ReclContextSearch(provider = null),

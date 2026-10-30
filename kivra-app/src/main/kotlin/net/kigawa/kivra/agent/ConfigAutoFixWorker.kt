@@ -94,8 +94,7 @@ class ConfigAutoFixWorker(
     }
 
     /** Attempts to fix a configuration issue. */
-    private suspend fun attemptFix(issue: ConfigIssue): Boolean {
-        try {
+    private suspend fun attemptFix(issue: ConfigIssue): Boolean = try {
             val fixed = configScanner.applyFix(issue)
             if (fixed) {
                 logger.info("config-auto-fix: issue={}, type={}, fixed", issue.id, issue.type.name)
@@ -107,7 +106,6 @@ class ConfigAutoFixWorker(
             logger.warn("config-auto-fix: issue={}, fix failed exception={}", issue.id, e.javaClass.simpleName)
             false
         }
-    }
 
     /** Starts the loop in [scope]: a pass, then one every [config.interval]. It stops when the scope is cancelled. */
     fun start(scope: CoroutineScope): Job = scope.launch {

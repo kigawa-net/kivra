@@ -60,6 +60,9 @@ internal class ScriptedProvider : TaskProvider {
 
     override suspend fun comment(id: TaskId, body: String, key: IdempotencyKey): TaskWriteResult =
         TaskWriteResult.Unsupported(TaskCapability.COMMENT, "scripted provider is read-only")
+
+    override suspend fun create(title: String, description: String?, parentId: TaskId?, key: IdempotencyKey): TaskWriteResult =
+        TaskWriteResult.Unsupported(TaskCapability.CREATE, "scripted provider is read-only")
 }
 
 internal class RecordingSink : TaskEventSink {

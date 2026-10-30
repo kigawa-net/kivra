@@ -3,6 +3,8 @@ package net.kigawa.kivra.agent
 import java.time.Clock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -60,19 +62,22 @@ class ConfigAutoFixWorker(
         var fixesSucceeded = 0
         var fixesFailed = 0
 
-        // Collect issues from scanner
-        val issues = mutableListOf<ConfigIssue>()
-        if (config.scanDatabaseConfig) {
-            issues.addAll(configScanner.getDatabaseConfigIssues())
-        }
-        if (config.scanEnvVars) {
-            issues.addAll(configScanner.getMissingEnvVars())
-        }
-        if (config.scanDependencies) {
-            issues.addAll(configScanner.getDependencyConflicts())
-        }
-        if (config.scanNetwork) {
-            issues.addAll(configScanner.getNetworkIssues())
+        // Collect issues from scanner. Scanners block (sockets, files), so keep them off the caller's thread.
+        val issues = withContext(Dispatchers.IO) {
+            val found = mutableListOf<ConfigIssue>()
+            if (config.scanDatabaseConfig) {
+                found.addAll(configScanner.getDatabaseConfigIssues())
+            }
+            if (config.scanEnvVars) {
+                found.addAll(configScanner.getMissingEnvVars())
+            }
+            if (config.scanDependencies) {
+                found.addAll(configScanner.getDependencyConflicts())
+            }
+            if (config.scanNetwork) {
+                found.addAll(configScanner.getNetworkIssues())
+            }
+            found
         }
 
         // Process up to maxIssuesPerTick

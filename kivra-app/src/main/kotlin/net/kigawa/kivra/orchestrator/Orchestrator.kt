@@ -25,6 +25,8 @@ import net.kigawa.kivra.db.LeaderLease
 import net.kigawa.kivra.db.LeaderLeaseRepository
 import net.kigawa.kivra.fusha.outbox.FushaTaskOutboxPublisher
 import net.kigawa.kivra.planner.PlannerPipeline
+import net.kigawa.kivra.recl.ReclContextSearch
+import net.kigawa.kivra.recl.ReclSummaryWriter
 import net.kigawa.kivra.reviewer.ReviewerPipeline
 import org.slf4j.LoggerFactory
 import java.time.Clock
@@ -56,6 +58,8 @@ class Orchestrator(
     private val agentManager: AgentManager?,
     private val reviewerPipeline: ReviewerPipeline?,
     private val plannerPipeline: PlannerPipeline?,
+    private val reclContextSearch: ReclContextSearch?,
+    private val reclSummaryWriter: ReclSummaryWriter?,
     private val clock: Clock = Clock.systemUTC(),
 ) : TaskEventSink {
 
@@ -220,6 +224,16 @@ class Orchestrator(
                 for (taskId in activeRunIds) {
                     if (pipeline.shouldEnterPlanning(taskId)) {
                         logger.info("orchestrator reconcile: taskId={} should enter planning phase", taskId)
+                    }
+                }
+                // Create child tasks for approved plans
+                for (taskId in activeRunIds) {
+                    val approvedPlan = pipeline.getApprovedPlan(taskId)
+                    if (approvedPlan != null) {
+                        val created = pipeline.createChildTasks(taskId)
+                        if (created.isNotEmpty()) {
+                            logger.info("orchestrator reconcile: taskId={}, created {} child tasks", taskId, created.size)
+                        }
                     }
                 }
                 for (taskId in activeRunIds) {

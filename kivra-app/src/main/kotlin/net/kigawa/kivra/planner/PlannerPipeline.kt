@@ -1,6 +1,9 @@
 package net.kigawa.kivra.planner
 
 import net.kigawa.kivra.core.DevelopmentRunState
+import net.kigawa.kivra.core.IdempotencyKey
+import net.kigawa.kivra.core.TaskId
+import net.kigawa.kivra.core.TaskWriteResult
 import net.kigawa.kivra.agent.AgentProfile
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.fusha.FushaTaskAdapter
@@ -9,6 +12,7 @@ import net.kigawa.kivra.reviewer.ReviewerResult
 import net.kigawa.kivra.reviewer.ReviewerVerdict
 import org.slf4j.LoggerFactory
 import java.time.Clock
+import java.util.UUID
 
 /**
  * Planner pipeline configuration (design #3 section 5.4).
@@ -177,6 +181,16 @@ class PlannerPipeline(
     fun getApprovedPlan(taskId: String): PlanProposal? {
         val state = decompositionStates[taskId] ?: return null
         return if (state.planApproved) state.planProposal else null
+    }
+
+    /**
+     * Create child tasks from an approved plan proposal.
+     * TODO: FushaTaskAdapter.create() is not yet implemented; this method returns emptyList until
+     * fusha-task supports task creation via API (design #3 section 5.4, C3).
+     */
+    suspend fun createChildTasks(parentTaskId: String): List<String> {
+        logger.warn("planner pipeline: taskId={}, createChildTasks not yet supported (FushaTaskAdapter.create missing)", parentTaskId)
+        return emptyList()
     }
 
     /**

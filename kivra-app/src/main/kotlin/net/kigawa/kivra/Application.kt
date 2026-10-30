@@ -119,6 +119,8 @@ import net.kigawa.kivra.orchestrator.Orchestrator
 import net.kigawa.kivra.orchestrator.OrchestratorSettings
 import net.kigawa.kivra.planner.PlannerPipeline
 import net.kigawa.kivra.planner.PlannerPipelineConfig
+import net.kigawa.kivra.recl.ReclContextSearch
+import net.kigawa.kivra.recl.ReclSummaryWriter
 
 fun Application.module() = appModule(System.getenv())
 
@@ -378,6 +380,8 @@ internal fun Application.appModule(env: Map<String, String>) {
                 reviewerPipeline = null,
                 config = PlannerPipelineConfig(),
             ),
+            reclContextSearch = ReclContextSearch(provider = null),
+            reclSummaryWriter = ReclSummaryWriter(provider = null),
         )
         orchestrator.start(this)
     }

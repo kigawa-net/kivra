@@ -57,6 +57,8 @@ internal class SelfDevParts(
     val autoMergeShadow: AutoMergeShadowWatch? = null,
     /** The Anthropic HTTP client and credential the developer uses. Reused by the LLM stop judgement (ADR 0021 L4); nothing else reads it. */
     val anthropic: AnthropicHandle? = null,
+    /** The DeveloperPort instance for code auto-fix worker (C4). */
+    val developer: net.kigawa.kivra.developer.DeveloperPort? = null,
 )
 
 /** The Anthropic client and its credential (Workload Identity Federation, or the bound static key), shared by the callers of the model. */
@@ -207,6 +209,7 @@ internal fun buildSelfDev(
         planWorker = planWorker,
         autoMergeShadow = autoMergeShadow,
         anthropic = AnthropicHandle(anthropicClient, anthropicAuth),
+        developer = developer,
     )
 }
 

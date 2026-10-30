@@ -170,7 +170,6 @@ private const val ORDER_NOT_FOUND = "order not found"
 private const val REQUEST_NOT_FOUND = "stop request not found"
 private const val FORBIDDEN = "forbidden"
 private const val STALE = "the order changed; reload and try again"
-private const val ROOT_EXISTS = "the root order already exists"
 private const val REASON_INVALID = "reasonCode is not one of the fixed codes"
 private const val DIGEST_INVALID = "digest must be 64 lowercase hex characters"
 private const val STATE_INVALID = "state must be PENDING"
@@ -207,13 +206,9 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
             return@post call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
         }
         val repo = deps.targetRepo ?: return@post call.respond(HttpStatusCode.ServiceUnavailable, OrderError(ORDERS_DISABLED))
-        when (val created = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles)) {
-            is CreateRootResult.Created -> {
-                operatorLog.info("order operator action: action=ORDER_CREATED actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), created.order.orderId)
-                call.respond(HttpStatusCode.Created, created.order.summary())
-            }
-            CreateRootResult.RootExists -> call.respond(HttpStatusCode.Conflict, OrderError(ROOT_EXISTS))
-        }
+        val created = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles) as CreateRootResult.Created
+        operatorLog.info("order operator action: action=ORDER_CREATED actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), created.order.orderId)
+        call.respond(HttpStatusCode.Created, created.order.summary())
     }
 
     get("/api/selfdev/orders/{id}") {

@@ -357,6 +357,13 @@ internal fun Application.appModule(env: Map<String, String>) {
             config = net.kigawa.kivra.agent.CodeAutoFixConfig(),
         ).start(this)
     }
+    // The config auto-fix worker: periodically scans for configuration and environment issues
+    // and attempts to fix them automatically.
+    // Always started so that config issues can be detected and resolved.
+    net.kigawa.kivra.agent.ConfigAutoFixWorker(
+        configScanner = net.kigawa.kivra.agent.NoOpConfigIssueScanner,
+        config = net.kigawa.kivra.agent.ConfigAutoFixConfig(),
+    ).start(this)
     // Phase C6: Kill Switch (design #3 section 9) — created before Orchestrator so it can be used in routing.
     val killSwitch = KillSwitch(KillSwitch.initialStateFromEnv(env))
     

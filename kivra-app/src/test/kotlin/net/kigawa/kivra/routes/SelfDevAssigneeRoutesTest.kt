@@ -250,7 +250,7 @@ class SelfDevAssigneeRoutesTest {
         assertEquals("ACTIVE", made.str("state"))
         assertEquals(0, made.getValue("version").jsonPrimitive.content.toInt())
         assertEquals(NAME_MARK, made.str("displayName"))
-        assertEquals(setOf("assigneeId", "displayName", "role", "state", "version", "memberCount", "activeTokenCount"), made.keys)
+        assertEquals(setOf("assigneeId", "displayName", "role", "state", "version", "memberCount", "activeTokenCount", "projectId"), made.keys)
 
         val list = send(HttpMethod.Get, "/api/selfdev/assignees", null).bodyAsText()
         assertTrue(list.contains(id))

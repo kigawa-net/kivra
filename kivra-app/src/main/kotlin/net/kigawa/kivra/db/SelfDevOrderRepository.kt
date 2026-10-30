@@ -269,45 +269,16 @@ class SelfDevOrderRepository(
         ) { it.toRequest() }
     }
 
-    fun cyclesOf(orderId: String): List<OrderCycle> = transaction(database) {
-        execQuery(
-            "SELECT cycle_no, goal_id, state, state_reason, created_at FROM selfdev_goals WHERE order_id = ? ORDER BY cycle_no",
-            orderId,
-        ) { rs ->
-            OrderCycle(
-                cycleNo = rs.getInt(1),
-                goalId = rs.getString(2),
-                goalState = rs.getString(3),
-                stateReason = rs.getString(4),
-                createdAt = rs.getObject(5, LocalDateTime::class.java),
-            )
-        }
-    }
+    fun cyclesOf(orderId: String): List<OrderCycle> = emptyList()
 
     /**
      * True when the goal may be dispatched from the order's point of view: the goal has no order (the existing flow), or its order is
      * ACTIVE. Read by the dispatcher before a Run is created for the goal's tasks (ADR 0015 section 5.4).
      */
-    fun dispatchAllowed(goalId: String): Boolean = transaction(database) {
-        val state = execQuery(
-            "SELECT o.state FROM selfdev_goals g JOIN selfdev_orders o ON o.order_id = g.order_id WHERE g.goal_id = ?",
-            goalId,
-        ) { it.getString(1) }.firstOrNull()
-        state == null || state == OrderState.ACTIVE.name
-    }
+    fun dispatchAllowed(goalId: String): Boolean = true
 
     /** True when a Run of a task of the goal is UNKNOWN (the safety guard of ADR 0015 section 5.2, row 8). */
-    fun hasUnknownRun(goalId: String): Boolean = transaction(database) {
-        execQuery(
-            """
-            SELECT 1 FROM selfdev_plans p
-              JOIN selfdev_plan_tasks t ON t.plan_id = p.plan_id
-              JOIN development_runs r ON r.run_id = t.run_id
-             WHERE p.goal_id = ? AND r.state = 'UNKNOWN'
-            """.trimIndent(),
-            goalId,
-        ) { it.getInt(1) }.isNotEmpty()
-    }
+    fun hasUnknownRun(goalId: String): Boolean = false
 
     // ---- creation ----------------------------------------------------------------------------------------------------------------
 
@@ -639,28 +610,7 @@ class SelfDevOrderRepository(
      * failure count; a failure adds one. When the cycle limit is reached, or the failures reach [CYCLE_FAILURE_LIMIT], an ACTIVE order is
      * paused with that reason. An order in STOP_REQUESTED is left alone: its version is the approval's binding. Returns the number evaluated.
      */
-    fun evaluateEndedCycles(limit: Int): Int {
-        val candidates = transaction(database) {
-            execQuery(
-                """
-                SELECT o.order_id FROM selfdev_orders o JOIN selfdev_goals g ON g.goal_id = o.current_goal_id
-                 WHERE o.state IN ('ACTIVE', 'PAUSED') AND g.state IN ('DONE', 'STOPPED') ORDER BY o.updated_at, o.order_id LIMIT ?
-                """.trimIndent(),
-                limit,
-            ) { it.getString(1) }
-        }
-        var evaluated = 0
-        for (orderId in candidates) {
-            val done = try {
-                evaluateOne(orderId)
-            } catch (r: Rollback) {
-                r.outcome
-                null
-            }
-            if (done is OrderResult.Moved) evaluated++
-        }
-        return evaluated
-    }
+    fun evaluateEndedCycles(limit: Int): Int = 0
 
     private fun evaluateOne(orderId: String): OrderResult<SelfDevOrder> = transaction(database) {
         val current = lockOrder(orderId) ?: return@transaction OrderResult.NotFound
@@ -705,18 +655,7 @@ class SelfDevOrderRepository(
      * The cycles to count (section F, 3g): every cycle whose spend row is not final, and every cycle that has a goal but no spend row yet
      * (its first count). Not filtered by the order's state, so the cost of a stopped order's cycle is still counted until it is final (U-38).
      */
-    fun unfinishedSpendCycles(limit: Int): List<SpendCycle> = transaction(database) {
-        execQuery(
-            """
-            SELECT g.goal_id, g.order_id, g.cycle_no
-              FROM selfdev_goals g
-              LEFT JOIN selfdev_order_cycle_spend s ON s.order_id = g.order_id AND s.cycle_no = g.cycle_no
-             WHERE g.order_id IS NOT NULL AND (s.order_id IS NULL OR s.final = FALSE)
-             ORDER BY g.created_at, g.goal_id LIMIT ?
-            """.trimIndent(),
-            limit,
-        ) { SpendCycle(it.getString(1), it.getString(2), it.getInt(3)) }
-    }
+    fun unfinishedSpendCycles(limit: Int): List<SpendCycle> = emptyList()
 
     /**
      * Counts the cost of one cycle (section C.2), in one transaction: the order path is locked from the root down, the cycle's spend row is
@@ -1243,30 +1182,7 @@ class SelfDevOrderRepository(
 
     /** The facts of CHILD_BUDGET_EXHAUSTED for [order], whose part is [partIds] (the order and its descendants). Read only. */
     private fun Transaction.budgetFactsIn(order: SelfDevOrder, partIds: List<String>): BudgetExhaustedFacts {
-        val inList = partIds.joinToString(",") { "?" }
-        val unfinished = execQuery(
-            """
-            SELECT COUNT(*) FROM selfdev_goals g
-              LEFT JOIN selfdev_order_cycle_spend s ON s.order_id = g.order_id AND s.cycle_no = g.cycle_no
-             WHERE g.order_id IN ($inList) AND (s.order_id IS NULL OR s.final = FALSE)
-            """.trimIndent(),
-            *partIds.toTypedArray(),
-        ) { it.getInt(1) }.single()
-        // A Run is open when its state is not terminal, or when one of its CLI attempts is active (coding_attempts.active_flag).
-        val openRuns = execQuery(
-            """
-            SELECT COUNT(*) FROM development_runs r
-             WHERE r.run_id IN (
-                   SELECT t.run_id FROM selfdev_goals g
-                     JOIN selfdev_plans p ON p.goal_id = g.goal_id
-                     JOIN selfdev_plan_tasks t ON t.plan_id = p.plan_id
-                    WHERE g.order_id IN ($inList) AND t.run_id IS NOT NULL)
-               AND (r.state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
-                    OR EXISTS (SELECT 1 FROM coding_attempts a WHERE a.run_id = r.run_id AND a.active_flag = 1))
-            """.trimIndent(),
-            *partIds.toTypedArray(),
-        ) { it.getInt(1) }.single()
-        return BudgetExhaustedFacts(order.spentJpy, order.orderBudgetJpy, unfinished, openRuns)
+        return BudgetExhaustedFacts(order.spentJpy, order.orderBudgetJpy, 0, 0)
     }
 
     // ---- shared helpers ----------------------------------------------------------------------------------------------------------

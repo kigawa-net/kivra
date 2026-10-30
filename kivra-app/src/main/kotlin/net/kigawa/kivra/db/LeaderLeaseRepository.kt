@@ -1,11 +1,14 @@
 package net.kigawa.kivra.db
 
 import java.time.Clock
+import java.time.Duration
 import java.time.LocalDateTime
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.or
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -30,6 +33,7 @@ data class LeaderLease(
 class LeaderLeaseRepository(
     private val database: Database,
     private val clock: Clock = Clock.systemUTC(),
+    private val leaseTtl: Duration = Duration.ofSeconds(60),
 ) {
     /**
      * Try to acquire the leader lease.
@@ -39,26 +43,34 @@ class LeaderLeaseRepository(
      */
     fun tryAcquire(owner: String): LeaderLease? = transaction(database) {
         val now = utcNow(clock)
+        val expiresAt = now.plusSeconds(leaseTtl.seconds)
         val gen = System.currentTimeMillis()
 
-        // Try to update the existing row only if it has expired.
+        // Try to update the existing row only if it has expired or owned by us or empty.
         val updated = LeaderLeasesTable.update({
-            LeaderLeasesTable.id eq 0
+            (LeaderLeasesTable.id eq 0) and (
+                (LeaderLeasesTable.expiresAt less now) or
+                (LeaderLeasesTable.owner eq owner) or
+                (LeaderLeasesTable.owner eq "")
+            )
         }) {
             it[LeaderLeasesTable.owner] = owner
-            it[LeaderLeasesTable.expiresAt] = now
+            it[LeaderLeasesTable.expiresAt] = expiresAt
             it[LeaderLeasesTable.generation] = gen
             it[LeaderLeasesTable.updatedAt] = now
         }
 
         // If the row didn't exist, insert it.
         if (updated == 0) {
-            LeaderLeasesTable.insert {
-                it[LeaderLeasesTable.id] = 0
-                it[LeaderLeasesTable.owner] = owner
-                it[LeaderLeasesTable.expiresAt] = now
-                it[LeaderLeasesTable.generation] = gen
-                it[LeaderLeasesTable.updatedAt] = now
+            val exists = LeaderLeasesTable.selectAll().where { LeaderLeasesTable.id eq 0 }.count() > 0
+            if (!exists) {
+                LeaderLeasesTable.insert {
+                    it[LeaderLeasesTable.id] = 0
+                    it[LeaderLeasesTable.owner] = owner
+                    it[LeaderLeasesTable.expiresAt] = expiresAt
+                    it[LeaderLeasesTable.generation] = gen
+                    it[LeaderLeasesTable.updatedAt] = now
+                }
             }
         }
 
@@ -70,7 +82,7 @@ class LeaderLeaseRepository(
                 val rowOwner: String = row[LeaderLeasesTable.owner]
                 val rowExpiresAt: LocalDateTime = row[LeaderLeasesTable.expiresAt]
                 val rowGen: Long = row[LeaderLeasesTable.generation]
-                if (rowOwner == owner) {
+                if (rowOwner == owner && rowExpiresAt.isAfter(now)) {
                     LeaderLease(owner, rowExpiresAt, rowGen)
                 } else {
                     null
@@ -85,10 +97,11 @@ class LeaderLeaseRepository(
      */
     fun renew(owner: String): Boolean = transaction(database) {
         val now = utcNow(clock)
+        val expiresAt = now.plusSeconds(leaseTtl.seconds)
         val updated = LeaderLeasesTable.update({
             (LeaderLeasesTable.id eq 0) and (LeaderLeasesTable.owner eq owner)
         }) {
-            it[LeaderLeasesTable.expiresAt] = now
+            it[LeaderLeasesTable.expiresAt] = expiresAt
             it[LeaderLeasesTable.updatedAt] = now
         }
         updated > 0

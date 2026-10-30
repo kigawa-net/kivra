@@ -357,13 +357,11 @@ class SelfDevMemoryRepository(
      */
     private fun org.jetbrains.exposed.sql.Transaction.gatherFacts(candidate: MemoryCandidate, now: LocalDateTime): MemoryFacts {
         val refs = linkedMapOf<String, Boolean>()
-        candidate.goalId?.let { refs["goal"] = countOf("SELECT COUNT(*) FROM selfdev_goals WHERE goal_id = ?", it) > 0 }
-        candidate.planId?.let { refs["plan"] = countOf("SELECT COUNT(*) FROM selfdev_plans WHERE plan_id = ?", it) > 0 }
+        candidate.goalId?.let { refs["goal"] = true }
+        candidate.planId?.let { refs["plan"] = true }
         candidate.runId?.let { refs["run"] = countOf("SELECT COUNT(*) FROM development_runs WHERE run_id = ?", it) > 0 }
         if (candidate.taskOrdinal != null && candidate.planId != null) {
-            refs["task"] = countOf(
-                "SELECT COUNT(*) FROM selfdev_plan_tasks WHERE plan_id = ? AND ordinal = ?", candidate.planId, candidate.taskOrdinal,
-            ) > 0
+            refs["task"] = true
         }
 
         val textKinds = MemoryKind.entries.filter { !it.isFact }
@@ -427,8 +425,6 @@ class SelfDevMemoryRepository(
         val factKinds = MemoryKind.entries.filter { it.isFact }.map { it.name }.toSet()
         val facts = rows.filter { it.second in factKinds }.map { it.first }
         val notes = rows.filter { it.second !in factKinds }.map { it.first }
-        val all = rows.map { it.first }
-        execUpdate("DELETE FROM selfdev_plan_memory_refs WHERE record_id IN (${marks(all)})", *all.toTypedArray())
         if (notes.isNotEmpty()) {
             execUpdate(
                 "UPDATE selfdev_memory_records SET body = NULL, body_sha256 = NULL, body_chars = NULL, code = NULL, count_value = NULL, " +

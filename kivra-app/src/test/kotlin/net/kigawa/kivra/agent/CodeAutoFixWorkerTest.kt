@@ -38,7 +38,7 @@ class CodeAutoFixWorkerTest {
         // Given
         val developer = FakeDeveloper()
         val scanner = FakeCodeIssueScanner(
-            compilationErrors = listOf(
+            errors = listOf(
                 CodeIssue(
                     id = "comp-1",
                     type = IssueType.COMPILATION_ERROR,
@@ -48,7 +48,7 @@ class CodeAutoFixWorkerTest {
                     relatedFiles = listOf("src/main/kotlin/Example.kt"),
                 ),
             ),
-            testFailures = emptyList(),
+            failures = emptyList(),
         )
         val config = CodeAutoFixConfig()
         val worker = CodeAutoFixWorker(developer, scanner, config)
@@ -69,8 +69,8 @@ class CodeAutoFixWorkerTest {
         // Given
         val developer = FakeDeveloper()
         val scanner = FakeCodeIssueScanner(
-            compilationErrors = emptyList(),
-            testFailures = listOf(
+            errors = emptyList(),
+            failures = listOf(
                 CodeIssue(
                     id = "test-1",
                     type = IssueType.TEST_FAILURE,
@@ -99,13 +99,13 @@ class CodeAutoFixWorkerTest {
         // Given
         val developer = FakeDeveloper()
         val scanner = FakeCodeIssueScanner(
-            compilationErrors = listOf(
+            errors = listOf(
                 CodeIssue(id = "1", type = IssueType.COMPILATION_ERROR, message = "Error 1"),
                 CodeIssue(id = "2", type = IssueType.COMPILATION_ERROR, message = "Error 2"),
                 CodeIssue(id = "3", type = IssueType.COMPILATION_ERROR, message = "Error 3"),
                 CodeIssue(id = "4", type = IssueType.COMPILATION_ERROR, message = "Error 4"),
             ),
-            testFailures = emptyList(),
+            failures = emptyList(),
         )
         val config = CodeAutoFixConfig(maxIssuesPerTick = 2)
         val worker = CodeAutoFixWorker(developer, scanner, config)
@@ -124,10 +124,10 @@ class CodeAutoFixWorkerTest {
         // Given
         val developer = FakeDeveloper(refuseAll = true)
         val scanner = FakeCodeIssueScanner(
-            compilationErrors = listOf(
+            errors = listOf(
                 CodeIssue(id = "1", type = IssueType.COMPILATION_ERROR, message = "Error 1"),
             ),
-            testFailures = emptyList(),
+            failures = emptyList(),
         )
         val config = CodeAutoFixConfig()
         val worker = CodeAutoFixWorker(developer, scanner, config)
@@ -147,10 +147,10 @@ class CodeAutoFixWorkerTest {
         // Given
         val developer = FakeDeveloper()
         val scanner = FakeCodeIssueScanner(
-            compilationErrors = listOf(
+            errors = listOf(
                 CodeIssue(id = "1", type = IssueType.COMPILATION_ERROR, message = "Error 1"),
             ),
-            testFailures = emptyList(),
+            failures = emptyList(),
         )
         val config = CodeAutoFixConfig(scanCompilationErrors = false)
         val worker = CodeAutoFixWorker(developer, scanner, config)
@@ -169,8 +169,8 @@ class CodeAutoFixWorkerTest {
         // Given
         val developer = FakeDeveloper()
         val scanner = FakeCodeIssueScanner(
-            compilationErrors = emptyList(),
-            testFailures = listOf(
+            errors = emptyList(),
+            failures = listOf(
                 CodeIssue(id = "1", type = IssueType.TEST_FAILURE, message = "Test failed"),
             ),
         )
@@ -211,10 +211,10 @@ class FakeDeveloper(
 
 /** Fake CodeIssueScanner for testing. */
 class FakeCodeIssueScanner(
-    val compilationErrors: List<CodeIssue> = emptyList(),
-    val testFailures: List<CodeIssue> = emptyList(),
+    private val errors: List<CodeIssue> = emptyList(),
+    private val failures: List<CodeIssue> = emptyList(),
 ) : CodeIssueScanner {
-    override fun getCompilationErrors(): List<CodeIssue> = compilationErrors
-    override fun getTestFailures(): List<CodeIssue> = testFailures
+    override fun getCompilationErrors(): List<CodeIssue> = errors
+    override fun getTestFailures(): List<CodeIssue> = failures
     override fun readFileContent(path: String): String = "// Fake content for $path"
 }

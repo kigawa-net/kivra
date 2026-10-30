@@ -63,11 +63,13 @@ internal val MIGRATION_FILES = mapOf(
      39 to "V39__selfdev_llm_stop_decider.sql",
      40 to "V40__flatten_tasks.sql",
      41 to "V41__orchestrator_leader_lease.sql",
+     42 to "V42__project_scoped_orders_and_assignees.sql",
+     43 to "V43__selfdev_multiple_roots.sql",
 )
 
 /** The versions applied on the full chain. V22 and V30 are never used on this branch (reserved gaps), so the list skips them. */
 internal val EXPECTED_APPLIED_VERSIONS: List<String> =
-    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41")
+    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43")
 
 /**
  * Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved; V30 is left
@@ -98,7 +100,7 @@ class MigrationChainTest {
         assertEquals(1, db.columnCount("selfdev_order_events", "parent_order_id"))
         assertEquals(1, db.tableCount("selfdev_memory_records"))
         assertEquals(1, db.tableCount("selfdev_memory_events"))
-        assertEquals(1, db.tableCount("selfdev_plan_memory_refs"))
+        assertEquals(1, db.tableCount("selfdev_tasks"))
         assertEquals(1, db.tableCount("selfdev_memory_quota_lock"))
         assertEquals(1, db.tableCount("selfdev_assignees"))
         assertEquals(1, db.tableCount("selfdev_assignee_members"))

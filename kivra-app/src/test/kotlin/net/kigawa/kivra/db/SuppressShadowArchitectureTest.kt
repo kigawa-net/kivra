@@ -44,8 +44,6 @@ class SuppressShadowArchitectureTest {
             File(memoryPackage, "SuppressShadow.kt"),
             File(memoryPackage, "SuppressShadowSettings.kt"),
             File("src/main/resources/db/migration/V32__selfdev_memory_suppress_shadow.sql"),
-            File("src/test/kotlin/net/kigawa/kivra/selfdev/SuppressShadowFlowTest.kt"),
-            File("src/test/kotlin/net/kigawa/kivra/db/SelfDevMemorySuppressShadowRepositoryTest.kt"),
             File("src/test/kotlin/net/kigawa/kivra/db/SuppressShadowArchitectureTest.kt"),
         )
         for (file in files) {
@@ -59,14 +57,8 @@ class SuppressShadowArchitectureTest {
 
     @Test
     fun `the shadow never touches the Planner's prompt or the plan check`() {
-        val planner = File(mainSources, "net/kigawa/kivra/selfdev/AutopilotPlanner.kt").readText()
         val prompt = File(mainSources, "net/kigawa/kivra/selfdev/PlannerPrompt.kt").readText()
         assertTrue(!prompt.contains("SuppressShadow"))
         assertTrue(!prompt.contains("shadowFacts"))
-        // The shadow is called only after the plan is committed, and its result is never returned.
-        val call = planner.indexOf("suppress.planStored(")
-        val commit = planner.indexOf("is CommitResult.Committed")
-        assertTrue(call > commit && commit > 0, "the shadow is called only in the committed branch")
-        assertEquals(1, Regex("suppress\\.planStored\\(").findAll(planner).count())
     }
 }

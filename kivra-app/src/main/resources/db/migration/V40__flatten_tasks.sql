@@ -6,7 +6,16 @@
 -- and the task-level properties (dependencies, execution state). Tasks reference other tasks
 -- by task_id for dependencies, enabling cross-project relationships.
 
+-- Drop foreign key constraints that reference the tables being removed.
+ALTER TABLE selfdev_memory_records DROP CONSTRAINT fk_selfdev_memory_records_plan_task;
+ALTER TABLE selfdev_memory_records DROP CONSTRAINT fk_selfdev_memory_records_plan;
+ALTER TABLE selfdev_memory_records DROP CONSTRAINT fk_selfdev_memory_records_goal;
+ALTER TABLE selfdev_plan_memory_refs DROP CONSTRAINT fk_selfdev_plan_memory_refs_plan;
+ALTER TABLE selfdev_orders DROP CONSTRAINT fk_selfdev_orders_goal;
+ALTER TABLE selfdev_order_cycle_spend DROP CONSTRAINT fk_selfdev_order_cycle_spend_goal;
+
 -- Drop dependent tables first (foreign key order)
+DROP TABLE IF EXISTS selfdev_plan_memory_refs;
 DROP TABLE IF EXISTS selfdev_plan_tasks;
 DROP TABLE IF EXISTS selfdev_plans;
 DROP TABLE IF EXISTS selfdev_goals;

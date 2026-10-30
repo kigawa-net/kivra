@@ -10,6 +10,7 @@ COPY gradle/ gradle/
 COPY settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY kivra-agent/build.gradle.kts kivra-agent/build.gradle.kts
 COPY kivra-app/build.gradle.kts kivra-app/build.gradle.kts
+COPY kivra-compose-ui/build.gradle.kts kivra-compose-ui/build.gradle.kts
 COPY kivra-core/build.gradle.kts kivra-core/build.gradle.kts
 COPY kivra-developer/build.gradle.kts kivra-developer/build.gradle.kts
 COPY kivra-exkes/build.gradle.kts kivra-exkes/build.gradle.kts
@@ -22,14 +23,15 @@ COPY kivra-observability/build.gradle.kts kivra-observability/build.gradle.kts
 COPY kivra-policy/build.gradle.kts kivra-policy/build.gradle.kts
 COPY kivra-scheduler/build.gradle.kts kivra-scheduler/build.gradle.kts
 COPY kivra-ui-api/build.gradle.kts kivra-ui-api/build.gradle.kts
-COPY kivra-compose-ui/build.gradle.kts kivra-compose-ui/build.gradle.kts
 COPY kivra-web/build.gradle.kts kivra-web/build.gradle.kts
+COPY kotlin-js-store/ kotlin-js-store/
 
 # gradle-wrapper.properties で固定された Gradle を使うため、イメージ同梱の gradle ではなく ./gradlew を使う
 RUN chmod +x gradlew && ./gradlew :kivra-app:dependencies --configuration runtimeClasspath --no-daemon > /dev/null
 
 COPY kivra-agent/ kivra-agent/
 COPY kivra-app/ kivra-app/
+COPY kivra-compose-ui/ kivra-compose-ui/
 COPY kivra-core/ kivra-core/
 COPY kivra-developer/ kivra-developer/
 COPY kivra-exkes/ kivra-exkes/
@@ -42,7 +44,6 @@ COPY kivra-observability/ kivra-observability/
 COPY kivra-policy/ kivra-policy/
 COPY kivra-scheduler/ kivra-scheduler/
 COPY kivra-ui-api/ kivra-ui-api/
-COPY kivra-compose-ui/ kivra-compose-ui/
 COPY kivra-web/ kivra-web/
 
 # shadowJar(ファット JAR)は Flyway のクラスパス走査と相性が悪く、db/migration 配下の SQL を認識できず

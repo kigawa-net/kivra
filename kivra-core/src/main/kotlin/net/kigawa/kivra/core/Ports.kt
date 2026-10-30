@@ -98,6 +98,17 @@ interface TaskProvider {
 
     suspend fun update(id: TaskId, patch: TaskPatch, expectedUpdatedAt: Instant?): TaskWriteResult
     suspend fun comment(id: TaskId, body: String, key: IdempotencyKey): TaskWriteResult
+
+    /**
+     * Create a new task. Returns the created task snapshot on success.
+     * [parentId] is optional and indicates the task that was decomposed into this one.
+     */
+    suspend fun create(
+        title: String,
+        description: String?,
+        parentId: TaskId?,
+        key: IdempotencyKey,
+    ): TaskWriteResult
 }
 
 // ---- MemoryPort (recl) ----

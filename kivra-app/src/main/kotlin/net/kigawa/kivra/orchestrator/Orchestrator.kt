@@ -24,6 +24,7 @@ import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.LeaderLease
 import net.kigawa.kivra.db.LeaderLeaseRepository
 import net.kigawa.kivra.fusha.outbox.FushaTaskOutboxPublisher
+import net.kigawa.kivra.planner.PlannerPipeline
 import net.kigawa.kivra.reviewer.ReviewerPipeline
 import org.slf4j.LoggerFactory
 import java.time.Clock
@@ -54,6 +55,7 @@ class Orchestrator(
     private val outboxPublisher: FushaTaskOutboxPublisher?,
     private val agentManager: AgentManager?,
     private val reviewerPipeline: ReviewerPipeline?,
+    private val plannerPipeline: PlannerPipeline?,
     private val clock: Clock = Clock.systemUTC(),
 ) : TaskEventSink {
 
@@ -208,6 +210,25 @@ class Orchestrator(
                 }
             } catch (e: Exception) {
                 logger.warn("orchestrator reconcile: review check failed, exception={}", e.javaClass.simpleName)
+            }
+        }
+
+        // Check for tasks that should enter planning phase (design #3 section 5.4, C3)
+        plannerPipeline?.let { pipeline ->
+            try {
+                val activeRunIds = runRepo.findActiveRuns().map { it.taskId }
+                for (taskId in activeRunIds) {
+                    if (pipeline.shouldEnterPlanning(taskId)) {
+                        logger.info("orchestrator reconcile: taskId={} should enter planning phase", taskId)
+                    }
+                }
+                for (taskId in activeRunIds) {
+                    if (pipeline.areAllChildrenComplete(taskId)) {
+                        logger.info("orchestrator reconcile: taskId={} all children complete, ready for join", taskId)
+                    }
+                }
+            } catch (e: Exception) {
+                logger.warn("orchestrator reconcile: planner check failed, exception={}", e.javaClass.simpleName)
             }
         }
     }

@@ -117,6 +117,8 @@ import net.kigawa.kivra.db.DbRunAdmission
 import net.kigawa.kivra.fusha.poller.TaskPoller
 import net.kigawa.kivra.orchestrator.Orchestrator
 import net.kigawa.kivra.orchestrator.OrchestratorSettings
+import net.kigawa.kivra.planner.PlannerPipeline
+import net.kigawa.kivra.planner.PlannerPipelineConfig
 
 fun Application.module() = appModule(System.getenv())
 
@@ -370,6 +372,12 @@ internal fun Application.appModule(env: Map<String, String>) {
             outboxPublisher = outboxPublisher,
             agentManager = null,
             reviewerPipeline = null,
+            plannerPipeline = PlannerPipeline(
+                runRepo = runs,
+                fushaAdapter = fushaAdapter,
+                reviewerPipeline = null,
+                config = PlannerPipelineConfig(),
+            ),
         )
         orchestrator.start(this)
     }

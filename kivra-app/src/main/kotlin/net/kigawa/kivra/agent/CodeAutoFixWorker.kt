@@ -91,8 +91,7 @@ class CodeAutoFixWorker(
     }
 
     /** Attempts to fix a code issue by generating a patch using DeveloperPort. */
-    private suspend fun attemptFix(issue: CodeIssue): Boolean {
-        try {
+    private suspend fun attemptFix(issue: CodeIssue): Boolean = try {
             // Build task description from the issue
             val taskTitle = "Auto-fix: ${issue.type.name}"
             val taskDescription = buildFixDescription(issue)
@@ -112,7 +111,7 @@ class CodeAutoFixWorker(
 
             // Propose a fix
             val result = developer.propose(request)
-            return when (result) {
+            when (result) {
                 is DeveloperResult.Proposed -> {
                     // Patch generated successfully - in real implementation, would apply it
                     logger.info("code-auto-fix: issue={}, patch generated", issue.id)
@@ -131,7 +130,6 @@ class CodeAutoFixWorker(
             logger.warn("code-auto-fix: issue={}, fix failed exception={}", issue.id, e.javaClass.simpleName)
             false
         }
-    }
 
     /** Builds a description for the fix based on the issue context. */
     private fun buildFixDescription(issue: CodeIssue): String {
@@ -157,7 +155,7 @@ class CodeAutoFixWorker(
         )
         while (isActive) {
             tick()
-            delay(config.interval.toMillis())
+            kotlinx.coroutines.delay(config.interval.toMillis())
         }
     }
 

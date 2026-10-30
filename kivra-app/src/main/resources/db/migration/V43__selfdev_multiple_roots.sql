@@ -1,4 +1,4 @@
--- V42: allow multiple root orders. The root_slot UNIQUE constraint enforced a single root (ADR 0015 stage 1). Removing it lets the
+-- V43: allow multiple root orders. The root_slot UNIQUE constraint enforced a single root (ADR 0015 stage 1). Removing it lets the
 -- operator create independent root orders, each with its own tree. The root is now identified by parent_order_id IS NULL and depth = 0,
 -- the same invariant the CHECK constraint already enforces. root_slot is kept as a legacy column (NULL for every row) and will be
 -- dropped in a future migration after the application code no longer references it.

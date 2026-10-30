@@ -347,6 +347,16 @@ internal fun Application.appModule(env: Map<String, String>) {
             config = net.kigawa.kivra.agent.AutoRecoveryConfig(),
         ).start(this)
     }
+    // The code auto-fix worker: periodically scans for code issues (compilation errors, test failures)
+    // and attempts to fix them using the DeveloperPort.
+    // Started only when self-development is enabled (DeveloperPort is available).
+    selfDevParts?.developer?.let { developer ->
+        net.kigawa.kivra.agent.CodeAutoFixWorker(
+            developer = developer,
+            codeScanner = net.kigawa.kivra.agent.NoOpCodeIssueScanner,
+            config = net.kigawa.kivra.agent.CodeAutoFixConfig(),
+        ).start(this)
+    }
     // Phase C6: Kill Switch (design #3 section 9) — created before Orchestrator so it can be used in routing.
     val killSwitch = KillSwitch(KillSwitch.initialStateFromEnv(env))
     

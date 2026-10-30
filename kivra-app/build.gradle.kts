@@ -7,6 +7,7 @@ plugins {
 // Copy Compose Web Wasm distribution output to resources/ui/compose/ so UiRoutes can serve it.
 // This task runs before processResources, ensuring the UI assets are available on the classpath.
 val copyComposeWebDist = tasks.register("copyComposeWebDist", Copy::class) {
+    dependsOn(":kivra-web:wasmJsBrowserDistribution")
     val projectRoot = layout.projectDirectory
     val distDir = projectRoot.dir("../kivra-web/build/dist/wasmJs/productionExecutable")
     from(distDir)

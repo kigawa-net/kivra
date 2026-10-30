@@ -4,173 +4,114 @@ sessionId: session-261028-000244-f4ff
 
 # Requirements
 
-### Overview
-現在の HTML/CSS/JS UI（3ファイル）を Compose Multiplatform for Web（Kotlin/Wasm）に置き換えます。Ktor サーバー（API）はそのまま維持し、UI のみを Kotlin で記述する Compose に書き換えます。
+### Overview & Goals
+Compose Multiplatform for Web のコード実装（`kivra-compose-ui`, `kivra-web`, 7画面のコンポーネント実装、`copyComposeWebDist` タスク）は完了しましたが、本番環境（`/ui/compose`）で 404 が発生しています。
+主な原因は Docker ビルド時に Wasm 成果物が生成・同梱されていないこと、および `main` ブランチにおける DB マイグレーション（V40〜V43）とテストスイートの不整合により PR がマージできない状態にあることです。
+本計画では、DB マイグレーションとテストの不整合を解消し、Docker ビルドおよび Wasm 成果物の同梱設定（PR #398）を修正・検証して、本番環境へのデプロイと `/ui/compose` の正常稼働を達成します。
 
 ### Scope
 **In Scope:**
-- `kivra-compose-ui` モジュール（Compose UI コード）を追加
-- `kivra-web` モジュール（Wasm 構築と配信）を追加
-- 7つのページ（タスク、開発目標、order、承認、予算、記憶、担当）を Compose に書き換え
-- サイドバー（プロジェクト一覧）とトップヘッダー（ナビゲーションタブ）を Compose に書き換え
-- Ktor サーバーから Compose Web アプリを配信（`/ui` パス）
-- 既存の REST API（`/api/...`）をそのまま使用
+- DB マイグレーション（V40〜V43）の H2 / MariaDB 互換性修正とテスト Allowlist の更新
+- `kivra-app` テストスイート（`SelfDevAssigneeRoutesTest`, `RolesCoverageArchitectureTest`, `DockerfileModuleCoverageTest` 等）の全パス化
+- `Dockerfile` と `kivra-app/build.gradle.kts` の Wasm ビルド依存関係（`dependsOn(":kivra-web:wasmJsBrowserDistribution")`）と成果物コピー設定の修正
+- PR 作成・CI パス・main ブランチへのマージ
+- k8s マニフェスト更新と `https://kivra-dev.kigawa.net/ui/compose` での Wasm UI 稼働確認
 
 **Out of Scope:**
-- Android/iOS/Desktop への展開（後続フェーズ）
-- Ktor サーバーの API 変更（変更なし）
-- DB 層の変更（変更なし）
-- OIDC 認証フローの変更（Cookie ベースを維持）
+- Compose UI 側の追加機能開発（既存画面のレイアウト追加等）
+- モバイル（Android/iOS/Desktop）向けクライアントビルド
 
-### Key Constraints
-- Compose Multiplatform for Web は **Beta**（2025年9月）。WasmGC 対応ブラウザが必要
-- 初期ロードに数秒かかる（Wasm のダウンロード・初期化）
-- SEO 未対応（SPA なので問題なし）
-- Kotlin 2.1.21 は Compose 1.8 と互換性あり
+### Functional Requirements
+- `kivra-app` の Gradle ビルド時に `:kivra-web:wasmJsBrowserDistribution` が自動実行され、Wasm/JS アセットが classpath の `ui/compose/` に同梱されること。
+- Docker イメージビルド時に Wasm 成果物が正常にビルド・配置され、Docker 内で `/ui/compose` から index.html および `.wasm` ファイルが配信されること。
+- `GET /ui/compose` および Wasm アセットへのリクエストが 404 ではなく HTTP 200 で返却され、ブラウザ上で Compose Multiplatform UI が初期化・表示されること。
 
 # Technical Design
 
 ### Current Implementation
-- **UI**: `kivra-app/src/main/resources/ui/` 配下の 3 ファイル
-  - `index.html` (431行) — 7ページの HTML 構造、ダイアログ、フォーム
-  - `app.js` (4489行) — 全ロジック（ルーティング、API 呼び出し、状態管理、レンダリング）
-  - `app.css` (822行) — 全スタイル
-- **ルーティング**: ハッシュベース（`#/`, `#/goals`, `#/orders` など）。`PAGES` 配列で定義
-- **API 呼び出し**: `apiFetch()` 関数が `/api/...` を呼び出し、JSON をパース
-- **配信**: `UiRoutes.kt` が classpath から静的ファイルを配信（CSP ヘッダー付き）
+- `kivra-compose-ui` および `kivra-web` モジュールが作成され、Wasm 出力コードが実装済み。
+- `UiRoutes.kt` に `/ui/compose` ルートおよび動的 `.wasm` / `.js` リソース配信エンドポイントが実装済み。
+- `copyComposeWebDist` タスクが `build/dist/wasmJs/productionExecutable` をコピーするが、`:kivra-web:wasmJsBrowserDistribution` への明示的な `dependsOn` が不足していた。
+- V40（Goal/Plan → Task 統合）、V41（Leader Lease）、V42（Project Scoped Orders/Assignees）、V43（Multiple Roots）のマイグレーションとテスト allowlist に不整合が存在。
 
-### Architecture
-```
-graph LR
-    subgraph Browser
-        A[Compose Web UI<br/>Wasm]
-    end
-    subgraph Ktor Server
-        B[ApiRoutes<br/>/api/*]
-        C[ComposeRoute<br/>/ui]
-    end
-    subgraph DB
-        D[MariaDB]
-    end
-    A -->|fetch /api/*| B
-    C -->|index.html + Wasm| A
-    B --> D
-```
+### Key Decisions
+1. **Gradle タスク依存の明示化**: `copyComposeWebDist` に `dependsOn(":kivra-web:wasmJsBrowserDistribution")` を追加し、ビルド順序を保証する。
+2. **Dockerfile へのビルド依存追加**: `kotlin-js-store/` および新モジュール（`kivra-compose-ui`, `kivra-web`）を Docker ビルドコンテキストでコピーし、Wasm コンパイルをコンテナ内ビルドで完結させる。
+3. **H2 / MariaDB マイグレーション整合性の確保**: V40 の FK DROP 順序、V42/V43 の制約名とインデックス作成構文を両 RDBMS で動作する標準形式に調整する。
 
 ### Proposed Changes
 
-#### 1. 新しいモジュールを追加
-- **`kivra-compose-ui`**: Compose UI コード（commonMain でプラットフォーム非依存）
-  - 画面（Screen）コンポーザブル
-  - 状態管理（ViewModel）
-  - API クライアント（Ktor Client）
-  - ナビゲーション
-- **`kivra-web`**: wasmJs ターゲット、Compose Web のエントリーポイント
-  - `wasmJsBrowserDistribution` でビルド
-  - 生成物を Ktor サーバーが配信
+#### 1. DB マイグレーションとテストの修正
+- `kivra-app/src/main/resources/db/migration/V42__project_scoped_orders_and_assignees.sql` と `V43__selfdev_multiple_roots.sql` の SQL 構文を H2 / MariaDB 双方でエラーなく動作するよう調整。
+- `MigrationChainTest`, `MigrationExpandOnlyTest`, `MigrationRollingUpgradeTest` の allowlist を最新マイグレーション番号（V40〜V43）に追従。
+- `RolesCoverageArchitectureTest` および `DockerfileModuleCoverageTest` のルート・モジュール定義を更新。
 
-#### 2. Ktor サーバーの変更
-- `UiRoutes.kt` を更新：静的ファイル配信 → Compose Wasm 配信
-- `kivra-web` のビルド成果物（`build/dist/wasmJs/productionExecutable/`）を classpath にコピー
-- CSP ヘッダーを更新（Wasm 用）
+#### 2. ビルド設定と Dockerfile の修正
+- `kivra-app/build.gradle.kts`:
+  ```kotlin
+  val copyComposeWebDist = tasks.register<Copy>("copyComposeWebDist") {
+      dependsOn(":kivra-web:wasmJsBrowserDistribution")
+      from(project(":kivra-web").layout.buildDirectory.dir("dist/wasmJs/productionExecutable"))
+      into(layout.buildDirectory.dir("resources/main/ui/compose"))
+  }
+  tasks.named("processResources") {
+      dependsOn(copyComposeWebDist)
+  }
+  ```
+- `Dockerfile`:
+  - `kotlin-js-store/` をコピー対象に追加。
+  - `kivra-compose-ui` および `kivra-web` のビルド定義を網羅。
 
-#### 3. Compose UI の構成
-- **ナビゲーション**: `@Composable fun KivraApp()` — ルートコンポーザブル
-- **レイアウト**: トップヘッダー（タブ）+ サイドバー（プロジェクト）+ メインコンテンツ
-- **画面**: 各ページを Compose 関数に
-  - `TasksScreen` — Run 一覧、Task 投入フォーム
-  - `GoalsScreen` — Goal 一覧、承認、Autopilot
-  - `OrdersScreen` — order 一覧、作成
-  - `ApprovalsScreen` — 停止承認
-  - `BudgetScreen` — 予算表示
-  - `MemoryScreen` — 記憶一覧、絞り込み
-  - `AssigneesScreen` — 担当管理
-- **ダイアログ**: `ReleaseDialog`, `StopDialog`, `MemoryDialog`, `BudgetDialog` など
-
-#### 4. 状態管理
-- `KtorClient` で API 呼び出し（既存エンドポイントを使用）
-- `@Stable` data class で API レスポンスを保持
-- `remember { mutableStateOf(...) }` で UI 状態
-- 後続で ViewModel パターンに改善可能
-
-#### 5. ビルド構成
-- `kivra-compose-ui`: KMP モジュール（jvm + wasmJs）
-- `kivra-web`: wasmJs のみ、Compose Web 依存
-- `kivra-app`: `kivra-web` に依存、ビルド時に Wasm 成果物をコピー
-
-### Key Decisions
-1. **Wasm（JS ではなく）**: パフォーマンスと将来性。WasmGC 対応ブラウザが主流
-2. **既存 API を維持**: バックエンド変更なし。UI のみ書き換え
-3. **Ktor Client で API 呼び出し**: サーバー側と同じ Ktor を使用、コード共有が可能
-4. **段階的移行**: まず基本的な画面（タスク一覧）から、徐々に全画面を移行
-5. **CSS は Compose Modifier に置き換え**: 外部 CSS ファイル不要
+### Architecture Diagram
+```mermaid
+graph LR
+    subgraph Build Phase
+        A[kivra-compose-ui] -->|KMP Wasm Compile| B[kivra-web]
+        B -->|wasmJsBrowserDistribution| C[Wasm/JS Production Bundle]
+        C -->|copyComposeWebDist| D[kivra-app resources/ui/compose]
+    end
+    subgraph Runtime
+        D -->|UiRoutes.kt| E[Ktor Server EngineMain]
+        E -->|HTTP 200| F[Browser /ui/compose]
+    end
+```
 
 # Testing
 
 ### Validation Approach
-- `./gradlew :kivra-compose-ui:compileKotlinWasmJs` — Compose UI モジュールのコンパイル確認
-- `./gradlew :kivra-web:wasmJsBrowserProductionRun` — ローカルで Wasm サーバー起動してブラウザ確認
-- `./gradlew :kivra-app:test` — 既存テストの全テスト合格（API 変更なしなので影響なし）
+- `./gradlew :kivra-app:compileKotlin :kivra-app:compileTestKotlin` でコンパイルエラーゼロを確認。
+- `./gradlew :kivra-app:test` を実行し、全テスト（マイグレーション、アーキテクチャ、API ルート）のパスを確認。
+- `./gradlew :kivra-app:copyComposeWebDist` で `kivra-app/build/resources/main/ui/compose` に Wasm/JS ファイル群が生成されることを確認。
+- Docker ビルドローカル検証を実施し、イメージ内で静的アセットが存在することを確認。
 
 ### Key Scenarios
-1. ブラウザで `/ui` にアクセス → Compose UI が表示される
-2. ナビゲーションタブでページ遷移
-3. プロジェクトサイドバーでフィルタ
-4. Run 一覧の表示と詳細表示
-5. Task 投入フォームの送信
-
-### Edge Cases
-- Wasm ロード中のローディング表示
-- API エラー時の表示
-- プロジェクトが0件の場合の空状態
-- モバイル画面（レスポンシブ）
+1. **テストスイートの全合格**: V40〜V43 適用後の H2 テスト環境で全ルートおよびマイグレーションテストがグリーンになること。
+2. **Wasm 成果物の自動生成**: `kivra-app` ビルド時に Wasm 配信物が欠落せず配置されること。
+3. **本番配信**: デプロイ環境の `/ui/compose` にアクセスした際、404 が解消され Compose Web UI が読み込まれること。
 
 # Delivery Steps
 
-### ✓ Step 1: Add kivra-compose-ui and kivra-web modules
-Compose Multiplatform の基盤モジュールを追加。KMP 構成、依存関係、ビルド設定を整える。
-- `settings.gradle.kts` に `kivra-compose-ui` と `kivra-web` を追加
-- `gradle/libs.versions.toml` に Compose Multiplatform 1.8.0 と Ktor Client（wasmJs）の依存を追加
-- `kivra-compose-ui/build.gradle.kts` を作成（KMP: jvm + wasmJs、Compose 依存）
-- `kivra-web/build.gradle.kts` を作成（wasmJs、Compose Web、Ktor Client）
-- `kivra-compose-ui/src/commonMain/kotlin/App.kt` に基本の Compose エントリポイントを追加
-- `kivra-web/src/wasmJsMain/kotlin/main.kt` に Wasm エントリーポイントを追加
-- `./gradlew :kivra-compose-ui:compileKotlinWasmJs` でコンパイル確認
+### * Step 1: Fix Database Migrations (V40-V43) and Test Compatibility
+Ensure all database migrations run cleanly across H2 and MariaDB, and all allowlists and unit tests in `kivra-app` pass.
+- Adjust SQL syntax in `V42__project_scoped_orders_and_assignees.sql` and `V43__selfdev_multiple_roots.sql` for H2 compatibility.
+- Update migration allowlists and assertions in `MigrationChainTest`, `MigrationExpandOnlyTest`, and `MigrationRollingUpgradeTest`.
+- Fix route allowlists in `RolesCoverageArchitectureTest` and module lists in `DockerfileModuleCoverageTest`.
+- Run `./gradlew :kivra-app:test` to verify all test suites pass.
 
-### ✓ Step 2: Implement navigation and layout shell
-トップヘッダー（タブ）、サイドバー（プロジェクト）、メインコンテンツのレイアウトとルーティングを実装。
-- `KivraApp` ルートコンポーザブルを作成（Scaffold レイアウト）
-- トップヘッダー：アプリ名、ナビゲーションタブ（7ページ）、ヘルステータス
-- サイドバー：プロジェクト一覧、空状態、作成フォーム
-- `NavDestination` sealed class でルーティング定義
-- `rememberNavController` でページ遷移
-- プロジェクト API（`/api/projects`）を Ktor Client で呼び出し
-- ローディング中とエラー時の表示
+###   Step 2: Fix Docker Build and Compose Web Distribution Packaging
+Configure Gradle task dependencies and Dockerfile to reliably build and bundle Wasm artifacts into the application jar and container.
+- Update `kivra-app/build.gradle.kts` so that `copyComposeWebDist` explicitly depends on `:kivra-web:wasmJsBrowserDistribution`.
+- Update `Dockerfile` to copy `kotlin-js-store/` and all module files needed for Wasm compilation.
+- Verify `DockerfileModuleCoverageTest` and local Gradle resource packaging.
 
-### ✓ Step 3: Implement Tasks page (Run list and submit form)
-タスクページ（Run 一覧と Task 投入フォーム）を Compose で実装。最も重要な画面。
-- `TasksScreen`: Run 一覧（`/api/runs`）、スコープ切り替え（自分/全員）
-- Run 詳細（クリックで詳細表示、`/api/runs/{id}`）
-- Task 投入フォーム（種別、タイトル、本文、送信）
-- プロジェクトフィルタ連携
-- 解放ダイアログ（Release dialog）
-- Run 一覧のステータスバッジとソート
+###   Step 3: CI Test Verification and Main Branch Merge
+Create/update the pull request with migration fixes and Compose Web packaging, verify CI pipeline checks, and merge to `main`.
+- Commit changes and push branch to GitHub.
+- Create/update PR, monitor CI workflow status (`test-h2`, `test-mariadb`, `boot`, `build`).
+- Squash merge the PR into `main`.
 
-### ✓ Step 4: Implement remaining pages (Goals, Orders, Approvals, Budget, Memory, Assignees)
-残りの6ページを Compose で実装。
-- `GoalsScreen`: Goal 一覧、Autopilot 制御、昇格条件、Goal 作成フォーム
-- `OrdersScreen`: order 一覧、作成フォーム、停止要求
-- `ApprovalsScreen`: 停止承認リスト、承認ダイアログ
-- `BudgetScreen`: 予算バー、未確定予約、解除ダイアログ
-- `MemoryScreen`: 記憶一覧、絞り込み、ページネーション、削除
-- `AssigneesScreen`: 担当一覧、作成フォーム、トークン発行
-- 各ダイアログ（Stop、Memory、Budget、Order 承認など）
-
-### ✓ Step 5: Wire Compose UI to Ktor server and update UiRoutes
-Ktor サーバーが Compose Wasm アプリを配信するように UiRoutes を更新。
-- `kivra-app/build.gradle.kts` に `copyComposeWebDist` タスクを追加（`wasmJsBrowserDistribution` の成果物を `resources/ui/compose/` にコピー）
-- `UiRoutes.kt` を更新：wasm ファイルを動的に発見して配信（ファイル名ハードコードなし）
-- CSP ヘッダーを更新（Wasm 用：`worker-src 'self'` と `child-src 'self'` を追加）
-- `RolesCoverageArchitectureTest` を更新：新しいルートパターンを OPEN_ROUTES に追加
-- `compose.dev.yml` で確認（ローカル起動して UI が表示されるか）
-- `./gradlew :kivra-app:test` で全1998テスト合格確認
+###   Step 4: Kubernetes Deployment and Verification of Compose Web UI
+Deploy the updated container image to Kubernetes and verify that Compose Web UI is accessible and functional at `/ui/compose`.
+- Update/merge Kubernetes manifest PR in `kigawa-net-k8s` repository.
+- Verify ArgoCD synchronization and pod rollout.
+- Test `GET https://kivra-dev.kigawa.net/ui/compose` in browser and confirm HTTP 200 response and proper Compose UI rendering.

@@ -59,6 +59,7 @@ class RolesCoverageArchitectureTest {
     /** The permission each registered route needs. A route here must also name that permission in its handler (or its shared gate). */
     private val ROUTE_PERMISSIONS: Map<String, Permission> = mapOf(
         "POST /api/tasks" to Permission.SPEND_START,
+        "POST /api/runs/{id}/comments" to Permission.SPEND_START,
         "GET /api/runs/{id}" to Permission.READ,
         "GET /api/runs" to Permission.READ,
         "GET /api/runs/{id}/operations" to Permission.READ,
@@ -251,7 +252,7 @@ class RolesCoverageArchitectureTest {
         "routes/SelfDevMemoryRoutes.kt" to 1,
         // PR T3: the assignee admin API and /me share one `operators.authenticate(` (the roles' routes, then `guard.resolve`).
         "routes/SelfDevAssigneeRoutes.kt" to 1,
-        "routes/TaskApiRoutes.kt" to 3,
+        "routes/TaskApiRoutes.kt" to 4,
         "routes/OperationApiRoutes.kt" to 1,
         "routes/RunViewRoutes.kt" to 3,
         "routes/SelfDevRoutes.kt" to 3,

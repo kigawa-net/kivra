@@ -139,24 +139,29 @@ class MigrationExpandOnlyTest {
             "V39:DROP (ALTER TABLE SELFDEV_ORDER_EVENTS DROP CONSTRAINT CK_SELFDEV_ORDER_EVENTS_ACTOR)" to
                 "V39 replaces the actor CHECK. An old Writer never writes the new values, so its rows pass the new CHECK.",
             // V40: flatten Goal/Plan into unified Task model — no old Writer targets these tables
-            "V40:DROP (ALTER TABLE SELFDEV_ORDERS DROP FOREIGN KEY FK_SELFDEV_ORDERS_GOAL)" to
-                "V40 drops selfdev_goals; no Writer references it after migration.",
-            "V40:DROP (ALTER TABLE SELFDEV_MEMORY_RECORDS DROP FOREIGN KEY FK_SELFDEV_MEMORY_RECORDS_PLAN_TASK)" to
+            "V40:DROP (ALTER TABLE SELFDEV_MEMORY_RECORDS DROP CONSTRAINT FK_SELFDEV_MEMORY_RECORDS_PLAN_TASK)" to
                 "V40 drops selfdev_plan_tasks; memory records no longer reference plan tasks.",
-            "V40:DROP (ALTER TABLE SELFDEV_MEMORY_RECORDS DROP FOREIGN KEY FK_SELFDEV_MEMORY_RECORDS_PLAN)" to
+            "V40:DROP (ALTER TABLE SELFDEV_MEMORY_RECORDS DROP CONSTRAINT FK_SELFDEV_MEMORY_RECORDS_PLAN)" to
                 "V40 drops selfdev_plans; memory records no longer reference plans.",
-            "V40:DROP (ALTER TABLE SELFDEV_MEMORY_RECORDS DROP FOREIGN KEY FK_SELFDEV_MEMORY_RECORDS_GOAL)" to
+            "V40:DROP (ALTER TABLE SELFDEV_MEMORY_RECORDS DROP CONSTRAINT FK_SELFDEV_MEMORY_RECORDS_GOAL)" to
                 "V40 drops selfdev_goals; memory records no longer reference goals.",
-            "V40:DROP (ALTER TABLE SELFDEV_PLAN_MEMORY_REFS DROP FOREIGN KEY FK_SELFDEV_PLAN_MEMORY_REFS_PLAN)" to
+            "V40:DROP (ALTER TABLE SELFDEV_PLAN_MEMORY_REFS DROP CONSTRAINT FK_SELFDEV_PLAN_MEMORY_REFS_PLAN)" to
                 "V40 drops selfdev_plans; plan memory refs table is orphaned.",
-            "V40:DROP (ALTER TABLE SELFDEV_ORDER_CYCLE_SPEND DROP FOREIGN KEY FK_SELFDEV_ORDER_CYCLE_SPEND_GOAL)" to
+            "V40:DROP (ALTER TABLE SELFDEV_ORDERS DROP CONSTRAINT FK_SELFDEV_ORDERS_GOAL)" to
+                "V40 drops selfdev_goals; orders no longer reference goals.",
+            "V40:DROP (ALTER TABLE SELFDEV_ORDER_CYCLE_SPEND DROP CONSTRAINT FK_SELFDEV_ORDER_CYCLE_SPEND_GOAL)" to
                 "V40 drops selfdev_goals; order cycle spend no longer references goals.",
+            "V40:DROP (DROP TABLE IF EXISTS SELFDEV_PLAN_MEMORY_REFS)" to
+                "V40 drops selfdev_plan_memory_refs as part of the Goal/Plan → Task migration.",
             "V40:DROP (DROP TABLE IF EXISTS SELFDEV_PLAN_TASKS)" to
                 "V40 drops selfdev_plan_tasks as part of the Goal/Plan → Task migration.",
             "V40:DROP (DROP TABLE IF EXISTS SELFDEV_PLANS)" to
                 "V40 drops selfdev_plans as part of the Goal/Plan → Task migration.",
             "V40:DROP (DROP TABLE IF EXISTS SELFDEV_GOALS)" to
                 "V40 drops selfdev_goals as part of the Goal/Plan → Task migration.",
+            // V43: allow multiple root orders
+            "V43:DROP (ALTER TABLE SELFDEV_ORDERS DROP CONSTRAINT UK_SELFDEV_ORDERS_ROOT)" to
+                "V43 removes the single-root UNIQUE constraint to allow multiple independent root orders.",
         )
     }
 }

@@ -106,9 +106,10 @@ class AutoRecoveryWorker(
                 return false
             }
             try {
+                val currentRun = runs.get(run.runId) ?: return false
                 runs.transition(
                     lease = lease,
-                    expectedVersion = run.version,
+                    expectedVersion = currentRun.version,
                     to = DevelopmentRunState.DEVELOPING,
                     actor = "auto-recovery",
                     reason = "AUTO_RETRY",

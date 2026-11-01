@@ -99,4 +99,14 @@ class ProcessCodeIssueScannerTest {
         assertEquals("", scanner.readFileContent("/etc/passwd"))
         assertEquals("", scanner.readFileContent("missing.kt"))
     }
+
+    @Test
+    fun `readFileContent refuses symlinks that resolve outside the repo`() {
+        val root = tempRepo()
+        val outside = Files.createTempFile("kivra-outside", ".txt")
+        Files.writeString(outside, "secret")
+        Files.createSymbolicLink(root.resolve("linked.txt"), outside)
+
+        assertEquals("", ProcessCodeIssueScanner(root, listOf("b")).readFileContent("linked.txt"))
+    }
 }

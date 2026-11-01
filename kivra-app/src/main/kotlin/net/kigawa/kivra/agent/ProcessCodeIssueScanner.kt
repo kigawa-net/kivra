@@ -97,7 +97,7 @@ class ProcessCodeIssueScanner(
     private val maxIssues: Int = 50,
     private val maxFileBytes: Long = 64 * 1024,
 ) : CodeIssueScanner {
-    private val root: Path = repoRoot.toAbsolutePath().normalize()
+    private val root: Path = repoRoot.toRealPath()
 
     override fun getCompilationErrors(): List<CodeIssue> {
         val result = try {
@@ -125,10 +125,10 @@ class ProcessCodeIssueScanner(
     override fun getTestFailures(): List<CodeIssue> {
         val reports = try {
             Files.walk(root, 8).use { stream ->
-                stream.filter { p ->
-                    Files.isRegularFile(p) && p.fileName.toString().let { it.startsWith("TEST-") && it.endsWith(".xml") } &&
+                stream.iterator().asSequence().filter { p ->
+                    p.fileName.toString().let { it.startsWith("TEST-") && it.endsWith(".xml") } &&
                         p.toString().contains("build/test-results")
-                }.toList()
+                }.mapNotNull(::confinedRegularFile).toList()
             }
         } catch (e: Exception) {
             logger.warn("code-scan: cannot list test reports exception={}", e.javaClass.simpleName)
@@ -159,12 +159,21 @@ class ProcessCodeIssueScanner(
 
     override fun readFileContent(path: String): String {
         val resolved = root.resolve(path).normalize()
-        if (!resolved.startsWith(root) || !Files.isRegularFile(resolved)) return ""
+        if (!resolved.startsWith(root)) return ""
         return try {
-            if (Files.size(resolved) > maxFileBytes) "" else Files.readString(resolved)
+            val real = confinedRegularFile(resolved) ?: return ""
+            if (Files.size(real) > maxFileBytes) "" else Files.readString(real)
         } catch (_: Exception) {
             ""
         }
+    }
+
+    /** Resolves links before use, and accepts only regular files whose real path stays under [root]. */
+    private fun confinedRegularFile(path: Path): Path? = try {
+        val real = path.toRealPath()
+        real.takeIf { it.startsWith(root) && Files.isRegularFile(it) }
+    } catch (_: Exception) {
+        null
     }
 
     /** Repo-relative path of [printed] (absolute or relative), or null when outside the repo. */
@@ -182,7 +191,7 @@ class ProcessCodeIssueScanner(
             Files.walk(root, 10).use { stream ->
                 stream.filter { p ->
                     p.fileName.toString() == "$simple.kt" && p.toString().contains("/src/") && !p.toString().contains("/build/")
-                }.findFirst().map { root.relativize(it).toString() }.orElse(null)
+                }.iterator().asSequence().mapNotNull(::confinedRegularFile).firstOrNull()?.let { root.relativize(it).toString() }
             }
         } catch (_: Exception) {
             null

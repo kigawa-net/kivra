@@ -577,7 +577,7 @@ internal fun Application.appModule(env: Map<String, String>) {
         if (taskApiIdentityWithSession != null) {
             configureTaskApiRoutes(runs, taskApiIdentityWithSession, selfDevSettings.config?.repo, permissionGuard, projectRepo)
             configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentityWithSession, permissionGuard)
-            configureProjectRoutes(projectRepo, taskApiIdentityWithSession)
+            configureProjectRoutes(projectRepo, runs, taskApiIdentityWithSession, permissionGuard)
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()
             configureBudgetAdminRoutes(budgetStore, taskApiIdentityWithSession, fx = fxSettings, operatorView = budgetStore, guard = permissionGuard)

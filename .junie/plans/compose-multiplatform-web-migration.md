@@ -91,26 +91,26 @@ graph LR
 
 # Delivery Steps
 
-### * Step 1: Fix Database Migrations (V40-V43) and Test Compatibility
+### ✓ Step 1: Fix Database Migrations (V40-V43) and Test Compatibility
 Ensure all database migrations run cleanly across H2 and MariaDB, and all allowlists and unit tests in `kivra-app` pass.
 - Adjust SQL syntax in `V42__project_scoped_orders_and_assignees.sql` and `V43__selfdev_multiple_roots.sql` for H2 compatibility.
 - Update migration allowlists and assertions in `MigrationChainTest`, `MigrationExpandOnlyTest`, and `MigrationRollingUpgradeTest`.
 - Fix route allowlists in `RolesCoverageArchitectureTest` and module lists in `DockerfileModuleCoverageTest`.
 - Run `./gradlew :kivra-app:test` to verify all test suites pass.
 
-###   Step 2: Fix Docker Build and Compose Web Distribution Packaging
+### ✓ Step 2: Fix Docker Build and Compose Web Distribution Packaging
 Configure Gradle task dependencies and Dockerfile to reliably build and bundle Wasm artifacts into the application jar and container.
 - Update `kivra-app/build.gradle.kts` so that `copyComposeWebDist` explicitly depends on `:kivra-web:wasmJsBrowserDistribution`.
 - Update `Dockerfile` to copy `kotlin-js-store/` and all module files needed for Wasm compilation.
 - Verify `DockerfileModuleCoverageTest` and local Gradle resource packaging.
 
-###   Step 3: CI Test Verification and Main Branch Merge
+### ✓ Step 3: CI Test Verification and Main Branch Merge
 Create/update the pull request with migration fixes and Compose Web packaging, verify CI pipeline checks, and merge to `main`.
 - Commit changes and push branch to GitHub.
 - Create/update PR, monitor CI workflow status (`test-h2`, `test-mariadb`, `boot`, `build`).
 - Squash merge the PR into `main`.
 
-###   Step 4: Kubernetes Deployment and Verification of Compose Web UI
+### ✓ Step 4: Kubernetes Deployment and Verification of Compose Web UI
 Deploy the updated container image to Kubernetes and verify that Compose Web UI is accessible and functional at `/ui/compose`.
 - Update/merge Kubernetes manifest PR in `kigawa-net-k8s` repository.
 - Verify ArgoCD synchronization and pod rollout.

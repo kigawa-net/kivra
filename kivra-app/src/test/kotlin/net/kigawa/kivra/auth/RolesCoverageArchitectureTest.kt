@@ -254,6 +254,8 @@ class RolesCoverageArchitectureTest {
         "routes/SelfDevAssigneeRoutes.kt" to 1,
         "routes/TaskApiRoutes.kt" to 4,
         "routes/OperationApiRoutes.kt" to 1,
+        // Issue #387: the Project API now resolves the caller's Task API identity once per handler.
+        "routes/ProjectRoutes.kt" to 1,
         "routes/RunViewRoutes.kt" to 3,
         "routes/SelfDevRoutes.kt" to 3,
         "routes/SelfDevAdminRoutes.kt" to 2,

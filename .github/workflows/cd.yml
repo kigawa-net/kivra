@@ -17,13 +17,11 @@ env:
   dockerRepository: harbor.kigawa.net/library
   name: kivra
   manifestRepository: kigawa-net/kigawa-net-k8s
-  OPENBAO_URL: https://openbao.kigawa.net
-  OPENBAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # fork からの PR には OPENBAO_TOKEN が渡らないため、ビルドしない
+    # fork からの PR には BWS_ACCESS_TOKEN / Harbor の認証情報が渡らないため、ビルドしない
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -56,17 +54,12 @@ jobs:
           sudo mv bws /usr/local/bin/
           bws --version
 
-      - name: Get Harbor credentials from OpenBao
+      - name: Harbor 認証情報を BWS から取得
         env:
-          OPENBAO_TOKEN: ${{ secrets.OPENBAO_TOKEN }}
+          BWS_ACCESS_TOKEN: ${{ secrets.BWS_ACCESS_TOKEN }}
         run: |
-          # OpenBao から Harbor の認証情報を取得
-          HARBOR_USER=$(curl -s -X GET "${OPENBAO_URL}/v1/credentials/repository/harbor/kigawa-net-k8s/user" \
-            -H "Authorization: Bearer ${OPENBAO_TOKEN}" \
-            | jq -r '.data.value')
-          HARBOR_PASS=$(curl -s -X GET "${OPENBAO_URL}/v1/credentials/repository/harbor/kigawa-net-k8s/password" \
-            -H "Authorization: Bearer ${OPENBAO_TOKEN}" \
-            | jq -r '.data.value')
+          HARBOR_USER=$(bws -c no secret get 929d361e-e599-4b58-b173-b3e201004d0a | jq -r '.value')
+          HARBOR_PASS=$(bws -c no secret get 13c66d3b-7eb6-4c37-b466-b3e2010057b1 | jq -r '.value')
           echo "::add-mask::$HARBOR_USER"
           echo "::add-mask::$HARBOR_PASS"
           echo "HARBOR_USER=$HARBOR_USER" >> "$GITHUB_ENV"

@@ -204,8 +204,16 @@ internal fun buildSelfDev(
         buildPlanWorker(autopilotConfig, registry, gateway, SelfDevOperatorRepository(database), tenantId, repoFiles, memory, suppress)
     }
     // ADR 0014 S1: the shadow judgement. Built only with the autopilot and its shadow switch on; it reads GitHub and writes the audit only.
-    // autoMergeShadow temporarily disabled pending Task model migration (V40): its store still reads the plan tables.
-    val autoMergeShadow: AutoMergeShadowWatch? = null
+    val autoMergeShadow: AutoMergeShadowWatch? = buildAutoMergeShadowWatch(
+        autopilot = autopilot,
+        store = DbAutoMergeShadowStore(
+            database, runs, SelfDevOperatorRepository(database), SelfDevAutopilotControlRepository(database), AuditRepository(),
+        ),
+        port = GitHubAutoMergeShadowPort(github, github),
+        repo = config.repo,
+        baseBranch = config.baseBranch,
+        botAuthorId = botUserId.reveal().toLong(),
+    )
     return SelfDevParts(
         worker = worker,
         routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github),

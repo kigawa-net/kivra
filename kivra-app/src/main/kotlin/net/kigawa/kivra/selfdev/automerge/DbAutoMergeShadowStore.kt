@@ -7,19 +7,21 @@ import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.DevelopmentRunsTable
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
-// SelfDevPlanRepository and SelfDevPlanTask removed in V40
+import net.kigawa.kivra.db.SelfDevOperatorRepository
+import net.kigawa.kivra.db.SelfDevTask
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 
 /**
- * The database side of the shadow judgement. The reads are read only; the one write is the audit event, appended in the Run's chain under
- * the Run's row lock (the same lock as [net.kigawa.kivra.db.DbAuditSink]).
+ * The database side of the shadow judgement, over the V40 Task model (`selfdev_tasks`, linked to a Run by `run_id`). The reads are read
+ * only; the one write is the audit event, appended in the Run's chain under the Run's row lock (the same lock as
+ * [net.kigawa.kivra.db.DbAuditSink]).
  */
-/** Stubbed pending Task model migration (V40). */
 class DbAutoMergeShadowStore(
     private val database: Database,
     private val runs: DevelopmentRunRepository,
+    private val operators: SelfDevOperatorRepository,
     private val control: SelfDevAutopilotControlRepository,
     private val audit: AuditRepository,
 ) : AutoMergeShadowStore {
@@ -33,8 +35,7 @@ class DbAutoMergeShadowStore(
                 AutoMergeBinding(repo = b.repository, prNumber = number.toInt(), nodeId = b.prNodeId, headSha = b.headSha)
             }
         }
-        // approval stubbed pending Task model migration (V40)
-        return ShadowRunSnapshot(state = run.state, binding = binding, approval = null)
+        return ShadowRunSnapshot(state = run.state, binding = binding, approval = approvalOf(operators.taskOfRun(runId.value)))
     }
 
     override fun globalSnapshot(): ShadowGlobalSnapshot {
@@ -60,5 +61,16 @@ class DbAutoMergeShadowStore(
 
     private companion object {
         const val ACTOR = "system:automerge-shadow"
+
+        /**
+         * The approval kind of a Run's task (ADR 0011 section 2.8d). An operator's approval is `approved_by`; a task that does not need an
+         * approval and has none recorded is AUTO_APPROVED. Anything else is null, which the judgement refuses (fail-closed).
+         */
+        fun approvalOf(task: SelfDevTask?): AutoMergeTaskApproval? = when {
+            task == null -> null
+            task.approvedBy != null -> AutoMergeTaskApproval.OPERATOR_APPROVED
+            !task.requiresApproval -> AutoMergeTaskApproval.AUTO_APPROVED
+            else -> null
+        }
     }
 }

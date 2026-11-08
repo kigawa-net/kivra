@@ -23,6 +23,12 @@ import net.kigawa.kivra.ui.TASK_TITLE_MAX
 import net.kigawa.kivra.ui.TaskSignature
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiRun
+import net.kigawa.kivra.ui.displayTime
+import net.kigawa.kivra.ui.pullRequestText
+import net.kigawa.kivra.ui.runKindText
+import net.kigawa.kivra.ui.runReasonText
+import net.kigawa.kivra.ui.runStateText
+import net.kigawa.kivra.ui.runTitleText
 import net.kigawa.kivra.ui.api.ApiSession
 import net.kigawa.kivra.ui.codePointCount
 import net.kigawa.kivra.ui.effectiveKind
@@ -83,7 +89,7 @@ fun TasksScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
             LoadedList(loaded, emptyText = "Run が見つかりません") { runs ->
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
                     items(runs) { run ->
-                        RunCard(run, onClick = { onNavigate(Route.RunDetail(run.runId)) })
+                        RunCard(run, showCreator = scope == "all", onClick = { onNavigate(Route.RunDetail(run.runId)) })
                         Divider()
                     }
                 }
@@ -240,22 +246,30 @@ private fun SubmitTaskCard(onAccepted: () -> Unit) {
     }
 }
 
+/**
+ * Run の一行(旧 UI の runRow)。題名、状態、種別、作成日時、(全員の一覧では)作成者、理由、PR。
+ * 種別や状態の表示は [runKindText] / [runStateText] の表を使い、知らない値はそのまま出す。
+ */
 @Composable
-private fun RunCard(run: ApiRun, onClick: () -> Unit) {
+private fun RunCard(run: ApiRun, showCreator: Boolean, onClick: () -> Unit) {
+    val kind = runKindText(run.mode)
+    val state = runStateText(run.state)
+    val reason = runReasonText(run.reasonCode)
     Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable(onClick = onClick)) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(run.title, style = MaterialTheme.typography.titleMedium)
+                Text(runTitleText(run.mode, run.title), style = MaterialTheme.typography.titleMedium)
                 AssistChip(
                     onClick = { },
-                    label = { Text(run.state) }
+                    label = { Text("状態: ${state.label}") }
                 )
             }
             Spacer(modifier = Modifier.height(4.dp))
-            Text("状態: ${run.state} | モード: ${run.mode}",
+            val creator = if (showCreator) " | 作成者: ${run.createdBy ?: ""}" else ""
+            Text("${kind.label} | 作成日時: ${displayTime(run.createdAt)}$creator",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (run.projectName != null) {
@@ -263,6 +277,14 @@ private fun RunCard(run: ApiRun, onClick: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            if (reason.isNotEmpty()) {
+                Text("理由: $reason",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text("PR: ${pullRequestText(run.pullRequestRepository, run.pullRequestNumber)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

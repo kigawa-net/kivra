@@ -12,9 +12,21 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import net.kigawa.kivra.ui.ActionNotice
+import net.kigawa.kivra.ui.AutopilotAvailability
 import net.kigawa.kivra.ui.GatedOperation
+import net.kigawa.kivra.ui.LocalAutopilotAvailability
 import net.kigawa.kivra.ui.LocalCallerPermissions
+import net.kigawa.kivra.ui.ORDER_TREE_MAX_INDENT
+import net.kigawa.kivra.ui.ORDER_REASONS
+import net.kigawa.kivra.ui.OrderTreeRow
 import net.kigawa.kivra.ui.Route
+import net.kigawa.kivra.ui.STOP_REASONS
+import net.kigawa.kivra.ui.displayTime
+import net.kigawa.kivra.ui.orderCodeText
+import net.kigawa.kivra.ui.orderStateText
+import net.kigawa.kivra.ui.orderTreeOf
+import net.kigawa.kivra.ui.requesterKindText
+import net.kigawa.kivra.ui.yenText
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiOrder
@@ -24,11 +36,14 @@ import net.kigawa.kivra.ui.writeFailureOf
 import net.kigawa.kivra.ui.writeFailureText
 
 /**
- * Orders screen: Order list.
+ * Orders screen: Order list (旧 UI の order 一覧と同じ木構造。子は親の直後に一段深く並ぶ)。
+ * 自律運転が無効のときは一覧ごと出さない(旧 UI の orders-section と同じ。読みにも行かない)。
  */
 @Composable
 fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
-    val loaded = rememberLoad(selectedProjectId) {
+    val autopilotOn = LocalAutopilotAvailability.current == AutopilotAvailability.ENABLED
+    val loaded = rememberLoad(Pair(selectedProjectId, autopilotOn)) {
+        if (!autopilotOn) return@rememberLoad emptyList()
         val allOrders = ApiClient.getOrders()
         if (selectedProjectId != null) allOrders.filter { it.projectId == selectedProjectId } else allOrders
     }
@@ -37,23 +52,47 @@ fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit)
         Text("order", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
-        LoadedList(loaded, emptyText = "orderが見つかりません") { orders ->
+        if (autopilotOn) LoadedList(loaded, emptyText = "orderが見つかりません") { orders ->
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(orders, key = { it.orderId }) { order ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onNavigate(Route.OrderDetail(order.orderId)) }) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text("order ${order.orderId}", style = MaterialTheme.typography.titleMedium)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("状態: ${order.state} | 深さ: ${order.depth} | 周: ${order.cyclesStarted} / ${order.maxCycles}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("使用: ${order.spentJpy} 円 / 予算: ${order.orderBudgetJpy} 円",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
+                items(orderTreeOf(orders), key = { it.order.orderId }) { row ->
+                    OrderCard(row, onClick = { onNavigate(Route.OrderDetail(row.order.orderId)) })
                     HorizontalDivider()
                 }
+            }
+        }
+    }
+}
+
+/** order の一行(旧 UI の ordRow)。字下げは木の深さ(旧 UI の order-level-N と同じく、上限の段まで)。 */
+@Composable
+private fun OrderCard(row: OrderTreeRow, onClick: () -> Unit) {
+    val order = row.order
+    val st = orderStateText(order.state)
+    val indent = (row.level.coerceAtMost(ORDER_TREE_MAX_INDENT) * 16).dp
+    val reason = order.stateReason?.takeIf { it.isNotEmpty() }?.let { orderCodeText(ORDER_REASONS, it) }
+    Card(modifier = Modifier.fillMaxWidth().padding(start = 8.dp + indent, end = 8.dp, top = 8.dp, bottom = 8.dp).clickable(onClick = onClick)) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("order ${order.orderId}", style = MaterialTheme.typography.titleMedium)
+                AssistChip(onClick = { }, label = { Text("状態: ${st.label}") })
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("深さ: ${order.depth} | 子の数: ${order.childCount}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("使用: ${yenText(order.spentJpy)} / 予算: ${yenText(order.orderBudgetJpy)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("周: ${order.cyclesStarted} / ${order.maxCycles} | 連続して失敗した周: ${order.consecutiveFailedCycles}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("期限: ${displayTime(order.expiresAt)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (reason != null) {
+                Text("理由: $reason",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -78,7 +117,10 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
     val perms = LocalCallerPermissions.current
 
     // 一覧。書き込みの後の読み直し(reloadKey)でも前の一覧を残す。
-    val loaded = rememberLoad(selectedProjectId, reloadKey) {
+    // 承認の一覧は自律運転が有効なときだけ(旧 UI の approval-section と同じ)。
+    val autopilotOn = LocalAutopilotAvailability.current == AutopilotAvailability.ENABLED
+    val loaded = rememberLoad(Pair(selectedProjectId, autopilotOn), reloadKey) {
+        if (!autopilotOn) return@rememberLoad emptyList()
         val allApprovals = ApiClient.getApprovals()
         if (selectedProjectId != null) {
             // A stop request has no project of its own: it belongs to its order's project.
@@ -128,15 +170,18 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
             )
         }
 
-        LoadedList(loaded, emptyText = "承認待ちの項目はありません") { approvals ->
+        if (autopilotOn) LoadedList(loaded, emptyText = "承認待ちの項目はありません") { approvals ->
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(approvals, key = { it.requestId }) { approval ->
                     val digestOk = isValidStopDigest(approval.digest)
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text("停止の承認待ち", style = MaterialTheme.typography.titleMedium)
+                            Text("対象の order: ${approval.orderId}", style = MaterialTheme.typography.titleMedium)
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text("対象の order: ${approval.orderId} | 理由: ${approval.reasonCode}",
+                            Text("理由: ${orderCodeText(STOP_REASONS, approval.reasonCode)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("要求した主体: ${requesterKindText(approval.requesterKind)} | 要求の時刻: ${displayTime(approval.createdAt)} | 期限: ${displayTime(approval.expiresAt)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             // 承認・却下は STOP_DECIDE の人だけ出す(旧 UI と同じ。サーバーも 403 で拒否する)。
@@ -178,7 +223,7 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
         ReasonDialog(
             title = "停止の承認",
             message = "この order を停止します。元に戻せません。\n" +
-                "対象の order: ${target.orderId}（理由: ${target.reasonCode}）",
+                "対象の order: ${target.orderId}（理由: ${orderCodeText(STOP_REASONS, target.reasonCode)}）",
             submitLabel = "承認する",
             reasonLabel = null,
             busy = busy,

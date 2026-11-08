@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import net.kigawa.kivra.ui.api.ApiClient
+import net.kigawa.kivra.ui.api.ApiMe
 import net.kigawa.kivra.ui.api.ApiProject
 import net.kigawa.kivra.ui.api.ApiSession
 import net.kigawa.kivra.ui.screens.*
@@ -48,6 +49,9 @@ val LocalCallerPermissions = compositionLocalOf { CallerPermissions.UNKNOWN }
 /** 自己開発の有無(ホームに出す)。読み直しの度に [KivraApp] が読む。 */
 val LocalSelfDevAvailability = compositionLocalOf { SelfDevAvailability.LOADING }
 
+/** 自律運転の有無(節と、その画面の一覧を出すかに使う)。読み直しの度に [KivraApp] が読む。 */
+val LocalAutopilotAvailability = compositionLocalOf { AutopilotAvailability.LOADING }
+
 /** 時刻の表示(端末の地域の `HH:MM:SS`)。 */
 private val clockText: (Long) -> String = { formatClock(it.toDouble()) }
 
@@ -60,12 +64,16 @@ fun KivraApp() {
     // 権限は読み込みのたびではなく起動時に 1 回だけ読む(旧 UI の loadMe と同じ)。失敗は UNKNOWN。
     // 表示の出し分けは UX のためで、サーバーが各リクエストで判定する。
     var permissions by remember { mutableStateOf(CallerPermissions.UNKNOWN) }
+    // ヘッダーに出す役割(旧 UI の me-role / me-note)。同じ応答を 1 回だけ使う。
+    var me by remember { mutableStateOf<ApiMe?>(null) }
     LaunchedEffect(Unit) {
-        permissions = try {
-            CallerPermissions.of(ApiClient.getMe())
+        val read = try {
+            ApiClient.getMe()
         } catch (e: Exception) {
-            CallerPermissions.UNKNOWN
+            null
         }
+        me = read
+        permissions = read?.let { CallerPermissions.of(it) } ?: CallerPermissions.UNKNOWN
     }
 
     // 読み直しの合図。手動の「更新」と定期更新で増える。表示中の画面は [LocalRefreshCount] をキーにして読み直す。
@@ -77,6 +85,9 @@ fun KivraApp() {
     var selfDev by remember { mutableStateOf(SelfDevAvailability.LOADING) }
     var autopilot by remember { mutableStateOf(AutopilotAvailability.LOADING) }
     var health by remember { mutableStateOf(HealthState()) }
+    // ナビの出し分け(旧 UI の予算の節・承認の節の表示条件)。予算は読めたときだけ、承認は件数が読めたときだけ。
+    var budgetVisible by remember { mutableStateOf(false) }
+    var pendingApprovals by remember { mutableStateOf<Int?>(null) }
 
     val refresh: () -> Unit = {
         refreshCount += 1
@@ -91,10 +102,26 @@ fun KivraApp() {
         } catch (e: Exception) {
             SelfDevAvailability.UNKNOWN
         }
-        autopilot = try {
+        val autopilotNow = try {
             autopilotAvailabilityOf(ApiClient.getAutopilot().enabled)
         } catch (e: Exception) {
             AutopilotAvailability.HIDDEN
+        }
+        autopilot = autopilotNow
+        // 承認の件数。自律運転が有効なときだけ読む(旧 UI の ORD と同じ。読めない・403・503 は null で出さない)。
+        pendingApprovals = if (autopilotNow != AutopilotAvailability.ENABLED) {
+            null
+        } else {
+            try {
+                ApiClient.getApprovals().size
+            } catch (e: Exception) {
+                null
+            }
+        }
+        budgetVisible = try {
+            loadBudgetOrHidden() != null
+        } catch (e: Exception) {
+            false
         }
         val ok = ApiClient.checkHealth()
         health = health.after(ok, nowMillis().toLong())
@@ -126,12 +153,16 @@ fun KivraApp() {
         LocalCallerPermissions provides permissions,
         LocalRefreshCount provides refreshCount,
         LocalSelfDevAvailability provides selfDev,
+        LocalAutopilotAvailability provides autopilot,
     ) {
         KivraAppContent(
             connection = connectionLabel(health, clockText),
             lastRefreshText = lastManualRefreshAt?.let { "最終更新: ${clockText(it)}" } ?: "最終更新: 未更新",
             onRefresh = onManualRefresh,
             autopilot = autopilot,
+            roleHeader = roleHeaderOf(me),
+            pendingApprovals = pendingApprovals,
+            budgetVisible = budgetVisible,
         )
     }
 }
@@ -142,6 +173,9 @@ private fun KivraAppContent(
     lastRefreshText: String,
     onRefresh: () -> Unit,
     autopilot: AutopilotAvailability,
+    roleHeader: RoleHeader?,
+    pendingApprovals: Int?,
+    budgetVisible: Boolean,
 ) {
     val perms = LocalCallerPermissions.current
     // 画面のルート。ブラウザのハッシュ(#/runs/<id> 等)と双方向に同期する: 読み込み時に解釈し、遷移時に書き、戻る/進むで読み直す。
@@ -152,6 +186,10 @@ private fun KivraAppContent(
     }
     LaunchedEffect(Unit) {
         addHashChangeListener { route = parseRoute(currentLocationHash()) }
+    }
+    // ページタイトル(旧 UI の renderNav の document.title)。画面が変わるたびに入れる。
+    LaunchedEffect(route) {
+        setDocumentTitle(documentTitleOf(route))
     }
     var projects by remember { mutableStateOf<List<ApiProject>>(emptyList()) }
     var selectedProjectId by remember { mutableStateOf<String?>(null) }
@@ -185,9 +223,14 @@ private fun KivraAppContent(
                             onClick = { navigate(Route.Page(NavDestination.Home)) },
                             label = { Text(NavDestination.Home.label) }
                         )
+                        val approvalsBadge = approvalsBadgeText(pendingApprovals)
                         NavDestination.grouped.forEach { (group, allItems) ->
-                            // 権限と自律運転の有無で隠す項目を外し、残りが無いグループは見出しごと出さない。
-                            val items = allItems.filter { perms.navVisible(it) && navVisibleForAutopilot(it, autopilot) }
+                            // 権限と自律運転・API の結果で隠す項目を外し、残りが無いグループは見出しごと出さない。
+                            val items = allItems.filter {
+                                perms.navVisible(it) &&
+                                    navVisibleForAutopilot(it, autopilot) &&
+                                    navVisibleForSections(it, autopilot, budgetVisible, pendingApprovals)
+                            }
                             if (items.isEmpty()) return@forEach
                             Text(
                                 text = group.label,
@@ -199,7 +242,11 @@ private fun KivraAppContent(
                                 NavigationDrawerItem(
                                     selected = route.nav == dest,
                                     onClick = { navigate(Route.Page(dest)) },
-                                    label = { Text(dest.label) }
+                                    label = { Text(dest.label) },
+                                    // 承認の件数のバッジ(旧 UI の nav-approvals-badge)。件数が読めている時だけ。
+                                    badge = approvalsBadge.takeIf { dest == NavDestination.Approvals }?.let { text ->
+                                        @Composable { Text(text) }
+                                    },
                                 )
                             }
                         }
@@ -252,6 +299,17 @@ private fun KivraAppContent(
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(horizontal = 8.dp)
                         )
+                        // 承認待ちの件数(1 件以上のとき。押すと承認の画面へ)。
+                        headerApprovalsText(pendingApprovals)?.let { text ->
+                            TextButton(onClick = { navigate(Route.Page(NavDestination.Approvals)) }) { Text(text) }
+                        }
+                        // 役割と、判定の状態の補足(読めた時だけ)。
+                        roleHeader?.let { role ->
+                            Column(modifier = Modifier.padding(horizontal = 8.dp)) {
+                                Text(role.roleText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                role.note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            }
+                        }
                         OutlinedButton(onClick = onRefresh) { Text("更新") }
                         Text(
                             text = lastRefreshText,

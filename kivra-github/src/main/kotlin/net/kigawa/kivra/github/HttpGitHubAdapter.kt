@@ -870,6 +870,17 @@ class HttpGitHubAdapter(
         return GitHubResult.Success(id)
     }
 
+    override suspend fun createIssue(repo: RepoRef, request: CreateIssue): GitHubResult<Long> {
+        val payload = JsonObject(mapOf("title" to JsonPrimitive(request.title), "body" to JsonPrimitive(request.body)))
+        val raw = when (val r = post("create issue", "${repoPath(repo)}/issues", payload)) {
+            is GitHubResult.Success -> r.value
+            is GitHubResult.Failure -> return r
+            is GitHubResult.Unknown -> return r
+        }
+        val number = (parse(raw) as? JsonObject)?.long("number") ?: return protocol("issue number")
+        return GitHubResult.Success(number)
+    }
+
     override suspend fun getPrRebaseView(repo: RepoRef, number: Int): GitHubResult<PrRebaseView> {
         val raw = when (val r = get("${repoPath(repo)}/pulls/$number")) {
             is GitHubResult.Success -> r.value

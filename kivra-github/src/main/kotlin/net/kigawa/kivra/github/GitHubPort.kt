@@ -85,6 +85,25 @@ interface GitHubPort {
      * Returns the id of the new comment.
      */
     suspend fun createPullRequestComment(repo: RepoRef, number: Int, body: String): GitHubResult<Long>
+
+    /**
+     * Creates one issue (the self-healing incident report, issue #225). The only issue write of the port: no edit, close, label or
+     * comment. POST is sent once; an unknown outcome is `Unknown` and is never re-sent. Returns the number of the new issue.
+     */
+    suspend fun createIssue(repo: RepoRef, request: CreateIssue): GitHubResult<Long>
+}
+
+/** A new issue. Its title and body are bounded here, so a caller cannot send an unbounded text. */
+data class CreateIssue(val title: String, val body: String) {
+    init {
+        require(title.isNotBlank() && title.length <= MAX_TITLE) { "title must be 1 to $MAX_TITLE characters" }
+        require(body.length <= MAX_BODY) { "body must be at most $MAX_BODY characters" }
+    }
+
+    companion object {
+        const val MAX_TITLE = 200
+        const val MAX_BODY = 4_000
+    }
 }
 
 enum class TreeEntryType { BLOB, TREE, COMMIT }

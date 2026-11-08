@@ -5,6 +5,7 @@ import net.kigawa.kivra.github.CheckRunsSummary
 import net.kigawa.kivra.github.CombinedStatus
 import net.kigawa.kivra.github.CommitFilesRequest
 import net.kigawa.kivra.github.CommittedFiles
+import net.kigawa.kivra.github.CreateIssue
 import net.kigawa.kivra.github.CreatePullRequest
 import net.kigawa.kivra.github.EnsuredBranch
 import net.kigawa.kivra.github.EnsuredPullRequest
@@ -269,6 +270,28 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
         diffFailure?.let { return GitHubResult.Failure(it, it.code) }
         if (diff.toByteArray(Charsets.UTF_8).size > maxBytes) return GitHubResult.Failure(GitHubFailureKind.TOO_LARGE, GitHubFailureKind.TOO_LARGE.code)
         return GitHubResult.Success(diff)
+    }
+
+    /** Issues created by [createIssue], in call order: (title, body). */
+    val issues = ArrayList<Pair<String, String>>()
+
+    /** The next issue create answers UNKNOWN after storing the issue when true (a lost response). Consumed once. */
+    var issueLost: Boolean = false
+
+    /** The next issue create answers with this failure and stores nothing when set. Consumed once. */
+    var issueFailure: GitHubFailureKind? = null
+
+    override suspend fun createIssue(repo: RepoRef, request: CreateIssue): GitHubResult<Long> {
+        touch("createIssue")
+        if (repo != this.repo) return foreign()
+        writes += "createIssue"
+        issueFailure?.let { issueFailure = null; return GitHubResult.Failure(it, it.code) }
+        issues += request.title to request.body
+        if (issueLost) {
+            issueLost = false
+            return GitHubResult.Unknown("createIssue", "response lost")
+        }
+        return GitHubResult.Success(issues.size.toLong())
     }
 
     override suspend fun createPullRequestComment(repo: RepoRef, number: Int, body: String): GitHubResult<Long> {

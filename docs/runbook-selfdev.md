@@ -486,6 +486,34 @@ SELECT pr_number, head_sha, state, verdict, finding_count, created_at
 - **止め方**: `KIVRA_SELFDEV_PR_REVIEW_ENABLED=false` にして再起動する(新しいレビューが止まる)。投稿済みのコメントと行は消さない。
 - **未対応**: 承認やマージへの接続、判定の一覧画面、差分が大きいときの分割レビュー、既存の PR に対する遡及レビュー(有効化の後の PR だけが対象)。
 
+### 4.13 自己開発の失敗の Issue 自動起票(#225 の第 1 段、既定は無効)
+
+自己開発の Run の失敗と、オートパイロットのサーキットブレーカーの開放を `IncidentIssueWatch` が検知し、原因ごとに GitHub の Issue を **1 件** 起票する。Issue の作成だけを行う(`createIssue`)。コメント、編集、クローズ、ラベル、マージ、承認は行わず、Run も開始しない(Issue から Run を作るのは #226 の仕事)。読むのは `development_runs`(自己開発のタスクだけ、状態が `FAILED` と `UNKNOWN`)と `selfdev_autopilot_control.breaker_open`。
+
+- **有効化**: `KIVRA_SELFDEV_AUTO_ISSUE_ENABLED=true`(`true` と `false` 以外の値は起動に失敗する。空は `false`)。`false` のあいだは、下の変数を一つも読まず、何も組み立てず、何も読まず、何も書かない。自己開発(`KIVRA_SELFDEV_ENABLED`)が有効なときだけ意味がある。
+- **必要な環境変数**(有効化のときだけ読む。k8s の既存の変数は変えない):
+  - `KIVRA_SELFDEV_AUTO_ISSUE_MAX_PER_HOUR`(既定 `2`、0 から 20)。1 時間あたりに起票する件数の上限。0 で起票を止める。
+  - `KIVRA_SELFDEV_AUTO_ISSUE_MIN_FAILED_RUNS`(既定 `3`、1 から 100)。同じ理由コードの FAILED の Run がこの回数以上、窓の中にあると `RUN_FAILED` になる。
+  - `KIVRA_SELFDEV_AUTO_ISSUE_WINDOW_HOURS`(既定 `24`、1 から 168)。窓の長さ。原因ごとに、窓の中では 1 回だけ起票する。
+- **検知の規則**(1 周 5 分):
+  - `RUN_FAILED`: FAILED の Run が理由コードごとに `MIN_FAILED_RUNS` 件以上。
+  - `RUN_UNKNOWN`: UNKNOWN の Run が 1 件以上(外部の結果が不明で人の判断待ち)。
+  - `BREAKER_OPEN`: ブレーカーが開いている間(1 件)。
+- **冪等**: 原因の指紋(`SHA-256(コード, 理由コード, リポジトリ)`)が `selfdev_incident_issues`(V46)の主キー。起票の前に行を claim する。窓の中では、再起動、2 つ目の Pod、応答の喪失があっても 2 件目は作らない。窓が過ぎた後に再発した原因は、もう一度 1 件だけ起票する。
+- **失敗時**: 作成が拒否された(`FAILED`)、応答が不明(`UNKNOWN`)のときは、どちらも再送しない。次に起票されるのは窓が過ぎてから。
+- **上限と無害化**: 1 時間あたりの上限は、失敗した作成も数える(GitHub が壊れていても暴走しない)。Issue の本文は固定の文章、コード、理由コード、件数、窓の時間、指紋の先頭 12 文字だけ。理由コードが大文字の識別子の形でないもの(自由テキストや秘密らしいもの)は `OTHER` になる。実行 ID、ログ、タスクの本文、モデルの出力は入らない。
+- **GitHub の権限**: 既存の GitHub App が Issue の書き込み(Issues: Read and write)を持つこと。PR レビュー(§4.12)のコメントと同じ権限で足りる。
+- **確認**(読み取りだけ):
+
+```sql
+SELECT incident_code, reason_code, state, issue_number, created_at
+  FROM selfdev_incident_issues
+ ORDER BY created_at DESC
+ LIMIT 50;
+```
+- **止め方**: `KIVRA_SELFDEV_AUTO_ISSUE_ENABLED=false` にして再起動する(新しい起票が止まる)。起票済みの Issue は消さない。
+- **未対応(この段階)**: Kivra が止まっているときの検知(外部の watchdog と通知経路は別の段階)、起票した Issue から Run を作ること(#226)、既存の Issue の open 状態の確認(GitHub の読み取りを増やさないため、窓で代用している)、CI の失敗と CrashLoop の検知(Run の失敗とブレーカーだけが対象)、起票の遡及。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

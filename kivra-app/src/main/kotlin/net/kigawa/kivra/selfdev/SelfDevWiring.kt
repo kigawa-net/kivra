@@ -43,6 +43,10 @@ import net.kigawa.kivra.selfdev.automerge.AutoMergeShadowWatch
 import net.kigawa.kivra.selfdev.automerge.DbAutoMergeShadowStore
 import net.kigawa.kivra.selfdev.automerge.GitHubAutoMergeShadowPort
 import net.kigawa.kivra.selfdev.automerge.buildAutoMergeShadowWatch
+import net.kigawa.kivra.selfdev.incident.DbIncidentSource
+import net.kigawa.kivra.selfdev.incident.DbIncidentStore
+import net.kigawa.kivra.selfdev.incident.IncidentIssueSettings
+import net.kigawa.kivra.selfdev.incident.IncidentIssueWatch
 import net.kigawa.kivra.selfdev.review.DbPrReviewStore
 import net.kigawa.kivra.selfdev.review.PrReviewSettings
 import net.kigawa.kivra.selfdev.review.PrReviewWatch
@@ -60,6 +64,8 @@ internal class SelfDevParts(
     val autoMergeShadow: AutoMergeShadowWatch? = null,
     /** The AI review of self-development pull requests (comment only). Non-null only when KIVRA_SELFDEV_PR_REVIEW_ENABLED is true. */
     val prReview: PrReviewWatch? = null,
+    /** The incident issue detector (issue #225). Non-null only when KIVRA_SELFDEV_AUTO_ISSUE_ENABLED is true. */
+    val incidentIssue: IncidentIssueWatch? = null,
     /** The Anthropic HTTP client and credential the developer uses. Reused by the LLM stop judgement (ADR 0021 L4); nothing else reads it. */
     val anthropic: AnthropicHandle? = null,
     /** The DeveloperPort instance for code auto-fix worker (C4). */
@@ -235,12 +241,27 @@ internal fun buildSelfDev(
     } else {
         null
     }
+    // Issue #225: the incident issue of a self-development failure. Off unless its switch is exactly true; it reads the Runs and the
+    // breaker and creates at most one issue per cause and window. It never starts a Run and never changes a Run.
+    val incidentSettings = IncidentIssueSettings.fromEnv(env)
+    val incidentIssue: IncidentIssueWatch? = if (incidentSettings.enabled) {
+        IncidentIssueWatch(
+            settings = incidentSettings,
+            store = DbIncidentStore(database),
+            source = DbIncidentSource(database, SelfDevAutopilotControlRepository(database)),
+            github = github,
+            repo = config.repo,
+        )
+    } else {
+        null
+    }
     return SelfDevParts(
         worker = worker,
         routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github),
         planWorker = planWorker,
         autoMergeShadow = autoMergeShadow,
         prReview = prReview,
+        incidentIssue = incidentIssue,
         anthropic = AnthropicHandle(anthropicClient, anthropicAuth),
         developer = developer,
     )

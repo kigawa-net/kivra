@@ -40,6 +40,22 @@ import net.kigawa.kivra.ui.api.ApiOrderCycle
 import net.kigawa.kivra.ui.api.ApiOrderDetail
 import net.kigawa.kivra.ui.api.ApiRun
 import net.kigawa.kivra.ui.api.ApiRunEvent
+import net.kigawa.kivra.ui.ORDER_REASONS
+import net.kigawa.kivra.ui.STOP_REASONS
+import net.kigawa.kivra.ui.displayTime
+import net.kigawa.kivra.ui.displayUtcTime
+import net.kigawa.kivra.ui.goalReasonText
+import net.kigawa.kivra.ui.goalStateText
+import net.kigawa.kivra.ui.orderCodeText
+import net.kigawa.kivra.ui.orderStateText
+import net.kigawa.kivra.ui.pullRequestText
+import net.kigawa.kivra.ui.requesterKindText
+import net.kigawa.kivra.ui.runActionText
+import net.kigawa.kivra.ui.runKindText
+import net.kigawa.kivra.ui.runReasonText
+import net.kigawa.kivra.ui.runStateText
+import net.kigawa.kivra.ui.runTitleText
+import net.kigawa.kivra.ui.yenText
 import net.kigawa.kivra.ui.writeFailureOf
 import net.kigawa.kivra.ui.writeFailureText
 
@@ -64,22 +80,26 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
             Spacer(Modifier.height(8.dp))
         }
         LoadedView(state) { run ->
-            Text(run.title, style = MaterialTheme.typography.headlineSmall)
+            Text(runTitleText(run.mode, run.title), style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
-                    DetailRow("状態", run.state)
-                    DetailRow("モード", run.mode)
+                    val kind = runKindText(run.mode)
+                    DetailRow("種別", kind.label + (kind.note?.let { "（$it）" } ?: ""))
+                    val state = runStateText(run.state)
+                    DetailRow("状態", "${state.label} — ${state.desc}")
                     DetailRow("実行", run.executed?.let { if (it) "実行した" else "実行していない" } ?: "—")
                     DetailRow("効果", run.effect)
-                    DetailRow("理由", run.reasonCode ?: "なし")
+                    DetailRow("理由", runReasonText(run.reasonCode).ifEmpty { "なし" })
                     DetailRow("プロジェクト", run.projectName ?: "未割り当て")
-                    run.taskSource?.let { DetailRow("解決元(参照)", it) }
+                    run.taskSource?.let { DetailRow("解決元（参照）", it) }
                     run.createdBy?.let { DetailRow("作成者", it) }
+                    DetailRow("PR", pullRequestText(run.pullRequestRepository, run.pullRequestNumber))
                     DetailRow("Run ID", run.runId)
                     DetailRow("Task ID", run.taskId)
-                    DetailRow("作成日時", run.createdAt)
-                    DetailRow("更新日時", run.updatedAt)
+                    DetailRow("作成日時（ローカル）", displayTime(run.createdAt))
+                    displayUtcTime(run.createdAt).takeIf { it.isNotEmpty() }?.let { DetailRow("作成日時（UTC）", it) }
+                    DetailRow("更新日時（ローカル）", displayTime(run.updatedAt))
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -184,9 +204,9 @@ private fun PullRequestSection(run: ApiRun) {
 @Composable
 private fun EventLine(event: ApiRunEvent) {
     val transition = event.toState?.let { " → $it" } ?: ""
-    val reason = event.reasonCode?.let { "（$it）" } ?: ""
+    val reason = runReasonText(event.reasonCode).takeIf { it.isNotEmpty() }?.let { "（$it）" } ?: ""
     Text(
-        text = "${event.occurredAt}  ${event.action}$transition$reason  [${event.result}]",
+        text = "${displayTime(event.occurredAt)}  ${runActionText(event.action)}$transition$reason  [${event.result}]",
         style = MaterialTheme.typography.bodySmall,
         modifier = Modifier.padding(vertical = 2.dp),
     )
@@ -233,14 +253,16 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
-                    DetailRow("状態", goal.state + (goal.stateReason?.let { "（$it）" } ?: ""))
+                    val goalState = goalStateText(goal.state)
+                    DetailRow("状態", "${goalState.label} — ${goalState.desc}")
+                    goal.stateReason?.takeIf { it.isNotEmpty() }?.let { DetailRow("理由", goalReasonText(it)) }
                     DetailRow("対象リポジトリ", goal.targetRepo)
                     DetailRow("試行回数", goal.attempts.toString())
                     DetailRow("承認が必要", if (goal.requiresApproval) "はい" else "いいえ")
                     DetailRow("依存", if (goal.dependencies.isEmpty()) "なし" else goal.dependencies.joinToString())
                     DetailRow("Task ID", goal.taskId)
-                    DetailRow("作成日時", goal.createdAt)
-                    DetailRow("更新日時", goal.updatedAt)
+                    DetailRow("作成日時", displayTime(goal.createdAt))
+                    DetailRow("更新日時", displayTime(goal.updatedAt))
                     if (goal.revision > 0) {
                         Spacer(Modifier.height(4.dp))
                         Text("計画の親タスクです。承認・見送りは子タスクごとに行います。",
@@ -371,16 +393,18 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
-                    DetailRow("状態", order.state + (order.stateReason?.let { "（$it）" } ?: ""))
+                    val st = orderStateText(order.state)
+                    DetailRow("状態", "${st.label} — ${st.desc}")
+                    order.stateReason?.takeIf { it.isNotEmpty() }?.let { DetailRow("理由", orderCodeText(ORDER_REASONS, it)) }
                     DetailRow("深さ", order.depth.toString())
                     DetailRow("周", "開始 ${order.cyclesStarted} / 上限 ${order.maxCycles}")
                     DetailRow("連続して失敗した周", order.consecutiveFailedCycles.toString())
                     DetailRow("子 order 数", order.childCount.toString())
                     DetailRow("現在の開発目標", order.currentGoalId ?: "なし")
                     DetailRow("プロジェクト", order.projectId ?: "未割り当て")
-                    DetailRow("有効期限", order.expiresAt)
-                    DetailRow("作成日時", order.createdAt)
-                    DetailRow("更新日時", order.updatedAt)
+                    DetailRow("有効期限", displayTime(order.expiresAt))
+                    DetailRow("作成日時", displayTime(order.createdAt))
+                    DetailRow("更新日時", displayTime(order.updatedAt))
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -388,11 +412,11 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                 Column(Modifier.padding(16.dp)) {
                     Text("予算(円)", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(4.dp))
-                    DetailRow("order 予算", order.orderBudgetJpy.toString())
-                    DetailRow("割り当て済み", order.allocatedJpy.toString())
-                    DetailRow("使用", order.spentJpy.toString())
-                    DetailRow("残り", order.remainingJpy.toString())
-                    DetailRow("1 周の予算", order.cycleBudgetJpy.toString())
+                    DetailRow("order 予算", yenText(order.orderBudgetJpy))
+                    DetailRow("割り当て済み", yenText(order.allocatedJpy))
+                    DetailRow("使用", yenText(order.spentJpy))
+                    DetailRow("残り", yenText(order.remainingJpy))
+                    DetailRow("1 周の予算", yenText(order.cycleBudgetJpy))
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -404,10 +428,11 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                     if (pending == null) {
                         Text("なし")
                     } else {
-                        DetailRow("状態", pending.state)
-                        DetailRow("理由", pending.reasonCode)
+                        DetailRow("理由", orderCodeText(STOP_REASONS, pending.reasonCode))
+                        DetailRow("要求した主体", requesterKindText(pending.requesterKind))
                         DetailRow("対象", if (pending.targetIsRoot) "order 全体(根)" else "子 order")
-                        DetailRow("有効期限", pending.expiresAt)
+                        DetailRow("要求の時刻", displayTime(pending.createdAt))
+                        DetailRow("有効期限", displayTime(pending.expiresAt))
                     }
                 }
             }
@@ -503,8 +528,10 @@ fun OrderCyclesScreen(orderId: String, onNavigate: (Route) -> Unit) {
                         Column(Modifier.padding(16.dp)) {
                             Text("周 ${cycle.cycleNo}", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
-                            DetailRow("開発目標の状態", cycle.goalState + (cycle.stateReason?.let { "（$it）" } ?: ""))
-                            DetailRow("開始日時", cycle.createdAt)
+                            val goalState = goalStateText(cycle.goalState)
+                            DetailRow("開発目標の状態", goalState.label)
+                            cycle.stateReason?.takeIf { it.isNotEmpty() }?.let { DetailRow("理由", goalReasonText(it)) }
+                            DetailRow("開始日時", displayTime(cycle.createdAt))
                             OutlinedButton(onClick = { onNavigate(Route.GoalDetail(cycle.goalId)) }) {
                                 Text("この周の開発目標を開く")
                             }

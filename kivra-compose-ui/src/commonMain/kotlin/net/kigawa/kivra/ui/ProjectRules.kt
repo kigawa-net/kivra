@@ -123,7 +123,7 @@ private val REASON_LABELS = mapOf(
 )
 
 /** 状態の表示名。旧 UI の stateInfo と同じ: 説明が無い code は「不明な状態」。 */
-fun runStateText(code: String): String {
+fun projectRunStateText(code: String): String {
     val desc = RUN_STATE_DESCRIPTIONS[code] ?: "不明な状態です（この画面に説明はありません）"
     return "$code（$desc）"
 }

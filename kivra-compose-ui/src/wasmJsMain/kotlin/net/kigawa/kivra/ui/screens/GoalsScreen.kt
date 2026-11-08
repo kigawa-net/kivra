@@ -14,6 +14,7 @@ import androidx.compose.foundation.clickable
 import net.kigawa.kivra.ui.AutopilotAvailability
 import net.kigawa.kivra.ui.GOAL_BAD_MESSAGE
 import net.kigawa.kivra.ui.GoalSignature
+import net.kigawa.kivra.ui.LocalAutopilotAvailability
 import net.kigawa.kivra.ui.IdempotencyKeys
 import net.kigawa.kivra.ui.LocalCallerPermissions
 import net.kigawa.kivra.ui.PROJECT_REQUIRED_MESSAGE
@@ -26,6 +27,8 @@ import net.kigawa.kivra.ui.TASK_TITLE_MAX
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiSession
 import net.kigawa.kivra.ui.autopilotAvailabilityOf
+import net.kigawa.kivra.ui.goalReasonText
+import net.kigawa.kivra.ui.goalStateText
 import net.kigawa.kivra.ui.codePointCount
 import net.kigawa.kivra.ui.goalFailureText
 import net.kigawa.kivra.ui.goalSuccessText
@@ -44,7 +47,11 @@ fun GoalsScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
     var listReload by remember { mutableStateOf(0) }
     var autopilotReload by remember { mutableStateOf(0) }
 
-    val loaded = rememberLoad(selectedProjectId, reload = listReload) { ApiClient.getGoals() }
+    // 一覧は自律運転が有効なときだけ(旧 UI の plans-section と同じ。無効なら一覧ごと出さず、読みにも行かない)。
+    val autopilotOn = LocalAutopilotAvailability.current == AutopilotAvailability.ENABLED
+    val loaded = rememberLoad(Pair(selectedProjectId, autopilotOn), reload = listReload) {
+        if (autopilotOn) ApiClient.getGoals() else emptyList()
+    }
     // 投入フォームを出すかの元になる、自律運転の有無と対象リポジトリ。読めない・無効なら何も出さない(旧 UI の goal-section と同じ)。
     val autopilot = rememberLoad(Unit, reload = autopilotReload) { readGoalAutopilot() }
     val read = autopilot.value ?: GoalAutopilot(AutopilotAvailability.LOADING, null)
@@ -62,17 +69,24 @@ fun GoalsScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
             Spacer(modifier = Modifier.height(16.dp))
         }
 
-        Column(modifier = Modifier.weight(1f)) {
+        if (autopilotOn) Column(modifier = Modifier.weight(1f)) {
             LoadedList(loaded, emptyText = "開発目標が見つかりません") { goals ->
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
                     items(goals) { goal ->
+                        val st = goalStateText(goal.state)
+                        val reason = goal.stateReason?.takeIf { it.isNotEmpty() }?.let { goalReasonText(it) }
                         Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onNavigate(Route.GoalDetail(goal.taskId)) }) {
                             Column(modifier = Modifier.padding(16.dp)) {
                                 Text(goal.title, style = MaterialTheme.typography.titleMedium)
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Text("状態: ${goal.state}",
+                                Text("状態: ${st.label}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (reason != null) {
+                                    Text("理由: $reason",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                         HorizontalDivider()

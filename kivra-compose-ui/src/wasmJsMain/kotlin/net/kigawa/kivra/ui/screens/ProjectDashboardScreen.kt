@@ -53,7 +53,7 @@ import net.kigawa.kivra.ui.projectRepoFailureText
 import net.kigawa.kivra.ui.projectScopeText
 import net.kigawa.kivra.ui.projectStateRows
 import net.kigawa.kivra.ui.projectTotalText
-import net.kigawa.kivra.ui.runStateText
+import net.kigawa.kivra.ui.projectRunStateText
 import net.kigawa.kivra.ui.showsProjectOperator
 import net.kigawa.kivra.ui.submitBlocked
 import net.kigawa.kivra.ui.yenText
@@ -91,7 +91,7 @@ private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNa
         Text("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
     } else {
         rows.forEach { (code, count) ->
-            Text("${runStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
+            Text("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
         }
     }
     Spacer(Modifier.height(12.dp))

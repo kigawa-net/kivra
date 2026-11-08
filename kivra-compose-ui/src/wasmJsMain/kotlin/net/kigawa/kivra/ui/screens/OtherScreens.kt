@@ -16,6 +16,11 @@ import net.kigawa.kivra.ui.GatedOperation
 import net.kigawa.kivra.ui.LocalCallerPermissions
 import net.kigawa.kivra.ui.OperatorAction
 import net.kigawa.kivra.ui.budgetPathLabel
+import net.kigawa.kivra.ui.budgetSummaryText
+import net.kigawa.kivra.ui.moneyText
+import net.kigawa.kivra.ui.countText
+import net.kigawa.kivra.ui.assigneeStateText
+import net.kigawa.kivra.ui.clipText
 import net.kigawa.kivra.ui.reservationLabel
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiBudget
@@ -55,10 +60,10 @@ fun BudgetScreen() {
             val used = b.usedValue
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("月: ${b.period}", style = MaterialTheme.typography.titleMedium)
+                    Text("月: ${b.period}（JST の暦月。上限は月ごとに数えます）", style = MaterialTheme.typography.titleMedium)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Text("上限: ${b.limitJpy} 円")
+                    Text("今月の使用額（確定と予約中の合計）", style = MaterialTheme.typography.bodySmall)
                     LinearProgressIndicator(
                         progress = if (limit != null && used != null && limit > 0) {
                             (used / limit).coerceIn(0.0, 1.0).toFloat()
@@ -67,9 +72,13 @@ fun BudgetScreen() {
                         },
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Text("確定: ${b.committedJpy} 円 / 予約中: ${b.reservedJpy} 円 / 残り: ${b.remainingJpy} 円")
-                    BudgetOverspendLine(b.remainingJpy)
-                    Text("確定(API): ${b.paths.api.committedJpy} 円 / 確定(CLI): ${b.paths.cli.committedJpy} 円")
+                    // 超過は文字でも示す(色だけに頼らない)。旧 UI の budget-bar-text と同じ。
+                    val over = b.remainingJpy.toDoubleOrNull()?.let { it < 0 } == true
+                    Text(
+                        budgetSummaryText(b),
+                        color = if (over) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text("確定(API): ${moneyText(b.paths.api.committedJpy)} / 確定(CLI): ${moneyText(b.paths.cli.committedJpy)}")
                     Text("未確定の予約: ${b.unpricedCount} 件")
                 }
             }

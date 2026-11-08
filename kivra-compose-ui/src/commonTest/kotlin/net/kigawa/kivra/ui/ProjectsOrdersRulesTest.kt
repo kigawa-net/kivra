@@ -80,8 +80,8 @@ class ProjectsOrdersRulesTest {
 
     @Test
     fun stateTextShowsCodeAndDescription() {
-        assertEquals("DEVELOPING（実装中）", runStateText("DEVELOPING"))
-        assertEquals("ZZZ（不明な状態です（この画面に説明はありません））", runStateText("ZZZ"))
+        assertEquals("DEVELOPING（実装中）", projectRunStateText("DEVELOPING"))
+        assertEquals("ZZZ（不明な状態です（この画面に説明はありません））", projectRunStateText("ZZZ"))
     }
 
     @Test

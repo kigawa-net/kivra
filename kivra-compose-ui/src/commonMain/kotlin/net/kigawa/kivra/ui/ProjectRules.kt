@@ -156,20 +156,7 @@ fun projectActivityText(event: ApiProjectActivity): String {
     return "$text  [${event.result}]"
 }
 
-private val YEN_SHAPE = Regex("-?[0-9]+(\\.[0-9]+)?")
-
-/**
- * 円の表示。十進の文字列を、整数部の 3 桁区切りと「 円」で出す(旧 UI の moneyText)。形が違えば「（不明）」。
- */
-fun yenText(raw: String): String {
-    if (!YEN_SHAPE.matches(raw)) return "（不明）"
-    val negative = raw.startsWith("-")
-    val unsigned = raw.removePrefix("-")
-    val intPart = unsigned.substringBefore('.')
-    val fraction = if (unsigned.contains('.')) "." + unsigned.substringAfter('.') else ""
-    val grouped = intPart.reversed().chunked(3).joinToString(",").reversed()
-    return (if (negative) "-" else "") + grouped + fraction + " 円"
-}
+// 円の表示は BudgetFxRules.kt の [yenText] を使う(旧 UI の moneyText。重複を避けるため main の版に統一)。
 
 /** scope の説明(旧 UI の project-dash-scope)。ALL は運用者の表示、OWN は自分の Run だけ。 */
 fun projectScopeText(scope: String): String = if (scope == "ALL") {

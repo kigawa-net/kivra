@@ -292,6 +292,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     selfDevParts?.autoMergeShadow?.start(this)
     // ADR 0008 addendum: the AI review of the bot's pull requests. Started only with its switch on (the watch is null otherwise).
     selfDevParts?.prReview?.start(this)
+    // Issue #225: the incident issue of a self-development failure. Started only with its switch on (the watch is null otherwise).
+    selfDevParts?.incidentIssue?.start(this)
     // The memory's retention step (ADR 0016 section 9). Started only with the memory switch on.
     memoryRepo?.let { repo -> SelfDevMemoryRetentionWorker({ repo.purgeRetention() }, SelfDevMemoryRetentionWorker.DEFAULT_INTERVAL).start(this) }
     // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD). Nothing runs before this.

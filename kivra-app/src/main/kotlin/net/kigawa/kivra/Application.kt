@@ -614,6 +614,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                 projectRepo, runs, taskApiIdentityWithSession, permissionGuard, selfDevSettings.config?.repo,
                 backfill = ProjectBackfillRepository(database),
                 members = ProjectMemberRepository(database, java.time.Clock.systemUTC()),
+                budgets = budgetStore,
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

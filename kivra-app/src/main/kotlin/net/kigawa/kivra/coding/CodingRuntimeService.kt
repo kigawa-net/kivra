@@ -123,6 +123,8 @@ class CodingRuntimeService(
                 continue
             }
             val title = tasks.title(run)?.takeIf { it.isNotBlank() } ?: continue
+            // The Run's project has its own limit (ADR 0022 PR-E). A refusal holds this attempt only: Runs of other projects still go on.
+            if (run.projectId != null && cost.claimDenial(run.projectId) != null) continue
             val claimed = attempts.claim(attemptId, agentId, config.leaseTtl)
             if (claimed is CodingAttemptResult.Ok) return CodingClaimOutcome.Claimed(inputFor(claimed.attempt, title, run.taskBody))
         }
@@ -145,7 +147,12 @@ class CodingRuntimeService(
     fun fail(attemptId: String, agentId: String, generation: Long, code: CodingErrorCode, usage: CliUsage? = null): CodingAttemptResult {
         val current = attempts.get(attemptId, agentId)
         if (current != null && current.leaseGeneration == generation && current.state.active) {
-            val booked = if (usage != null) cost.recordReported(attemptId, generation, usage) else cost.recordEstimated(attemptId, generation)
+            val projectId = projectOf(current.runId)
+            val booked = if (usage != null) {
+                cost.recordReported(attemptId, generation, usage, projectId)
+            } else {
+                cost.recordEstimated(attemptId, generation, projectId)
+            }
             if (!booked) throw CodingCostUnavailableException()
         }
         return attempts.fail(attemptId, agentId, generation, code.name, code.state)
@@ -176,7 +183,8 @@ class CodingRuntimeService(
             return CodingSubmitOutcome.Refused(CodingRefusal.NOT_ACTIVE)
         }
         if (current.leaseGeneration != generation) return CodingSubmitOutcome.Refused(CodingRefusal.STALE_GENERATION)
-        if (usage != null && !cost.recordReported(attemptId, generation, usage)) return CodingSubmitOutcome.StoreFailed
+        val projectId = projectOf(current.runId)
+        if (usage != null && !cost.recordReported(attemptId, generation, usage, projectId)) return CodingSubmitOutcome.StoreFailed
 
         return when (val verdict = validator.check(result)) {
             is CodingResultValidator.Verdict.Rejected -> {
@@ -186,7 +194,7 @@ class CodingRuntimeService(
                 CodingSubmitOutcome.Rejected(verdict.reasons, verdict.policyReasons)
             }
             is CodingResultValidator.Verdict.Accepted ->
-                store(attemptId, agentId, generation, result, verdict.patch, verdict.digest, reported = usage != null)
+                store(attemptId, agentId, generation, result, verdict.patch, verdict.digest, reported = usage != null, projectId = projectId)
         }
     }
 
@@ -198,6 +206,7 @@ class CodingRuntimeService(
         patch: PatchSet,
         digest: String,
         reported: Boolean,
+        projectId: String?,
     ): CodingSubmitOutcome {
         try {
             results.save(attemptId, digest, patch)
@@ -207,7 +216,7 @@ class CodingRuntimeService(
             return CodingSubmitOutcome.StoreFailed
         }
         // No usage was reported with this result: the reserve is booked before the attempt is marked received (fail closed).
-        if (!reported && !cost.recordEstimated(attemptId, generation)) return CodingSubmitOutcome.StoreFailed
+        if (!reported && !cost.recordEstimated(attemptId, generation, projectId)) return CodingSubmitOutcome.StoreFailed
         return when (val done = attempts.complete(attemptId, agentId, generation, digest, result.exitStatus, result.sessionId)) {
             is CodingAttemptResult.Ok -> {
                 logger.info("coding result accepted: attemptId={} changes={}", attemptId, patch.files.size)
@@ -278,14 +287,20 @@ class CodingRuntimeService(
     private fun expireAndBookEstimates(): ExpireResult {
         val expired = attempts.expire(config.reconcileLimit)
         for (id in expired.expiredQueued) {
-            if (!cost.recordEstimated(id, 0)) logger.error("coding reserve not booked: attemptId={} code=LEDGER_UNAVAILABLE", id)
+            val projectId = attempts.get(id)?.let { projectOf(it.runId) }
+            if (!cost.recordEstimated(id, 0, projectId)) logger.error("coding reserve not booked: attemptId={} code=LEDGER_UNAVAILABLE", id)
         }
         for (id in expired.orphaned) {
-            val generation = attempts.get(id)?.leaseGeneration ?: continue
-            if (!cost.recordEstimated(id, generation)) logger.error("coding reserve not booked: attemptId={} code=LEDGER_UNAVAILABLE", id)
+            val attempt = attempts.get(id) ?: continue
+            if (!cost.recordEstimated(id, attempt.leaseGeneration, projectOf(attempt.runId))) {
+                logger.error("coding reserve not booked: attemptId={} code=LEDGER_UNAVAILABLE", id)
+            }
         }
         return expired
     }
+
+    /** The project of the Run [runId] (ADR 0022 PR-E), or null: the cost then counts for the tenant only (as before the project scope). */
+    private fun projectOf(runId: String): String? = runs.find(RunId(runId))?.projectId
 
     /** The newest attempt of [runId], active or terminal. */
     fun latest(runId: String): CodingAttempt? = attempts.latestAttempt(runId)

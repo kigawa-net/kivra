@@ -40,6 +40,7 @@ import net.kigawa.kivra.db.SelfDevAssigneeRepository
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.execUpdate
+import net.kigawa.kivra.db.newDbStore
 import org.jetbrains.exposed.sql.transactions.transaction
 
 /** The project members API (ADR 0022, PR-D2): auth, CSRF, 404/400, idempotence, the last ADMIN, and the bulk import. */
@@ -68,6 +69,7 @@ class ProjectMembersRoutesTest {
                     guard,
                     backfill = ProjectBackfillRepository(db.database),
                     members = ProjectMemberRepository(db.database, Clock.systemUTC()),
+                    budgets = newDbStore(db, Clock.systemUTC()),
                 )
             }
         }

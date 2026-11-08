@@ -89,14 +89,23 @@ object CliUsageParser {
 
 /** The claim-time, report-time and expiry-time cost rules the coding service calls. Implemented by [DbCodingCostLedger]. */
 interface CodingCostPort {
-    /** Null when a claim may be handed out. Otherwise the fixed denial code (BUDGET, UNKNOWN_COST, BUDGET_STORE_UNAVAILABLE, ...). */
-    fun claimDenial(): String?
+    /**
+     * Null when a claim may be handed out. Otherwise the fixed denial code (BUDGET, UNKNOWN_COST, BUDGET_STORE_UNAVAILABLE, ...).
+     * [projectId] is the Run's project (ADR 0022 PR-E): its limit is checked too. Null: the tenant only.
+     */
+    fun claimDenial(projectId: String? = null): String?
 
-    /** Books the reported usage of (attempt, generation). Returns false when nothing could be recorded, so the caller must not complete. */
-    fun recordReported(attemptId: String, leaseGeneration: Long, usage: CliUsage): Boolean
+    /**
+     * Books the reported usage of (attempt, generation). Returns false when nothing could be recorded, so the caller must not complete.
+     * [projectId]: the Run's project, booked to its scope as well as the tenant's. Null: the tenant only.
+     */
+    fun recordReported(attemptId: String, leaseGeneration: Long, usage: CliUsage, projectId: String? = null): Boolean
 
-    /** Books the per-attempt reserve as an unpriced estimate for (attempt, generation). Idempotent. Returns false when nothing could be recorded. */
-    fun recordEstimated(attemptId: String, leaseGeneration: Long): Boolean
+    /**
+     * Books the per-attempt reserve as an unpriced estimate for (attempt, generation). Idempotent. Returns false when nothing could be recorded.
+     * [projectId] as in [recordReported].
+     */
+    fun recordEstimated(attemptId: String, leaseGeneration: Long, projectId: String? = null): Boolean
 }
 
 /** The ledger could not record a cost, so the holder's fail is refused (the route answers 503). Carries no identifiers. */
@@ -125,18 +134,18 @@ class DbCodingCostLedger(
 ) : CodingCostPort {
     private val logger = LoggerFactory.getLogger(DbCodingCostLedger::class.java)
 
-    override fun claimDenial(): String? {
+    override fun claimDenial(projectId: String?): String? {
         val reserve = converter.toYen(reserveUsd, USD, clock.instant())
         if (reserve == null) {
             logger.warn("coding claim refused: code={} costReason=FX_UNUSABLE", BudgetDenial.UNKNOWN_COST)
             return BudgetDenial.UNKNOWN_COST
         }
-        val denied = budget.admission(listOf(tenantScope), yen(reserve.amount)) ?: return null
+        val denied = budget.admission(budget.scopesFor(projectId), yen(reserve.amount)) ?: return null
         logger.warn("coding claim refused: code={} costReason={}", denied.code, denied.costReason ?: "-")
         return denied.code
     }
 
-    override fun recordReported(attemptId: String, leaseGeneration: Long, usage: CliUsage): Boolean {
+    override fun recordReported(attemptId: String, leaseGeneration: Long, usage: CliUsage, projectId: String?): Boolean {
         val now = clock.instant()
         val converted = converter.toYen(usage.totalCostUsd, USD, now)
         val priced = modelPriced(usage.model, now)
@@ -144,6 +153,7 @@ class DbCodingCostLedger(
         if (!priced) logger.warn("coding cost model not priced: attemptId={} code=MODEL_UNPRICED", attemptId)
         return post(
             attemptId, leaseGeneration,
+            projectId = projectId,
             amount = converted?.amount ?: BigDecimal.ZERO,
             unpriced = converted == null || !priced,
             row = CodingUsageRow(
@@ -161,11 +171,12 @@ class DbCodingCostLedger(
         )
     }
 
-    override fun recordEstimated(attemptId: String, leaseGeneration: Long): Boolean {
+    override fun recordEstimated(attemptId: String, leaseGeneration: Long, projectId: String?): Boolean {
         val converted = converter.toYen(reserveUsd, USD, clock.instant())
         if (converted == null) logger.warn("coding reserve not convertible: attemptId={} code=FX_UNUSABLE", attemptId)
         return post(
             attemptId, leaseGeneration,
+            projectId = projectId,
             amount = converted?.amount ?: BigDecimal.ZERO,
             unpriced = true,
             row = CodingUsageRow(attemptId, leaseGeneration, reserveUsd, SOURCE_ESTIMATED),
@@ -177,8 +188,15 @@ class DbCodingCostLedger(
      * without its usage row, which is safe: the key still blocks a second charge. The usage row is never written for a key that was
      * already booked, so it always matches the charge it describes.
      */
-    private fun post(attemptId: String, leaseGeneration: Long, amount: BigDecimal, unpriced: Boolean, row: CodingUsageRow): Boolean {
-        val outcome = budget.recordSpend(reservationKey(attemptId, leaseGeneration), yen(amount), unpriced)
+    private fun post(
+        attemptId: String,
+        leaseGeneration: Long,
+        projectId: String?,
+        amount: BigDecimal,
+        unpriced: Boolean,
+        row: CodingUsageRow,
+    ): Boolean {
+        val outcome = budget.recordSpend(reservationKey(attemptId, leaseGeneration), yen(amount), unpriced, projectId)
         return when (outcome.result) {
             SpendResult.FAILURE -> {
                 logger.error("coding cost not recorded: attemptId={} code=LEDGER_UNAVAILABLE", attemptId)

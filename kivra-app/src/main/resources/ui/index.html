@@ -303,12 +303,31 @@
         <h3 id="h-project-dash-runs">最近の Run</h3>
         <ul id="project-dash-runs" class="run-list" aria-labelledby="h-project-dash-runs"></ul>
         <h3 id="h-project-dash-spend">費用（この Run に紐づく分）</h3>
-        <p class="meta" id="project-dash-spend-note">プロジェクトごとの上限はありません（月ごとの上限は、運用者向けの予算画面で確認します）。計画（Planner）の費用は含みません。</p>
+        <p class="meta" id="project-dash-spend-note">この Run に紐づく費用です。計画（Planner）の費用は含みません。プロジェクトの月の上限は、運用者には下の「今月の予算」に出ます。</p>
         <dl id="project-dash-spend" aria-labelledby="h-project-dash-spend"></dl>
         <h3 id="h-project-dash-activity">最近の活動</h3>
         <ol id="project-dash-activity" class="events" aria-labelledby="h-project-dash-activity"></ol>
         <!-- Operator only (the dashboard's scope is ALL): the repositories of the project, and the backfill of existing rows (ADR 0022). -->
         <div id="project-ops" hidden>
+          <!-- The monthly budget of the project (ADR 0022, PR-E). Filled from the dashboard; hidden for everyone else. -->
+          <div id="project-budget" hidden>
+            <h3 id="h-project-budget">今月の予算（運用者のみ）</h3>
+            <p class="meta">上限は、このプロジェクトの Run のコーディング CLI の費用だけに効きます。上限に達すると、このプロジェクトの新しい Run の割り当てだけが止まります（ほかのプロジェクトと全体の上限には影響しません）。警告の基準に達しても止まりません。</p>
+            <p class="meta" id="project-budget-period"></p>
+            <dl id="project-budget-figures" aria-labelledby="h-project-budget"></dl>
+            <p class="meta" id="project-budget-warning" role="status"></p>
+            <form id="project-budget-form" class="inline-form" novalidate>
+              <label for="project-budget-limit">月の上限（円、整数）</label>
+              <input id="project-budget-limit" type="text" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="例 10000">
+              <label for="project-budget-ratio">警告の基準（0 より大きく 1 以下）</label>
+              <input id="project-budget-ratio" type="text" inputmode="decimal" autocomplete="off" maxlength="5" value="0.8">
+            </form>
+            <div class="actions">
+              <button type="button" id="project-budget-set">上限を設定…</button>
+              <button type="button" class="secondary" id="project-budget-clear">上限を解除…</button>
+            </div>
+            <p id="project-budget-status" class="meta" role="status"></p>
+          </div>
           <h3 id="h-project-ops">リポジトリの対応（運用者のみ）</h3>
           <p class="meta">登録した repo（owner/name）に対応する既存の Task・Order・Run・記憶は、下の振り分けでこのプロジェクトに入ります。1 つの repo は 1 つのプロジェクトにだけ登録できます。</p>
           <ul id="project-repos" class="run-list" aria-labelledby="h-project-ops"></ul>
@@ -381,6 +400,18 @@
     <div class="dialog-actions">
       <button type="button" class="secondary" id="backfill-cancel" autofocus>キャンセル</button>
       <button type="button" id="backfill-confirm">振り分けを実行する</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="project-budget-dialog" aria-labelledby="project-budget-title">
+  <div class="release-body">
+    <h2 id="project-budget-title">今月の予算</h2>
+    <p id="project-budget-explain"></p>
+    <p class="error" id="project-budget-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="project-budget-cancel" autofocus>キャンセル</button>
+      <button type="button" id="project-budget-confirm">実行する</button>
     </div>
   </div>
 </dialog>

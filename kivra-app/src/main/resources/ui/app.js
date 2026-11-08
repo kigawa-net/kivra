@@ -1178,9 +1178,11 @@
     var countsOk = Object.keys(d.tasks.byState).every(function (k) { return typeof d.tasks.byState[k] === 'number'; });
     if (!countsOk || !Array.isArray(d.recentRuns) || !Array.isArray(d.activity)) return false;
     var s = d.spend;
-    return !!s && ['committedJpy', 'reservedJpy', 'lapsedJpy', 'unpricedJpy', 'totalJpy'].every(function (k) {
+    var spendOk = !!s && ['committedJpy', 'reservedJpy', 'lapsedJpy', 'unpricedJpy', 'totalJpy'].every(function (k) {
       return YEN_RE.test(str(s[k]));
     });
+    // The budget is the operator's only (null for everyone else). When present, its fields must be as the screen reads them.
+    return spendOk && (d.budget === null || d.budget === undefined || isProjectBudgetBody(d.budget));
   }
 
   async function loadProjectDashboard(id) {
@@ -1357,6 +1359,7 @@
     var ops = $('project-ops');
     var operator = d.scope === 'ALL';
     ops.hidden = !operator;
+    renderProjectBudget(operator ? d.budget : null, d.project.projectId);
     if (!operator) return;
     var id = d.project.projectId;
     if (PREPO.id !== id || PREPO.failed) loadProjectRepos(id);
@@ -1523,6 +1526,147 @@
     } else {
       showBackfillError(BACKFILL_MSG.failed);
     }
+  }
+
+  // ---- Operator: the monthly budget of a project (ADR 0022, PR-E). Shown with the operator block (scope ALL), from the dashboard's
+  // budget. Setting or clearing the limit asks first (a dialog). The server decides who may change it and checks the values.
+
+  var PBUD = { id: null, busy: false, pending: null };
+  var PBUD_LIMIT_SHAPE = /^(0|[1-9][0-9]{0,11})$/;
+  var PBUD_RATIO_SHAPE = /^[0-9]+(\.[0-9]{1,3})?$/;
+  var PBUD_MSG = {
+    invalid: '上限は 0 以上の整数（円）、警告の基準は 0 より大きく 1 以下（小数は 3 桁まで）で入力してください。',
+    notFound: 'このプロジェクトは見つかりません。画面を読み直してから、もう一度お試しください。',
+    forbidden: 'この操作は運用者だけができます。',
+    set: '今月の上限を設定しました。',
+    cleared: '今月の上限を解除しました。',
+    failed: '操作に失敗しました。時間をおいてもう一度お試しください。'
+  };
+
+  function isNoneValue(v) {
+    return v === null || v === undefined;
+  }
+
+  /** A budget figure from the server: the yen text, or 'なし' when there is no limit (the figure is then null). */
+  function budgetYenText(v) {
+    return isNoneValue(v) ? 'なし' : moneyText(v);
+  }
+
+  /** The budget fields this screen reads. A body without them is not shown (the dashboard then counts as invalid). */
+  function isProjectBudgetBody(b) {
+    if (!b || typeof b !== 'object') return false;
+    if (typeof b.projectId !== 'string' || typeof b.period !== 'string' || typeof b.softExceeded !== 'boolean') return false;
+    if (!isNoneValue(b.monthlyLimitJpy) && !YEN_RE.test(str(b.monthlyLimitJpy))) return false;
+    return ['committedJpy', 'reservedJpy'].every(function (k) { return YEN_RE.test(str(b[k])); });
+  }
+
+  function setPbudStatus(text, kind) {
+    var el = $('project-budget-status');
+    el.textContent = text;
+    el.className = kind === 'error' ? 'meta error' : 'meta';
+  }
+
+  function showPbudError(text) {
+    var el = $('project-budget-error');
+    el.textContent = text;
+    el.hidden = text === '';
+  }
+
+  /** The message for a failed budget request, by its status only (the body is never shown). */
+  function budgetFailText(r) {
+    if (r.kind === 'session') return MESSAGES.session;
+    if (r.status === 400) return PBUD_MSG.invalid;
+    if (r.status === 404) return PBUD_MSG.notFound;
+    if (r.status === 403) return PBUD_MSG.forbidden;
+    return PBUD_MSG.failed;
+  }
+
+  /** Shows the budget of the dashboard on screen, or hides the block (a viewer has no budget). The form takes the stored values once per
+   * project, so a refresh does not overwrite what the operator is typing. */
+  function renderProjectBudget(b, id) {
+    $('project-budget').hidden = !b;
+    if (!b) return;
+    $('project-budget-period').textContent = '対象の月：' + b.period + '（日本時間）。消化額は、このプロジェクトの Run のコーディング CLI の費用です。';
+    var dl = $('project-budget-figures');
+    clear(dl);
+    [
+      ['上限', budgetYenText(b.monthlyLimitJpy)],
+      ['警告の基準', budgetYenText(b.softLimitJpy)],
+      ['確定', budgetYenText(b.committedJpy)],
+      ['予約中', budgetYenText(b.reservedJpy)],
+      ['残額', budgetYenText(b.remainingJpy)]
+    ].forEach(function (row) {
+      dl.appendChild(h('dt', { text: row[0] }));
+      dl.appendChild(h('dd', { text: row[1] }));
+    });
+    var warn = $('project-budget-warning');
+    if (isNoneValue(b.monthlyLimitJpy)) {
+      warn.textContent = '上限は設定されていません。';
+      warn.className = 'meta';
+    } else if (b.softExceeded) {
+      warn.textContent = '警告：今月の消化（確定と予約中）が警告の基準に達しています。止まるのは上限に達したときだけです。';
+      warn.className = 'meta error';
+    } else {
+      warn.textContent = '今月の消化は警告の基準に達していません。';
+      warn.className = 'meta';
+    }
+    if (PBUD.id !== id) {
+      PBUD.id = id;
+      $('project-budget-limit').value = isNoneValue(b.monthlyLimitJpy) ? '' : str(b.monthlyLimitJpy);
+      $('project-budget-ratio').value = isNoneValue(b.softRatio) ? '0.8' : str(b.softRatio);
+    }
+  }
+
+  /** Opens the confirmation for setting the limit. The typed values are checked here first; the server checks them again. */
+  function openBudgetSetDialog() {
+    if (PBUD.busy || PDASH.id === null) return;
+    var limit = $('project-budget-limit').value.trim();
+    var ratio = $('project-budget-ratio').value.trim();
+    var ratioNum = Number(ratio);
+    if (!PBUD_LIMIT_SHAPE.test(limit) || !PBUD_RATIO_SHAPE.test(ratio) || !(ratioNum > 0 && ratioNum <= 1)) {
+      setPbudStatus(PBUD_MSG.invalid, 'error');
+      return;
+    }
+    PBUD.pending = { kind: 'set', id: PDASH.id, limit: limit, ratio: ratio };
+    $('project-budget-title').textContent = '今月の上限を設定';
+    $('project-budget-explain').textContent = '今月の上限を ' + Number(limit).toLocaleString('ja-JP') + ' 円、警告の基準を ' +
+      Math.round(ratioNum * 100) + '% に設定します。このプロジェクトの新しい Run は、上限に達すると割り当てられなくなります（ほかのプロジェクトと全体の上限には影響しません）。';
+    $('project-budget-confirm').textContent = '上限を設定する';
+    showPbudError('');
+    $('project-budget-confirm').disabled = false;
+    $('project-budget-dialog').showModal();
+  }
+
+  function openBudgetClearDialog() {
+    if (PBUD.busy || PDASH.id === null) return;
+    PBUD.pending = { kind: 'clear', id: PDASH.id };
+    $('project-budget-title').textContent = '今月の上限を解除';
+    $('project-budget-explain').textContent = '今月の上限を解除します。このプロジェクトは、全体の上限だけで判定されるようになります。今月までの消化額は残ります。';
+    $('project-budget-confirm').textContent = '上限を解除する';
+    showPbudError('');
+    $('project-budget-confirm').disabled = false;
+    $('project-budget-dialog').showModal();
+  }
+
+  async function confirmProjectBudget() {
+    var p = PBUD.pending;
+    if (p === null || PBUD.busy) return;
+    PBUD.busy = true;
+    $('project-budget-confirm').disabled = true;
+    var r = p.kind === 'set'
+      ? await apiFetch('/api/projects/' + encodeURIComponent(p.id) + '/budget', 'PUT', { monthlyLimitJpy: Number(p.limit), softRatio: Number(p.ratio) })
+      : await apiFetch('/api/projects/' + encodeURIComponent(p.id) + '/budget', 'DELETE', {});
+    PBUD.busy = false;
+    $('project-budget-confirm').disabled = false;
+    if (!r.ok) {
+      showPbudError(budgetFailText(r));
+      return;
+    }
+    PBUD.pending = null;
+    $('project-budget-dialog').close();
+    setPbudStatus(p.kind === 'set' ? PBUD_MSG.set : PBUD_MSG.cleared, 'ok');
+    PBUD.id = null;
+    await loadProjectDashboard(p.id);
   }
 
   // ---- Operator: the members of a project (ADR 0022, PR-D2). Shown with the operator block (scope ALL). The server decides who may
@@ -5300,6 +5444,11 @@
     $('backfill-run').addEventListener('click', openBackfillDialog);
     $('backfill-cancel').addEventListener('click', function () { $('backfill-dialog').close(); });
     $('backfill-confirm').addEventListener('click', confirmBackfill);
+    $('project-budget-form').addEventListener('submit', function (e) { e.preventDefault(); openBudgetSetDialog(); });
+    $('project-budget-set').addEventListener('click', openBudgetSetDialog);
+    $('project-budget-clear').addEventListener('click', openBudgetClearDialog);
+    $('project-budget-cancel').addEventListener('click', function () { $('project-budget-dialog').close(); });
+    $('project-budget-confirm').addEventListener('click', confirmProjectBudget);
     var projectMemberForm = $('project-member-form');
     if (projectMemberForm) projectMemberForm.addEventListener('submit', onProjectMemberSubmit);
     $('members-import-dry').addEventListener('click', function () {

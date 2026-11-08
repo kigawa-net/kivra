@@ -44,6 +44,7 @@ import net.kigawa.kivra.db.SelfDevSubmitResult
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.db.execQuery
+import net.kigawa.kivra.db.newDbStore
 import org.jetbrains.exposed.sql.transactions.transaction
 
 class ProjectRoutesTest {
@@ -66,6 +67,7 @@ class ProjectRoutesTest {
                     projects, db.runs, identity, guard,
                     backfill = ProjectBackfillRepository(db.database),
                     members = ProjectMemberRepository(db.database, Clock.systemUTC()),
+                    budgets = newDbStore(db, Clock.systemUTC()),
                 )
             }
         }

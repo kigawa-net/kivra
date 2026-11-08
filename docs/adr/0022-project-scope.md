@@ -87,3 +87,15 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - 画面(運用者の欄): メンバーの一覧、追加(担当の選択と role。候補は既存の `GET /api/selfdev/assignees` で、この一覧だけはプロジェクトの絞り込みを掛けずに読む)、role の変更、外す(確認つき)、全担当の取り込み(dry-run、確認つきの実行)。
 - 運用の手順は `docs/runbook-selfdev.md` 4.17 の「enforce へ進む手順」(取り込み、役割の調整、shadow で `PROJECT_NOT_MEMBER` が 0 件になるのを確かめる、enforce)。
 - 残り(後続): MCP の一覧と Task 投入の判定、PR-E(予算。表の PR-E と同じ)、PR-F(NULL の行を消す)。PR-D1 の節の「PR-D2(予算)」の表記は、予算を PR-E とする上の表に合わせて読む。
+
+## 進捗(PR-E: 予算、ブランチ `feat/project-budget`)
+
+- マイグレーションは追加しない。V51 の `project_budgets` と既存の `budget_*` の表だけを使う。スコープは `project:<projectId>`(表の PR-E の予算)。
+- 上限は `project_budgets` の行。行が無い project は上限なし(経路に入らず、従来どおり全体の上限だけで判定される)。API は `GET/PUT/DELETE /api/projects/{id}/budget`(ORDER_MANAGE、JSON)。`monthlyLimitJpy` は 0 以上の整数(円)、`softRatio` は 0 より大きく 1 以下(小数 3 桁まで、省略は 0.8)。不正値は 400、存在しない project は 404。
+- 期間は tenant と同じ JST の暦月。予約パスは `[tenant, project:<id>]`(上限がある project だけ)。決済(`recordSpend`)は上限の有無によらず project の行にも計上する。上限を後から設定しても、その月の消化額が見えるようにするため(導入前の消化は数えない)。
+- 台帳の経路はコーディング CLI(`CodingCostLedger`)。claim は候補 Run の project の上限で判定し、拒否はその attempt だけを保留する(ほかの project と全体は影響しない)。報告・見積もり・失敗の計上は Run の project に計上する。Run の project が NULL なら tenant だけ。Planner の費用と、API 経由のモデル呼び出し(`budgetScopes = [tenant]`)は、この段階では tenant だけ。
+- ロック順は tenant → project → run(各々 scope id、period でソート)。`lockOrder` の単体テスト(`BudgetLockOrderTest`)で固定する。上限の設定・解除は tenant のロックの下で行い、判定と直列化する。
+- 進行中の予約は予約時のスコープ(`budget_reservation_scopes`)のまま決済される。上限を外すと、その後の新しい経路は `BUDGET_POLICY_MISSING` で拒否される(安全側)。
+- soft は警告のみ。ダッシュボードの `softExceeded` と、決済時のログ `project budget soft limit reached`(ID と月だけ)。
+- ダッシュボードは運用者(scope `ALL`)にだけ `budget` を返す。画面には「今月の予算(運用者のみ)」と、確認つきの設定・解除を置いた。手順は `docs/runbook-selfdev.md` 4.18。
+- 残り(後続): API 経由のモデル呼び出し(ModelGateway)と Planner の費用の project 対応、MCP の経路、導入前の消化の遡及(必要なら集計の移行を別途)。

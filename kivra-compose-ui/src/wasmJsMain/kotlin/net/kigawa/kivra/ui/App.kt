@@ -272,7 +272,7 @@ private fun KivraAppContent(
                             NavDestination.Orders -> OrdersScreen(projectId, navigate)
                             NavDestination.Approvals -> ApprovalsScreen(projectId)
                             NavDestination.Budget -> BudgetScreen()
-                            NavDestination.Memory -> MemoryScreen()
+                            NavDestination.Memory -> MemoryScreen(projectId)
                             NavDestination.Assignees -> AssigneesScreen(projectId)
                             NavDestination.Autopilot -> AutopilotScreen()
                         }

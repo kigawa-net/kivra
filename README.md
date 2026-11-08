@@ -183,6 +183,7 @@ Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込み
 | `POST /api/tasks` | body `{"title": "...", "idempotencyKey": "..."}`。新規は 202、同じ (呼び出し元, idempotencyKey) の再送は 200 で同じ `runId` を返す。同じキーで title が違えば 409 |
 | `GET /api/runs/{id}` | 自分の Run。他人の Run、存在しない Run は 404 |
 | `GET /api/runs` | 自分の Run を新しい順に最大 50 件 |
+| `GET /api/projects/{id}/dashboard` | プロジェクトのダッシュボード（読み取りのみ、READ 権限）。`{project, scope, tasks, recentRuns, spend, activity}`。`scope` は `ALL`（運用者: プロジェクトの全 Run を数える）か `OWN`（それ以外: 自分の Run だけ）。`tasks` は Run の総数と状態別件数、`recentRuns` は最大 10 件、`spend` は Run に紐づく予算台帳の費用（円の文字列。確定・予約中・見積もりで計上した分。Planner の費用は含まない。プロジェクトごとの上限は無い）、`activity` は Run の監査イベントの新しい順 最大 30 件（固定の code のみ）。存在しないプロジェクトは 404 |
 | `GET /api/runs/{id}/operations` | 自分の Run の Operation を作成順に最大 100 件（読み取り専用）。他人の Run・存在しない Run は同じ 404。`{schemaVersion, runId, operations, limit, truncated}`。`?after=<operationId>` で次ページを取得でき、`truncated=true` のとき応答の `nextAfter` がその値（不正な `after` は 400）。`state` は Journal の状態名をそのまま返す（UNKNOWN / RECONCILIATION_REQUIRED を成功・完了とは表示しない）。トークン、request hash、外部参照、生のエラー、Evidence は含まない |
 
 応答（Run のスナップショット）: `{runId, taskId, title, state, mode, executed, effect, reasonCode, createdAt, updatedAt, ...}`。投入は `state` が `CREATED`、`mode` が `SIMULATED`、`executed` が `false`。自己開発の Run は `mode` が `SELF_DEV` で、`title` と `executed` は null（タイトルは返さない）、`effect` は `CREATES_PULL_REQUEST`。PR の番号とリンクは DB の binding から作る（GitHub は呼ばない）。

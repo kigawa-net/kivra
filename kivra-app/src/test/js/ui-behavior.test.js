@@ -63,6 +63,17 @@ class El {
   walk(fn) { fn(this); this.children.forEach((c) => { if (c.nodeType !== 3) c.walk(fn); }); }
   tags() { const out = []; this.walk((n) => out.push(n.tagName)); return out; }
   buttons() { const out = []; this.walk((n) => { if (n.tagName === 'BUTTON') out.push(n); }); return out; }
+  // The one selector the page uses on its own elements: '.class' (a descendant with that class).
+  querySelectorAll(sel) {
+    const cls = sel.replace(/^\./, '');
+    const out = [];
+    this.children.forEach((c) => {
+      if (c.nodeType === 3) return;
+      if (String(c.className || '').split(/\s+/).includes(cls)) out.push(c);
+      out.push(...c.querySelectorAll(sel));
+    });
+    return out;
+  }
 }
 
 function makeDom() {
@@ -3772,4 +3783,141 @@ test('the failed list says so in fixed words, and the header refresh reads the a
   };
   assert.equal(await where('#/assignees'), 1);
   assert.equal(await where('#/'), 0);
+});
+
+// ---- Project dashboard (#/projects/<id>/dashboard) ----------------------------
+
+const PROJECT_ID = '01PROJ' + 'A'.repeat(20);
+const DASH_HASH = '#/projects/' + PROJECT_ID + '/dashboard';
+const PROJECTS = [{ projectId: PROJECT_ID, name: 'Alpha' }];
+
+/** A dashboard body (scope OWN unless given). Titles are plain text here; the EVIL test builds its own. */
+function dashboardOf(over = {}) {
+  return Object.assign({
+    project: { projectId: PROJECT_ID, name: 'Alpha', description: '最初のプロジェクト' },
+    scope: 'OWN',
+    tasks: { total: 3, byState: { DEVELOPING: 2, COMPLETED: 1 } },
+    recentRuns: [{
+      runId: SIM_RUN_ID, taskId: 't-1', title: '採点を直す', state: 'DEVELOPING', mode: 'SIMULATED', executed: false,
+      effect: 'SIMULATED_ONLY', reasonCode: null, createdAt: '2026-10-18T10:00:00Z', updatedAt: '2026-10-18T10:05:00Z',
+      projectId: PROJECT_ID, projectName: 'Alpha',
+    }],
+    spend: { committedJpy: '1.5', reservedJpy: '0', lapsedJpy: '0', unpricedJpy: '0', totalJpy: '1.5' },
+    activity: [{ runId: SIM_RUN_ID, occurredAt: '2026-10-18T10:05:00Z', action: 'RUN_TRANSITION', result: 'OK', toState: 'DEVELOPING', reasonCode: null }],
+  }, over);
+}
+
+/** The projects list and the dashboard as given; everything else is answered as in `defaults(true)`. */
+function projectResponder(dashboard, projects = PROJECTS) {
+  const base = defaults(true);
+  return (p, init) => {
+    if (p === '/api/projects') return { status: 200, data: projects };
+    if (p === '/api/projects/' + encodeURIComponent(PROJECT_ID) + '/dashboard') return dashboard;
+    return base(p, init);
+  };
+}
+
+function dashboardCalls(calls) {
+  return calls.filter((c) => c.method === 'GET' && c.path.startsWith('/api/projects/') && c.path.endsWith('/dashboard'));
+}
+
+function allTags(node) { const out = []; node.walk((n) => out.push(n.tagName)); return out; }
+
+test('the side navigation gives each project a link to its dashboard, next to the filter link', async () => {
+  const dom = load(projectResponder({ status: 200, data: dashboardOf() }));
+  await flush();
+  const list = dom.byId('side-project-list');
+  const dash = list.querySelectorAll('.side-project-dash');
+  assert.equal(dash.length, 1);
+  assert.equal(dash[0].getAttribute('href'), DASH_HASH);
+  assert.equal(dash[0].textContent, 'ダッシュボード');
+  assert.equal(list.querySelectorAll('.side-project-link')[0].getAttribute('data-project-filter'), PROJECT_ID);
+  assert.equal(dashboardCalls(dom.calls).length, 0, 'the sidebar alone does not load a dashboard');
+});
+
+test('a dashboard route shows the counts, the recent Runs, the cost and the activity, and no other page', async () => {
+  const dom = load(projectResponder({ status: 200, data: dashboardOf() }), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dashboardCalls(dom.calls).length, 1);
+  assert.equal(dom.window.location.hash, DASH_HASH, 'the route is kept, not sent back to the list');
+  assert.equal(dom.byId('page-project').hidden, false);
+  assert.equal(dom.byId('page-tasks').hidden, true);
+  assert.equal(dom.byId('view-list').hidden, false);
+  assert.equal(dom.byId('view-detail').hidden, true);
+  assert.equal(dom.ids['nav-project'], undefined, 'the dashboard has no header item');
+  assert.equal(dom.byId('h-project-dash').textContent, 'Alpha');
+  assert.equal(dom.byId('project-dash-body').hidden, false);
+  assert.match(dom.byId('project-dash-total').textContent, /3 件/);
+  const states = dom.byId('project-dash-states').textContent;
+  assert.match(states, /DEVELOPING（実装中）：2 件/);
+  assert.match(states, /COMPLETED（完了（マージを検証済み））：1 件/);
+  assert.match(dom.byId('project-dash-runs').textContent, /採点を直す/);
+  assert.match(dom.byId('project-dash-spend').textContent, /確定1\.5 円/);
+  assert.match(dom.byId('project-dash-spend').textContent, /合計1\.5 円/);
+  assert.match(dom.byId('project-dash-activity').textContent, /Run 01SIMRUN.*→ DEVELOPING/);
+  assert.match(dom.byId('project-dash-status').textContent, /最終取得/);
+  assert.match(dom.byId('project-dash-scope').textContent, /あなたが投入した Run だけ/);
+});
+
+test('the operator sees every Run of the project with its creator, and a viewer sees only their own', async () => {
+  const operator = dashboardOf({ scope: 'ALL', recentRuns: [{ ...dashboardOf().recentRuns[0], createdBy: 'bob' }] });
+  const op = load(projectResponder({ status: 200, data: operator }), { hash: DASH_HASH });
+  await flush();
+  assert.match(op.byId('project-dash-runs').textContent, /作成者: bob/);
+  assert.match(op.byId('project-dash-scope').textContent, /すべての Run/);
+
+  const viewer = load(projectResponder({ status: 200, data: dashboardOf() }), { hash: DASH_HASH });
+  await flush();
+  assert.doesNotMatch(viewer.byId('project-dash-runs').textContent, /作成者/);
+  assert.match(viewer.byId('project-dash-scope').textContent, /ほかの人の Run は件数にも一覧にも入りません/);
+});
+
+test('an unknown project says so in fixed words and shows no body, and the server text is never shown', async () => {
+  const dom = load(projectResponder({ status: 404, data: { error: 'LEAK-project-not-found' } }), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('project-dash-status').textContent, 'このプロジェクトは見つかりません（削除されたか、リンクが正しくありません）。');
+  assert.equal(dom.byId('project-dash-status').className, 'meta error');
+  assert.equal(dom.byId('project-dash-body').hidden, true);
+  assert.ok(!dom.byId('page-project').textContent.includes('LEAK'));
+});
+
+test('a body without the fields this screen reads is shown as invalid, never half-rendered', async () => {
+  const dom = load(projectResponder({ status: 200, data: { project: { projectId: PROJECT_ID, name: 'Alpha' } } }), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('project-dash-body').hidden, true);
+  assert.equal(dom.byId('project-dash-status').textContent, '応答の形式が想定と違います。ログインが切れている可能性があります。ページを再読み込みしてください。');
+});
+
+test('a server-sent name, description, title and activity are written as text only', async () => {
+  const data = dashboardOf({
+    project: { projectId: PROJECT_ID, name: EVIL, description: EVIL },
+    recentRuns: [{ ...dashboardOf().recentRuns[0], title: EVIL }],
+    activity: [{ runId: SIM_RUN_ID, occurredAt: '2026-10-18T10:05:00Z', action: EVIL, result: EVIL, toState: EVIL, reasonCode: EVIL }],
+  });
+  const dom = load(projectResponder({ status: 200, data }), { hash: DASH_HASH });
+  await flush();
+  const tags = allTags(dom.byId('page-project'));
+  assert.ok(!tags.includes('IMG') && !tags.includes('SCRIPT'), 'no element is made from server text');
+  assert.ok(dom.byId('h-project-dash').textContent.includes(EVIL.slice(0, 20)));
+  assert.ok(dom.byId('project-dash-runs').textContent.includes(EVIL.slice(0, 20)));
+});
+
+test('the header refresh and the 30 second timer reload the open dashboard, and no other page does', async () => {
+  const dom = load(projectResponder({ status: 200, data: dashboardOf() }), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dashboardCalls(dom.calls).length, 1);
+  dom.byId('refresh-all-btn').fire('click');
+  await flush();
+  assert.equal(dashboardCalls(dom.calls).length, 2, 'the header refresh reloads it');
+
+  dom.clock.now += 30000;
+  dom.tickNow();
+  await flush();
+  assert.equal(dashboardCalls(dom.calls).length, 3, 'the timer reloads it after 30 seconds');
+
+  const list = load(projectResponder({ status: 200, data: dashboardOf() }));
+  await flush();
+  list.byId('refresh-all-btn').fire('click');
+  await flush();
+  assert.equal(dashboardCalls(list.calls).length, 0);
 });

@@ -735,7 +735,14 @@
           e.preventDefault();
           selectProjectFilter(p.projectId);
         });
-        list.appendChild(link);
+        var dash = h('a', {
+          className: 'side-project-dash',
+          href: projectDashboardHash(p.projectId),
+          text: 'ダッシュボード',
+          'aria-label': p.name + ' のダッシュボード',
+          'data-project-dashboard': p.projectId
+        });
+        list.appendChild(h('div', { className: 'side-project' }, [link, dash]));
       });
     }
     // Update active state
@@ -745,6 +752,18 @@
     }
     list.querySelectorAll('.side-project-link').forEach(function (el) {
       el.setAttribute('aria-current', el.getAttribute('data-project-filter') === state.projectFilter ? 'page' : '');
+    });
+    markProjectDashboardLink();
+  }
+
+  /** The dashboard link of the project on screen is the current one. Nothing else in the sidebar changes. */
+  function markProjectDashboardLink() {
+    var list = $('side-project-list');
+    if (!list) return;
+    var onDashboard = currentPageId() === 'project' ? PDASH.id : null;
+    list.querySelectorAll('.side-project-dash').forEach(function (el) {
+      if (onDashboard !== null && el.getAttribute('data-project-dashboard') === onDashboard) el.setAttribute('aria-current', 'page');
+      else el.removeAttribute('aria-current');
     });
   }
 
@@ -850,10 +869,10 @@
 
   // ---- Detail -----------------------------------------------------------
 
-  function eventLine(ev) {
+  function eventLine(ev, prefix) {
     var t = parseTime(ev.occurredAt);
     var action = has(ACTIONS, str(ev.action)) ? ACTIONS[str(ev.action)] : str(ev.action);
-    var text = (t === null ? str(ev.occurredAt) : fmtLocal(t)) + '  ' + action;
+    var text = (prefix ? prefix + '  ' : '') + (t === null ? str(ev.occurredAt) : fmtLocal(t)) + '  ' + action;
     if (ev.toState) text += ' → ' + str(ev.toState);
     if (ev.reasonCode) text += '（' + reasonText(ev.reasonCode) + '）';
     text += '  [' + str(ev.result) + ']';
@@ -969,15 +988,33 @@
     { id: 'approvals', hash: '#/approvals', title: '承認', gate: 'approval-section' },
     { id: 'budget', hash: '#/budget', title: '予算', gate: 'budget-section' },
     { id: 'memory', hash: '#/memory', title: '記憶', gate: 'memory-section' },
-    { id: 'assignees', hash: '#/assignees', title: '担当', gate: 'assignees-section' }
+    { id: 'assignees', hash: '#/assignees', title: '担当', gate: 'assignees-section' },
+    // The project dashboard (#/projects/<id>/dashboard): no header item; it is opened from the side navigation.
+    { id: 'project', hash: null, title: 'プロジェクト', gate: null, nav: false }
   ];
   // Set once a page's API answer is known, so a deep link is not sent back to #/ before the answer arrives.
   var NAV = { settled: {} };
+
+  /** For #/projects/<id>/dashboard: { id } (the id is '' when it cannot be decoded). Otherwise null. */
+  function parseProjectRoute() {
+    var m = /^#\/projects\/([^\/?#]+)\/dashboard$/.exec(window.location.hash);
+    if (!m) return null;
+    try {
+      return { id: decodeURIComponent(m[1]) };
+    } catch (e) {
+      return { id: '' };
+    }
+  }
+
+  function projectDashboardHash(projectId) {
+    return '#/projects/' + encodeURIComponent(projectId) + '/dashboard';
+  }
 
   /** The page id for the current hash: a run detail belongs to 'tasks'; anything unknown is null (route sends it to #/). */
   function pageIdForHash() {
     var h = window.location.hash;
     if (parseRoute() !== null) return 'tasks';
+    if (parseProjectRoute() !== null) return 'project';
     if (h === '' || h === '#') return 'tasks';
     for (var i = 0; i < PAGES.length; i++) {
       if (PAGES[i].hash === h) return PAGES[i].id;
@@ -1013,12 +1050,13 @@
       }
     });
     PAGES.forEach(function (p) {
+      $('page-' + p.id).hidden = p.id !== cur;
+      if (p.nav === false) return;
       var shown = p.gate === null || !$(p.gate).hidden;
       var link = $('nav-' + p.id);
       link.hidden = !shown;
       if (p.id === cur) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
-      $('page-' + p.id).hidden = p.id !== cur;
     });
     var n = pendingCount();
     var badge = $('nav-approvals-badge');
@@ -1032,7 +1070,7 @@
     head.textContent = n === null ? '' : '承認待ち ' + n + ' 件';
     if (n === null) head.removeAttribute('aria-label');
     else head.setAttribute('aria-label', label);
-    var title = detail ? 'Run の詳細' : PAGES.filter(function (p) { return p.id === cur; })[0].title;
+    var title = detail ? 'Run の詳細' : cur === 'project' ? 'プロジェクトのダッシュボード' : PAGES.filter(function (p) { return p.id === cur; })[0].title;
     document.title = 'Kivra \u2014 ' + title;
   }
 
@@ -1046,11 +1084,152 @@
     $('view-detail').hidden = !showDetail;
     $('detail-notice').textContent = '';
     renderNav();
-    if (showDetail) {
+    var project = parseProjectRoute();
+    if (project !== null) {
+      loadProjectDashboard(project.id);
+      window.scrollTo(0, 0);
+    } else if (showDetail) {
       loadDetail(r.id, r.all);
     } else {
       window.scrollTo(0, 0);
     }
+    markProjectDashboardLink();
+  }
+
+  // ---- Project dashboard (#/projects/<id>/dashboard): one project's Runs by state, the recent Runs, their ledger cost and
+  // their recent audit events. The server decides the scope (ALL for an operator, OWN otherwise). Text only, as everywhere here.
+
+  var PDASH = { id: null, seq: 0, data: null, error: null, okAt: 0, loading: false, lastAttemptAt: 0 };
+
+  var PDASH_MSG = {
+    notFound: 'このプロジェクトは見つかりません（削除されたか、リンクが正しくありません）。',
+    link: 'リンクが正しくありません。',
+    session: MESSAGES.session,
+    network: MESSAGES.network,
+    invalid: MESSAGES.invalid,
+    server: MESSAGES.server
+  };
+
+  /** The fields this screen reads. A body without them is shown as invalid, never half-rendered. */
+  function isProjectDashboardBody(d) {
+    if (!d || typeof d !== 'object') return false;
+    if (!d.project || typeof d.project !== 'object' || typeof d.project.projectId !== 'string') return false;
+    if (d.scope !== 'ALL' && d.scope !== 'OWN') return false;
+    if (!d.tasks || typeof d.tasks.total !== 'number' || !d.tasks.byState || typeof d.tasks.byState !== 'object') return false;
+    var countsOk = Object.keys(d.tasks.byState).every(function (k) { return typeof d.tasks.byState[k] === 'number'; });
+    if (!countsOk || !Array.isArray(d.recentRuns) || !Array.isArray(d.activity)) return false;
+    var s = d.spend;
+    return !!s && ['committedJpy', 'reservedJpy', 'lapsedJpy', 'unpricedJpy', 'totalJpy'].every(function (k) {
+      return YEN_RE.test(str(s[k]));
+    });
+  }
+
+  async function loadProjectDashboard(id) {
+    var seq = ++PDASH.seq;
+    if (PDASH.id !== id) {
+      PDASH.data = null;
+      PDASH.error = null;
+      PDASH.okAt = 0;
+    }
+    PDASH.id = id;
+    PDASH.loading = true;
+    PDASH.lastAttemptAt = Date.now();
+    renderProjectDashboard();
+    try {
+      var r = id === ''
+        ? { ok: false, kind: 'link' }
+        : await apiFetch('/api/projects/' + encodeURIComponent(id) + '/dashboard', 'GET');
+      if (seq !== PDASH.seq) return;
+      if (!r.ok) {
+        PDASH.data = null;
+        PDASH.error = has(PDASH_MSG, r.kind) ? r.kind : 'server';
+      } else if (!isProjectDashboardBody(r.data)) {
+        PDASH.data = null;
+        PDASH.error = 'invalid';
+      } else {
+        PDASH.data = r.data;
+        PDASH.error = null;
+        PDASH.okAt = Date.now();
+      }
+    } finally {
+      if (seq === PDASH.seq) {
+        PDASH.loading = false;
+        renderProjectDashboard();
+      }
+    }
+  }
+
+  /** The state codes in the order of STATES; a code the screen does not know follows, shown as it is. */
+  function projectStateRows(byState) {
+    var rows = [];
+    Object.keys(STATES).forEach(function (k) { if (has(byState, k)) rows.push(k); });
+    Object.keys(byState).forEach(function (k) { if (!has(STATES, k)) rows.push(k); });
+    return rows;
+  }
+
+  function renderProjectDashboard() {
+    var page = $('page-project');
+    if (!page || page.hidden) return;
+    var d = PDASH.data;
+    var status = $('project-dash-status');
+    $('project-dash-body').hidden = d === null;
+    if (d === null) {
+      $('h-project-dash').textContent = 'プロジェクトのダッシュボード';
+      $('project-dash-desc').textContent = '';
+      $('project-dash-scope').textContent = '';
+      if (PDASH.loading) {
+        status.className = 'meta';
+        status.textContent = '読み込み中…';
+      } else {
+        status.className = 'meta error';
+        status.textContent = PDASH_MSG[PDASH.error] || PDASH_MSG.server;
+      }
+      return;
+    }
+    status.className = 'meta';
+    status.textContent = PDASH.loading ? '更新中…' : '最終取得: ' + fmtLocal(PDASH.okAt) + '（' + relative(PDASH.okAt, Date.now()) + '）';
+    $('h-project-dash').textContent = clip(d.project.name, MAX_TITLE) || 'プロジェクトのダッシュボード';
+    $('project-dash-desc').textContent = str(d.project.description);
+    var all = d.scope === 'ALL';
+    $('project-dash-scope').textContent = all
+      ? '表示は、このプロジェクトのすべての Run です（運用者の表示）。'
+      : '表示は、あなたが投入した Run だけです。ほかの人の Run は件数にも一覧にも入りません。';
+
+    $('project-dash-total').textContent = d.tasks.total === 0 ? 'Run はまだありません。' : '全部で ' + d.tasks.total + ' 件です。';
+    var states = $('project-dash-states');
+    clear(states);
+    projectStateRows(d.tasks.byState).forEach(function (k) {
+      var info = stateInfo(k);
+      states.appendChild(h('li', { text: info.label + '（' + info.desc + '）：' + d.tasks.byState[k] + ' 件' }));
+    });
+    if (states.firstChild === null) states.appendChild(h('li', { className: 'empty', text: 'Run はありません。' }));
+
+    var runs = $('project-dash-runs');
+    clear(runs);
+    d.recentRuns.forEach(function (run) {
+      if (run && typeof run === 'object' && typeof run.runId === 'string') runs.appendChild(runRow(run, all));
+    });
+    if (runs.firstChild === null) runs.appendChild(h('li', { className: 'empty', text: 'Run はありません。' }));
+
+    var dl = $('project-dash-spend');
+    clear(dl);
+    [
+      ['確定', d.spend.committedJpy],
+      ['予約中', d.spend.reservedJpy],
+      ['見積もりで計上（確定待ち）', d.spend.lapsedJpy],
+      ['見積もりで計上（金額の確認待ち）', d.spend.unpricedJpy],
+      ['合計', d.spend.totalJpy]
+    ].forEach(function (row) {
+      dl.appendChild(h('dt', { text: row[0] }));
+      dl.appendChild(h('dd', { text: moneyText(row[1]) }));
+    });
+
+    var ol = $('project-dash-activity');
+    clear(ol);
+    d.activity.forEach(function (ev) {
+      if (ev && typeof ev === 'object') ol.appendChild(eventLine(ev, 'Run ' + str(ev.runId)));
+    });
+    if (ol.firstChild === null) ol.appendChild(h('li', { className: 'empty', text: '最近の活動はありません。' }));
   }
 
   // ---- Release (UNKNOWN, and a PULL_REQUEST without a binding) ----------
@@ -3054,6 +3233,7 @@
     if (page === 'budget' && state.budgetVisible) jobs.push(refreshBudget);
     if (page === 'memory' && memoryShown()) jobs.push(refreshMemory);
     if (page === 'assignees' && assigneesVisible()) jobs.push(refreshAssignees);
+    if (page === 'project' && PDASH.id) jobs.push(function () { return loadProjectDashboard(PDASH.id); });
     try {
       // One failure never stops the others (each function shows its own error).
       await Promise.all(jobs.map(function (fn) {
@@ -3077,6 +3257,7 @@
     // Budget and memory refresh only while their section is shown, and never while a dialog or a submission is open.
     if (state.budgetVisible && !budgetBusy() && now - state.budgetLastAttemptAt >= REFRESH_MS) refreshBudget();
     if (memoryShown() && !memoryBusy() && now - MEMS.lastAttemptAt >= REFRESH_MS) refreshMemory();
+    if (currentPageId() === 'project' && PDASH.id && !PDASH.loading && now - PDASH.lastAttemptAt >= REFRESH_MS) loadProjectDashboard(PDASH.id);
     renderRunsStatus(now);
     renderGoalsStatus(now);
   }

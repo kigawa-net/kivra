@@ -10,13 +10,18 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.route
+import java.math.BigDecimal
+import java.time.ZoneOffset
 import kotlinx.serialization.Serializable
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectActivityEntry
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.ProjectRow
+import net.kigawa.kivra.db.ProjectSpend
+import net.kigawa.kivra.github.RepoRef
 
 @Serializable
 private data class ProjectError(val error: String)
@@ -36,12 +41,18 @@ private data class ProjectError(val error: String)
  * Run owned by another principal additionally needs [Permission.ORDER_MANAGE] (the operator case, as with
  * `/api/admin/runs`); a caller without it gets a 404 for another principal's Run, so its existence is not
  * revealed.
+ *
+ * `GET /api/projects/{id}/dashboard` (read only, one screen): the project's Runs by state, the most recent Runs, the Runs' ledger
+ * cost and their recent audit events. The operator (ORDER_MANAGE) counts every Run of the project; anyone else only their own, so
+ * the scope is the same as the Run list's (scope "ALL" or "OWN" says which).
  */
 internal fun Route.configureProjectRoutes(
     projectRepo: ProjectRepository,
     runs: DevelopmentRunRepository,
     identity: TaskApiIdentity,
     guard: PermissionGuard = offPermissionGuard(),
+    /** The configured self-development repository: a pull request link is made only for it. Null: no link. */
+    targetRepo: RepoRef? = null,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -75,6 +86,30 @@ internal fun Route.configureProjectRoutes(
     }
 
     route("/api/projects/{projectId}") {
+        get("dashboard") {
+            val principal = call.principalOr401() ?: return@get
+            if (!call.permitOr403(principal, Permission.READ, "project_dashboard")) return@get
+            val projectId = call.parameters["projectId"]
+                ?: return@get call.respond(HttpStatusCode.NotFound)
+            val project = projectRepo.get(projectId)
+                ?: return@get call.respond(HttpStatusCode.NotFound)
+            val everyRun = guard.permits(principal, Permission.ORDER_MANAGE, "project_dashboard")
+            val scope = if (everyRun) null else principal
+            val countsByState = runs.countProjectRunsByState(projectId, scope)
+            call.respond(
+                ProjectDashboardResponse(
+                    project = project.toResponse(),
+                    scope = if (everyRun) "ALL" else "OWN",
+                    tasks = ProjectTaskCounts(total = countsByState.values.sum(), byState = countsByState),
+                    recentRuns = runs.listProjectRuns(projectId, scope, DASHBOARD_RECENT_RUNS).map {
+                        // The creator is shown only to the operator, as in GET /api/admin/runs.
+                        runs.viewOf(it, targetRepo, createdBy = if (everyRun) it.principal else null, projectRepo = projectRepo)
+                    },
+                    spend = projectRepo.runSpend(projectId, scope).toResponse(),
+                    activity = runs.projectActivity(projectId, scope, DASHBOARD_ACTIVITY).map { it.toResponse() },
+                ),
+            )
+        }
         get {
             val principal = call.principalOr401() ?: return@get
             if (!call.permitOr403(principal, Permission.READ, "project_get")) return@get
@@ -178,6 +213,72 @@ data class ProjectResponse(
     val projectId: String,
     val name: String,
     val description: String?,
+)
+
+/** The project dashboard (`GET /api/projects/{id}/dashboard`). Money is decimal yen as a string (the budget screen's form). */
+@Serializable
+data class ProjectDashboardResponse(
+    val project: ProjectResponse,
+    /** "ALL": the caller may manage projects, so every Run of the project is counted. "OWN": only the caller's own Runs are. */
+    val scope: String,
+    val tasks: ProjectTaskCounts,
+    val recentRuns: List<TaskRunResponse>,
+    val spend: ProjectSpendResponse,
+    val activity: List<ProjectActivityResponse>,
+)
+
+/** The Runs of the dashboard's scope: their total and the count per state (only states that occur). */
+@Serializable
+data class ProjectTaskCounts(val total: Long, val byState: Map<String, Long>)
+
+/**
+ * The ledger cost of the dashboard's Runs, in yen. A Run has no spending limit of its own, so there is no limit here.
+ * The Planner's cost is not included (it belongs to a cycle, not to one Run).
+ */
+@Serializable
+data class ProjectSpendResponse(
+    val committedJpy: String,
+    val reservedJpy: String,
+    val lapsedJpy: String,
+    val unpricedJpy: String,
+    val totalJpy: String,
+)
+
+/** One audit event of a Run of the dashboard. Only fixed codes; no actor and no free text. */
+@Serializable
+data class ProjectActivityResponse(
+    val runId: String,
+    val occurredAt: String,
+    val action: String,
+    val result: String,
+    val toState: String? = null,
+    val reasonCode: String? = null,
+)
+
+private const val DASHBOARD_RECENT_RUNS = 10
+private const val DASHBOARD_ACTIVITY = 30
+
+private fun ProjectSpend.toResponse(): ProjectSpendResponse {
+    val total = committedMicroYen + reservedMicroYen + lapsedMicroYen + unpricedMicroYen
+    return ProjectSpendResponse(
+        committedJpy = microYenToJpy(committedMicroYen),
+        reservedJpy = microYenToJpy(reservedMicroYen),
+        lapsedJpy = microYenToJpy(lapsedMicroYen),
+        unpricedJpy = microYenToJpy(unpricedMicroYen),
+        totalJpy = microYenToJpy(total),
+    )
+}
+
+/** Micro-yen (6 decimal places) as decimal yen with no trailing zeros. */
+private fun microYenToJpy(micro: Long): String = BigDecimal.valueOf(micro, 6).stripTrailingZeros().toPlainString()
+
+private fun ProjectActivityEntry.toResponse() = ProjectActivityResponse(
+    runId = runId,
+    occurredAt = occurredAt.toInstant(ZoneOffset.UTC).toString(),
+    action = action,
+    result = result,
+    toState = toState,
+    reasonCode = reasonCode,
 )
 
 private fun ProjectRow.toResponse() = ProjectResponse(

@@ -27,9 +27,11 @@ import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
+import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.or
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.count
 import org.jetbrains.exposed.sql.insert
@@ -134,6 +136,16 @@ data class AuditTrailEntry(
     /** The state a RUN_TRANSITION moved the run to (a fixed code), else null. */
     val toState: String?,
     /** The fixed reason code of a RUN_TRANSITION, else null. Never free text. */
+    val reasonCode: String?,
+)
+
+/** One audit event of a project's Run, for the project dashboard. The same fixed fields as [AuditTrailEntry], plus the run. */
+data class ProjectActivityEntry(
+    val runId: String,
+    val occurredAt: LocalDateTime,
+    val action: String,
+    val result: String,
+    val toState: String?,
     val reasonCode: String?,
 )
 
@@ -439,6 +451,56 @@ class DevelopmentRunRepository(
                     reasonCode = codes.reasonCode,
                 )
             }
+    }
+
+    /**
+     * The Runs of [projectId], newest first (the project dashboard). [principal] null: every principal's Run (the operator view);
+     * otherwise only that principal's Runs.
+     */
+    fun listProjectRuns(projectId: String, principal: String?, limit: Int): List<DevelopmentRun> = transaction(database) {
+        DevelopmentRunsTable.selectAll()
+            .where { projectRunsScope(projectId, principal) }
+            .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
+            .limit(limit)
+            .mapNotNull { it.toDevelopmentRunOrNull() }
+    }
+
+    /** The number of [projectId]'s Runs per state, in the same scope as [listProjectRuns]. Only states that occur are listed. */
+    fun countProjectRunsByState(projectId: String, principal: String?): Map<String, Long> = transaction(database) {
+        val total = DevelopmentRunsTable.runId.count()
+        DevelopmentRunsTable.select(DevelopmentRunsTable.state, total)
+            .where { projectRunsScope(projectId, principal) }
+            .groupBy(DevelopmentRunsTable.state)
+            .associate { it[DevelopmentRunsTable.state] to it[total] }
+    }
+
+    /**
+     * The audit events of [projectId]'s Runs, newest first, in the same scope as [listProjectRuns]. Only the fixed fields
+     * [auditTrail] reads are returned (never the actor or the free-text payload).
+     */
+    fun projectActivity(projectId: String, principal: String?, limit: Int): List<ProjectActivityEntry> = transaction(database) {
+        (AuditEventsTable innerJoin DevelopmentRunsTable)
+            .selectAll()
+            .where { projectRunsScope(projectId, principal) }
+            .orderBy(AuditEventsTable.occurredAt to SortOrder.DESC, AuditEventsTable.eventId to SortOrder.DESC)
+            .limit(limit)
+            .map { row ->
+                val action = row[AuditEventsTable.action]
+                val codes = if (action == "RUN_TRANSITION") transitionCodes(row[AuditEventsTable.payload]) else TransitionCodes(null, null)
+                ProjectActivityEntry(
+                    runId = row[DevelopmentRunsTable.runId],
+                    occurredAt = row[AuditEventsTable.occurredAt],
+                    action = action,
+                    result = row[AuditEventsTable.result],
+                    toState = codes.toState,
+                    reasonCode = codes.reasonCode,
+                )
+            }
+    }
+
+    private fun projectRunsScope(projectId: String, principal: String?): Op<Boolean> {
+        val inProject = DevelopmentRunsTable.projectId eq projectId
+        return if (principal == null) inProject else inProject and (DevelopmentRunsTable.principal eq principal)
     }
 
     private data class TransitionCodes(val toState: String?, val reasonCode: String?)

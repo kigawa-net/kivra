@@ -18,9 +18,12 @@ import io.ktor.server.testing.testApplication
 import java.time.Clock
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -84,6 +87,7 @@ class ProjectRoutesTest {
                 call(HttpMethod.Get, "/api/projects/01AAAAAAAAAAAAAAAAAAAAAAAA", null),
                 call(HttpMethod.Put, "/api/projects/01AAAAAAAAAAAAAAAAAAAAAAAA", null, """{"name":"hidden"}"""),
                 call(HttpMethod.Delete, "/api/projects/01AAAAAAAAAAAAAAAAAAAAAAAA", null),
+                call(HttpMethod.Get, "/api/projects/01AAAAAAAAAAAAAAAAAAAAAAAA/dashboard", null),
                 call(HttpMethod.Put, "/api/runs/$runId/project", null, """{"projectId":"missing"}"""),
                 call(HttpMethod.Delete, "/api/runs/$runId/project", null),
             )
@@ -161,6 +165,131 @@ class ProjectRoutesTest {
         testApplication {
             setUp(db)
             assertEquals(HttpStatusCode.NoContent, call(HttpMethod.Put, "/api/runs/$otherRun/project", "operator", """{"projectId":"$projectId"}""").status)
+        }
+    }
+
+    /** A reservation row of the budget ledger, with the columns this test needs. Amounts are micro-yen. */
+    private fun TestDb.reserve(key: String, micro: Long, state: String) {
+        val at = java.sql.Timestamp.valueOf(java.time.LocalDateTime.of(2030, 1, 1, 0, 0))
+        dataSource.connection.use { c ->
+            c.prepareStatement(
+                "INSERT INTO budget_reservations (reservation_key, amount_micro_yen, state, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            ).use { st ->
+                st.setString(1, key)
+                st.setLong(2, micro)
+                st.setString(3, state)
+                st.setTimestamp(4, at)
+                st.setTimestamp(5, at)
+                st.executeUpdate()
+            }
+        }
+    }
+
+    /** A CLI attempt of [runId] (coding_attempts), so that its ledger key `coding:<attemptId>:<generation>` is one of the run's. */
+    private fun TestDb.attempt(runId: String, attemptId: String, generation: Long) {
+        val at = java.sql.Timestamp.valueOf(java.time.LocalDateTime.of(2030, 1, 1, 0, 0))
+        dataSource.connection.use { c ->
+            c.prepareStatement(
+                "INSERT INTO coding_attempts (attempt_id, run_id, attempt_no, state, lease_generation, queued_expires_at, base_sha, version, created_at, updated_at) " +
+                    "VALUES (?, ?, 1, 'FAILED', ?, ?, ?, 0, ?, ?)",
+            ).use { st ->
+                st.setString(1, attemptId)
+                st.setString(2, runId)
+                st.setLong(3, generation)
+                st.setTimestamp(4, at)
+                st.setString(5, "a".repeat(40))
+                st.setTimestamp(6, at)
+                st.setTimestamp(7, at)
+                st.executeUpdate()
+            }
+        }
+    }
+
+    @Test
+    fun `the operator's dashboard counts every Run of the project, with creators, cost and activity`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val projectId = projects.create("Alpha", "first").projectId
+        val mine = db.run("operator", "dash-own")
+        val alice = db.run("alice", "dash-alice")
+        val outside = db.run("bob", "dash-outside")
+        projects.assignRunToProject(mine, projectId)
+        projects.assignRunToProject(alice, projectId)
+        testApplication {
+            setUp(db)
+            val response = call(HttpMethod.Get, "/api/projects/$projectId/dashboard", "operator")
+            assertEquals(HttpStatusCode.OK, response.status)
+            val text = response.bodyAsText()
+            val body = Json.parseToJsonElement(text).jsonObject
+            assertEquals("ALL", body["scope"]!!.jsonPrimitive.content)
+            val tasks = body["tasks"]!!.jsonObject
+            assertEquals(2, tasks["total"]!!.jsonPrimitive.int)
+            assertEquals(2, tasks["byState"]!!.jsonObject.values.sumOf { it.jsonPrimitive.int })
+            val runs = body["recentRuns"]!!.jsonArray.map { it.jsonObject }
+            assertEquals(setOf(mine, alice), runs.map { it["runId"]!!.jsonPrimitive.content }.toSet())
+            assertEquals(setOf("operator", "alice"), runs.map { it["createdBy"]!!.jsonPrimitive.content }.toSet())
+            assertEquals("0", body["spend"]!!.jsonObject["totalJpy"]!!.jsonPrimitive.content)
+            val activity = body["activity"]!!.jsonArray.map { it.jsonObject["runId"]!!.jsonPrimitive.content }
+            assertTrue(activity.isNotEmpty(), "the Runs' creation is in the activity")
+            assertTrue(activity.all { it == mine || it == alice })
+            assertFalse(text.contains(outside), "a Run outside the project is not in the dashboard")
+        }
+    }
+
+    @Test
+    fun `a viewer's dashboard counts and lists only their own Runs of the project`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val projectId = projects.create("Alpha", null).projectId
+        val viewerRun = db.run("viewer", "dash-viewer")
+        val aliceRun = db.run("alice", "dash-alice-viewer")
+        projects.assignRunToProject(viewerRun, projectId)
+        projects.assignRunToProject(aliceRun, projectId)
+        testApplication {
+            setUp(db, guard(mapOf("viewer" to Role.VIEWER)))
+            val response = call(HttpMethod.Get, "/api/projects/$projectId/dashboard", "viewer")
+            assertEquals(HttpStatusCode.OK, response.status)
+            val text = response.bodyAsText()
+            val body = Json.parseToJsonElement(text).jsonObject
+            assertEquals("OWN", body["scope"]!!.jsonPrimitive.content)
+            assertEquals(1, body["tasks"]!!.jsonObject["total"]!!.jsonPrimitive.int)
+            val runs = body["recentRuns"]!!.jsonArray.map { it.jsonObject }
+            assertEquals(listOf(viewerRun), runs.map { it["runId"]!!.jsonPrimitive.content })
+            assertTrue(runs.all { (it["createdBy"] ?: JsonNull) is JsonNull }, "the creator is shown to the operator only")
+            assertFalse(text.contains(aliceRun), "another principal's Run is not in the dashboard")
+        }
+    }
+
+    @Test
+    fun `the dashboard cost is the ledger of the project's Runs by state, in yen`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val projectId = projects.create("Alpha", null).projectId
+        val runId = db.run("operator", "cost-run")
+        val outside = db.run("operator", "cost-outside")
+        projects.assignRunToProject(runId, projectId)
+        val attemptId = "01ATT" + "A".repeat(21)
+        db.attempt(runId, attemptId, 3)
+        db.reserve("coding:$attemptId:3", 1_500_000, "COMMITTED")
+        db.reserve("developer-$runId-1", 250_000, "RESERVED")
+        db.reserve("developer-$runId-2", 999_000_000, "RELEASED")
+        db.reserve("developer-$outside-1", 5_000_000, "COMMITTED")
+        db.reserve("planner-$runId-1", 7_000_000, "COMMITTED")
+        testApplication {
+            setUp(db)
+            val response = call(HttpMethod.Get, "/api/projects/$projectId/dashboard", "operator")
+            assertEquals(HttpStatusCode.OK, response.status)
+            val spend = Json.parseToJsonElement(response.bodyAsText()).jsonObject["spend"]!!.jsonObject
+            assertEquals("1.5", spend["committedJpy"]!!.jsonPrimitive.content, "CLI attempt, COMMITTED")
+            assertEquals("0.25", spend["reservedJpy"]!!.jsonPrimitive.content, "API call of the run, RESERVED")
+            assertEquals("0", spend["lapsedJpy"]!!.jsonPrimitive.content)
+            assertEquals("0", spend["unpricedJpy"]!!.jsonPrimitive.content)
+            assertEquals("1.75", spend["totalJpy"]!!.jsonPrimitive.content, "RELEASED, another run and the planner are not counted")
+        }
+    }
+
+    @Test
+    fun `the dashboard of a missing project is not found`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            assertEquals(HttpStatusCode.NotFound, call(HttpMethod.Get, "/api/projects/01AAAAAAAAAAAAAAAAAAAAAAAA/dashboard", "operator").status)
         }
     }
 

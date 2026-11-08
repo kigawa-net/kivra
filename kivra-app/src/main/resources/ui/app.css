@@ -764,6 +764,30 @@ textarea {
   background: var(--badge-bg);
 }
 
+.side-project {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.side-project .side-project-link {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.side-project-dash {
+  flex: 0 0 auto;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-decoration: underline;
+}
+
+.side-project-dash[aria-current="page"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .side-project-link[aria-current="page"] {
   background: var(--badge-bg);
   border-color: var(--accent);

@@ -10,6 +10,21 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 
+/**
+ * The ledger cost of a set of Runs, in micro-yen (1 JPY = 1,000,000), by reservation state. RELEASED rows are not counted.
+ * See [ProjectRepository.runSpend] for what is included.
+ */
+data class ProjectSpend(
+    /** COMMITTED and ACKNOWLEDGED: the settled cost. */
+    val committedMicroYen: Long,
+    /** RESERVED: in progress, not charged yet. */
+    val reservedMicroYen: Long,
+    /** LAPSED: charged at the estimate, waiting for the true-up. */
+    val lapsedMicroYen: Long,
+    /** UNPRICED: charged at the estimate, not verified until an operator acknowledges it. */
+    val unpricedMicroYen: Long,
+)
+
 /** A project that groups Runs. */
 data class ProjectRow(
     val projectId: String,
@@ -63,6 +78,50 @@ class ProjectRepository(private val database: Database, private val clock: Clock
     /** List all projects, ordered by name. */
     fun listAll(): List<ProjectRow> = transaction(database) {
         ProjectsTable.selectAll().orderBy(ProjectsTable.name).map { toProject(it) }
+    }
+
+    /**
+     * The ledger cost of [projectId]'s Runs, in the dashboard's scope ([principal] null: every principal's Run). Read only.
+     * A Run's cost is its CLI attempts (`coding:<attempt_id>:<lease_generation>`, via coding_attempts.run_id) and its API calls
+     * (the Developer's `developer-<run_id>-` key prefix). The Planner's cost belongs to a cycle, not to one Run, so it is not
+     * counted here.
+     */
+    fun runSpend(projectId: String, principal: String?): ProjectSpend = transaction(database) {
+        val scope = if (principal == null) "" else " AND r.principal = ?"
+        val principalParams = listOfNotNull(principal)
+        val params = listOf<Any?>(projectId) + principalParams + listOf<Any?>(projectId) + principalParams
+        val rows = execQuery(
+            """
+            SELECT res.state, res.amount_micro_yen
+              FROM budget_reservations res
+             WHERE res.reservation_key IN (
+                   SELECT CONCAT('${DbBudgetStore.CODING_KEY_PREFIX}', a.attempt_id, ':', a.lease_generation)
+                     FROM coding_attempts a
+                     JOIN development_runs r ON r.run_id = a.run_id
+                    WHERE r.project_id = ?$scope)
+                OR EXISTS (
+                   SELECT 1 FROM development_runs r
+                    WHERE r.project_id = ?$scope
+                      AND res.reservation_key LIKE CONCAT('${SelfDevCycleSpendReader.DEVELOPER_PREFIX}', r.run_id, '-%'))
+            """.trimIndent(),
+            *params.toTypedArray(),
+        ) { rs -> rs.getString(1) to rs.getLong(2) }
+        var committed = 0L
+        var reserved = 0L
+        var lapsed = 0L
+        var unpriced = 0L
+        rows.forEach { (state, amount) ->
+            when (state) {
+                DbBudgetStore.COMMITTED, DbBudgetStore.ACKNOWLEDGED -> committed += amount
+                DbBudgetStore.RESERVED -> reserved += amount
+                DbBudgetStore.LAPSED -> lapsed += amount
+                DbBudgetStore.UNPRICED -> unpriced += amount
+                DbBudgetStore.RELEASED -> Unit
+                // As in SelfDevCycleSpendReader: an unknown state is not counted as zero.
+                else -> error("unknown reservation state in the budget ledger")
+            }
+        }
+        ProjectSpend(committedMicroYen = committed, reservedMicroYen = reserved, lapsedMicroYen = lapsed, unpricedMicroYen = unpriced)
     }
 
     /** Assign a run to a project. Returns true if the run existed. */

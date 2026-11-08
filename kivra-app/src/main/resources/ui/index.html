@@ -283,6 +283,29 @@
     </section>
   </div>
 
+  <div class="page" id="page-project" data-page="project" hidden>
+    <!-- Project dashboard (#/projects/<id>/dashboard), opened from the side navigation. Only text is written into it. -->
+    <section class="card" id="project-dash" aria-labelledby="h-project-dash">
+      <p><a href="#/">← 一覧に戻る</a></p>
+      <h2 id="h-project-dash">プロジェクトのダッシュボード</h2>
+      <p id="project-dash-desc" class="meta"></p>
+      <p id="project-dash-status" class="meta" role="status"></p>
+      <p id="project-dash-scope" class="meta"></p>
+      <div id="project-dash-body" hidden>
+        <h3 id="h-project-dash-tasks">Run の状態別件数</h3>
+        <p id="project-dash-total" class="meta"></p>
+        <ul id="project-dash-states" class="run-list" aria-labelledby="h-project-dash-tasks"></ul>
+        <h3 id="h-project-dash-runs">最近の Run</h3>
+        <ul id="project-dash-runs" class="run-list" aria-labelledby="h-project-dash-runs"></ul>
+        <h3 id="h-project-dash-spend">費用（この Run に紐づく分）</h3>
+        <p class="meta" id="project-dash-spend-note">プロジェクトごとの上限はありません（月ごとの上限は、運用者向けの予算画面で確認します）。計画（Planner）の費用は含みません。</p>
+        <dl id="project-dash-spend" aria-labelledby="h-project-dash-spend"></dl>
+        <h3 id="h-project-dash-activity">最近の活動</h3>
+        <ol id="project-dash-activity" class="events" aria-labelledby="h-project-dash-activity"></ol>
+      </div>
+    </section>
+  </div>
+
   </div>
 
   <section id="view-detail" class="card" hidden aria-labelledby="h-detail">

@@ -204,8 +204,9 @@ class UiRoutesTest {
         assertContains(appJs, "var url = safePrUrl(run.pullRequestUrl);")
         assertContains(appJs, "if (url === null) return h('span', { text: label });")
         assertContains(appJs, "h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: label + ' ↗' })")
-        // Exactly three href sites: the list link (fixed path plus an encoded id), the checked PR link, and the project sidebar link (fixed '#/').
-        assertEquals(3, Regex("\\bhref:").findAll(appJs).count(), "href sites")
+        // Exactly four href sites: the list link (fixed path plus an encoded id), the checked PR link, the project sidebar link
+        // (fixed '#/'), and the project's dashboard link (a same-origin hash: '#/projects/' plus an encoded id, never a server URL).
+        assertEquals(4, Regex("\\bhref:").findAll(appJs).count(), "href sites")
         assertContains(appJs, "href: '#/runs/' + encodeURIComponent(id)")
         // target and rel are assigned only from constants, through the allow-listed prop names.
         assertContains(appJs, "else if (k === 'target' || k === 'rel') node[k] = v;")

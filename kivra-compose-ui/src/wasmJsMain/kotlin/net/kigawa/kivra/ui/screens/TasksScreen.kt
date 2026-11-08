@@ -21,10 +21,7 @@ import net.kigawa.kivra.ui.api.ApiRun
  */
 @Composable
 fun TasksScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
-    var runs by remember { mutableStateOf<List<ApiRun>>(emptyList()) }
     var scope by remember { mutableStateOf("mine") }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
     
     var title by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
@@ -33,21 +30,10 @@ fun TasksScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
     val scopeLauncher = rememberCoroutineScope()
     val perms = LocalCallerPermissions.current
 
-    LaunchedEffect(scope, selectedProjectId) {
-        loading = true
-        error = null
-        try {
-            val allRuns = ApiClient.getRuns(scope)
-            runs = if (selectedProjectId != null) {
-                allRuns.filter { it.projectId == selectedProjectId }
-            } else {
-                allRuns
-            }
-        } catch (e: Exception) {
-            error = e.message ?: "エラーが発生しました"
-        } finally {
-            loading = false
-        }
+    // 一覧。読み直しの間は前の一覧を残す。入力中のフォーム(下)は読み直しで消えない。
+    val loaded = rememberLoad(listOf(scope, selectedProjectId)) {
+        val allRuns = ApiClient.getRuns(scope)
+        if (selectedProjectId != null) allRuns.filter { it.projectId == selectedProjectId } else allRuns
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -76,13 +62,7 @@ fun TasksScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
         Spacer(modifier = Modifier.height(16.dp))
 
         // Run list
-        if (loading) {
-            CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-        } else if (error != null) {
-            Text("エラー: $error", color = MaterialTheme.colorScheme.error)
-        } else if (runs.isEmpty()) {
-            Text("Run が見つかりません")
-        } else {
+        LoadedList(loaded, emptyText = "Run が見つかりません") { runs ->
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(runs) { run ->
                     RunCard(run, onClick = { onNavigate(Route.RunDetail(run.runId)) })

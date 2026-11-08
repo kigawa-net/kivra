@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import net.kigawa.kivra.ui.LocalSelfDevAvailability
 import net.kigawa.kivra.ui.NavDestination
 import net.kigawa.kivra.ui.api.ApiBudget
 import net.kigawa.kivra.ui.api.ApiClient
@@ -25,36 +26,15 @@ private val TERMINAL_STATES = setOf("FAILED", "COMPLETED", "CANCELLED", "NOT_EXE
 /** ホーム: 要対応(承認待ち・失敗 Run・予算)を既存 API の読み取りだけで束ねる。 */
 @Composable
 fun HomeScreen(projectId: String?, onNavigate: (NavDestination) -> Unit) {
-    var summary by remember { mutableStateOf<HomeSummary?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var loading by remember { mutableStateOf(true) }
-
-    LaunchedEffect(projectId) {
-        loading = true
-        error = null
-        try {
-            val runs = ApiClient.getRuns().filter { projectId == null || it.projectId == projectId }
-            val approvals = approvalsOf(projectId)
-            summary = HomeSummary(
-                approvals = approvals,
-                failedRuns = runs.count { it.state in FAILED_STATES },
-                activeRuns = runs.count { it.state !in TERMINAL_STATES },
-                budget = budgetOrNull(),
-            )
-        } catch (e: Exception) {
-            summary = null
-            error = e.message ?: "エラーが発生しました"
-        } finally {
-            loading = false
-        }
-    }
+    val loaded = rememberLoad(projectId) { loadHomeSummary(projectId) }
+    val selfDev = LocalSelfDevAvailability.current
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        val s = summary
-        when {
-            loading -> CircularProgressIndicator()
-            s == null -> Text("読み込めませんでした: ${error ?: ""}")
-            else -> {
+        // 自己開発の有無(読めなかった時は「取得失敗」)。SELF_DEV の選択は別の作業で、ここでは表示だけ。
+        Text(selfDev.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(8.dp))
+        LoadedView(loaded) { s ->
+            run {
                 val attention = s.approvals + s.failedRuns
                 Text(
                     if (attention == 0) "対応が必要なものはありません" else "対応が必要: $attention 件",
@@ -87,13 +67,16 @@ private suspend fun approvalsOf(projectId: String?): Int {
     return requests.count { projectOf[it.orderId] == projectId }
 }
 
-/** The budget card is hidden (null) when the caller may not see it (403/404), as in the old UI. Other failures are thrown. */
-private suspend fun budgetOrNull(): ApiBudget? =
-    try {
-        ApiClient.getBudget()
-    } catch (e: ApiException) {
-        if (e.status == 403 || e.status == 404) null else throw e
-    }
+/** ホームの読み取り。予算は [loadBudgetOrHidden](見せない利用者は予算の欄を出さない)。失敗は投げる。 */
+private suspend fun loadHomeSummary(projectId: String?): HomeSummary {
+    val runs = ApiClient.getRuns().filter { projectId == null || it.projectId == projectId }
+    return HomeSummary(
+        approvals = approvalsOf(projectId),
+        failedRuns = runs.count { it.state in FAILED_STATES },
+        activeRuns = runs.count { it.state !in TERMINAL_STATES },
+        budget = loadBudgetOrHidden(),
+    )
+}
 
 private suspend fun <T> unavailableAsEmpty(load: suspend () -> List<T>): List<T> =
     try {

@@ -42,6 +42,8 @@ fun ReasonDialog(
     onDismiss: () -> Unit,
     maxCodePoints: Int = REASON_MAX_CODE_POINTS,
 ) {
+    // 開いている間は定期更新を止める(入力中の内容を読み直しで消さないため)。
+    HoldAutoRefreshWhileShown()
     var reasonInput by remember { mutableStateOf("") }
     val check = checkReason(reasonInput, maxCodePoints)
     val reasonOk = reasonLabel == null || check is ReasonCheck.Valid

@@ -21,6 +21,7 @@ import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.canStopGoal
 import net.kigawa.kivra.ui.releaseKindOf
 import net.kigawa.kivra.ui.releaseTextsOf
+import net.kigawa.kivra.ui.safePullRequestUrl
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiGoal
@@ -47,16 +48,13 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
     var reloadKey by remember { mutableStateOf(0) }
     var notice by remember { mutableStateOf<String?>(null) }
     val perms = LocalCallerPermissions.current
-    val state by produceState<LoadState<ApiRun>>(LoadState.Loading, runId, reloadKey) {
-        value = LoadState.Loading
-        value = loadState { ApiClient.getRun(runId) }
-    }
+    val state = rememberLoad(runId, reloadKey) { ApiClient.getRun(runId) }
     DetailPage {
         notice?.let { n ->
             Text(n, color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(8.dp))
         }
-        LoadStateView(state) { run ->
+        LoadedView(state) { run ->
             Text(run.title, style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
@@ -141,7 +139,10 @@ private fun RunReleaseSection(runId: String, kind: ReleaseKind, onReleased: (Str
     }
 }
 
-/** PR のリンク。PR が無い Run は「なし」。 */
+/**
+ * PR のリンク。PR が無い Run は「なし」。リンクは URL の形が GitHub の PR と合う時だけ出す([safePullRequestUrl]、旧 UI と同じ判定)。
+ * 合わない URL は開かず、リポジトリと番号の行だけを出す。
+ */
 @Composable
 private fun PullRequestSection(run: ApiRun) {
     val uriHandler = LocalUriHandler.current
@@ -151,8 +152,8 @@ private fun PullRequestSection(run: ApiRun) {
             Spacer(Modifier.height(8.dp))
             val repo = run.pullRequestRepository
             val number = run.pullRequestNumber
-            val url = run.pullRequestUrl
-            if (repo == null && number == null && url == null) {
+            val url = safePullRequestUrl(run.pullRequestUrl)
+            if (repo == null && number == null && run.pullRequestUrl == null) {
                 Text("PR はありません", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 DetailRow("リポジトリ", repo ?: "—")
@@ -182,10 +183,7 @@ private fun EventLine(event: ApiRunEvent) {
 fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
     // 承認・見送りの後に増やして、詳細を読み直させる。
     var reloadKey by remember { mutableStateOf(0) }
-    val state by produceState<LoadState<ApiGoalDetail>>(LoadState.Loading, taskId, reloadKey) {
-        value = LoadState.Loading
-        value = loadState { ApiClient.getGoal(taskId) }
-    }
+    val state = rememberLoad(taskId, reloadKey) { ApiClient.getGoal(taskId) }
     var busy by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<ActionNotice?>(null) }
     val scope = rememberCoroutineScope()
@@ -215,7 +213,7 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
     }
 
     DetailPage {
-        LoadStateView(state) { detail ->
+        LoadedView(state) { detail ->
             val goal: ApiGoal = detail.task
             Text(goal.title, style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
@@ -320,12 +318,9 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
 /** order 詳細: 状態、周、予算、親子、停止要求。題名と方針は旧 UI と同じくこの画面には出さない。 */
 @Composable
 fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
-    val state by produceState<LoadState<ApiOrderDetail>>(LoadState.Loading, orderId) {
-        value = LoadState.Loading
-        value = loadState { ApiClient.getOrder(orderId) }
-    }
+    val state = rememberLoad(orderId) { ApiClient.getOrder(orderId) }
     DetailPage {
-        LoadStateView(state) { detail ->
+        LoadedView(state) { detail ->
             val order: ApiOrder = detail.order
             Text("order ${order.orderId}", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
@@ -390,14 +385,11 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
 /** order の周の一覧(周番号順)。周ごとの開発目標へ遷移できる。 */
 @Composable
 fun OrderCyclesScreen(orderId: String, onNavigate: (Route) -> Unit) {
-    val state by produceState<LoadState<List<ApiOrderCycle>>>(LoadState.Loading, orderId) {
-        value = LoadState.Loading
-        value = loadState { ApiClient.getOrderCycles(orderId) }
-    }
+    val state = rememberLoad(orderId) { ApiClient.getOrderCycles(orderId) }
     DetailPage {
         Text("order $orderId の周", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
-        LoadStateView(state) { cycles ->
+        LoadedView(state) { cycles ->
             if (cycles.isEmpty()) {
                 Text("周はまだ開始されていません")
             } else {

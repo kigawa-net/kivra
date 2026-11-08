@@ -19,31 +19,13 @@ import net.kigawa.kivra.ui.api.ApiGoal
  */
 @Composable
 fun GoalsScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
-    var goals by remember { mutableStateOf<List<ApiGoal>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(selectedProjectId) {
-        try {
-            goals = ApiClient.getGoals()
-        } catch (e: Exception) {
-            error = e.message ?: "エラーが発生しました"
-        } finally {
-            loading = false
-        }
-    }
+    val loaded = rememberLoad(selectedProjectId) { ApiClient.getGoals() }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("開発目標", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (loading) {
-            CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-        } else if (error != null) {
-            Text("エラー: $error", color = MaterialTheme.colorScheme.error)
-        } else if (goals.isEmpty()) {
-            Text("開発目標が見つかりません")
-        } else {
+        LoadedList(loaded, emptyText = "開発目標が見つかりません") { goals ->
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(goals) { goal ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onNavigate(Route.GoalDetail(goal.taskId)) }) {

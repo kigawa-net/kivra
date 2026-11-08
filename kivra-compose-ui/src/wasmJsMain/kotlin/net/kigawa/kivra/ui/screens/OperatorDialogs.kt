@@ -93,6 +93,8 @@ internal fun BudgetAcknowledgeDialog(
     onSubmit: (actual: String?, evidence: String, reason: String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // 開いている間は定期更新を止める(入力中の内容を読み直しで消さないため)。
+    HoldAutoRefreshWhileShown()
     var actualInput by remember { mutableStateOf("") }
     var evidenceInput by remember { mutableStateOf("") }
     var reasonInput by remember { mutableStateOf("") }

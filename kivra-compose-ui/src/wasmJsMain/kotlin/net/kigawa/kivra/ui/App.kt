@@ -1,5 +1,6 @@
 package net.kigawa.kivra.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,11 +11,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.PermanentDrawerSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -30,8 +33,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiProject
+import net.kigawa.kivra.ui.api.ApiSession
 import net.kigawa.kivra.ui.screens.*
 
 /**
@@ -39,6 +44,12 @@ import net.kigawa.kivra.ui.screens.*
  * (何も隠さない。旧 UI と同じ)。各画面は [LocalCallerPermissions].current で操作の出し分けに使う。
  */
 val LocalCallerPermissions = compositionLocalOf { CallerPermissions.UNKNOWN }
+
+/** 自己開発の有無(ホームに出す)。読み直しの度に [KivraApp] が読む。 */
+val LocalSelfDevAvailability = compositionLocalOf { SelfDevAvailability.LOADING }
+
+/** 時刻の表示(端末の地域の `HH:MM:SS`)。 */
+private val clockText: (Long) -> String = { formatClock(it.toDouble()) }
 
 /**
  * Root composable for the Kivra Compose UI.
@@ -56,13 +67,69 @@ fun KivraApp() {
             CallerPermissions.UNKNOWN
         }
     }
-    CompositionLocalProvider(LocalCallerPermissions provides permissions) {
-        KivraAppContent()
+
+    // 読み直しの合図。手動の「更新」と定期更新で増える。表示中の画面は [LocalRefreshCount] をキーにして読み直す。
+    var refreshCount by remember { mutableStateOf(0) }
+    // 手動の「更新」の時刻(ヘッダーの「最終更新」。旧 UI の refresh-all-at と同じく、手動の更新だけで変える)。
+    var lastManualRefreshAt by remember { mutableStateOf<Long?>(null) }
+    // 最後に読み直しを始めた時刻。定期更新の間隔の基準(手動も含む)。
+    var lastAttemptAt by remember { mutableStateOf(0L) }
+    var selfDev by remember { mutableStateOf(SelfDevAvailability.LOADING) }
+    var health by remember { mutableStateOf(HealthState()) }
+
+    val refresh: () -> Unit = {
+        refreshCount += 1
+        lastAttemptAt = nowMillis().toLong()
+    }
+
+    // 読み直しの度に、自己開発の有無と接続を読む(旧 UI の refreshStatus と checkHealth)。
+    LaunchedEffect(refreshCount) {
+        selfDev = try {
+            selfDevAvailabilityOf(ApiClient.getSelfDevStatus().enabled)
+        } catch (e: Exception) {
+            SelfDevAvailability.UNKNOWN
+        }
+        val ok = ApiClient.checkHealth()
+        health = health.after(ok, nowMillis().toLong())
+    }
+
+    // 定期更新。1 秒ごとに見て、間隔を過ぎていて、隠れていなくて、送信中・ダイアログ表示中でなければ読み直す(旧 UI の tick)。
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000)
+            if (shouldAutoRefresh(
+                    now = nowMillis().toLong(),
+                    lastAttemptAt = lastAttemptAt,
+                    hidden = isDocumentHidden(),
+                    holds = ApiSession.holds,
+                    sessionExpired = ApiSession.expired,
+                )
+            ) {
+                refresh()
+            }
+        }
+    }
+
+    val onManualRefresh: () -> Unit = {
+        lastManualRefreshAt = nowMillis().toLong()
+        refresh()
+    }
+
+    CompositionLocalProvider(
+        LocalCallerPermissions provides permissions,
+        LocalRefreshCount provides refreshCount,
+        LocalSelfDevAvailability provides selfDev,
+    ) {
+        KivraAppContent(
+            connection = connectionLabel(health, clockText),
+            lastRefreshText = lastManualRefreshAt?.let { "最終更新: ${clockText(it)}" } ?: "最終更新: 未更新",
+            onRefresh = onManualRefresh,
+        )
     }
 }
 
 @Composable
-private fun KivraAppContent() {
+private fun KivraAppContent(connection: String, lastRefreshText: String, onRefresh: () -> Unit) {
     val perms = LocalCallerPermissions.current
     // 画面のルート。ブラウザのハッシュ(#/runs/<id> 等)と双方向に同期する: 読み込み時に解釈し、遷移時に書き、戻る/進むで読み直す。
     var route by remember { mutableStateOf(parseRoute(currentLocationHash())) }
@@ -126,9 +193,11 @@ private fun KivraAppContent() {
                     }
                 }
                 HorizontalDivider()
-                
+
                 // Main content area
                 Column(modifier = Modifier.weight(1f)) {
+                    // セッションが切れた時の案内。入力中の内容は残る(再読み込みするまで送信しない)。
+                    if (ApiSession.expired) SessionBanner()
                     // Top header with project selector
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -153,7 +222,7 @@ private fun KivraAppContent() {
                                 modifier = Modifier.weight(1f)
                             )
                         }
-                        
+
                         // Project selector dropdown
                         ProjectSelectorDropdown(
                             selectedProjectId = selectedProjectId,
@@ -162,16 +231,24 @@ private fun KivraAppContent() {
                             dropdownExpanded = dropdownExpanded,
                             onDropdownExpandedChange = { dropdownExpanded = it }
                         )
-                        
+
                         TextButton(onClick = { searchOpen = true }) { Text("検索") }
 
                         Text(
-                            text = "接続: 未確認",
-                            modifier = Modifier.padding(16.dp)
+                            text = connection,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(horizontal = 8.dp)
+                        )
+                        OutlinedButton(onClick = onRefresh) { Text("更新") }
+                        Text(
+                            text = lastRefreshText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 8.dp, end = 16.dp)
                         )
                     }
                     HorizontalDivider()
-                    
+
                     // Main content
                     val projectId = selectedProjectId
                     when (val r = route) {
@@ -201,6 +278,22 @@ private fun KivraAppContent() {
     }
 }
 
+/** セッション切れの案内(旧 UI の session-banner と同じ趣旨)。再読み込みでサインインし直す。 */
+@Composable
+private fun SessionBanner() {
+    Row(
+        modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.errorContainer).padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "セッションが切れました（ログインが必要です）。入力中の内容は残っています。",
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            modifier = Modifier.weight(1f),
+        )
+        Button(onClick = { reloadPage() }) { Text("再読み込みしてログインし直す") }
+    }
+}
+
 @Composable
 fun ProjectSelectorDropdown(
     selectedProjectId: String?,
@@ -214,7 +307,7 @@ fun ProjectSelectorDropdown(
             onClick = { onDropdownExpandedChange(!dropdownExpanded) }
         ) {
             Text(
-                text = if (selectedProjectId == null) "全プロジェクト" 
+                text = if (selectedProjectId == null) "全プロジェクト"
                        else projects.find { it.projectId == selectedProjectId }?.name ?: "選択",
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -225,7 +318,7 @@ fun ProjectSelectorDropdown(
         ) {
             DropdownMenuItem(
                 text = { Text("全プロジェクト") },
-                onClick = { 
+                onClick = {
                     onProjectSelected(null)
                     onDropdownExpandedChange(false)
                 }
@@ -233,7 +326,7 @@ fun ProjectSelectorDropdown(
             projects.forEach { project ->
                 DropdownMenuItem(
                     text = { Text(project.name) },
-                    onClick = { 
+                    onClick = {
                         onProjectSelected(project.projectId)
                         onDropdownExpandedChange(false)
                     }

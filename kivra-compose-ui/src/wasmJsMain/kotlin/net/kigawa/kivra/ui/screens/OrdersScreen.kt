@@ -28,38 +28,16 @@ import net.kigawa.kivra.ui.writeFailureText
  */
 @Composable
 fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
-    var orders by remember { mutableStateOf<List<ApiOrder>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(selectedProjectId) {
-        loading = true
-        error = null
-        try {
-            val allOrders = ApiClient.getOrders()
-            orders = if (selectedProjectId != null) {
-                allOrders.filter { it.projectId == selectedProjectId }
-            } else {
-                allOrders
-            }
-        } catch (e: Exception) {
-            error = e.message ?: "エラーが発生しました"
-        } finally {
-            loading = false
-        }
+    val loaded = rememberLoad(selectedProjectId) {
+        val allOrders = ApiClient.getOrders()
+        if (selectedProjectId != null) allOrders.filter { it.projectId == selectedProjectId } else allOrders
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("order", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (loading) {
-            CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-        } else if (error != null) {
-            Text("エラー: $error", color = MaterialTheme.colorScheme.error)
-        } else if (orders.isEmpty()) {
-            Text("orderが見つかりません")
-        } else {
+        LoadedList(loaded, emptyText = "orderが見つかりません") { orders ->
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(orders, key = { it.orderId }) { order ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onNavigate(Route.OrderDetail(order.orderId)) }) {
@@ -89,9 +67,6 @@ fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit)
  */
 @Composable
 fun ApprovalsScreen(selectedProjectId: String? = null) {
-    var approvals by remember { mutableStateOf<List<ApiStopRequest>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
     // 書き込みの後に増やして、一覧を読み直させる。
     var reloadKey by remember { mutableStateOf(0) }
     var notice by remember { mutableStateOf<ActionNotice?>(null) }
@@ -102,22 +77,15 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
     val scope = rememberCoroutineScope()
     val perms = LocalCallerPermissions.current
 
-    LaunchedEffect(selectedProjectId, reloadKey) {
-        loading = true
-        error = null
-        try {
-            val allApprovals = ApiClient.getApprovals()
-            approvals = if (selectedProjectId != null) {
-                // A stop request has no project of its own: it belongs to its order's project.
-                val projectOf = ApiClient.getOrders().associate { it.orderId to it.projectId }
-                allApprovals.filter { projectOf[it.orderId] == selectedProjectId }
-            } else {
-                allApprovals
-            }
-        } catch (e: Exception) {
-            error = e.message ?: "エラーが発生しました"
-        } finally {
-            loading = false
+    // 一覧。書き込みの後の読み直し(reloadKey)でも前の一覧を残す。
+    val loaded = rememberLoad(selectedProjectId, reloadKey) {
+        val allApprovals = ApiClient.getApprovals()
+        if (selectedProjectId != null) {
+            // A stop request has no project of its own: it belongs to its order's project.
+            val projectOf = ApiClient.getOrders().associate { it.orderId to it.projectId }
+            allApprovals.filter { projectOf[it.orderId] == selectedProjectId }
+        } else {
+            allApprovals
         }
     }
 
@@ -160,13 +128,7 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
             )
         }
 
-        if (loading) {
-            CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-        } else if (error != null) {
-            Text("エラー: $error", color = MaterialTheme.colorScheme.error)
-        } else if (approvals.isEmpty()) {
-            Text("承認待ちの項目はありません")
-        } else {
+        LoadedList(loaded, emptyText = "承認待ちの項目はありません") { approvals ->
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(approvals, key = { it.requestId }) { approval ->
                     val digestOk = isValidStopDigest(approval.digest)

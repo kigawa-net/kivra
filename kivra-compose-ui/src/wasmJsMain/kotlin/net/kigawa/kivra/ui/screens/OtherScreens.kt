@@ -28,9 +28,6 @@ import net.kigawa.kivra.ui.api.ApiUnpricedReservation
  */
 @Composable
 fun BudgetScreen() {
-    var budget by remember { mutableStateOf<ApiBudget?>(null) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
     // 解除の後に増やして、予算を読み直させる。
     var reloadKey by remember { mutableStateOf(0) }
     var notice by remember { mutableStateOf<ActionNotice?>(null) }
@@ -39,17 +36,8 @@ fun BudgetScreen() {
     val gate = rememberOperatorWriteGate()
     val perms = LocalCallerPermissions.current
 
-    LaunchedEffect(reloadKey) {
-        loading = true
-        error = null
-        try {
-            budget = ApiClient.getBudget()
-        } catch (e: Exception) {
-            error = e.message ?: "エラーが発生しました"
-        } finally {
-            loading = false
-        }
-    }
+    // 予算。読み直しの間は前の値を残す。見せない利用者は欄ごと出さない。
+    val loaded = rememberLoad(Unit, reloadKey) { BudgetRead(loadBudgetOrHidden()) }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text("予算", style = MaterialTheme.typography.headlineSmall)
@@ -59,14 +47,12 @@ fun BudgetScreen() {
         }
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (loading) {
-            CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-        } else if (error != null) {
-            Text("エラー: $error", color = MaterialTheme.colorScheme.error)
-        } else if (budget == null) {
-            Text("予算情報が見つかりません")
+        loaded.error?.let { Text("エラー: $it", color = MaterialTheme.colorScheme.error) }
+        val b = loaded.value?.budget
+        if (b == null) {
+            // 読み込み中だけスピナー。見せない利用者(401 / 403 / 404)は何も出さない。
+            if (loaded.value == null && loaded.error == null) CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
         } else {
-            val b = budget!!
             val limit = b.limitValue
             val used = b.usedValue
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -188,31 +174,14 @@ private val BUDGET_REASON_TEXT = mapOf(
  */
 @Composable
 fun MemoryScreen() {
-    var memories by remember { mutableStateOf<List<ApiMemory>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(Unit) {
-        try {
-            memories = ApiClient.getMemories()
-        } catch (e: Exception) {
-            error = e.message ?: "エラーが発生しました"
-        } finally {
-            loading = false
-        }
-    }
+    val loaded = rememberLoad(Unit) { ApiClient.getMemories() }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("記憶", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (loading) {
-            CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-        } else if (error != null) {
-            Text("エラー: $error", color = MaterialTheme.colorScheme.error)
-        } else if (memories.isEmpty()) {
-            Text("記憶が見つかりません")
-        } else {
+        LoadedList(loaded, emptyText = "記憶が見つかりません") { memories ->
+
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(memories, key = { it.recordId }) { mem ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
@@ -242,38 +211,17 @@ fun MemoryScreen() {
  */
 @Composable
 fun AssigneesScreen(selectedProjectId: String? = null) {
-    var assignees by remember { mutableStateOf<List<ApiAssignee>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(selectedProjectId) {
-        loading = true
-        error = null
-        try {
-            val allAssignees = ApiClient.getAssignees()
-            assignees = if (selectedProjectId != null) {
-                allAssignees.filter { it.projectId == selectedProjectId }
-            } else {
-                allAssignees
-            }
-        } catch (e: Exception) {
-            error = e.message ?: "エラーが発生しました"
-        } finally {
-            loading = false
-        }
+    val loaded = rememberLoad(selectedProjectId) {
+        val allAssignees = ApiClient.getAssignees()
+        if (selectedProjectId != null) allAssignees.filter { it.projectId == selectedProjectId } else allAssignees
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("担当", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (loading) {
-            CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-        } else if (error != null) {
-            Text("エラー: $error", color = MaterialTheme.colorScheme.error)
-        } else if (assignees.isEmpty()) {
-            Text("担当が見つかりません")
-        } else {
+        LoadedList(loaded, emptyText = "担当が見つかりません") { assignees ->
+
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(assignees, key = { it.assigneeId }) { asgn ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {

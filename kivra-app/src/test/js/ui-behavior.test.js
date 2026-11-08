@@ -4191,3 +4191,219 @@ test('the goals, orders, approvals and memory are read for the selected project 
     assert.ok(last.path.includes('projectId=' + PROJECT_ID), prefix + ' is read for the project: ' + last.path);
   }
 });
+
+// ---- Project members (ADR 0022, PR-D2): the operator block, the picker, the role change, the removal and the bulk import ----
+
+const MEMBERS_PATH = '/api/projects/' + encodeURIComponent(PROJECT_ID) + '/members';
+const PMEM_EMPTY_TEXT = 'メンバーはいません。';
+
+/** The members of the project and every assignee, in memory. Changed by the member requests the page sends. */
+function membersState(over = {}) {
+  return Object.assign({
+    members: [{ assigneeId: 'AS-1', displayName: 'Alice', role: 'OPERATOR', state: 'ACTIVE' }],
+    assignees: [
+      { assigneeId: 'AS-1', displayName: 'Alice', role: 'OPERATOR', state: 'ACTIVE' },
+      { assigneeId: 'AS-2', displayName: 'Bob', role: 'VIEWER', state: 'ACTIVE' },
+      { assigneeId: 'AS-3', displayName: 'Carol', role: 'VIEWER', state: 'ACTIVE' },
+      { assigneeId: 'AS-4', displayName: 'Dan', role: 'VIEWER', state: 'DISABLED' },
+    ],
+  }, over);
+}
+
+/**
+ * The members API over [state], the assignee list, and the dashboard of the operator responder for everything else. `opts.lastAdmin`
+ * makes every change refuse with 409 and a body that must never be shown.
+ */
+function membersResponder(state, opts = {}) {
+  const base = operatorResponder([], opts);
+  const memberOf = (id) => state.members.find((m) => m.assigneeId === id);
+  const idOf = (p) => decodeURIComponent(p.slice(MEMBERS_PATH.length + 1));
+  return (p, init) => {
+    const method = init.method;
+    if (p === '/api/selfdev/assignees' && method === 'GET') return { status: 200, data: state.assignees };
+    if (p === MEMBERS_PATH && method === 'GET') return { status: 200, data: state.members };
+    if (p.startsWith(MEMBERS_PATH + '/import-all') && method === 'POST') {
+      const dryRun = !p.includes('dryRun=false');
+      const role = JSON.parse(init.body).role;
+      const active = state.assignees.filter((a) => a.state === 'ACTIVE');
+      const candidates = active.filter((a) => !memberOf(a.assigneeId));
+      if (!dryRun) candidates.forEach((a) => state.members.push({ assigneeId: a.assigneeId, displayName: a.displayName, role, state: a.state }));
+      return {
+        status: 200,
+        data: {
+          dryRun, role, candidates: candidates.length, added: dryRun ? 0 : candidates.length,
+          alreadyMember: active.length - candidates.length, disabled: state.assignees.length - active.length,
+        },
+      };
+    }
+    if (p.startsWith(MEMBERS_PATH + '/') && method === 'PUT') {
+      if (opts.lastAdmin) return { status: 409, data: { error: 'LEAK-last-admin' } };
+      const id = idOf(p);
+      const role = JSON.parse(init.body).role;
+      const existing = memberOf(id);
+      if (existing) {
+        existing.role = role;
+        return { status: 200, data: { assigneeId: id, role } };
+      }
+      const a = state.assignees.find((x) => x.assigneeId === id);
+      if (!a) return { status: 404, data: { error: 'not found' } };
+      state.members.push({ assigneeId: id, displayName: a.displayName, role, state: a.state });
+      return { status: 201, data: { assigneeId: id, role } };
+    }
+    if (p.startsWith(MEMBERS_PATH + '/') && method === 'DELETE') {
+      const i = state.members.findIndex((m) => m.assigneeId === idOf(p));
+      if (i === -1) return { status: 404, data: { error: 'not found' } };
+      state.members.splice(i, 1);
+      return { status: 204, data: null };
+    }
+    return base(p, init);
+  };
+}
+
+/** The `li` rows of the member list, and the control of a row by its tag. */
+const memberRows = (dom) => dom.byId('project-members').children.filter((c) => c.tagName === 'LI');
+const rowControl = (li, tag) => li.children.find((c) => c.tagName === tag);
+const memberCalls = (calls, method) => calls.filter((c) => c.method === method && c.path.startsWith(MEMBERS_PATH));
+
+test('a viewer sees no member controls and the page asks for no member', async () => {
+  const state = membersState();
+  const dom = load(membersResponder(state, { dashboard: { status: 200, data: dashboardOf() } }), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('project-ops').hidden, true);
+  assert.equal(dom.calls.filter((c) => c.path.startsWith(MEMBERS_PATH)).length, 0, 'no member request for a viewer');
+  assert.equal(dom.calls.filter((c) => c.path === '/api/selfdev/assignees').length, 0, 'no assignee request for a viewer');
+});
+
+test('the members are listed with their names and roles as text, and a name with markup makes no element', async () => {
+  const state = membersState({ members: [{ assigneeId: 'AS-9', displayName: EVIL, role: 'APPROVER', state: 'ACTIVE' }] });
+  const dom = load(membersResponder(state), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('project-ops').hidden, false);
+  assert.ok(dom.byId('project-members').textContent.includes(EVIL), 'the name is shown as text');
+  const tags = dom.byId('project-members').tags();
+  assert.ok(!tags.includes('IMG') && !tags.includes('SCRIPT'), 'no element is made from the name');
+  assert.equal(rowControl(memberRows(dom)[0], 'SELECT').value, 'APPROVER', 'the role is the row select');
+});
+
+test('the picker offers only the active assignees that are not members, and an add sends one PUT with the role', async () => {
+  const state = membersState();
+  const dom = load(membersResponder(state), { hash: DASH_HASH });
+  await flush();
+  const options = dom.byId('project-member-assignee').children.map((c) => c.value);
+  assert.deepEqual(options, ['AS-2', 'AS-3'], 'Alice is a member and Dan is disabled');
+
+  dom.byId('project-member-assignee').value = 'AS-3';
+  dom.byId('project-member-role').value = 'APPROVER';
+  dom.byId('project-member-form').fire('submit', { preventDefault() {} });
+  await flush();
+  const put = memberCalls(dom.calls, 'PUT');
+  assert.equal(put.length, 1);
+  assert.equal(put[0].path, MEMBERS_PATH + '/AS-3');
+  assert.deepEqual(put[0].body, { role: 'APPROVER' });
+  assert.equal(dom.byId('project-members-status').textContent, 'メンバーに追加しました。');
+  assert.equal(memberRows(dom).length, 2);
+});
+
+test('a role change sends a PUT with the role and says so; the refusal of the last ADMIN is fixed text', async () => {
+  const state = membersState();
+  const dom = load(membersResponder(state), { hash: DASH_HASH });
+  await flush();
+  const select = rowControl(memberRows(dom)[0], 'SELECT');
+  select.value = 'VIEWER';
+  select.fire('change', {});
+  await flush();
+  assert.deepEqual(memberCalls(dom.calls, 'PUT')[0].body, { role: 'VIEWER' });
+  assert.equal(dom.byId('project-members-status').textContent, 'role を変えました。');
+
+  const refused = load(membersResponder(membersState(), { lastAdmin: true }), { hash: DASH_HASH });
+  await flush();
+  const refusedSelect = rowControl(memberRows(refused)[0], 'SELECT');
+  refusedSelect.value = 'VIEWER';
+  refusedSelect.fire('change', {});
+  await flush();
+  assert.equal(
+    refused.byId('project-members-status').textContent,
+    'このプロジェクトの最後の管理者（ADMIN）は、外すことも role を変えることもできません。先に別の担当を ADMIN にしてください。',
+  );
+  assert.equal(refused.byId('project-members-status').className, 'meta error');
+  assert.ok(!refused.byId('page-project').textContent.includes('LEAK'), 'the server text is never shown');
+});
+
+test('a removal asks first: cancel sends nothing, confirm sends a DELETE with an empty JSON body', async () => {
+  const state = membersState();
+  const dom = load(membersResponder(state), { hash: DASH_HASH });
+  await flush();
+  rowControl(memberRows(dom)[0], 'BUTTON').fire('click', {});
+  assert.equal(dom.byId('members-dialog').open, true, 'the dialog opens first');
+  dom.byId('members-cancel').fire('click', {});
+  await flush();
+  assert.equal(memberCalls(dom.calls, 'DELETE').length, 0, 'cancel sends nothing');
+  assert.equal(state.members.length, 1);
+
+  rowControl(memberRows(dom)[0], 'BUTTON').fire('click', {});
+  dom.byId('members-confirm').fire('click', {});
+  await flush();
+  const del = memberCalls(dom.calls, 'DELETE');
+  assert.equal(del.length, 1);
+  assert.equal(del[0].path, MEMBERS_PATH + '/AS-1');
+  assert.deepEqual(del[0].body, {}, 'a state-changing request carries a JSON body');
+  assert.equal(state.members.length, 0);
+  assert.equal(dom.byId('members-dialog').open, false);
+  assert.equal(dom.byId('project-members-status').textContent, 'メンバーから外しました。');
+  assert.equal(dom.byId('project-members').textContent, PMEM_EMPTY_TEXT, 'the list says there are no members');
+});
+
+test('the import dry run counts and writes nothing; the real run is off until a dry run finds rows, and asks first', async () => {
+  const state = membersState();
+  const dom = load(membersResponder(state), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('members-import-run').disabled, true, 'no real run before a dry run');
+
+  // The stub DOM does not read the HTML defaults, so the role the page would have shown is set here.
+  dom.byId('members-import-role').value = 'VIEWER';
+  dom.byId('members-import-dry').fire('click', {});
+  await flush();
+  const dry = dom.calls.find((c) => c.method === 'POST' && c.path.startsWith(MEMBERS_PATH + '/import-all'));
+  assert.equal(dry.path, MEMBERS_PATH + '/import-all?dryRun=true');
+  assert.deepEqual(dry.body, { role: 'VIEWER' });
+  assert.equal(state.members.length, 1, 'a dry run writes nothing');
+  assert.match(dom.byId('members-import-result').textContent, /対象（有効で未登録）2 件、追加 0 件、すでにメンバー 1 件/);
+  assert.equal(dom.byId('members-import-run').disabled, false);
+
+  dom.byId('members-import-run').fire('click', {});
+  assert.equal(dom.byId('members-dialog').open, true, 'the real run asks first');
+  dom.byId('members-confirm').fire('click', {});
+  await flush();
+  const real = dom.calls.filter((c) => c.method === 'POST' && c.path.startsWith(MEMBERS_PATH + '/import-all')).at(-1);
+  assert.equal(real.path, MEMBERS_PATH + '/import-all?dryRun=false');
+  assert.equal(state.members.length, 3, 'Bob and Carol are added, Dan (disabled) is not');
+  assert.equal(state.members.find((m) => m.assigneeId === 'AS-1').role, 'OPERATOR', 'an existing member keeps its role');
+  assert.equal(dom.byId('members-import-run').disabled, true, 'the dry run made before is spent');
+});
+
+test('a dry run that finds nothing to add disables the real run', async () => {
+  const state = membersState({ assignees: [{ assigneeId: 'AS-1', displayName: 'Alice', role: 'OPERATOR', state: 'ACTIVE' }] });
+  const dom = load(membersResponder(state), { hash: DASH_HASH });
+  await flush();
+  dom.byId('members-import-dry').fire('click', {});
+  await flush();
+  assert.match(dom.byId('members-import-result').textContent, /対象（有効で未登録）0 件/);
+  assert.equal(dom.byId('members-import-run').disabled, true);
+});
+
+test('the member picker reads every assignee, even while the project filter narrows the assignee list', async () => {
+  const state = membersState();
+  const dom = load(membersResponder(state), { hash: '#/' });
+  await flush();
+  clickProject(dom);
+  await flush();
+  assert.ok(getsTo(dom.calls, '/api/runs').at(-1).path.includes('projectId='), 'the project filter is on');
+
+  const before = dom.calls.length;
+  dom.window.location.hash = DASH_HASH;
+  dom.hashListeners.forEach((fn) => fn());
+  await flush();
+  const picker = dom.calls.slice(before).filter((c) => c.method === 'GET' && c.path.startsWith('/api/selfdev/assignees'));
+  assert.ok(picker.length > 0, 'the picker reads the assignees on the dashboard');
+  assert.ok(picker.every((c) => !c.path.includes('projectId')), 'the picker is not narrowed');
+});

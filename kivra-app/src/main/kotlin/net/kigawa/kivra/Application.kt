@@ -20,6 +20,7 @@ import net.kigawa.kivra.coding.buildCodingCostLedger
 import net.kigawa.kivra.coding.CodingTaskSource
 import net.kigawa.kivra.coding.DbCodingRunPort
 import net.kigawa.kivra.db.AssigneeStoreLookup
+import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectMemberStore
 import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingMonitorEventRepository
@@ -612,6 +613,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureProjectRoutes(
                 projectRepo, runs, taskApiIdentityWithSession, permissionGuard, selfDevSettings.config?.repo,
                 backfill = ProjectBackfillRepository(database),
+                members = ProjectMemberRepository(database, java.time.Clock.systemUTC()),
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

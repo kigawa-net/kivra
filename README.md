@@ -190,6 +190,10 @@ Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込み
 | `PUT /api/projects/{id}/repos` | body `{"repoKey": "owner/name"}` で repo を登録（ORDER_MANAGE、JSON）。登録は 201。形式が違えば 400、既に別の（または同じ）プロジェクトに登録済みなら 409、存在しないプロジェクトは 404 |
 | `DELETE /api/projects/{id}/repos?repoKey=owner/name` | repo の登録を外す（ORDER_MANAGE、JSON、本文は `{}`）。204。登録がなければ 404 |
 | `POST /api/projects/backfill?dryRun=true` | 既存データの振り分け（ORDER_MANAGE、JSON）。既定は dry-run（何も書かない）。`dryRun=false` で実行。`project_id` が NULL の行だけを repo の対応で更新する。テーブルごとに `matched`（対応あり）・`updated`（書いた件数）・`unmatched`（対応なしで NULL のまま）を返す。冪等。手順は `docs/runbook-selfdev.md` 4.16 |
+| `GET /api/projects/{id}/members` | プロジェクトのメンバー（担当の `assigneeId`、表示名、role、state）の一覧（ORDER_MANAGE）。存在しないプロジェクトは 404 |
+| `PUT /api/projects/{id}/members/{assigneeId}` | body `{"role": "ADMIN\|OPERATOR\|APPROVER\|AI\|VIEWER"}` で担当を追加、または role を変える（ORDER_MANAGE、JSON）。追加は 201、同じ role の再送と role の変更は 200（冪等）。role が不正なら 400、存在しない project・担当は 404、そのプロジェクトの最後の ADMIN を降格するなら 409（ADR 0022 PR-D2） |
+| `DELETE /api/projects/{id}/members/{assigneeId}` | メンバーから外す（ORDER_MANAGE、JSON、本文は `{}`）。204。メンバーでなければ 404、そのプロジェクトの最後の ADMIN なら 409 |
+| `POST /api/projects/{id}/members/import-all?dryRun=true` | 有効（ACTIVE）で未登録の全担当を、body `{"role": ...}` の role でメンバーに追加（ORDER_MANAGE、JSON）。既定は dry-run（何も書かない）。`dryRun=false` で実行。既存メンバーの role は変えない。無効（DISABLED）の担当は対象外。`candidates`・`added`・`alreadyMember`・`disabled` の件数を返す。冪等。存在しないプロジェクトは 404。手順は `docs/runbook-selfdev.md` 4.17 |
 | `GET /api/runs/{id}/operations` | 自分の Run の Operation を作成順に最大 100 件（読み取り専用）。他人の Run・存在しない Run は同じ 404。`{schemaVersion, runId, operations, limit, truncated}`。`?after=<operationId>` で次ページを取得でき、`truncated=true` のとき応答の `nextAfter` がその値（不正な `after` は 400）。`state` は Journal の状態名をそのまま返す（UNKNOWN / RECONCILIATION_REQUIRED を成功・完了とは表示しない）。トークン、request hash、外部参照、生のエラー、Evidence は含まない |
 
 応答（Run のスナップショット）: `{runId, taskId, title, state, mode, executed, effect, reasonCode, createdAt, updatedAt, ...}`。投入は `state` が `CREATED`、`mode` が `SIMULATED`、`executed` が `false`。自己開発の Run は `mode` が `SELF_DEV` で、`title` と `executed` は null（タイトルは返さない）、`effect` は `CREATES_PULL_REQUEST`。PR の番号とリンクは DB の binding から作る（GitHub は呼ばない）。

@@ -19,7 +19,13 @@ import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.BackfillReport
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.ProjectActivityEntry
+import net.kigawa.kivra.db.ImportAllResult
+import net.kigawa.kivra.db.MemberPutResult
+import net.kigawa.kivra.db.MemberRemoveResult
+import net.kigawa.kivra.db.PROJECT_MEMBER_ROLES
 import net.kigawa.kivra.db.ProjectBackfillRepository
+import net.kigawa.kivra.db.ProjectMemberRepository
+import net.kigawa.kivra.db.ProjectMemberRow
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.ProjectRow
 import net.kigawa.kivra.db.ProjectSpend
@@ -59,6 +65,8 @@ internal fun Route.configureProjectRoutes(
     targetRepo: RepoRef? = null,
     /** The backfill of the project scope (ADR 0022, PR-B): `POST /api/projects/backfill`. */
     backfill: ProjectBackfillRepository,
+    /** The members of a project (ADR 0022, PR-D2): `/api/projects/{id}/members`. */
+    members: ProjectMemberRepository,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -153,6 +161,97 @@ internal fun Route.configureProjectRoutes(
             } else {
                 projectAdminLog.info("project admin action: action=PROJECT_REPO_REMOVED actor={} projectId={}", operatorTag(principal), projectId)
                 call.respond(HttpStatusCode.NoContent)
+            }
+        }
+    }
+
+    // The members of a project (ADR 0022, PR-D2). Everything here needs ORDER_MANAGE: the list shows the assignees' names and the roles,
+    // and a change decides who may act in the project. A project with members keeps at least one ADMIN (409 otherwise).
+    route("/api/projects/{projectId}/members") {
+        get {
+            val principal = call.principalOr401() ?: return@get
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_members_list")) return@get
+            val projectId = call.parameters["projectId"]
+                ?: return@get call.respond(HttpStatusCode.NotFound)
+            if (!members.projectExists(projectId)) return@get call.respond(HttpStatusCode.NotFound)
+            call.respond(members.list(projectId).map { it.toResponse() })
+        }
+        // Every ACTIVE assignee that is not a member yet, added with the given role. `dryRun=true` (the default) only counts.
+        post("import-all") {
+            val principal = call.principalOr401() ?: return@post
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_members_import")) return@post
+            if (!call.requireJsonSameOrigin()) return@post
+            val dryRun = when (call.request.queryParameters["dryRun"]) {
+                null, "true" -> true
+                "false" -> false
+                else -> return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_dry_run"))
+            }
+            val projectId = call.parameters["projectId"]
+                ?: return@post call.respond(HttpStatusCode.NotFound)
+            val input = call.receive<ProjectMemberImportRequest>()
+            if (input.role !in PROJECT_MEMBER_ROLES) return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_role"))
+            val result = members.importAll(projectId, input.role, dryRun)
+                ?: return@post call.respond(HttpStatusCode.NotFound)
+            if (!dryRun) {
+                projectAdminLog.info(
+                    "project admin action: action=PROJECT_MEMBERS_IMPORTED actor={} projectId={} role={} added={}",
+                    operatorTag(principal), projectId, input.role, result.added,
+                )
+            }
+            call.respond(result.toResponse(input.role))
+        }
+        route("{assigneeId}") {
+            // Adds the assignee with the role, or changes the role of a member. The same role again changes nothing (200).
+            put {
+                val principal = call.principalOr401() ?: return@put
+                if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_member_put")) return@put
+                if (!call.requireJsonSameOrigin()) return@put
+                val projectId = call.parameters["projectId"]
+                    ?: return@put call.respond(HttpStatusCode.NotFound)
+                val assigneeId = call.parameters["assigneeId"]
+                    ?: return@put call.respond(HttpStatusCode.NotFound)
+                val input = call.receive<ProjectMemberRequest>()
+                if (input.role !in PROJECT_MEMBER_ROLES) return@put call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_role"))
+                when (members.put(projectId, assigneeId, input.role)) {
+                    MemberPutResult.CREATED -> {
+                        projectAdminLog.info(
+                            "project admin action: action=PROJECT_MEMBER_ADDED actor={} projectId={} target={} role={}",
+                            operatorTag(principal), projectId, operatorTag(assigneeId), input.role,
+                        )
+                        call.respond(HttpStatusCode.Created, ProjectMemberRoleResponse(assigneeId, input.role))
+                    }
+                    MemberPutResult.UPDATED -> {
+                        projectAdminLog.info(
+                            "project admin action: action=PROJECT_MEMBER_ROLE_CHANGED actor={} projectId={} target={} role={}",
+                            operatorTag(principal), projectId, operatorTag(assigneeId), input.role,
+                        )
+                        call.respond(ProjectMemberRoleResponse(assigneeId, input.role))
+                    }
+                    MemberPutResult.UNCHANGED -> call.respond(ProjectMemberRoleResponse(assigneeId, input.role))
+                    MemberPutResult.PROJECT_NOT_FOUND, MemberPutResult.ASSIGNEE_NOT_FOUND -> call.respond(HttpStatusCode.NotFound)
+                    MemberPutResult.LAST_ADMIN -> call.respond(HttpStatusCode.Conflict, ProjectError("last_admin"))
+                }
+            }
+            // Removes a member. The body is `{}`, as with the repository removal: the server accepts only JSON on a state-changing request.
+            delete {
+                val principal = call.principalOr401() ?: return@delete
+                if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_member_remove")) return@delete
+                if (!call.requireJsonSameOrigin()) return@delete
+                val projectId = call.parameters["projectId"]
+                    ?: return@delete call.respond(HttpStatusCode.NotFound)
+                val assigneeId = call.parameters["assigneeId"]
+                    ?: return@delete call.respond(HttpStatusCode.NotFound)
+                when (members.remove(projectId, assigneeId)) {
+                    MemberRemoveResult.REMOVED -> {
+                        projectAdminLog.info(
+                            "project admin action: action=PROJECT_MEMBER_REMOVED actor={} projectId={} target={}",
+                            operatorTag(principal), projectId, operatorTag(assigneeId),
+                        )
+                        call.respond(HttpStatusCode.NoContent)
+                    }
+                    MemberRemoveResult.NOT_MEMBER, MemberRemoveResult.PROJECT_NOT_FOUND -> call.respond(HttpStatusCode.NotFound)
+                    MemberRemoveResult.LAST_ADMIN -> call.respond(HttpStatusCode.Conflict, ProjectError("last_admin"))
+                }
             }
         }
     }
@@ -286,6 +385,30 @@ data class ProjectRepoRequest(val repoKey: String)
 @Serializable
 data class ProjectRepoResponse(val repoKey: String)
 
+@Serializable
+data class ProjectMemberRequest(val role: String)
+
+@Serializable
+data class ProjectMemberImportRequest(val role: String)
+
+/** A member: the assignee's id and display name, its role in the project and its state (ACTIVE or DISABLED). */
+@Serializable
+data class ProjectMemberResponse(val assigneeId: String, val displayName: String, val role: String, val state: String)
+
+@Serializable
+data class ProjectMemberRoleResponse(val assigneeId: String, val role: String)
+
+/** The result of a bulk import (`import-all`): the counts only. */
+@Serializable
+data class ImportAllResponse(
+    val dryRun: Boolean,
+    val role: String,
+    val candidates: Long,
+    val added: Long,
+    val alreadyMember: Long,
+    val disabled: Long,
+)
+
 /** The backfill result per table: matched (with a project to give), updated (written), unmatched (stays NULL). */
 @Serializable
 data class BackfillResponse(val dryRun: Boolean, val tables: List<BackfillTableResponse>)
@@ -351,6 +474,17 @@ internal fun parseRepoKey(value: String): String? {
     if (parts.size != 2) return null
     return runCatching { RepoRef(parts[0], parts[1]) }.getOrNull()?.toString()
 }
+
+private fun ProjectMemberRow.toResponse() = ProjectMemberResponse(assigneeId = assigneeId, displayName = displayName, role = role, state = state)
+
+private fun ImportAllResult.toResponse(role: String) = ImportAllResponse(
+    dryRun = dryRun,
+    role = role,
+    candidates = candidates,
+    added = added,
+    alreadyMember = alreadyMember,
+    disabled = disabled,
+)
 
 private fun BackfillReport.toResponse() = BackfillResponse(
     dryRun = dryRun,

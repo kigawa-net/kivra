@@ -356,12 +356,13 @@
    * redirect: 'manual' keeps a redirect to the sign-in page from being followed silently. It shows up as an
    * opaqueredirect response, which is treated as an expired session. The page never builds a redirect URL itself.
    */
-  async function apiFetch(path, method, body, quiet) {
+  async function apiFetch(path, method, body, quiet, unscoped) {
     // Client-side guard only: it saves unneeded requests and is not an authorization check. The server still
     // enforces auth on every request. Only a page reload clears sessionExpired (the sign-in happens on reload).
     if (isApi(path) && state.sessionExpired) return { ok: false, kind: 'session' };
     // The operator's lists are narrowed to the selected project here (ADR 0022 PR-D). The callers keep their literal paths.
-    if (method === 'GET' && state.projectFilter && PROJECT_SCOPED_GET.test(path)) path = withProject(path);
+    // The unscoped flag keeps a list whole when the project filter would narrow it (the member picker needs every assignee).
+    if (method === 'GET' && state.projectFilter && !unscoped && PROJECT_SCOPED_GET.test(path)) path = withProject(path);
     var init = {
       method: method,
       credentials: 'same-origin',
@@ -1359,6 +1360,7 @@
     if (!operator) return;
     var id = d.project.projectId;
     if (PREPO.id !== id || PREPO.failed) loadProjectRepos(id);
+    if (PMEM.id !== id || PMEM.failed) loadProjectMembers(id);
     updateBackfillControls();
   }
 
@@ -1520,6 +1522,311 @@
       $('backfill-dialog').close();
     } else {
       showBackfillError(BACKFILL_MSG.failed);
+    }
+  }
+
+  // ---- Operator: the members of a project (ADR 0022, PR-D2). Shown with the operator block (scope ALL). The server decides who may
+  // change anything. The picker reads every assignee (unscoped: the project filter would narrow it to the members).
+
+  var PMEM = { id: null, seq: 0, busy: false, failed: false, list: [], pending: null, importDry: null };
+  var MEMBER_ROLES = ['ADMIN', 'OPERATOR', 'APPROVER', 'AI', 'VIEWER'];
+  var PMEM_MSG = {
+    loadFailed: 'メンバーの一覧を読めませんでした。',
+    assigneesFailed: '担当の一覧を読めませんでした。担当の管理の権限が必要です。',
+    empty: 'メンバーはいません。',
+    noCandidate: '追加できる担当（有効で、まだメンバーでない担当）はいません。',
+    added: 'メンバーに追加しました。',
+    changed: 'role を変えました。',
+    removed: 'メンバーから外しました。',
+    lastAdmin: 'このプロジェクトの最後の管理者（ADMIN）は、外すことも role を変えることもできません。先に別の担当を ADMIN にしてください。',
+    notFound: '担当またはプロジェクトが見つかりません。画面を読み直してから、もう一度お試しください。',
+    forbidden: 'この操作は運用者だけができます。',
+    failed: '操作に失敗しました。時間をおいてもう一度お試しください。',
+    importDryDone: '確認の結果です（dry-run。何も書き込んでいません）。',
+    importDone: '全担当を取り込みました。',
+    importNothing: '取り込むものはありません（全担当がすでにメンバーか、無効です）。'
+  };
+
+  function setPmemStatus(text, kind) {
+    var el = $('project-members-status');
+    el.textContent = text;
+    el.className = kind === 'error' ? 'meta error' : 'meta';
+  }
+
+  function setImportStatus(text, kind) {
+    var el = $('members-import-status');
+    el.textContent = text;
+    el.className = kind === 'error' ? 'meta error' : 'meta';
+  }
+
+  function showMembersError(text) {
+    var el = $('members-error');
+    el.textContent = text;
+    el.hidden = text === '';
+  }
+
+  /** The message for a failed member request, by its status only (the body is never shown). */
+  function pmemFailText(r) {
+    if (r.kind === 'session') return MESSAGES.session;
+    if (r.status === 409) return PMEM_MSG.lastAdmin;
+    if (r.status === 404) return PMEM_MSG.notFound;
+    if (r.status === 400) return MESSAGES.invalid;
+    if (r.status === 403) return PMEM_MSG.forbidden;
+    return PMEM_MSG.failed;
+  }
+
+  function isMemberList(x) {
+    return Array.isArray(x) && x.every(function (m) {
+      return !!m && typeof m.assigneeId === 'string' && typeof m.displayName === 'string' &&
+        typeof m.role === 'string' && typeof m.state === 'string';
+    });
+  }
+
+  function isAssigneeList(x) {
+    return Array.isArray(x) && x.every(function (a) {
+      return !!a && typeof a.assigneeId === 'string' && typeof a.displayName === 'string' && typeof a.state === 'string';
+    });
+  }
+
+  function isImportBody(d, dryRun) {
+    if (!d || typeof d !== 'object' || d.dryRun !== dryRun) return false;
+    return ['candidates', 'added', 'alreadyMember', 'disabled'].every(function (k) { return typeof d[k] === 'number'; });
+  }
+
+  function roleSelect(current, label) {
+    var sel = h('select', { 'aria-label': label });
+    MEMBER_ROLES.forEach(function (r) {
+      var o = document.createElement('option');
+      o.value = r;
+      o.textContent = r;
+      sel.appendChild(o);
+    });
+    sel.value = current;
+    return sel;
+  }
+
+  async function loadProjectMembers(id) {
+    var seq = ++PMEM.seq;
+    PMEM.id = id;
+    PMEM.failed = false;
+    var r = await apiFetch('/api/projects/' + encodeURIComponent(id) + '/members', 'GET');
+    if (seq !== PMEM.seq) return;
+    if (!r.ok) {
+      PMEM.failed = true;
+      setPmemStatus(r.kind === 'session' ? MESSAGES.session : PMEM_MSG.loadFailed, 'error');
+      return;
+    }
+    if (!isMemberList(r.data)) {
+      PMEM.failed = true;
+      setPmemStatus(MESSAGES.invalid, 'error');
+      return;
+    }
+    PMEM.list = r.data;
+    renderProjectMembers();
+    await loadMemberCandidates(seq);
+  }
+
+  function renderProjectMembers() {
+    var ul = $('project-members');
+    var id = PMEM.id;
+    clear(ul);
+    PMEM.list.forEach(function (m) {
+      var sel = roleSelect(m.role, '役割（' + m.displayName + '）');
+      sel.addEventListener('change', function () { changeMemberRole(id, m.assigneeId, sel.value); });
+      var remove = h('button', { type: 'button', className: 'secondary', text: '外す…' });
+      remove.addEventListener('click', function () { openRemoveDialog(id, m); });
+      var label = m.state === 'DISABLED' ? m.displayName + '（無効）' : m.displayName;
+      ul.appendChild(h('li', {}, [label, ' ', sel, ' ', remove]));
+    });
+    if (ul.firstChild === null) ul.appendChild(h('li', { className: 'empty', text: PMEM_MSG.empty }));
+    renderMemberCandidates(null);
+    updateImportControls();
+  }
+
+  /** The picker: the ACTIVE assignees that are not members yet. Read unscoped (see the block comment above). */
+  async function loadMemberCandidates(seq) {
+    var r = await apiFetch('/api/selfdev/assignees', 'GET', undefined, false, true);
+    if (seq !== PMEM.seq) return;
+    if (!r.ok || !isAssigneeList(r.data)) {
+      renderMemberCandidates(r.kind === 'session' ? MESSAGES.session : PMEM_MSG.assigneesFailed);
+      return;
+    }
+    renderMemberCandidates(null, r.data);
+  }
+
+  /** Fills the picker. [error] is shown in the status line when the list could not be read; [assignees] is the full list. */
+  function renderMemberCandidates(error, assignees) {
+    var sel = $('project-member-assignee');
+    var member = {};
+    PMEM.list.forEach(function (m) { member[m.assigneeId] = true; });
+    if (assignees) PMEM.assignees = assignees;
+    clear(sel);
+    var candidates = (PMEM.assignees || []).filter(function (a) { return a.state === 'ACTIVE' && !member[a.assigneeId]; });
+    candidates.forEach(function (a) {
+      var o = document.createElement('option');
+      o.value = a.assigneeId;
+      o.textContent = a.displayName;
+      sel.appendChild(o);
+    });
+    $('project-member-add').disabled = candidates.length === 0 || PMEM.busy;
+    if (error) setPmemStatus(error, 'error');
+  }
+
+  /** The members changed, so an import dry run made before no longer says what a real run would do. */
+  function invalidateMemberImport() {
+    PMEM.importDry = null;
+    renderImportResult(null);
+  }
+
+  async function addProjectMember(id, assigneeId, role) {
+    if (PMEM.busy) return;
+    PMEM.busy = true;
+    var r = await apiFetch('/api/projects/' + encodeURIComponent(id) + '/members/' + encodeURIComponent(assigneeId), 'PUT', { role: role });
+    PMEM.busy = false;
+    if (!r.ok) {
+      setPmemStatus(pmemFailText(r), 'error');
+      renderMemberCandidates(null);
+      return;
+    }
+    setPmemStatus(PMEM_MSG.added, 'ok');
+    invalidateMemberImport();
+    await loadProjectMembers(id);
+  }
+
+  async function changeMemberRole(id, assigneeId, role) {
+    if (PMEM.busy) {
+      renderProjectMembers();
+      return;
+    }
+    PMEM.busy = true;
+    var r = await apiFetch('/api/projects/' + encodeURIComponent(id) + '/members/' + encodeURIComponent(assigneeId), 'PUT', { role: role });
+    PMEM.busy = false;
+    if (!r.ok) {
+      setPmemStatus(pmemFailText(r), 'error');
+      await loadProjectMembers(id);
+      return;
+    }
+    setPmemStatus(PMEM_MSG.changed, 'ok');
+    invalidateMemberImport();
+    await loadProjectMembers(id);
+  }
+
+  /** Removes a member. Answers null on success, or the fixed text to show. */
+  async function removeMember(p) {
+    if (PMEM.busy) return PMEM_MSG.failed;
+    PMEM.busy = true;
+    // The body is an empty JSON object: the server accepts only JSON on a state-changing request.
+    var r = await apiFetch('/api/projects/' + encodeURIComponent(p.id) + '/members/' + encodeURIComponent(p.assigneeId), 'DELETE', {});
+    PMEM.busy = false;
+    if (!r.ok) return pmemFailText(r);
+    setPmemStatus(PMEM_MSG.removed, 'ok');
+    invalidateMemberImport();
+    await loadProjectMembers(p.id);
+    return null;
+  }
+
+  function onProjectMemberSubmit(e) {
+    e.preventDefault();
+    var id = PDASH.id;
+    if (!id || !PDASH.data || PDASH.data.scope !== 'ALL') return;
+    var assigneeId = $('project-member-assignee').value;
+    var role = $('project-member-role').value;
+    if (!assigneeId) {
+      setPmemStatus(PMEM_MSG.noCandidate, 'error');
+      return;
+    }
+    if (MEMBER_ROLES.indexOf(role) === -1) {
+      setPmemStatus(MESSAGES.invalid, 'error');
+      return;
+    }
+    addProjectMember(id, assigneeId, role);
+  }
+
+  function openRemoveDialog(id, m) {
+    PMEM.pending = { kind: 'remove', id: id, assigneeId: m.assigneeId };
+    $('members-explain').textContent = 'この担当（' + m.displayName + '）を、このプロジェクトのメンバーから外します。担当そのものは消えません。' +
+      'プロジェクトの最後の管理者（ADMIN）は外せません。';
+    showMembersError('');
+    $('members-confirm').disabled = false;
+    $('members-dialog').showModal();
+  }
+
+  /** A dry run: counts only. Answers the fixed text to show on a failure, or null. */
+  async function runMembersImport(dryRun, role) {
+    var id = PMEM.id;
+    if (PMEM.busy || !id) return PMEM_MSG.failed;
+    PMEM.busy = true;
+    updateImportControls();
+    var r = await apiFetch('/api/projects/' + encodeURIComponent(id) + '/members/import-all?dryRun=' + (dryRun ? 'true' : 'false'), 'POST', { role: role });
+    PMEM.busy = false;
+    if (!r.ok) {
+      updateImportControls();
+      return pmemFailText(r);
+    }
+    if (!isImportBody(r.data, dryRun)) {
+      updateImportControls();
+      return MESSAGES.invalid;
+    }
+    PMEM.importDry = dryRun ? r.data : null;
+    renderImportResult(r.data);
+    if (dryRun) {
+      setImportStatus(PMEM_MSG.importDryDone, 'ok');
+    } else {
+      setImportStatus(PMEM_MSG.importDone, 'ok');
+      await loadProjectMembers(id);
+    }
+    return null;
+  }
+
+  function renderImportResult(d) {
+    var ul = $('members-import-result');
+    clear(ul);
+    if (d) {
+      ul.appendChild(h('li', {
+        text: '対象（有効で未登録）' + d.candidates + ' 件、追加 ' + d.added + ' 件、すでにメンバー ' + d.alreadyMember +
+          ' 件（role は変えません）、無効（対象外）' + d.disabled + ' 件'
+      }));
+    }
+    updateImportControls();
+  }
+
+  function updateImportControls() {
+    $('members-import-dry').disabled = PMEM.busy;
+    $('members-import-run').disabled = PMEM.busy || PMEM.importDry === null || PMEM.importDry.candidates === 0;
+  }
+
+  function openImportDialog() {
+    var d = PMEM.importDry;
+    if (d === null || PMEM.busy) return;
+    if (d.candidates === 0) {
+      setImportStatus(PMEM_MSG.importNothing, 'error');
+      return;
+    }
+    var role = $('members-import-role').value;
+    PMEM.pending = { kind: 'import', role: role };
+    $('members-explain').textContent = '確認の結果、' + d.candidates + ' 人の有効な担当を role「' + role + '」でこのプロジェクトのメンバーに追加します。' +
+      'すでにメンバーの人の role は変えません。一括で外す機能はありません（外すには一人ずつ「外す…」を使います）。';
+    showMembersError('');
+    $('members-confirm').disabled = false;
+    $('members-dialog').showModal();
+  }
+
+  async function confirmMembers() {
+    var p = PMEM.pending;
+    if (!p) return;
+    $('members-confirm').disabled = true;
+    var error = null;
+    if (p.kind === 'remove') {
+      error = await removeMember(p);
+    } else {
+      error = await runMembersImport(false, p.role);
+    }
+    $('members-confirm').disabled = false;
+    if (error === null) {
+      PMEM.pending = null;
+      $('members-dialog').close();
+    } else {
+      showMembersError(error);
     }
   }
 
@@ -4993,6 +5300,20 @@
     $('backfill-run').addEventListener('click', openBackfillDialog);
     $('backfill-cancel').addEventListener('click', function () { $('backfill-dialog').close(); });
     $('backfill-confirm').addEventListener('click', confirmBackfill);
+    var projectMemberForm = $('project-member-form');
+    if (projectMemberForm) projectMemberForm.addEventListener('submit', onProjectMemberSubmit);
+    $('members-import-dry').addEventListener('click', function () {
+      runMembersImport(true, $('members-import-role').value).then(function (err) {
+        if (err) setImportStatus(err, 'error');
+      });
+    });
+    $('members-import-run').addEventListener('click', openImportDialog);
+    $('members-import-role').addEventListener('change', function () {
+      invalidateMemberImport();
+      setImportStatus('', 'ok');
+    });
+    $('members-cancel').addEventListener('click', function () { $('members-dialog').close(); });
+    $('members-confirm').addEventListener('click', confirmMembers);
     // Re-entering the sign-in flow is done by the browser reload; the sign-in URL is never built here.
     $('reload-btn').addEventListener('click', function () {
       window.location.reload();

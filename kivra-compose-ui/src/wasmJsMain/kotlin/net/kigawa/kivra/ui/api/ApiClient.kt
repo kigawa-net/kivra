@@ -9,6 +9,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.ui.percentEncode
@@ -163,8 +164,64 @@ object ApiClient {
     suspend fun getAssignees(): List<ApiAssignee> =
         getJson("/api/selfdev/assignees")
 
+    /**
+     * 停止要求の承認。`POST /api/selfdev/stop-requests/{id}/approve`、本文 `{"digest": "..."}`(一覧で読んだ digest をそのまま返す)。
+     * 応答は order の要約(使わない)。409 は状態の競合、403 は権限(root 承認者でない / 自分の要求)。
+     */
+    suspend fun approveStopRequest(requestId: String, digest: String) =
+        postWrite("/api/selfdev/stop-requests/${percentEncode(requestId)}/approve", DigestRequest(digest))
+
+    /**
+     * 停止要求の却下。`POST /api/selfdev/stop-requests/{id}/reject`、本文は空の JSON オブジェクト `{}`(JSON の Content-Type が必須)。
+     * 理由は取らない(app.js と同じ)。
+     */
+    suspend fun rejectStopRequest(requestId: String) =
+        postWrite("/api/selfdev/stop-requests/${percentEncode(requestId)}/reject", EmptyJsonBody())
+
+    /**
+     * 開発目標(Task)の承認。`POST /api/selfdev/tasks/{id}/approve`、本文 `{"version": n}`(読んだ version)。
+     * 409 は version の競合または状態の不整合、403 は権限(GOAL_WRITE)。計画の親タスク(revision > 0)は 409。
+     */
+    suspend fun approveGoal(taskId: String, version: Long) =
+        postWrite("/api/selfdev/tasks/${percentEncode(taskId)}/approve", VersionRequest(version))
+
+    /**
+     * 開発目標(Task)の見送り(却下)。`POST /api/selfdev/tasks/{id}/reject`、本文 `{"version": n}`。
+     * 状態は SKIPPED になる。理由は取らない(app.js の「見送る」と同じ)。
+     */
+    suspend fun rejectGoal(taskId: String, version: Long) =
+        postWrite("/api/selfdev/tasks/${percentEncode(taskId)}/reject", VersionRequest(version))
+
+    /**
+     * 書き込みの共通処理。2xx 以外は [ApiException](HTTP ステータス付き)を投げる。通信の失敗は status を null にした [ApiException]。
+     * 応答の本文は読まない(承認の応答は使わないため、本文の形の違いで成功を失敗にしない)。
+     */
+    private suspend inline fun <reified B : Any> postWrite(path: String, body: B) {
+        val response = try {
+            client.post(path) {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw ApiException(null, NETWORK_FAILURE)
+        }
+        if (!response.status.isSuccess()) {
+            throw ApiException(response.status.value, serverErrorOf(response))
+        }
+    }
+
     private val ERROR_FIELD = Regex("\"error\"\\s*:\\s*\"([^\"]{0,200})\"")
+    private const val NETWORK_FAILURE = "network"
 }
+
+@Serializable private class DigestRequest(val digest: String)
+
+@Serializable private class VersionRequest(val version: Long)
+
+/** 本文が空の JSON オブジェクト `{}`(フィールドなし)。 */
+@Serializable private class EmptyJsonBody
 
 /** Server `MemoryListResponse`: the page of notes plus the counts. Only the items are used by the UI. */
 @Serializable

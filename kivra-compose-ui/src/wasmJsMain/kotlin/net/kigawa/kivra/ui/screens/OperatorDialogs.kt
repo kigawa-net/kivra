@@ -1,12 +1,17 @@
 package net.kigawa.kivra.ui.screens
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -15,14 +20,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.BUDGET_ACTUAL_HINT
 import net.kigawa.kivra.ui.BUDGET_TEXT_MAX
+import net.kigawa.kivra.ui.ORDER_STOP_CONFIRM
 import net.kigawa.kivra.ui.OperatorAction
+import net.kigawa.kivra.ui.REQUESTABLE_STOP_REASONS
 import net.kigawa.kivra.ui.ReasonCheck
 import net.kigawa.kivra.ui.budgetPathLabel
 import net.kigawa.kivra.ui.checkReason
@@ -189,3 +198,65 @@ private fun confirmText(actual: String, amountJpy: String): String =
     } else {
         "実額として $actual 円を記録します（0 は「請求されていないことを確認済み」の意味です）。"
     }
+
+/**
+ * order の停止要求ダイアログ。理由は要求できる 4 種から一つ選ぶ(自由入力はない)。選んで「停止を要求する」を押すまで送らない。
+ * 送信中は [busy] の間、すべての操作を止める。失敗時は [errorText] をダイアログ内に出し、ダイアログは閉じない。
+ * 成功時は呼び出し側が閉じる。旧 UI の order-stop-dialog と同じ(確認文・理由の 4 種)。
+ */
+@Composable
+internal fun OrderStopRequestDialog(
+    orderId: String,
+    busy: Boolean,
+    errorText: String?,
+    onSubmit: (reasonCode: String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    // 開いている間は定期更新を止める(選んだ理由を読み直しで消さないため)。
+    HoldAutoRefreshWhileShown()
+    var chosen by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("停止の要求") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(ORDER_STOP_CONFIRM)
+                Spacer(Modifier.height(4.dp))
+                Text("対象の order: $orderId")
+                Spacer(Modifier.height(8.dp))
+                REQUESTABLE_STOP_REASONS.forEach { (code, label) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = chosen == code,
+                                enabled = !busy,
+                                role = Role.RadioButton,
+                                onClick = { chosen = code },
+                            )
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = chosen == code, onClick = null, enabled = !busy)
+                        Spacer(Modifier.width(8.dp))
+                        Text(label)
+                    }
+                }
+                if (errorText != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(errorText, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !busy && chosen != null,
+                onClick = { chosen?.let(onSubmit) },
+            ) { Text("停止を要求する") }
+        },
+        dismissButton = {
+            TextButton(enabled = !busy, onClick = onDismiss) { Text("キャンセル") }
+        },
+    )
+}

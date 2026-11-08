@@ -14,10 +14,18 @@ import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.GOAL_STOP_REASON_MAX
 import net.kigawa.kivra.ui.GatedOperation
 import net.kigawa.kivra.ui.LocalCallerPermissions
+import net.kigawa.kivra.ui.ORDER_PAUSED_DONE
+import net.kigawa.kivra.ui.ORDER_RESUMED_DONE
+import net.kigawa.kivra.ui.ORDER_STOP_CANCELLED_DONE
+import net.kigawa.kivra.ui.ORDER_STOP_REQUESTED_DONE
 import net.kigawa.kivra.ui.OperatorAction
 import net.kigawa.kivra.ui.RUN_RELEASE_REASON_MAX
 import net.kigawa.kivra.ui.ReleaseKind
 import net.kigawa.kivra.ui.Route
+import net.kigawa.kivra.ui.canCancelOrderStop
+import net.kigawa.kivra.ui.canPauseOrder
+import net.kigawa.kivra.ui.canRequestOrderStop
+import net.kigawa.kivra.ui.canResumeOrder
 import net.kigawa.kivra.ui.canStopGoal
 import net.kigawa.kivra.ui.releaseKindOf
 import net.kigawa.kivra.ui.releaseTextsOf
@@ -36,7 +44,7 @@ import net.kigawa.kivra.ui.writeFailureText
 
 /*
  * 詳細画面。Run 詳細は UNKNOWN などの Run に運用者の解放を出す。Goal 詳細は承認待ちの Task に承認・見送りを、
- * 終端でない Goal に中止を出す。order 詳細の停止の操作は含まない(別 PR)。
+ * 終端でない Goal に中止を出す。order 詳細は一時停止・再開と、停止要求・取り消しを出す(緊急停止系)。
  * 表示する項目は旧 UI(kivra-app/src/main/resources/ui/app.js)と同じ範囲に合わせる。
  * 時刻は API の文字列のまま表示する(旧 UI のローカル時刻変換は未移植)。
  */
@@ -315,13 +323,42 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
     }
 }
 
-/** order 詳細: 状態、周、予算、親子、停止要求。題名と方針は旧 UI と同じくこの画面には出さない。 */
+/**
+ * order 詳細: 状態、周、予算、親子、停止要求。題名と方針は旧 UI と同じくこの画面には出さない。
+ * 運用操作: 一時停止・再開(ORDER_MANAGE)、停止要求・取り消し(STOP_REQUEST)。操作の可否は [canPauseOrder] などの純粋ロジック。
+ * 成功したら詳細を読み直す。失敗は操作の下に固定の文言で出す(停止要求の失敗はダイアログ内に出し、ダイアログは開いたままにする)。
+ */
 @Composable
 fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
-    val state = rememberLoad(orderId) { ApiClient.getOrder(orderId) }
+    // 操作の後に増やして、詳細を読み直させる。
+    var reloadKey by remember { mutableStateOf(0) }
+    var notice by remember { mutableStateOf<ActionNotice?>(null) }
+    var stopOpen by remember { mutableStateOf(false) }
+    var stopError by remember { mutableStateOf<String?>(null) }
+    val perms = LocalCallerPermissions.current
+    val gate = rememberOperatorWriteGate()
+    val state = rememberLoad(orderId, reloadKey) { ApiClient.getOrder(orderId) }
+
+    // 停止要求以外の操作を一つ送る。成否にかかわらず読み直す(旧 UI の ordAfterWrite と同じ)。
+    val send: (OperatorAction, String, suspend () -> Unit) -> Unit = { action, doneText, call ->
+        gate.send(
+            action = action,
+            call = call,
+            onSuccess = {
+                notice = ActionNotice(doneText, ok = true)
+                reloadKey++
+            },
+            onFailure = {
+                notice = ActionNotice(it, ok = false)
+                reloadKey++
+            },
+        )
+    }
+
     DetailPage {
         LoadedView(state) { detail ->
             val order: ApiOrder = detail.order
+            val pending = detail.pendingStopRequest
             Text("order ${order.orderId}", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
@@ -367,6 +404,66 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                 }
             }
             Spacer(Modifier.height(12.dp))
+            // 運用操作。ボタンは権限と状態で出し分ける(サーバーが最終判定し、403 / 409 は固定の文言で出す)。
+            val showPause = perms.can(GatedOperation.MANAGE_ORDER) && canPauseOrder(order.state)
+            val showResume = perms.can(GatedOperation.MANAGE_ORDER) && canResumeOrder(order.state, order.stateReason)
+            val showRequest = perms.can(GatedOperation.REQUEST_ORDER_STOP) && canRequestOrderStop(order.state, pending != null)
+            val showCancel = perms.can(GatedOperation.REQUEST_ORDER_STOP) && canCancelOrderStop(pending)
+            notice?.let { n ->
+                Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                Spacer(Modifier.height(8.dp))
+            }
+            if (showPause || showResume || showRequest || showCancel) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (showPause) {
+                        Button(enabled = !gate.busy, onClick = {
+                            send(OperatorAction.PAUSE_ORDER, ORDER_PAUSED_DONE) { ApiClient.pauseOrder(order.orderId, order.version) }
+                        }) { Text("一時停止") }
+                    }
+                    if (showResume) {
+                        Button(enabled = !gate.busy, onClick = {
+                            send(OperatorAction.RESUME_ORDER, ORDER_RESUMED_DONE) { ApiClient.resumeOrder(order.orderId, order.version) }
+                        }) { Text("再開") }
+                    }
+                    if (showRequest) {
+                        OutlinedButton(enabled = !gate.busy, onClick = { stopError = null; stopOpen = true }) { Text("停止を要求…") }
+                    }
+                    if (showCancel && pending != null) {
+                        OutlinedButton(enabled = !gate.busy, onClick = {
+                            send(OperatorAction.CANCEL_STOP, ORDER_STOP_CANCELLED_DONE) {
+                                ApiClient.cancelOrderStopRequest(pending.requestId)
+                            }
+                        }) { Text("要求を取り消す") }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+            if (stopOpen && showRequest) {
+                OrderStopRequestDialog(
+                    orderId = order.orderId,
+                    busy = gate.busy,
+                    errorText = stopError,
+                    onSubmit = { code ->
+                        stopError = null
+                        gate.send(
+                            action = OperatorAction.REQUEST_STOP,
+                            call = { ApiClient.requestOrderStop(order.orderId, order.version, code) },
+                            onSuccess = {
+                                stopOpen = false
+                                notice = ActionNotice(ORDER_STOP_REQUESTED_DONE, ok = true)
+                                reloadKey++
+                            },
+                            onFailure = { stopError = it },
+                        )
+                    },
+                    onDismiss = {
+                        if (!gate.busy) {
+                            stopOpen = false
+                            stopError = null
+                        }
+                    },
+                )
+            }
             Row {
                 order.parentOrderId?.let { parent ->
                     OutlinedButton(onClick = { onNavigate(Route.OrderDetail(parent)) }) { Text("親の order") }
@@ -411,9 +508,9 @@ fun OrderCyclesScreen(orderId: String, onNavigate: (Route) -> Unit) {
     }
 }
 
-/** 詳細画面の外枠: 縦スクロール付きの本文領域。 */
+/** 詳細画面の外枠: 縦スクロール付きの本文領域(自律運転の画面も使う)。 */
 @Composable
-private fun DetailPage(content: @Composable ColumnScope.() -> Unit) {
+internal fun DetailPage(content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         content = content,

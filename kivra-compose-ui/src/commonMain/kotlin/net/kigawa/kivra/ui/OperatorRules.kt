@@ -63,8 +63,22 @@ fun isValidBudgetActual(raw: String): Boolean {
     return text.isEmpty() || (ACTUAL_SHAPE.matches(text) && text.length <= BUDGET_ACTUAL_MAX)
 }
 
-/** 操作の種類。失敗の文言を操作ごとに出し分けるために使う。 */
-enum class OperatorAction { RELEASE_RUN, STOP_GOAL, ACKNOWLEDGE_BUDGET }
+/**
+ * 操作の種類。失敗の文言を操作ごとに出し分けるために使う。PAUSE_AUTOPILOT 以降は緊急停止系
+ * (自律運転・order の一時停止・再開、停止要求と取り消し)。
+ */
+enum class OperatorAction {
+    RELEASE_RUN,
+    STOP_GOAL,
+    ACKNOWLEDGE_BUDGET,
+    PAUSE_AUTOPILOT,
+    RESUME_AUTOPILOT,
+    RESET_BREAKER,
+    PAUSE_ORDER,
+    RESUME_ORDER,
+    REQUEST_STOP,
+    CANCEL_STOP,
+}
 
 /**
  * 運用操作の失敗の日本語の文言。[failure] は [writeFailureOf] の結果、[code] は 400 のときの機械的なコード
@@ -74,8 +88,16 @@ enum class OperatorAction { RELEASE_RUN, STOP_GOAL, ACKNOWLEDGE_BUDGET }
 fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code: String? = null): String = when (failure) {
     WriteFailure.STALE -> when (action) {
         OperatorAction.RELEASE_RUN -> "この Run は解放できる状態ではありません（状態が既に変わっています）。詳細を読み直してください。"
-        OperatorAction.STOP_GOAL -> writeFailureText(failure)
         OperatorAction.ACKNOWLEDGE_BUDGET -> "この予約は未確定ではありません（既に解除されたか、状態が変わりました）。一覧を更新してください。"
+        OperatorAction.RESUME_ORDER -> "この order は再開できる状態ではありません（状態が既に変わっています）。詳細を読み直してください。"
+        OperatorAction.STOP_GOAL,
+        OperatorAction.PAUSE_AUTOPILOT,
+        OperatorAction.RESUME_AUTOPILOT,
+        OperatorAction.RESET_BREAKER,
+        OperatorAction.PAUSE_ORDER,
+        OperatorAction.REQUEST_STOP,
+        OperatorAction.CANCEL_STOP,
+        -> writeFailureText(failure)
     }
     WriteFailure.BAD_REQUEST -> when (action) {
         OperatorAction.RELEASE_RUN -> "理由を確認してください（1〜500 文字、空白だけは使えません）。"
@@ -85,11 +107,28 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             "NOT_COMPARABLE" -> "実額の単位が予約と合いません。円の数字で入力してください。"
             else -> "入力を確認してください（実額は円の数字、根拠と理由は 1〜500 文字、制御文字は使えません）。"
         }
+        OperatorAction.PAUSE_AUTOPILOT,
+        OperatorAction.RESUME_AUTOPILOT,
+        OperatorAction.RESET_BREAKER,
+        OperatorAction.PAUSE_ORDER,
+        OperatorAction.RESUME_ORDER,
+        OperatorAction.REQUEST_STOP,
+        OperatorAction.CANCEL_STOP,
+        -> writeFailureText(failure)
     }
     WriteFailure.DISABLED -> when (action) {
-        OperatorAction.STOP_GOAL -> "自律運転が今は無効です。時間をおいて、もう一度お試しください。"
+        OperatorAction.STOP_GOAL,
+        OperatorAction.PAUSE_AUTOPILOT,
+        OperatorAction.RESUME_AUTOPILOT,
+        OperatorAction.RESET_BREAKER,
+        -> "自律運転が今は無効です。時間をおいて、もう一度お試しください。"
         OperatorAction.ACKNOWLEDGE_BUDGET -> "予算の台帳に書けませんでした。予約は変わっていません。時間をおいて、もう一度お試しください。"
         OperatorAction.RELEASE_RUN -> writeFailureText(WriteFailure.UNKNOWN)
+        OperatorAction.PAUSE_ORDER,
+        OperatorAction.RESUME_ORDER,
+        OperatorAction.REQUEST_STOP,
+        OperatorAction.CANCEL_STOP,
+        -> writeFailureText(failure)
     }
     else -> writeFailureText(failure)
 }

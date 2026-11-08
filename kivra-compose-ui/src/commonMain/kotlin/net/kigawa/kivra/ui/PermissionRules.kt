@@ -52,6 +52,15 @@ enum class GatedOperation(val permission: SelfDevPermission) {
 
     /** 記憶の一覧とナビ(app.js: memory-section の can('READ_TEXT')。サーバー: memory.list)。 */
     READ_MEMORY(SelfDevPermission.READ_TEXT),
+
+    /** 自律運転の一時停止・再開、サーキットブレーカーの手動再開(app.js: can('ORDER_MANAGE') / サーバー: autopilot pause・resume・reset-breaker)。 */
+    MANAGE_AUTOPILOT(SelfDevPermission.ORDER_MANAGE),
+
+    /** order の一時停止・再開(app.js: can('ORDER_MANAGE') / サーバー: order.pause・order.resume)。 */
+    MANAGE_ORDER(SelfDevPermission.ORDER_MANAGE),
+
+    /** order の停止要求と、要求の取り消し(app.js: can('STOP_REQUEST') / サーバー: order.stop.request・order.stop.cancel)。 */
+    REQUEST_ORDER_STOP(SelfDevPermission.STOP_REQUEST),
 }
 
 private val ROLE_NAME = Regex("[A-Z_]{1,32}")

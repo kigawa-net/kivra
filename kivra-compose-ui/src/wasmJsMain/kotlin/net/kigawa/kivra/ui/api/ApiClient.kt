@@ -6,6 +6,8 @@ import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.*
@@ -26,8 +28,9 @@ import net.kigawa.kivra.ui.releasePath
 
 /**
  * A failed API call: a non-2xx answer, or a body that does not match the model.
- * [status] is the HTTP status, or null when the body could not be read as the expected model.
- * [detail] is the server's fixed `error` text when it sent one (for example `AUTOPILOT_DISABLED`), otherwise the status text.
+ * [status] is the HTTP status, or null when the body could not be read as the expected model or the call did not complete.
+ * [detail] is the server's fixed `error` text when it sent one (for example `AUTOPILOT_DISABLED`), otherwise a fixed text of this client.
+ * An expired session is always a 401 (see [ApiSession]).
  */
 class ApiException(val status: Int?, val detail: String, val code: String? = null) : Exception(
     if (status != null) "HTTP $status: $detail" else detail,
@@ -40,6 +43,10 @@ class ApiException(val status: Int?, val detail: String, val code: String? = nul
  * header and relies on the same-origin cookie, the same as the old UI (`kivra-app/src/main/resources/ui/app.js`, apiFetch).
  *
  * Read calls throw [ApiException] on failure, so a failed load is never shown as an empty list. Callers must catch it.
+ *
+ * Session (旧 UI の apiFetch と同じ判定): a 401 ends the session, and so does a 2xx answer that is not JSON (an HTML sign-in
+ * page served after a followed redirect). While the session is expired, no /api request is sent ([ApiSession.expired]).
+ * A call marked `quiet` (the caller's own role, the budget) does not end the session on 401, as in the old UI.
  */
 object ApiClient {
 
@@ -53,26 +60,22 @@ object ApiClient {
     }
 
     /** GET [path] and decode the body as [T]. Throws [ApiException] for a non-2xx answer or a body that does not decode. */
-    private suspend inline fun <reified T> getJson(path: String): T {
+    private suspend inline fun <reified T> getJson(path: String, quiet: Boolean = false): T {
+        checkSession()
         val response = client.get(path)
         if (!response.status.isSuccess()) {
-            throw ApiException(response.status.value, serverErrorOf(response))
+            throw failureOf(response, quiet)
+        }
+        if (!isJson(response)) {
+            throw sessionLost(quiet)
         }
         return try {
             response.body<T>()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             throw ApiException(null, "response is not the expected format")
         }
-    }
-
-    /** The server's `{"error": "..."}` text, or the status description when the body has none. */
-    private suspend fun serverErrorOf(response: HttpResponse): String {
-        val text = try {
-            response.bodyAsText()
-        } catch (e: Exception) {
-            return response.status.description
-        }
-        return ERROR_FIELD.find(text)?.groupValues?.get(1) ?: response.status.description
     }
 
     /**
@@ -104,20 +107,16 @@ object ApiClient {
      * 2xx なら true。同じ呼び出しの再送は新しい key になるため、二重投入の防止は呼び出し側で行う。
      */
     suspend fun submitTask(title: String, body: String? = null, kind: String = "SIMULATED"): Boolean {
+        val key = newIdempotencyKey()
         return try {
-            val key = newIdempotencyKey()
-            val response = if (kind == "SELF_DEV") {
-                client.post("/api/selfdev/tasks") {
-                    contentType(ContentType.Application.Json)
-                    setBody(SubmitSelfDevRequest(title, body?.takeIf { it.isNotBlank() }, key))
-                }
+            if (kind == "SELF_DEV") {
+                postWriteText("/api/selfdev/tasks", SubmitSelfDevRequest(title, body?.takeIf { it.isNotBlank() }, key))
             } else {
-                client.post("/api/tasks") {
-                    contentType(ContentType.Application.Json)
-                    setBody(SubmitTaskRequest(title, key))
-                }
+                postWriteText("/api/tasks", SubmitTaskRequest(title, key))
             }
-            response.status.isSuccess()
+            true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             false
         }
@@ -131,11 +130,10 @@ object ApiClient {
 
     suspend fun createProject(name: String, description: String? = null): Boolean {
         return try {
-            val response = client.post("/api/projects") {
-                contentType(ContentType.Application.Json)
-                setBody(CreateProjectRequest(name, description?.takeIf { it.isNotBlank() }))
-            }
-            response.status.isSuccess()
+            postWriteText("/api/projects", CreateProjectRequest(name, description?.takeIf { it.isNotBlank() }))
+            true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             false
         }
@@ -144,8 +142,29 @@ object ApiClient {
     /**
      * 呼び出し者の役割と権限。`GET /api/selfdev/me`。どの運用者にも 200 で返る。失敗は [ApiException]
      * (呼び出し側は [net.kigawa.kivra.ui.CallerPermissions.UNKNOWN] として扱う)。
+     * 旧 UI の loadMe と同じく quiet。401 でもセッション切れの案内は出さない。
      */
-    suspend fun getMe(): ApiMe = getJson("/api/selfdev/me")
+    suspend fun getMe(): ApiMe = getJson("/api/selfdev/me", quiet = true)
+
+    /**
+     * 自己開発の有無。`GET /api/selfdev/status`。応答は `enabled` のほかに設定の要約を持つが、UI は有無だけを使う。
+     * 401 はセッション切れ(旧 UI の refreshStatus と同じ)。
+     */
+    suspend fun getSelfDevStatus(): ApiSelfDevStatus = getJson("/api/selfdev/status")
+
+    /**
+     * `GET /health` が `{"status": "ok"}` で応えるか。/api ではないので、セッションの判定は行わない(旧 UI の checkHealth と同じ)。
+     * 通信の失敗や形の違いは false。
+     */
+    suspend fun checkHealth(): Boolean =
+        try {
+            val response = client.get("/health")
+            response.status.isSuccess() && response.body<HealthBody>().status == "ok"
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
 
     /** Goals (= selfdev tasks). `GET /api/selfdev/goals`. 503 `AUTOPILOT_DISABLED` while the autopilot is off. */
     suspend fun getGoals(): List<ApiGoal> =
@@ -166,9 +185,12 @@ object ApiClient {
     suspend fun getMemories(): List<ApiMemory> =
         getJson<ApiMemoryList>("/api/selfdev/memory?limit=100").items
 
-    /** Budget of the month. `GET /api/admin/budget/status`. */
+    /**
+     * Budget of the month. `GET /api/admin/budget/status`. quiet: 401 / 403 / 404 mean "not for this user" (the old UI hides the
+     * section and keeps the session), so they do not end the session.
+     */
     suspend fun getBudget(): ApiBudget =
-        getJson("/api/admin/budget/status")
+        getJson("/api/admin/budget/status", quiet = true)
 
     /** Assignees. `GET /api/selfdev/assignees`. 403 unless the caller may manage assignees; 503 while roles are off. */
     suspend fun getAssignees(): List<ApiAssignee> =
@@ -210,38 +232,79 @@ object ApiClient {
         postWriteText(path, body)
     }
 
-    /** [postWrite] の本文の文字列を返す版。応答の本文の `status` などを読む時に使う。 */
+    /**
+     * [postWrite] の本文の文字列を返す版。応答の本文の `status` などを読む時に使う。
+     * セッション切れの後は送らない。送信中は [ApiSession.hold] で定期更新を止める。
+     * 204 は本文なしの成功。2xx で JSON でない応答はサインイン画面への追従とみなし、セッション切れにする(旧 UI と同じ)。
+     */
     private suspend inline fun <reified B : Any> postWriteText(path: String, body: B): String {
-        val response = try {
-            client.post(path) {
-                contentType(ContentType.Application.Json)
-                setBody(body)
+        checkSession()
+        ApiSession.hold()
+        try {
+            val response = try {
+                client.post(path) {
+                    contentType(ContentType.Application.Json)
+                    setBody(body)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                throw ApiException(null, NETWORK_FAILURE)
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            throw ApiException(null, NETWORK_FAILURE)
-        }
-        if (!response.status.isSuccess()) {
-            throw failureOf(response)
-        }
-        return try {
-            response.bodyAsText()
-        } catch (e: Exception) {
-            ""
+            if (!response.status.isSuccess()) {
+                throw failureOf(response, quiet = false)
+            }
+            if (response.status == HttpStatusCode.NoContent) {
+                return ""
+            }
+            if (!isJson(response)) {
+                throw sessionLost(quiet = false)
+            }
+            return try {
+                response.bodyAsText()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ""
+            }
+        } finally {
+            ApiSession.unhold()
         }
     }
 
-    /** A non-2xx write answer: the status, the server's fixed `error` text, and the machine `code` when it sent one. */
-    private suspend fun failureOf(response: HttpResponse): ApiException {
+    /**
+     * 非 2xx の応答を [ApiException] にする。401 はセッション切れ(quiet を除く)。サーバーの `error` と機械の `code` は固定の形のものだけ残す。
+     */
+    private suspend fun failureOf(response: HttpResponse, quiet: Boolean): ApiException {
         val text = try {
             response.bodyAsText()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             ""
+        }
+        if (response.status.value == 401 && !quiet) {
+            ApiSession.markExpired()
         }
         val error = ERROR_FIELD.find(text)?.groupValues?.get(1) ?: response.status.description
         return ApiException(response.status.value, error, CODE_FIELD.find(text)?.groupValues?.get(1))
     }
+
+    /** セッションが切れた時の例外。quiet でなければ [ApiSession] を切れた状態にする。 */
+    private fun sessionLost(quiet: Boolean): ApiException {
+        if (!quiet) ApiSession.markExpired()
+        return ApiException(401, SESSION_DETAIL)
+    }
+
+    /** 切れた後は /api へ要求を送らない(旧 UI の apiFetch の先頭の判定)。 */
+    private fun checkSession() {
+        if (ApiSession.expired) throw ApiException(401, SESSION_DETAIL)
+    }
+
+    /** JSON の応答か(`application/json`、パラメータは問わない)。 */
+    private fun isJson(response: HttpResponse): Boolean =
+        response.headers[HttpHeaders.ContentType]?.substringBefore(';')?.trim()
+            ?.equals("application/json", ignoreCase = true) == true
 
     /**
      * Run の解放(運用者)。UNKNOWN は `POST .../release`、束縛なしの PR は `POST .../release-unbound-pr`(パスは [releasePath])。
@@ -288,6 +351,7 @@ object ApiClient {
     private val CODE_FIELD = Regex("\"code\"\\s*:\\s*\"([A-Z_]{1,32})\"")
     private val ACK_STATUS_ALREADY = Regex("\"status\"\\s*:\\s*\"ALREADY_ACKNOWLEDGED\"")
     private const val NETWORK_FAILURE = "network"
+    private const val SESSION_DETAIL = "session expired"
 }
 
 @Serializable private class DigestRequest(val digest: String)
@@ -300,6 +364,9 @@ object ApiClient {
 
 /** 本文が空の JSON オブジェクト `{}`(フィールドなし)。 */
 @Serializable private class EmptyJsonBody
+
+/** `GET /health` の本文(`status` だけ読む)。 */
+@Serializable private class HealthBody(val status: String? = null)
 
 /** Server `MemoryListResponse`: the page of notes plus the counts. Only the items are used by the UI. */
 @Serializable

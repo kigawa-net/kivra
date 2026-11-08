@@ -21,6 +21,15 @@ data class ApiMe(
     val source: String? = null,
 )
 
+/**
+ * `GET /api/selfdev/status` (server `selfDevStatusBody`). Only `enabled` is read; when disabled the server sends nothing else.
+ * The other settings are not read (the UI shows only whether self-development is on).
+ */
+@Serializable
+data class ApiSelfDevStatus(
+    val enabled: Boolean,
+)
+
 @Serializable
 data class ApiRun(
     val runId: String,

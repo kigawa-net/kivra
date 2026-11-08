@@ -12,7 +12,11 @@ import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import net.kigawa.kivra.ui.ReleaseKind
 import net.kigawa.kivra.ui.percentEncode
+import net.kigawa.kivra.ui.releasePath
 
 @Serializable private class SubmitTaskRequest(val title: String, val idempotencyKey: String)
 
@@ -25,7 +29,7 @@ import net.kigawa.kivra.ui.percentEncode
  * [status] is the HTTP status, or null when the body could not be read as the expected model.
  * [detail] is the server's fixed `error` text when it sent one (for example `AUTOPILOT_DISABLED`), otherwise the status text.
  */
-class ApiException(val status: Int?, val detail: String) : Exception(
+class ApiException(val status: Int?, val detail: String, val code: String? = null) : Exception(
     if (status != null) "HTTP $status: $detail" else detail,
 )
 
@@ -197,6 +201,11 @@ object ApiClient {
      * 応答の本文は読まない(承認の応答は使わないため、本文の形の違いで成功を失敗にしない)。
      */
     private suspend inline fun <reified B : Any> postWrite(path: String, body: B) {
+        postWriteText(path, body)
+    }
+
+    /** [postWrite] の本文の文字列を返す版。応答の本文の `status` などを読む時に使う。 */
+    private suspend inline fun <reified B : Any> postWriteText(path: String, body: B): String {
         val response = try {
             client.post(path) {
                 contentType(ContentType.Application.Json)
@@ -208,15 +217,78 @@ object ApiClient {
             throw ApiException(null, NETWORK_FAILURE)
         }
         if (!response.status.isSuccess()) {
-            throw ApiException(response.status.value, serverErrorOf(response))
+            throw failureOf(response)
+        }
+        return try {
+            response.bodyAsText()
+        } catch (e: Exception) {
+            ""
         }
     }
 
+    /** A non-2xx write answer: the status, the server's fixed `error` text, and the machine `code` when it sent one. */
+    private suspend fun failureOf(response: HttpResponse): ApiException {
+        val text = try {
+            response.bodyAsText()
+        } catch (e: Exception) {
+            ""
+        }
+        val error = ERROR_FIELD.find(text)?.groupValues?.get(1) ?: response.status.description
+        return ApiException(response.status.value, error, CODE_FIELD.find(text)?.groupValues?.get(1))
+    }
+
+    /**
+     * Run の解放(運用者)。UNKNOWN は `POST .../release`、束縛なしの PR は `POST .../release-unbound-pr`(パスは [releasePath])。
+     * 本文は `{"reason": "..."}` だけ(サーバーは余計なフィールドを拒否する)。冪等キーは取らない。
+     * 409 は状態が変わった、404 は無い Run、400 は理由の形式、403 は権限(BUDGET_OVERRIDE)。
+     */
+    suspend fun releaseRun(runId: String, kind: ReleaseKind, reason: String) =
+        postWrite(releasePath(runId, kind), ReasonRequest(reason))
+
+    /**
+     * Goal(Task)の中止。`POST /api/selfdev/goals/{id}/stop`、本文 `{"version": n, "reason": "..."}`(読んだ version)。
+     * 理由はサーバーが保存もログもしない。409 は状態・version の競合、503 は自律運転が無効、403 は権限(GOAL_STOP)。
+     */
+    suspend fun stopGoal(taskId: String, version: Long, reason: String) =
+        postWrite("/api/selfdev/goals/${percentEncode(taskId)}/stop", StopGoalRequest(version, reason))
+
+    /**
+     * 未確定の予約の解除(運用者)。`POST /api/admin/budget/acknowledge`。本文は scopeId・period・reservationKey(一覧の行の値)、
+     * evidence・reason(trim 済み)、actualAmountJpy(任意。空欄なら送らない = 実額不明)。冪等キーは取らない(同じ解除は
+     * サーバーが ALREADY_ACKNOWLEDGED で返す)。400 は code に TOO_LARGE / NOT_COMPARABLE が入ることがある。
+     * 戻り値は「既に解除済みだった」なら true(応答の status が ALREADY_ACKNOWLEDGED)。
+     */
+    suspend fun acknowledgeBudget(
+        scopeId: String,
+        period: String,
+        reservationKey: String,
+        actualAmountJpy: String?,
+        evidence: String,
+        reason: String,
+    ): Boolean {
+        val body = buildJsonObject {
+            put("scopeId", scopeId)
+            put("period", period)
+            put("reservationKey", reservationKey)
+            if (actualAmountJpy != null) put("actualAmountJpy", actualAmountJpy)
+            put("evidence", evidence)
+            put("reason", reason)
+        }
+        val text = postWriteText("/api/admin/budget/acknowledge", body)
+        return ACK_STATUS_ALREADY.containsMatchIn(text)
+    }
+
     private val ERROR_FIELD = Regex("\"error\"\\s*:\\s*\"([^\"]{0,200})\"")
+    private val CODE_FIELD = Regex("\"code\"\\s*:\\s*\"([A-Z_]{1,32})\"")
+    private val ACK_STATUS_ALREADY = Regex("\"status\"\\s*:\\s*\"ALREADY_ACKNOWLEDGED\"")
     private const val NETWORK_FAILURE = "network"
 }
 
 @Serializable private class DigestRequest(val digest: String)
+
+@Serializable private class ReasonRequest(val reason: String)
+
+@Serializable private class StopGoalRequest(val version: Long, val reason: String)
 
 @Serializable private class VersionRequest(val version: Long)
 

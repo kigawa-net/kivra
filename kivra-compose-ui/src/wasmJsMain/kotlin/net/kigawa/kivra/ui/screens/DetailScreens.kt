@@ -11,7 +11,14 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
+import net.kigawa.kivra.ui.GOAL_STOP_REASON_MAX
+import net.kigawa.kivra.ui.OperatorAction
+import net.kigawa.kivra.ui.RUN_RELEASE_REASON_MAX
+import net.kigawa.kivra.ui.ReleaseKind
 import net.kigawa.kivra.ui.Route
+import net.kigawa.kivra.ui.canStopGoal
+import net.kigawa.kivra.ui.releaseKindOf
+import net.kigawa.kivra.ui.releaseTextsOf
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiGoal
@@ -25,7 +32,8 @@ import net.kigawa.kivra.ui.writeFailureOf
 import net.kigawa.kivra.ui.writeFailureText
 
 /*
- * 詳細画面。Goal 詳細は承認待ちの Task に承認・見送りを出す。解放・中止・予算解除などの操作は含まない(別 PR)。
+ * 詳細画面。Run 詳細は UNKNOWN などの Run に運用者の解放を出す。Goal 詳細は承認待ちの Task に承認・見送りを、
+ * 終端でない Goal に中止を出す。order 詳細の停止の操作は含まない(別 PR)。
  * 表示する項目は旧 UI(kivra-app/src/main/resources/ui/app.js)と同じ範囲に合わせる。
  * 時刻は API の文字列のまま表示する(旧 UI のローカル時刻変換は未移植)。
  */
@@ -33,11 +41,18 @@ import net.kigawa.kivra.ui.writeFailureText
 /** Run 詳細: 基本情報、PR、イベント一覧。 */
 @Composable
 fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
-    val state by produceState<LoadState<ApiRun>>(LoadState.Loading, runId) {
+    // 解放の後に増やして、詳細を読み直させる。
+    var reloadKey by remember { mutableStateOf(0) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    val state by produceState<LoadState<ApiRun>>(LoadState.Loading, runId, reloadKey) {
         value = LoadState.Loading
         value = loadState { ApiClient.getRun(runId) }
     }
     DetailPage {
+        notice?.let { n ->
+            Text(n, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(8.dp))
+        }
         LoadStateView(state) { run ->
             Text(run.title, style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
@@ -58,6 +73,11 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
                 }
             }
             Spacer(Modifier.height(12.dp))
+            // 運用者の解放。UNKNOWN、または束縛のない PULL_REQUEST の Run だけ出す(旧 UI と同じ条件)。
+            releaseKindOf(run)?.let { kind ->
+                RunReleaseSection(runId = run.runId, kind = kind, onReleased = { notice = it; reloadKey++ })
+                Spacer(Modifier.height(12.dp))
+            }
             PullRequestSection(run)
             Spacer(Modifier.height(16.dp))
             Text("状態の経過", style = MaterialTheme.typography.titleMedium)
@@ -70,6 +90,51 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
                 events.forEach { EventLine(it) }
             }
         }
+    }
+}
+
+/**
+ * 運用者の解放ボタンと理由入力のダイアログ。成功なら [onReleased] に操作結果の文言を渡す(詳細の読み直しは呼び出し側)。
+ * 失敗はダイアログ内に出し、ダイアログは開いたままにする。
+ */
+@Composable
+private fun RunReleaseSection(runId: String, kind: ReleaseKind, onReleased: (String) -> Unit) {
+    val gate = rememberOperatorWriteGate()
+    val texts = releaseTextsOf(kind)
+    var open by remember { mutableStateOf(false) }
+    var dialogError by remember { mutableStateOf<String?>(null) }
+
+    OutlinedButton(onClick = { dialogError = null; open = true }) { Text(if (kind == ReleaseKind.UNKNOWN) "運用者の解放…" else "解放（束縛なし）…") }
+    if (open) {
+        ReasonDialog(
+            title = texts.title,
+            message = texts.explain,
+            submitLabel = "解放する",
+            reasonLabel = "理由",
+            busy = gate.busy,
+            errorText = dialogError,
+            maxCodePoints = RUN_RELEASE_REASON_MAX,
+            onSubmit = { reason ->
+                if (reason != null) {
+                    dialogError = null
+                    gate.send(
+                        action = OperatorAction.RELEASE_RUN,
+                        call = { ApiClient.releaseRun(runId, kind, reason) },
+                        onSuccess = {
+                            open = false
+                            onReleased("解放しました（状態: CANCELLED）。")
+                        },
+                        onFailure = { dialogError = it },
+                    )
+                }
+            },
+            onDismiss = {
+                if (!gate.busy) {
+                    open = false
+                    dialogError = null
+                }
+            },
+        )
     }
 }
 
@@ -121,6 +186,9 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<ActionNotice?>(null) }
     val scope = rememberCoroutineScope()
+    val stopGate = rememberOperatorWriteGate()
+    var stopOpen by remember { mutableStateOf(false) }
+    var stopError by remember { mutableStateOf<String?>(null) }
 
     // 承認・見送りを一つずつ送る。busy は送信の前に立てる(連打で二重に送らない)。version は読んだ値を送る。
     fun act(onSuccess: String, call: suspend () -> Unit) {
@@ -191,6 +259,44 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
                 notice?.let { n ->
                     Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(12.dp))
+                }
+            }
+            // 中止は終端でない Goal だけ(旧 UI と同じ条件)。理由は必須で、送るだけで保存しない。
+            if (canStopGoal(goal.state)) {
+                OutlinedButton(onClick = { stopError = null; stopOpen = true }) { Text("中止…") }
+                Spacer(Modifier.height(12.dp))
+                if (stopOpen) {
+                    ReasonDialog(
+                        title = "開発目標の中止",
+                        message = "この開発目標（タスク）を中止します。まだ投入していなければ見送りになります。" +
+                            "作成済みの PR は閉じず、マージもしません（PR の扱いは人が決めます）。",
+                        submitLabel = "中止する",
+                        reasonLabel = "理由",
+                        busy = stopGate.busy,
+                        errorText = stopError,
+                        maxCodePoints = GOAL_STOP_REASON_MAX,
+                        onSubmit = { reason ->
+                            if (reason != null) {
+                                stopError = null
+                                stopGate.send(
+                                    action = OperatorAction.STOP_GOAL,
+                                    call = { ApiClient.stopGoal(goal.taskId, goal.version, reason) },
+                                    onSuccess = {
+                                        stopOpen = false
+                                        notice = ActionNotice("タスクを中止しました（作成済みの PR はそのままです）。", ok = true)
+                                        reloadKey++
+                                    },
+                                    onFailure = { stopError = it },
+                                )
+                            }
+                        },
+                        onDismiss = {
+                            if (!stopGate.busy) {
+                                stopOpen = false
+                                stopError = null
+                            }
+                        },
+                    )
                 }
             }
             goal.runId?.let { runId ->

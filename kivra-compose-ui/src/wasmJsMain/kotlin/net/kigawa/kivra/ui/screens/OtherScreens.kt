@@ -70,10 +70,12 @@ fun BudgetScreen() {
                         modifier = Modifier.fillMaxWidth()
                     )
                     Text("確定: ${b.committedJpy} 円 / 予約中: ${b.reservedJpy} 円 / 残り: ${b.remainingJpy} 円")
+                    BudgetOverspendLine(b.remainingJpy)
                     Text("確定(API): ${b.paths.api.committedJpy} 円 / 確定(CLI): ${b.paths.cli.committedJpy} 円")
                     Text("未確定の予約: ${b.unpricedCount} 件")
                 }
             }
+            BudgetFxNotice()
             Spacer(modifier = Modifier.height(12.dp))
             UnpricedReservationsSection(
                 b,

@@ -29,6 +29,9 @@ import net.kigawa.kivra.ui.submitResultOfSuccess
 
 @Serializable private class SubmitSelfDevRequest(val title: String, val body: String?, val idempotencyKey: String, val projectId: String)
 
+/** `POST /api/selfdev/goals` の本文(server `SubmitGoalRequest`)。projectId は必須。 */
+@Serializable private class SubmitGoalRequest(val title: String, val body: String?, val idempotencyKey: String, val projectId: String)
+
 /** 投入の応答のうち使う値。Run の投入は runId、Goal の投入は taskId(どちらも状態の state を持つ)。 */
 @Serializable private class SubmitReply(val runId: String? = null, val taskId: String? = null, val state: String? = null)
 
@@ -133,6 +136,12 @@ object ApiClient {
         }
         return submitRequest("/api/tasks", SubmitTaskRequest(title, idempotencyKey))
     }
+
+    /**
+     * Goal を投入する。`POST /api/selfdev/goals`。projectId は必須(ADR 0022)。503 は自律運転が無効。
+     */
+    suspend fun submitGoal(title: String, body: String?, projectId: String, idempotencyKey: String): SubmitResult =
+        submitRequest("/api/selfdev/goals", SubmitGoalRequest(title, body?.takeIf { it.isNotBlank() }, idempotencyKey, projectId))
 
     /**
      * 投入の共通処理。成功は 202(作成)か 200(再送)で、応答の id と state を読む。失敗は [ApiException] の status から

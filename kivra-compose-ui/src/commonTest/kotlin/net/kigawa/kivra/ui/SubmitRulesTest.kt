@@ -1,5 +1,6 @@
 package net.kigawa.kivra.ui
 
+import net.kigawa.kivra.ui.api.ApiMe
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -179,6 +180,16 @@ class SubmitRulesTest {
         assertTrue(text.contains("二重には作られません"))
     }
 
+    @Test
+    fun goalTextsFollowTheOldGoalMessages() {
+        assertEquals(GOAL_SAVED_MESSAGE, goalSuccessText(SubmitResult.Created("T1", "TASK_SUBMITTED")))
+        assertEquals(GOAL_REPLAYED_MESSAGE, goalSuccessText(SubmitResult.Replayed("T1", "TASK_SUBMITTED")))
+        assertEquals(GOAL_KEY_CONFLICT_MESSAGE, goalFailureText(SubmitFailure.CONFLICT))
+        assertEquals(GOAL_BAD_MESSAGE, goalFailureText(SubmitFailure.BAD_REQUEST))
+        assertEquals("通信に失敗しました。もう一度お試しください。", goalFailureText(SubmitFailure.NETWORK))
+        assertTrue(goalFailureText(SubmitFailure.DISABLED).contains("自律運転が無効"))
+    }
+
     // ---- 種別の出し分け(app.js の updateKindControls / renderKindNote / applySelfDevAvailability) ----
 
     @Test
@@ -224,5 +235,23 @@ class SubmitRulesTest {
         assertFalse(isProjectId("01arz3ndektsv4rrffq69g5fav"))
         assertFalse(isProjectId("unassigned"))
         assertFalse(isProjectId(""))
+    }
+
+    // ---- Goal フォームの出し分け ----
+
+    private fun perms(vararg granted: String) = CallerPermissions.of(ApiMe("enforce", "OPERATOR", granted.toList()))
+
+    @Test
+    fun theGoalFormNeedsTheAutopilotAndGoalWrite() {
+        assertTrue(showsGoalForm(AutopilotAvailability.ENABLED, perms("GOAL_WRITE")))
+        assertFalse(showsGoalForm(AutopilotAvailability.ENABLED, perms("READ")), "no GOAL_WRITE: no form")
+        assertFalse(showsGoalForm(AutopilotAvailability.HIDDEN, perms("GOAL_WRITE")), "autopilot off: no form")
+        assertFalse(showsGoalForm(AutopilotAvailability.LOADING, perms("GOAL_WRITE")), "not known yet: no form")
+    }
+
+    @Test
+    fun withoutRolesEnforcedTheGoalFormIsShownWhenTheAutopilotIsOn() {
+        // app.js の can(): 未取得・mode が enforce でないときは隠さない(サーバーが判定する)。
+        assertTrue(showsGoalForm(AutopilotAvailability.ENABLED, CallerPermissions.UNKNOWN))
     }
 }

@@ -63,6 +63,9 @@ fun newIdempotencyKey(): String = KEY_PREFIX + (1..24).map { HEX_DIGITS.random()
 /** 投入の内容(種別・タイトル・本文・プロジェクト)。内容が変われば投入キーを作り直す。 */
 data class TaskSignature(val kind: SubmitKind, val title: String, val body: String, val projectId: String?)
 
+/** Goal の内容(タイトル・本文・プロジェクト)。 */
+data class GoalSignature(val title: String, val body: String, val projectId: String)
+
 /**
  * 投入キーの管理(app.js の keyForSubmission / keyForGoal と newSubmitKey)。
  * 同じ内容の再送は同じキー(ネットワークの失敗後の再送が同じ投入になる)。内容が変わったらキーを作り直す。
@@ -145,9 +148,34 @@ fun taskSuccessText(result: SubmitResult, kind: SubmitKind): String = when (resu
     is SubmitResult.Failed -> taskFailureText(result.failure, kind)
 }
 
+/** Goal の投入の失敗の文言(app.js の onGoalSubmit と AP)。 */
+fun goalFailureText(failure: SubmitFailure): String = when (failure) {
+    SubmitFailure.BAD_REQUEST -> GOAL_BAD_MESSAGE
+    SubmitFailure.SESSION -> SESSION_EXPIRED_MESSAGE
+    SubmitFailure.CONFLICT -> GOAL_KEY_CONFLICT_MESSAGE
+    SubmitFailure.NETWORK -> "通信に失敗しました。もう一度お試しください。"
+    SubmitFailure.NOT_FOUND -> PROJECT_NOT_FOUND_MESSAGE
+    SubmitFailure.FORBIDDEN -> "この操作は、あなたの権限では行えません。"
+    SubmitFailure.DISABLED -> GOAL_DISABLED_MESSAGE
+    SubmitFailure.TOO_MANY, SubmitFailure.UNSUPPORTED, SubmitFailure.SERVER, SubmitFailure.INVALID ->
+        taskFailureText(failure, SubmitKind.SIMULATED)
+}
+
+/** Goal の投入の成功の文言(app.js の AP.goalSaved / AP.goalReplayed)。 */
+fun goalSuccessText(result: SubmitResult): String = when (result) {
+    is SubmitResult.Created -> GOAL_SAVED_MESSAGE
+    is SubmitResult.Replayed -> GOAL_REPLAYED_MESSAGE
+    is SubmitResult.Failed -> goalFailureText(result.failure)
+}
+
 const val SESSION_EXPIRED_MESSAGE = "セッションが切れました（ログインが必要です）。「再読み込みしてログインし直す」からログインし直してください。"
 const val PROJECT_NOT_FOUND_MESSAGE = "選んだプロジェクトが見つかりません。一覧を読み直してから、もう一度お試しください。"
 const val PROJECT_REQUIRED_MESSAGE = "プロジェクトを選んでください。"
+const val GOAL_BAD_MESSAGE = "入力内容を確認してください（目的は 1〜200 文字、本文は 0〜8000 文字。制御文字は使えません）。"
+const val GOAL_SAVED_MESSAGE = "Goal を受け付けました。Planner が計画を作るまで少し待ってください。"
+const val GOAL_REPLAYED_MESSAGE = "この Goal は既に受け付け済みです（二重には作られません）。"
+const val GOAL_KEY_CONFLICT_MESSAGE = "この投入キーは別の内容で既に使われていました。投入キーを作り直しました。内容を確認して、もう一度送ってください。"
+const val GOAL_DISABLED_MESSAGE = "自律運転が無効のため、Goal は送れません。自律運転の状態を読み直しました。"
 
 /** 自己開発の注意書き(app.js の renderKindNote)。LOADING は最初の読み取りの前で、取得失敗と同じ文言。 */
 fun selfDevNoteText(availability: SelfDevAvailability): String = when (availability) {
@@ -168,6 +196,10 @@ fun submitBlocked(submitting: Boolean, sessionExpired: Boolean): Boolean = submi
 
 /** 本文の欄は自己開発だけ(旧 UI: 本文は SELF_DEV のみ送る)。 */
 fun showsBodyField(kind: SubmitKind): Boolean = kind == SubmitKind.SELF_DEV
+
+/** Goal の投入フォームを出すか。自律運転が有効で、GOAL_WRITE があるとき(app.js の goal-section と goal-form)。 */
+fun showsGoalForm(autopilot: AutopilotAvailability, perms: CallerPermissions): Boolean =
+    autopilot == AutopilotAvailability.ENABLED && perms.can(GatedOperation.SUBMIT_GOAL)
 
 private val PROJECT_ID_SHAPE = Regex("[0-9A-Z]{26}")
 

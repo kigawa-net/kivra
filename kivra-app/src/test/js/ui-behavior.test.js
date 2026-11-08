@@ -4407,3 +4407,145 @@ test('the member picker reads every assignee, even while the project filter narr
   assert.ok(picker.length > 0, 'the picker reads the assignees on the dashboard');
   assert.ok(picker.every((c) => !c.path.includes('projectId')), 'the picker is not narrowed');
 });
+
+// ---- Operator: the monthly budget of a project (ADR 0022, PR-E) -----------------------------------------------
+
+const PBUD_PATH = '/api/projects/' + encodeURIComponent(PROJECT_ID) + '/budget';
+
+/** A budget as the dashboard carries it (the operator's view): 10,000 yen with 80%, 850 yen spent. */
+function pbudOf(over = {}) {
+  return Object.assign({
+    projectId: PROJECT_ID, period: '2026-10', monthlyLimitJpy: '10000', softRatio: '0.8', softLimitJpy: '8000',
+    committedJpy: '850', reservedJpy: '0', remainingJpy: '9150', softExceeded: true,
+  }, over);
+}
+
+/** The dashboard as given. A PUT answers `put` (saved as sent by default), a DELETE answers `del`. */
+function pbudResponder(dashboardBody, put = { status: 200, data: pbudOf() }, del = { status: 204, data: null }) {
+  const base = projectResponder({ status: 200, data: dashboardBody });
+  return (p, init) => {
+    if (p === PBUD_PATH && init.method === 'PUT') return put;
+    if (p === PBUD_PATH && init.method === 'DELETE') return del;
+    return base(p, init);
+  };
+}
+
+function pbudWrites(calls) {
+  return calls.filter((c) => c.path === PBUD_PATH && (c.method === 'PUT' || c.method === 'DELETE'));
+}
+
+function setPbudInputs(dom, limit, ratio) {
+  dom.byId('project-budget-limit').value = limit;
+  dom.byId('project-budget-ratio').value = ratio;
+}
+
+test('the operator sees the month budget, and a viewer sees no budget at all', async () => {
+  const op = load(pbudResponder(dashboardOf({ scope: 'ALL', budget: pbudOf() })), { hash: DASH_HASH });
+  await flush();
+  assert.equal(op.byId('project-budget').hidden, false);
+  assert.match(op.byId('project-budget-figures').textContent, /10,000 円/);
+  assert.match(op.byId('project-budget-figures').textContent, /850 円/);
+  assert.match(op.byId('project-budget-figures').textContent, /9,150 円/);
+  assert.match(op.byId('project-budget-warning').textContent, /警告：/);
+  assert.equal(op.byId('project-budget-limit').value, '10000', 'the form takes the stored limit');
+  assert.equal(op.byId('project-budget-ratio').value, '0.8');
+
+  const viewer = load(projectResponder({ status: 200, data: dashboardOf({ budget: null }) }), { hash: DASH_HASH });
+  await flush();
+  assert.equal(viewer.byId('project-budget').hidden, true);
+  assert.equal(viewer.byId('project-budget-figures').textContent, '');
+});
+
+test('a project without a limit says so, and the form offers to set one', async () => {
+  const dom = load(pbudResponder(dashboardOf({
+    scope: 'ALL',
+    budget: pbudOf({ monthlyLimitJpy: null, softRatio: null, softLimitJpy: null, remainingJpy: null, softExceeded: false }),
+  })), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('project-budget').hidden, false);
+  assert.match(dom.byId('project-budget-figures').textContent, /なし/);
+  assert.equal(dom.byId('project-budget-warning').textContent, '上限は設定されていません。');
+  assert.equal(dom.byId('project-budget-limit').value, '');
+  assert.equal(dom.byId('project-budget-ratio').value, '0.8');
+});
+
+test('setting the limit asks first: nothing is sent until the operator confirms, and then the dashboard is read again', async () => {
+  const dom = load(pbudResponder(dashboardOf({
+    scope: 'ALL',
+    budget: pbudOf({ monthlyLimitJpy: null, softRatio: null, softLimitJpy: null, remainingJpy: null, softExceeded: false }),
+  })), { hash: DASH_HASH });
+  await flush();
+  setPbudInputs(dom, '5000', '0.75');
+
+  dom.byId('project-budget-set').fire('click');
+  await flush();
+  assert.equal(dom.byId('project-budget-dialog').open, true, 'the confirmation opens');
+  assert.equal(pbudWrites(dom.calls).length, 0, 'nothing is sent before the confirmation');
+  assert.match(dom.byId('project-budget-explain').textContent, /5,000 円/);
+
+  dom.byId('project-budget-confirm').fire('click');
+  await flush();
+  const writes = pbudWrites(dom.calls);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].method, 'PUT');
+  assert.deepEqual(writes[0].body, { monthlyLimitJpy: 5000, softRatio: 0.75 }, 'the limit and the ratio, and nothing else');
+  assert.equal(dom.byId('project-budget-dialog').open, false, 'the dialog closes after the save');
+  assert.equal(dom.byId('project-budget-status').textContent, '今月の上限を設定しました。');
+  assert.ok(dashboardCalls(dom.calls).length >= 2, 'the dashboard is read again');
+});
+
+test('clearing the limit asks first, cancel sends nothing, and DELETE is sent only after the confirmation', async () => {
+  const dom = load(pbudResponder(dashboardOf({ scope: 'ALL', budget: pbudOf() })), { hash: DASH_HASH });
+  await flush();
+
+  dom.byId('project-budget-clear').fire('click');
+  await flush();
+  assert.equal(dom.byId('project-budget-dialog').open, true);
+  dom.byId('project-budget-cancel').fire('click');
+  assert.equal(dom.byId('project-budget-dialog').open, false);
+  assert.equal(pbudWrites(dom.calls).length, 0, 'cancel sends nothing');
+
+  dom.byId('project-budget-clear').fire('click');
+  await flush();
+  dom.byId('project-budget-confirm').fire('click');
+  await flush();
+  assert.deepEqual(pbudWrites(dom.calls).map((c) => c.method), ['DELETE']);
+  assert.equal(dom.byId('project-budget-status').textContent, '今月の上限を解除しました。');
+});
+
+test('an invalid limit or ratio is refused on the page, and nothing is sent', async () => {
+  const dom = load(pbudResponder(dashboardOf({ scope: 'ALL', budget: pbudOf() })), { hash: DASH_HASH });
+  await flush();
+  const bad = [['1.5', '0.8'], ['-1', '0.8'], ['10000', '1.5'], ['10000', '0'], ['', '0.8'], ['10000', '0.8123']];
+  for (const [limit, ratio] of bad) {
+    setPbudInputs(dom, limit, ratio);
+    dom.byId('project-budget-set').fire('click');
+    await flush();
+    assert.equal(dom.byId('project-budget-dialog').open, false, limit + ' / ' + ratio);
+    assert.match(dom.byId('project-budget-status').textContent, /上限は 0 以上の整数/);
+  }
+  assert.equal(pbudWrites(dom.calls).length, 0);
+});
+
+test('a refused save shows fixed words, never the server text, and keeps the dialog open', async () => {
+  const dom = load(pbudResponder(dashboardOf({ scope: 'ALL', budget: pbudOf() }), { status: 400, data: { error: 'LEAK-budget' } }), { hash: DASH_HASH });
+  await flush();
+  setPbudInputs(dom, '5000', '0.8');
+  dom.byId('project-budget-set').fire('click');
+  await flush();
+  dom.byId('project-budget-confirm').fire('click');
+  await flush();
+  assert.equal(dom.byId('project-budget-dialog').open, true);
+  assert.equal(
+    dom.byId('project-budget-error').textContent,
+    '上限は 0 以上の整数（円）、警告の基準は 0 より大きく 1 以下（小数は 3 桁まで）で入力してください。',
+  );
+  assert.ok(!dom.byId('project-budget-error').textContent.includes('LEAK'));
+});
+
+test('a dashboard whose budget is malformed is shown as invalid, not half-rendered', async () => {
+  const dom = load(projectResponder({ status: 200, data: dashboardOf({ scope: 'ALL', budget: { projectId: PROJECT_ID, period: '2026-10' } }) }), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('project-dash-body').hidden, true);
+  assert.equal(dom.byId('project-dash-status').textContent, '応答の形式が想定と違います。ログインが切れている可能性があります。ページを再読み込みしてください。');
+});

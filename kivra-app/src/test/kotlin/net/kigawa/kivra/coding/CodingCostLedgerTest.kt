@@ -333,9 +333,9 @@ class CodingCostLedgerTest {
 
     /** A cost port whose ledger cannot write. Every booking fails; the claim gate is open. */
     private val failingCost = object : CodingCostPort {
-        override fun claimDenial(): String? = null
-        override fun recordReported(attemptId: String, leaseGeneration: Long, usage: CliUsage): Boolean = false
-        override fun recordEstimated(attemptId: String, leaseGeneration: Long): Boolean = false
+        override fun claimDenial(projectId: String?): String? = null
+        override fun recordReported(attemptId: String, leaseGeneration: Long, usage: CliUsage, projectId: String?): Boolean = false
+        override fun recordEstimated(attemptId: String, leaseGeneration: Long, projectId: String?): Boolean = false
     }
 
     @Test

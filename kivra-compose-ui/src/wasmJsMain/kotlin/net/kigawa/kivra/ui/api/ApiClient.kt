@@ -209,6 +209,52 @@ object ApiClient {
         )
 
     /**
+     * 運用者: プロジェクトのメンバーの一覧。`GET /api/projects/{id}/members`(ORDER_MANAGE。403 は運用者でない、404 は無いプロジェクト)。
+     */
+    suspend fun getProjectMembers(projectId: String): List<ApiProjectMember> =
+        getJson("/api/projects/${percentEncode(projectId)}/members")
+
+    /**
+     * 運用者: メンバーの追加、または role の変更。`PUT /api/projects/{id}/members/{assigneeId}`、本文 `{"role": "..."}`。
+     * 追加は 201、同じ role の再送と変更は 200。409 は最後の ADMIN を降格させる、404 は担当かプロジェクトが無い。
+     */
+    suspend fun putProjectMember(projectId: String, assigneeId: String, role: String) =
+        writeWith(
+            HttpMethod.Put,
+            "/api/projects/${percentEncode(projectId)}/members/${percentEncode(assigneeId)}",
+            ProjectMemberBody(role),
+        )
+
+    /**
+     * 運用者: メンバーを外す。`DELETE /api/projects/{id}/members/{assigneeId}`、本文は空の JSON オブジェクト `{}`。
+     * 204 が成功。409 は最後の ADMIN、404 は メンバーでない担当。
+     */
+    suspend fun removeProjectMember(projectId: String, assigneeId: String) =
+        writeWith(
+            HttpMethod.Delete,
+            "/api/projects/${percentEncode(projectId)}/members/${percentEncode(assigneeId)}",
+            EmptyJsonBody(),
+        )
+
+    /**
+     * 運用者: 全担当の取り込み。`POST /api/projects/{id}/members/import-all?dryRun=true|false`、本文 `{"role": "..."}`。
+     * dryRun は数えるだけ(既定もそう)。有効で未登録の担当を指定の role で追加する。既存の role は変えない。
+     */
+    suspend fun importProjectMembers(projectId: String, role: String, dryRun: Boolean): ApiMemberImportReport {
+        val text = postWriteText(
+            "/api/projects/${percentEncode(projectId)}/members/import-all?dryRun=${if (dryRun) "true" else "false"}",
+            ProjectMemberBody(role),
+        )
+        return try {
+            replyJson.decodeFromString<ApiMemberImportReport>(text)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw ApiException(null, "response is not the expected format")
+        }
+    }
+
+    /**
      * 既存データの振り分け。`POST /api/projects/backfill?dryRun=true|false`、本文 `{}`。dryRun は数えるだけ、実行は
      * プロジェクトが未設定の行だけを書く。403 は運用者でない。応答の形が違えば [ApiException]。
      */
@@ -626,6 +672,9 @@ object ApiClient {
 
 /** repo の登録の本文(server `ProjectRepoRequest`)。 */
 @Serializable private class ProjectRepoBody(val repoKey: String)
+
+/** メンバーの追加・role の変更・取り込みの本文(server `ProjectMemberRequest` / `ProjectMemberImportRequest`)。 */
+@Serializable private class ProjectMemberBody(val role: String)
 
 /** order の作成の本文(server `CreateOrderRequest`)。冪等キーは持たない(サーバーは知らないフィールドを拒否する)。 */
 @Serializable private class CreateOrderBody(val title: String, val policy: String, val maxCycles: Int, val projectId: String)

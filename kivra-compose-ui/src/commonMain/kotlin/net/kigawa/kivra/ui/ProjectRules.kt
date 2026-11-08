@@ -1,8 +1,11 @@
 package net.kigawa.kivra.ui
 
+import net.kigawa.kivra.ui.api.ApiAssignee
 import net.kigawa.kivra.ui.api.ApiBackfillReport
 import net.kigawa.kivra.ui.api.ApiBackfillTable
+import net.kigawa.kivra.ui.api.ApiMemberImportReport
 import net.kigawa.kivra.ui.api.ApiProjectActivity
+import net.kigawa.kivra.ui.api.ApiProjectMember
 
 /*
  * プロジェクトの純粋ロジック(画面に依存しない)。旧 UI(kivra-app/src/main/resources/ui/app.js)の規則と文言に合わせる:
@@ -233,3 +236,73 @@ fun backfillFailureText(status: Int?): String = when (status) {
     403 -> "この操作は運用者だけができます。"
     else -> BACKFILL_FAILED_MESSAGE
 }
+
+/* ---- メンバー(ADR 0022 PR-D2。旧 UI の PMEM_MSG と MEMBER_ROLES) ---- */
+
+/** 役割の選択肢。サーバーの PROJECT_MEMBER_ROLES と同じ集合・同じ並び。 */
+val MEMBER_ROLES: List<String> = listOf("ADMIN", "OPERATOR", "APPROVER", "AI", "VIEWER")
+
+/** 追加・取り込みの既定の役割(旧 UI の select の selected)。 */
+const val MEMBER_DEFAULT_ROLE = "VIEWER"
+
+const val MEMBER_LIST_EMPTY_MESSAGE = "メンバーはいません。"
+const val MEMBER_NO_CANDIDATE_MESSAGE = "追加できる担当（有効で、まだメンバーでない担当）はいません。"
+const val MEMBER_ASSIGNEES_FAILED_MESSAGE = "担当の一覧を読めませんでした。担当の管理の権限が必要です。"
+const val MEMBER_ADDED_MESSAGE = "メンバーに追加しました。"
+const val MEMBER_ROLE_CHANGED_MESSAGE = "role を変えました。"
+const val MEMBER_REMOVED_MESSAGE = "メンバーから外しました。"
+const val MEMBER_IMPORT_DRY_DONE_MESSAGE = "確認の結果です（dry-run。何も書き込んでいません）。"
+const val MEMBER_IMPORT_DONE_MESSAGE = "全担当を取り込みました。"
+
+private const val MEMBER_LAST_ADMIN_MESSAGE =
+    "このプロジェクトの最後の管理者（ADMIN）は、外すことも role を変えることもできません。先に別の担当を ADMIN にしてください。"
+private const val MEMBER_NOT_FOUND_MESSAGE = "担当またはプロジェクトが見つかりません。画面を読み直してから、もう一度お試しください。"
+private const val MEMBER_INVALID_MESSAGE = "役割（role）の値が正しくありません。画面を読み直してから、もう一度お試しください。"
+private const val MEMBER_FORBIDDEN_MESSAGE = "この操作は運用者だけができます。"
+private const val MEMBER_UNAVAILABLE_MESSAGE = "この機能は今使えません（503）。時間をおいてもう一度お試しください。"
+private const val MEMBER_FAILED_MESSAGE = "操作に失敗しました。時間をおいてもう一度お試しください。"
+
+/**
+ * メンバーの操作の失敗の文言。HTTP のステータスだけで決める(サーバーの本文は出さない)。
+ * 409 は最後の ADMIN、404 は担当かプロジェクトが無い、400 は role の値、403 は運用者でない、401 はセッション切れ。
+ */
+fun memberFailureText(status: Int?): String = when (status) {
+    401 -> SESSION_EXPIRED_MESSAGE
+    409 -> MEMBER_LAST_ADMIN_MESSAGE
+    404 -> MEMBER_NOT_FOUND_MESSAGE
+    400 -> MEMBER_INVALID_MESSAGE
+    403 -> MEMBER_FORBIDDEN_MESSAGE
+    503 -> MEMBER_UNAVAILABLE_MESSAGE
+    else -> MEMBER_FAILED_MESSAGE
+}
+
+/**
+ * 追加の候補: 有効(ACTIVE)で、まだメンバーでない担当(旧 UI の renderMemberCandidates)。受け取った順を保つ。
+ */
+fun memberCandidates(assignees: List<ApiAssignee>, members: List<ApiProjectMember>): List<ApiAssignee> {
+    val member = members.mapTo(HashSet()) { it.assigneeId }
+    return assignees.filter { it.state == "ACTIVE" && it.assigneeId !in member }
+}
+
+/** 一覧の行の名前。無効の担当には「（無効）」を付ける(旧 UI の renderProjectMembers)。 */
+fun memberLabel(member: ApiProjectMember): String =
+    if (member.state == "DISABLED") "${member.displayName}（無効）" else member.displayName
+
+/** 取り込みの dry-run の結果の一行(旧 UI の renderImportResult)。 */
+fun memberImportSummary(report: ApiMemberImportReport): String =
+    "対象（有効で未登録）${report.candidates} 件、追加 ${report.added} 件、すでにメンバー ${report.alreadyMember} 件" +
+        "（role は変えません）、無効（対象外）${report.disabled} 件"
+
+/** 取り込みの実行ができるか: dry-run の結果があり、対象が 1 件以上で、送信中でない(旧 UI の updateImportControls)。 */
+fun canRunMemberImport(dryRun: ApiMemberImportReport?, busy: Boolean): Boolean =
+    !busy && dryRun != null && dryRun.candidates > 0L
+
+/** 取り込みの確認ダイアログの説明(旧 UI の openImportDialog)。役割は dry-run のときのもの。 */
+fun memberImportExplain(report: ApiMemberImportReport): String =
+    "確認の結果、${report.candidates} 人の有効な担当を role「${report.role}」でこのプロジェクトのメンバーに追加します。" +
+        "すでにメンバーの人の role は変えません。一括で外す機能はありません（外すには一人ずつ「外す…」を使います）。"
+
+/** 外すの確認ダイアログの説明(旧 UI の openRemoveDialog)。 */
+fun memberRemoveExplain(displayName: String): String =
+    "この担当（$displayName）を、このプロジェクトのメンバーから外します。担当そのものは消えません。" +
+        "プロジェクトの最後の管理者（ADMIN）は外せません。"

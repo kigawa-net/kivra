@@ -31,7 +31,7 @@ data class CycleSpend(
  * Reads the cost of one cycle (order, cycle_no) from the budget ledger. Stage 3f of the addendum: read only. It writes no row and takes
  * no lock, so it cannot change the lock order (order rows first, then the tenant budget rows; see SelfDevBudgetLockOrderTest).
  *
- * The chain (V48, the Task model): the cycle's root task (selfdev_tasks: order_id, cycle_no) -> its planned tasks (parent_task_id) -> their
+ * The chain (V49, the Task model): the cycle's root task (selfdev_tasks: order_id, cycle_no) -> its planned tasks (parent_task_id) -> their
  * runs (run_id) -> coding_attempts (run_id). The ledger key of a CLI attempt is `coding:<attempt_id>:<lease_generation>`, an exact match on
  * the chain. The API calls have no column that links them, so they are matched by the key prefix (section C.5, C.6): the Planner's
  * `planner-<root task id>-` and the Developer's `developer-<run_id>-`. The key forms are pinned by SelfDevCycleSpendContractTest.

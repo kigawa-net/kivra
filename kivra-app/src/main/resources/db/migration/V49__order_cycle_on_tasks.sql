@@ -1,4 +1,4 @@
--- V48: an order's cycle is a root Task (selfdev_tasks), not a goal (V40 removed selfdev_goals). Expand only: two nullable columns, an index
+-- V49: an order's cycle is a root Task (selfdev_tasks), not a goal (V40 removed selfdev_goals). Expand only: two nullable columns, an index
 -- and a foreign key from a new column. Nothing is backfilled: no order cycle existed on the Task model before this change.
 --
 -- A cycle is one Task whose order_id is the order and whose cycle_no is the cycle's number. Its parent_task_id stays NULL: it is a plan

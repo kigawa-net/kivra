@@ -1,5 +1,6 @@
 package net.kigawa.kivra.selfdev.automerge
 
+import java.time.Instant
 import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.github.BranchInfo
@@ -58,11 +59,20 @@ interface AutoMergeShadowStore {
     /** The ids of the self-development Runs in PULL_REQUEST, oldest first, at most [limit]. */
     fun pullRequestRunIds(limit: Int): List<RunId>
 
-    /** The state, binding and task approval of [runId]; null when the Run does not exist. */
+    /** The state, binding, task approval, re-bind and incident facts of [runId]; null when the Run does not exist. */
     fun runSnapshot(runId: RunId): ShadowRunSnapshot?
 
     /** The whole-system pause and breaker. */
     fun globalSnapshot(): ShadowGlobalSnapshot
+
+    /** The AI review recorded for the head of the PR (`selfdev_pr_reviews`), or null when none is recorded. Read only. */
+    fun reviewOf(repo: String, number: Int, headSha: String): AutoMergeReviewFact?
+
+    /** How many automatic merge attempts started at or after [since] (`selfdev_automerge_attempts`). Read only. */
+    fun attemptsSince(since: Instant): Int
+
+    /** How many automatic merge attempts hold the single slot now (CLAIMED and not yet finished). Read only. */
+    fun inFlightAttempts(): Int
 
     /** Appends one `AUTO_MERGE_JUDGED` event to the Run's audit chain. [payload] carries fixed codes and counts only. */
     fun recordJudgement(runId: RunId, verdict: String, payload: String)
@@ -71,7 +81,19 @@ interface AutoMergeShadowStore {
     fun recordPaused(runId: RunId)
 }
 
-data class ShadowRunSnapshot(val state: DevelopmentRunState, val binding: AutoMergeBinding?, val approval: AutoMergeTaskApproval?)
+/**
+ * The facts of a Run that the judgement reads from the database. [rebound] is true when a `PR_REBASE_REBOUND` row exists for the Run (issue
+ * #351). [incidentFix] is true when the Run is the fix of an incident (ADR 0014 active addendum). [policyRevision] is the binding's
+ * PatchPolicy revision, null when there is no binding.
+ */
+data class ShadowRunSnapshot(
+    val state: DevelopmentRunState,
+    val binding: AutoMergeBinding?,
+    val approval: AutoMergeTaskApproval?,
+    val rebound: Boolean = false,
+    val incidentFix: Boolean = false,
+    val policyRevision: String? = null,
+)
 
 /** [autoMergePaused] is the per-feature pause (V31, ADR 0014 U-10). It defaults to false for the callers that do not read it. */
 data class ShadowGlobalSnapshot(val selfDevPaused: Boolean, val breakerOpen: Boolean, val autoMergePaused: Boolean = false)

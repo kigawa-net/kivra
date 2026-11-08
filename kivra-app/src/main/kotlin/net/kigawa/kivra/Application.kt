@@ -290,6 +290,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     selfDevParts?.planWorker?.start(this)
     // ADR 0014 S1: the shadow judgement of the automatic merge. Started only with its switch on (the watch is null otherwise).
     selfDevParts?.autoMergeShadow?.start(this)
+    // ADR 0014 active: the automatic merge. Started only with KIVRA_SELFDEV_AUTOMERGE_ACTIVE_ENABLED=true (the watch is null otherwise).
+    selfDevParts?.autoMergeActive?.start(this)
     // ADR 0008 addendum: the AI review of the bot's pull requests. Started only with its switch on (the watch is null otherwise).
     selfDevParts?.prReview?.start(this)
     // Issue #225: the incident issue of a self-development failure. Started only with its switch on (the watch is null otherwise).

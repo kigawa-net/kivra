@@ -450,7 +450,7 @@ private suspend fun SelfDevOrderRouteDeps.permit(
 
 /**
  * After a stop is approved, the cycle in progress of each stopped order is stopped too: its root Task moves to STOPPED (ADR 0015 section 4.5,
- * V48). The order is already STOPPED, and the dispatcher will not submit a Run for its tasks, so a refusal here is logged as a code and
+ * V49). The order is already STOPPED, and the dispatcher will not submit a Run for its tasks, so a refusal here is logged as a code and
  * left for the operator.
  */
 private fun SelfDevOrderRouteDeps.stopCurrentGoal(order: SelfDevOrder) {

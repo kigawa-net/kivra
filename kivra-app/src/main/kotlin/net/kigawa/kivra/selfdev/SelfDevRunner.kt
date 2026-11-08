@@ -585,8 +585,11 @@ class SelfDevRunner(
         /** The run's state reason when its task reference cannot be used (Issue #229 addendum). The sub reason is the audit code. */
         const val TASK_REFERENCE_UNRESOLVED = "TASK_REFERENCE_UNRESOLVED"
 
-        /** Recorded in the binding. Not checked against any provider fact yet (ADR 0011 / #49, #50 own the real policy revision). */
-        const val POLICY_REVISION = "patchpolicy-v1"
+        /**
+         * Recorded in the binding. The automatic merge checks that it is this value (ADR 0014 active addendum). The value lives in the
+         * automerge package, so the writer and the checker cannot drift apart.
+         */
+        const val POLICY_REVISION = net.kigawa.kivra.selfdev.automerge.PATCH_POLICY_REVISION
 
         /** Placeholder review manifest digest, derived from the run and the head. Not checked yet (#49 owns the real manifest). */
         fun manifestDigest(runId: String, headSha: String): String =

@@ -6,7 +6,7 @@ import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.TaskTransition
 
 /**
- * Stops the cycle in progress of [order] after its stop was approved (ADR 0015 section 4.5, V48). The cycle's root Task is the one in
+ * Stops the cycle in progress of [order] after its stop was approved (ADR 0015 section 4.5, V49). The cycle's root Task is the one in
  * `current_goal_id`; it moves to STOPPED through the operator's task stop, which also skips its planned tasks that have not started.
  * A Task that already ended is left alone.
  *

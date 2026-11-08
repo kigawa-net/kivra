@@ -45,7 +45,7 @@ private class MutableClock(var now: Instant) : Clock() {
 }
 
 /**
- * The orders' cycles on the Task model (V48, ADR 0015 and ADR 0011): a cycle is a root Task, the Planner plans it, the Dispatcher submits its
+ * The orders' cycles on the Task model (V49, ADR 0015 and ADR 0011): a cycle is a root Task, the Planner plans it, the Dispatcher submits its
  * planned tasks as Runs, and the cycle's outcome moves the order. The database is the real one (TestDb) and the Runs are the real Run
  * repository; a Run's result is set in the table (a fake result), so no model or GitHub call is made.
  */

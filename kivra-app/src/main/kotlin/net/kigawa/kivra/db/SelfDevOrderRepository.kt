@@ -87,7 +87,7 @@ data class SelfDevOrderStopRequest(
 )
 
 /**
- * One cycle of an order (V48): the cycle number, the ID of its root Task in `goalId` (`selfdev_tasks.task_id`, also held in `current_goal_id`
+ * One cycle of an order (V49): the cycle number, the ID of its root Task in `goalId` (`selfdev_tasks.task_id`, also held in `current_goal_id`
  * while it runs), the Task's state in `goalState`, and when the cycle started. The field names are the API's (kept for its clients).
  */
 data class OrderCycle(val cycleNo: Int, val goalId: String, val goalState: String, val stateReason: String?, val createdAt: LocalDateTime)

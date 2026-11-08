@@ -366,7 +366,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - この実装では、`update-branch` に必要な権限と、App の実際の付与(GitHub 上の設定)は確認していない。有効化の前に、dev で `PUT /pulls/{n}/update-branch` が 403 にならないことを確認する。403 のときは `GITHUB_PERMISSION` で人に残り、その試行も上限に数えられる。
 - 権限の追加は共有基盤の変更であり、リポジトリ管理者の承認が要る。
 
-### 4.10 自動マージの判定ロジック(部品。未配線)
+### 4.10 自動マージの判定ロジック(影の判定と本番化の両方が使う)
 
 ADR 0014 の第 1 の部品。`net.kigawa.kivra.selfdev.automerge` の `decideAutoMerge` は、呼び出し側が読んだ事実だけを受け取り、判定の結果(`Eligible`、`Hold(理由)`、`Refuse(理由)`)を返す純粋な関数である。I/O、ログ、DB、GitHub の読み取りとマージの呼び出しは持たない。
 
@@ -437,7 +437,7 @@ ADR 0014 の段階 S1。オートパイロットが有効なとき、`AutoMergeS
 - **`checks:read` が必要**: 必須チェックの読み取り(`commits/{sha}/check-runs`)と、`main` の CI の読み取りには、GitHub App の `checks:read` の権限が要る。権限が無いと 403 になり、チェックを読めなかったとして扱われる。その場合の判定は、必ず `REFUSE`(`CHECK_MISSING`)か `HOLD`(`MAIN_CI_NOT_GREEN`)になり、`ELIGIBLE` にはならない。この権限の追加は共有基盤の変更で、運用者が後で行う(ADR 0014 U-4)。
 - **判定の中身**: 事実は GitHub の PR の値と、DB の Run、タスクの承認の種別、全体の一時停止とブレーカーから組み立てる。`main` の CI は、`main` の head コミットの必須チェックから導く(`PENDING` と `UNKNOWN` は保留、`FAILURE` は拒否)。PR の本文は、`kivra-head-sha:` の行(40 桁の 16 進)だけを読み、それ以外は使わない。本文は保存も記録もしない。
 - **自動マージの一時停止(V31、ADR 0014 U-10)**: `selfdev_autopilot_control.auto_merge_paused`(既定 `FALSE`)が `TRUE` のあいだ、影の判定は GitHub を読まず、判定もしない。Run ごとに 1 件だけ `AUTO_MERGE_SHADOW_PAUSED`(結果 `PAUSED`)を監査に記録する(同じ状態のあいだは繰り返さない)。次の tick から効く。全体の一時停止(`/api/selfdev/autopilot/pause`)とは独立で、どちらか一方だけでも止まる。操作は §7.4 の `auto-merge/pause` と `auto-merge/resume`。AI の主体は拒否される。画面には「自動マージ: 一時停止中」と表示される。この操作はマージも有効化もしない。
-- **判定の残りは S1 のまま**: 自動マージのフラグは環境変数と DB の値を合わせて計算する対象だが、S1 の影の判定では `autoMergeEnabled` を常に true とする(フラグの有効化は k8s 側の別の作業)。
+- **フラグ**: 影の判定は `autoMergeEnabled` を常に true とする。マージを実際に行うかは、§4.15 の `KIVRA_SELFDEV_AUTOMERGE_ACTIVE_ENABLED` だけが決める(影の判定はマージしない)。
 - **監査**: 行動 `AUTO_MERGE_JUDGED`、Run の id、結果(`ELIGIBLE`、`HOLD`、`REFUSE`)。`payload` には次の項目だけを入れる。
   - `prNumber`、`headSha`、`verdict`、`reason`(§4.10 の理由コード。`PR_NOT_OPEN` などの読み取りの理由は別)、`files`(件数)、`lines`(`additions + deletions` の合計)、`checks`(判定の対象の名前)、`readFailures`(読めなかったものの固定コード)。
   - **記録しない**: PR の題名と本文、Goal と Task の題名と本文、パス、ファイルの内容、チェックの出力、プロバイダーの応答、トークン。
@@ -452,7 +452,7 @@ SELECT occurred_at, run_id, result, payload
  LIMIT 50;
 ```
 - **止め方**: `KIVRA_SELFDEV_AUTOMERGE_SHADOW_ENABLED=false` にして再起動する(判定の記録が止まる)。オートパイロットを止めれば、判定も止まる。記録は消さない(監査は追記のみ)。
-- **マージしないこと**: この段階は、PR をマージしない。判定の結果が `ELIGIBLE` でも、PR は人がマージする。S1 の進む条件は ADR 0014 §6 の S1 の欄による(判定が 20 件以上、そのうち「マージ可能」と判定した件数のうち人が問題と判断した件数が 0)。
+- **マージしないこと**: この判定そのものは、PR をマージしない。判定の結果が `ELIGIBLE` でも、マージは §4.15 の本番化の経路が、その PR について全ての条件を再検査したうえで行う(有効化しているときだけ)。影の判定の進む条件は ADR 0014 §6 の S1 の欄による。
 - **ダッシュボード**: 判定の一覧の画面は、部品 C の仕事で、この段階には無い。
 
 
@@ -538,6 +538,66 @@ SELECT f.fingerprint, f.incident_code, f.reason_code, f.issue_number, f.state, f
 - **枠が止まったとき**(根が承認待ちのまま、など): 根の Task を operator の停止(`stopTask`)で `STOPPED` にすると、次の周で枠が解放される。承認すれば、計画された子 Task が進み、Draft PR が開く。
 - **止め方**: `KIVRA_SELFDEV_AUTO_FIX_ENABLED=false` にして再起動する。投入済みの Task は消さない(オートパイロットの従来の操作で止める)。
 - **未対応(この段階)**: Incident の Issue へ Run、PR、CI のリンクを書き戻すこと(#223、#224)、CI の結果による修正の検証(#49 の独立レビューと #220 の再現テストの強制。現状は Task の本文の指示だけ)、PR の作成後の健康確認とロールバックの提案。
+
+### 4.15 自動マージの本番化(active、ADR 0014 追補 2026-11-08、既定は無効)
+
+低リスクな PR を、全ての条件を満たしたときだけ squash でマージする。既定は無効で、無効のあいだは GitHub へ書かない(影の判定の記録だけ)。条件、理由コード、残るリスクは ADR 0014 の末尾の追補に書いてある。
+
+**前提(満たさないと起動に失敗する)**
+
+- `KIVRA_SELFDEV_ENABLED=true`(自己開発が無効のとき、この変数は読まれず、何も起きない)、`KIVRA_SELFDEV_AUTOPILOT_ENABLED=true`、`KIVRA_SELFDEV_AUTOMERGE_SHADOW_ENABLED=true`、`KIVRA_SELFDEV_PR_REVIEW_ENABLED=true`(PR の AI レビューと、`KIVRA_SELFDEV_PR_REVIEW_MODEL` を含む)。
+- App の権限 `checks:read`(必須チェックと `main` の CI を読むため。無いと `CHECK_MISSING` で拒否され、マージは起きない)。これは共有基盤の変更で、運用者が行う(ADR 0014 U-4)。
+- `main` の必須ステータスチェック(`test`、`build`、`boot`)の設定は、`kigawa-net/infra` の作業(U-3)。
+
+**有効化**
+
+1. 上の前提の変数を確認する。
+2. `KIVRA_SELFDEV_AUTOMERGE_ACTIVE_ENABLED=true` を設定して再起動する。`true` と `false` 以外、または前提の不足は起動に失敗する(メッセージは変数の名前だけを出す)。
+3. 起動後、ログに `automerge active` の行が出ない限り、最初の判定は 1 分後に始まる。最初の数件は、監査で `AUTO_MERGE_REQUESTED` と `AUTO_MERGE_MERGED` を見て確かめる(下の SQL)。
+
+**1 時間と 1 日の上限**: 1 時間あたり 1 件、UTC の 1 日あたり 3 件、同時に 1 件(単一スロット)。試行の件数で数え、失敗した試行も含む。上限の値は ADR 0014 の追補の U-5 に従う。
+
+**止め方**
+
+- **一時停止(再起動なし、次の周期から効く)**: `POST /api/selfdev/autopilot/auto-merge/pause`(運用者の認証が要る。AI の主体は拒否される)。影の判定も止まる(判定の記録も、GitHub の読み取りも行わない)。
+- **再開**: `POST /api/selfdev/autopilot/auto-merge/resume`。自動停止の後も、再開は運用者が行う。
+- **無効化(再起動が要る)**: `KIVRA_SELFDEV_AUTOMERGE_ACTIVE_ENABLED` を `false` にして再起動する。影の判定は続く。
+- **全体の停止**: `/api/selfdev/autopilot/pause`、または `KIVRA_SELFDEV_AUTOPILOT_ENABLED=false` は、自動マージも止める。
+
+**自動停止(キルスイッチ)**: 次のどれかで、システムが自動マージを一時停止する(`auto_merge_paused = TRUE`)。再開は運用者が行う。
+
+- マージの要求の結果が分からない(タイムアウト、5xx など)。再送はしない。理由コード `MERGE_UNKNOWN`。
+- マージの応答に merge commit の SHA が無い。理由コード `MERGE_UNCONFIRMED`。
+- GitHub の拒否(409、422、405)が 2 件続いた。理由コード `MERGE_FAILURES`。
+- 処理中の試行が 10 分を過ぎて残っている(クラッシュの跡)。理由コード `ATTEMPT_UNFINISHED`。
+
+自動停止の監査は `AUTO_MERGE_HALTED`(理由コードだけ)。停止のあと、まず GitHub の `main` と対象の PR を人が確認する。マージが実際に起きたかどうかは、`selfdev_automerge_attempts` と GitHub で照らし合わせる。
+
+`ATTEMPT_UNFINISHED` で止まったときは、残っている `CLAIMED` の行の PR を GitHub で確かめてから、人が行の状態を確定する(確定しないと、再開しても同じ理由で止まる)。確定は、マージされていれば `MERGED`、されていなければ `UNKNOWN` に変え、`active_slot` を `NULL` にする。この操作は運用者の判断で行い、kivra は行わない。
+
+**GitHub の拒否(1 件)**: 再試行しない。その head の試行は `REFUSED` で終わり、同じ head には二度と送らない。PR は人がマージするか、閉じる。
+
+**確認用 SQL(読み取りだけ)**
+
+```sql
+-- 直近の自動マージの動き(依頼、マージ、拒否、停止)
+SELECT occurred_at, run_id, action, result, payload
+  FROM audit_events
+ WHERE action IN ('AUTO_MERGE_REQUESTED', 'AUTO_MERGE_MERGED', 'AUTO_MERGE_REFUSED', 'AUTO_MERGE_HALTED')
+ ORDER BY occurred_at DESC
+ LIMIT 50;
+
+-- 試行の一覧(head ごとに 1 行。CLAIMED が残っていたら、結果は不明)
+SELECT repo_key, pr_number, head_sha, state, created_at, updated_at
+  FROM selfdev_automerge_attempts
+ ORDER BY created_at DESC
+ LIMIT 50;
+
+-- 一時停止の状態
+SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WHERE control_id = 1;
+```
+
+**残るリスク(運用で見る)**: マージのあとに `main` の CI が赤になったことを、kivra は自動では検知しない(ADR 0014 §4 の後半は未実装)。赤のあいだ、新しいマージは `MAIN_CI_NOT_GREEN` で保留される。週に 1 回、`AUTO_MERGE_MERGED` の一覧と `main` の CI を人が確認する(U-9)。
 
 ## 5. 動作確認
 
@@ -1672,7 +1732,7 @@ ADR から変えた点(PR A での判断、ADR §2.8 に記録):
 
 ### 7.6 自己開発の order(ADR 0015 段階 1、Issue #273、既定は無効)
 
-order は、Task を 1 周ずつ回す長く生きる指示である(V40 以降、周の実体は `selfdev_tasks` の 1 行。V48)。周の開始は運用者の操作か、既定で無効の自動の開始(`KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED`)である。操作は HTTP、MCP(§8.8)、`/ui` の画面(§7.6.7)である。
+order は、Task を 1 周ずつ回す長く生きる指示である(V40 以降、周の実体は `selfdev_tasks` の 1 行。V49)。周の開始は運用者の操作か、既定で無効の自動の開始(`KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED`)である。操作は HTTP、MCP(§8.8)、`/ui` の画面(§7.6.7)である。
 
 #### 7.6.1 有効化の前提(起動時に検査される)
 
@@ -1691,7 +1751,7 @@ order は、Task を 1 周ずつ回す長く生きる指示である(V40 以降�
 - 周の開始: `POST /api/selfdev/orders/{id}/cycles` `{"version": n}`。周の根の Task が 1 件作られ(`selfdev_tasks` の `order_id` と `cycle_no` = 1、状態 `TASK_SUBMITTED`)、既存の Planner と Plan の承認に進む。進行中の周があるとき、上限に達したとき、期限切れのとき、全体の一時停止中のときは 409。
 - 状況: `GET /api/selfdev/orders/{id}`(状態、理由、周の数、保留中の停止の要求。方針と題名は運用者だけに返る)、`GET /api/selfdev/orders/{id}/cycles`。一覧 `GET /api/selfdev/orders` には題名と方針を含めない。
 
-#### 7.6.2a 周の実体と周の終わり(V48)
+#### 7.6.2a 周の実体と周の終わり(V49)
 
 - **周 = 根の Task**: `selfdev_tasks` の 1 行。`order_id` と `cycle_no` が周を指す(`(order_id, cycle_no)` は一意)。`parent_task_id` は NULL(計画の根。V44)。計画された子の Task が作業を持つ。`selfdev_orders.current_goal_id` は、進行中の周の根の Task の ID(外部キーは無い)。冪等キーは `order:{order_id}:cycle:{n}`。
 - **周の終わり**: 根が `DONE`(全ての子が `COMPLETED`)なら成功。`FAILED`、`STOPPED`、`CANCELLED`、`SKIPPED` なら失敗。成功で連続失敗が 0 に戻り、失敗で 1 増える。周の結果は `OrderWatch` の tick で記録され、`current_goal_id` は NULL に戻る。`BLOCKED` の計画段階(`PLAN_INVALID` など)の根は終わらない。運用者が再計画するまで周は進まず、`TREE_BUSY` で次の周も始まらない。

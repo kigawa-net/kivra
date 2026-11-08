@@ -70,11 +70,13 @@ internal val MIGRATION_FILES = mapOf(
     47 to "V47__selfdev_incident_fixes.sql",
     48 to "V48__selfdev_automerge_attempts.sql",
     49 to "V49__order_cycle_on_tasks.sql",
+    50 to "V50__project_scope_columns.sql",
+    51 to "V51__project_members_repos_budgets.sql",
 )
 
 /** The versions applied on the full chain. V22 and V30 are never used on this branch (reserved gaps), so the list skips them. */
 internal val EXPECTED_APPLIED_VERSIONS: List<String> =
-    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49")
+    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51")
 
 /**
  * Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved; V30 is left
@@ -199,6 +201,71 @@ class MigrationChainTest {
             assertNull(entry.providerContractVersion)
             assertNull(entry.evidenceRef)
         }
+    }
+
+    /**
+     * V50 and V51 (ADR 0022, expand only). A task or memory row written with the pre-V50 column list is accepted and keeps
+     * project_id NULL. The new project tables take rows, and a project that still owns a task cannot be deleted (RESTRICT).
+     */
+    @Test
+    fun `V50 and V51 keep pre-V50 rows unassigned and restrict deleting a project that owns rows`() = TestDb().use { db ->
+        classpathFlyway(db.dataSource).validate()
+        val projectId = Ulid.generate()
+        val assigneeId = Ulid.generate()
+        val taskId = Ulid.generate()
+        transaction(db.database) {
+            execUpdate(
+                "INSERT INTO projects (project_id, name, created_at, updated_at) VALUES (?, 'p', NOW(6), NOW(6))",
+                projectId,
+            )
+            // The pre-V50 column list: project_id is not named, so it stays NULL.
+            execUpdate(
+                """
+                INSERT INTO selfdev_tasks
+                    (task_id, created_by, idempotency_key, title, target_repo, state, dependencies, created_at, updated_at)
+                VALUES (?, 'operator', ?, 'title', 'owner/repo', 'TASK_SUBMITTED', '[]', NOW(6), NOW(6))
+                """.trimIndent(),
+                taskId, "idem-$taskId",
+            )
+            execUpdate(
+                """
+                INSERT INTO selfdev_memory_records
+                    (record_id, kind, source_kind, trust_tier, status, count_value, created_at)
+                VALUES (?, 'COST_FACT', 'SYSTEM', 'UNTRUSTED', 'ACTIVE', 1, NOW(6))
+                """.trimIndent(),
+                Ulid.generate(),
+            )
+            execUpdate(
+                "INSERT INTO selfdev_assignees (assignee_id, display_name, role, created_by, created_at, updated_at) " +
+                    "VALUES (?, 'a', 'OPERATOR', 'bootstrap', NOW(6), NOW(6))",
+                assigneeId,
+            )
+            execUpdate(
+                "INSERT INTO project_members (project_id, assignee_id, role, created_at) VALUES (?, ?, 'VIEWER', NOW(6))",
+                projectId, assigneeId,
+            )
+            execUpdate(
+                "INSERT INTO project_repos (project_id, repo_key, created_at) VALUES (?, 'owner/repo', NOW(6))",
+                projectId,
+            )
+            execUpdate(
+                "INSERT INTO project_budgets (project_id, monthly_limit_jpy, updated_at) VALUES (?, 5000, NOW(6))",
+                projectId,
+            )
+        }
+        assertNull(transaction(db.database) {
+            execQuery("SELECT project_id FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }.single()
+        })
+        // The owning row blocks the delete: RESTRICT, not SET NULL.
+        transaction(db.database) {
+            execUpdate("UPDATE selfdev_tasks SET project_id = ? WHERE task_id = ?", projectId, taskId)
+        }
+        assertFailsWith<Exception> {
+            transaction(db.database) { execUpdate("DELETE FROM projects WHERE project_id = ?", projectId) }
+        }
+        assertEquals(projectId, transaction(db.database) {
+            execQuery("SELECT project_id FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }.single()
+        })
     }
 
     @Test

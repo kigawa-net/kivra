@@ -9,6 +9,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -121,12 +122,23 @@ private class FakeShadowStore : AutoMergeShadowStore {
     var global = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = false)
     val recorded = mutableListOf<Recorded>()
     val pausedRecords = mutableListOf<RunId>()
+    val reviews = mutableMapOf<Triple<String, Int, String>, AutoMergeReviewFact>()
+
+    /** The attempts started since a given instant (the hourly and daily caps read this). */
+    var attemptCount: (Instant) -> Int = { 0 }
+    var inFlight = 0
 
     override fun pullRequestRunIds(limit: Int): List<RunId> = prRuns.take(limit)
 
     override fun runSnapshot(runId: RunId): ShadowRunSnapshot? = snapshots[runId]
 
     override fun globalSnapshot(): ShadowGlobalSnapshot = global
+
+    override fun reviewOf(repo: String, number: Int, headSha: String): AutoMergeReviewFact? = reviews[Triple(repo, number, headSha)]
+
+    override fun attemptsSince(since: Instant): Int = attemptCount(since)
+
+    override fun inFlightAttempts(): Int = inFlight
 
     override fun recordJudgement(runId: RunId, verdict: String, payload: String) {
         recorded += Recorded(runId, verdict, payload)
@@ -142,9 +154,16 @@ private fun binding(head: String = HEAD) = AutoMergeBinding(repo = REPO.toString
 private fun snapshot(
     approval: AutoMergeTaskApproval? = AutoMergeTaskApproval.AUTO_APPROVED,
     head: String = HEAD,
-) = ShadowRunSnapshot(state = DevelopmentRunState.PULL_REQUEST, binding = binding(head), approval = approval)
+) = ShadowRunSnapshot(
+    state = DevelopmentRunState.PULL_REQUEST,
+    binding = binding(head),
+    approval = approval,
+    policyRevision = PATCH_POLICY_REVISION,
+)
 
-/** The happy path: one in-scope file, the required checks green on the head and on main. Each test changes one thing. */
+private val START_OF_DAY: Instant = Instant.parse("2026-10-22T00:00:00Z")
+
+/** The happy path: one in-scope file, the required checks green on the head and on main, and a PASS review. Each test changes one thing. */
 private class Harness {
     val port = FakeShadowPort()
     val store = FakeShadowStore()
@@ -158,6 +177,7 @@ private class Harness {
         port.files = GitHubResult.Success(PullRequestFiles(listOf(PullRequestFile(IN_SCOPE, "modified", 10, 2)), truncated = false))
         port.branch = GitHubResult.Success(BranchInfo(REPO, "main", MAIN))
         port.checks[MAIN] = GitHubResult.Success(passing(MAIN))
+        store.reviews[Triple(REPO.toString(), PR_NUMBER, HEAD)] = AutoMergeReviewFact(state = "POSTED", verdict = "PASS")
     }
 
     /** Points the PR, its tree and its checks at [sha], with a body marker for it. */
@@ -305,6 +325,28 @@ class AutoMergeShadowTest {
                 port.trees[HEAD] = GitHubResult.Success(RepoTree(HEAD, listOf(TreeEntry(IN_SCOPE, TreeEntryType.BLOB, "120000", 1L)), false))
             },
             Case("tree unreadable", "REFUSE", "MODE_NOT_REGULAR") { port.trees[HEAD] = failure() },
+            // ADR 0014 active addendum and issue #351 item 1 (option C): a re-bound Run is never ELIGIBLE, even with a matching marker.
+            Case("re-bound run", "REFUSE", "REBOUND_NOT_ELIGIBLE") { store.snapshots[RUN_ID] = snapshot().copy(rebound = true) },
+            Case("incident fix", "REFUSE", "INCIDENT_FIX") { store.snapshots[RUN_ID] = snapshot().copy(incidentFix = true) },
+            Case("policy revision differs", "REFUSE", "POLICY_VIOLATION") {
+                store.snapshots[RUN_ID] = snapshot().copy(policyRevision = "patchpolicy-v0")
+            },
+            Case("no policy revision on the binding", "REFUSE", "POLICY_VIOLATION") {
+                store.snapshots[RUN_ID] = snapshot().copy(policyRevision = null)
+            },
+            Case("no review of the head yet", "HOLD", "REVIEW_PENDING") { store.reviews.clear() },
+            Case("review still running", "HOLD", "REVIEW_PENDING") {
+                store.reviews[Triple(REPO.toString(), PR_NUMBER, HEAD)] = AutoMergeReviewFact("CLAIMED", null)
+            },
+            Case("review says concerns", "REFUSE", "REVIEW_NOT_PASS") {
+                store.reviews[Triple(REPO.toString(), PR_NUMBER, HEAD)] = AutoMergeReviewFact("POSTED", "CONCERNS")
+            },
+            Case("review failed", "REFUSE", "REVIEW_NOT_PASS") {
+                store.reviews[Triple(REPO.toString(), PR_NUMBER, HEAD)] = AutoMergeReviewFact("FAILED", null)
+            },
+            Case("hourly cap reached", "HOLD", "HOURLY_LIMIT") { store.attemptCount = { since -> if (since == NOW.minusSeconds(3600)) 1 else 0 } },
+            Case("daily cap reached", "HOLD", "DAILY_LIMIT") { store.attemptCount = { since -> if (since == START_OF_DAY) 3 else 0 } },
+            Case("another merge in flight", "HOLD", "CONCURRENCY_LIMIT") { store.inFlight = 1 },
         )
         for (case in cases) {
             val h = Harness()
@@ -410,5 +452,216 @@ class AutoMergeShadowTest {
         )
         assertEquals(MainCiResult.UNKNOWN, AutoMergeFactsAssembler.deriveMainCi(listOf(check("test", "completed", CheckConclusion.SUCCESS)), REQUIRED))
         assertEquals(MainCiResult.UNKNOWN, AutoMergeFactsAssembler.deriveMainCi(emptyList(), REQUIRED))
+    }
+}
+
+/** The fake of the one write of the automatic merge: each squash merge is recorded, and the answer is set by the test. */
+private class FakeMerge : AutoMergeActivePort {
+    val calls = mutableListOf<Pair<Int, String>>()
+    var outcome: GitHubResult<String?> = GitHubResult.Success("c".repeat(40))
+
+    override suspend fun squashMerge(repo: RepoRef, number: Int, expectedHeadSha: String): GitHubResult<String?> {
+        calls += number to expectedHeadSha
+        return outcome
+    }
+}
+
+/** The fake of the active store. [onAttemptRead] runs when the attempt of a head is read: after the first judgement, before the C10 re-check. */
+private class FakeActiveStore(private val shadow: FakeShadowStore) : AutoMergeActiveStore {
+    class Attempt(var state: String)
+
+    val attempts = linkedMapOf<Triple<String, Int, String>, Attempt>()
+    val audits = mutableListOf<Pair<String, String>>()
+    val payloads = mutableListOf<String>()
+    val halts = mutableListOf<String>()
+    var stale: RunId? = null
+    var onAttemptRead: () -> Unit = {}
+
+    override fun attemptState(repo: String, number: Int, headSha: String): String? {
+        onAttemptRead()
+        return attempts[Triple(repo, number, headSha)]?.state
+    }
+
+    override fun claim(repo: String, number: Int, headSha: String, runId: RunId): Boolean {
+        val key = Triple(repo, number, headSha)
+        if (key in attempts || attempts.values.any { it.state == AutoMergeAttemptState.CLAIMED }) return false
+        attempts[key] = Attempt(AutoMergeAttemptState.CLAIMED)
+        return true
+    }
+
+    override fun finish(repo: String, number: Int, headSha: String, state: String) {
+        attempts.getValue(Triple(repo, number, headSha)).state = state
+    }
+
+    override fun recentStates(limit: Int): List<String> = attempts.values.map { it.state }.reversed().take(limit)
+
+    override fun staleClaim(olderThan: Instant): RunId? = stale
+
+    override fun audit(runId: RunId, action: String, result: String, payload: JsonObject) {
+        audits += action to result
+        payloads += payload.toString()
+    }
+
+    override fun halt(runId: RunId, reasonCode: String) {
+        halts += reasonCode
+        shadow.global = shadow.global.copy(autoMergePaused = true)
+    }
+}
+
+/** The happy path of [Harness] with the active merge wired to fakes. */
+private class ActiveHarness {
+    val base = Harness()
+    val active = FakeActiveStore(base.store)
+    val merge = FakeMerge()
+    val watch = AutoMergeActiveWatch(base.store, active, base.port, merge, base.settings, CLOCK)
+
+    suspend fun tick(): Int = watch.tick()
+}
+
+class AutoMergeActiveTest {
+    private val headKey = Triple(REPO.toString(), PR_NUMBER, HEAD)
+
+    @Test
+    fun `an ELIGIBLE PR is merged once with its head SHA, and the next pass sends nothing`() = runBlocking {
+        val a = ActiveHarness()
+        assertEquals(1, a.tick())
+        assertEquals(listOf(PR_NUMBER to HEAD), a.merge.calls)
+        assertEquals(AutoMergeAttemptState.MERGED, a.active.attempts.getValue(headKey).state)
+        assertEquals(listOf("AUTO_MERGE_REQUESTED", "AUTO_MERGE_MERGED"), a.active.audits.map { it.first })
+        assertEquals(listOf("REQUESTED", "MERGED"), a.active.audits.map { it.second })
+        // The audit carries codes and SHAs only: no title, no body, no path.
+        val all = a.active.payloads.joinToString()
+        assertFalse(all.contains(INJECTED))
+        assertFalse(all.contains(IN_SCOPE))
+        assertTrue(all.contains("mergeCommitSha"))
+
+        assertEquals(0, a.tick())
+        assertEquals(1, a.merge.calls.size)
+    }
+
+    @Test
+    fun `a merge that GitHub refuses is recorded once and never sent again for that head, and one refusal does not pause`() = runBlocking {
+        val a = ActiveHarness()
+        a.merge.outcome = GitHubResult.Failure(GitHubFailureKind.CONFLICT, "GITHUB_CONFLICT", 409)
+        assertEquals(1, a.tick())
+        assertEquals(AutoMergeAttemptState.REFUSED, a.active.attempts.getValue(headKey).state)
+        assertEquals(emptyList<String>(), a.active.halts)
+        assertEquals(0, a.tick())
+        assertEquals(1, a.merge.calls.size)
+    }
+
+    @Test
+    fun `two refusals in a row pause the automatic merge, and a paused merge sends nothing`() = runBlocking {
+        val a = ActiveHarness()
+        a.merge.outcome = GitHubResult.Failure(GitHubFailureKind.VALIDATION, "GITHUB_VALIDATION", 405)
+        a.tick()
+        // The same PR on its next head: the Run is judged on that head.
+        a.base.useHead(HEAD2)
+        a.base.store.snapshots[RUN_ID] = snapshot(head = HEAD2)
+        a.base.store.reviews[Triple(REPO.toString(), PR_NUMBER, HEAD2)] = AutoMergeReviewFact("POSTED", "PASS")
+        a.tick()
+        assertEquals(listOf(AutoMergeHaltCode.MERGE_FAILURES), a.active.halts)
+        assertTrue(a.base.store.global.autoMergePaused)
+
+        val sent = a.merge.calls.size
+        assertEquals(0, a.tick())
+        assertEquals(sent, a.merge.calls.size)
+    }
+
+    @Test
+    fun `an unknown outcome pauses at once and is never sent again`() = runBlocking {
+        val a = ActiveHarness()
+        a.merge.outcome = GitHubResult.Unknown("squashMerge", "timeout")
+        assertEquals(1, a.tick())
+        assertEquals(listOf(AutoMergeHaltCode.MERGE_UNKNOWN), a.active.halts)
+        assertEquals(AutoMergeAttemptState.UNKNOWN, a.active.attempts.getValue(headKey).state)
+        assertEquals(0, a.tick())
+        assertEquals(1, a.merge.calls.size)
+    }
+
+    @Test
+    fun `a failure that is not a refusal pauses, and a merge without its commit SHA is not confirmed`() = runBlocking {
+        val a = ActiveHarness()
+        a.merge.outcome = GitHubResult.Failure(GitHubFailureKind.PERMISSION, "GITHUB_PERMISSION", 403)
+        a.tick()
+        assertEquals(listOf(AutoMergeHaltCode.MERGE_UNKNOWN), a.active.halts)
+
+        val b = ActiveHarness()
+        b.merge.outcome = GitHubResult.Success(null)
+        b.tick()
+        assertEquals(listOf(AutoMergeHaltCode.MERGE_UNCONFIRMED), b.active.halts)
+    }
+
+    @Test
+    fun `a PR that stops being eligible before the call is not merged, and no attempt is claimed`() = runBlocking {
+        val a = ActiveHarness()
+        // Between the first judgement and the C10 re-check, the PR gets the hold label.
+        a.active.onAttemptRead = {
+            a.base.port.pr = GitHubResult.Success(PrRebaseView(pullRequest(HEAD, labels = listOf("kivra:hold")), mergeableState = "clean", mergeable = true))
+        }
+        assertEquals(0, a.tick())
+        assertEquals(emptyList<Pair<Int, String>>(), a.merge.calls)
+        assertTrue(a.active.attempts.isEmpty())
+        assertEquals(listOf("AUTO_MERGE_REFUSED"), a.active.audits.map { it.first })
+        assertTrue(a.active.payloads.single().contains("HOLD_LABEL"))
+    }
+
+    @Test
+    fun `no condition that stops the judgement sends a merge, and no attempt is started`() = runBlocking {
+        data class Case(val name: String, val setup: ActiveHarness.() -> Unit)
+        val cases = listOf(
+            Case("draft") {
+                base.port.pr = GitHubResult.Success(PrRebaseView(pullRequest(HEAD).copy(draft = true), mergeable = true, mergeableState = "clean"))
+            },
+            Case("hold label") {
+                base.port.pr = GitHubResult.Success(PrRebaseView(pullRequest(HEAD, labels = listOf("kivra:hold")), mergeableState = "clean", mergeable = true))
+            },
+            Case("operator approved task") { base.store.snapshots[RUN_ID] = snapshot(approval = AutoMergeTaskApproval.OPERATOR_APPROVED) },
+            Case("re-bound run") { base.store.snapshots[RUN_ID] = snapshot().copy(rebound = true) },
+            Case("incident fix") { base.store.snapshots[RUN_ID] = snapshot().copy(incidentFix = true) },
+            Case("policy revision missing") { base.store.snapshots[RUN_ID] = snapshot().copy(policyRevision = null) },
+            Case("out of scope path") {
+                base.port.files = GitHubResult.Success(PullRequestFiles(listOf(PullRequestFile("docs/x.md", "modified", 1, 1)), false))
+                base.port.trees[HEAD] = GitHubResult.Success(RepoTree(HEAD, listOf(TreeEntry("docs/x.md", TreeEntryType.BLOB, "100644", 1L)), false))
+            },
+            Case("review concerns") { base.store.reviews[headKey] = AutoMergeReviewFact("POSTED", "CONCERNS") },
+            Case("review not written yet") { base.store.reviews.clear() },
+            Case("required check failed") {
+                base.port.checks[HEAD] = GitHubResult.Success(CheckRunsSummary(HEAD, listOf(checkRun("test", HEAD, conclusion = CheckConclusion.FAILURE)) + passing(HEAD).runs.drop(1), 3, true))
+            },
+            Case("main CI red") {
+                base.port.checks[MAIN] = GitHubResult.Success(CheckRunsSummary(MAIN, listOf(checkRun("build", MAIN, conclusion = CheckConclusion.FAILURE)) + passing(MAIN).runs.filter { it.name != "build" }, 3, true))
+            },
+            Case("hourly cap reached") { base.store.attemptCount = { since -> if (since == NOW.minusSeconds(3600)) 1 else 0 } },
+            Case("daily cap reached") { base.store.attemptCount = { since -> if (since == START_OF_DAY) 3 else 0 } },
+            Case("automatic merge paused") { base.store.global = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = false, autoMergePaused = true) },
+            Case("self-development paused") { base.store.global = ShadowGlobalSnapshot(selfDevPaused = true, breakerOpen = false) },
+            Case("breaker open") { base.store.global = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = true) },
+        )
+        for (case in cases) {
+            val a = ActiveHarness()
+            case.setup(a)
+            a.tick()
+            assertEquals(emptyList<Pair<Int, String>>(), a.merge.calls, case.name)
+            assertTrue(a.active.attempts.isEmpty(), case.name)
+        }
+    }
+
+    @Test
+    fun `an attempt left in flight from before pauses the automatic merge before anything is judged`() = runBlocking {
+        val a = ActiveHarness()
+        a.active.stale = RUN_ID
+        assertEquals(0, a.tick())
+        assertEquals(listOf(AutoMergeHaltCode.ATTEMPT_UNFINISHED), a.active.halts)
+        assertEquals(emptyList<Pair<Int, String>>(), a.merge.calls)
+    }
+
+    @Test
+    fun `while paused, the active pass reads nothing from GitHub and sends nothing`() = runBlocking {
+        val a = ActiveHarness()
+        a.base.store.global = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = false, autoMergePaused = true)
+        assertEquals(0, a.tick())
+        assertTrue(a.base.port.calls.isEmpty())
+        assertEquals(emptyList<Pair<Int, String>>(), a.merge.calls)
     }
 }

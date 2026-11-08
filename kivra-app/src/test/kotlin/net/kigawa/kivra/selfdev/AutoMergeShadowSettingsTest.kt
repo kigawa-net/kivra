@@ -11,6 +11,7 @@ import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.selfdev.automerge.AutoMergeReviewFact
 import net.kigawa.kivra.selfdev.automerge.AutoMergeShadowPort
 import net.kigawa.kivra.selfdev.automerge.AutoMergeShadowStore
 import net.kigawa.kivra.selfdev.automerge.ShadowGlobalSnapshot
@@ -139,6 +140,9 @@ class AutoMergeShadowSettingsTest {
         override fun pullRequestRunIds(limit: Int): List<RunId> = emptyList()
         override fun runSnapshot(runId: RunId): ShadowRunSnapshot? = null
         override fun globalSnapshot(): ShadowGlobalSnapshot = ShadowGlobalSnapshot(selfDevPaused = false, breakerOpen = false)
+        override fun reviewOf(repo: String, number: Int, headSha: String): AutoMergeReviewFact? = null
+        override fun attemptsSince(since: java.time.Instant): Int = 0
+        override fun inFlightAttempts(): Int = 0
         override fun recordJudgement(runId: RunId, verdict: String, payload: String) = Unit
         override fun recordPaused(runId: RunId) = Unit
     }

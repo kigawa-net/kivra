@@ -39,7 +39,12 @@ import net.kigawa.kivra.modelgateway.RegistryLoader
 import net.kigawa.kivra.modelgateway.StaticKeyAuth
 import net.kigawa.kivra.modelgateway.Requirements
 import net.kigawa.kivra.routes.SelfDevRouteDeps
+import net.kigawa.kivra.selfdev.automerge.AutoMergeActiveSettings
+import net.kigawa.kivra.selfdev.automerge.AutoMergeActiveWatch
 import net.kigawa.kivra.selfdev.automerge.AutoMergeShadowWatch
+import net.kigawa.kivra.selfdev.automerge.DbAutoMergeActiveStore
+import net.kigawa.kivra.selfdev.automerge.GitHubAutoMergeActivePort
+import net.kigawa.kivra.selfdev.automerge.buildAutoMergeActiveWatch
 import net.kigawa.kivra.selfdev.automerge.DbAutoMergeShadowStore
 import net.kigawa.kivra.selfdev.automerge.GitHubAutoMergeShadowPort
 import net.kigawa.kivra.selfdev.automerge.buildAutoMergeShadowWatch
@@ -67,6 +72,8 @@ internal class SelfDevParts(
     val planWorker: PlannerWorker? = null,
     /** The shadow judgement of the automatic merge (ADR 0014 S1). Non-null only with the autopilot and its shadow switch on. */
     val autoMergeShadow: AutoMergeShadowWatch? = null,
+    /** The automatic merge (ADR 0014 active). Non-null only when KIVRA_SELFDEV_AUTOMERGE_ACTIVE_ENABLED is true. */
+    val autoMergeActive: AutoMergeActiveWatch? = null,
     /** The AI review of self-development pull requests (comment only). Non-null only when KIVRA_SELFDEV_PR_REVIEW_ENABLED is true. */
     val prReview: PrReviewWatch? = null,
     /** The incident issue detector (issue #225). Non-null only when KIVRA_SELFDEV_AUTO_ISSUE_ENABLED is true. */
@@ -256,6 +263,26 @@ internal fun buildSelfDev(
     } else {
         null
     }
+    // ADR 0014 active: the automatic merge. Off unless KIVRA_SELFDEV_AUTOMERGE_ACTIVE_ENABLED is exactly true, and read only then. It needs the
+    // shadow judgement (built above only with the autopilot and its shadow switch) and the PR AI review; any other combination fails at startup.
+    val autoMergeActiveSettings = AutoMergeActiveSettings.fromEnv(
+        env,
+        shadowOn = autoMergeShadow != null,
+        reviewOn = prReviewSettings.enabled,
+    )
+    val autoMergeActive: AutoMergeActiveWatch? = buildAutoMergeActiveWatch(
+        active = autoMergeActiveSettings,
+        autopilot = autopilot,
+        shadowStore = DbAutoMergeShadowStore(
+            database, runs, SelfDevOperatorRepository(database), SelfDevAutopilotControlRepository(database), AuditRepository(),
+        ),
+        activeStore = DbAutoMergeActiveStore(database, SelfDevAutopilotControlRepository(database), AuditRepository()),
+        port = GitHubAutoMergeShadowPort(github, github),
+        merge = GitHubAutoMergeActivePort(github),
+        repo = config.repo,
+        baseBranch = config.baseBranch,
+        botAuthorId = botUserId.reveal().toLong(),
+    )
     // Issue #225: the incident issue of a self-development failure. Off unless its switch is exactly true; it reads the Runs and the
     // breaker and creates at most one issue per cause and window. It never starts a Run and never changes a Run.
     val incidentSettings = IncidentIssueSettings.fromEnv(env)
@@ -284,6 +311,7 @@ internal fun buildSelfDev(
         routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github),
         planWorker = planWorker,
         autoMergeShadow = autoMergeShadow,
+        autoMergeActive = autoMergeActive,
         prReview = prReview,
         incidentIssue = incidentIssue,
         incidentFix = incidentFix,

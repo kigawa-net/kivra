@@ -1,6 +1,8 @@
 package net.kigawa.kivra.selfdev.automerge
 
 import java.time.Clock
+import java.time.Duration
+import java.time.ZoneOffset
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.github.CheckConclusion
 import net.kigawa.kivra.github.CheckRun
@@ -44,6 +46,10 @@ internal class AutoMergeFactsAssembler(
         val snapshot = store.runSnapshot(runId) ?: return null
         val binding = snapshot.binding ?: return null
         val number = binding.prNumber
+        val now = clock.instant()
+        val mergedToday = store.attemptsSince(now.atZone(ZoneOffset.UTC).toLocalDate().atStartOfDay(ZoneOffset.UTC).toInstant())
+        val mergedLastHour = store.attemptsSince(now.minus(Duration.ofHours(1)))
+        val inFlight = store.inFlightAttempts()
 
         val view = when (val r = meter.read { port.pullRequest(settings.repo, number) }) {
             is GitHubResult.Success -> r.value
@@ -92,6 +98,7 @@ internal class AutoMergeFactsAssembler(
             }
         }
 
+        val review = store.reviewOf(settings.repo.toString(), number, pr.headSha)
         val input = AutoMergeInput(
             pr = AutoMergePrFacts(
                 repo = settings.repo.toString(),
@@ -111,6 +118,10 @@ internal class AutoMergeFactsAssembler(
                 binding = binding,
                 markerHeadSha = headMarkerOf(pr.body),
                 approval = snapshot.approval,
+                rebound = snapshot.rebound,
+                incidentFix = snapshot.incidentFix,
+                policyRevision = snapshot.policyRevision,
+                review = review,
             ),
             files = files.map { it.toFact(modes[it.path]) },
             checks = checks,
@@ -125,8 +136,9 @@ internal class AutoMergeFactsAssembler(
                 selfDevPaused = global.selfDevPaused,
                 breakerOpen = global.breakerOpen,
                 mainCi = main.result,
-                inFlight = 0,
-                mergedToday = 0,
+                inFlight = inFlight,
+                mergedToday = mergedToday,
+                mergedLastHour = mergedLastHour,
             ),
         )
         val decision = decideAutoMerge(input, decisionSettings)

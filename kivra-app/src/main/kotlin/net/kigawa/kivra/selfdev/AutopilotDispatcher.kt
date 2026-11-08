@@ -28,8 +28,10 @@ import org.slf4j.LoggerFactory
 /**
  * The periodic loop that submits the autopilot's tasks as Runs (ADR 0011 section 5). One [tick] runs these steps in order, each contained:
  *
- * 1. Records the outcome of every SUBMITTED task whose Run has ended: COMPLETED (PR_MERGED), FAILED (RUN_FAILED), CANCELLED (RUN_RELEASED).
- *    A failure feeds the circuit breaker. The Run itself is never changed here.
+ * 1. Records the outcome of every SUBMITTED task whose Run has ended: COMPLETED (PR_MERGED), FAILED (RUN_FAILED, or POLICY_REJECTED when the
+ *    Run was refused by the PatchPolicy), CANCELLED (RUN_RELEASED). A failure feeds the circuit breaker. The task's move and the count are one
+ *    transaction. The Run itself is never changed here.
+ *    Then settles every plan root whose planned tasks have all ended (DONE, or STOPPED with TASKS_INCOMPLETE); a catch-up for the settlement.
  * 2. Stops here while the autopilot is paused (nothing is submitted; no state moves).
  * 3. Clears the dispatch blocks whose guard now holds (GUARD_CLEARED), and the circuit block once the operator has reset the breaker.
  * 4. Submits again a SUBMITTING task that has no Run yet (an interrupted submission), with the same key, so no second Run is made.
@@ -53,6 +55,8 @@ class AutopilotDispatcher(
     /** One pass. Blocking (database and Run repository calls only). */
     fun tick() {
         step("run outcomes") { recordRunOutcomes() }
+        // Bookkeeping, not dispatch: it runs while paused too, so a plan whose tasks all ended is never left waiting.
+        step("finished plans") { operations.settleFinishedPlans(BATCH) }
         if (control.read().paused) return
         step("dispatch blocks") { clearDispatchBlocks() }
         step("interrupted submissions") { resubmitInterrupted() }
@@ -87,16 +91,20 @@ class AutopilotDispatcher(
             // `succeeded` feeds the circuit breaker; null means the outcome does not count either way.
             val (to, reason, succeeded) = when (run.state) {
                 DevelopmentRunState.COMPLETED -> Triple(TaskState.COMPLETED, AutopilotReason.PR_MERGED, true)
-                DevelopmentRunState.FAILED -> Triple(TaskState.FAILED, AutopilotReason.RUN_FAILED, false)
+                DevelopmentRunState.FAILED -> Triple(TaskState.FAILED, failureReasonOf(run.stateReason), false)
                 DevelopmentRunState.CANCELLED -> Triple(TaskState.CANCELLED, AutopilotReason.RUN_RELEASED, null)
                 else -> continue
             }
             val task = operations.task(submitted.taskId) ?: continue
-            if (operations.moveTask(task.taskId, task.version, to, reason) !is TaskTransition.Moved) continue
+            // The move and the breaker's count are one transaction, so a crash keeps neither or both.
+            if (operations.settleRunOutcome(task.taskId, task.version, to, reason, succeeded, config.maxConsecutiveFailures) !is TaskTransition.Moved) continue
             logger.info("autopilot task outcome: taskId={} runId={} state={} reason={}", task.taskId, submitted.runId, to.name, reason.name)
-            succeeded?.let { control.recordRunOutcome(it, config.maxConsecutiveFailures) }
         }
     }
+
+    /** The task's reason for a failed Run: a change the PatchPolicy refused is POLICY_REJECTED (it counts in the promotion readout), any other is RUN_FAILED. */
+    private fun failureReasonOf(runStateReason: String?): AutopilotReason =
+        if (runStateReason != null && runStateReason in POLICY_REJECTED_RUN_REASONS) AutopilotReason.POLICY_REJECTED else AutopilotReason.RUN_FAILED
 
     private fun clearDispatchBlocks() {
         val ctl = control.read()
@@ -212,6 +220,8 @@ class AutopilotDispatcher(
         val logger = LoggerFactory.getLogger(AutopilotDispatcher::class.java)
         const val BATCH = 20
         val DISPATCH_INTERVAL: Duration = Duration.ofSeconds(10)
+        /** The Run state reasons of a refused change: the Run's own (SelfDevRunner) and the developer's (`DEVELOPER_` + its refusal). */
+        val POLICY_REJECTED_RUN_REASONS = setOf("POLICY_REJECTED", "DEVELOPER_POLICY_REJECTED")
     }
 }
 

@@ -64,6 +64,16 @@ data class TaskContext(
     val blockedReason: AutopilotReason? = null,
     /** The state a PAUSED task returns to. A PAUSED task may only move to this state. */
     val resumeState: TaskState? = null,
+    /**
+     * The states of a plan root's planned tasks (V44). Read only by the settlement of a root: DONE needs every one COMPLETED, and
+     * STOPPED with [AutopilotReason.TASKS_INCOMPLETE] needs every one ended (see [PLAN_CHILD_END_STATES]) and not all COMPLETED.
+     */
+    val childStates: List<TaskState> = emptyList(),
+)
+
+/** The states a planned task ends in. A plan root settles (DONE or STOPPED) only when every planned task is in one of them. */
+val PLAN_CHILD_END_STATES: Set<TaskState> = setOf(
+    TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED, TaskState.SKIPPED, TaskState.STOPPED,
 )
 
 /** A Task has at most this many Plan revisions (ADR 0011 section 2.1). */
@@ -122,6 +132,8 @@ private val TASK_EDGES: List<Edge<TaskState>> = buildList {
         setOf(AutopilotReason.OPERATOR_APPROVED, AutopilotReason.AUTO_APPROVED),
     )
     edge(TaskState.PENDING_APPROVAL, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.TASK_STOPPED))
+    // A plan root (V44) is never run: it settles when all its planned tasks have ended (ADR 0011 section 2.8b).
+    edge(TaskState.PENDING_APPROVAL, TaskState.DONE, setOf(AutopilotReason.ALL_TASKS_COMPLETED))
     edge(TaskState.QUEUED, TaskState.SUBMITTING, NO_REASON)
     edge(TaskState.QUEUED, TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.TASK_STOPPED))
     edge(TaskState.SUBMITTING, TaskState.SUBMITTED, NO_REASON)
@@ -160,7 +172,8 @@ private val TASK_EDGES: List<Edge<TaskState>> = buildList {
     )
     val dispatchEnds = setOf(TaskState.QUEUED, TaskState.SUBMITTING, TaskState.SUBMITTED, TaskState.BLOCKED)
     for (from in active) {
-        val reasons = if (from in dispatchEnds) {
+        // The settlement of a plan root (PENDING_APPROVAL) is the other place a task stops by the dispatcher's rule.
+        val reasons = if (from in dispatchEnds || from == TaskState.PENDING_APPROVAL) {
             setOf(AutopilotReason.OPERATOR_STOPPED, AutopilotReason.TASKS_INCOMPLETE)
         } else {
             setOf(AutopilotReason.OPERATOR_STOPPED)
@@ -181,6 +194,12 @@ fun checkTaskTransition(from: TaskState?, to: TaskState, reason: AutopilotReason
     val edge = checkEdge(TASK_EDGES, from, to, reason)
     if (edge != TransitionDecision.Allowed) return edge
     val guardHolds = when {
+        // Settling a plan root: DONE only when every planned task COMPLETED; STOPPED (TASKS_INCOMPLETE) only when every planned task
+        // has ended and at least one did not COMPLETE. An empty plan never settles.
+        from == TaskState.PENDING_APPROVAL && reason == AutopilotReason.ALL_TASKS_COMPLETED ->
+            context.childStates.isNotEmpty() && context.childStates.all { it == TaskState.COMPLETED }
+        reason == AutopilotReason.TASKS_INCOMPLETE -> context.childStates.isNotEmpty() &&
+            context.childStates.all { it in PLAN_CHILD_END_STATES } && context.childStates.any { it != TaskState.COMPLETED }
         // Replanning: PLANNING -> TASK_SUBMITTED needs fewer than MAX_REVISIONS
         from == TaskState.PLANNING && to == TaskState.TASK_SUBMITTED && reason == AutopilotReason.CLAIM_EXPIRED -> true
         from == TaskState.BLOCKED && to == TaskState.TASK_SUBMITTED -> context.blockedReason in PLAN_BLOCK_REASONS

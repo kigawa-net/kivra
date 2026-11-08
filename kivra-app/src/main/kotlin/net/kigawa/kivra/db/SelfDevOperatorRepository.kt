@@ -10,6 +10,7 @@ import kotlinx.serialization.json.Json
 import net.kigawa.kivra.core.autopilot.AutopilotReason
 import net.kigawa.kivra.core.autopilot.DISPATCH_BLOCK_REASONS
 import net.kigawa.kivra.core.autopilot.MAX_REVISIONS
+import net.kigawa.kivra.core.autopilot.PLAN_CHILD_END_STATES
 import net.kigawa.kivra.core.autopilot.TaskContext
 import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.core.autopilot.TransitionDecision
@@ -140,21 +141,23 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
     }
 
     fun skipTask(taskId: String, expectedVersion: Long): TaskTransition = transaction(database) {
-        val current = lockTask(taskId) ?: return@transaction TaskTransition.NotFound
+        val current = lockWithParent(taskId) ?: return@transaction TaskTransition.NotFound
         if (current.version != expectedVersion) return@transaction TaskTransition.StaleVersion
         if (current.isPlanRoot) return@transaction TaskTransition.Refused(TransitionRefusal.GUARD_FAILED)
         val decision = checkTaskTransition(current.state, TaskState.SKIPPED, AutopilotReason.OPERATOR_SKIPPED, contextOf(current))
         if (decision is TransitionDecision.Refused) return@transaction TaskTransition.Refused(decision.reason)
+        val now = utcNow(clock)
         val changed = execUpdate(
             "UPDATE selfdev_tasks SET state = 'SKIPPED', state_reason = 'OPERATOR_SKIPPED', version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = 'PENDING_APPROVAL'",
-            utcNow(clock), taskId, expectedVersion)
+            now, taskId, expectedVersion)
         if (changed != 1) return@transaction TaskTransition.StaleVersion
+        settlePlanOf(current.parentTaskId, now)
         TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
     }
 
     fun stopTask(taskId: String, expectedVersion: Long): TaskTransition = try {
         transaction(database) {
-            val current = lockTask(taskId) ?: return@transaction TaskTransition.NotFound
+            val current = lockWithParent(taskId) ?: return@transaction TaskTransition.NotFound
             if (current.version != expectedVersion) return@transaction TaskTransition.StaleVersion
             val decision = checkTaskTransition(current.state, TaskState.STOPPED, AutopilotReason.OPERATOR_STOPPED, contextOf(current))
             if (decision is TransitionDecision.Refused) return@transaction TaskTransition.Refused(decision.reason)
@@ -164,6 +167,7 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                 now, taskId, expectedVersion)
             if (changed != 1) return@transaction TaskTransition.StaleVersion
             skipUnsubmittedTasks(taskId, now)
+            settlePlanOf(current.parentTaskId, now)
             TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
         }
     } catch (_: TaskMovedDuringStop) { TaskTransition.StaleVersion }
@@ -373,16 +377,58 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
      * and the version still matches. Used for the dispatch guards, the Run's outcome and the submission rollback.
      */
     fun moveTask(taskId: String, expectedVersion: Long, to: TaskState, reason: AutopilotReason?): TaskTransition = transaction(database) {
-        val current = lockTask(taskId) ?: return@transaction TaskTransition.NotFound
-        if (current.version != expectedVersion) return@transaction TaskTransition.StaleVersion
+        moveTaskIn(taskId, expectedVersion, to, reason)
+    }
+
+    /**
+     * Records a Run's outcome in one transaction: the task moves to [to] with [reason], and the circuit breaker counts the outcome when
+     * [succeeded] is not null. Both happen or neither does, so a crash never keeps the move without its count. A task that did not move
+     * counts nothing; it is still SUBMITTED, so the next pass looks at its Run again.
+     */
+    fun settleRunOutcome(
+        taskId: String, expectedVersion: Long, to: TaskState, reason: AutopilotReason, succeeded: Boolean?, maxConsecutiveFailures: Int,
+    ): TaskTransition = transaction(database) {
+        val result = moveTaskIn(taskId, expectedVersion, to, reason)
+        if (result is TaskTransition.Moved && succeeded != null) recordRunOutcomeIn(succeeded, maxConsecutiveFailures)
+        result
+    }
+
+    /**
+     * Settles the plan roots whose planned tasks have all ended (a catch-up: the settlement is also made in the same transaction as the last
+     * planned task's move, so this only finds one that a crash left behind). Returns how many settled.
+     */
+    fun settleFinishedPlans(limit: Int): Int {
+        val roots = transaction(database) {
+            execQuery(
+                """
+                SELECT r.task_id FROM selfdev_tasks r
+                 WHERE r.state = 'PENDING_APPROVAL' AND r.parent_task_id IS NULL AND r.revision > 0
+                   AND EXISTS (SELECT 1 FROM selfdev_tasks c WHERE c.parent_task_id = r.task_id)
+                   AND NOT EXISTS (SELECT 1 FROM selfdev_tasks c WHERE c.parent_task_id = r.task_id
+                                    AND c.state NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'SKIPPED', 'STOPPED'))
+                 ORDER BY r.created_at, r.task_id LIMIT ?
+                """.trimIndent(),
+                limit,
+            ) { it.getString(1) }
+        }
+        return roots.count { rootId -> transaction(database) { settlePlanIfFinished(rootId, utcNow(clock)) } }
+    }
+
+    /** The move of [moveTask], in the caller's transaction. */
+    private fun Transaction.moveTaskIn(taskId: String, expectedVersion: Long, to: TaskState, reason: AutopilotReason?): TaskTransition {
+        val current = lockWithParent(taskId) ?: return TaskTransition.NotFound
+        if (current.version != expectedVersion) return TaskTransition.StaleVersion
+        if (reopensUnderClosedPlan(current)) return TaskTransition.Refused(TransitionRefusal.GUARD_FAILED)
         val decision = checkTaskTransition(current.state, to, reason, contextOf(current))
-        if (decision is TransitionDecision.Refused) return@transaction TaskTransition.Refused(decision.reason)
+        if (decision is TransitionDecision.Refused) return TaskTransition.Refused(decision.reason)
+        val now = utcNow(clock)
         val changed = execUpdate(
             "UPDATE selfdev_tasks SET state = ?, state_reason = ?, version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = ?",
-            to.name, reason?.name, utcNow(clock), taskId, expectedVersion, current.state.name,
+            to.name, reason?.name, now, taskId, expectedVersion, current.state.name,
         )
-        if (changed != 1) return@transaction TaskTransition.StaleVersion
-        TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
+        if (changed != 1) return TaskTransition.StaleVersion
+        settlePlanOf(current.parentTaskId, now)
+        return TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
     }
 
     /**
@@ -413,6 +459,50 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         execQuery("SELECT task_id FROM selfdev_tasks WHERE task_id = ? FOR UPDATE", taskId) { it.getString(1) }
         return taskIn(taskId)
     }
+
+    /** Locks the plan root first, then the task: the order [beginSubmission] uses too, so a planned task and its root never lock in reverse. */
+    private fun Transaction.lockWithParent(taskId: String): SelfDevTask? {
+        val probe = taskIn(taskId) ?: return null
+        probe.parentTaskId?.let { lockTask(it) }
+        return lockTask(taskId)
+    }
+
+    /** A failed or cancelled planned task is not requeued once its plan root has settled (DONE or STOPPED). */
+    private fun Transaction.reopensUnderClosedPlan(task: SelfDevTask): Boolean {
+        val parentId = task.parentTaskId ?: return false
+        if (task.state != TaskState.FAILED && task.state != TaskState.CANCELLED) return false
+        val parentState = taskIn(parentId)?.state ?: return false
+        return parentState == TaskState.DONE || parentState == TaskState.STOPPED
+    }
+
+    /** Settles the plan root of a planned task (see [settlePlanIfFinished]). A task with no root is left alone. */
+    private fun Transaction.settlePlanOf(parentId: String?, now: LocalDateTime) {
+        if (parentId != null) settlePlanIfFinished(parentId, now)
+    }
+
+    /**
+     * A plan root (PENDING_APPROVAL, planned at least once) moves on when every planned task has ended: DONE (ALL_TASKS_COMPLETED) when all
+     * of them COMPLETED, otherwise STOPPED (TASKS_INCOMPLETE), ADR 0011 section 2.8b. The root is never run itself. Returns true when it moved.
+     */
+    private fun Transaction.settlePlanIfFinished(rootId: String, now: LocalDateTime): Boolean {
+        val root = lockTask(rootId) ?: return false
+        if (root.state != TaskState.PENDING_APPROVAL || !root.isPlanRoot) return false
+        val states = childStatesOf(rootId)
+        if (states.isEmpty() || states.any { it !in PLAN_CHILD_END_STATES }) return false
+        val (to, reason) = if (states.all { it == TaskState.COMPLETED }) {
+            TaskState.DONE to AutopilotReason.ALL_TASKS_COMPLETED
+        } else {
+            TaskState.STOPPED to AutopilotReason.TASKS_INCOMPLETE
+        }
+        if (checkTaskTransition(root.state, to, reason, contextOf(root).copy(childStates = states)) is TransitionDecision.Refused) return false
+        return execUpdate(
+            "UPDATE selfdev_tasks SET state = ?, state_reason = ?, version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = 'PENDING_APPROVAL'",
+            to.name, reason.name, now, rootId, root.version,
+        ) == 1
+    }
+
+    private fun Transaction.childStatesOf(parentId: String): List<TaskState> =
+        execQuery("SELECT state FROM selfdev_tasks WHERE parent_task_id = ?", parentId) { TaskState.valueOf(it.getString(1)) }
     private fun taskIn(taskId: String): SelfDevTask? =
         SelfDevTasksTable.selectAll().where { SelfDevTasksTable.taskId eq taskId }.firstOrNull()?.let { taskOf(it) }
     private fun Transaction.skipUnsubmittedTasks(taskId: String, now: LocalDateTime) {
@@ -427,6 +517,7 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         check(checkTaskTransition(row.state, TaskState.SKIPPED, AutopilotReason.TASK_STOPPED, contextOf(row)) is TransitionDecision.Allowed)
         if (execUpdate("UPDATE selfdev_tasks SET state = 'SKIPPED', state_reason = 'TASK_STOPPED', version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state IN ('PENDING_APPROVAL', 'QUEUED')", now, id, row.version) != 1)
             throw TaskMovedDuringStop()
+        settlePlanOf(row.parentTaskId, now)
     }
     private fun Transaction.childIdsOf(parentId: String): List<String> =
         execQuery("SELECT task_id FROM selfdev_tasks WHERE parent_task_id = ?", parentId) { it.getString(1) }

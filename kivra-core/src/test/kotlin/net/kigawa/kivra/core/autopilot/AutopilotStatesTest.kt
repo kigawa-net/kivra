@@ -29,6 +29,8 @@ class AutopilotStatesTest {
         // --- Approval & Execution ---
         put(TaskState.PENDING_APPROVAL to TaskState.QUEUED, setOf(AutopilotReason.OPERATOR_APPROVED, AutopilotReason.AUTO_APPROVED))
         put(TaskState.PENDING_APPROVAL to TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.TASK_STOPPED))
+        // A plan root settles when its planned tasks have all ended.
+        put(TaskState.PENDING_APPROVAL to TaskState.DONE, setOf(AutopilotReason.ALL_TASKS_COMPLETED))
         put(TaskState.QUEUED to TaskState.SUBMITTING, none)
         put(TaskState.QUEUED to TaskState.SKIPPED, setOf(AutopilotReason.OPERATOR_SKIPPED, AutopilotReason.TASK_STOPPED))
         put(TaskState.SUBMITTING to TaskState.SUBMITTED, none)
@@ -71,16 +73,24 @@ class AutopilotStatesTest {
             put(from to TaskState.STOPPED, setOf(AutopilotReason.OPERATOR_STOPPED))
         }
         // Dispatcher's terminal step: every task ended, not all COMPLETED.
-        for (from in listOf(TaskState.QUEUED, TaskState.SUBMITTING, TaskState.SUBMITTED, TaskState.BLOCKED)) {
+        for (from in listOf(TaskState.QUEUED, TaskState.SUBMITTING, TaskState.SUBMITTED, TaskState.BLOCKED, TaskState.PENDING_APPROVAL)) {
             put(from to TaskState.STOPPED, setOf(AutopilotReason.OPERATOR_STOPPED, AutopilotReason.TASKS_INCOMPLETE))
         }
     }
 
-    /** A context in which every guard holds for [to] (a permissive setup, so the matrix checks the table alone). */
-    private fun permissive(to: TaskState) = TaskContext(
+    /**
+     * A context in which every guard holds for [to] under [reason] (a permissive setup, so the matrix checks the table alone). A plan
+     * settlement gets planned tasks that make its guard hold: all COMPLETED for DONE, one FAILED among ended tasks for TASKS_INCOMPLETE.
+     */
+    private fun permissive(to: TaskState, reason: AutopilotReason?) = TaskContext(
         revision = 0,
         blockedReason = if (to == TaskState.TASK_SUBMITTED) AutopilotReason.PLAN_INVALID else AutopilotReason.PENDING_PR_LIMIT,
         resumeState = to,
+        childStates = when (reason) {
+            AutopilotReason.ALL_TASKS_COMPLETED -> listOf(TaskState.COMPLETED)
+            AutopilotReason.TASKS_INCOMPLETE -> listOf(TaskState.FAILED)
+            else -> emptyList()
+        },
     )
 
     @Test
@@ -91,7 +101,7 @@ class AutopilotStatesTest {
             for (to in TaskState.entries) {
                 val allowedReasons = expectedTask[from to to]
                 for (reason in reasons) {
-                    val decision = checkTaskTransition(from, to, reason, permissive(to))
+                    val decision = checkTaskTransition(from, to, reason, permissive(to, reason))
                     val expected = if (allowedReasons != null && reason in allowedReasons) {
                         TransitionDecision.Allowed
                     } else if (allowedReasons == null) {
@@ -186,5 +196,52 @@ class AutopilotStatesTest {
         assertEquals(setOf(AutopilotReason.PENDING_PR_LIMIT, AutopilotReason.DAILY_RUN_CAP, AutopilotReason.BUDGET_HOLD), AUTO_CLEARABLE_REASONS)
         assertEquals(setOf(AutopilotReason.PLAN_INVALID, AutopilotReason.PLAN_BUDGET_HOLD, AutopilotReason.PLAN_CALL_FAILED), PLAN_BLOCK_REASONS)
         assertEquals(3, MAX_REVISIONS)
+    }
+
+    @Test
+    fun aPlanRootSettlesOnlyWhenItsPlannedTasksHaveEnded() {
+        fun settle(from: TaskState, to: TaskState, reason: AutopilotReason, children: List<TaskState>) =
+            checkTaskTransition(from, to, reason, TaskContext(revision = 1, childStates = children))
+
+        // DONE: every planned task COMPLETED. Any other state, or no planned task, keeps the root waiting.
+        assertEquals(
+            TransitionDecision.Allowed,
+            settle(TaskState.PENDING_APPROVAL, TaskState.DONE, AutopilotReason.ALL_TASKS_COMPLETED, listOf(TaskState.COMPLETED, TaskState.COMPLETED)),
+        )
+        for (children in listOf(emptyList(), listOf(TaskState.COMPLETED, TaskState.FAILED), listOf(TaskState.COMPLETED, TaskState.PENDING_APPROVAL))) {
+            assertEquals(
+                TransitionDecision.Refused(TransitionRefusal.GUARD_FAILED),
+                settle(TaskState.PENDING_APPROVAL, TaskState.DONE, AutopilotReason.ALL_TASKS_COMPLETED, children),
+                "DONE with $children",
+            )
+        }
+
+        // STOPPED (TASKS_INCOMPLETE): every planned task ended, and not all COMPLETED.
+        assertEquals(
+            TransitionDecision.Allowed,
+            settle(TaskState.PENDING_APPROVAL, TaskState.STOPPED, AutopilotReason.TASKS_INCOMPLETE, listOf(TaskState.COMPLETED, TaskState.SKIPPED)),
+        )
+        for (children in listOf(
+            emptyList(),
+            listOf(TaskState.COMPLETED, TaskState.SUBMITTED),
+            listOf(TaskState.COMPLETED, TaskState.QUEUED),
+            listOf(TaskState.COMPLETED, TaskState.COMPLETED),
+        )) {
+            assertEquals(
+                TransitionDecision.Refused(TransitionRefusal.GUARD_FAILED),
+                settle(TaskState.PENDING_APPROVAL, TaskState.STOPPED, AutopilotReason.TASKS_INCOMPLETE, children),
+                "STOPPED with $children",
+            )
+        }
+
+        // The operator's stop of the root is not a settlement, and COMPLETED -> DONE is unchanged.
+        assertEquals(
+            TransitionDecision.Allowed,
+            settle(TaskState.PENDING_APPROVAL, TaskState.STOPPED, AutopilotReason.OPERATOR_STOPPED, listOf(TaskState.SUBMITTED)),
+        )
+        assertEquals(
+            TransitionDecision.Allowed,
+            checkTaskTransition(TaskState.COMPLETED, TaskState.DONE, AutopilotReason.ALL_TASKS_COMPLETED, TaskContext()),
+        )
     }
 }

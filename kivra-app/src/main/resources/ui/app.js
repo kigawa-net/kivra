@@ -2062,8 +2062,13 @@
     box.appendChild(h('p', { className: 'meta', text: '状態: ' + st.label + ' — ' + st.desc + (task.stateReason ? '（' + goalReasonText(task.stateReason) + '）' : '') }));
     box.appendChild(h('p', { className: 'meta', text: '対象リポジトリ: ' + str(task.targetRepo) + '　試行: ' + str(task.attempts) + ' 回' }));
 
+    // A plan root (revision > 0) is never approved or skipped itself: the server answers 409. Its planned tasks are approved one by one.
+    var planRoot = Number(task.revision) > 0;
+    if (planRoot) {
+      box.appendChild(h('p', { className: 'meta', text: '計画の親タスクです。承認・見送りは子タスクごとに行います。' }));
+    }
     var actions = [];
-    if (task.state === 'PENDING_APPROVAL' && can('GOAL_WRITE')) {
+    if (task.state === 'PENDING_APPROVAL' && !planRoot && can('GOAL_WRITE')) {
       var approve = actionButton('このタスクを承認', function () { approveTask(task); });
       approve.disabled = state.sessionExpired;
       var reject = actionButton('見送る', function () { rejectTask(task); }, 'secondary');

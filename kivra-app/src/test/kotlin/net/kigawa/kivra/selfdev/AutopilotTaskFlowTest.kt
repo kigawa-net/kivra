@@ -12,6 +12,7 @@ import kotlin.test.assertTrue
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.autopilot.AutopilotReason
 import net.kigawa.kivra.core.autopilot.TaskState
+import net.kigawa.kivra.core.autopilot.TransitionRefusal
 import net.kigawa.kivra.db.PlanCommit
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
@@ -374,5 +375,107 @@ class AutopilotTaskFlowTest {
         val children = h.planned(root.taskId)
         assertTrue(children.all { it.state == TaskState.SKIPPED && it.stateReason == AutopilotReason.TASK_STOPPED })
         assertNull(children.single { it.title == "More" }.runId)
+    }
+
+    @Test
+    fun aPlanRootIsDoneWhenEveryPlannedTaskCompletes() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("Docs"))))
+        val root = h.submitRoot()
+        runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+        h.dispatcher().tick()
+        val child = h.planned(root.taskId).single()
+        h.setRunState(child.runId!!, "COMPLETED")
+        h.dispatcher().tick()
+
+        assertEquals(TaskState.COMPLETED, h.ops.task(child.taskId)!!.state)
+        val settled = h.ops.task(root.taskId)!!
+        assertEquals(TaskState.DONE, settled.state)
+        assertEquals(AutopilotReason.ALL_TASKS_COMPLETED, settled.stateReason)
+    }
+
+    @Test
+    fun aPlanRootStopsWithTasksIncompleteWhenAPlannedTaskFails() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("Docs"))))
+        val root = h.submitRoot()
+        runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+        h.dispatcher().tick()
+        val child = h.planned(root.taskId).single()
+        h.setRunState(child.runId!!, "FAILED")
+        h.dispatcher().tick()
+
+        assertEquals(AutopilotReason.RUN_FAILED, h.ops.task(child.taskId)!!.stateReason)
+        val settled = h.ops.task(root.taskId)!!
+        assertEquals(TaskState.STOPPED, settled.state)
+        assertEquals(AutopilotReason.TASKS_INCOMPLETE, settled.stateReason)
+    }
+
+    @Test
+    fun aPolicyRefusedRunFailsItsTaskAsPolicyRejectedAndCountsInThePromotionReadout() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("Docs"))))
+        val root = h.submitRoot()
+        runBlocking { h.planner(AutopilotApproval.REQUIRED).planTask(root.taskId) }
+        val child = h.planned(root.taskId).single()
+        assertTrue(h.ops.approveTask(child.taskId, child.version, "operator") is TaskTransition.Moved)
+        h.dispatcher().tick()
+        val submitted = h.ops.task(child.taskId)!!
+        assertEquals(TaskState.SUBMITTED, submitted.state)
+        transaction(db.database) {
+            execUpdate("UPDATE development_runs SET state = 'FAILED', state_reason = 'POLICY_REJECTED' WHERE run_id = ?", submitted.runId)
+        }
+        h.dispatcher().tick()
+
+        val after = h.ops.task(child.taskId)!!
+        assertEquals(TaskState.FAILED, after.state)
+        assertEquals(AutopilotReason.POLICY_REJECTED, after.stateReason)
+        assertEquals(1L, h.ops.promotionCounts().approvedPolicyRejected)
+    }
+
+    @Test
+    fun aRunOutcomeCountsOnlyWhenItsMoveHappens() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("Docs"))))
+        val root = h.submitRoot()
+        runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+        h.dispatcher().tick()
+        val child = h.planned(root.taskId).single()
+
+        val stale = h.ops.settleRunOutcome(child.taskId, child.version + 5, TaskState.FAILED, AutopilotReason.RUN_FAILED, false, 3)
+        assertEquals(TaskTransition.StaleVersion, stale)
+        assertEquals(0, h.control.read().consecutiveFailures)
+        assertEquals(TaskState.SUBMITTED, h.ops.task(child.taskId)!!.state)
+
+        val moved = h.ops.settleRunOutcome(child.taskId, child.version, TaskState.FAILED, AutopilotReason.RUN_FAILED, false, 3)
+        assertTrue(moved is TaskTransition.Moved)
+        assertEquals(1, h.control.read().consecutiveFailures)
+    }
+
+    @Test
+    fun aPlanLeftUnsettledIsSettledByTheNextCatchUp() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("Docs"))))
+        val root = h.submitRoot()
+        runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+        val child = h.planned(root.taskId).single()
+        // The child ended, but the root's settlement did not run (as if the process stopped between the two writes).
+        transaction(db.database) { execUpdate("UPDATE selfdev_tasks SET state = 'COMPLETED' WHERE task_id = ?", child.taskId) }
+        assertEquals(TaskState.PENDING_APPROVAL, h.ops.task(root.taskId)!!.state)
+
+        assertEquals(1, h.ops.settleFinishedPlans(10))
+        assertEquals(TaskState.DONE, h.ops.task(root.taskId)!!.state)
+        assertEquals(0, h.ops.settleFinishedPlans(10))
+    }
+
+    @Test
+    fun aStoppedPlanDoesNotRequeueItsFailedTask() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("Docs"))))
+        val root = h.submitRoot()
+        runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+        h.dispatcher().tick()
+        val child = h.planned(root.taskId).single()
+        h.setRunState(child.runId!!, "FAILED")
+        h.dispatcher().tick()
+        assertEquals(TaskState.STOPPED, h.ops.task(root.taskId)!!.state)
+
+        val failed = h.ops.task(child.taskId)!!
+        val requeue = h.ops.moveTask(child.taskId, failed.version, TaskState.QUEUED, AutopilotReason.OPERATOR_REQUEUED)
+        assertEquals(TaskTransition.Refused(TransitionRefusal.GUARD_FAILED), requeue)
     }
 }

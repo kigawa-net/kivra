@@ -40,7 +40,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # push しない PR ビルドでは Harbor にログインしない (ビルドの検証だけを行う)。
+      - name: Check Harbor credentials
+        if: github.event_name != 'pull_request'
+        env:
+          HARBOR_USER: ${{ secrets.HARBOR_USER }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          if [ -z "$HARBOR_USER" ] || [ -z "$HARBOR_PASSWORD" ]; then
+            echo "::error::GitHub Secrets の HARBOR_USER / HARBOR_PASSWORD が空です。Harbor の robot アカウントの値をこのリポジトリの Actions secrets に設定してください。"
+            exit 1
+          fi
+
       - name: Harbor login
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: harbor.kigawa.net
@@ -51,7 +64,7 @@ jobs:
         with:
           context: ./
           file: Dockerfile
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ env.dockerRepository }}/${{ env.name }}:${{ steps.tag.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

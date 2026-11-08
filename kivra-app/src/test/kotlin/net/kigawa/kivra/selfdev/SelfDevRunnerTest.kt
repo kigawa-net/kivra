@@ -58,6 +58,7 @@ class SelfDevRunnerTest {
             dev: DeveloperPort = developer,
             cfg: SelfDevConfig = config,
             clk: Clock = clock,
+            origin: net.kigawa.kivra.selfdev.autofix.IncidentRunOrigin? = null,
         ) = SelfDevRunner(
             config = cfg,
             runs = DbDevelopmentRunStore(db.runs),
@@ -67,6 +68,7 @@ class SelfDevRunnerTest {
             repoReader = InMemoryRepoReader(files, github.baseSha),
             taskTexts = FixedTaskTextSource(taskText),
             clock = clk,
+            incidentOrigin = origin,
         )
 
         fun newRun(): RunId = db.runs.create("task-1", "test", RunCompletionMode.PR_ONLY).runId
@@ -100,6 +102,36 @@ class SelfDevRunnerTest {
             assertEquals(Advanced(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.COMPLETED, "PR_MERGED"), runner.advance(runId))
             assertEquals(DevelopmentRunState.COMPLETED, h.state(runId))
             assertEquals(listOf("createRef", "commit", "createPr"), h.github.writes)
+        }
+    }
+
+    @Test
+    fun aRunOfAnIncidentFixOpensADraftPullRequestThatNamesTheIssue() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new text\n"))
+            val runner = h.runner(origin = object : net.kigawa.kivra.selfdev.autofix.IncidentRunOrigin {
+                override fun issueOf(runId: String): Long = 7L
+            })
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.PULL_REQUEST), runner.advance(runId))
+            val pr = h.github.pullRequests().single()
+            assertTrue(pr.draft)
+            assertTrue(pr.body.contains("incident Issue #7"), pr.body)
+        }
+    }
+
+    @Test
+    fun aRunWithNoIncidentOriginOpensAPullRequestThatIsNotADraft() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new text\n"))
+            val runner = h.runner(origin = object : net.kigawa.kivra.selfdev.autofix.IncidentRunOrigin {
+                override fun issueOf(runId: String): Long? = null
+            })
+            val runId = h.newRun()
+            runner.advance(runId)
+            runner.advance(runId)
+            assertFalse(h.github.pullRequests().single().draft)
         }
     }
 

@@ -78,7 +78,7 @@
 2. `NavDestination` に `Projects` / `StopRequests` / `Autopilot` / `System` を追加し、`screens/` に対応画面を足す。ハッシュと選択状態の双方向同期を `App.kt` に入れる。
 3. ホームは新規 API を作らず、既存の status・approvals・stop-requests・budget の読み取りを束ねる(`kivra-ui-api` の ReadModel に `HomeSummary` を足す場合は別 PR)。
 4. 旧 `/ui` 側は機能追加せず、Compose 版が同等になった時点で `/ui` を `/ui/compose` へリダイレクトして撤去する。`dashboard-audit.md` の課題(`app.js` 肥大・ダイアログ重複)は撤去で解消する扱いとし、旧版は修正しない。
-5. 段階: ① ナビ再編 → ② ホーム → ③ 検索・パンくず → ④ 旧 `/ui` 撤去。
+5. 段階: ① ナビ再編 → ② ホーム → ③ 検索(クライアント側絞り込み。パンくずは Compose 版に詳細画面ができてから) → ④ 旧 `/ui` 撤去。
 
 ## 6. 未決事項
 

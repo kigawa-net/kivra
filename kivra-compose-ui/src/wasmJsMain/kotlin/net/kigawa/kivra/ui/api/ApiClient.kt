@@ -175,16 +175,67 @@ object ApiClient {
     suspend fun getProjects(): List<ApiProject> =
         getJson("/api/projects")
 
-    suspend fun createProject(name: String, description: String? = null): Boolean {
+    /**
+     * プロジェクトの作成。`POST /api/projects`、本文 `{"name", "description"?}`(空の説明は送らない)。失敗は [ApiException]。
+     * 403 は ORDER_MANAGE の無い利用者。
+     */
+    suspend fun createProject(name: String, description: String? = null) =
+        postWrite("/api/projects", CreateProjectRequest(name, description?.takeIf { it.isNotBlank() }))
+
+    /** プロジェクトの詳細(ダッシュボード)。`GET /api/projects/{id}/dashboard`。404 は無い id。scope は ALL か OWN。 */
+    suspend fun getProjectDashboard(projectId: String): ApiProjectDashboard =
+        getJson("/api/projects/${percentEncode(projectId)}/dashboard")
+
+    /** 運用者: プロジェクトの repo の一覧。`GET /api/projects/{id}/repos`。 */
+    suspend fun getProjectRepos(projectId: String): List<ApiProjectRepo> =
+        getJson("/api/projects/${percentEncode(projectId)}/repos")
+
+    /**
+     * 運用者: repo の登録。`PUT /api/projects/{id}/repos`、本文 `{"repoKey": "owner/name"}`。409 は別のプロジェクトに登録済み、
+     * 400 は形式、404 は無いプロジェクト、403 は権限(ORDER_MANAGE)。
+     */
+    suspend fun addProjectRepo(projectId: String, repoKey: String) =
+        writeWith(HttpMethod.Put, "/api/projects/${percentEncode(projectId)}/repos", ProjectRepoBody(repoKey))
+
+    /**
+     * 運用者: repo の登録を外す。`DELETE /api/projects/{id}/repos?repoKey=owner/name`。本文は空の JSON オブジェクト `{}`
+     * (サーバーは状態を変える要求に JSON だけを受ける)。404 は登録されていない repo。
+     */
+    suspend fun removeProjectRepo(projectId: String, repoKey: String) =
+        writeWith(
+            HttpMethod.Delete,
+            "/api/projects/${percentEncode(projectId)}/repos?repoKey=${percentEncode(repoKey)}",
+            EmptyJsonBody(),
+        )
+
+    /**
+     * 既存データの振り分け。`POST /api/projects/backfill?dryRun=true|false`、本文 `{}`。dryRun は数えるだけ、実行は
+     * プロジェクトが未設定の行だけを書く。403 は運用者でない。応答の形が違えば [ApiException]。
+     */
+    suspend fun backfillProjects(dryRun: Boolean): ApiBackfillReport {
+        val text = postWriteText("/api/projects/backfill?dryRun=${if (dryRun) "true" else "false"}", EmptyJsonBody())
         return try {
-            postWriteText("/api/projects", CreateProjectRequest(name, description?.takeIf { it.isNotBlank() }))
-            true
+            replyJson.decodeFromString<ApiBackfillReport>(text)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            false
+            throw ApiException(null, "response is not the expected format")
         }
     }
+
+    /**
+     * Goal の再計画。`POST /api/selfdev/goals/{id}/replan`、本文 `{"version": n}`(読んだ version)。BLOCKED で計画の失敗のときだけ。
+     * 409 は状態・version の競合、403 は権限(GOAL_WRITE)、503 は自律運転が無効。
+     */
+    suspend fun replanGoal(taskId: String, version: Long) =
+        postWrite("/api/selfdev/goals/${percentEncode(taskId)}/replan", VersionRequest(version))
+
+    /**
+     * order の作成(ルートの order)。`POST /api/selfdev/orders`、本文 `{title, policy, maxCycles, projectId}`。
+     * 冪等キーは送らない(サーバーの本文は厳密で、知らないフィールドは 400 になる)。ルートは一つだけ(2 つ目は 409)。
+     */
+    suspend fun createOrder(title: String, policy: String, maxCycles: Int, projectId: String) =
+        postWrite("/api/selfdev/orders", CreateOrderBody(title, policy, maxCycles, projectId))
 
     /**
      * 呼び出し者の役割と権限。`GET /api/selfdev/me`。どの運用者にも 200 で返る。失敗は [ApiException]
@@ -338,6 +389,14 @@ object ApiClient {
     /** [postWriteReply] の本文の文字列だけを返す版。応答の本文の `status` などを読む時に使う。 */
     private suspend inline fun <reified B : Any> postWriteText(path: String, body: B): String =
         postWriteReply(path, body).text
+
+    /** 書き込みの動詞を選べる版(PUT / DELETE。応答の本文は読まない)。 */
+    private suspend inline fun <reified B : Any> writeWith(verb: HttpMethod, path: String, body: B) {
+        postWriteReply(path, body, verb)
+    }
+
+    private suspend inline fun <reified B : Any> writeReply(verb: HttpMethod, path: String, body: B): WriteReply =
+        postWriteReply(path, body, verb)
 
     /**
      * [postWrite] の本文とステータスを返す版。セッション切れの後は送らない。送信中は [ApiSession.hold] で定期更新を止める。
@@ -564,6 +623,12 @@ object ApiClient {
 @Serializable private class StopGoalRequest(val version: Long, val reason: String)
 
 @Serializable private class VersionRequest(val version: Long)
+
+/** repo の登録の本文(server `ProjectRepoRequest`)。 */
+@Serializable private class ProjectRepoBody(val repoKey: String)
+
+/** order の作成の本文(server `CreateOrderRequest`)。冪等キーは持たない(サーバーは知らないフィールドを拒否する)。 */
+@Serializable private class CreateOrderBody(val title: String, val policy: String, val maxCycles: Int, val projectId: String)
 
 /** order の停止要求の本文(server `RequestStopRequest`)。フィールドは厳密に検査されるので、この二つだけ送る。 */
 @Serializable private class OrderStopRequest(val version: Long, val reasonCode: String)

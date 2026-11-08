@@ -315,6 +315,8 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
                     )
                 }
             }
+            // 計画の失敗で止まった Goal の再計画(旧 UI の「再計画する」)。GOAL_WRITE の人だけ。
+            ReplanGoalAction(goal = goal, onChanged = { reloadKey++ })
             goal.runId?.let { runId ->
                 OutlinedButton(onClick = { onNavigate(Route.RunDetail(runId)) }) { Text("関連する Run を開く") }
                 Spacer(Modifier.height(12.dp))

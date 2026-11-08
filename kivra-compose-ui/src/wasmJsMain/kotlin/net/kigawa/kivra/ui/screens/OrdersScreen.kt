@@ -12,6 +12,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import net.kigawa.kivra.ui.ActionNotice
+import net.kigawa.kivra.ui.AutopilotAvailability
 import net.kigawa.kivra.ui.GatedOperation
 import net.kigawa.kivra.ui.LocalCallerPermissions
 import net.kigawa.kivra.ui.Route
@@ -19,7 +20,9 @@ import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiOrder
 import net.kigawa.kivra.ui.api.ApiStopRequest
+import net.kigawa.kivra.ui.autopilotAvailabilityOf
 import net.kigawa.kivra.ui.isValidStopDigest
+import net.kigawa.kivra.ui.showsOrderCreateForm
 import net.kigawa.kivra.ui.writeFailureOf
 import net.kigawa.kivra.ui.writeFailureText
 
@@ -28,31 +31,44 @@ import net.kigawa.kivra.ui.writeFailureText
  */
 @Composable
 fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
-    val loaded = rememberLoad(selectedProjectId) {
+    // 作成の後に増やして、一覧を読み直させる。
+    var listReload by remember { mutableStateOf(0) }
+    val loaded = rememberLoad(selectedProjectId, listReload) {
         val allOrders = ApiClient.getOrders()
         if (selectedProjectId != null) allOrders.filter { it.projectId == selectedProjectId } else allOrders
     }
+    val perms = LocalCallerPermissions.current
+    // 作成フォームの元になる自律運転の有無。読めない・無効なら出さない(旧 UI の order-section と同じ)。
+    val autopilot = rememberLoad(Unit) { autopilotAvailabilityOf(ApiClient.getAutopilot().enabled) }
+    val availability = autopilot.value ?: AutopilotAvailability.LOADING
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("order", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
-        LoadedList(loaded, emptyText = "orderが見つかりません") { orders ->
-            LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(orders, key = { it.orderId }) { order ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onNavigate(Route.OrderDetail(order.orderId)) }) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text("order ${order.orderId}", style = MaterialTheme.typography.titleMedium)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("状態: ${order.state} | 深さ: ${order.depth} | 周: ${order.cyclesStarted} / ${order.maxCycles}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("使用: ${order.spentJpy} 円 / 予算: ${order.orderBudgetJpy} 円",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (showsOrderCreateForm(availability, perms)) {
+            OrderCreateCard(onChanged = { listReload += 1 })
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        Column(modifier = Modifier.weight(1f)) {
+            LoadedList(loaded, emptyText = "orderが見つかりません") { orders ->
+                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                    items(orders, key = { it.orderId }) { order ->
+                        Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onNavigate(Route.OrderDetail(order.orderId)) }) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text("order ${order.orderId}", style = MaterialTheme.typography.titleMedium)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text("状態: ${order.state} | 深さ: ${order.depth} | 周: ${order.cyclesStarted} / ${order.maxCycles}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("使用: ${order.spentJpy} 円 / 予算: ${order.orderBudgetJpy} 円",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
+                        HorizontalDivider()
                     }
-                    HorizontalDivider()
                 }
             }
         }

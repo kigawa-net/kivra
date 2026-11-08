@@ -6,6 +6,7 @@ package net.kigawa.kivra.ui
  * - `#/`、`#/<一覧>`(`#/tasks` `#/goals` `#/orders` `#/approvals` `#/budget` `#/memory` `#/assignees`)
  * - `#/runs` は Run 一覧(タスク画面に含まれる)、`#/runs/<id>` は Run 詳細
  * - `#/goals/<id>` は開発目標の詳細、`#/orders/<id>` は order の詳細、`#/orders/<id>/cycles` は order の周の一覧
+ * - `#/projects/<id>/dashboard` はプロジェクトのダッシュボード(旧 UI と同じ形)
  *
  * 解釈と生成は純粋関数([parseRoute] / [toHash])。ブラウザとの同期は呼び出し側(App.kt)が行う。
  */
@@ -33,6 +34,11 @@ sealed interface Route {
     /** order の周(cycles)の一覧。 */
     data class OrderCycles(val orderId: String) : Route {
         override val nav: NavDestination? get() = NavDestination.Orders
+    }
+
+    /** プロジェクトのダッシュボード(`#/projects/<id>/dashboard`、旧 UI と同じ形)。属する項目はプロジェクト。 */
+    data class ProjectDashboard(val projectId: String) : Route {
+        override val nav: NavDestination? get() = NavDestination.Projects
     }
 
     /** 解釈できないハッシュ(id のパーセント符号化が壊れている等)。画面に「リンクが正しくありません」と出す。 */
@@ -64,6 +70,7 @@ fun parseRoute(hash: String): Route {
         segments.size == 2 && segments[0] == "goals" -> Route.GoalDetail(id)
         segments.size == 2 && segments[0] == "orders" -> Route.OrderDetail(id)
         segments.size == 3 && segments[0] == "orders" && segments[2] == "cycles" -> Route.OrderCycles(id)
+        segments.size == 3 && segments[0] == "projects" && segments[2] == "dashboard" -> Route.ProjectDashboard(id)
         else -> Route.Invalid(hash)
     }
 }
@@ -75,6 +82,7 @@ fun Route.toHash(): String = when (this) {
     is Route.GoalDetail -> "#/goals/${percentEncode(taskId)}"
     is Route.OrderDetail -> "#/orders/${percentEncode(orderId)}"
     is Route.OrderCycles -> "#/orders/${percentEncode(orderId)}/cycles"
+    is Route.ProjectDashboard -> "#/projects/${percentEncode(projectId)}/dashboard"
     is Route.Invalid -> "#/"
 }
 
@@ -97,6 +105,8 @@ fun Route.breadcrumbs(): List<Crumb> {
             Crumb(NavDestination.Orders.label, Route.Page(NavDestination.Orders)) +
             Crumb(orderId, Route.OrderDetail(orderId)) +
             Crumb("cycles", null)
+        is Route.ProjectDashboard -> head + Crumb(NavDestination.Projects.label, Route.Page(NavDestination.Projects)) +
+            Crumb(projectId, null) + Crumb("ダッシュボード", null)
         is Route.Invalid -> emptyList()
     }
 }

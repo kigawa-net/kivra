@@ -180,6 +180,8 @@ class AutopilotDispatcher(
                 selfDev = true,
                 maxActiveSelfDev = maxActiveSelfDev,
                 body = row.body,
+                // The Run takes its task's project (ADR 0022); a task with no project gives a Run with none.
+                projectId = row.projectId,
             )
         } catch (_: ActiveSelfDevLimitException) {
             control.releaseRunSlot()

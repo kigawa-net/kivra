@@ -249,6 +249,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             autopilot = autopilotSettings,
             targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
             operations = SelfDevOperatorRepository(database),
+            projects = projectRepo,
             control = SelfDevAutopilotControlRepository(database),
             memory = memory,
             aiPrincipal = aiPrincipal,
@@ -271,6 +272,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             orders = orderRepo,
             // Goals parameter temporarily removed pending Task model migration (V40).
             operations = SelfDevOperatorRepository(database),
+            projects = projectRepo,
             guard = permissionGuard,
         )
     } else {
@@ -281,7 +283,7 @@ internal fun Application.appModule(env: Map<String, String>) {
         mcpSettings, env, runs, selfDevSettings.config?.repo, guard = permissionGuard,
         // The assignee token entrance exists only while the roles are on (ADR 0020 addendum, T2); off creates and reads nothing.
         tokenAuth = if (rolesSettings.mode == PermissionMode.OFF) null else McpTokenAuth.forDatabase(database, rolesSettings.mode),
-        selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns,
+        selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns, projects = projectRepo,
         // The order tools serve only while the orders answer (the same condition as the REST routes' requireEnabled).
         orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, aiPrincipal) },
         // Goal tools temporarily removed pending Task model migration (V40)

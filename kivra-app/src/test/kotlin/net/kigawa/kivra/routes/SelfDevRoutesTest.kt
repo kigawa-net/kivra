@@ -35,17 +35,26 @@ class SelfDevRoutesTest {
     private val identity = TaskApiIdentity { headers -> headers["X-Test-Principal"]?.takeIf { it.isNotBlank() } }
     private val title = "SECRET-TITLE-MARKER README を直す"
 
+    /** The project every submission in a test is made under; set by [setUp]. */
+    private var projectId = ""
+
     private fun ApplicationTestBuilder.setUp(db: TestDb, maxActive: Int = 1) {
+        projectId = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()).create("Route project", null).projectId
         application {
             install(ContentNegotiation) { json() }
             routing {
                 configureTaskApiRoutes(db.runs, identity)
-                configureSelfDevRoutes(SelfDevRouteDeps(db.runs, identity, RepoRef("kigawa-net", "kivra"), maxActive, FakeGitHub()))
+                configureSelfDevRoutes(
+                    SelfDevRouteDeps(
+                        db.runs, identity, RepoRef("kigawa-net", "kivra"), maxActive, FakeGitHub(),
+                        net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()),
+                    ),
+                )
             }
         }
     }
 
-    private suspend fun ApplicationTestBuilder.submit(principal: String?, key: String, body: String = """{"title":"$title","idempotencyKey":"$key"}"""): HttpResponse =
+    private suspend fun ApplicationTestBuilder.submit(principal: String?, key: String, body: String = """{"title":"$title","idempotencyKey":"$key","projectId":"$projectId"}"""): HttpResponse =
         client.post("/api/selfdev/tasks") {
             principal?.let { header("X-Test-Principal", it) }
             contentType(ContentType.Application.Json)
@@ -89,7 +98,7 @@ class SelfDevRoutesTest {
             val replay = submit("alice", "k1")
             assertEquals(HttpStatusCode.OK, replay.status)
             assertEquals(first, replay.json()["runId"]!!.jsonPrimitive.content)
-            val other = submit("alice", "k1", """{"title":"other","idempotencyKey":"k1"}""")
+            val other = submit("alice", "k1", """{"title":"other","idempotencyKey":"k1","projectId":"$projectId"}""")
             assertEquals(HttpStatusCode.Conflict, other.status)
         }
     }
@@ -98,7 +107,7 @@ class SelfDevRoutesTest {
     fun `an unknown field is refused and nothing is written`() = TestDb().use { db ->
         testApplication {
             setUp(db)
-            val response = submit("alice", "k2", """{"title":"t","idempotencyKey":"k2","target":"B","repo":"x/y"}""")
+            val response = submit("alice", "k2", """{"title":"t","idempotencyKey":"k2","projectId":"$projectId","target":"B","repo":"x/y"}""")
             assertEquals(HttpStatusCode.BadRequest, response.status)
             assertFalse("target" in response.bodyAsText())
             assertTrue(db.runs.listTasks("alice", selfDev = true).isEmpty())
@@ -109,10 +118,10 @@ class SelfDevRoutesTest {
     fun `invalid input is refused - control characters, empty and oversize values`() = TestDb().use { db ->
         testApplication {
             setUp(db, maxActive = 10)
-            assertEquals(HttpStatusCode.BadRequest, submit("alice", "k3", """{"title":"a\u0001b","idempotencyKey":"k3"}""").status)
-            assertEquals(HttpStatusCode.BadRequest, submit("alice", "k4", """{"title":"   ","idempotencyKey":"k4"}""").status)
-            assertEquals(HttpStatusCode.BadRequest, submit("alice", "k5", """{"title":"${"x".repeat(201)}","idempotencyKey":"k5"}""").status)
-            assertEquals(HttpStatusCode.BadRequest, submit("alice", "", """{"title":"t","idempotencyKey":""}""").status)
+            assertEquals(HttpStatusCode.BadRequest, submit("alice", "k3", """{"title":"a\u0001b","idempotencyKey":"k3","projectId":"$projectId"}""").status)
+            assertEquals(HttpStatusCode.BadRequest, submit("alice", "k4", """{"title":"   ","idempotencyKey":"k4","projectId":"$projectId"}""").status)
+            assertEquals(HttpStatusCode.BadRequest, submit("alice", "k5", """{"title":"${"x".repeat(201)}","idempotencyKey":"k5","projectId":"$projectId"}""").status)
+            assertEquals(HttpStatusCode.BadRequest, submit("alice", "", """{"title":"t","idempotencyKey":"","projectId":"$projectId"}""").status)
             assertTrue(db.runs.listTasks("alice", selfDev = true).isEmpty())
         }
     }
@@ -181,6 +190,7 @@ class SelfDevRoutesTest {
     private fun body(title: String, key: String, text: String?): String = buildJsonObject {
         put("title", title)
         put("idempotencyKey", key)
+        put("projectId", projectId)
         if (text != null) put("body", text)
     }.toString()
 

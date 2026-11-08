@@ -143,6 +143,8 @@
         <label for="goal-body">背景・制約・受け入れ条件（任意、0〜8000 文字）</label>
         <textarea id="goal-body" name="goal-body" rows="6" maxlength="8000"></textarea>
         <div class="counter" id="goal-count">0 / 8000</div>
+        <label for="goal-project">プロジェクト（必須）</label>
+        <select id="goal-project" name="goal-project" required></select>
         <div>
           <button type="submit" id="goal-submit">Goal を送る</button>
         </div>
@@ -186,6 +188,8 @@
           <div class="counter" id="order-policy-count">0 / 2000</div>
           <label for="order-max-cycles">最大の周の数（1〜10。作成後は変えられません。サーバーの上限を超えると拒否されます）</label>
           <input id="order-max-cycles" name="order-max-cycles" type="number" min="1" max="10" step="1" value="1" inputmode="numeric" required>
+          <label for="order-project">プロジェクト（必須。作成後は変えられません）</label>
+          <select id="order-project" name="order-project" required></select>
           <div>
             <button type="submit" id="order-create-submit">order を作る</button>
           </div>

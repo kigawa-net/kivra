@@ -14,6 +14,7 @@ import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.ActiveSelfDevLimitException
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SELF_DEV_TASK_PREFIX
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.github.GitHubPort
@@ -34,10 +35,12 @@ internal class SelfDevRouteDeps(
     val repo: RepoRef,
     val maxActiveRuns: Int,
     val github: GitHubPort,
+    /** The projects a new self-development task may be assigned to (ADR 0022). */
+    val projects: ProjectRepository,
     /** The permission entrance. The default is the roles off and no store: today's rules. */
     val guard: PermissionGuard = offPermissionGuard(),
 ) {
-    fun withGuard(guard: PermissionGuard) = SelfDevRouteDeps(runs, identity, repo, maxActiveRuns, github, guard)
+    fun withGuard(guard: PermissionGuard) = SelfDevRouteDeps(runs, identity, repo, maxActiveRuns, github, projects, guard)
 }
 
 /**
@@ -46,7 +49,13 @@ internal class SelfDevRouteDeps(
  * which kivra resolves (see `TaskReference`).
  */
 @Serializable
-data class SubmitSelfDevTaskRequest(val title: String, val idempotencyKey: String, val body: String? = null)
+data class SubmitSelfDevTaskRequest(
+    val title: String,
+    val idempotencyKey: String,
+    val body: String? = null,
+    /** The project of the Run (ADR 0022). Required; a missing one is a 400. */
+    val projectId: String? = null,
+)
 
 /** The task body of a submission: trimmed, at most [MAX_TASK_BODY_CODE_POINTS] code points, with no control characters but line feed and tab, and no bidi control ([isBidiControl]). Null when empty. */
 internal fun validatedBody(raw: String?): String? {
@@ -110,8 +119,17 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
             call.respond(HttpStatusCode.BadRequest, SelfDevError("body must be at most 8000 characters, and may contain line breaks but no other control characters"))
             return@post
         }
+        val projectId = when (val scope = deps.projects.scopeOf(request.projectId)) {
+            is ProjectScope.Refused -> {
+                call.respond(scope.status, SelfDevError(scope.error))
+                return@post
+            }
+            is ProjectScope.Assigned -> scope.projectId
+        }
         try {
-            val submitted = deps.runs.submitTask(principal, key, title, selfDev = true, maxActiveSelfDev = deps.maxActiveRuns, body = body)
+            val submitted = deps.runs.submitTask(
+                principal, key, title, selfDev = true, maxActiveSelfDev = deps.maxActiveRuns, body = body, projectId = projectId,
+            )
             when (submitted) {
                 is TaskSubmitResult.Created -> call.respond(HttpStatusCode.Accepted, submitted.run.toSelfDevResponse(note = SELF_DEV_NOTE))
                 is TaskSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, submitted.run.toSelfDevResponse(note = SELF_DEV_NOTE))

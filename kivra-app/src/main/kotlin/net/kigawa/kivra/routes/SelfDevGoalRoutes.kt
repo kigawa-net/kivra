@@ -18,6 +18,7 @@ import net.kigawa.kivra.auth.PermissionMode
 import net.kigawa.kivra.auth.PermissionService
 import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.core.autopilot.AutopilotReason
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevSubmitResult
@@ -53,6 +54,8 @@ class SelfDevGoalRouteDeps(
     /** `owner/repo` of the self-development target. Stored with each task at submission (fixed; not changeable from the UI). */
     val targetRepo: String?,
     val operations: SelfDevOperatorRepository,
+    /** The projects a new goal may be assigned to (ADR 0022). A goal's projectId must name one of them. */
+    val projects: ProjectRepository,
     val control: SelfDevAutopilotControlRepository,
     /** The shadow record of the self-development memory (ADR 0016 P1). Off unless the memory switch is on. Never read here. */
     val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
@@ -63,7 +66,13 @@ class SelfDevGoalRouteDeps(
 )
 
 @Serializable
-data class SubmitGoalRequest(val title: String, val body: String? = null, val idempotencyKey: String)
+data class SubmitGoalRequest(
+    val title: String,
+    val body: String? = null,
+    val idempotencyKey: String,
+    /** The project the goal belongs to (ADR 0022). Required; a missing one is a 400. Nullable here so that the route answers with its own text. */
+    val projectId: String? = null,
+)
 
 @Serializable
 data class VersionRequest(val version: Long)
@@ -86,6 +95,8 @@ data class TaskSummaryResponse(
     val attempts: Int,
     val createdAt: String,
     val updatedAt: String,
+    /** The project of the task (ADR 0022). Null for a task that predates the project or is a system task without one. */
+    val projectId: String? = null,
 )
 
 @Serializable
@@ -252,7 +263,14 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
             call.respond(HttpStatusCode.ServiceUnavailable, GoalError(AUTOPILOT_DISABLED))
             return@post
         }
-        when (val result = deps.operations.submitTask(principal, key, title, body, repo)) {
+        val projectId = when (val scope = deps.projects.scopeOf(request.projectId)) {
+            is ProjectScope.Refused -> {
+                call.respond(scope.status, GoalError(scope.error))
+                return@post
+            }
+            is ProjectScope.Assigned -> scope.projectId
+        }
+        when (val result = deps.operations.submitTask(principal, key, title, body, repo, projectId)) {
             is SelfDevSubmitResult.Created -> {
                 operatorLog.info("autopilot operator action: action=GOAL_SUBMITTED actor={} taskId={} result=GOAL_SUBMITTED", operatorTag(principal), result.task.taskId)
                 // The title only (ADR 0016 U-6). The body is never recorded.
@@ -507,4 +525,5 @@ private fun SelfDevTask.summary() = TaskSummaryResponse(
     attempts = attempts,
     createdAt = createdAt.toInstant(ZoneOffset.UTC).toString(),
     updatedAt = updatedAt.toInstant(ZoneOffset.UTC).toString(),
+    projectId = projectId,
 )

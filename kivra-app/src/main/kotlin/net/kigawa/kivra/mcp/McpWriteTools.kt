@@ -8,10 +8,12 @@ import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.db.ActiveSelfDevLimitException
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.routes.MAX_IDEMPOTENCY_KEY_CODE_POINTS
 import net.kigawa.kivra.routes.MAX_TASK_BODY_CODE_POINTS
 import net.kigawa.kivra.routes.MAX_TASK_TITLE_CODE_POINTS
+import net.kigawa.kivra.routes.PROJECT_ID_SHAPE
 import net.kigawa.kivra.routes.validatedBody
 import net.kigawa.kivra.routes.validatedText
 import org.slf4j.LoggerFactory
@@ -39,6 +41,8 @@ class McpWriteTools(
     private val runs: DevelopmentRunRepository,
     private val selfDevEnabled: Boolean,
     private val maxActiveSelfDev: Int,
+    /** The projects a new run may be assigned to (ADR 0022). `project_id` must name one of them. */
+    private val projects: ProjectRepository,
 ) {
     fun tools(): List<McpTool> = listOf(selfDevStart())
 
@@ -62,7 +66,12 @@ class McpWriteTools(
                 put("minLength", 1)
                 put("maxLength", MAX_IDEMPOTENCY_KEY_CODE_POINTS)
             },
-            required = listOf("title", "idempotency_key"),
+            "project_id" to buildJsonObject {
+                put("type", "string")
+                put("pattern", "^[0-9A-Z]{26}\$")
+                put("description", "The project the run belongs to. Required; it must be an existing project id.")
+            },
+            required = listOf("title", "idempotency_key", "project_id"),
         ),
         scope = SCOPE_SELFDEV_START,
         write = true,
@@ -73,7 +82,7 @@ class McpWriteTools(
     private fun start(caller: McpCaller, args: JsonObject): ToolOutcome {
         // The kill switch is answered before the input is read, so a disabled kivra says nothing about the input.
         if (!selfDevEnabled) return refusal(REASON_SELFDEV_DISABLED, "self-development is disabled")
-        args.requireOnly("title", "body", "idempotency_key")
+        args.requireOnly("title", "body", "idempotency_key", "project_id")
         val title = validatedText(args.requiredString("title"), MAX_TASK_TITLE_CODE_POINTS)
             ?: throw InvalidParamsException("title must be 1-200 characters without control characters")
         val key = validatedText(args.requiredString("idempotency_key"), MAX_IDEMPOTENCY_KEY_CODE_POINTS)
@@ -83,8 +92,12 @@ class McpWriteTools(
         if (rawBody != null && body == null && rawBody.isNotBlank()) {
             throw InvalidParamsException("body must be at most 8000 characters, with line breaks and tabs but no other control characters")
         }
+        val projectId = args.requiredString("project_id", PROJECT_ID_SHAPE)
+        if (projects.get(projectId) == null) return refusal("PROJECT_NOT_FOUND", "project not found")
         val submitted = try {
-            runs.submitTask(caller.principal, key, title, selfDev = true, maxActiveSelfDev = maxActiveSelfDev, body = body)
+            runs.submitTask(
+                caller.principal, key, title, selfDev = true, maxActiveSelfDev = maxActiveSelfDev, body = body, projectId = projectId,
+            )
         } catch (_: ActiveSelfDevLimitException) {
             return refusal("CONCURRENCY_LIMIT", "too many active self-development runs")
         }

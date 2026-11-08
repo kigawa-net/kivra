@@ -243,8 +243,10 @@ class DevelopmentRunRepository(
         maxActiveSelfDev: Int? = null,
         /** The manual task body (V17), or null. It is part of the idempotency comparison: the same key with another body conflicts. */
         body: String? = null,
+        /** The project of the Run (V38, ADR 0022). A self-development Run takes its task's project. It is part of the replay comparison. */
+        projectId: String? = null,
     ): TaskSubmitResult {
-        findTask(principal, idempotencyKey)?.let { return replayOrConflict(it, title, body, selfDev) }
+        findTask(principal, idempotencyKey)?.let { return replayOrConflict(it, title, body, selfDev, projectId) }
         val runId = RunId(Ulid.generate(clock))
         val insert = {
             transaction(database) {
@@ -263,6 +265,7 @@ class DevelopmentRunRepository(
                     it[completionMode] = RunCompletionMode.PR_ONLY.name
                     it[taskTitle] = title
                     it[taskBody] = body
+                    it[DevelopmentRunsTable.projectId] = projectId
                     it[DevelopmentRunsTable.principal] = principal
                     it[DevelopmentRunsTable.idempotencyKey] = idempotencyKey
                     it[createdAt] = now
@@ -279,7 +282,7 @@ class DevelopmentRunRepository(
             if (!e.isUniqueViolation()) throw e
             // Lost the race (or a replay): the winner's row is committed, so a fresh transaction sees it.
             val existing = findTask(principal, idempotencyKey) ?: throw e
-            return replayOrConflict(existing, title, body, selfDev)
+            return replayOrConflict(existing, title, body, selfDev, projectId)
         }
         return TaskSubmitResult.Created(get(runId)!!)
     }
@@ -344,9 +347,9 @@ class DevelopmentRunRepository(
      * A kind mismatch under the same (principal, idempotency key) is a conflict, never a replay of another kind of run. A different
      * body is a conflict too: the body changes what the agent is asked to do. An empty body and no body are the same.
      */
-    private fun replayOrConflict(existing: DevelopmentRun, title: String, body: String?, selfDev: Boolean): TaskSubmitResult =
+    private fun replayOrConflict(existing: DevelopmentRun, title: String, body: String?, selfDev: Boolean, projectId: String?): TaskSubmitResult =
         if (existing.taskTitle == title && existing.taskBody.orEmpty() == body.orEmpty() &&
-            existing.taskId.startsWith(SELF_DEV_TASK_PREFIX) == selfDev
+            existing.taskId.startsWith(SELF_DEV_TASK_PREFIX) == selfDev && existing.projectId == projectId
         ) {
             TaskSubmitResult.Replayed(existing)
         } else {

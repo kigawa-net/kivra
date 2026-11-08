@@ -38,6 +38,8 @@ data class SelfDevTask(
     val createdAt: LocalDateTime, val updatedAt: LocalDateTime, val approvedBy: String?,
     /** The plan root this task was planned under (V44), or null for a task the operator submitted. */
     val parentTaskId: String? = null,
+    /** The project the task belongs to (V50, ADR 0022), or null when it is not assigned. */
+    val projectId: String? = null,
 ) {
     /** A plan root has been planned at least once. Its own run is never submitted; its planned tasks carry the work. */
     val isPlanRoot: Boolean get() = revision > 0
@@ -72,6 +74,13 @@ sealed interface SelfDevSubmitResult {
     data object KeyConflict : SelfDevSubmitResult
 }
 
+/**
+ * True when every dependency has the task's own project (ADR 0022). A dependency in another project, or an unassigned one while the task is
+ * assigned (or the reverse), is out of scope. Two unassigned tasks are in scope, as before V50.
+ */
+internal fun dependenciesInScope(taskProjectId: String?, dependencyProjectIds: List<String?>): Boolean =
+    dependencyProjectIds.all { it == taskProjectId }
+
 class SelfDevOperatorRepository(private val database: Database, private val clock: Clock = Clock.systemUTC()) {
     fun listTasks(limit: Int): List<SelfDevTask> = transaction(database) {
         SelfDevTasksTable.selectAll()
@@ -82,16 +91,24 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
 
     /**
      * Accepts a task from the operator (V40 `selfdev_tasks`, state TASK_SUBMITTED). The pair (created_by, idempotency_key) is unique: the
-     * same key with the same title, body and target is a replay, and with other content it is a conflict. Nothing is planned here.
+     * same key with the same title, body, target and project is a replay, and with other content it is a conflict. Nothing is planned here.
+     * [projectId] is the project the task belongs to (V50, ADR 0022). The API requires it; the system's own submissions pass null.
      */
-    fun submitTask(createdBy: String, idempotencyKey: String, title: String, body: String?, targetRepo: String): SelfDevSubmitResult {
+    fun submitTask(
+        createdBy: String,
+        idempotencyKey: String,
+        title: String,
+        body: String?,
+        targetRepo: String,
+        projectId: String? = null,
+    ): SelfDevSubmitResult {
         val created = try {
             transaction(database) {
                 val now = utcNow(clock)
                 val taskId = Ulid.generate(clock)
                 execUpdate(
-                    "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, dependencies, requires_approval, revision, attempts, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'TASK_SUBMITTED', '[]', TRUE, 0, 0, 0, ?, ?)",
-                    taskId, createdBy, idempotencyKey, title, body, targetRepo, now, now,
+                    "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, dependencies, requires_approval, revision, attempts, version, created_at, updated_at, project_id) VALUES (?, ?, ?, ?, ?, ?, 'TASK_SUBMITTED', '[]', TRUE, 0, 0, 0, ?, ?, ?)",
+                    taskId, createdBy, idempotencyKey, title, body, targetRepo, now, now, projectId,
                 )
                 taskIn(taskId) ?: error("vanished")
             }
@@ -106,7 +123,7 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                 .where { (SelfDevTasksTable.createdBy eq createdBy) and (SelfDevTasksTable.idempotencyKey eq idempotencyKey) }
                 .firstOrNull()?.let { taskOf(it) }
         } ?: error("the duplicate key has no row")
-        return if (existing.title == title && existing.body == body && existing.targetRepo == targetRepo) {
+        return if (existing.title == title && existing.body == body && existing.targetRepo == targetRepo && existing.projectId == projectId) {
             SelfDevSubmitResult.Replayed(existing)
         } else {
             SelfDevSubmitResult.KeyConflict
@@ -252,10 +269,12 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                 }
                 val dependencies = plan.dependsOn.map { ids[it - 1] }
                 execUpdate(
-                    "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, state_reason, dependencies, requires_approval, parent_task_id, revision, attempts, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?)",
+                    // A planned task inherits the root's project (ADR 0022). Its dependencies are planned tasks of the same root, so they share it.
+                    "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, state_reason, dependencies, requires_approval, parent_task_id, revision, attempts, version, created_at, updated_at, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)",
                     ids[index], current.createdBy, "plan:${current.taskId}:r$revision:${index + 1}", plan.title, plan.body, current.targetRepo,
                     plan.initialState.name, if (queued) AutopilotReason.AUTO_APPROVED.name else null,
                     JSON.encodeToString(ListSerializer(String.serializer()), dependencies), plan.requiresApproval, current.taskId, now, now,
+                    current.projectId,
                 )
             }
             val changed = execUpdate(
@@ -349,6 +368,11 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                 "SELECT COUNT(*) FROM selfdev_tasks WHERE state = 'COMPLETED' AND task_id IN (${deps.joinToString { "?" }})", *deps.toTypedArray(),
             ) { it.getLong(1) }.single()
             if (completed != deps.size.toLong()) return@transaction TaskTransition.Refused(TransitionRefusal.GUARD_FAILED)
+            val depProjects = execQuery(
+                "SELECT project_id FROM selfdev_tasks WHERE task_id IN (${deps.joinToString { "?" }})", *deps.toTypedArray(),
+            ) { it.getString(1) }
+            // A dependency across projects, or between an assigned and an unassigned task, is refused (ADR 0022).
+            if (!dependenciesInScope(current.projectId, depProjects)) return@transaction TaskTransition.Refused(TransitionRefusal.GUARD_FAILED)
         }
         val changed = execUpdate(
             "UPDATE selfdev_tasks SET state = 'SUBMITTING', state_reason = NULL, attempts = attempts + 1, version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = 'QUEUED'",
@@ -536,7 +560,8 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         requiresApproval = row[SelfDevTasksTable.requiresApproval], runId = row[SelfDevTasksTable.runId],
         attempts = row[SelfDevTasksTable.attempts], version = row[SelfDevTasksTable.version],
         createdAt = row[SelfDevTasksTable.createdAt], updatedAt = row[SelfDevTasksTable.updatedAt],
-        approvedBy = row[SelfDevTasksTable.approvedBy], parentTaskId = row[SelfDevTasksTable.parentTaskId])
+        approvedBy = row[SelfDevTasksTable.approvedBy], parentTaskId = row[SelfDevTasksTable.parentTaskId],
+        projectId = row[SelfDevTasksTable.projectId])
     /** A unique-key violation anywhere in the cause chain: MariaDB 1062, H2 23505. */
     private fun Throwable.isDuplicateKey(): Boolean =
         generateSequence(this) { it.cause }.any { it is SQLException && (it.sqlState == "23505" || it.errorCode == 1062 || it.errorCode == 23505) }

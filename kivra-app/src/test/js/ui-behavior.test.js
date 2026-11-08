@@ -684,6 +684,7 @@ test('a goal is sent with a title and an optional body, a retry keeps the key, a
   const dom = load(apResponder(s));
   await flush();
   dom.byId('goal-title').value = '  CI を速くする  ';
+  dom.byId('goal-project').value = PROJECT_ID;
   dom.byId('goal-body').value = '   ';
   dom.byId('goal-form').fire('submit', { preventDefault() {} });
   await flush();
@@ -711,6 +712,7 @@ test('a goal with a control character is refused before any request; a 409 makes
   assert.equal(postsTo(dom.calls, '/api/selfdev/goals').length, 0, 'a control character is not sent');
 
   dom.byId('goal-title').value = 'ok';
+  dom.byId('goal-project').value = PROJECT_ID;
   dom.byId('goal-form').fire('submit', { preventDefault() {} });
   await flush();
   const first = postsTo(dom.calls, '/api/selfdev/goals')[0].body.idempotencyKey;
@@ -2369,6 +2371,36 @@ test('the list and the run detail are shown one at a time, and the hash switches
   assert.equal(dom.byId('view-detail').hidden, true, 'back to no hash: the detail is hidden again');
 });
 
+// ---- Project choice (ADR 0022, PR-C): a goal and an order are sent with the project chosen in their form, and never without one ----
+
+test('a goal is not sent without a chosen project, and a chosen one is sent as projectId', async () => {
+  const s = apState();
+  const dom = load(apResponder(s));
+  await flush();
+  dom.byId('goal-title').value = 'プロジェクトなし';
+  dom.byId('goal-form').fire('submit', { preventDefault() {} });
+  await flush();
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals').length, 0, 'nothing is sent without a project');
+  assert.match(dom.byId('goal-result').textContent, /プロジェクトを選んでください/);
+  dom.byId('goal-project').value = PROJECT_ID;
+  dom.byId('goal-form').fire('submit', { preventDefault() {} });
+  await flush();
+  const sent = postsTo(dom.calls, '/api/selfdev/goals');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.projectId, PROJECT_ID, 'the chosen project is sent');
+});
+
+test('an order is not sent without a chosen project', async () => {
+  const s = orderCreateState(() => ({ status: 201, data: orderOf({ orderId: O2 }) }));
+  const dom = ordLoad(s);
+  await flush();
+  dom.byId('order-title').value = ORDER_TITLE;
+  dom.byId('order-policy').value = ORDER_POLICY;
+  await orderCreateSubmit(dom);
+  assert.equal(orderCreatePosts(dom).length, 0, 'nothing is sent without a project');
+  assert.match(dom.byId('order-create-result').textContent, /プロジェクトを選んでください/);
+});
+
 // ---- Order create (ADR 0015): the form on the order section posts the title and the policy; neither is shown back ----
 
 const ORDER_TITLE = 'ROOT-TITLE-SECRET';
@@ -2388,6 +2420,7 @@ function orderCreateSubmit(dom) {
 }
 
 function fillOrderCreate(dom, title, policy) {
+  dom.byId('order-project').value = PROJECT_ID;
   dom.byId('order-title').value = title;
   dom.byId('order-policy').value = policy;
 }
@@ -2403,7 +2436,7 @@ test('a create posts the trimmed title and policy as JSON, clears the inputs, an
   await orderCreateSubmit(dom);
   const sent = orderCreatePosts(dom);
   assert.equal(sent.length, 1, 'one POST');
-  assert.deepEqual(sent[0].body, { title: ORDER_TITLE, policy: ORDER_POLICY, maxCycles: 1 }, 'the trimmed title and policy and the default cycle count, and no other field');
+  assert.deepEqual(sent[0].body, { title: ORDER_TITLE, policy: ORDER_POLICY, maxCycles: 1, projectId: PROJECT_ID }, 'the trimmed title and policy, the default cycle count and the project, and no other field');
   assert.equal(dom.byId('order-title').value, '', 'the title is cleared after success');
   assert.equal(dom.byId('order-policy').value, '', 'the policy is cleared after success');
   assert.equal(dom.byId('order-create-result').textContent, ORDER_CREATE_MSG_SAVED);

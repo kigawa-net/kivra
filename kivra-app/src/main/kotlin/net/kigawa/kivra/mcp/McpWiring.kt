@@ -4,6 +4,7 @@ import com.auth0.jwk.JwkProvider
 import net.kigawa.kivra.auth.OidcJwtConfig
 import net.kigawa.kivra.auth.RefreshingJwkProvider
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.github.RepoRef
 import net.kigawa.kivra.routes.PermissionGuard
 import net.kigawa.kivra.routes.legacyPermissionGuard
@@ -31,13 +32,19 @@ fun buildMcpRouteDeps(
     // goals: McpGoalDeps temporarily removed pending Task model migration (V40)
     guard: PermissionGuard? = null,
     tokenAuth: McpTokenAuth? = null,
+    /** The projects a write tool may assign a run to (ADR 0022). Required while the MCP write switch is on. */
+    projects: ProjectRepository? = null,
 ): McpRouteDeps? {
     if (!settings.enabled) return null
     val oidc = OidcJwtConfig.fromEnv(env).copy(audience = checkNotNull(settings.audience))
     // The order tools are registered only while the orders are on ([orders] is null otherwise).
     // Goal tools temporarily removed pending Task model migration (V40).
     val tools = McpRunTools(runs, targetRepo).tools() +
-        (if (settings.writeEnabled) McpWriteTools(runs, selfDevEnabled, maxActiveSelfDev).tools() else emptyList()) +
+        (if (settings.writeEnabled) {
+            McpWriteTools(runs, selfDevEnabled, maxActiveSelfDev, requireNotNull(projects) { "projects is required when the MCP writes are on" }).tools()
+        } else {
+            emptyList()
+        }) +
         (orders?.let { McpOrderTools(it).tools(settings.writeEnabled) } ?: emptyList())
     return McpRouteDeps(
         settings = settings,

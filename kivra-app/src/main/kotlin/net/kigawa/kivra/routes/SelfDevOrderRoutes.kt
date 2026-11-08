@@ -27,6 +27,7 @@ import net.kigawa.kivra.db.OrderConflict
 import net.kigawa.kivra.db.OrderCycle
 import net.kigawa.kivra.db.OrderResult
 // SelfDevGoalRepository removed in V40
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
@@ -61,6 +62,8 @@ class SelfDevOrderRouteDeps(
     val targetRepo: String?,
     val orders: SelfDevOrderRepository,
     val operations: SelfDevOperatorRepository,
+    /** The projects a new root order may be assigned to (ADR 0022). */
+    val projects: ProjectRepository,
     /** The permission entrance. The default is the roles off and no store: today's rules, from [aiPrincipal] and the root approver. */
     val guard: PermissionGuard = PermissionGuard(
         PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, aiPrincipal, orderSettings.rootApprover, null),
@@ -73,6 +76,8 @@ data class CreateOrderRequest(
     val policy: String,
     /** The most cycles the order may run (ADR 0015 section 3.2). Absent means 1. Checked against 1..`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`. */
     val maxCycles: Int? = null,
+    /** The project the root order belongs to (ADR 0022). Required on creation; a child takes its parent's. Checked by the route. */
+    val projectId: String? = null,
 )
 
 @Serializable
@@ -206,7 +211,11 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
             return@post call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
         }
         val repo = deps.targetRepo ?: return@post call.respond(HttpStatusCode.ServiceUnavailable, OrderError(ORDERS_DISABLED))
-        val created = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles) as CreateRootResult.Created
+        val projectId = when (val scope = deps.projects.scopeOf(request.projectId)) {
+            is ProjectScope.Refused -> return@post call.respond(scope.status, OrderError(scope.error))
+            is ProjectScope.Assigned -> scope.projectId
+        }
+        val created = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles, projectId) as CreateRootResult.Created
         operatorLog.info("order operator action: action=ORDER_CREATED actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), created.order.orderId)
         call.respond(HttpStatusCode.Created, created.order.summary())
     }

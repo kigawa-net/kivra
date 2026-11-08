@@ -225,6 +225,47 @@ object ApiClient {
         postWrite("/api/selfdev/tasks/${percentEncode(taskId)}/reject", VersionRequest(version))
 
     /**
+     * 自律運転の状態。`GET /api/selfdev/autopilot`。503 `AUTOPILOT_DISABLED` は無効(節を出さない)、403 は READ の無い利用者。
+     */
+    suspend fun getAutopilot(): ApiAutopilot = getJson("/api/selfdev/autopilot")
+
+    /** 自律運転の一時停止。`POST /api/selfdev/autopilot/pause`、本文は空の JSON オブジェクト `{}`。403 は ORDER_MANAGE の無い利用者。 */
+    suspend fun pauseAutopilot() = postWrite("/api/selfdev/autopilot/pause", EmptyJsonBody())
+
+    /** 自律運転の再開。`POST /api/selfdev/autopilot/resume`、本文 `{}`。 */
+    suspend fun resumeAutopilot() = postWrite("/api/selfdev/autopilot/resume", EmptyJsonBody())
+
+    /** サーキットブレーカーの手動再開(連続失敗の数を 0 に戻す)。`POST /api/selfdev/autopilot/reset-breaker`、本文 `{}`。 */
+    suspend fun resetAutopilotBreaker() = postWrite("/api/selfdev/autopilot/reset-breaker", EmptyJsonBody())
+
+    /**
+     * order の一時停止。`POST /api/selfdev/orders/{id}/pause`、本文 `{"version": n}`(読んだ version)。
+     * 409 は状態・version の競合、403 は権限(ORDER_MANAGE)。
+     */
+    suspend fun pauseOrder(orderId: String, version: Long) =
+        postWrite("/api/selfdev/orders/${percentEncode(orderId)}/pause", VersionRequest(version))
+
+    /**
+     * order の再開。`POST /api/selfdev/orders/{id}/resume`、本文 `{"version": n}`。LIMIT_REACHED / EXPIRED の一時停止は 409。
+     */
+    suspend fun resumeOrder(orderId: String, version: Long) =
+        postWrite("/api/selfdev/orders/${percentEncode(orderId)}/resume", VersionRequest(version))
+
+    /**
+     * order の停止要求。`POST /api/selfdev/orders/{id}/stop-requests`、本文 `{"version": n, "reasonCode": "..."}`。
+     * reasonCode は要求できる 4 種のいずれか(一覧から選ぶ)。承認されるまで order は止まらない。403 は権限(STOP_REQUEST)。
+     */
+    suspend fun requestOrderStop(orderId: String, version: Long, reasonCode: String) =
+        postWrite("/api/selfdev/orders/${percentEncode(orderId)}/stop-requests", OrderStopRequest(version, reasonCode))
+
+    /**
+     * 待っている停止要求の取り消し。`POST /api/selfdev/stop-requests/{id}/cancel`、本文 `{}`。
+     * 403 は要求者でも停止の判断者でもない時。取り消すと order は一時停止中になる。
+     */
+    suspend fun cancelOrderStopRequest(requestId: String) =
+        postWrite("/api/selfdev/stop-requests/${percentEncode(requestId)}/cancel", EmptyJsonBody())
+
+    /**
      * 書き込みの共通処理。2xx 以外は [ApiException](HTTP ステータス付き)を投げる。通信の失敗は status を null にした [ApiException]。
      * 応答の本文は読まない(承認の応答は使わないため、本文の形の違いで成功を失敗にしない)。
      */
@@ -361,6 +402,9 @@ object ApiClient {
 @Serializable private class StopGoalRequest(val version: Long, val reason: String)
 
 @Serializable private class VersionRequest(val version: Long)
+
+/** order の停止要求の本文(server `RequestStopRequest`)。フィールドは厳密に検査されるので、この二つだけ送る。 */
+@Serializable private class OrderStopRequest(val version: Long, val reasonCode: String)
 
 /** 本文が空の JSON オブジェクト `{}`(フィールドなし)。 */
 @Serializable private class EmptyJsonBody

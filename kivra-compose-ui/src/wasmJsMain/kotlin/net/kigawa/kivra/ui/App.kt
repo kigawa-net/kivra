@@ -75,6 +75,7 @@ fun KivraApp() {
     // 最後に読み直しを始めた時刻。定期更新の間隔の基準(手動も含む)。
     var lastAttemptAt by remember { mutableStateOf(0L) }
     var selfDev by remember { mutableStateOf(SelfDevAvailability.LOADING) }
+    var autopilot by remember { mutableStateOf(AutopilotAvailability.LOADING) }
     var health by remember { mutableStateOf(HealthState()) }
 
     val refresh: () -> Unit = {
@@ -82,12 +83,18 @@ fun KivraApp() {
         lastAttemptAt = nowMillis().toLong()
     }
 
-    // 読み直しの度に、自己開発の有無と接続を読む(旧 UI の refreshStatus と checkHealth)。
+    // 読み直しの度に、自己開発の有無・自律運転の有無と接続を読む(旧 UI の refreshStatus・refreshAutopilot と checkHealth)。
+    // 自動化の項目を出すかだけに使う。自律運転の画面は自分で読む。
     LaunchedEffect(refreshCount) {
         selfDev = try {
             selfDevAvailabilityOf(ApiClient.getSelfDevStatus().enabled)
         } catch (e: Exception) {
             SelfDevAvailability.UNKNOWN
+        }
+        autopilot = try {
+            autopilotAvailabilityOf(ApiClient.getAutopilot().enabled)
+        } catch (e: Exception) {
+            AutopilotAvailability.HIDDEN
         }
         val ok = ApiClient.checkHealth()
         health = health.after(ok, nowMillis().toLong())
@@ -124,12 +131,18 @@ fun KivraApp() {
             connection = connectionLabel(health, clockText),
             lastRefreshText = lastManualRefreshAt?.let { "最終更新: ${clockText(it)}" } ?: "最終更新: 未更新",
             onRefresh = onManualRefresh,
+            autopilot = autopilot,
         )
     }
 }
 
 @Composable
-private fun KivraAppContent(connection: String, lastRefreshText: String, onRefresh: () -> Unit) {
+private fun KivraAppContent(
+    connection: String,
+    lastRefreshText: String,
+    onRefresh: () -> Unit,
+    autopilot: AutopilotAvailability,
+) {
     val perms = LocalCallerPermissions.current
     // 画面のルート。ブラウザのハッシュ(#/runs/<id> 等)と双方向に同期する: 読み込み時に解釈し、遷移時に書き、戻る/進むで読み直す。
     var route by remember { mutableStateOf(parseRoute(currentLocationHash())) }
@@ -173,8 +186,8 @@ private fun KivraAppContent(connection: String, lastRefreshText: String, onRefre
                             label = { Text(NavDestination.Home.label) }
                         )
                         NavDestination.grouped.forEach { (group, allItems) ->
-                            // 権限で隠す項目を外し、残りが無いグループは見出しごと出さない。
-                            val items = allItems.filter { perms.navVisible(it) }
+                            // 権限と自律運転の有無で隠す項目を外し、残りが無いグループは見出しごと出さない。
+                            val items = allItems.filter { perms.navVisible(it) && navVisibleForAutopilot(it, autopilot) }
                             if (items.isEmpty()) return@forEach
                             Text(
                                 text = group.label,
@@ -261,6 +274,7 @@ private fun KivraAppContent(connection: String, lastRefreshText: String, onRefre
                             NavDestination.Budget -> BudgetScreen()
                             NavDestination.Memory -> MemoryScreen()
                             NavDestination.Assignees -> AssigneesScreen(projectId)
+                            NavDestination.Autopilot -> AutopilotScreen()
                         }
                         is Route.RunDetail -> RunDetailScreen(r.runId, navigate)
                         is Route.GoalDetail -> GoalDetailScreen(r.taskId, navigate)

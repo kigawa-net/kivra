@@ -30,6 +30,24 @@ data class ApiSelfDevStatus(
     val enabled: Boolean,
 )
 
+/**
+ * `GET /api/selfdev/autopilot` = server `AutopilotStatusResponse`. 503 `AUTOPILOT_DISABLED` while the autopilot is off (the
+ * section is then hidden). [targetRepo] is null when it is not set.
+ */
+@Serializable
+data class ApiAutopilot(
+    val enabled: Boolean,
+    val targetRepo: String? = null,
+    val paused: Boolean,
+    val autoMergePaused: Boolean,
+    val breakerOpen: Boolean,
+    val consecutiveFailures: Int,
+    val runsToday: Int,
+    val maxRunsPerDay: Int,
+    val maxConsecutiveFailures: Int,
+    val approval: String,
+)
+
 @Serializable
 data class ApiRun(
     val runId: String,

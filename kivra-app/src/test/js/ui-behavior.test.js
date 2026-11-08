@@ -585,23 +585,22 @@ test('the page is still usable with the self-development kind chosen after a rel
   assert.equal(dom.byId('kind-sim').checked, true);
 });
 
-// ---- Autopilot (ADR 0011): the Goal form, the Goal list and detail, approvals, the switches ---------------------
+// ---- Autopilot (ADR 0011): the Goal form, the Task list and detail, approvals, the switches -------------------
 
-const G1 = '01GOALAAAAAAAAAAAAAAAAAAAA';
-const P1 = '01PLANAAAAAAAAAAAAAAAAAAAA';
+const T1 = '01TASKAAAAAAAAAAAAAAAAAAAA';
 const AP_STATUS = { enabled: true, targetRepo: 'kigawa-net/kivra', paused: false, breakerOpen: false, consecutiveFailures: 0, runsToday: 0, maxRunsPerDay: 5, maxConsecutiveFailures: 3, approval: 'required' };
 
 /**
- * A responder for the autopilot API. `s` is the mutable server state: the status, the goal list, and the goal detail body.
+ * A responder for the autopilot API. `s` is the mutable server state: the status, the task list, and the task detail body.
  * Unknown paths fall back to the defaults (status enabled=false, an empty run list).
  */
 function apResponder(s) {
   return (p, init) => {
     if (p === '/api/selfdev/status') return status(false);
     if (p === '/api/selfdev/autopilot') return s.autopilot === 503 ? { status: 503, data: { error: 'autopilot is disabled' } } : { status: 200, data: s.autopilotStatus };
-    if (p === '/api/selfdev/goals' && init.method === 'GET') return { status: 200, data: s.goals };
-    if (p === '/api/selfdev/goals' && init.method === 'POST') return s.postGoal ? s.postGoal(init) : { status: 202, data: { goalId: G1, state: 'GOAL_SUBMITTED' } };
-    if (p === '/api/selfdev/goals/' + G1) return { status: 200, data: s.detail };
+    if (p === '/api/selfdev/goals' && init.method === 'GET') return { status: 200, data: s.tasks };
+    if (p === '/api/selfdev/goals' && init.method === 'POST') return s.postGoal ? s.postGoal(init) : { status: 202, data: { taskId: T1, state: 'TASK_SUBMITTED' } };
+    if (p === '/api/selfdev/goals/' + T1 && init.method === 'GET') return { status: 200, data: s.detail };
     if (p === '/api/selfdev/autopilot/promotion') return s.promotion || { status: 404, data: { error: 'not found' } };
     if (s.other) {
       const r = s.other(p, init);
@@ -615,39 +614,34 @@ function apState(overrides = {}) {
   return {
     autopilot: 200,
     autopilotStatus: { ...AP_STATUS },
-    goals: [],
+    tasks: [],
     detail: null,
     ...overrides,
   };
 }
 
-function goalSummary(over = {}) {
+/** One row of GET /api/selfdev/goals (TaskSummaryResponse). */
+function taskSummary(over = {}) {
   return {
-    goalId: G1, title: 'CI を速くする', state: 'PLAN_PROPOSED', stateReason: null, revision: 1, version: 2,
-    targetRepo: 'kigawa-net/kivra', createdAt: '2026-10-18T10:00:00Z', updatedAt: '2026-10-18T10:05:00Z', ...over,
+    taskId: T1, title: 'CI を速くする', state: 'PENDING_APPROVAL', stateReason: null, revision: 0, version: 2,
+    targetRepo: 'kigawa-net/kivra', requiresApproval: true, dependencies: [], runId: null, attempts: 0,
+    createdAt: '2026-10-18T10:00:00Z', updatedAt: '2026-10-18T10:05:00Z', ...over,
   };
 }
 
-function taskOf(over = {}) {
-  return {
-    taskId: P1 + '-1', ordinal: 1, title: 'テストを足す', body: '手順の本文', targetPaths: ['docs/a.md'], sizeEstimate: 'S',
-    dependsOn: [], requiresApproval: false, state: 'PENDING_APPROVAL', stateReason: null, runId: null, version: 0, ...over,
-  };
-}
-
-function detailOf(goal, tasks, extra = {}) {
-  return {
-    goal: goal,
-    body: '背景の本文',
-    plans: [{ planId: P1, revision: 1, state: 'PROPOSED', summary: '要約', plannerModel: 'claude-haiku-5-5', createdAt: '2026-10-18T10:04:00Z', tasks }],
-    ...extra,
-  };
+/** GET /api/selfdev/goals/{id} answers { task, body }. */
+function detailOf(task, extra = {}) {
+  return { task: task, body: '背景の本文', ...extra };
 }
 
 function buttonIn(container, text) {
   const found = container.buttons().filter((b) => b.textContent === text);
   assert.equal(found.length >= 1, true, `no button "${text}" in the container`);
   return found[0];
+}
+
+function hasButton(container, text) {
+  return container.buttons().some((b) => b.textContent === text);
 }
 
 test('the autopilot sections stay hidden unless the status answers 200 with enabled (503 and failures show nothing)', async () => {
@@ -673,7 +667,7 @@ test('a goal is sent with a title and an optional body, a retry keeps the key, a
   const s = apState({
     postGoal: () => {
       if (fail) throw new Error('network down');
-      return { status: 202, data: { goalId: G1, state: 'GOAL_SUBMITTED' } };
+      return { status: 202, data: { taskId: T1, state: 'TASK_SUBMITTED' } };
     },
   });
   const dom = load(apResponder(s));
@@ -716,10 +710,10 @@ test('a goal with a control character is refused before any request; a 409 makes
   assert.match(dom.byId('goal-result').textContent, /別の内容/);
 });
 
-test('the goal list and detail show operator text as text, never as markup', async () => {
+test('the task list and detail show operator text as text, never as markup', async () => {
   const s = apState({
-    goals: [goalSummary({ title: EVIL })],
-    detail: detailOf(goalSummary({ title: EVIL }), [taskOf({ title: EVIL, body: EVIL })], { body: EVIL }),
+    tasks: [taskSummary({ title: EVIL })],
+    detail: detailOf(taskSummary({ title: EVIL }), { body: EVIL }),
   });
   const dom = load(apResponder(s));
   await flush();
@@ -735,18 +729,14 @@ test('the goal list and detail show operator text as text, never as markup', asy
   assert.equal(buttonIn(dom.byId('plans-list'), '閉じる').getAttribute('aria-expanded'), 'true');
 });
 
-test('the plan approval comes first; a task is approved with the version the operator read, and a denylisted task waits', async () => {
-  const goal = goalSummary({ state: 'PLAN_PROPOSED', version: 2 });
-  const tasks = [taskOf({ ordinal: 1, taskId: P1 + '-1', version: 0 }), taskOf({ ordinal: 2, taskId: P1 + '-2', title: '権限', requiresApproval: true, version: 0 })];
-  const s = apState({ goals: [goal], detail: detailOf(goal, tasks) });
+test('a pending task is approved with the version the operator read; no plan step is called', async () => {
+  const task = taskSummary({ version: 2 });
+  const s = apState({ tasks: [task], detail: detailOf(task) });
   s.other = (p, init) => {
-    if (p === '/api/selfdev/goals/' + G1 + '/approve-plan' && init.method === 'POST') {
-      s.goals = [goalSummary({ state: 'TASKS_QUEUED', version: 3 })];
-      s.detail = detailOf(s.goals[0], tasks);
-      return { status: 200, data: s.goals[0] };
-    }
-    if (p === '/api/selfdev/tasks/' + P1 + '-1/approve' && init.method === 'POST') {
-      return { status: 200, data: taskOf({ ordinal: 1, taskId: P1 + '-1', state: 'QUEUED', version: 1 }) };
+    if (p === '/api/selfdev/tasks/' + T1 + '/approve' && init.method === 'POST') {
+      s.tasks = [taskSummary({ state: 'QUEUED', version: 3 })];
+      s.detail = detailOf(s.tasks[0]);
+      return { status: 200, data: s.tasks[0] };
     }
     return null;
   };
@@ -754,27 +744,38 @@ test('the plan approval comes first; a task is approved with the version the ope
   await flush();
   buttonIn(dom.byId('plans-list'), '詳細').fire('click');
   await flush();
-  const list = dom.byId('plans-list');
-  assert.equal(buttonIn(list, 'このタスクを承認').disabled, true, 'a task cannot be approved before the plan');
-  buttonIn(list, 'この Plan を承認').fire('click');
-  await flush();
-  const approvePlan = postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/approve-plan');
-  assert.equal(approvePlan.length, 1);
-  assert.deepEqual(approvePlan[0].body, { version: 2 });
-  assert.match(dom.byId('plans-msg').textContent, /Plan を承認しました/);
-
   buttonIn(dom.byId('plans-list'), 'このタスクを承認').fire('click');
   await flush();
-  const approveTask = postsTo(dom.calls, '/api/selfdev/tasks/' + P1 + '-1/approve');
-  assert.equal(approveTask.length, 1);
-  assert.deepEqual(approveTask[0].body, { version: 0 });
+  const approve = postsTo(dom.calls, '/api/selfdev/tasks/' + T1 + '/approve');
+  assert.equal(approve.length, 1);
+  assert.deepEqual(approve[0].body, { version: 2 });
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + T1 + '/approve-plan').length, 0, 'the plan step is gone');
+  assert.match(dom.byId('plans-msg').textContent, /タスクを承認しました/);
+  assert.equal(hasButton(dom.byId('plans-list'), 'このタスクを承認'), false, 'a queued task has no approve button');
 });
 
-test('a 409 on an approval shows the fixed text, never the server text, and reloads the goal', async () => {
-  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 3 });
-  const tasks = [taskOf({ version: 0 })];
-  const s = apState({ goals: [goal], detail: detailOf(goal, tasks) });
-  s.other = (p, init) => (p === '/api/selfdev/tasks/' + P1 + '-1/approve' && init.method === 'POST'
+test('reject sends the version the operator read and says the task was set aside', async () => {
+  const task = taskSummary({ version: 2 });
+  const s = apState({ tasks: [task], detail: detailOf(task) });
+  s.other = (p, init) => (p === '/api/selfdev/tasks/' + T1 + '/reject' && init.method === 'POST'
+    ? { status: 200, data: taskSummary({ state: 'SKIPPED', stateReason: 'OPERATOR_SKIPPED', version: 3 }) }
+    : null);
+  const dom = load(apResponder(s));
+  await flush();
+  buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+  await flush();
+  buttonIn(dom.byId('plans-list'), '見送る').fire('click');
+  await flush();
+  const sent = postsTo(dom.calls, '/api/selfdev/tasks/' + T1 + '/reject');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].body, { version: 2 });
+  assert.match(dom.byId('plans-msg').textContent, /見送りました/);
+});
+
+test('a 409 on an approval shows the fixed text, never the server text, and reloads the task', async () => {
+  const task = taskSummary({ version: 3 });
+  const s = apState({ tasks: [task], detail: detailOf(task) });
+  s.other = (p, init) => (p === '/api/selfdev/tasks/' + T1 + '/approve' && init.method === 'POST'
     ? { status: 409, data: { error: 'SERVER-SECRET-TEXT' } }
     : null);
   const dom = load(apResponder(s));
@@ -787,13 +788,14 @@ test('a 409 on an approval shows the fixed text, never the server text, and relo
   assert.match(msg, /状態が変わっていました/);
   assert.equal(msg.includes('SERVER-SECRET-TEXT'), false);
   assert.equal(dom.byId('plans-msg').className, 'result error');
+  assert.equal(dom.calls.filter((c) => c.path === '/api/selfdev/goals/' + T1 && c.method === 'GET').length >= 2, true, 'the detail is read again');
 });
 
 test('stop asks for a reason in a dialog; an empty reason is not sent; the request carries the version', async () => {
-  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 4 });
-  const s = apState({ goals: [goal], detail: detailOf(goal, [taskOf({ version: 0 })]) });
-  s.other = (p, init) => (p === '/api/selfdev/goals/' + G1 + '/stop' && init.method === 'POST'
-    ? { status: 200, data: goalSummary({ state: 'STOPPED', version: 5 }) }
+  const task = taskSummary({ state: 'QUEUED', version: 4 });
+  const s = apState({ tasks: [task], detail: detailOf(task) });
+  s.other = (p, init) => (p === '/api/selfdev/goals/' + T1 + '/stop' && init.method === 'POST'
+    ? { status: 200, data: taskSummary({ state: 'STOPPED', version: 5 }) }
     : null);
   const dom = load(apResponder(s));
   await flush();
@@ -804,24 +806,35 @@ test('stop asks for a reason in a dialog; an empty reason is not sent; the reque
   assert.equal(dom.byId('stop-submit').disabled, true, 'no reason, no send');
   dom.byId('stop-submit').fire('click');
   await flush();
-  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 0);
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + T1 + '/stop').length, 0);
 
   dom.byId('stop-reason').value = '  もう要らない  ';
   dom.byId('stop-reason').fire('input');
   assert.equal(dom.byId('stop-submit').disabled, false);
   dom.byId('stop-submit').fire('click');
   await flush();
-  const sent = postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop');
+  const sent = postsTo(dom.calls, '/api/selfdev/goals/' + T1 + '/stop');
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].body, { version: 4, reason: 'もう要らない' });
   assert.equal(dom.byId('stop-dialog').open, false);
 });
 
+test('a finished task has no stop button, and a task still in progress has one', async () => {
+  for (const [state, expected] of [['COMPLETED', false], ['SKIPPED', false], ['PENDING_APPROVAL', true], ['SUBMITTED', true]]) {
+    const task = taskSummary({ state: state, version: 1 });
+    const dom = load(apResponder(apState({ tasks: [task], detail: detailOf(task) })));
+    await flush();
+    buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+    await flush();
+    assert.equal(hasButton(dom.byId('plans-list'), '中止…'), expected, `${state}: stop button`);
+  }
+});
+
 test('a stop dialog cancelled and opened again sends the request once (the listeners of the first opening are removed)', async () => {
-  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 4 });
-  const s = apState({ goals: [goal], detail: detailOf(goal, [taskOf({ version: 0 })]) });
-  s.other = (p, init) => (p === '/api/selfdev/goals/' + G1 + '/stop' && init.method === 'POST'
-    ? { status: 200, data: goalSummary({ state: 'STOPPED', version: 5 }) }
+  const task = taskSummary({ state: 'QUEUED', version: 4 });
+  const s = apState({ tasks: [task], detail: detailOf(task) });
+  s.other = (p, init) => (p === '/api/selfdev/goals/' + T1 + '/stop' && init.method === 'POST'
+    ? { status: 200, data: taskSummary({ state: 'STOPPED', version: 5 }) }
     : null);
   const dom = load(apResponder(s));
   await flush();
@@ -832,23 +845,23 @@ test('a stop dialog cancelled and opened again sends the request once (the liste
   dom.byId('stop-reason').fire('input');
   dom.byId('stop-cancel').fire('click');
   dom.byId('stop-dialog').fire('close'); // a browser fires close on cancel; the stub's close() does not
-  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 0, 'cancel sends nothing');
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + T1 + '/stop').length, 0, 'cancel sends nothing');
 
   buttonIn(dom.byId('plans-list'), '中止…').fire('click');
   dom.byId('stop-reason').value = 'もう要らない';
   dom.byId('stop-reason').fire('input');
   dom.byId('stop-submit').fire('click');
   await flush();
-  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 1, 'one request after reopening');
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + T1 + '/stop').length, 1, 'one request after reopening');
 });
 
 test('while a stop is in flight the send and cancel buttons are disabled, and they are enabled again after the answer', async () => {
   let release;
   const gate = new Promise((r) => { release = r; });
-  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 4 });
-  const s = apState({ goals: [goal], detail: detailOf(goal, [taskOf({ version: 0 })]) });
-  s.other = (p, init) => (p === '/api/selfdev/goals/' + G1 + '/stop' && init.method === 'POST'
-    ? gate.then(() => ({ status: 200, data: goalSummary({ state: 'STOPPED', version: 5 }) }))
+  const task = taskSummary({ state: 'QUEUED', version: 4 });
+  const s = apState({ tasks: [task], detail: detailOf(task) });
+  s.other = (p, init) => (p === '/api/selfdev/goals/' + T1 + '/stop' && init.method === 'POST'
+    ? gate.then(() => ({ status: 200, data: taskSummary({ state: 'STOPPED', version: 5 }) }))
     : null);
   const dom = load(apResponder(s));
   await flush();
@@ -862,7 +875,7 @@ test('while a stop is in flight the send and cancel buttons are disabled, and th
   await flush();
   assert.equal(dom.byId('stop-submit').disabled, true, 'disabled while the stop is in flight');
   assert.equal(dom.byId('stop-cancel').disabled, true, 'cancel is disabled while the stop is in flight');
-  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 1, 'a second click sends nothing');
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + T1 + '/stop').length, 1, 'a second click sends nothing');
   release();
   await flush();
   assert.equal(dom.byId('stop-submit').disabled, false, 'submit is enabled again after the answer');
@@ -870,8 +883,8 @@ test('while a stop is in flight the send and cancel buttons are disabled, and th
 });
 
 test('a stop reason that is blank, longer than 500 characters or has a control character cannot be sent', async () => {
-  const goal = goalSummary({ state: 'TASKS_QUEUED', version: 4 });
-  const s = apState({ goals: [goal], detail: detailOf(goal, [taskOf({ version: 0 })]) });
+  const task = taskSummary({ state: 'QUEUED', version: 4 });
+  const s = apState({ tasks: [task], detail: detailOf(task) });
   const dom = load(apResponder(s));
   await flush();
   buttonIn(dom.byId('plans-list'), '詳細').fire('click');
@@ -884,7 +897,7 @@ test('a stop reason that is blank, longer than 500 characters or has a control c
     assert.equal(dom.byId('stop-submit').disabled, true, `${JSON.stringify(reason).slice(0, 20)}: cannot send`);
     dom.byId('stop-submit').fire('click');
     await flush();
-    assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + G1 + '/stop').length, 0, `${JSON.stringify(reason).slice(0, 20)}: no request`);
+    assert.equal(postsTo(dom.calls, '/api/selfdev/goals/' + T1 + '/stop').length, 0, `${JSON.stringify(reason).slice(0, 20)}: no request`);
   }
   assert.equal(dom.byId('stop-dialog').open, true, 'the dialog stays open');
 });
@@ -3103,8 +3116,8 @@ function asgLoad(s = {}, { hash = '' } = {}) {
     orderList: { status: 200, data: [orderOf()] },
     orderDetail: { status: 200, data: orderDetailOf({}, s.pending || null) },
     requestList: { status: 200, data: [stopRequestOf()] },
-    goals: [goalSummary({ state: 'PLAN_PROPOSED', version: 2 })],
-    detail: detailOf(goalSummary({ state: 'PLAN_PROPOSED', version: 2 }), [taskOf({ version: 0 })]),
+    tasks: [taskSummary({ version: 2 })],
+    detail: detailOf(taskSummary({ version: 2 })),
   });
   const orders = ordersOther(st);
   st.other = (p, init) => {
@@ -3656,7 +3669,7 @@ async function roleActions(me, { pending = null } = {}) {
   };
 }
 
-const WRITE_BUTTONS = ['この Plan を承認', 'このタスクを承認', '見送る', '中止…', '一時停止', '停止を要求', '承認', '却下', '解除…', 'この記録を削除'];
+const WRITE_BUTTONS = ['このタスクを承認', '見送る', '中止…', '一時停止', '停止を要求', '承認', '却下', '解除…', 'この記録を削除'];
 
 test('every write button is on the page when /me is absent, or the mode is shadow or off, whatever the role', async () => {
   for (const [label, me] of [
@@ -3691,7 +3704,7 @@ test('with the roles enforced, each permission shows exactly its own buttons', a
     ['ORDER_MANAGE', ['一時停止'], 'orderCreate'],
     ['STOP_REQUEST', ['停止を要求'], null],
     ['STOP_DECIDE', ['承認', '却下'], null],
-    ['GOAL_WRITE', ['この Plan を承認', 'このタスクを承認', '見送る', 'この記録を削除'], 'goalForm'],
+    ['GOAL_WRITE', ['このタスクを承認', '見送る', 'この記録を削除'], 'goalForm'],
     ['GOAL_STOP', ['中止…'], null],
     ['BUDGET_OVERRIDE', ['解除…'], null],
   ];

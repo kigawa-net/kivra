@@ -151,13 +151,13 @@
     autopilotCheckedAt: 0,
     promotion: null,
     promotionLoading: false,
-    goals: null,
+    tasks: null,
     goalsOkAt: 0,
     goalsFailed: false,
     goalsLoading: false,
     goalsPending: false,
     goalsLastAttemptAt: 0,
-    openGoalId: null,
+    openTaskId: null,
     detail: null,
     detailError: null,
     detailLoading: false,
@@ -1600,28 +1600,26 @@
   // Shown only when GET /api/selfdev/autopilot answers 200 with enabled. A 503 (disabled) or any other answer keeps every
   // autopilot control hidden. The operator's text (goal title and body, task text, reasons) enters the DOM through textContent only.
 
-  var GOAL_STATES = {
-    GOAL_SUBMITTED: { label: '計画待ち', desc: 'Goal を受け付けました。Planner が計画を作るのを待っています' },
+  // The states of a Task (selfdev_tasks.state, V40). An unknown state is shown as text, with no explanation.
+  var TASK_STATES = {
+    TASK_SUBMITTED: { label: '受付済み', desc: 'Task を受け付けました。Planner が作業を始めるのを待っています' },
     PLANNING: { label: '計画中', desc: 'Planner が計画を作っています' },
-    PLAN_PROPOSED: { label: '計画の承認待ち', desc: '計画ができました。Plan を確認し、承認すると、承認したタスクだけが投入されます' },
-    TASKS_QUEUED: { label: '承認済み', desc: '計画は承認されています。承認したタスクの投入を待っています' },
-    RUNNING: { label: '投入あり', desc: '投入済みのタスクがあります（Run が作られています）' },
+    PENDING_APPROVAL: { label: '承認待ち', desc: '運用者の承認が必要です。承認すると投入を待つ状態になります' },
+    QUEUED: { label: '承認済み', desc: '承認されています。投入を待っています' },
+    SUBMITTING: { label: '投入中', desc: 'Run を作成しています' },
+    SUBMITTED: { label: 'Run 作成済み', desc: 'Run が作られています' },
+    COMPLETED: { label: '完了', desc: 'PR をマージ済みです' },
+    FAILED: { label: '失敗', desc: '失敗しました（自動では再投入しません）' },
+    CANCELLED: { label: '解放済み', desc: '運用者が再投入するか見送ります' },
+    SKIPPED: { label: '見送り', desc: '却下、または中止により見送られました' },
     BLOCKED: { label: '停止中', desc: '止まっています。理由を確認してください' },
     PAUSED: { label: '一時停止中', desc: '運用者が一時停止しました' },
-    DONE: { label: '完了', desc: '全タスクが完了しました' },
-    STOPPED: { label: '中止', desc: '中止で終わりました（運用者の中止、またはタスクが完了せずに終わった）' }
+    DONE: { label: '全体完了', desc: '全タスクが完了しました' },
+    STOPPED: { label: '中止', desc: '運用者が中止しました' }
   };
 
-  var TASK_STATES = {
-    PENDING_APPROVAL: '承認待ち（運用者の承認が必要です）',
-    QUEUED: '承認済み（投入を待っています）',
-    SUBMITTING: '投入中',
-    SUBMITTED: 'Run を作成済み',
-    COMPLETED: '完了（PR をマージ済み）',
-    FAILED: '失敗（自動では再投入しません）',
-    CANCELLED: '解放済み（運用者が再投入するか見送ります）',
-    SKIPPED: '見送り（却下、または Goal の中止）'
-  };
+  /** A finished Task takes no stop: the stop button is not shown for these. */
+  var TASK_TERMINAL = ['COMPLETED', 'FAILED', 'CANCELLED', 'SKIPPED', 'DONE', 'STOPPED'];
 
   var GOAL_REASONS = {
     PLAN_INVALID: '計画の検証に失敗しました（再計画できます）',
@@ -1655,29 +1653,22 @@
     stale: '状態が変わっていました。一覧と詳細を読み直してから、もう一度操作してください。',
     refused: 'この操作は、今の状態では行えません。一覧と詳細を確認してください。',
     notFound: '見つかりません（既に消えたか、ID が違います）。',
-    planApproved: 'Plan を承認しました。投入の対象は、承認されたタスクだけです。',
     taskApproved: 'タスクを承認しました（投入を待っています）。',
     taskRejected: 'タスクを見送りました。',
     replanned: '再計画を要求しました。Planner が新しい計画を作ります。',
-    stopped: 'Goal を中止しました。未投入のタスクは見送りになります（作成済みの PR はそのままです）。',
+    stopped: 'タスクを中止しました（作成済みの PR はそのままです）。',
     pausedDone: '自律運転を一時停止しました。新しい投入は止まります（投入済みの Run は止めません）。',
     resumedDone: '自律運転を再開しました。',
     breakerDone: 'サーキットブレーカーを再開しました（連続失敗の数を 0 に戻しました）。',
-    approvalNeedsPlan: '先に Plan を承認してください。',
     reasonInvalid: '理由を確認してください（1〜500 文字、空白だけは使えません）。',
     network: '通信に失敗しました。もう一度お試しください。',
     unknown: '結果を確認できませんでした。一覧を読み直してください。'
   };
 
-  function goalStateInfo(s) {
+  function taskStateInfo(s) {
     var c = str(s);
-    if (has(GOAL_STATES, c)) return GOAL_STATES[c];
+    if (has(TASK_STATES, c)) return TASK_STATES[c];
     return { label: c === '' ? '（不明）' : c, desc: '不明な状態です' };
-  }
-
-  function taskStateText(s) {
-    var c = str(s);
-    return has(TASK_STATES, c) ? TASK_STATES[c] : (c === '' ? '（不明）' : c);
   }
 
   function goalReasonText(code) {
@@ -1751,7 +1742,7 @@
       state.goalSubmitting = false;
       updateGoalControls();
     }
-    var accepted = r.ok && (r.status === 202 || r.status === 200) && r.data && typeof r.data.goalId === 'string';
+    var accepted = r.ok && (r.status === 202 || r.status === 200) && r.data && typeof r.data.taskId === 'string';
     if (accepted) {
       state.goalKey = newKey();
       state.goalKeyFor = null;
@@ -1898,8 +1889,8 @@
       MEMS.enabled = false;
       MEMS.data = null;
       renderMemory();
-      state.goals = null;
-      state.openGoalId = null;
+      state.tasks = null;
+      state.openTaskId = null;
       state.detail = null;
       renderGoals();
       updateGoalControls();
@@ -1937,7 +1928,7 @@
     try {
       var r = await apiFetch('/api/selfdev/goals', 'GET');
       if (r.ok && Array.isArray(r.data)) {
-        state.goals = r.data;
+        state.tasks = r.data;
         state.goalsOkAt = Date.now();
         state.goalsFailed = false;
         renderGoals();
@@ -1973,52 +1964,52 @@
   function renderGoals() {
     var ul = $('plans-list');
     clear(ul);
-    if (!state.goals) return;
-    if (state.goals.length === 0) {
-      ul.appendChild(h('li', { className: 'empty', text: 'まだ Goal はありません。上のフォームから Goal を送れます。' }));
+    if (!state.tasks) return;
+    if (state.tasks.length === 0) {
+      ul.appendChild(h('li', { className: 'empty', text: 'まだ Task はありません。上のフォームから Goal を送れます。' }));
       return;
     }
-    state.goals.forEach(function (goal) {
-      if (goal && typeof goal === 'object' && typeof goal.goalId === 'string') ul.appendChild(goalRow(goal));
+    state.tasks.forEach(function (task) {
+      if (task && typeof task === 'object' && typeof task.taskId === 'string') ul.appendChild(taskRow(task));
     });
   }
 
-  function goalRow(goal) {
-    var id = str(goal.goalId);
-    var open = state.openGoalId === id;
-    var st = goalStateInfo(goal.state);
-    var updated = parseTime(goal.updatedAt);
-    var when = updated === null ? str(goal.updatedAt) : fmtLocal(updated);
+  function taskRow(task) {
+    var id = str(task.taskId);
+    var open = state.openTaskId === id;
+    var st = taskStateInfo(task.state);
+    var updated = parseTime(task.updatedAt);
+    var when = updated === null ? str(task.updatedAt) : fmtLocal(updated);
     var toggle = h('button', {
       type: 'button',
       className: 'secondary',
       text: open ? '閉じる' : '詳細',
       'aria-expanded': open ? 'true' : 'false',
-      'aria-controls': 'goal-detail-' + id
+      'aria-controls': 'task-detail-' + id
     });
-    toggle.addEventListener('click', function () { toggleGoal(id); });
+    toggle.addEventListener('click', function () { toggleTask(id); });
     var kids = [
       h('div', { className: 'run-head' }, [
-        h('span', { className: 'run-title', text: goalTitleOf(goal) }),
+        h('span', { className: 'run-title', text: goalTitleOf(task) }),
         h('span', { className: 'badge', text: '状態: ' + st.label })
       ]),
       h('div', { className: 'run-meta' }, [
         h('span', { className: 'time', text: '更新: ' + when }),
-        h('span', { className: 'time', text: '計画の回数: ' + str(goal.revision) })
+        h('span', { className: 'time', text: '依存するタスク: ' + (Array.isArray(task.dependencies) ? task.dependencies.length : 0) + ' 件' })
       ]),
       h('div', { className: 'run-sub' }, [
-        goal.stateReason ? h('span', { className: 'reason', text: '理由: ' + goalReasonText(goal.stateReason) }) : null
+        task.stateReason ? h('span', { className: 'reason', text: '理由: ' + goalReasonText(task.stateReason) }) : null
       ]),
       toggle
     ];
-    if (open) kids.push(goalDetailBox(id));
+    if (open) kids.push(taskDetailBox(id));
     return h('li', { className: 'run-item' }, kids);
   }
 
-  function goalDetailBox(id) {
-    var box = h('div', { className: 'goal-detail', id: 'goal-detail-' + id });
+  function taskDetailBox(id) {
+    var box = h('div', { className: 'goal-detail', id: 'task-detail-' + id });
     var d = state.detail;
-    if (state.detailLoading || !d || d.goalId !== id) {
+    if (state.detailLoading || !d || d.taskId !== id) {
       if (state.detailError) {
         box.appendChild(h('p', { className: 'error', text: MESSAGES[state.detailError] || MESSAGES.server }));
       } else {
@@ -2026,33 +2017,33 @@
       }
       return box;
     }
-    renderGoalDetail(box, d.data);
+    renderTaskDetail(box, d.data);
     return box;
   }
 
-  function toggleGoal(id) {
-    if (state.openGoalId === id) {
-      state.openGoalId = null;
+  function toggleTask(id) {
+    if (state.openTaskId === id) {
+      state.openTaskId = null;
       state.detail = null;
       state.detailError = null;
       renderGoals();
       return;
     }
-    state.openGoalId = id;
+    state.openTaskId = id;
     state.detail = null;
     state.detailError = null;
     renderGoals();
-    loadGoalDetail(id);
+    loadTaskDetail(id);
   }
 
-  async function loadGoalDetail(id) {
+  async function loadTaskDetail(id) {
     var seq = ++state.detailSeq;
     state.detailLoading = true;
     var r = await apiFetch('/api/selfdev/goals/' + encodeURIComponent(id), 'GET');
     if (seq !== state.detailSeq) return;
     state.detailLoading = false;
-    if (r.ok && r.data && typeof r.data === 'object' && r.data.goal && typeof r.data.goal === 'object') {
-      state.detail = { goalId: id, data: r.data };
+    if (r.ok && r.data && typeof r.data === 'object' && r.data.task && typeof r.data.task === 'object') {
+      state.detail = { taskId: id, data: r.data };
       state.detailError = null;
     } else {
       state.detail = null;
@@ -2061,42 +2052,31 @@
     renderGoals();
   }
 
-  /** Builds the goal detail: the body, the Plan(s) with their tasks, and the actions the current state allows. */
-  function renderGoalDetail(box, data) {
+  /** Builds the task detail from { task, body }: the body, the state, and the actions the current state allows. */
+  function renderTaskDetail(box, data) {
     clear(box);
-    var goal = data.goal;
-    var st = goalStateInfo(goal.state);
+    var task = data.task;
+    var st = taskStateInfo(task.state);
     box.appendChild(h('h3', { text: '本文' }));
     box.appendChild(h('pre', { className: 'task-body', text: typeof data.body === 'string' && data.body !== '' ? data.body : '（本文はありません）' }));
-    box.appendChild(h('p', { className: 'meta', text: '状態: ' + st.label + ' — ' + st.desc + (goal.stateReason ? '（' + goalReasonText(goal.stateReason) + '）' : '') }));
+    box.appendChild(h('p', { className: 'meta', text: '状態: ' + st.label + ' — ' + st.desc + (task.stateReason ? '（' + goalReasonText(task.stateReason) + '）' : '') }));
+    box.appendChild(h('p', { className: 'meta', text: '対象リポジトリ: ' + str(task.targetRepo) + '　試行: ' + str(task.attempts) + ' 回' }));
 
     var actions = [];
-    if (goal.state === 'PLAN_PROPOSED' && can('GOAL_WRITE')) {
-      actions.push(actionButton('この Plan を承認', function () { approvePlan(goal); }));
+    if (task.state === 'PENDING_APPROVAL' && can('GOAL_WRITE')) {
+      var approve = actionButton('このタスクを承認', function () { approveTask(task); });
+      approve.disabled = state.sessionExpired;
+      var reject = actionButton('見送る', function () { rejectTask(task); }, 'secondary');
+      reject.disabled = state.sessionExpired;
+      actions.push(approve, reject);
     }
-    if (goal.state === 'BLOCKED' && PLAN_BLOCK_CODES.indexOf(str(goal.stateReason)) !== -1 && can('GOAL_WRITE')) {
-      actions.push(actionButton('再計画する', function () { replanGoal(goal); }));
+    if (task.state === 'BLOCKED' && PLAN_BLOCK_CODES.indexOf(str(task.stateReason)) !== -1 && can('GOAL_WRITE')) {
+      actions.push(actionButton('再計画する', function () { replanTask(task); }));
     }
-    if (goal.state !== 'DONE' && goal.state !== 'STOPPED' && can('GOAL_STOP')) {
-      actions.push(actionButton('中止…', function () { openStop(goal); }, 'secondary'));
+    if (TASK_TERMINAL.indexOf(str(task.state)) === -1 && can('GOAL_STOP')) {
+      actions.push(actionButton('中止…', function () { openStop(task); }, 'secondary'));
     }
     if (actions.length) box.appendChild(h('div', { className: 'detail-actions' }, actions));
-
-    var plans = Array.isArray(data.plans) ? data.plans : [];
-    if (plans.length === 0) {
-      box.appendChild(h('p', { className: 'empty', text: 'まだ計画はありません（Planner が作るのを待っています）' }));
-      return;
-    }
-    plans.forEach(function (plan) {
-      if (!plan || typeof plan !== 'object') return;
-      box.appendChild(h('h3', { text: '計画 ' + str(plan.revision) + '（' + str(plan.state) + '）' }));
-      if (plan.summary) box.appendChild(h('p', { className: 'meta', text: str(plan.summary) }));
-      var ol = h('ol', { className: 'tasks' }, []);
-      (Array.isArray(plan.tasks) ? plan.tasks : []).forEach(function (task) {
-        if (task && typeof task === 'object') ol.appendChild(taskItem(goal, task));
-      });
-      box.appendChild(ol);
-    });
   }
 
   function actionButton(text, onClick, cls) {
@@ -2105,38 +2085,11 @@
     return b;
   }
 
-  function taskItem(goal, task) {
-    var kids = [
-      h('div', { className: 'run-head' }, [
-        h('span', { className: 'run-title', text: str(task.ordinal) + '. ' + clip(task.title, MAX_TITLE) }),
-        h('span', { className: 'badge', text: taskStateText(task.state) })
-      ])
-    ];
-    var sub = [
-      h('span', { text: '規模: ' + str(task.sizeEstimate) }),
-      h('span', { text: '対象: ' + (Array.isArray(task.targetPaths) ? task.targetPaths.join(', ') : '') })
-    ];
-    if (task.requiresApproval === true) sub.push(h('span', { className: 'reason', text: '変更範囲に承認が必要なパス（承認なしでは投入されません）' }));
-    if (task.stateReason) sub.push(h('span', { className: 'reason', text: '理由: ' + goalReasonText(task.stateReason) }));
-    kids.push(h('div', { className: 'run-sub' }, sub));
-    if (typeof task.body === 'string' && task.body !== '') kids.push(h('pre', { className: 'task-body', text: task.body }));
-    if (task.state === 'PENDING_APPROVAL' && can('GOAL_WRITE')) {
-      var planApproved = goal.state !== 'PLAN_PROPOSED';
-      var approve = actionButton('このタスクを承認', function () { approveTask(goal, task); });
-      approve.disabled = !planApproved || state.sessionExpired;
-      var reject = actionButton('見送る', function () { rejectTask(goal, task); }, 'secondary');
-      reject.disabled = state.sessionExpired;
-      kids.push(h('div', { className: 'detail-actions' }, [approve, reject]));
-      if (!planApproved) kids.push(h('p', { className: 'meta', text: AP.approvalNeedsPlan }));
-    }
-    return h('li', { className: 'task' }, kids);
-  }
-
   /**
    * The shared tail of the approval and state actions. The caller sends the request (so each apiFetch path is a literal) and passes
-   * the promise in. The body carries the version the operator read (compare and set), and the goal is reloaded afterwards.
+   * the promise in. The body carries the version the operator read (compare and set), and the list and the detail are reloaded afterwards.
    */
-  async function goalWrite(pending, goalId, okText) {
+  async function taskWrite(pending, taskId, okText) {
     var r = await pending;
     var msg;
     if (r.ok) {
@@ -2155,31 +2108,26 @@
     $('plans-msg').textContent = msg;
     $('plans-msg').className = 'result' + (r.ok ? ' ok' : ' error');
     refreshGoals();
-    if (state.openGoalId === goalId) {
+    if (state.openTaskId === taskId) {
       state.detail = null;
-      loadGoalDetail(goalId);
+      loadTaskDetail(taskId);
     }
     return r;
   }
 
-  function approvePlan(goal) {
+  function replanTask(task) {
     if (state.sessionExpired) return;
-    goalWrite(apiFetch('/api/selfdev/goals/' + encodeURIComponent(goal.goalId) + '/approve-plan', 'POST', { version: goal.version }), goal.goalId, AP.planApproved);
+    taskWrite(apiFetch('/api/selfdev/goals/' + encodeURIComponent(str(task.taskId)) + '/replan', 'POST', { version: task.version }), str(task.taskId), AP.replanned);
   }
 
-  function replanGoal(goal) {
+  function approveTask(task) {
     if (state.sessionExpired) return;
-    goalWrite(apiFetch('/api/selfdev/goals/' + encodeURIComponent(goal.goalId) + '/replan', 'POST', { version: goal.version }), goal.goalId, AP.replanned);
+    taskWrite(apiFetch('/api/selfdev/tasks/' + encodeURIComponent(str(task.taskId)) + '/approve', 'POST', { version: task.version }), str(task.taskId), AP.taskApproved);
   }
 
-  function approveTask(goal, task) {
+  function rejectTask(task) {
     if (state.sessionExpired) return;
-    goalWrite(apiFetch('/api/selfdev/tasks/' + encodeURIComponent(str(task.taskId)) + '/approve', 'POST', { version: task.version }), goal.goalId, AP.taskApproved);
-  }
-
-  function rejectTask(goal, task) {
-    if (state.sessionExpired) return;
-    goalWrite(apiFetch('/api/selfdev/tasks/' + encodeURIComponent(str(task.taskId)) + '/reject', 'POST', { version: task.version }), goal.goalId, AP.taskRejected);
+    taskWrite(apiFetch('/api/selfdev/tasks/' + encodeURIComponent(str(task.taskId)) + '/reject', 'POST', { version: task.version }), str(task.taskId), AP.taskRejected);
   }
 
   /**
@@ -2245,10 +2193,10 @@
     el.hidden = text === '';
   }
 
-  function openStop(goal) {
-    state.stop = { goalId: goal.goalId, version: goal.version };
-    $('stop-title').textContent = 'Goal の中止';
-    $('stop-explain').textContent = 'この Goal を中止します。まだ投入していないタスクは見送りになります。作成済みの PR は閉じず、マージもしません（PR の扱いは人が決めます）。';
+  function openStop(task) {
+    state.stop = { taskId: str(task.taskId), version: task.version };
+    $('stop-title').textContent = 'タスクの中止';
+    $('stop-explain').textContent = 'このタスクを中止します。まだ投入していなければ見送りになります。作成済みの PR は閉じず、マージもしません（PR の扱いは人が決めます）。';
     showStopError('');
     openReasonDialog({
       dialog: 'stop-dialog', input: 'stop-reason', submit: 'stop-submit', cancel: 'stop-cancel',
@@ -2261,16 +2209,16 @@
     var s = state.stop;
     if (!s || state.sessionExpired) return;
     showStopError('');
-    var r = await apiFetch('/api/selfdev/goals/' + encodeURIComponent(s.goalId) + '/stop', 'POST', { version: s.version, reason: reason });
+    var r = await apiFetch('/api/selfdev/goals/' + encodeURIComponent(s.taskId) + '/stop', 'POST', { version: s.version, reason: reason });
     if (r.ok) {
       state.stop = null;
       $('stop-dialog').close();
       $('plans-msg').textContent = AP.stopped;
       $('plans-msg').className = 'result ok';
       refreshGoals();
-      if (state.openGoalId === s.goalId) {
+      if (state.openTaskId === s.taskId) {
         state.detail = null;
-        loadGoalDetail(s.goalId);
+        loadTaskDetail(s.taskId);
       }
       return;
     }

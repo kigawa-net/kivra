@@ -38,7 +38,7 @@ import net.kigawa.kivra.ui.screens.*
  */
 @Composable
 fun KivraApp() {
-    var currentRoute by remember { mutableStateOf("tasks") }
+    var currentRoute by remember { mutableStateOf(NavDestination.Home.route) }
     val currentDestination = NavDestination.fromRoute(currentRoute)
     var projects by remember { mutableStateOf<List<ApiProject>>(emptyList()) }
     var selectedProjectId by remember { mutableStateOf<String?>(null) }
@@ -59,6 +59,11 @@ fun KivraApp() {
                 PermanentDrawerSheet(modifier = Modifier.width(200.dp)) {
                     Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
                         Text("Kivra", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(8.dp))
+                        NavigationDrawerItem(
+                            selected = currentRoute == NavDestination.Home.route,
+                            onClick = { currentRoute = NavDestination.Home.route },
+                            label = { Text(NavDestination.Home.label) }
+                        )
                         NavDestination.grouped.forEach { (group, items) ->
                             Text(
                                 text = group.label,
@@ -111,6 +116,7 @@ fun KivraApp() {
                     // Main content
                     val projectId = selectedProjectId
                     when (currentDestination) {
+                        NavDestination.Home -> HomeScreen(projectId) { currentRoute = it.route }
                         NavDestination.Tasks -> TasksScreen(projectId)
                         NavDestination.Goals -> GoalsScreen(projectId)
                         NavDestination.Orders -> OrdersScreen(projectId)

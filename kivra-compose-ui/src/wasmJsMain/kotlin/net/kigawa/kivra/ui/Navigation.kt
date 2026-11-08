@@ -13,7 +13,9 @@ enum class NavGroup(val label: String) {
 /**
  * Navigation destinations for the Kivra app.
  */
-sealed class NavDestination(val route: String, val label: String, val group: NavGroup) {
+sealed class NavDestination(val route: String, val label: String, val group: NavGroup?) {
+    /** グループに属さない最上位項目(要対応サマリ)。 */
+    object Home : NavDestination("home", "ホーム", null)
     object Tasks : NavDestination("tasks", "タスク", NavGroup.Work)
     object Goals : NavDestination("goals", "開発目標", NavGroup.Work)
     object Orders : NavDestination("orders", "order", NavGroup.Work)
@@ -23,14 +25,14 @@ sealed class NavDestination(val route: String, val label: String, val group: Nav
     object Assignees : NavDestination("assignees", "担当", NavGroup.Admin)
 
     companion object {
-        val all = listOf(Tasks, Goals, Orders, Approvals, Budget, Memory, Assignees)
+        val all = listOf(Home, Tasks, Goals, Orders, Approvals, Budget, Memory, Assignees)
 
         /** グループ順に並べた (グループ, 項目一覧)。空のグループは含めない。 */
         val grouped: List<Pair<NavGroup, List<NavDestination>>> =
             NavGroup.entries.map { g -> g to all.filter { it.group == g } }.filter { it.second.isNotEmpty() }
 
         fun fromRoute(route: String): NavDestination {
-            return all.find { it.route == route } ?: Tasks
+            return all.find { it.route == route } ?: Home
         }
     }
 }

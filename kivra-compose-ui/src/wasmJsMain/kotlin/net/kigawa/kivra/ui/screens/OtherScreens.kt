@@ -12,6 +12,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
+import net.kigawa.kivra.ui.GatedOperation
+import net.kigawa.kivra.ui.LocalCallerPermissions
 import net.kigawa.kivra.ui.OperatorAction
 import net.kigawa.kivra.ui.budgetPathLabel
 import net.kigawa.kivra.ui.reservationLabel
@@ -35,6 +37,7 @@ fun BudgetScreen() {
     var target by remember { mutableStateOf<ApiUnpricedReservation?>(null) }
     var dialogError by remember { mutableStateOf<String?>(null) }
     val gate = rememberOperatorWriteGate()
+    val perms = LocalCallerPermissions.current
 
     LaunchedEffect(reloadKey) {
         loading = true
@@ -86,7 +89,11 @@ fun BudgetScreen() {
                 }
             }
             Spacer(modifier = Modifier.height(12.dp))
-            UnpricedReservationsSection(b, onRelease = { target = it; dialogError = null })
+            UnpricedReservationsSection(
+                b,
+                mayRelease = perms.can(GatedOperation.ACKNOWLEDGE_BUDGET),
+                onRelease = { target = it; dialogError = null },
+            )
         }
     }
 
@@ -133,10 +140,14 @@ fun BudgetScreen() {
 
 /**
  * 未確定の予約の一覧(旧 UI の予算カードと同じ内容)。各行の「解除…」で [onRelease] を呼ぶ。
- * サーバーの一覧は上限件数まで。残りがあれば件数の注記を出す。
+ * サーバーの一覧は上限件数まで。残りがあれば件数の注記を出す。[mayRelease] が false なら「解除…」を出さない(BUDGET_OVERRIDE が要る)。
  */
 @Composable
-private fun UnpricedReservationsSection(budget: ApiBudget, onRelease: (ApiUnpricedReservation) -> Unit) {
+private fun UnpricedReservationsSection(
+    budget: ApiBudget,
+    mayRelease: Boolean,
+    onRelease: (ApiUnpricedReservation) -> Unit,
+) {
     Text("未確定の予約", style = MaterialTheme.typography.titleMedium)
     Text(
         if (budget.unpricedCount == 0L) {
@@ -153,7 +164,7 @@ private fun UnpricedReservationsSection(budget: ApiBudget, onRelease: (ApiUnpric
                 Spacer(modifier = Modifier.height(4.dp))
                 Text("金額 ${row.amountJpy} 円、期間 ${row.period}、状態 ${row.state}", style = MaterialTheme.typography.bodySmall)
                 Text("理由: ${BUDGET_REASON_TEXT[row.reason] ?: row.reason}", style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(onClick = { onRelease(row) }) { Text("解除…") }
+                if (mayRelease) OutlinedButton(onClick = { onRelease(row) }) { Text("解除…") }
             }
         }
     }

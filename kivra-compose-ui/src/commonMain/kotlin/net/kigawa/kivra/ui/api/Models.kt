@@ -9,6 +9,18 @@ import kotlinx.serialization.Serializable
  * Unknown keys are ignored (ignoreUnknownKeys = true in ApiClient), so only the fields the UI reads are listed where noted.
  */
 
+/**
+ * `GET /api/selfdev/me` (server `MeResponse`). mode は off / shadow / enforce、role と permissions は権限の名前(文字列)。
+ * 判定は PermissionRules.kt の CallerPermissions.of で行う。
+ */
+@Serializable
+data class ApiMe(
+    val mode: String,
+    val role: String,
+    val permissions: List<String>,
+    val source: String? = null,
+)
+
 @Serializable
 data class ApiRun(
     val runId: String,

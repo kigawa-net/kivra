@@ -20,7 +20,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,11 +35,35 @@ import net.kigawa.kivra.ui.api.ApiProject
 import net.kigawa.kivra.ui.screens.*
 
 /**
+ * 呼び出し者の権限。[KivraApp] が `/api/selfdev/me` を 1 回読んで入れる。読めていないときは [CallerPermissions.UNKNOWN]
+ * (何も隠さない。旧 UI と同じ)。各画面は [LocalCallerPermissions].current で操作の出し分けに使う。
+ */
+val LocalCallerPermissions = compositionLocalOf { CallerPermissions.UNKNOWN }
+
+/**
  * Root composable for the Kivra Compose UI.
  * This is the entry point for all platforms (Web, Desktop, Android, iOS).
  */
 @Composable
 fun KivraApp() {
+    // 権限は読み込みのたびではなく起動時に 1 回だけ読む(旧 UI の loadMe と同じ)。失敗は UNKNOWN。
+    // 表示の出し分けは UX のためで、サーバーが各リクエストで判定する。
+    var permissions by remember { mutableStateOf(CallerPermissions.UNKNOWN) }
+    LaunchedEffect(Unit) {
+        permissions = try {
+            CallerPermissions.of(ApiClient.getMe())
+        } catch (e: Exception) {
+            CallerPermissions.UNKNOWN
+        }
+    }
+    CompositionLocalProvider(LocalCallerPermissions provides permissions) {
+        KivraAppContent()
+    }
+}
+
+@Composable
+private fun KivraAppContent() {
+    val perms = LocalCallerPermissions.current
     // 画面のルート。ブラウザのハッシュ(#/runs/<id> 等)と双方向に同期する: 読み込み時に解釈し、遷移時に書き、戻る/進むで読み直す。
     var route by remember { mutableStateOf(parseRoute(currentLocationHash())) }
     val navigate: (Route) -> Unit = { target ->
@@ -79,7 +105,10 @@ fun KivraApp() {
                             onClick = { navigate(Route.Page(NavDestination.Home)) },
                             label = { Text(NavDestination.Home.label) }
                         )
-                        NavDestination.grouped.forEach { (group, items) ->
+                        NavDestination.grouped.forEach { (group, allItems) ->
+                            // 権限で隠す項目を外し、残りが無いグループは見出しごと出さない。
+                            val items = allItems.filter { perms.navVisible(it) }
+                            if (items.isEmpty()) return@forEach
                             Text(
                                 text = group.label,
                                 style = MaterialTheme.typography.labelMedium,

@@ -12,6 +12,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.GOAL_STOP_REASON_MAX
+import net.kigawa.kivra.ui.GatedOperation
+import net.kigawa.kivra.ui.LocalCallerPermissions
 import net.kigawa.kivra.ui.OperatorAction
 import net.kigawa.kivra.ui.RUN_RELEASE_REASON_MAX
 import net.kigawa.kivra.ui.ReleaseKind
@@ -44,6 +46,7 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
     // 解放の後に増やして、詳細を読み直させる。
     var reloadKey by remember { mutableStateOf(0) }
     var notice by remember { mutableStateOf<String?>(null) }
+    val perms = LocalCallerPermissions.current
     val state by produceState<LoadState<ApiRun>>(LoadState.Loading, runId, reloadKey) {
         value = LoadState.Loading
         value = loadState { ApiClient.getRun(runId) }
@@ -73,8 +76,8 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
                 }
             }
             Spacer(Modifier.height(12.dp))
-            // 運用者の解放。UNKNOWN、または束縛のない PULL_REQUEST の Run だけ出す(旧 UI と同じ条件)。
-            releaseKindOf(run)?.let { kind ->
+            // 運用者の解放。UNKNOWN、または束縛のない PULL_REQUEST の Run だけ出す(旧 UI と同じ条件)。BUDGET_OVERRIDE の人だけ。
+            releaseKindOf(run)?.takeIf { perms.can(GatedOperation.RELEASE_RUN) }?.let { kind ->
                 RunReleaseSection(runId = run.runId, kind = kind, onReleased = { notice = it; reloadKey++ })
                 Spacer(Modifier.height(12.dp))
             }
@@ -187,6 +190,7 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
     var notice by remember { mutableStateOf<ActionNotice?>(null) }
     val scope = rememberCoroutineScope()
     val stopGate = rememberOperatorWriteGate()
+    val perms = LocalCallerPermissions.current
     var stopOpen by remember { mutableStateOf(false) }
     var stopError by remember { mutableStateOf<String?>(null) }
 
@@ -234,8 +238,8 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
                 }
             }
             Spacer(Modifier.height(12.dp))
-            // 承認待ちで、計画の親でない Task だけ承認・見送りを出す(旧 UI と同じ条件)。権限が無ければ 403 が文言で出る。
-            if (goal.state == "PENDING_APPROVAL" && goal.revision == 0) {
+            // 承認待ちで、計画の親でない Task だけ承認・見送りを出す(旧 UI と同じ条件)。GOAL_WRITE の人だけ出す。
+            if (goal.state == "PENDING_APPROVAL" && goal.revision == 0 && perms.can(GatedOperation.APPROVE_GOAL)) {
                 notice?.let { n ->
                     Text(
                         n.text,
@@ -261,8 +265,8 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
                     Spacer(Modifier.height(12.dp))
                 }
             }
-            // 中止は終端でない Goal だけ(旧 UI と同じ条件)。理由は必須で、送るだけで保存しない。
-            if (canStopGoal(goal.state)) {
+            // 中止は終端でない Goal だけ(旧 UI と同じ条件)。GOAL_STOP の人だけ。理由は必須で、送るだけで保存しない。
+            if (canStopGoal(goal.state) && perms.can(GatedOperation.STOP_GOAL)) {
                 OutlinedButton(onClick = { stopError = null; stopOpen = true }) { Text("中止…") }
                 Spacer(Modifier.height(12.dp))
                 if (stopOpen) {

@@ -141,6 +141,12 @@ object ApiClient {
         }
     }
 
+    /**
+     * 呼び出し者の役割と権限。`GET /api/selfdev/me`。どの運用者にも 200 で返る。失敗は [ApiException]
+     * (呼び出し側は [net.kigawa.kivra.ui.CallerPermissions.UNKNOWN] として扱う)。
+     */
+    suspend fun getMe(): ApiMe = getJson("/api/selfdev/me")
+
     /** Goals (= selfdev tasks). `GET /api/selfdev/goals`. 503 `AUTOPILOT_DISABLED` while the autopilot is off. */
     suspend fun getGoals(): List<ApiGoal> =
         getJson("/api/selfdev/goals")

@@ -316,7 +316,15 @@ class SelfDevOrderRepository(
      * Creates the root order, ACTIVE, with no cycle yet. The tree has one root: the UNIQUE `root_slot` refuses a second one, and that
      * refusal is returned as [CreateRootResult.RootExists].
      */
-    fun createRoot(createdBy: String, title: String, policy: String, targetRepo: String, maxCycles: Int = 1): CreateRootResult = try {
+    fun createRoot(
+        createdBy: String,
+        title: String,
+        policy: String,
+        targetRepo: String,
+        maxCycles: Int = 1,
+        /** The project the order belongs to (V42, ADR 0022). The API requires it; the repository itself does not. */
+        projectId: String? = null,
+    ): CreateRootResult = try {
         require(maxCycles in 1..MAX_CYCLES_LIMIT) { "maxCycles must be 1 to $MAX_CYCLES_LIMIT" }
         transaction(database) {
             val now = utcNow(clock)
@@ -324,10 +332,10 @@ class SelfDevOrderRepository(
             execUpdate(
                 """
                 INSERT INTO selfdev_orders (order_id, parent_order_id, depth, root_slot, title, policy, target_repo, max_cycles,
-                    cycles_started, consecutive_failed_cycles, state, expires_at, created_by, version, created_at, updated_at)
-                VALUES (?, NULL, 0, 1, ?, ?, ?, ?, 0, 0, 'ACTIVE', ?, ?, 0, ?, ?)
+                    cycles_started, consecutive_failed_cycles, state, expires_at, created_by, version, created_at, updated_at, project_id)
+                VALUES (?, NULL, 0, 1, ?, ?, ?, ?, 0, 0, 'ACTIVE', ?, ?, 0, ?, ?, ?)
                 """.trimIndent(),
-                orderId, title, policy, targetRepo, maxCycles, now.plus(orderTtl), createdBy, now, now,
+                orderId, title, policy, targetRepo, maxCycles, now.plus(orderTtl), createdBy, now, now, projectId,
             )
             appendEvent(orderId, null, "ORDER_CREATED", null, OrderState.ACTIVE, null, OrderActor.HUMAN, createdBy, null, now)
             CreateRootResult.Created(getIn(orderId) ?: error("order vanished after insert"))
@@ -384,11 +392,11 @@ class SelfDevOrderRepository(
                 """
                 INSERT INTO selfdev_orders (order_id, parent_order_id, depth, root_slot, title, policy, target_repo, max_cycles,
                     cycles_started, consecutive_failed_cycles, state, expires_at, created_by, version, created_at, updated_at,
-                    order_budget_jpy, allocated_jpy, child_count, idempotency_key)
-                VALUES (?, ?, ?, NULL, ?, ?, ?, 1, 0, 0, 'ACTIVE', ?, ?, 0, ?, ?, ?, 0, 0, ?)
+                    order_budget_jpy, allocated_jpy, child_count, idempotency_key, project_id)
+                VALUES (?, ?, ?, NULL, ?, ?, ?, 1, 0, 0, 'ACTIVE', ?, ?, 0, ?, ?, ?, 0, 0, ?, ?)
                 """.trimIndent(),
                 childId, parentId, parent.depth + 1, title, policy, parent.targetRepo, lifetimeEnd, createdBy, now, now,
-                orderBudgetJpy, idempotencyKey,
+                orderBudgetJpy, idempotencyKey, parent.projectId,
             )
             val changed = execUpdate(
                 """
@@ -578,11 +586,11 @@ class SelfDevOrderRepository(
             execUpdate(
                 """
                 INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, dependencies,
-                    requires_approval, revision, attempts, version, created_at, updated_at, order_id, cycle_no)
-                VALUES (?, ?, ?, ?, ?, ?, 'TASK_SUBMITTED', '[]', TRUE, 0, 0, 0, ?, ?, ?, ?)
+                    requires_approval, revision, attempts, version, created_at, updated_at, order_id, cycle_no, project_id)
+                VALUES (?, ?, ?, ?, ?, ?, 'TASK_SUBMITTED', '[]', TRUE, 0, 0, 0, ?, ?, ?, ?, ?)
                 """.trimIndent(),
                 taskId, by.taskCreator, "order:$orderId:cycle:$cycleNo", current.title, current.policy, current.targetRepo, now, now,
-                orderId, cycleNo,
+                orderId, cycleNo, current.projectId,
             )
         } catch (e: Exception) {
             // The cycle's number or its idempotency key is taken: the cycle already exists, so none is started twice.

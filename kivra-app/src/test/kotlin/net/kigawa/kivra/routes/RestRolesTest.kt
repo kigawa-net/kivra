@@ -118,7 +118,12 @@ class RestRolesTest {
                 configureSelfDevAdminRoutes(db.runs, identity, guard)
                 configureBudgetAdminRoutes(budget, identity, operatorView = view, guard = guard)
                 configureTaskApiRoutes(db.runs, identity, null, guard)
-                configureSelfDevRoutes(SelfDevRouteDeps(db.runs, identity, RepoRef("kigawa-net", "kivra"), 1000, FakeGitHub(), guard))
+                configureSelfDevRoutes(
+                    SelfDevRouteDeps(
+                        db.runs, identity, RepoRef("kigawa-net", "kivra"), 1000, FakeGitHub(),
+                        net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()), guard,
+                    ),
+                )
                 configureOperationApiRoutes(db.runs, db.journal, identity, guard)
                 configureRunViewRoutes(db.runs, identity, SelfDevSettings.fromEnv(emptyMap()), guard)
                 configureRunExecutionRoutes(exec)

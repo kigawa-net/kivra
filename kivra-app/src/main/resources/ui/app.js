@@ -699,7 +699,41 @@
     if (r.ok && Array.isArray(r.data)) {
       state.projects = r.data;
       renderProjectSidebar();
+      fillProjectSelects();
     }
+  }
+
+  // ---- Project choice for the creation forms (ADR 0022, PR-C): a goal and an order belong to one project, chosen in its form.
+
+  var PROJECT_SELECT_IDS = ['goal-project', 'order-project'];
+  var PROJECT_ID_PATTERN = /^[0-9A-Z]{26}$/;
+
+  /** Fills the project selects from the project list. The first option is the placeholder (value ''), so nothing is chosen by default. */
+  function fillProjectSelects() {
+    PROJECT_SELECT_IDS.forEach(function (id) {
+      var sel = $(id);
+      if (!sel) return;
+      var keep = sel.value;
+      while (sel.firstChild) sel.removeChild(sel.firstChild);
+      var placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = '選んでください';
+      sel.appendChild(placeholder);
+      (Array.isArray(state.projects) ? state.projects : []).forEach(function (p) {
+        if (!p || typeof p.projectId !== 'string' || typeof p.name !== 'string') return;
+        var option = document.createElement('option');
+        option.value = p.projectId;
+        option.textContent = p.name;
+        sel.appendChild(option);
+      });
+      sel.value = keep;
+    });
+  }
+
+  /** The chosen project of a form, or null when none is chosen. */
+  function chosenProjectId(selectId) {
+    var v = $(selectId).value;
+    return typeof v === 'string' && PROJECT_ID_PATTERN.test(v) ? v : null;
   }
 
   function renderProjectSidebar() {
@@ -1829,6 +1863,7 @@
     goalReplayed: 'この Goal は既に受け付け済みです（二重には作られません）。',
     goalKeyConflict: 'この投入キーは別の内容で既に使われていました。投入キーを作り直しました。内容を確認して、もう一度送ってください。',
     goalBad: '入力内容を確認してください（目的は 1〜200 文字、本文は 0〜8000 文字。制御文字は使えません）。',
+    goalNoProject: 'プロジェクトを選んでください。',
     stale: '状態が変わっていました。一覧と詳細を読み直してから、もう一度操作してください。',
     refused: 'この操作は、今の状態では行えません。一覧と詳細を確認してください。',
     notFound: '見つかりません（既に消えたか、ID が違います）。',
@@ -1877,8 +1912,8 @@
   }
 
   /** The key stays the same while the title and the body stay the same (a retry is the same Goal). */
-  function keyForGoal(title, body) {
-    var sig = title + '\n' + body;
+  function keyForGoal(title, body, projectId) {
+    var sig = title + '\n' + body + '\n' + projectId;
     if (state.goalKeyFor !== sig) {
       if (state.goalKeyFor !== null) state.goalKey = newKey();
       state.goalKeyFor = sig;
@@ -1909,7 +1944,12 @@
       showGoalResult(AP.goalBad, 'error');
       return;
     }
-    var body = { title: title, idempotencyKey: keyForGoal(title, text) };
+    var projectId = chosenProjectId('goal-project');
+    if (projectId === null) {
+      showGoalResult(AP.goalNoProject, 'error');
+      return;
+    }
+    var body = { title: title, idempotencyKey: keyForGoal(title, text, projectId), projectId: projectId };
     if (text !== '') body.body = text;
     state.goalSubmitting = true;
     updateGoalControls();
@@ -3439,6 +3479,8 @@
   // the result, the log and the errors use only the fixed texts below. The server checks the length and the characters too.
 
   var ORDER_CREATE_MSG = {
+    noProject: 'プロジェクトを選んでください。',
+    projectNotFound: '選んだプロジェクトが見つかりません。画面を読み直してから、もう一度選んでください。',
     saved: 'order を作成しました。',
     bad: '題名は 1〜200 文字、方針は 1〜2000 文字で入力してください（制御文字は使えません）',
     rootExists: 'ルートの order は既にあります',
@@ -3483,6 +3525,7 @@
     if (r.kind === 'session') return MESSAGES.session;
     // The server answers a second root with 409 and only its error text (no code), and a create has no other conflict.
     if (r.status === 409) return ORDER_CREATE_MSG.rootExists;
+    if (r.status === 404) return ORDER_CREATE_MSG.projectNotFound;
     if (r.status === 400 && r.code === 'MAX_CYCLES_INVALID') return ORDER_CREATE_MSG.maxCycles;
     if (r.status === 400) return ORDER_CREATE_MSG.invalid;
     if (r.status === 403) return ORDER_CREATE_MSG.forbidden;
@@ -3505,12 +3548,17 @@
       showOrderCreateResult(ORDER_CREATE_MSG.maxCycles, 'error');
       return;
     }
+    var projectId = chosenProjectId('order-project');
+    if (projectId === null) {
+      showOrderCreateResult(ORDER_CREATE_MSG.noProject, 'error');
+      return;
+    }
     state.orderSubmitting = true;
     updateOrderCreate();
     showOrderCreateResult(ORDER_CREATE_MSG.sending, '');
     var r;
     try {
-      r = await apiFetch('/api/selfdev/orders', 'POST', { title: f.title, policy: f.policy, maxCycles: f.maxCycles });
+      r = await apiFetch('/api/selfdev/orders', 'POST', { title: f.title, policy: f.policy, maxCycles: f.maxCycles, projectId: projectId });
     } finally {
       state.orderSubmitting = false;
       updateOrderCreate();

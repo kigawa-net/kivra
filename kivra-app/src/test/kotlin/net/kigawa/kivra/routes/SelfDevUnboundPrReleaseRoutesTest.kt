@@ -54,12 +54,16 @@ class SelfDevUnboundPrReleaseRoutesTest {
     private val ttl = Duration.ofSeconds(30)
     private val github = FakeGitHub()
 
+    /** The project every submission in a test is made under; set by [setUp]. */
+    private var projectId = ""
+
     private fun ApplicationTestBuilder.setUp(db: TestDb, maxActive: Int = 1) {
+        projectId = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()).create("Route project", null).projectId
         application {
             install(ContentNegotiation) { json() }
             routing {
                 configureSelfDevAdminRoutes(db.runs, identity)
-                configureSelfDevRoutes(SelfDevRouteDeps(db.runs, identity, RepoRef("kigawa-net", "kivra"), maxActive, github))
+                configureSelfDevRoutes(SelfDevRouteDeps(db.runs, identity, RepoRef("kigawa-net", "kivra"), maxActive, github, net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC())))
             }
         }
     }
@@ -75,7 +79,7 @@ class SelfDevUnboundPrReleaseRoutesTest {
         client.post("/api/selfdev/tasks") {
             header("X-Test-Principal", principal)
             contentType(ContentType.Application.Json)
-            setBody("""{"title":"README を直す","idempotencyKey":"$key"}""")
+            setBody("""{"title":"README を直す","idempotencyKey":"$key","projectId":"$projectId"}""")
         }
 
     private fun TestDb.submitSelfDev(principal: String, key: String): RunId =

@@ -445,11 +445,27 @@ class SelfDevMemoryRepository(
     private fun org.jetbrains.exposed.sql.Transaction.insertRecord(id: String, c: MemoryCandidate, n: NormalizedMemory, now: LocalDateTime) {
         execUpdate(
             "INSERT INTO selfdev_memory_records (record_id, kind, source_kind, trust_tier, goal_id, plan_id, run_id, task_ordinal, body, " +
-                "body_sha256, body_chars, code, count_value, identity_sha256, status, created_by_hash, created_at, deleted_at, delete_reason_code) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, NULL, NULL)",
+                "body_sha256, body_chars, code, count_value, identity_sha256, status, created_by_hash, created_at, deleted_at, delete_reason_code, project_id) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, NULL, NULL, ?)",
             id, n.kind.name, n.source.name, n.tier.name, c.goalId, c.planId, c.runId, c.taskOrdinal, n.body, n.bodySha256, n.bodyChars,
-            n.code, n.countValue, n.identitySha256, n.actorHash, now,
+            n.code, n.countValue, n.identitySha256, n.actorHash, now, projectOfContext(c),
         )
+    }
+
+    /**
+     * The project of the record's context (ADR 0022): the project of the goal's task, else of the plan's task, else of the run. Null when
+     * none of them has one, or none of them exists. Only the project id is read; no text.
+     */
+    private fun org.jetbrains.exposed.sql.Transaction.projectOfContext(c: MemoryCandidate): String? {
+        for (taskId in listOfNotNull(c.goalId, c.planId)) {
+            val rows = execQuery("SELECT project_id FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }
+            rows.firstOrNull()?.let { return it }
+        }
+        c.runId?.let { runId ->
+            val rows = execQuery("SELECT project_id FROM development_runs WHERE run_id = ?", runId) { it.getString(1) }
+            rows.firstOrNull()?.let { return it }
+        }
+        return null
     }
 
     /** The only INSERT into `selfdev_memory_events`. It takes fixed codes, counts and hashes only: never text. */

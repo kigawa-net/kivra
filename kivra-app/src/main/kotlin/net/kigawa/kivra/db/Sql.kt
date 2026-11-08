@@ -73,5 +73,7 @@ internal object SelfDevTasksTable : Table("selfdev_tasks") {
     val updatedAt = datetime("updated_at")
     val approvedBy = varchar("approved_by", 255).nullable()
     val parentTaskId = char("parent_task_id", 26).nullable()
+    /** V50: the project the task belongs to. Null: not assigned yet (ADR 0022). */
+    val projectId = char("project_id", 26).nullable()
     override val primaryKey = PrimaryKey(taskId)
 }

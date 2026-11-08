@@ -610,11 +610,11 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 - `Authorization: Bearer` の curl は、`Origin` も `Sec-Fetch-Site` も付かないので、そのまま通る。
 
 ```sh
-# タスクの投入(項目は title と idempotencyKey、任意で body。ほかの項目は 400)
+# タスクの投入(項目は title、idempotencyKey、projectId(必須)、任意で body。ほかの項目は 400)
 curl -X POST "https://<kivra-host>/api/selfdev/tasks" \
   -H "Authorization: Bearer <JWT>" \
   -H "Content-Type: application/json" \
-  -d '{"title":"<タイトル 1-200 文字。Issue の URL、#番号、owner/repo#番号も可>","idempotencyKey":"<キー 1-128 文字>","body":"<任意。0-8000 文字>"}'
+  -d '{"title":"<タイトル 1-200 文字。Issue の URL、#番号、owner/repo#番号も可>","idempotencyKey":"<キー 1-128 文字>","projectId":"<プロジェクト ID(26 文字の ULID。GET /api/projects で確認)>","body":"<任意。0-8000 文字>"}'
 
 # 状態の確認(runId は 26 文字の ULID)
 curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs/<runId>"
@@ -625,7 +625,9 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 
 応答:
 
-- 投入: 202 `Accepted`、同じ `idempotencyKey` での再送は 200、同じキーで別のタイトルは 409、同時に進む上限(`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`)を超えると 429、認証されないと 401、本文が不正だと 400。
+- 投入: 202 `Accepted`、同じ `idempotencyKey` での再送は 200、同じキーで別のタイトルや別のプロジェクトは 409、同時に進む上限(`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`)を超えると 429、認証されないと 401、本文が不正だと 400。`projectId` が無い、または形式が正しくないと 400、存在しないプロジェクトは 404(ADR 0022)。
+- order の作成(`POST /api/selfdev/orders`)も同じ。根の order は `projectId` が必須で、子の order は親のプロジェクトを継ぐ。Goal の投入(`POST /api/selfdev/goals`)も `projectId` が必須。
+- MCP の `kivra_selfdev_start` は引数 `project_id` が必須(存在しないプロジェクトは `PROJECT_NOT_FOUND`)。
 - 応答の項目: `runId`、`state`、`mode`(`SELF_DEV`)、`note`、`reasonCode`、`pullRequestNumber`、`pullRequestUrl`。タスクのタイトル、パッチ、モデルの出力は返さない。
 - 状態の確認: 他の利用者の Run と存在しない Run は、どちらも 404。
 - PR ができるまで数分かかる。`state` が `PULL_REQUEST` になり、`pullRequestUrl` が入れば、人間がレビューしてマージする。

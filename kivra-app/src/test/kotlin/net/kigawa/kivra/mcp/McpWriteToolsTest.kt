@@ -71,12 +71,18 @@ class McpWriteToolsTest {
     )
 
     /** The production wiring: settings, deps and dispatcher are built by [buildMcpRouteDeps], as Application does. */
+    /** The project of the submissions in the current test; set by [deps] for the database it is given. */
+    private var projectId = ""
+
     private fun deps(db: TestDb, writeRate: Int = 1000, selfDev: Boolean = true, maxActive: Int = 1): McpRouteDeps {
         val e = env(writeRate, selfDev)
         val settings = McpSettings.fromEnv(e)
+        val projects = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC())
+        projectId = projects.create("MCP project", null).projectId
         return buildMcpRouteDeps(
             settings, e, db.runs, repo,
             jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = selfDev, maxActiveSelfDev = maxActive,
+            projects = projects,
         )!!
     }
 
@@ -102,7 +108,7 @@ class McpWriteToolsTest {
 
     private fun start(title: String, key: String, body: String? = null): String {
         val bodyPart = body?.let { ""","body":"${jsonEscape(it)}"""" } ?: ""
-        return """{"title":"${jsonEscape(title)}","idempotency_key":"${jsonEscape(key)}"$bodyPart}"""
+        return """{"title":"${jsonEscape(title)}","project_id":"$projectId","idempotency_key":"${jsonEscape(key)}"$bodyPart}"""
     }
 
     private fun jsonEscape(s: String): String = Json.encodeToString(kotlinx.serialization.serializer<String>(), s).let { it.substring(1, it.length - 1) }
@@ -127,7 +133,10 @@ class McpWriteToolsTest {
     fun `with the write switch off, tools list has only the read tools, and the write name is an unknown tool`() = withTestDb { db ->
         val e = env().toMutableMap().apply { this[McpSettings.ENV_WRITE_ENABLED] = "false" }
         val settings = McpSettings.fromEnv(e)
-        val off = buildMcpRouteDeps(settings, e, db.runs, repo, jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = true, maxActiveSelfDev = 1)!!
+        val off = buildMcpRouteDeps(
+            settings, e, db.runs, repo, jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = true, maxActiveSelfDev = 1,
+            projects = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()),
+        )!!
         testApplication {
             setUp(off)
             val list = rpc("""{"jsonrpc":"2.0","id":1,"method":"tools/list"}""").json()["result"]!!.jsonObject["tools"]!!.jsonArray
@@ -207,13 +216,13 @@ class McpWriteToolsTest {
         testApplication {
             setUp(deps(db))
             val badArgs = listOf(
-                """{"idempotency_key":"k"}""",
+                """{"project_id":"$projectId","idempotency_key":"k"}""",
                 """{"title":"README を直す"}""",
-                """{"title":"README を直す","idempotency_key":"k","repo":"other/repo"}""",
-                """{"title":"README を直す","idempotency_key":"k","command":"rm -rf /"}""",
-                """{"title":"README を直す","idempotency_key":"k","env":{"A":"b"}}""",
-                """{"title":"README を直す","idempotency_key":"k","token":"x"}""",
-                """{"title":"README を直す","idempotency_key":"k","branch":"main"}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"k","repo":"other/repo"}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"k","command":"rm -rf /"}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"k","env":{"A":"b"}}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"k","token":"x"}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"k","branch":"main"}""",
             )
             for (args in badArgs) {
                 val r = startCall(args)
@@ -229,27 +238,27 @@ class McpWriteToolsTest {
         testApplication {
             setUp(deps(db, maxActive = 100))
             val rejected = listOf(
-                """{"title":5,"idempotency_key":"k"}""",
-                """{"title":["a"],"idempotency_key":"k"}""",
-                """{"title":"","idempotency_key":"k"}""",
-                """{"title":"   ","idempotency_key":"k"}""",
-                """{"title":"${"a".repeat(201)}","idempotency_key":"k"}""",
-                """{"title":"a\u0007b","idempotency_key":"k"}""",
-                """{"title":"line\nbreak","idempotency_key":"k"}""",
-                """{"title":"README を直す","idempotency_key":""}""",
-                """{"title":"README を直す","idempotency_key":"${"k".repeat(129)}"}""",
-                """{"title":"README を直す","idempotency_key":"bad\tkey"}""",
-                """{"title":"README を直す","idempotency_key":"k","body":${"\"" + "b".repeat(8001) + "\""}}""",
-                """{"title":"README を直す","idempotency_key":"k","body":"cr\rhere"}""",
-                """{"title":"README を直す","idempotency_key":"k","body":"nul\u0001here"}""",
-                """{"title":"README を直す","idempotency_key":"k","body":7}""",
+                """{"title":5,"project_id":"$projectId","idempotency_key":"k"}""",
+                """{"title":["a"],"project_id":"$projectId","idempotency_key":"k"}""",
+                """{"title":"","project_id":"$projectId","idempotency_key":"k"}""",
+                """{"title":"   ","project_id":"$projectId","idempotency_key":"k"}""",
+                """{"title":"${"a".repeat(201)}","project_id":"$projectId","idempotency_key":"k"}""",
+                """{"title":"a\u0007b","project_id":"$projectId","idempotency_key":"k"}""",
+                """{"title":"line\nbreak","project_id":"$projectId","idempotency_key":"k"}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":""}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"${"k".repeat(129)}"}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"bad\tkey"}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"k","body":${"\"" + "b".repeat(8001) + "\""}}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"k","body":"cr\rhere"}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"k","body":"nul\u0001here"}""",
+                """{"title":"README を直す","project_id":"$projectId","idempotency_key":"k","body":7}""",
             )
             for (args in rejected) {
                 val r = startCall(args)
                 assertEquals(-32602, r.rpcCode(), "args: ${args.take(60)}")
             }
             // The boundaries are accepted: 200 code points of title, 8000 of body, 128 of key.
-            val boundary = startCall("""{"title":"${"a".repeat(200)}","idempotency_key":"${"k".repeat(128)}","body":"${"b".repeat(8000)}"}""")
+            val boundary = startCall("""{"title":"${"a".repeat(200)}","project_id":"$projectId","idempotency_key":"${"k".repeat(128)}","body":"${"b".repeat(8000)}"}""")
             assertEquals(false, boundary.result()["isError"]!!.jsonPrimitive.content.toBoolean())
             // A blank body is the same as no body.
             val blank = startCall(start("空の本文", "blank-body", body = "   "))
@@ -440,6 +449,33 @@ class McpWriteToolsTest {
             assertEquals(false, list.result()["isError"]!!.jsonPrimitive.content.toBoolean())
             assertEquals(2, list.structured()["runs"]!!.jsonArray.size)
             assertNotNull(db.runs.getTask(RunId(list.structured()["runs"]!!.jsonArray[0].jsonObject["run_id"]!!.jsonPrimitive.content), aliceOwner))
+        }
+    }
+
+    // ---- project (ADR 0022) ----------------------------------------------------------------------------
+
+    @Test
+    fun `the project is required and must exist - missing or malformed is an input error, an unknown one is a refusal, and no run is created`() =
+        withTestDb { db ->
+            testApplication {
+                setUp(deps(db))
+                val missing = startCall("""{"title":"README を直す","idempotency_key":"np-missing"}""")
+                assertEquals(-32602, missing.rpcCode())
+                val malformed = startCall("""{"title":"README を直す","project_id":"not-a-ulid","idempotency_key":"np-bad"}""")
+                assertEquals(-32602, malformed.rpcCode())
+                val unknown = startCall("""{"title":"README を直す","project_id":"01AAAAAAAAAAAAAAAAAAAAAAAA","idempotency_key":"np-unknown"}""")
+                assertEquals("true", unknown.result()["isError"]!!.jsonPrimitive.content)
+                assertEquals("PROJECT_NOT_FOUND", unknown.structured()["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+                assertTrue(runsOf(db, aliceOwner).isEmpty())
+            }
+        }
+
+    @Test
+    fun `a run keeps the project it was started under`() = withTestDb { db ->
+        testApplication {
+            setUp(deps(db))
+            val runId = startCall(start("README を直す", "pj-keep")).structured()["run_id"]!!.jsonPrimitive.content
+            assertEquals(projectId, db.runs.getTask(RunId(runId), aliceOwner)!!.projectId)
         }
     }
 }

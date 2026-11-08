@@ -92,6 +92,7 @@ class McpOrderToolsTest {
             McpSettings.fromEnv(e), e, db.runs, repo,
             jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = true, maxActiveSelfDev = 1,
             orders = orders?.let { McpOrderDeps(it, aliceOwner) },
+            projects = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()),
         )!!
     }
 

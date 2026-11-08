@@ -78,9 +78,13 @@ class RequestGuardsTest {
 
     private val keySeq = AtomicInteger()
 
+    /** The project of the submissions; set when the harness is mounted. */
+    private var projectId = ""
+
     /** A fresh idempotency key per call, so a second accepted submit is not a replay (200). */
     private fun body(endpoint: Endpoint): String = when (endpoint) {
-        Endpoint.TASKS, Endpoint.SELFDEV_TASKS -> """{"title":"README を直す","idempotencyKey":"csrf-key-${keySeq.incrementAndGet()}"}"""
+        Endpoint.TASKS -> """{"title":"README を直す","idempotencyKey":"csrf-key-${keySeq.incrementAndGet()}"}"""
+        Endpoint.SELFDEV_TASKS -> """{"title":"README を直す","idempotencyKey":"csrf-key-${keySeq.incrementAndGet()}","projectId":"$projectId"}"""
         Endpoint.RELEASE, Endpoint.RELEASE_UNBOUND_PR -> """{"reason":"csrf"}"""
         Endpoint.BUDGET ->
             """{"scopeId":"tenant","period":"2026-10","reservationKey":"csrf-missing","actualAmountJpy":"0","evidence":"e","reason":"r"}"""
@@ -89,11 +93,12 @@ class RequestGuardsTest {
     private class Harness(val db: TestDb, val budget: CountingBudget)
 
     private fun ApplicationTestBuilder.mount(h: Harness) {
+        projectId = net.kigawa.kivra.db.ProjectRepository(h.db.database, java.time.Clock.systemUTC()).create("Route project", null).projectId
         application {
             install(ContentNegotiation) { json() }
             routing {
                 configureTaskApiRoutes(h.db.runs, identity)
-                configureSelfDevRoutes(SelfDevRouteDeps(h.db.runs, identity, RepoRef("kigawa-net", "kivra"), 1000, FakeGitHub()))
+                configureSelfDevRoutes(SelfDevRouteDeps(h.db.runs, identity, RepoRef("kigawa-net", "kivra"), 1000, FakeGitHub(), net.kigawa.kivra.db.ProjectRepository(h.db.database, java.time.Clock.systemUTC())))
                 configureSelfDevAdminRoutes(h.db.runs, identity)
                 configureBudgetAdminRoutes(h.budget, identity)
             }

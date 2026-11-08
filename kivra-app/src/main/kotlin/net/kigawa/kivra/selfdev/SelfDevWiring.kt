@@ -3,11 +3,13 @@ package net.kigawa.kivra.selfdev
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import java.io.File
+import java.time.Clock
 import java.time.Duration
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DbRequestLedger
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SqlLeaseStore
@@ -308,7 +310,7 @@ internal fun buildSelfDev(
     }
     return SelfDevParts(
         worker = worker,
-        routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github),
+        routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github, ProjectRepository(database, Clock.systemUTC())),
         planWorker = planWorker,
         autoMergeShadow = autoMergeShadow,
         autoMergeActive = autoMergeActive,

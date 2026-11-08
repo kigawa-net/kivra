@@ -112,7 +112,12 @@ class AgentApiRoutesTest {
             routing {
                 configureAgentApiRoutes(AgentApiDeps(env.service, env.agents, CodingMonitorEventRepository(env.db.database)))
                 configureTaskApiRoutes(env.db.runs, env.operators)
-                configureSelfDevRoutes(SelfDevRouteDeps(env.db.runs, env.operators, RepoRef("kigawa-net", "kivra"), 1, FakeGitHub()))
+                configureSelfDevRoutes(
+                    SelfDevRouteDeps(
+                        env.db.runs, env.operators, RepoRef("kigawa-net", "kivra"), 1, FakeGitHub(),
+                        net.kigawa.kivra.db.ProjectRepository(env.db.database, java.time.Clock.systemUTC()),
+                    ),
+                )
                 configureSelfDevAdminRoutes(env.db.runs, env.operators)
                 configureBudgetAdminRoutes(env.budget, env.operators)
             }

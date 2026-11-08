@@ -28,6 +28,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.auth.OperatorAuth
 import net.kigawa.kivra.auth.OperatorAuthenticator
+import java.time.Clock
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.TestDb
@@ -88,13 +90,19 @@ class SelfDevGoalRoutesTest {
         ),
     )
 
+    /** The project every goal in a test is submitted under; set by [setUp]. */
+    private var projectId = ""
+
     private fun ApplicationTestBuilder.setUp(db: TestDb, autopilot: AutopilotSettings): SelfDevOperatorRepository {
         val operations = SelfDevOperatorRepository(db.database)
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        projectId = projects.create("Goal project", null).projectId
         val deps = SelfDevGoalRouteDeps(
             operators = StubAuth,
             autopilot = autopilot,
             targetRepo = TARGET,
             operations = operations,
+            projects = projects,
             control = SelfDevAutopilotControlRepository(db.database),
             aiPrincipal = AI,
         )
@@ -124,7 +132,7 @@ class SelfDevGoalRoutesTest {
     private suspend fun HttpResponse.obj(): JsonObject = Json.parseToJsonElement(bodyAsText()).jsonObject
 
     private suspend fun ApplicationTestBuilder.submit(key: String, title: String = "first task"): JsonObject =
-        send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"$title","idempotencyKey":"$key"}""").obj()
+        send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"$title","idempotencyKey":"$key","projectId":"$projectId"}""").obj()
 
     @Test
     fun `with the autopilot off every endpoint answers 503 AUTOPILOT_DISABLED, and nothing is written`() = testApplication {
@@ -133,7 +141,7 @@ class SelfDevGoalRoutesTest {
         val status = send(HttpMethod.Get, "/api/selfdev/autopilot", body = null)
         assertEquals(HttpStatusCode.ServiceUnavailable, status.status)
         assertEquals("AUTOPILOT_DISABLED", status.obj().getValue("error").jsonPrimitive.content)
-        val submit = send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"t","idempotencyKey":"k"}""")
+        val submit = send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"t","idempotencyKey":"k","projectId":"$projectId"}""")
         assertEquals(HttpStatusCode.ServiceUnavailable, submit.status)
         assertEquals("AUTOPILOT_DISABLED", submit.obj().getValue("error").jsonPrimitive.content)
         assertEquals(HttpStatusCode.ServiceUnavailable, send(HttpMethod.Post, "/api/selfdev/autopilot/pause").status)
@@ -164,12 +172,12 @@ class SelfDevGoalRoutesTest {
     fun `a task is accepted once per key, a replay is 200, and another content under the key is 409`() = testApplication {
         val db = newDb()
         val operations = setUp(db, enabledAutopilot())
-        val created = send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"first task","body":"b","idempotencyKey":"k1"}""")
+        val created = send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"first task","body":"b","idempotencyKey":"k1","projectId":"$projectId"}""")
         assertEquals(HttpStatusCode.Accepted, created.status)
         val taskId = created.obj().getValue("taskId").jsonPrimitive.content
         assertEquals("TASK_SUBMITTED", created.obj().getValue("state").jsonPrimitive.content)
-        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"first task","body":"b","idempotencyKey":"k1"}""").status)
-        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"other","idempotencyKey":"k1"}""").status)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"first task","body":"b","idempotencyKey":"k1","projectId":"$projectId"}""").status)
+        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"other","idempotencyKey":"k1","projectId":"$projectId"}""").status)
         assertEquals(1, operations.listTasks(10).size)
         val detail = send(HttpMethod.Get, "/api/selfdev/goals/$taskId", body = null).obj()
         assertEquals("b", detail.getValue("body").jsonPrimitive.content)
@@ -180,7 +188,7 @@ class SelfDevGoalRoutesTest {
     fun `the AI principal may read but a write is refused before the body is read`() = testApplication {
         val db = newDb()
         val operations = setUp(db, enabledAutopilot())
-        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"t","idempotencyKey":"k"}""", principal = AI).status)
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"t","idempotencyKey":"k","projectId":"$projectId"}""", principal = AI).status)
         assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, "/api/selfdev/autopilot/pause", principal = AI).status)
         assertEquals(HttpStatusCode.OK, send(HttpMethod.Get, "/api/selfdev/goals", body = null, principal = AI).status)
         assertTrue(operations.listTasks(10).isEmpty())
@@ -211,4 +219,29 @@ class SelfDevGoalRoutesTest {
         assertEquals(0, send(HttpMethod.Get, "/api/selfdev/autopilot", body = null).obj().getValue("consecutiveFailures").jsonPrimitive.int)
     }
 
+    @Test
+    fun `a goal needs an existing project - missing and malformed are 400, an unknown id is 404, and nothing is written`() = testApplication {
+        val db = newDb()
+        val operations = setUp(db, enabledAutopilot())
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"t","idempotencyKey":"k1"}""").status)
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"t","idempotencyKey":"k2","projectId":" "}""").status)
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"t","idempotencyKey":"k3","projectId":"not-a-ulid"}""").status)
+        assertEquals(
+            HttpStatusCode.NotFound,
+            send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"t","idempotencyKey":"k4","projectId":"01AAAAAAAAAAAAAAAAAAAAAAAA"}""").status,
+        )
+        assertTrue(operations.listTasks(10).isEmpty())
+    }
+
+    @Test
+    fun `a goal keeps the project it was submitted under, and a replay under another project is 409`() = testApplication {
+        val db = newDb()
+        val operations = setUp(db, enabledAutopilot())
+        val taskId = submit("kp").getValue("taskId").jsonPrimitive.content
+        assertEquals(projectId, operations.task(taskId)?.projectId)
+        val other = ProjectRepository(db.database, Clock.systemUTC()).create("Other", null).projectId
+        val replay = """{"title":"first task","idempotencyKey":"kp","projectId":"$other"}"""
+        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, "/api/selfdev/goals", replay).status)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/goals", """{"title":"first task","idempotencyKey":"kp","projectId":"$projectId"}""").status)
+    }
 }

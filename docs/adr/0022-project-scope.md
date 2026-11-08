@@ -41,3 +41,17 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 
 - `MigrationChainTest` に V50、V51 を追加。`MigrationExpandOnlyTest` は全ファイルを走査し、非 expand の変更がないことを確かめる。
 - 「V49 までの列だけで書く INSERT が V51 の後でも通り、`project_id` が NULL になる」と「値のあるプロジェクトを削除すると失敗する(RESTRICT)」を `MigrationChainTest` で確かめる。
+
+## 進捗(PR-C: 書き込み経路、ブランチ `feat/project-scope-write`)
+
+- 書き込み経路で `project_id` を書く。マイグレーションは追加しない。
+  - Task の投入(`SelfDevOperatorRepository.submitTask`)は引数 `projectId` を書く。Planner の子タスクは親(計画の根)から継承する(`commitPlan`)。
+  - order の根は `createRoot` の `projectId` を書く。子の order は親から継承する(`createChild`)。order の周回の Task は、その order から継承する(`startCycleIn`)。
+  - Run(`DevelopmentRunRepository.submitTask`)は `projectId` を書く。自律ループ(`AutopilotDispatcher`)は Task の `project_id` を Run へコピーする。
+  - 記憶(`SelfDevMemoryRepository`)は、文脈の goal・plan の Task、次に run の順に `project_id` を読んで書く。どれも持たなければ NULL。
+- API と MCP では `projectId`(MCP の引数は `project_id`)を必須にする。欠けた値と形式の誤りは 400、存在しない ID は 404(プロジェクト API と同じ)。対象は `POST /api/selfdev/goals`、`POST /api/selfdev/orders`、`POST /api/selfdev/tasks`、MCP の `kivra_selfdev_start`。
+  - MCP には order を作るツールがない(`kivra_order_list`、`kivra_order_get`、`kivra_order_request_stop` のみ)。そのため order 系ツールには引数を足していない。
+- 依存は同じプロジェクトの間だけ。`beginSubmission` は、依存の `project_id` が Task と一致しないとき(別プロジェクト、または片方だけ NULL)は投入しない。NULL 同士は従来どおり。`commitPlan` の依存は同じ計画の根の配下のタスクなので、構造上は必ず同じプロジェクトになる。
+- 読み取りと自律ループは NULL の行を引き続き扱う(フィルタは入れていない)。
+- 画面(`/ui`)は、目的(goal)と order の作成フォームにプロジェクトの選択を足した。選ぶまで送信しない。
+- 未対応(後続): システムが起票する Task(インシデントの自動修正など)は、プロジェクトを持たないので NULL のまま。PR-B の振り分けで扱う。

@@ -20,6 +20,7 @@ class AssigneeStoreLookup(private val repo: SelfDevAssigneeRepository) : Assigne
                     AssigneeRole.AI_APPROVER -> Role.AI_APPROVER
                 },
                 active = it.state == AssigneeState.ACTIVE,
+                assigneeId = it.assigneeId,
             )
         }
 }

@@ -79,6 +79,8 @@ data class SelfDevRunResponse(
     val reasonCode: String? = null,
     val pullRequestNumber: Int? = null,
     val pullRequestUrl: String? = null,
+    /** The project of the run (ADR 0022), or null when it has none. */
+    val projectId: String? = null,
 )
 
 @Serializable
@@ -95,7 +97,8 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
             call.respond(HttpStatusCode.Unauthorized, SelfDevError("unauthorized"))
             return@post
         }
-        if (!deps.guard.permits(principal, Permission.SPEND_START, "selfdev_submit")) {
+        val access = deps.guard.resolve(principal, legacyAdmin = true)
+        if (deps.guard.check(access, Permission.SPEND_START, "selfdev_submit") is GuardResult.Deny) {
             call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
             return@post
         }
@@ -125,6 +128,11 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
                 return@post
             }
             is ProjectScope.Assigned -> scope.projectId
+        }
+        // The project check (ADR 0022 PR-D): under the project mode off or shadow this is the same answer as before.
+        if (deps.guard.checkInProject(access, projectId, Permission.SPEND_START, "selfdev_submit") is GuardResult.Deny) {
+            call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
+            return@post
         }
         try {
             val submitted = deps.runs.submitTask(
@@ -177,7 +185,9 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
             call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
             return@get
         }
-        call.respond(deps.runs.listTasks(principal, limit = LIST_LIMIT, selfDev = true).map { it.toSelfDevResponse() })
+        val project = projectFilterOf(call.request.queryParameters["projectId"])
+            ?: return@get call.respond(HttpStatusCode.BadRequest, SelfDevError(PROJECT_FILTER_INVALID))
+        call.respond(deps.runs.listTasks(principal, limit = LIST_LIMIT, selfDev = true, project = project).map { it.toSelfDevResponse() })
     }
 }
 
@@ -201,4 +211,5 @@ private fun DevelopmentRun.toSelfDevResponse(note: String? = null): SelfDevRunRe
     state = state.name,
     note = note,
     reasonCode = stateReason,
+    projectId = projectId,
 )

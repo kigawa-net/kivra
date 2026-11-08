@@ -29,7 +29,10 @@ internal const val VIA_MCP = "mcp"
 sealed interface GuardResult {
     data object Allow : GuardResult
 
-    /** [code] is one of the fixed codes of Permissions.kt (`NO_ROLE`, `PERMISSION_DENIED`, `SCOPE_DENIED`). */
+    /**
+     * [code] is one of the fixed codes of Permissions.kt (`NO_ROLE`, `PERMISSION_DENIED`, `SCOPE_DENIED`, and for the project check
+     * `PROJECT_NOT_MEMBER`, `PROJECT_PERMISSION_DENIED`, `PROJECT_LOOKUP_FAILED`).
+     */
     data class Deny(val code: String) : GuardResult
 }
 
@@ -62,6 +65,9 @@ class PermissionGuard(
     private val windowMillis: Long = TimeUnit.SECONDS.toMillis(60),
 ) {
     val mode: PermissionMode get() = service.mode
+
+    /** Whether the project check can refuse or log anything: the roles and the project mode are both on (ADR 0022 PR-D). Reads nothing. */
+    val projectScopeOn: Boolean get() = service.mode != PermissionMode.OFF && service.projectMode != PermissionMode.OFF
 
     private class Window(var startedAt: Long, var suppressed: Int)
 
@@ -106,6 +112,47 @@ class PermissionGuard(
         return GuardResult.Allow
     }
 
+    /**
+     * The check of a request whose project is known (ADR 0022 PR-D, `KIVRA_SELFDEV_PROJECT_MODE`). [projectId] null (a row with no project, or
+     * a request whose project is not known) is the plain [check]: the project is never guessed.
+     *
+     *  - Project OFF (or the roles OFF): the plain [check].
+     *  - Project SHADOW: the plain [check] decides. When it allows and the project check would refuse, a fixed code is logged, and nothing else.
+     *  - Project ENFORCE: a project refusal is a refusal. The global ADMIN always passes the project check.
+     */
+    fun checkInProject(
+        access: GuardAccess,
+        projectId: String?,
+        permission: Permission,
+        route: String,
+        scopeOk: Boolean = true,
+        humanOnly: Boolean = false,
+        via: String = VIA_REST,
+    ): GuardResult {
+        val result = check(access, permission, route, scopeOk, humanOnly, via)
+        if (result is GuardResult.Deny || projectId == null || !projectScopeOn) return result
+        val code = projectDenialOf(access, projectId, permission, humanOnly) ?: return result
+        return when (service.projectMode) {
+            PermissionMode.ENFORCE -> GuardResult.Deny(code)
+            PermissionMode.SHADOW -> {
+                recordProjectWouldDeny(access, permission, route, code, via)
+                result
+            }
+            PermissionMode.OFF -> result
+        }
+    }
+
+    /**
+     * The project refusal of the caller, or null. Null when the global check refuses (that refusal is the global check's own), or when the
+     * caller is refused for humans only. It is only what the project adds to the global check.
+     */
+    private fun projectDenialOf(access: GuardAccess, projectId: String, permission: Permission, humanOnly: Boolean): String? {
+        val eff = access.effective
+        if (humanOnly && access.isAi) return null
+        if (service.check(eff, permission) is Decision.Deny) return null
+        return service.projectDenial(eff, projectId, permission)
+    }
+
     /** One call for a caller that has no [GuardAccess] yet. */
     fun check(ownerKey: String, legacyAdmin: Boolean, permission: Permission, scopeOk: Boolean = true, route: String): GuardResult =
         check(resolve(ownerKey, legacyAdmin), permission, route, scopeOk)
@@ -130,6 +177,18 @@ class PermissionGuard(
     fun permitsEffective(access: GuardAccess, permission: Permission): Boolean {
         if (access.isAi || access.legacy.role == Role.AI || access.effective.role == Role.AI) return false
         return service.check(access.effective, permission) == Decision.Allow
+    }
+
+    /** The project shadow's record: a fixed code, the permission, the source, the role and the route. No project id and no person. */
+    private fun recordProjectWouldDeny(access: GuardAccess, permission: Permission, route: String, code: String, via: String) {
+        val eff = access.effective
+        val key = "project|$permission|$code|${eff.source}|$route|$via"
+        throttled(key)?.let {
+            log.info(
+                "project shadow: wouldDeny permission=$permission code=$code source=${eff.source} role=${eff.role ?: "NONE"} " +
+                    "route=$route via=$via suppressed=$it",
+            )
+        }
     }
 
     private fun recordWouldDeny(access: GuardAccess, permission: Permission, route: String, scopeOk: Boolean, humanOnly: Boolean, via: String) {

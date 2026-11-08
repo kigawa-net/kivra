@@ -270,6 +270,7 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
             }
             is ProjectScope.Assigned -> scope.projectId
         }
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_submit", "GOAL_SUBMIT", projectId)) return@post
         when (val result = deps.operations.submitTask(principal, key, title, body, repo, projectId)) {
             is SelfDevSubmitResult.Created -> {
                 operatorLog.info("autopilot operator action: action=GOAL_SUBMITTED actor={} taskId={} result=GOAL_SUBMITTED", operatorTag(principal), result.task.taskId)
@@ -286,7 +287,9 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         val caller = deps.requireOperator(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
         if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ")) return@get
-        call.respond(deps.operations.listTasks(LIST_LIMIT).map { it.summary() })
+        val project = projectFilterOf(call.request.queryParameters["projectId"])
+            ?: return@get call.respond(HttpStatusCode.BadRequest, GoalError(PROJECT_FILTER_INVALID))
+        call.respond(deps.operations.listTasks(LIST_LIMIT, project).map { it.summary() })
     }
 
     get("/api/selfdev/goals/{id}") {
@@ -306,8 +309,10 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         val caller = deps.requireOperator(call) ?: return@post
         val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_approve_plan", "GOAL_APPROVE_PLAN")) return@post
         val taskId = taskIdOf(call)
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_approve_plan", "GOAL_APPROVE_PLAN", deps.projectOfTask(taskId))) {
+            return@post
+        }
         val version = call.readVersion() ?: return@post
         if (taskId == null) {
             call.respond(HttpStatusCode.NotFound, GoalError(TASK_NOT_FOUND))
@@ -346,8 +351,8 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         val caller = deps.requireOperator(call) ?: return@post
         val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.permit(call, caller, Permission.GOAL_STOP, "goal.goal_stop", "GOAL_STOP")) return@post
         val taskId = taskIdOf(call)
+        if (!deps.permit(call, caller, Permission.GOAL_STOP, "goal.goal_stop", "GOAL_STOP", deps.projectOfTask(taskId))) return@post
         val request = try {
             strictJson.decodeFromString(StopGoalRequest.serializer(), call.receiveText())
         } catch (_: Exception) {
@@ -378,8 +383,8 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         val caller = deps.requireOperator(call) ?: return@post
         val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.task_approve", "TASK_APPROVE")) return@post
         val taskId = taskIdOf(call)
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.task_approve", "TASK_APPROVE", deps.projectOfTask(taskId))) return@post
         val version = call.readVersion() ?: return@post
         if (taskId == null) {
             call.respond(HttpStatusCode.NotFound, GoalError(TASK_NOT_FOUND))
@@ -398,8 +403,8 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         val caller = deps.requireOperator(call) ?: return@post
         val principal = caller.principal
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.task_reject", "TASK_REJECT")) return@post
         val taskId = taskIdOf(call)
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.task_reject", "TASK_REJECT", deps.projectOfTask(taskId))) return@post
         val version = call.readVersion() ?: return@post
         if (taskId == null) {
             call.respond(HttpStatusCode.NotFound, GoalError(TASK_NOT_FOUND))
@@ -462,8 +467,10 @@ private suspend fun SelfDevGoalRouteDeps.permit(
     permission: Permission,
     route: String,
     action: String,
+    /** The request's project (ADR 0022 PR-D). Null: the plain check. */
+    projectId: String? = null,
 ): Boolean {
-    val result = guard.check(caller.access, permission, route)
+    val result = guard.checkInProject(caller.access, projectId, permission, route)
     if (result is GuardResult.Allow) return true
     val code = (result as GuardResult.Deny).code
     operatorLog.info("autopilot operator refused: action={} actor={} result={}", action, if (caller.access.isAi) "AI" else "OPERATOR", if (caller.access.isAi) FORBIDDEN else code)
@@ -475,6 +482,13 @@ private class GoalCaller(val principal: String, val access: GuardAccess)
 
 /** The task id from the path (a ULID shape), or null when it is not a ULID shape. */
 private fun taskIdOf(call: ApplicationCall): String? = call.parameters["id"]?.takeIf { TASK_ID_SHAPE.matches(it) }
+
+/**
+ * The project of a task, for the project check (ADR 0022 PR-D). Read only while the project check is on; otherwise nothing is read and the
+ * result is null (the plain check). A missing task is null too, and then the request is answered 404 after the check, as before.
+ */
+private fun SelfDevGoalRouteDeps.projectOfTask(taskId: String?): String? =
+    if (taskId == null || !guard.projectScopeOn) null else operations.task(taskId)?.projectId
 
 /** `{"version": n}`, strictly. Responds 400 and returns null when it is malformed or negative. */
 private suspend fun ApplicationCall.readVersion(): Long? {

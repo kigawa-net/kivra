@@ -84,6 +84,8 @@ data class SelfDevOrderStopRequest(
      * which is the root approver, so the requester may be the decider (ADR 0015 section 4.2 (a)).
      */
     val targetIsRoot: Boolean,
+    /** The project of the order the request is for (ADR 0022). Set only by the lists that read it; null otherwise. */
+    val projectId: String? = null,
 )
 
 /**
@@ -246,8 +248,13 @@ class SelfDevOrderRepository(
 
     fun get(orderId: String): SelfDevOrder? = transaction(database) { getIn(orderId) }
 
-    fun list(limit: Int): List<SelfDevOrder> = transaction(database) {
-        execQuery("SELECT $ORDER_COLUMNS FROM selfdev_orders ORDER BY created_at, order_id LIMIT ?", limit) { it.toOrder() }
+    /** The orders, oldest first, narrowed to [project] (ADR 0022 PR-D). The autonomous loops use [activeOrders] and never narrow. */
+    fun list(limit: Int, project: ProjectFilter = ProjectFilter.All): List<SelfDevOrder> = transaction(database) {
+        val (cond, params) = project.sql("project_id")
+        execQuery(
+            "SELECT $ORDER_COLUMNS FROM selfdev_orders WHERE 1 = 1$cond ORDER BY created_at, order_id LIMIT ?",
+            *(params + limit).toTypedArray(),
+        ) { it.toOrder() }
     }
 
     /** ACTIVE orders, for the safety guards. */
@@ -263,11 +270,26 @@ class SelfDevOrderRepository(
             .firstOrNull()
     }
 
-    fun pendingStopRequests(limit: Int): List<SelfDevOrderStopRequest> = transaction(database) {
+    /**
+     * The PENDING stop requests, oldest first, narrowed to the project of their order (ADR 0022 PR-D). Each carries that project's id, so a
+     * list can show it. The project is read from the order by a scalar subquery: a request whose order has no project has a NULL one.
+     */
+    fun pendingStopRequests(limit: Int, project: ProjectFilter = ProjectFilter.All): List<SelfDevOrderStopRequest> = transaction(database) {
+        val orderProject = "(SELECT o.project_id FROM selfdev_orders o WHERE o.order_id = selfdev_order_stop_requests.order_id)"
+        val (cond, params) = project.sql(orderProject)
         execQuery(
-            "SELECT $REQUEST_COLUMNS FROM selfdev_order_stop_requests WHERE state = 'PENDING' ORDER BY created_at, request_id LIMIT ?",
-            limit,
-        ) { it.toRequest() }
+            "SELECT $REQUEST_COLUMNS, $orderProject FROM selfdev_order_stop_requests WHERE state = 'PENDING'$cond " +
+                "ORDER BY created_at, request_id LIMIT ?",
+            *(params + limit).toTypedArray(),
+        ) { rs -> rs.toRequest().copy(projectId = rs.getString(13)) }
+    }
+
+    /** The project of the order a stop request is for, or null when the request is unknown or its order has none. Read only. */
+    fun projectIdOfStopRequest(requestId: String): String? = transaction(database) {
+        execQuery(
+            "SELECT o.project_id FROM selfdev_order_stop_requests r JOIN selfdev_orders o ON o.order_id = r.order_id WHERE r.request_id = ?",
+            requestId,
+        ) { it.getString(1) }.firstOrNull()
     }
 
     /** The cycles of the order, oldest first. Each is its root Task (`order_id`, `cycle_no`). */

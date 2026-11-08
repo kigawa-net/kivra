@@ -370,15 +370,21 @@ class DevelopmentRunRepository(
     }
 
     /** Runs submitted by [principal], newest first. */
-    fun listTasks(principal: String, limit: Int = 50, selfDev: Boolean? = null): List<DevelopmentRun> = transaction(database) {
+    fun listTasks(
+        principal: String,
+        limit: Int = 50,
+        selfDev: Boolean? = null,
+        project: ProjectFilter = ProjectFilter.All,
+    ): List<DevelopmentRun> = transaction(database) {
         DevelopmentRunsTable.selectAll()
             .where {
                 val byPrincipal = DevelopmentRunsTable.principal eq principal
-                when (selfDev) {
+                val scoped = when (selfDev) {
                     null -> byPrincipal
                     true -> byPrincipal and (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%")
                     false -> byPrincipal and (DevelopmentRunsTable.taskId notLike "$SELF_DEV_TASK_PREFIX%")
                 }
+                project.condition(DevelopmentRunsTable.projectId)?.let { scoped and it } ?: scoped
             }
             .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
             .limit(limit)
@@ -411,15 +417,16 @@ class DevelopmentRunRepository(
      * Every Task API run of any principal (the operator view, Issue #56 UI), newest first. Workflow runs (no principal) are
      * never listed. [selfDev] null lists both kinds, true only self-development runs, false only the simulated ones.
      */
-    fun listAllTasks(limit: Int, selfDev: Boolean? = null): List<DevelopmentRun> = transaction(database) {
+    fun listAllTasks(limit: Int, selfDev: Boolean? = null, project: ProjectFilter = ProjectFilter.All): List<DevelopmentRun> = transaction(database) {
         DevelopmentRunsTable.selectAll()
             .where {
                 val owned = DevelopmentRunsTable.principal.isNotNull()
-                when (selfDev) {
+                val scoped = when (selfDev) {
                     null -> owned
                     true -> owned and (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%")
                     false -> owned and (DevelopmentRunsTable.taskId notLike "$SELF_DEV_TASK_PREFIX%")
                 }
+                project.condition(DevelopmentRunsTable.projectId)?.let { scoped and it } ?: scoped
             }
             .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
             .limit(limit)

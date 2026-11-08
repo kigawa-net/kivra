@@ -3,6 +3,7 @@ package net.kigawa.kivra.selfdev
 import net.kigawa.kivra.auth.AssigneeLookup
 import net.kigawa.kivra.auth.PermissionMode
 import net.kigawa.kivra.auth.PermissionService
+import net.kigawa.kivra.auth.ProjectMemberLookup
 import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.auth.TaskApiAuthMode
 import net.kigawa.kivra.auth.resolveTaskApiAuthMode
@@ -10,22 +11,31 @@ import net.kigawa.kivra.auth.resolveTaskApiAuthMode
 /**
  * The roles settings. Fail-closed, like [OrderSettings]: while the orders are off no roles variable is read, and the mode is off.
  * A bad value is a startup failure whose message names the variable only.
+ *
+ * [projectMode] (`KIVRA_SELFDEV_PROJECT_MODE`, ADR 0022 PR-D) is the project check's mode. It needs the roles on: the membership is
+ * read with the assignee store.
  */
-class RolesSettings private constructor(val mode: PermissionMode, val default: RolesDefault, val recoverAdmin: Boolean = false) {
-    override fun toString(): String = "RolesSettings(mode=$mode)"
+class RolesSettings private constructor(
+    val mode: PermissionMode,
+    val default: RolesDefault,
+    val recoverAdmin: Boolean = false,
+    val projectMode: PermissionMode = PermissionMode.OFF,
+) {
+    override fun toString(): String = "RolesSettings(mode=$mode, projectMode=$projectMode)"
 
-    fun service(orders: OrderSettings, aiPrincipal: String?, assignees: AssigneeLookup?): PermissionService =
-        PermissionService(mode, default, aiPrincipal, orders.rootApprover, assignees)
+    fun service(orders: OrderSettings, aiPrincipal: String?, assignees: AssigneeLookup?, projects: ProjectMemberLookup? = null): PermissionService =
+        PermissionService(mode, default, aiPrincipal, orders.rootApprover, assignees, projectMode, projects)
 
     companion object {
         const val ENV_MODE = "KIVRA_SELFDEV_ROLES_MODE"
         const val ENV_DEFAULT = "KIVRA_SELFDEV_ROLES_DEFAULT"
         const val ENV_RECOVER_ADMIN = "KIVRA_SELFDEV_ROLES_RECOVER_ADMIN"
         const val ENV_ALLOW_INSECURE_AUTH = "KIVRA_SELFDEV_ROLES_ALLOW_INSECURE_AUTH"
+        const val ENV_PROJECT_MODE = "KIVRA_SELFDEV_PROJECT_MODE"
 
         /** For tests of the startup wiring, which need a mode without the environment. */
-        internal fun of(mode: PermissionMode, recoverAdmin: Boolean = false): RolesSettings =
-            RolesSettings(mode, RolesDefault.OPERATOR, recoverAdmin)
+        internal fun of(mode: PermissionMode, recoverAdmin: Boolean = false, projectMode: PermissionMode = PermissionMode.OFF): RolesSettings =
+            RolesSettings(mode, RolesDefault.OPERATOR, recoverAdmin, projectMode)
 
         fun disabled(): RolesSettings = RolesSettings(PermissionMode.OFF, RolesDefault.OPERATOR)
 
@@ -37,7 +47,16 @@ class RolesSettings private constructor(val mode: PermissionMode, val default: R
                 "enforce" -> PermissionMode.ENFORCE
                 else -> throw IllegalStateException("$ENV_MODE must be off, shadow or enforce")
             }
-            if (mode == PermissionMode.OFF) return disabled()
+            val projectMode = when (env[ENV_PROJECT_MODE]?.trim()) {
+                null, "", "off" -> PermissionMode.OFF
+                "shadow" -> PermissionMode.SHADOW
+                "enforce" -> PermissionMode.ENFORCE
+                else -> throw IllegalStateException("$ENV_PROJECT_MODE must be off, shadow or enforce")
+            }
+            if (mode == PermissionMode.OFF) {
+                check(projectMode == PermissionMode.OFF) { "$ENV_PROJECT_MODE other than off needs $ENV_MODE other than off" }
+                return disabled()
+            }
             val default = when (env[ENV_DEFAULT]?.trim()) {
                 null, "", "operator" -> RolesDefault.OPERATOR
                 "none" -> RolesDefault.NONE
@@ -56,7 +75,7 @@ class RolesSettings private constructor(val mode: PermissionMode, val default: R
             }
             // Read only while the mode is not off (the early return above).
             val recover = boolFlag(env, ENV_RECOVER_ADMIN, default = false)
-            return RolesSettings(mode, default, recover)
+            return RolesSettings(mode, default, recover, projectMode)
         }
     }
 }

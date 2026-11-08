@@ -66,6 +66,8 @@ data class MemoryItemResponse(
     val code: String?,
     val countValue: Int?,
     val createdAt: String,
+    /** The project of the record (ADR 0022), or null when it has none. */
+    val projectId: String? = null,
 )
 
 @Serializable
@@ -150,8 +152,14 @@ internal fun Route.configureSelfDevMemoryRoutes(deps: SelfDevMemoryRouteDeps) {
             call.respond(HttpStatusCode.BadRequest, MemoryError(INVALID_QUERY))
             return@get
         }
-        val rows = repo.search(filter, limit, offset)
-        val total = repo.count(filter)
+        // The project narrowing (ADR 0022 PR-D): absent is every record, as before. A record with no project is `unassigned`.
+        val project = projectFilterOf(params["projectId"])
+        if (project == null) {
+            call.respond(HttpStatusCode.BadRequest, MemoryError(PROJECT_FILTER_INVALID))
+            return@get
+        }
+        val rows = repo.search(filter, limit, offset, project)
+        val total = repo.count(filter, project)
         val audit = repo.auditSummary()
         call.respond(
             MemoryListResponse(
@@ -256,6 +264,7 @@ internal fun MemoryRecordView.toOperatorItem(): MemoryItemResponse {
         code = code,
         countValue = countValue,
         createdAt = createdAt.toInstant(ZoneOffset.UTC).toString(),
+        projectId = projectId,
     )
 }
 

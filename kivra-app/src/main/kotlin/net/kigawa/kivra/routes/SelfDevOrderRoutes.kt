@@ -141,6 +141,8 @@ data class StopRequestResponse(
     val createdAt: String,
     /** True when the request stops the root; false for a child, which its direct parent (the root approver) decides. */
     val targetIsRoot: Boolean,
+    /** The project of the order the request is for (ADR 0022). Null when it has none. */
+    val projectId: String? = null,
 )
 
 @Serializable
@@ -194,7 +196,9 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         val caller = deps.caller(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
         if (!deps.permit(call, caller, Permission.READ, "order.list")) return@get
-        call.respond(deps.orders.list(LIST_LIMIT).map { it.summary() })
+        val project = projectFilterOf(call.request.queryParameters["projectId"])
+            ?: return@get call.respond(HttpStatusCode.BadRequest, OrderError(PROJECT_FILTER_INVALID))
+        call.respond(deps.orders.list(LIST_LIMIT, project).map { it.summary() })
     }
 
     post("/api/selfdev/orders") {
@@ -215,6 +219,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
             is ProjectScope.Refused -> return@post call.respond(scope.status, OrderError(scope.error))
             is ProjectScope.Assigned -> scope.projectId
         }
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create", projectId = projectId)) return@post
         val created = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles, projectId) as CreateRootResult.Created
         operatorLog.info("order operator action: action=ORDER_CREATED actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), created.order.orderId)
         call.respond(HttpStatusCode.Created, created.order.summary())
@@ -233,7 +238,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
                 order = order.summary(),
                 title = order.title,
                 policy = order.policy,
-                pendingStopRequest = pending?.response(deps.guard.can(caller.access, Permission.STOP_DECIDE)),
+                pendingStopRequest = pending?.response(deps.guard.can(caller.access, Permission.STOP_DECIDE))?.copy(projectId = order.projectId),
             ),
         )
     }
@@ -335,8 +340,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     post("/api/selfdev/orders/{id}/stop-requests") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.permit(call, caller, Permission.STOP_REQUEST, "order.stop.request")) return@post
         val orderId = orderIdOf(call)
+        if (!deps.permit(call, caller, Permission.STOP_REQUEST, "order.stop.request", projectId = deps.projectOfOrder(orderId))) return@post
         val request = decodeOr<RequestStopRequest>(call) ?: return@post
         val reason = StopRequestReason.REQUESTABLE.firstOrNull { it.name == request.reasonCode }
             ?: return@post call.respond(HttpStatusCode.BadRequest, OrderError(REASON_INVALID))
@@ -360,14 +365,16 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.list")) return@get
         val state = call.request.queryParameters["state"]
         if (state != "PENDING") return@get call.respond(HttpStatusCode.BadRequest, OrderError(STATE_INVALID))
-        call.respond(deps.orders.pendingStopRequests(LIST_LIMIT).map { it.response(true) })
+        val project = projectFilterOf(call.request.queryParameters["projectId"])
+            ?: return@get call.respond(HttpStatusCode.BadRequest, OrderError(PROJECT_FILTER_INVALID))
+        call.respond(deps.orders.pendingStopRequests(LIST_LIMIT, project).map { it.response(true) })
     }
 
     post("/api/selfdev/stop-requests/{id}/approve") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.approve")) return@post
         val requestId = requestIdOf(call)
+        if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.approve", projectId = deps.projectOfStopRequest(requestId))) return@post
         val body = decodeOr<ApproveStopRequest>(call) ?: return@post
         if (!DIGEST_SHAPE.matches(body.digest)) return@post call.respond(HttpStatusCode.BadRequest, OrderError(DIGEST_INVALID))
         if (requestId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(REQUEST_NOT_FOUND))
@@ -385,8 +392,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     post("/api/selfdev/stop-requests/{id}/reject") {
         val caller = deps.caller(call) ?: return@post
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.reject")) return@post
         val requestId = requestIdOf(call)
+        if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.reject", projectId = deps.projectOfStopRequest(requestId))) return@post
         if (!call.readEmptyBody()) return@post
         if (requestId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(REQUEST_NOT_FOUND))
         when (val r = deps.orders.endStopRequest(requestId, StopEnd.REJECTED, caller.principal, OrderActor.HUMAN)) {
@@ -403,13 +410,16 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
         // The AI may not cancel: it may only request (ADR 0015 section 4.6). Anyone else needs the stop-request permission, and is then
         // the requester, or holds the permission to decide (below).
-        if (!deps.permit(call, caller, Permission.STOP_REQUEST, "order.stop.cancel", humanOnly = true)) return@post
         val requestId = requestIdOf(call)
+        val project = deps.projectOfStopRequest(requestId)
+        if (!deps.permit(call, caller, Permission.STOP_REQUEST, "order.stop.cancel", humanOnly = true, projectId = project)) return@post
         if (!call.readEmptyBody()) return@post
         if (requestId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(REQUEST_NOT_FOUND))
         val request = deps.orders.stopRequest(requestId)
         if (request == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(REQUEST_NOT_FOUND))
-        if (request.requestedBy != caller.principal && !deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.cancel.other")) {
+        if (request.requestedBy != caller.principal &&
+            !deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.cancel.other", projectId = project)
+        ) {
             return@post
         }
         when (val r = deps.orders.endStopRequest(requestId, StopEnd.CANCELLED, caller.principal, OrderActor.HUMAN)) {
@@ -451,11 +461,27 @@ private suspend fun SelfDevOrderRouteDeps.permit(
     permission: Permission,
     route: String,
     humanOnly: Boolean = false,
+    /** The request's project (ADR 0022 PR-D). Null: the plain check. */
+    projectId: String? = null,
 ): Boolean {
-    if (guard.check(caller.access, permission, route, humanOnly = humanOnly) is GuardResult.Allow) return true
+    // Without a project this is the plain check; with one, the project check of ADR 0022 PR-D is added to it (the same answer when off).
+    val result = if (projectId == null) {
+        guard.check(caller.access, permission, route, humanOnly = humanOnly)
+    } else {
+        guard.checkInProject(caller.access, projectId, permission, route, humanOnly = humanOnly)
+    }
+    if (result is GuardResult.Allow) return true
     call.respond(HttpStatusCode.Forbidden, OrderError(FORBIDDEN))
     return false
 }
+
+/** The project of an order, for the project check (ADR 0022 PR-D). Read only while the project check is on; otherwise null, nothing read. */
+private fun SelfDevOrderRouteDeps.projectOfOrder(orderId: String?): String? =
+    if (orderId == null || !guard.projectScopeOn) null else orders.get(orderId)?.projectId
+
+/** The project of a stop request's order, for the project check (ADR 0022 PR-D). As [projectOfOrder]. */
+private fun SelfDevOrderRouteDeps.projectOfStopRequest(requestId: String?): String? =
+    if (requestId == null || !guard.projectScopeOn) null else orders.projectIdOfStopRequest(requestId)
 
 /**
  * After a stop is approved, the cycle in progress of each stopped order is stopped too: its root Task moves to STOPPED (ADR 0015 section 4.5,
@@ -593,6 +619,7 @@ private fun SelfDevOrderStopRequest.response(approverView: Boolean) = StopReques
     expiresAt = expiresAt.utc(),
     createdAt = createdAt.utc(),
     targetIsRoot = targetIsRoot,
+    projectId = projectId,
 )
 
 private fun OrderCycle.response() = CycleResponse(

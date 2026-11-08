@@ -182,7 +182,9 @@ Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込み
 |---|---|
 | `POST /api/tasks` | body `{"title": "...", "idempotencyKey": "..."}`。新規は 202、同じ (呼び出し元, idempotencyKey) の再送は 200 で同じ `runId` を返す。同じキーで title が違えば 409 |
 | `GET /api/runs/{id}` | 自分の Run。他人の Run、存在しない Run は 404 |
-| `GET /api/runs` | 自分の Run を新しい順に最大 50 件 |
+| `GET /api/runs` | 自分の Run を新しい順に最大 50 件。`?projectId=` で絞り込める（後述） |
+| `GET /api/admin/runs`、`GET /api/selfdev/runs`、`GET /api/selfdev/goals`、`GET /api/selfdev/orders`、`GET /api/selfdev/stop-requests?state=PENDING`、`GET /api/selfdev/memory`、`GET /api/selfdev/assignees` | 一覧。`?projectId=<プロジェクトID>` でそのプロジェクトの行だけ、`?projectId=unassigned` でどのプロジェクトにも属さない行（NULL）だけ。省略時は従来どおり全件。その他の値は 400。応答に `projectId` を含む（ADR 0022 PR-D、`docs/runbook-selfdev.md` 4.17）。担当は、プロジェクトのメンバー（`project_members`）で絞る |
+| `POST /api/selfdev/tasks`、`POST /api/selfdev/goals`、`POST /api/selfdev/orders`、`POST /api/selfdev/orders/{id}/stop-requests`、停止要求の承認・却下・取消、目標の承認・停止、Task の承認・却下 | `KIVRA_SELFDEV_PROJECT_MODE`（既定 `off`）が `shadow` なら、プロジェクトのメンバーでない操作を記録だけする（応答は変えない）。`enforce` なら、メンバーでなければ 403（グローバル ADMIN は除く）。プロジェクトを特定できない行（NULL）は従来の判定だけ（ADR 0022 PR-D） |
 | `GET /api/projects/{id}/dashboard` | プロジェクトのダッシュボード（読み取りのみ、READ 権限）。`{project, scope, tasks, recentRuns, spend, activity}`。`scope` は `ALL`（運用者: プロジェクトの全 Run を数える）か `OWN`（それ以外: 自分の Run だけ）。`tasks` は Run の総数と状態別件数、`recentRuns` は最大 10 件、`spend` は Run に紐づく予算台帳の費用（円の文字列。確定・予約中・見積もりで計上した分。Planner の費用は含まない。プロジェクトごとの上限は無い）、`activity` は Run の監査イベントの新しい順 最大 30 件（固定の code のみ）。存在しないプロジェクトは 404 |
 | `GET /api/projects/{id}/repos` | プロジェクトの repo（owner/name）の一覧（READ 権限）。存在しないプロジェクトは 404 |
 | `PUT /api/projects/{id}/repos` | body `{"repoKey": "owner/name"}` で repo を登録（ORDER_MANAGE、JSON）。登録は 201。形式が違えば 400、既に別の（または同じ）プロジェクトに登録済みなら 409、存在しないプロジェクトは 404 |

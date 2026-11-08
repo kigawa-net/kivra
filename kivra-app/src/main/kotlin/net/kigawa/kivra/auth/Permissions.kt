@@ -78,12 +78,21 @@ enum class PermissionMode { OFF, SHADOW, ENFORCE }
 /** `KIVRA_SELFDEV_ROLES_DEFAULT`: what an admin-panel admin with no assignee gets. */
 enum class RolesDefault { OPERATOR, NONE }
 
-data class AssigneeAccess(val role: Role, val active: Boolean)
+/** [assigneeId] is the assignee's id, which the project membership is keyed by (ADR 0022 PR-D). Null when the store does not give one. */
+data class AssigneeAccess(val role: Role, val active: Boolean, val assigneeId: String? = null)
 
 /** The assignee store as seen by the permission service. A later PR implements it over the database. */
 interface AssigneeLookup {
     /** Null when the owner key is bound to no assignee. May throw; the service then denies (fail closed). */
     fun accessOf(ownerKey: String): AssigneeAccess?
+}
+
+/**
+ * The project membership (`project_members`, V51) as seen by the permission service (ADR 0022 PR-D). Read only.
+ */
+interface ProjectMemberLookup {
+    /** The role of [assigneeId] in [projectId]; null when it is not a member. May throw; the service then denies (fail closed). */
+    fun roleIn(projectId: String, assigneeId: String): Role?
 }
 
 enum class AccessSource {
@@ -109,7 +118,13 @@ enum class AccessSource {
     NONE,
 }
 
-data class PrincipalAccess(val role: Role?, val permissions: Set<Permission>, val source: AccessSource) {
+data class PrincipalAccess(
+    val role: Role?,
+    val permissions: Set<Permission>,
+    val source: AccessSource,
+    /** The assignee the caller is bound to, when the store gives one. Used only for the project membership. Never printed. */
+    val assigneeId: String? = null,
+) {
     // Never prints anything that identifies a person.
     override fun toString(): String = "PrincipalAccess(role=$role, source=$source)"
 }
@@ -128,12 +143,24 @@ const val DENY_NO_ROLE = "NO_ROLE"
 const val DENY_PERMISSION = "PERMISSION_DENIED"
 const val DENY_SCOPE = "SCOPE_DENIED"
 
+/** The project check (ADR 0022 PR-D): the caller is not a member of the request's project. */
+const val DENY_NOT_MEMBER = "PROJECT_NOT_MEMBER"
+
+/** The project check: the caller's project role does not hold the permission. */
+const val DENY_PROJECT_PERMISSION = "PROJECT_PERMISSION_DENIED"
+
+/** The project check: the membership store failed. Fail closed in ENFORCE. */
+const val DENY_PROJECT_LOOKUP = "PROJECT_LOOKUP_FAILED"
+
 class PermissionService(
     val mode: PermissionMode,
     private val default: RolesDefault,
     private val aiPrincipal: String?,
     private val rootApprover: String?,
     private val assignees: AssigneeLookup?,
+    /** `KIVRA_SELFDEV_PROJECT_MODE` (ADR 0022 PR-D). OFF: no project check. It needs [mode] other than OFF (RolesSettings checks it). */
+    val projectMode: PermissionMode = PermissionMode.OFF,
+    private val projects: ProjectMemberLookup? = null,
 ) {
     init {
         require(aiPrincipal == null || aiPrincipal != rootApprover) { "the AI principal must not be the root approver" }
@@ -164,11 +191,11 @@ class PermissionService(
             found = assignees?.accessOf(ownerKey)
         } catch (_: Exception) {
             // The AI principal stays an AI even when the store is down: it can only lose permissions.
-            return if (ownerKey == aiPrincipal) aiAccess(AccessSource.ENV_AI) else FAILED
+            return if (ownerKey == aiPrincipal) aiAccess(AccessSource.ENV_AI, null) else FAILED
         }
         if (ownerKey == aiPrincipal) {
             val conflict = found != null && (found.role != Role.AI)
-            return aiAccess(if (conflict) AccessSource.ENV_AI_CONFLICT else AccessSource.ENV_AI)
+            return aiAccess(if (conflict) AccessSource.ENV_AI_CONFLICT else AccessSource.ENV_AI, found?.assigneeId)
         }
         if (assignees == null) return FAILED
         if (found == null) {
@@ -179,10 +206,29 @@ class PermissionService(
             }
         }
         if (!found.active) return PrincipalAccess(null, emptySet(), AccessSource.ASSIGNEE_DISABLED)
-        return PrincipalAccess(found.role, ROLE_PERMISSIONS.getValue(found.role), AccessSource.ASSIGNEE)
+        return PrincipalAccess(found.role, ROLE_PERMISSIONS.getValue(found.role), AccessSource.ASSIGNEE, found.assigneeId)
     }
 
-    private fun aiAccess(source: AccessSource) = PrincipalAccess(Role.AI, ROLE_PERMISSIONS.getValue(Role.AI), source)
+    private fun aiAccess(source: AccessSource, assigneeId: String?) =
+        PrincipalAccess(Role.AI, ROLE_PERMISSIONS.getValue(Role.AI), source, assigneeId)
+
+    /**
+     * The project check of a request whose project is [projectId] (ADR 0022 PR-D). The global ADMIN (the assignee role ADMIN) always passes.
+     * Otherwise the caller must be a member of the project and its project role must hold [permission]. Returns the refusal code, or null
+     * when allowed. A caller with no assignee is not a member. The store's failure is [DENY_PROJECT_LOOKUP] (the caller decides whether to act on it).
+     */
+    fun projectDenial(access: PrincipalAccess, projectId: String, permission: Permission): String? {
+        if (access.role == Role.ADMIN && access.source == AccessSource.ASSIGNEE) return null
+        val assigneeId = access.assigneeId ?: return DENY_NOT_MEMBER
+        val found: Role?
+        try {
+            found = projects?.roleIn(projectId, assigneeId)
+        } catch (_: Exception) {
+            return DENY_PROJECT_LOOKUP
+        }
+        val role = found ?: return DENY_NOT_MEMBER
+        return if (permission in ROLE_PERMISSIONS.getValue(role)) null else DENY_PROJECT_PERMISSION
+    }
 
     /** [scopeOk]: the MCP token scope allows this operation (the caller computes it). The result is the intersection. */
     fun check(access: PrincipalAccess, permission: Permission, scopeOk: Boolean = true): Decision {

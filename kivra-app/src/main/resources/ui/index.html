@@ -110,7 +110,7 @@
     <!-- Autopilot (ADR 0011). Hidden unless GET /api/selfdev/autopilot answers 200 with the autopilot enabled. -->
     <section class="card" id="plans-section" aria-labelledby="h-plans" hidden>
       <div class="card-head">
-        <h2 id="h-plans">Goal の一覧と承認</h2>
+        <h2 id="h-plans">開発タスクの一覧と承認</h2>
       </div>
       <div class="autopilot-control" aria-live="polite">
         <p class="meta" id="autopilot-status" role="status">自律運転の状態を取得しています…</p>
@@ -130,12 +130,12 @@
       </div>
       <p id="plans-msg" class="result" role="status"></p>
       <p id="plans-status" class="meta" role="status"></p>
-      <ul id="plans-list" class="run-list" aria-label="Goal の一覧"></ul>
+      <ul id="plans-list" class="run-list" aria-label="開発タスクの一覧"></ul>
     </section>
 
     <section class="card" id="goal-section" aria-labelledby="h-goal" hidden>
       <h2 id="h-goal">開発目標（Goal）</h2>
-      <p class="meta" role="note">kivra が Goal から開発計画（Plan）を作り、承認した分だけ Run として投入します。PR のマージは人が行います。対象リポジトリ: <span id="goal-repo">-</span>（画面からは変えられません）。</p>
+      <p class="meta" role="note">kivra が Goal から開発タスクを作り、承認したタスクだけを Run として投入します。PR のマージは人が行います。対象リポジトリ: <span id="goal-repo">-</span>（画面からは変えられません）。</p>
       <form id="goal-form">
         <label for="goal-title">目的（1〜200 文字）</label>
         <input id="goal-title" name="goal-title" type="text" maxlength="200" required autocomplete="off">
@@ -311,7 +311,7 @@
 
 <dialog id="stop-dialog" aria-labelledby="stop-title">
   <div class="release-body">
-    <h2 id="stop-title">Goal の中止</h2>
+    <h2 id="stop-title">タスクの中止</h2>
     <p id="stop-explain"></p>
     <label for="stop-reason">理由（必須、1〜500 文字）</label>
     <input id="stop-reason" type="text" autocomplete="off">

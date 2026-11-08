@@ -9,6 +9,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.clickable
+import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiOrder
 import net.kigawa.kivra.ui.api.ApiStopRequest
@@ -17,7 +19,7 @@ import net.kigawa.kivra.ui.api.ApiStopRequest
  * Orders screen: Order list.
  */
 @Composable
-fun OrdersScreen(selectedProjectId: String? = null) {
+fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
     var orders by remember { mutableStateOf<List<ApiOrder>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -52,7 +54,7 @@ fun OrdersScreen(selectedProjectId: String? = null) {
         } else {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(orders, key = { it.orderId }) { order ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+                    Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onNavigate(Route.OrderDetail(order.orderId)) }) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text("order ${order.orderId}", style = MaterialTheme.typography.titleMedium)
                             Spacer(modifier = Modifier.height(4.dp))

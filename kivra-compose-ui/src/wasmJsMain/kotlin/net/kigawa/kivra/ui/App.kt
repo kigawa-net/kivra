@@ -38,8 +38,15 @@ import net.kigawa.kivra.ui.screens.*
  */
 @Composable
 fun KivraApp() {
-    var currentRoute by remember { mutableStateOf(NavDestination.Home.route) }
-    val currentDestination = NavDestination.fromRoute(currentRoute)
+    // 画面のルート。ブラウザのハッシュ(#/runs/<id> 等)と双方向に同期する: 読み込み時に解釈し、遷移時に書き、戻る/進むで読み直す。
+    var route by remember { mutableStateOf(parseRoute(currentLocationHash())) }
+    val navigate: (Route) -> Unit = { target ->
+        route = target
+        setLocationHash(target.toHash())
+    }
+    LaunchedEffect(Unit) {
+        addHashChangeListener { route = parseRoute(currentLocationHash()) }
+    }
     var projects by remember { mutableStateOf<List<ApiProject>>(emptyList()) }
     var selectedProjectId by remember { mutableStateOf<String?>(null) }
     var dropdownExpanded by remember { mutableStateOf(false) }
@@ -58,7 +65,7 @@ fun KivraApp() {
             SearchDialog(
                 projectId = selectedProjectId,
                 onDismiss = { searchOpen = false },
-                onNavigate = { currentRoute = it.route }
+                onNavigate = navigate
             )
         }
         Surface(modifier = Modifier.fillMaxSize()) {
@@ -68,8 +75,8 @@ fun KivraApp() {
                     Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
                         Text("Kivra", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(8.dp))
                         NavigationDrawerItem(
-                            selected = currentRoute == NavDestination.Home.route,
-                            onClick = { currentRoute = NavDestination.Home.route },
+                            selected = route.nav == NavDestination.Home,
+                            onClick = { navigate(Route.Page(NavDestination.Home)) },
                             label = { Text(NavDestination.Home.label) }
                         )
                         NavDestination.grouped.forEach { (group, items) ->
@@ -81,8 +88,8 @@ fun KivraApp() {
                             )
                             items.forEach { dest ->
                                 NavigationDrawerItem(
-                                    selected = currentRoute == dest.route,
-                                    onClick = { currentRoute = dest.route },
+                                    selected = route.nav == dest,
+                                    onClick = { navigate(Route.Page(dest)) },
                                     label = { Text(dest.label) }
                                 )
                             }
@@ -99,11 +106,24 @@ fun KivraApp() {
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = currentDestination.label,
-                            style = MaterialTheme.typography.headlineSmall,
-                            modifier = Modifier.padding(16.dp)
-                        )
+                        // 一覧はタイトル、詳細はパンくず(作業 › 一覧 › 詳細)。
+                        when (val r = route) {
+                            is Route.Page -> Text(
+                                text = r.dest.label,
+                                style = MaterialTheme.typography.headlineSmall,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                            is Route.Invalid -> Text(
+                                text = "リンクが正しくありません",
+                                style = MaterialTheme.typography.headlineSmall,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                            else -> Breadcrumb(
+                                crumbs = r.breadcrumbs(),
+                                onNavigate = navigate,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                         
                         // Project selector dropdown
                         ProjectSelectorDropdown(
@@ -125,15 +145,26 @@ fun KivraApp() {
                     
                     // Main content
                     val projectId = selectedProjectId
-                    when (currentDestination) {
-                        NavDestination.Home -> HomeScreen(projectId) { currentRoute = it.route }
-                        NavDestination.Tasks -> TasksScreen(projectId)
-                        NavDestination.Goals -> GoalsScreen(projectId)
-                        NavDestination.Orders -> OrdersScreen(projectId)
-                        NavDestination.Approvals -> ApprovalsScreen(projectId)
-                        NavDestination.Budget -> BudgetScreen()
-                        NavDestination.Memory -> MemoryScreen()
-                        NavDestination.Assignees -> AssigneesScreen(projectId)
+                    when (val r = route) {
+                        is Route.Page -> when (r.dest) {
+                            NavDestination.Home -> HomeScreen(projectId) { navigate(Route.Page(it)) }
+                            NavDestination.Tasks -> TasksScreen(projectId, navigate)
+                            NavDestination.Goals -> GoalsScreen(projectId, navigate)
+                            NavDestination.Orders -> OrdersScreen(projectId, navigate)
+                            NavDestination.Approvals -> ApprovalsScreen(projectId)
+                            NavDestination.Budget -> BudgetScreen()
+                            NavDestination.Memory -> MemoryScreen()
+                            NavDestination.Assignees -> AssigneesScreen(projectId)
+                        }
+                        is Route.RunDetail -> RunDetailScreen(r.runId, navigate)
+                        is Route.GoalDetail -> GoalDetailScreen(r.taskId, navigate)
+                        is Route.OrderDetail -> OrderDetailScreen(r.orderId, navigate)
+                        is Route.OrderCycles -> OrderCyclesScreen(r.orderId, navigate)
+                        is Route.Invalid -> Text(
+                            text = "このリンクは開けません。一覧から選び直してください。",
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(16.dp)
+                        )
                     }
                 }
             }

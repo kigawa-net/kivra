@@ -8,12 +8,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.PermanentDrawerSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -53,17 +55,25 @@ fun KivraApp() {
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
             Row(modifier = Modifier.fillMaxSize()) {
-                // Sidebar (Navigation Rail) - 左に寄せるために幅を固定
-                NavigationRail(modifier = Modifier.width(80.dp)) {
-                    Text("Kivra", modifier = Modifier.padding(8.dp))
-                    HorizontalDivider()
-                    NavDestination.all.forEach { dest ->
-                        NavigationRailItem(
-                            selected = currentRoute == dest.route,
-                            onClick = { currentRoute = dest.route },
-                            icon = {},
-                            label = { Text(dest.label) }
-                        )
+                // Sidebar: グループ見出し + 配下項目
+                PermanentDrawerSheet(modifier = Modifier.width(200.dp)) {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
+                        Text("Kivra", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(8.dp))
+                        NavDestination.grouped.forEach { (group, items) ->
+                            Text(
+                                text = group.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp)
+                            )
+                            items.forEach { dest ->
+                                NavigationDrawerItem(
+                                    selected = currentRoute == dest.route,
+                                    onClick = { currentRoute = dest.route },
+                                    label = { Text(dest.label) }
+                                )
+                            }
+                        }
                     }
                 }
                 HorizontalDivider()

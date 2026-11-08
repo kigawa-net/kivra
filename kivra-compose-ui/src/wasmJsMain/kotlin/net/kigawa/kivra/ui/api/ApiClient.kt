@@ -235,6 +235,21 @@ object ApiClient {
     suspend fun getBudget(): ApiBudget =
         getJson("/api/admin/budget/status", quiet = true)
 
+    /** 為替の期限。`GET /api/admin/budget/fx`(運用者向け)。quiet: 401 / 403 / 404 は「この利用者には見せない」で、セッションは切らない。 */
+    suspend fun getBudgetFx(): ApiBudgetFxResponse =
+        getJson("/api/admin/budget/fx", quiet = true)
+
+    /** 段階 1 → 2 の昇格条件。`GET /api/selfdev/autopilot/promotion`(運用者だけ。自律運転が無効なら 503)。読み取りのみ。 */
+    suspend fun getPromotion(): ApiPromotionReadout =
+        getJson("/api/selfdev/autopilot/promotion")
+
+    /**
+     * 実行の経過(CLI 経路の Run)。`GET /api/admin/runs/{id}/execution`。quiet: 401 / 403 / 404 は「この Run には節を出さない」
+     * (旧 UI の apiFetch と同じく、セッションは切らない)。
+     */
+    suspend fun getRunExecution(runId: String): ApiRunExecution =
+        getJson("/api/admin/runs/${percentEncode(runId)}/execution", quiet = true)
+
     /** Assignees. `GET /api/selfdev/assignees`. 403 unless the caller may manage assignees; 503 while roles are off. */
     suspend fun getAssignees(): List<ApiAssignee> =
         getJson("/api/selfdev/assignees")

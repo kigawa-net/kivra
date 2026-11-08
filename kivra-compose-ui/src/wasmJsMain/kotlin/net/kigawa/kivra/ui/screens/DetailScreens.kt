@@ -30,6 +30,7 @@ import net.kigawa.kivra.ui.canStopGoal
 import net.kigawa.kivra.ui.releaseKindOf
 import net.kigawa.kivra.ui.releaseTextsOf
 import net.kigawa.kivra.ui.safePullRequestUrl
+import net.kigawa.kivra.ui.showsExecutionSection
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiGoal
@@ -88,6 +89,11 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
                 Spacer(Modifier.height(12.dp))
             }
             PullRequestSection(run)
+            // 実行の経過(自己開発の Run だけ。読み取りの定期更新。詳細を離れると止まる)。
+            if (showsExecutionSection(run.mode, run.runId)) {
+                Spacer(Modifier.height(12.dp))
+                RunExecutionSection(run.runId)
+            }
             Spacer(Modifier.height(16.dp))
             Text("状態の経過", style = MaterialTheme.typography.titleMedium)
             val events = run.events

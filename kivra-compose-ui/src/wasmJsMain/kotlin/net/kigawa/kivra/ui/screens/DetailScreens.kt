@@ -8,8 +8,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
+import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.api.ApiClient
+import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiGoal
 import net.kigawa.kivra.ui.api.ApiGoalDetail
 import net.kigawa.kivra.ui.api.ApiOrder
@@ -17,9 +21,11 @@ import net.kigawa.kivra.ui.api.ApiOrderCycle
 import net.kigawa.kivra.ui.api.ApiOrderDetail
 import net.kigawa.kivra.ui.api.ApiRun
 import net.kigawa.kivra.ui.api.ApiRunEvent
+import net.kigawa.kivra.ui.writeFailureOf
+import net.kigawa.kivra.ui.writeFailureText
 
 /*
- * 詳細画面(読み取り専用)。承認・解放・中止などの操作は含まない(別 PR)。
+ * 詳細画面。Goal 詳細は承認待ちの Task に承認・見送りを出す。解放・中止・予算解除などの操作は含まない(別 PR)。
  * 表示する項目は旧 UI(kivra-app/src/main/resources/ui/app.js)と同じ範囲に合わせる。
  * 時刻は API の文字列のまま表示する(旧 UI のローカル時刻変換は未移植)。
  */
@@ -106,10 +112,36 @@ private fun EventLine(event: ApiRunEvent) {
 /** 開発目標(タスク)の詳細: 状態、対象リポジトリ、依存、関連 Run、本文。 */
 @Composable
 fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
-    val state by produceState<LoadState<ApiGoalDetail>>(LoadState.Loading, taskId) {
+    // 承認・見送りの後に増やして、詳細を読み直させる。
+    var reloadKey by remember { mutableStateOf(0) }
+    val state by produceState<LoadState<ApiGoalDetail>>(LoadState.Loading, taskId, reloadKey) {
         value = LoadState.Loading
         value = loadState { ApiClient.getGoal(taskId) }
     }
+    var busy by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<ActionNotice?>(null) }
+    val scope = rememberCoroutineScope()
+
+    // 承認・見送りを一つずつ送る。busy は送信の前に立てる(連打で二重に送らない)。version は読んだ値を送る。
+    fun act(onSuccess: String, call: suspend () -> Unit) {
+        if (busy) return
+        busy = true
+        notice = null
+        scope.launch {
+            try {
+                call()
+                notice = ActionNotice(onSuccess, ok = true)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                notice = ActionNotice(writeFailureText(writeFailureOf((e as? ApiException)?.status)), ok = false)
+            } finally {
+                busy = false
+                reloadKey++
+            }
+        }
+    }
+
     DetailPage {
         LoadStateView(state) { detail ->
             val goal: ApiGoal = detail.task
@@ -134,6 +166,33 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
                 }
             }
             Spacer(Modifier.height(12.dp))
+            // 承認待ちで、計画の親でない Task だけ承認・見送りを出す(旧 UI と同じ条件)。権限が無ければ 403 が文言で出る。
+            if (goal.state == "PENDING_APPROVAL" && goal.revision == 0) {
+                notice?.let { n ->
+                    Text(
+                        n.text,
+                        color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                }
+                Row {
+                    Button(
+                        enabled = !busy,
+                        onClick = { act("タスクを承認しました（投入を待っています）。") { ApiClient.approveGoal(goal.taskId, goal.version) } },
+                    ) { Text("このタスクを承認") }
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedButton(
+                        enabled = !busy,
+                        onClick = { act("タスクを見送りました。") { ApiClient.rejectGoal(goal.taskId, goal.version) } },
+                    ) { Text("見送る") }
+                }
+                Spacer(Modifier.height(12.dp))
+            } else {
+                notice?.let { n ->
+                    Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(12.dp))
+                }
+            }
             goal.runId?.let { runId ->
                 OutlinedButton(onClick = { onNavigate(Route.RunDetail(runId)) }) { Text("関連する Run を開く") }
                 Spacer(Modifier.height(12.dp))

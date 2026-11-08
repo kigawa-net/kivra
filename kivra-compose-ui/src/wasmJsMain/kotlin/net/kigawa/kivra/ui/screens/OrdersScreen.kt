@@ -8,12 +8,18 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
+import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.api.ApiClient
+import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiOrder
 import net.kigawa.kivra.ui.api.ApiStopRequest
+import net.kigawa.kivra.ui.isValidStopDigest
+import net.kigawa.kivra.ui.writeFailureOf
+import net.kigawa.kivra.ui.writeFailureText
 
 /**
  * Orders screen: Order list.
@@ -75,14 +81,25 @@ fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit)
 
 /**
  * Approvals screen: Stop approval list (pending stop requests of the orders).
+ *
+ * 承認は確認ダイアログ(理由なし)を経て送る。却下は旧 UI と同じく確認なしで送る(理由は取らない)。
+ * 書き込みの後は一覧を読み直す。プロジェクトの絞り込みは読み込みのたびに効く。
  */
 @Composable
 fun ApprovalsScreen(selectedProjectId: String? = null) {
     var approvals by remember { mutableStateOf<List<ApiStopRequest>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    // 書き込みの後に増やして、一覧を読み直させる。
+    var reloadKey by remember { mutableStateOf(0) }
+    var notice by remember { mutableStateOf<ActionNotice?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    // 承認の確認ダイアログの対象。null なら閉じている。
+    var pendingApprove by remember { mutableStateOf<ApiStopRequest?>(null) }
+    var approveError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
 
-    LaunchedEffect(selectedProjectId) {
+    LaunchedEffect(selectedProjectId, reloadKey) {
         loading = true
         error = null
         try {
@@ -101,9 +118,44 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
         }
     }
 
+    // 送信を一つだけ走らせる。busy は送信の前に立てるので、連打しても二重に送られない。
+    fun send(
+        onSuccess: String,
+        onFailure: (String) -> Unit,
+        call: suspend () -> Unit,
+    ) {
+        if (busy) return
+        busy = true
+        scope.launch {
+            try {
+                call()
+                notice = ActionNotice(onSuccess, ok = true)
+                pendingApprove = null
+                approveError = null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val failure = writeFailureText(writeFailureOf((e as? ApiException)?.status))
+                notice = ActionNotice(failure, ok = false)
+                onFailure(failure)
+            } finally {
+                busy = false
+                reloadKey++
+            }
+        }
+    }
+
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("承認", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
+
+        notice?.let { n ->
+            Text(
+                n.text,
+                color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        }
 
         if (loading) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
@@ -114,6 +166,7 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
         } else {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(approvals, key = { it.requestId }) { approval ->
+                    val digestOk = isValidStopDigest(approval.digest)
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text("停止の承認待ち", style = MaterialTheme.typography.titleMedium)
@@ -122,11 +175,28 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Row(modifier = Modifier.padding(top = 8.dp)) {
-                                Button(onClick = { /* 承認処理 */ }) {
+                                Button(
+                                    enabled = !busy && digestOk,
+                                    onClick = {
+                                        if (busy || !digestOk) return@Button
+                                        approveError = null
+                                        pendingApprove = approval
+                                    },
+                                ) {
                                     Text("承認")
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
-                                OutlinedButton(onClick = { /* 拒否処理 */ }) {
+                                OutlinedButton(
+                                    enabled = !busy,
+                                    onClick = {
+                                        send(
+                                            onSuccess = "停止の要求を却下しました。order は一時停止中になります（自動では再開しません）。",
+                                            onFailure = { },
+                                        ) {
+                                            ApiClient.rejectStopRequest(approval.requestId)
+                                        }
+                                    },
+                                ) {
                                     Text("拒否")
                                 }
                             }
@@ -136,5 +206,34 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
                 }
             }
         }
+    }
+
+    pendingApprove?.let { target ->
+        ReasonDialog(
+            title = "停止の承認",
+            message = "この order を停止します。元に戻せません。\n" +
+                "対象の order: ${target.orderId}（理由: ${target.reasonCode}）",
+            submitLabel = "承認する",
+            reasonLabel = null,
+            busy = busy,
+            errorText = approveError,
+            onSubmit = { _ ->
+                val digest = target.digest
+                if (digest != null && isValidStopDigest(digest)) {
+                    send(
+                        onSuccess = "停止を承認しました。order は停止済みになりました（元に戻せません）。",
+                        onFailure = { approveError = it },
+                    ) {
+                        ApiClient.approveStopRequest(target.requestId, digest)
+                    }
+                }
+            },
+            onDismiss = {
+                if (!busy) {
+                    pendingApprove = null
+                    approveError = null
+                }
+            },
+        )
     }
 }

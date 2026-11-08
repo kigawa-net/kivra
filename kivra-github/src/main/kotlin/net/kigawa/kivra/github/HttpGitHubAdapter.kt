@@ -116,6 +116,10 @@ fun githubHttpClient(engine: HttpClientEngine, config: GitHubAdapterConfig = Git
  * REST adapter. Every response is verified to be about the requested object (owner/repo/number/sha/branch):
  * a mismatch is `IDENTITY_MISMATCH`, never silently accepted (lesson from the PR #47 review).
  */
+/** The `Accept` of the JSON API (the default), and the one that returns a pull request's unified diff. */
+private const val ACCEPT_JSON = "application/vnd.github+json"
+private const val ACCEPT_DIFF = "application/vnd.github.diff"
+
 class HttpGitHubAdapter(
     private val client: HttpClient,
     private val tokens: TokenProvider,
@@ -137,11 +141,17 @@ class HttpGitHubAdapter(
     /**
      * One request. With [maxBodyBytes] the body is read only up to that limit; a longer body is [Transport.TooLarge].
      */
-    private suspend fun send(method: HttpMethod, path: String, body: JsonObject?, maxBodyBytes: Int? = null): Transport = try {
+    private suspend fun send(
+        method: HttpMethod,
+        path: String,
+        body: JsonObject?,
+        maxBodyBytes: Int? = null,
+        accept: String = ACCEPT_JSON,
+    ): Transport = try {
         val resp: HttpResponse = client.request(config.apiBase.trimEnd('/') + path) {
             this.method = method
             header("Authorization", "Bearer ${tokens.token()}")
-            header("Accept", "application/vnd.github+json")
+            header("Accept", accept)
             header("X-GitHub-Api-Version", "2022-11-28")
             if (body != null) {
                 contentType(ContentType.Application.Json)
@@ -168,11 +178,11 @@ class HttpGitHubAdapter(
     }
 
     /** GET with retry on 5xx / I/O and one token refresh on 401. Returns the raw 2xx response or a classified failure. */
-    private suspend fun get(path: String, maxBodyBytes: Int? = null): GitHubResult<Raw> {
+    private suspend fun get(path: String, maxBodyBytes: Int? = null, accept: String = ACCEPT_JSON): GitHubResult<Raw> {
         var refreshed = false
         var attempt = 1
         while (true) {
-            when (val t = send(HttpMethod.Get, path, null, maxBodyBytes)) {
+            when (val t = send(HttpMethod.Get, path, null, maxBodyBytes, accept)) {
                 is Transport.TooLarge -> return GitHubResult.Failure(GitHubFailureKind.TOO_LARGE, GitHubFailureKind.TOO_LARGE.code)
                 is Transport.Error ->
                     if (attempt >= config.maxGetAttempts) return GitHubResult.Failure(GitHubFailureKind.NETWORK, t.message)
@@ -838,6 +848,27 @@ class HttpGitHubAdapter(
     }
 
     // ---- pull request branch update (issue #276, PrBranchPort) ----
+
+    override suspend fun getPullRequestDiff(repo: RepoRef, number: Int, maxBytes: Int): GitHubResult<String> {
+        require(number > 0 && maxBytes > 0) { "number and maxBytes must be positive" }
+        return when (val r = get("${repoPath(repo)}/pulls/$number", maxBodyBytes = maxBytes, accept = ACCEPT_DIFF)) {
+            is GitHubResult.Success -> GitHubResult.Success(r.value.body)
+            is GitHubResult.Failure -> r
+            is GitHubResult.Unknown -> r
+        }
+    }
+
+    override suspend fun createPullRequestComment(repo: RepoRef, number: Int, body: String): GitHubResult<Long> {
+        require(number > 0) { "number must be positive" }
+        val payload = JsonObject(mapOf("body" to JsonPrimitive(body)))
+        val raw = when (val r = post("create pull request comment", "${repoPath(repo)}/issues/$number/comments", payload)) {
+            is GitHubResult.Success -> r.value
+            is GitHubResult.Failure -> return r
+            is GitHubResult.Unknown -> return r
+        }
+        val id = (parse(raw) as? JsonObject)?.long("id") ?: return protocol("comment id")
+        return GitHubResult.Success(id)
+    }
 
     override suspend fun getPrRebaseView(repo: RepoRef, number: Int): GitHubResult<PrRebaseView> {
         val raw = when (val r = get("${repoPath(repo)}/pulls/$number")) {

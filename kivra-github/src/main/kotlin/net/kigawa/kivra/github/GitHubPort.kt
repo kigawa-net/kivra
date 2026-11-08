@@ -72,6 +72,19 @@ interface GitHubPort {
      * decoded strictly from base64; binary (contains NUL) or non-UTF-8 content is returned with `isText = false`.
      */
     suspend fun readFile(repo: RepoRef, ref: String, path: String, maxBytes: Int): GitHubResult<RepoFileContent?>
+
+    /**
+     * Read-only (GET only). The unified diff of pull request [number] (the current head). A diff longer than [maxBytes] is
+     * `Failure(TOO_LARGE)`, never a truncated text.
+     */
+    suspend fun getPullRequestDiff(repo: RepoRef, number: Int, maxBytes: Int): GitHubResult<String>
+
+    /**
+     * Posts [body] as a comment on pull request [number] (an issue comment). The only write a review may make: it never
+     * approves, requests changes, merges or edits. POST is sent once; an unknown outcome is `Unknown` and is never re-sent.
+     * Returns the id of the new comment.
+     */
+    suspend fun createPullRequestComment(repo: RepoRef, number: Int, body: String): GitHubResult<Long>
 }
 
 enum class TreeEntryType { BLOB, TREE, COMMIT }

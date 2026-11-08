@@ -111,6 +111,7 @@ jobs:
             "$MANIFEST"
 
       - name: Create or update manifest pull request
+        id: manifest-pr
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ steps.k8s-token.outputs.token }}
@@ -125,5 +126,15 @@ jobs:
             Source commit: ${{ github.sha }}
             Image: ${{ env.dockerRepository }}/${{ env.name }}:${{ needs.build.outputs.tag }}
 
-            Review and merge this PR in kigawa-net-k8s to trigger ArgoCD.
+            dev 向けのため、cd ワークフローが自動で squash マージする (ArgoCD が反映する)。
           delete-branch: true
+
+      # dev のイメージタグ更新だけを自動マージする。人間の承認を待たない (dev 限定)。
+      # 差分が無く PR が作られなかった場合 (pull-request-number が空) は何もしない。
+      - name: Merge manifest pull request (dev)
+        if: steps.manifest-pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.k8s-token.outputs.token }}
+          PR_NUMBER: ${{ steps.manifest-pr.outputs.pull-request-number }}
+        run: |
+          gh pr merge "$PR_NUMBER" --repo "${{ env.manifestRepository }}" --squash

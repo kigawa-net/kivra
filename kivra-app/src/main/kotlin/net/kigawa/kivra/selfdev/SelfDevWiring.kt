@@ -9,7 +9,7 @@ import net.kigawa.kivra.db.AuditRepository
 import net.kigawa.kivra.db.DbRequestLedger
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
-// SelfDevGoalRepository and SelfDevPlanRepository removed in V40
+import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.developer.DeveloperConfig
 import net.kigawa.kivra.developer.LlmDeveloper
@@ -188,7 +188,7 @@ internal fun buildSelfDev(
         taskTexts = DbTaskTextSource,
         coding = coding,
         references = TaskReferenceResolvers(listOf(GitHubIssueResolver(github, config.repo))),
-        autoScope = PlanTaskAutoScopeGuard(),
+        autoScope = PlanTaskAutoScopeGuard(SelfDevOperatorRepository(database)),
         prRebaser = prRebaser,
     )
     val worker = SelfDevWorker(
@@ -198,10 +198,13 @@ internal fun buildSelfDev(
         beginTick = { prRebaser?.beginTick() },
     )
     // Built only when the autopilot is enabled. Nothing about planning exists otherwise (ADR 0011, PR B).
-    // planWorker temporarily disabled pending Task model migration (V40)
-    val planWorker: PlannerWorker? = null
+    val planWorker: PlannerWorker? = autopilot.config?.takeIf { autopilot.enabled }?.let { autopilotConfig ->
+        // The Planner's file list reads the same GitHub adapter, on the configured base branch (Issue #293). Off when the switch is off.
+        val repoFiles = if (autopilotConfig.plannerRepoTree) PlannerRepoFiles(github, config.repo, config.baseBranch) else null
+        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevOperatorRepository(database), tenantId, repoFiles, memory, suppress)
+    }
     // ADR 0014 S1: the shadow judgement. Built only with the autopilot and its shadow switch on; it reads GitHub and writes the audit only.
-    // autoMergeShadow temporarily disabled pending Task model migration (V40)
+    // autoMergeShadow temporarily disabled pending Task model migration (V40): its store still reads the plan tables.
     val autoMergeShadow: AutoMergeShadowWatch? = null
     return SelfDevParts(
         worker = worker,
@@ -217,7 +220,29 @@ internal fun buildSelfDev(
  * The Planner, pinned to [PLANNER_MODEL_ID]. Startup fails when that model is not in the registry or not active, so the feature never runs
  * on an unlisted model. The budget is the tenant's (the same scope as the developer). The worker starts only if the caller starts it.
  */
-// buildPlanWorker temporarily disabled pending Task model migration (V40)
+private fun buildPlanWorker(
+    config: AutopilotConfig,
+    registry: ModelRegistry,
+    gateway: ModelGateway,
+    operations: SelfDevOperatorRepository,
+    tenantId: String,
+    repoFiles: PlannerRepoFiles?,
+    memory: SelfDevMemoryRecorder,
+    suppress: SuppressShadow,
+): PlannerWorker {
+    check(registry.models.any { it.id == PLANNER_MODEL_ID && it.lifecycle == Lifecycle.ACTIVE }) {
+        "the autopilot planner model is not an active model in the registry"
+    }
+    val planner = AutopilotPlanner(
+        operations = operations,
+        gateway = gateway,
+        config = PlannerConfig(budgetScopes = listOf(tenantId), autopilot = config),
+        repoFiles = repoFiles,
+        memory = memory,
+        suppress = suppress,
+    )
+    return PlannerWorker(operations, planner, Duration.ofSeconds(config.planIntervalSeconds))
+}
 
 /** Loads the model registry. The failure message carries no path and no file content. */
 private fun loadRegistry(path: String): ModelRegistry = try {

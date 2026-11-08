@@ -70,10 +70,10 @@ import net.kigawa.kivra.routes.configureUiRoutes
 import net.kigawa.kivra.routes.configureProjectRoutes
 import net.kigawa.kivra.routes.configureRunViewRoutes
 import net.kigawa.kivra.routes.PermissionGuard
-// SelfDevGoalRouteDeps removed in V40
+import net.kigawa.kivra.routes.SelfDevGoalRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevAdminRoutes
 import net.kigawa.kivra.routes.SelfDevMemoryRouteDeps
-// configureSelfDevGoalRoutes removed in V40
+import net.kigawa.kivra.routes.configureSelfDevGoalRoutes
 import net.kigawa.kivra.routes.configureSelfDevMemoryRoutes
 import net.kigawa.kivra.routes.SelfDevAssigneeRouteDeps
 import net.kigawa.kivra.routes.configureSelfDevAssigneeRoutes
@@ -241,8 +241,20 @@ internal fun Application.appModule(env: Map<String, String>) {
             oidcIssuer = env["KIVRA_OIDC_ISSUER"]?.trim()?.takeIf { it.isNotEmpty() },
         )
     }
-    // Goal routes temporarily removed pending Task model migration (V40)
-    val goalRoutes: Any? = null
+    // The autopilot's operator API (ADR 0011) on the Task model (V40), registered with the operator check like the memory and order routes.
+    // While the autopilot is disabled, every endpoint answers 503 AUTOPILOT_DISABLED.
+    val goalRoutes = operatorVerifier?.let { verifier ->
+        SelfDevGoalRouteDeps(
+            operators = verifier,
+            autopilot = autopilotSettings,
+            targetRepo = selfDevSettings.config?.repo?.let { "${it.owner}/${it.repo}" },
+            operations = SelfDevOperatorRepository(database),
+            control = SelfDevAutopilotControlRepository(database),
+            memory = memory,
+            aiPrincipal = aiPrincipal,
+            guard = permissionGuard,
+        )
+    }
     // The memory's operator routes (ADR 0016 P2). Registered with the operator check; the repository is null while the memory switch is off,
     // and then every endpoint answers 503.
     val memoryRoutes = operatorVerifier?.let { verifier ->
@@ -583,7 +595,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureBudgetAdminRoutes(budgetStore, taskApiIdentityWithSession, fx = fxSettings, operatorView = budgetStore, guard = permissionGuard)
             configureSelfDevAdminRoutes(runs, taskApiIdentityWithSession, permissionGuard)
             configureRunViewRoutes(runs, taskApiIdentityWithSession, selfDevSettings, permissionGuard, projectRepo)
-            // Goal routes temporarily removed pending Task model migration (V40)
+            if (goalRoutes != null) configureSelfDevGoalRoutes(goalRoutes)
             if (memoryRoutes != null) configureSelfDevMemoryRoutes(memoryRoutes)
             if (orderRoutes != null) configureSelfDevOrderRoutes(orderRoutes)
             if (assigneeRoutes != null) configureSelfDevAssigneeRoutes(assigneeRoutes)

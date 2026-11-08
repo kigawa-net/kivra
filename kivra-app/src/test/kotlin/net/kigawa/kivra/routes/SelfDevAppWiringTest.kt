@@ -89,11 +89,10 @@ class SelfDevAppWiringTest {
                 ),
             )
         }
-        // Autopilot routes removed in V40 (were in SelfDevGoalRoutes.kt)
-        assertEquals(HttpStatusCode.NotFound, client.get("/api/selfdev/autopilot").status)
-        // Goal routes removed in V40
-        // assertEquals(HttpStatusCode.Unauthorized, client.get("/api/selfdev/goals").status)
-        // assertEquals(HttpStatusCode.Unauthorized, client.post("/api/selfdev/goals").status)
+        // The autopilot routes (SelfDevGoalRoutes.kt) answer 401 without a token, before the disabled check.
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/selfdev/autopilot").status)
+        assertEquals(HttpStatusCode.Unauthorized, client.get("/api/selfdev/goals").status)
+        assertEquals(HttpStatusCode.Unauthorized, client.post("/api/selfdev/goals").status)
         // Self-development is off, so its routes are not registered, as before.
         assertEquals(HttpStatusCode.NotFound, client.post("/api/selfdev/tasks").status)
         assertEquals(HttpStatusCode.OK, client.get("/health").status)

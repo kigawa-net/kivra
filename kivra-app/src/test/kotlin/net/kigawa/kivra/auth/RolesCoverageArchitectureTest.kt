@@ -91,23 +91,22 @@ class RolesCoverageArchitectureTest {
         "POST /api/selfdev/stop-requests/{id}/approve" to Permission.STOP_DECIDE,
         "POST /api/selfdev/stop-requests/{id}/reject" to Permission.STOP_DECIDE,
         "POST /api/selfdev/stop-requests/{id}/cancel" to Permission.STOP_REQUEST,
-        // Autopilot routes removed in V40 (were in SelfDevGoalRoutes.kt)
-        // "GET /api/selfdev/autopilot" to Permission.READ,
-        // "GET /api/selfdev/autopilot/promotion" to Permission.READ,
-        // "POST /api/selfdev/autopilot/pause" to Permission.ORDER_MANAGE,
-        // "POST /api/selfdev/autopilot/resume" to Permission.ORDER_MANAGE,
-        // "POST /api/selfdev/autopilot/auto-merge/pause" to Permission.ORDER_MANAGE,
-        // "POST /api/selfdev/autopilot/auto-merge/resume" to Permission.ORDER_MANAGE,
-        // "POST /api/selfdev/autopilot/reset-breaker" to Permission.ORDER_MANAGE,
-        // Goal routes removed in V40 (Goal/Plan → Task migration)
-        // "POST /api/selfdev/goals" to Permission.GOAL_WRITE,
-        // "GET /api/selfdev/goals" to Permission.READ,
-        // "GET /api/selfdev/goals/{id}" to Permission.READ,
-        // "POST /api/selfdev/goals/{id}/approve-plan" to Permission.GOAL_WRITE,
-        // "POST /api/selfdev/goals/{id}/replan" to Permission.GOAL_WRITE,
-        // "POST /api/selfdev/goals/{id}/stop" to Permission.GOAL_STOP,
-        // "POST /api/selfdev/tasks/{id}/approve" to Permission.GOAL_WRITE,
-        // "POST /api/selfdev/tasks/{id}/reject" to Permission.GOAL_WRITE,
+        // The autopilot and goal (task) routes: SelfDevGoalRoutes.kt, on the V40 Task model.
+        "GET /api/selfdev/autopilot" to Permission.READ,
+        "GET /api/selfdev/autopilot/promotion" to Permission.READ,
+        "POST /api/selfdev/autopilot/pause" to Permission.ORDER_MANAGE,
+        "POST /api/selfdev/autopilot/resume" to Permission.ORDER_MANAGE,
+        "POST /api/selfdev/autopilot/auto-merge/pause" to Permission.ORDER_MANAGE,
+        "POST /api/selfdev/autopilot/auto-merge/resume" to Permission.ORDER_MANAGE,
+        "POST /api/selfdev/autopilot/reset-breaker" to Permission.ORDER_MANAGE,
+        "POST /api/selfdev/goals" to Permission.GOAL_WRITE,
+        "GET /api/selfdev/goals" to Permission.READ,
+        "GET /api/selfdev/goals/{id}" to Permission.READ,
+        "POST /api/selfdev/goals/{id}/approve-plan" to Permission.GOAL_WRITE,
+        "POST /api/selfdev/goals/{id}/replan" to Permission.GOAL_WRITE,
+        "POST /api/selfdev/goals/{id}/stop" to Permission.GOAL_STOP,
+        "POST /api/selfdev/tasks/{id}/approve" to Permission.GOAL_WRITE,
+        "POST /api/selfdev/tasks/{id}/reject" to Permission.GOAL_WRITE,
         "GET /api/selfdev/memory" to Permission.READ_TEXT,
         "POST /api/selfdev/memory/{id}/delete" to Permission.GOAL_WRITE,
         "POST /api/selfdev/memory/delete-by-condition" to Permission.GOAL_WRITE,
@@ -248,7 +247,7 @@ class RolesCoverageArchitectureTest {
      */
     private val AUTH_CALLS: Map<String, Int> = mapOf(
         "routes/SelfDevOrderRoutes.kt" to 1,
-        // SelfDevGoalRoutes.kt removed in V40
+        "routes/SelfDevGoalRoutes.kt" to 1,
         "routes/SelfDevMemoryRoutes.kt" to 1,
         // PR T3: the assignee admin API and /me share one `operators.authenticate(` (the roles' routes, then `guard.resolve`).
         "routes/SelfDevAssigneeRoutes.kt" to 1,

@@ -1,5 +1,7 @@
 # ADR 0022: 全エンティティをプロジェクト配下にする(方針と段階。第1段は expand のみ)
 
+> 注記(2026-11-09): 旧 vanilla UI(`/ui`、`kivra-app/src/main/resources/ui/`)は撤去済み。現在の画面は Compose UI(`/ui/compose`)。本文の旧 UI への記述は当時の記録として残す。
+
 - ステータス: 提案(Proposed)。この PR は文書と、第1段(PR-A)のスキーマ変更だけを含む。
 - 日付: 2026-11-08
 - 関連: ADR 0020(担当とロール)、ADR 0021(停止要求の承認)、V38(projects)、V42(orders と assignees の project_id)

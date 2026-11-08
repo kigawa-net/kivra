@@ -109,8 +109,8 @@ internal fun Route.configureOidcSessionRoutes(
             "${settings.sessionCookieName}=$sessionId; Path=/; Max-Age=$maxAge; HttpOnly; $secureAttr SameSite=Lax"
         )
 
-        // Redirect to UI
-        call.respondRedirect("/ui", permanent = false)
+        // Redirect to the Compose UI
+        call.respondRedirect("/ui/compose", permanent = false)
     }
 
     post("/api/auth/logout") {
@@ -124,7 +124,8 @@ internal fun Route.configureOidcSessionRoutes(
         // Redirect to Keycloak logout
         val host = call.request.headers[HttpHeaders.Host] ?: "localhost"
         val scheme = "https"
-        val redirect = "$scheme://$host/ui"
+        // Keycloak must allow this exact post_logout_redirect_uri (external setting, outside this repository).
+        val redirect = "$scheme://$host/ui/compose"
         val encodedRedirect = URLEncoder.encode(redirect, StandardCharsets.UTF_8.name())
         val logoutUrl = "$logoutEndpoint?post_logout_redirect_uri=$encodedRedirect"
         call.respondRedirect(logoutUrl, permanent = false)

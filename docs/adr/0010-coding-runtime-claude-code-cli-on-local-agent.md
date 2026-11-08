@@ -1,5 +1,7 @@
 # ADR 0010: 自己開発のコード編集を、ユーザーのローカル PC の常駐エージェントと使い捨てコンテナの Claude Code CLI で行う
 
+> 注記(2026-11-09): 旧 vanilla UI(`/ui`、`kivra-app/src/main/resources/ui/`)は撤去済み。現在の画面は Compose UI(`/ui/compose`)。本文の旧 UI への記述は当時の記録として残す。
+
 - ステータス: 承認(Accepted)。承認日は 2026-10-18。根拠は dev での E2E(Run 01M5569F5PBC7T9HJPB7S17A82 → PR #228、Run 01M56QJR26F6YZ6KRA3PZ8FX80 → PR #241)
 - 日付: 2026-10-17(起草)、2026-10-18(承認)
 - 関連: Issue #187(Use existing logged-in Claude Code CLI as coding runtime)、#157、#56、#181、#174、#71、#112、#184、#188。ADR 0008(一部改定)、ADR 0009、ADR 0001(Run の正本)

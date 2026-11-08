@@ -1,5 +1,7 @@
 # ADR 0012: Run の実行イベントを記録し、運用者が読み取り専用で追える Run ライブモニターを作る(停止は既存の取消し要求を使う)
 
+> 注記(2026-11-09): 旧 vanilla UI(`/ui`、`kivra-app/src/main/resources/ui/`)は撤去済み。現在の画面は Compose UI(`/ui/compose`)。本文の旧 UI への記述は当時の記録として残す。
+
 - ステータス: 提案(Proposed)。ユーザーの承認待ち。承認まで実装は始めない
 - 日付: 2026-10-18
 - 関連: Issue #223(Self-dev Observability: Run Journal)、#224(Run ライブモニター UI)、#220(ClaudeCodeCliRuntime)、#76 / #79 / #85(Workspace UI と BFF)、#225 / #226(Self-healing)、#231(残件。エラーコード)、#157、#174、#181。ADR 0001(Run の正本)、ADR 0009(運用者の操作)、ADR 0010(CLI 経路の実行基盤)、ADR 0011(監査とログの衛生)。設計 `docs/design/15-coding-attempts.md`(`coding_attempts` / `coding_events`)

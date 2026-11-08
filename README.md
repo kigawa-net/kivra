@@ -228,18 +228,16 @@ Run の `task_id` は `api:<runId>`（fusha-task のタスクとは紐づかな�
 
 **#111 のダミー API との関係**: `/api/dev/*` は `KIVRA_DEV_DEMO_ENABLED=true` かつ `KIVRA_RUNTIME_ENV=development` のときだけ有効な、メモリ上の開発用ダミーで、そのまま残す。サーバーでは使わない。
 
-## UI（最小の Web UI）
+## UI（Compose Web UI）
 
-`GET /ui`（`/ui/`）で、Task の投入、Run の一覧と詳細を見られる最小の画面を配信する。ビルド工程（Node、React、バンドラ）は無く、`kivra-app/src/main/resources/ui/`（`index.html`、`app.js`、`app.css`）をそのまま jar に入れて返す。
+`GET /ui/compose` で、Compose Multiplatform（Wasm）で作った Web UI を配信する。`/ui` と `/ui/` は `/ui/compose` へ 302 で転送する（旧 vanilla UI は撤去済み）。ルート `/` も `/ui/compose` へ転送する。ソースは `kivra-compose-ui/`（共通の画面）と `kivra-web/`（Wasm のビルド）。`kivra-app` の `copyComposeWebDist` タスクが `kivra-web` の Wasm 成果物を `resources/ui/compose/` に入れ、jar に同梱される。
 
-- **有効化**: Task API と同じく `KIVRA_AUTH_MODE` が設定されているときだけ登録する。未設定なら `/ui` は 404。
-- **認証**: HTML 自体には秘密が無いので `/ui` には認証を掛けていない。画面が呼ぶ `/api/*` は Task API の認証（本番は oauth2-proxy が付ける Keycloak の JWT を kivra が検証）で保護される。画面の JS は `Authorization` を付けない。
-- **種別**: 一覧と詳細には、シミュレーションの Run（`mode: SIMULATED`）と自己開発の Run（`mode: SELF_DEV`、GitHub に PR を作成する）の両方を出し、種別のバッジで区別する。自己開発の Run のタイトルは表示しない。「実行中」「成功」のような実行されたと誤認させる表現は使わない。
-- **運用者の表示**: 「全員の Run」で、ロールを持つ運用者は全員の Run を見られる（`GET /api/admin/runs`）。自己開発の有効・無効（`GET /api/selfdev/status`）に応じた注意書きと、理由コードの説明を出す。詳細は `docs/runbook-selfdev.md` の 4.7。
-- **CSP**: `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`。インラインの script と style は使わない（別ファイル）。あわせて `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`。
-- **XSS 対策**: サーバーからのデータ（title など）は `textContent` だけで DOM に入れる。`innerHTML` などの HTML 文字列を解釈する API、`eval`、`new Function` は使わない（テストで静的に検査している）。
-- **外部依存なし**: CDN やフォント等の外部 URL は使わない（テストで検査している）。
-- **未対応**: Overview、Review・承認 UI、SSE による更新（現状は 30 秒ごとのポーリング）、Memory・Settings 画面、Chat からの投入。Issue #76 / #79 の後続フェーズで扱う。
+- **有効化**: Task API と同じく `KIVRA_AUTH_MODE` が設定されているときだけ登録する。未設定なら `/ui`、`/ui/compose` は 404。
+- **認証**: 画面の HTML と Wasm 自体には秘密が無いので `/ui/compose` には認証を掛けていない。画面が呼ぶ `/api/*` は Task API の認証（本番は oauth2-proxy が付ける Keycloak の JWT を kivra が検証）で保護される。
+- **画面の場所**: 画面の切り替えはブラウザのハッシュ（`#/runs/<id>` など）で行い、戻る・進むと同期する。旧 UI のハッシュ形式と同じものを Compose が解釈する。
+- **CSP**: `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; child-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`。あわせて `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`。
+- **ログイン・ログアウト**: ログイン後は `/ui/compose` へ戻る。ログアウト後の戻り先（Keycloak の `post_logout_redirect_uri`）も `/ui/compose`。Keycloak 側の許可 URI の登録は、このリポジトリの外の設定。
+
 
 ## デプロイ
 

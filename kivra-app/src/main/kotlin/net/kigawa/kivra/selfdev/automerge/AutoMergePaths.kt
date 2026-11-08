@@ -38,7 +38,9 @@ internal object AutoMergePaths {
         "kivra-github/**",
         "kivra-core/src/main/kotlin/net/kigawa/kivra/core/**",
         "kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/**",
-        "kivra-app/src/main/resources/ui/**",
+        // the operator screens (the legacy vanilla UI under resources/ui was removed; the Compose UI replaces it)
+        "kivra-compose-ui/**",
+        "kivra-web/**",
         // test resources can be read as configuration
         "kivra-*/src/test/resources/**",
         // git internals and dotfiles that carry configuration

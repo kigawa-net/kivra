@@ -75,7 +75,7 @@
 | `kivra-*/src/main/resources/db/migration/**` | 禁止 | `PatchPolicy` の denylist。マイグレーションは人が書く(V1〜V20 が実在する) |
 | `docs/adr/**`、`docs/provider-compatibility-matrix.md`、`**/CLAUDE.md`、`**/.env*`、`**/*.pem`、`**/*.key` | 禁止 | `PatchPolicy` の denylist |
 | `kivra-github/**`、`kivra-core/src/main/kotlin/net/kigawa/kivra/core/**`、`kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/**` | 禁止 | マージの判定と照合の本体。自動マージの門番を、門番自身が書き換えないため。これらは `kivra-*/src/main/**` でもあり、C3 の範囲外でもある |
-| `kivra-app/src/main/resources/ui/**` | 禁止 | 運用者の画面。表示の経路の変更は、人が見る |
+| `kivra-compose-ui/**`、`kivra-web/**` | 禁止 | 運用者の画面(Compose UI)。表示の経路の変更は、人が見る。旧 vanilla UI(`kivra-app/src/main/resources/ui/**`)は 2026-11-09 に撤去し、この行に置き換えた(追補を参照) |
 | `kivra-*/src/test/resources/**` | 禁止 | テストが読む設定として使われうる。ソースではない |
 | `docs/**`、`README.md` | **初回は対象外**(U-1) | §2.2 |
 | `kivra-*/src/test/kotlin/**/*.kt` | **対象**(U-1 の推奨) | §2.2 |
@@ -364,3 +364,9 @@ S1 の前提(P):
   - 1 時間と 1 日の上限は、複数の Pod で同時に走ったとき、判定のあとに超えうる(判定と要求の間の競合)。単一スロットと head ごとの 1 回の制限は DB で強制する。
   - App の `checks:read` と、`main` の必須チェックの設定(運用者の作業)。
   - S1 の進む条件(判定 20 件以上など)の達成は、未確認。
+
+## 追補(2026-11-09): 旧 vanilla UI の撤去に伴う禁止領域の変更
+
+- **きっかけ**: 運用者の画面を、旧 vanilla UI(`kivra-app/src/main/resources/ui/**`)から Compose Wasm UI(`kivra-compose-ui/**`、`kivra-web/**`)へ一本化し、旧 UI を撤去した。旧 UI のパスを禁止領域に残すと、何も守らないパスになる。
+- **決定**: §2.1 の表の `kivra-app/src/main/resources/ui/**` の行を `kivra-compose-ui/**`、`kivra-web/**` に置き換える。`AutoMergePaths.kt` の `DENYLIST` も同じ内容に合わせる。画面の表示の経路を変えるファイルは、どちらも人が承認する。
+- **結果**: 旧 UI のパスは禁止領域から外れる。ただし旧 UI のファイルは削除済みなので、この変更で自動マージの範囲が広がることはない(範囲は `kivra-*/src/test/kotlin/**/*.kt` のまま)。

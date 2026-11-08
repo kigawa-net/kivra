@@ -1,5 +1,7 @@
 # ADR 0011: 自己開発オートパイロットは、運用者の Goal から Plan を作り、承認と予算の範囲で Run に投入する
 
+> 注記(2026-11-09): 旧 vanilla UI(`/ui`、`kivra-app/src/main/resources/ui/`)は撤去済み。現在の画面は Compose UI(`/ui/compose`)。本文の旧 UI への記述は当時の記録として残す。
+
 - ステータス: 提案(Proposed)。PR A〜D(基盤、Planner、Dispatcher、UI と HTTP)は main に実装済みだが、段階 1 の dev での有効化と E2E が未実施のため、Proposed のまま(「実装状況」を参照)
 - 日付: 2026-10-18
 - 関連: Issue #233(本 ADR の設計案の正本)、#229(依頼文の本文 body)、#230(CLI 経路の費用の予算 ledger 計上)、#231(ローカルエージェントの結線の残件。reconcile の配線)、#222(E2E fixture)、#187(ローカルエージェント)、#56(Self-Development Integration Runner)、#112(Task API)。ADR 0001(Run の正本)、ADR 0003(予算と UNKNOWN_COST)、ADR 0004(予算の正本は BudgetPort)、ADR 0005(結果の分類と UNKNOWN)、ADR 0008(PR 作成までの自己開発ループ、マージは人間)、ADR 0009(運用者による UNKNOWN と PULL_REQUEST の解放)、ADR 0010(CLI 経路の実行基盤)

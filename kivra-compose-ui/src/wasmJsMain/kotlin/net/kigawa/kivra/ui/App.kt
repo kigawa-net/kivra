@@ -274,7 +274,7 @@ private fun KivraAppContent(
                             NavDestination.Orders -> OrdersScreen(projectId, navigate)
                             NavDestination.Approvals -> ApprovalsScreen(projectId)
                             NavDestination.Budget -> BudgetScreen()
-                            NavDestination.Memory -> MemoryScreen()
+                            NavDestination.Memory -> MemoryScreen(projectId)
                             NavDestination.Projects -> ProjectsScreen(
                                 onNavigate = navigate,
                                 onProjectsChanged = { projectsReload += 1 },

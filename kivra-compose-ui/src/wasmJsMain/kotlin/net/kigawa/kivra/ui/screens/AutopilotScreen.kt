@@ -72,6 +72,9 @@ fun AutopilotScreen() {
                 }
             }
             Spacer(Modifier.height(12.dp))
+            // 昇格条件の読み取り。自律運転が有効(この分岐)のときだけ読む。
+            PromotionSection()
+            Spacer(Modifier.height(12.dp))
             if (perms.can(GatedOperation.MANAGE_AUTOPILOT)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(

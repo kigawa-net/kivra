@@ -19,8 +19,6 @@ import net.kigawa.kivra.ui.budgetPathLabel
 import net.kigawa.kivra.ui.reservationLabel
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiBudget
-import net.kigawa.kivra.ui.api.ApiMemory
-import net.kigawa.kivra.ui.api.ApiAssignee
 import net.kigawa.kivra.ui.api.ApiUnpricedReservation
 
 /**
@@ -70,10 +68,12 @@ fun BudgetScreen() {
                         modifier = Modifier.fillMaxWidth()
                     )
                     Text("確定: ${b.committedJpy} 円 / 予約中: ${b.reservedJpy} 円 / 残り: ${b.remainingJpy} 円")
+                    BudgetOverspendLine(b.remainingJpy)
                     Text("確定(API): ${b.paths.api.committedJpy} 円 / 確定(CLI): ${b.paths.cli.committedJpy} 円")
                     Text("未確定の予約: ${b.unpricedCount} 件")
                 }
             }
+            BudgetFxNotice()
             Spacer(modifier = Modifier.height(12.dp))
             UnpricedReservationsSection(
                 b,
@@ -168,74 +168,3 @@ private val BUDGET_REASON_TEXT = mapOf(
     "COST_NOT_ESTABLISHED" to "費用が確定しない（予約額のまま計上。実額の確認が必要）",
     "TTL_ELAPSED" to "期限切れ（保守的に予約額で計上。請求が無かったかもしれない）",
 )
-
-/**
- * Memory screen: Memory list.
- */
-@Composable
-fun MemoryScreen() {
-    val loaded = rememberLoad(Unit) { ApiClient.getMemories() }
-
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("記憶", style = MaterialTheme.typography.headlineSmall)
-        Spacer(modifier = Modifier.height(16.dp))
-
-        LoadedList(loaded, emptyText = "記憶が見つかりません") { memories ->
-
-            LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(memories, key = { it.recordId }) { mem ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(mem.code ?: mem.kind, style = MaterialTheme.typography.titleMedium)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            // The body is null for an untrusted note (bodyWithheld tells whether one exists) and for a fact.
-                            Text(
-                                mem.body ?: if (mem.bodyWithheld) "（本文は表示されません）" else "（本文はありません）",
-                                style = MaterialTheme.typography.bodyMedium,
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("種類: ${mem.kind} | 出所: ${mem.source} | 層: ${mem.tier}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                    HorizontalDivider()
-                }
-            }
-        }
-    }
-}
-
-/**
- * Assignees screen: Assignee list.
- */
-@Composable
-fun AssigneesScreen(selectedProjectId: String? = null) {
-    val loaded = rememberLoad(selectedProjectId) {
-        val allAssignees = ApiClient.getAssignees()
-        if (selectedProjectId != null) allAssignees.filter { it.projectId == selectedProjectId } else allAssignees
-    }
-
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("担当", style = MaterialTheme.typography.headlineSmall)
-        Spacer(modifier = Modifier.height(16.dp))
-
-        LoadedList(loaded, emptyText = "担当が見つかりません") { assignees ->
-
-            LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(assignees, key = { it.assigneeId }) { asgn ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(asgn.displayName, style = MaterialTheme.typography.titleMedium)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("ID: ${asgn.assigneeId} | 役割: ${asgn.role} | 状態: ${asgn.state}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                    HorizontalDivider()
-                }
-            }
-        }
-    }
-}

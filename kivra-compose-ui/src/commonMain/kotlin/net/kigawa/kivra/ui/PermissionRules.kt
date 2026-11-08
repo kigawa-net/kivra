@@ -70,6 +70,12 @@ enum class GatedOperation(val permission: SelfDevPermission) {
 
     /** order の停止要求と、要求の取り消し(app.js: can('STOP_REQUEST') / サーバー: order.stop.request・order.stop.cancel)。 */
     REQUEST_ORDER_STOP(SelfDevPermission.STOP_REQUEST),
+
+    /** 記憶の個別の削除と条件での削除(app.js: can('GOAL_WRITE') / サーバー: memory.delete・memory.delete_by_condition)。 */
+    DELETE_MEMORY(SelfDevPermission.GOAL_WRITE),
+
+    /** 担当の管理(作成・ロール・有効化/無効化・メンバー・トークン)。担当の画面を見せる条件と同じ(サーバー: ASSIGNEE_MANAGE)。 */
+    MANAGE_ASSIGNEE(SelfDevPermission.ASSIGNEE_MANAGE),
 }
 
 private val ROLE_NAME = Regex("[A-Z_]{1,32}")

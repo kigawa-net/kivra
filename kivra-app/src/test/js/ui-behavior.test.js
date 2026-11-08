@@ -3954,3 +3954,168 @@ test('the header refresh and the 30 second timer reload the open dashboard, and 
   await flush();
   assert.equal(dashboardCalls(list.calls).length, 0);
 });
+
+// ---- Operator: repositories of a project and the backfill (ADR 0022, PR-B) -----------------------------------
+
+const REPOS_PATH = '/api/projects/' + encodeURIComponent(PROJECT_ID) + '/repos';
+const BACKFILL_PATH = '/api/projects/backfill';
+const BACKFILL_TABLES = (n) => [
+  { table: 'selfdev_tasks', matched: n, updated: n, unmatched: 1 },
+  { table: 'selfdev_orders', matched: 0, updated: 0, unmatched: 0 },
+  { table: 'development_runs', matched: 0, updated: 0, unmatched: 0 },
+  { table: 'selfdev_memory_records', matched: 0, updated: 0, unmatched: 0 },
+];
+
+/**
+ * The dashboard, the project's repositories (kept in `repos`, changed by PUT and DELETE), and the backfill: the dry run counts 2
+ * tasks, the real run writes them. `opts.realStatus` makes the real run fail with a body that must never be shown.
+ */
+function operatorResponder(repos, opts = {}) {
+  const base = projectResponder(opts.dashboard || { status: 200, data: dashboardOf({ scope: 'ALL' }) });
+  return (p, init) => {
+    if (p === REPOS_PATH && init.method === 'GET') return { status: 200, data: repos.map((k) => ({ repoKey: k })) };
+    if (p === REPOS_PATH && init.method === 'PUT') {
+      repos.push(JSON.parse(init.body).repoKey);
+      return { status: 201, data: { repoKey: repos[repos.length - 1] } };
+    }
+    if (p.startsWith(REPOS_PATH + '?repoKey=') && init.method === 'DELETE') {
+      const key = decodeURIComponent(p.slice((REPOS_PATH + '?repoKey=').length));
+      const i = repos.indexOf(key);
+      if (i === -1) return { status: 404, data: { error: 'not found' } };
+      repos.splice(i, 1);
+      return { status: 204, data: null };
+    }
+    if (p === BACKFILL_PATH + '?dryRun=true') return { status: 200, data: { dryRun: true, tables: BACKFILL_TABLES(2) } };
+    if (p === BACKFILL_PATH + '?dryRun=false') {
+      if (opts.realStatus) return { status: opts.realStatus, data: { error: 'LEAK-backfill' } };
+      return { status: 200, data: { dryRun: false, tables: BACKFILL_TABLES(2) } };
+    }
+    return base(p, init);
+  };
+}
+
+const backfillCalls = (calls) => calls.filter((c) => c.method === 'POST' && c.path.startsWith(BACKFILL_PATH));
+
+test('a viewer sees no repository or backfill controls and the page asks for none', async () => {
+  const dom = load(operatorResponder(['kigawa-net/alpha'], { dashboard: { status: 200, data: dashboardOf() } }), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('page-project').hidden, false);
+  assert.equal(dom.byId('project-ops').hidden, true, 'the operator block stays hidden for a viewer');
+  assert.equal(dom.calls.filter((c) => c.path.includes('/repos')).length, 0, 'no repository request for a viewer');
+  assert.equal(backfillCalls(dom.calls).length, 0);
+});
+
+test('an operator sees the repositories of the project, and a repository is added only in the shape owner/name', async () => {
+  const repos = ['kigawa-net/alpha'];
+  const dom = load(operatorResponder(repos), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('project-ops').hidden, false);
+  assert.match(dom.byId('project-repos').textContent, /kigawa-net\/alpha/);
+
+  dom.byId('project-repo-input').value = 'not a repo';
+  dom.byId('project-repo-form').fire('submit', { preventDefault() {} });
+  await flush();
+  assert.equal(dom.calls.filter((c) => c.method === 'PUT').length, 0, 'a malformed name is not sent');
+  assert.equal(dom.byId('project-repos-status').textContent, 'repo は owner/name の形で入力してください（英数字、ハイフン、ピリオド、アンダースコア）。');
+
+  dom.byId('project-repo-input').value = 'kigawa-net/beta';
+  dom.byId('project-repo-form').fire('submit', { preventDefault() {} });
+  await flush();
+  const put = dom.calls.find((c) => c.method === 'PUT');
+  assert.equal(put.path, REPOS_PATH);
+  assert.deepEqual(put.body, { repoKey: 'kigawa-net/beta' });
+  assert.equal(dom.byId('project-repos-status').textContent, 'repo を登録しました。振り分けは下の「既存データの振り分け」で行います。');
+  assert.match(dom.byId('project-repos').textContent, /kigawa-net\/beta/);
+  assert.equal(dom.byId('project-repo-input').value, '', 'the field is cleared after a successful add');
+});
+
+test('a repository that belongs to a project already is refused in fixed words, and the server text is never shown', async () => {
+  const conflict = operatorResponder([]);
+  const dom = load((p, init) => (init.method === 'PUT' && p === REPOS_PATH
+    ? { status: 409, data: { error: 'LEAK-repo-taken' } }
+    : conflict(p, init)), { hash: DASH_HASH });
+  await flush();
+  dom.byId('project-repo-input').value = 'kigawa-net/taken';
+  dom.byId('project-repo-form').fire('submit', { preventDefault() {} });
+  await flush();
+  assert.equal(dom.byId('project-repos-status').textContent, 'この repo は、どれかのプロジェクトに既に登録されています。1 つの repo は 1 つのプロジェクトにだけ登録できます。');
+  assert.equal(dom.byId('project-repos-status').className, 'meta error');
+  assert.ok(!dom.byId('page-project').textContent.includes('LEAK'));
+});
+
+test('a removed repository is sent by its name in the query, and a dry run made before is dropped', async () => {
+  const repos = ['kigawa-net/alpha'];
+  const dom = load(operatorResponder(repos), { hash: DASH_HASH });
+  await flush();
+  dom.byId('backfill-dry').fire('click');
+  await flush();
+  assert.equal(dom.byId('backfill-run').disabled, false, 'a dry run that found rows enables the real run');
+
+  dom.byId('project-repos').buttons()[0].fire('click');
+  await flush();
+  const del = dom.calls.find((c) => c.method === 'DELETE');
+  assert.equal(del.path, REPOS_PATH + '?repoKey=' + encodeURIComponent('kigawa-net/alpha'));
+  assert.deepEqual(del.body, {}, 'a state-changing request carries a JSON body, as the server requires');
+  assert.deepEqual(repos, []);
+  assert.equal(dom.byId('backfill-run').disabled, true, 'the repositories changed, so the dry run is no longer the plan');
+  assert.equal(dom.byId('backfill-result').textContent, '');
+});
+
+test('the backfill dry run shows the counts and writes nothing; the real run asks first', async () => {
+  const dom = load(operatorResponder(['kigawa-net/alpha']), { hash: DASH_HASH });
+  await flush();
+  assert.equal(dom.byId('backfill-run').disabled, true, 'nothing to run before a dry run');
+
+  dom.byId('backfill-dry').fire('click');
+  await flush();
+  assert.equal(backfillCalls(dom.calls).length, 1);
+  assert.equal(backfillCalls(dom.calls)[0].path, BACKFILL_PATH + '?dryRun=true', 'the dry run is the first request');
+  assert.match(dom.byId('backfill-result').textContent, /Task：対応あり 2 件、更新 2 件、対応なし（未設定のまま）1 件/);
+  assert.match(dom.byId('backfill-status').textContent, /何も書き込んでいません/);
+
+  dom.byId('backfill-run').fire('click');
+  assert.equal(dom.byId('backfill-dialog').open, true, 'the real run asks first');
+  assert.match(dom.byId('backfill-explain').textContent, /Task 2 件/);
+  assert.match(dom.byId('backfill-explain').textContent, /取り消す機能はありません/);
+  dom.byId('backfill-cancel').fire('click');
+  assert.equal(dom.byId('backfill-dialog').open, false);
+  assert.equal(backfillCalls(dom.calls).length, 1, 'cancelling sends nothing');
+
+  dom.byId('backfill-run').fire('click');
+  dom.byId('backfill-confirm').fire('click');
+  await flush();
+  const real = backfillCalls(dom.calls)[1];
+  assert.equal(real.path, BACKFILL_PATH + '?dryRun=false');
+  assert.deepEqual(real.body, {});
+  assert.equal(dom.byId('backfill-dialog').open, false, 'the dialog closes when the run succeeded');
+  assert.match(dom.byId('backfill-result').textContent, /更新 2 件/);
+  assert.equal(dom.byId('backfill-run').disabled, true, 'a real run needs a new dry run before it can run again');
+});
+
+test('a failed real run keeps the dialog open with fixed words, and the server text is never shown', async () => {
+  const dom = load(operatorResponder(['kigawa-net/alpha'], { realStatus: 500 }), { hash: DASH_HASH });
+  await flush();
+  dom.byId('backfill-dry').fire('click');
+  await flush();
+  dom.byId('backfill-run').fire('click');
+  dom.byId('backfill-confirm').fire('click');
+  await flush();
+  assert.equal(dom.byId('backfill-dialog').open, true, 'the dialog stays open on failure');
+  assert.equal(dom.byId('backfill-error').textContent, '振り分けに失敗しました。時間をおいてもう一度お試しください。');
+  assert.equal(dom.byId('backfill-error').hidden, false);
+  assert.ok(!dom.byId('page-project').textContent.includes('LEAK'));
+});
+
+test('a backfill with nothing to give is refused without a real request', async () => {
+  const responder = operatorResponder(['kigawa-net/alpha']);
+  const dom = load((p, init) => (p === BACKFILL_PATH + '?dryRun=true'
+    ? { status: 200, data: { dryRun: true, tables: BACKFILL_TABLES(0) } }
+    : responder(p, init)), { hash: DASH_HASH });
+  await flush();
+  dom.byId('backfill-dry').fire('click');
+  await flush();
+  assert.equal(dom.byId('backfill-run').disabled, true, 'a dry run with no match leaves nothing to run');
+  dom.byId('backfill-run').fire('click');
+  assert.equal(dom.byId('backfill-dialog').open, false);
+  assert.equal(backfillCalls(dom.calls).filter((c) => c.path.endsWith('dryRun=false')).length, 0);
+});

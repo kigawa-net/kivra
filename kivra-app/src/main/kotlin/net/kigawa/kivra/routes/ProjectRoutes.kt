@@ -16,12 +16,16 @@ import kotlinx.serialization.Serializable
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.db.BackfillReport
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.ProjectActivityEntry
+import net.kigawa.kivra.db.ProjectBackfillRepository
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.ProjectRow
 import net.kigawa.kivra.db.ProjectSpend
+import net.kigawa.kivra.db.RepoAddResult
 import net.kigawa.kivra.github.RepoRef
+import org.slf4j.LoggerFactory
 
 @Serializable
 private data class ProjectError(val error: String)
@@ -53,6 +57,8 @@ internal fun Route.configureProjectRoutes(
     guard: PermissionGuard = offPermissionGuard(),
     /** The configured self-development repository: a pull request link is made only for it. Null: no link. */
     targetRepo: RepoRef? = null,
+    /** The backfill of the project scope (ADR 0022, PR-B): `POST /api/projects/backfill`. */
+    backfill: ProjectBackfillRepository,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -82,6 +88,72 @@ internal fun Route.configureProjectRoutes(
             val input = call.receive<ProjectCreateRequest>()
             val project = projectRepo.create(input.name, input.description)
             call.respond(HttpStatusCode.Created, project.toResponse())
+        }
+        // The backfill (ADR 0022, PR-B). An operator's action: it changes rows of every project, so it needs ORDER_MANAGE. A dry run
+        // (the default) only counts. Idempotent: it writes only rows whose project_id is NULL.
+        post("backfill") {
+            val principal = call.principalOr401() ?: return@post
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_backfill")) return@post
+            if (!call.requireJsonSameOrigin()) return@post
+            val dryRun = when (call.request.queryParameters["dryRun"]) {
+                null, "true" -> true
+                "false" -> false
+                else -> return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_dry_run"))
+            }
+            val report = backfill.run(dryRun)
+            projectAdminLog.info(
+                "project admin action: action=PROJECT_BACKFILL mode={} actor={} counts={}",
+                if (dryRun) "DRY_RUN" else "EXECUTE",
+                operatorTag(principal),
+                report.tables.entries.joinToString(",") { (table, t) -> "$table:${t.matched}/${t.updated}/${t.unmatched}" },
+            )
+            call.respond(report.toResponse())
+        }
+    }
+
+    // The repositories a project owns (ADR 0022, V51). Reads need READ; changes need ORDER_MANAGE, as the project itself does.
+    route("/api/projects/{projectId}/repos") {
+        get {
+            val principal = call.principalOr401() ?: return@get
+            if (!call.permitOr403(principal, Permission.READ, "project_repos_list")) return@get
+            val projectId = call.parameters["projectId"]
+                ?: return@get call.respond(HttpStatusCode.NotFound)
+            if (projectRepo.get(projectId) == null) return@get call.respond(HttpStatusCode.NotFound)
+            call.respond(projectRepo.listRepos(projectId).map { ProjectRepoResponse(repoKey = it) })
+        }
+        put {
+            val principal = call.principalOr401() ?: return@put
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_repo_add")) return@put
+            if (!call.requireJsonSameOrigin()) return@put
+            val projectId = call.parameters["projectId"]
+                ?: return@put call.respond(HttpStatusCode.NotFound)
+            val input = call.receive<ProjectRepoRequest>()
+            val repoKey = parseRepoKey(input.repoKey)
+                ?: return@put call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_repo_key"))
+            when (projectRepo.addRepo(projectId, repoKey)) {
+                RepoAddResult.ADDED -> {
+                    projectAdminLog.info("project admin action: action=PROJECT_REPO_ADDED actor={} projectId={}", operatorTag(principal), projectId)
+                    call.respond(HttpStatusCode.Created, ProjectRepoResponse(repoKey = repoKey))
+                }
+                RepoAddResult.CONFLICT -> call.respond(HttpStatusCode.Conflict, ProjectError("repo_already_mapped"))
+                RepoAddResult.PROJECT_NOT_FOUND -> call.respond(HttpStatusCode.NotFound)
+            }
+        }
+        delete {
+            val principal = call.principalOr401() ?: return@delete
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_repo_remove")) return@delete
+            if (!call.requireJsonSameOrigin()) return@delete
+            val projectId = call.parameters["projectId"]
+                ?: return@delete call.respond(HttpStatusCode.NotFound)
+            // The repository is named in the query (`?repoKey=owner/name`), so the path stays one segment.
+            val repoKey = call.request.queryParameters["repoKey"]?.let { parseRepoKey(it) }
+                ?: return@delete call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_repo_key"))
+            if (!projectRepo.removeRepo(projectId, repoKey)) {
+                call.respond(HttpStatusCode.NotFound)
+            } else {
+                projectAdminLog.info("project admin action: action=PROJECT_REPO_REMOVED actor={} projectId={}", operatorTag(principal), projectId)
+                call.respond(HttpStatusCode.NoContent)
+            }
         }
     }
 
@@ -209,6 +281,19 @@ data class ProjectUpdateRequest(val name: String, val description: String? = nul
 data class ProjectAssignRequest(val projectId: String)
 
 @Serializable
+data class ProjectRepoRequest(val repoKey: String)
+
+@Serializable
+data class ProjectRepoResponse(val repoKey: String)
+
+/** The backfill result per table: matched (with a project to give), updated (written), unmatched (stays NULL). */
+@Serializable
+data class BackfillResponse(val dryRun: Boolean, val tables: List<BackfillTableResponse>)
+
+@Serializable
+data class BackfillTableResponse(val table: String, val matched: Long, val updated: Long, val unmatched: Long)
+
+@Serializable
 data class ProjectResponse(
     val projectId: String,
     val name: String,
@@ -256,6 +341,21 @@ data class ProjectActivityResponse(
 )
 
 private const val DASHBOARD_RECENT_RUNS = 10
+
+/** Audit lines of the project administration: fixed codes and ids only. A repository name is never logged. */
+private val projectAdminLog = LoggerFactory.getLogger("net.kigawa.kivra.project.admin")
+
+/** owner/name as [RepoRef] accepts it (the rule of the self-development target), or null. The value is returned as given. */
+internal fun parseRepoKey(value: String): String? {
+    val parts = value.split('/')
+    if (parts.size != 2) return null
+    return runCatching { RepoRef(parts[0], parts[1]) }.getOrNull()?.toString()
+}
+
+private fun BackfillReport.toResponse() = BackfillResponse(
+    dryRun = dryRun,
+    tables = tables.map { (table, t) -> BackfillTableResponse(table = table, matched = t.matched, updated = t.updated, unmatched = t.unmatched) },
+)
 private const val DASHBOARD_ACTIVITY = 30
 
 private fun ProjectSpend.toResponse(): ProjectSpendResponse {

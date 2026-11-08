@@ -528,6 +528,23 @@ class SelfDevMemoryRepository(
     private fun startOfUtcDay(now: LocalDateTime): LocalDateTime = now.toLocalDate().atStartOfDay()
 
     companion object {
+        /**
+         * ADR 0022 PR-B: the project backfill of the memory records. A record takes the project of its goal's Task, else of its plan's
+         * Task, else of its Run. The only write is the `project_id` of a record that has none (see [ProjectBackfillRepository]). It lives
+         * here because this table is written only by this repository.
+         */
+        internal fun projectBackfillTarget(database: Database): ProjectBackfillTarget = SqlProjectBackfillTarget(
+            database,
+            "selfdev_memory_records",
+            "record_id",
+            "COALESCE(" +
+                "(SELECT COALESCE(g.project_id, (${repoProjectSql("g")})) FROM selfdev_tasks g WHERE g.task_id = selfdev_memory_records.goal_id), " +
+                "(SELECT COALESCE(p.project_id, (${repoProjectSql("p")})) FROM selfdev_tasks p WHERE p.task_id = selfdev_memory_records.plan_id), " +
+                "(SELECT COALESCE(r.project_id, (SELECT COALESCE(t.project_id, (${repoProjectSql("t")})) " +
+                "FROM selfdev_tasks t WHERE t.run_id = r.run_id LIMIT 1)) FROM development_runs r " +
+                "WHERE r.run_id = selfdev_memory_records.run_id))",
+        )
+
         /** The most rows one conditional deletion or one retention batch may touch (ADR 0016 section 8.1 (b)). */
         const val MAX_CONDITION_DELETE = 500
         const val MAX_SEARCH_LIMIT = 200

@@ -19,6 +19,7 @@ import java.time.Clock
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
@@ -35,9 +36,14 @@ import net.kigawa.kivra.auth.Role
 import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.db.ProjectBackfillRepository
 import net.kigawa.kivra.db.ProjectRepository
+import net.kigawa.kivra.db.SelfDevOperatorRepository
+import net.kigawa.kivra.db.SelfDevSubmitResult
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.db.execQuery
+import org.jetbrains.exposed.sql.transactions.transaction
 
 class ProjectRoutesTest {
     private val identity = TaskApiIdentity { headers -> headers["X-Test-Principal"]?.takeIf { it.isNotBlank() } }
@@ -54,7 +60,7 @@ class ProjectRoutesTest {
         val projects = ProjectRepository(db.database, Clock.systemUTC())
         application {
             install(ContentNegotiation) { json() }
-            routing { configureProjectRoutes(projects, db.runs, identity, guard) }
+            routing { configureProjectRoutes(projects, db.runs, identity, guard, backfill = ProjectBackfillRepository(db.database)) }
         }
     }
 
@@ -299,6 +305,121 @@ class ProjectRoutesTest {
             setUp(db)
             assertEquals(HttpStatusCode.NotFound, call(HttpMethod.Get, "/api/projects/01AAAAAAAAAAAAAAAAAAAAAAAA", "operator").status)
             assertEquals(HttpStatusCode.NotFound, call(HttpMethod.Put, "/api/runs/01AAAAAAAAAAAAAAAAAAAAAAAA/project", "operator", """{"projectId":"missing"}""").status)
+        }
+    }
+    @Test
+    fun `an operator can list add and remove the repositories of a project`() = TestDb().use { db ->
+        val projectId = ProjectRepository(db.database, Clock.systemUTC()).create("Repos", null).projectId
+        testApplication {
+            setUp(db)
+            val path = "/api/projects/$projectId/repos"
+            assertEquals(HttpStatusCode.OK, call(HttpMethod.Get, path, "operator").status)
+            assertEquals("[]", call(HttpMethod.Get, path, "operator").bodyAsText())
+
+            val added = call(HttpMethod.Put, path, "operator", """{"repoKey":"kigawa-net/kivra"}""")
+            assertEquals(HttpStatusCode.Created, added.status)
+            assertEquals("kigawa-net/kivra", Json.parseToJsonElement(added.bodyAsText()).jsonObject["repoKey"]!!.jsonPrimitive.content)
+            assertTrue(call(HttpMethod.Get, path, "operator").bodyAsText().contains("kigawa-net/kivra"))
+
+            assertEquals(HttpStatusCode.NoContent, call(HttpMethod.Delete, "$path?repoKey=kigawa-net%2Fkivra", "operator", "{}").status)
+            assertEquals(HttpStatusCode.NotFound, call(HttpMethod.Delete, "$path?repoKey=kigawa-net%2Fkivra", "operator", "{}").status)
+            assertEquals("[]", call(HttpMethod.Get, path, "operator").bodyAsText())
+        }
+    }
+
+    @Test
+    fun `a repository that already belongs to a project is a conflict, a missing project is not found, a bad name is refused`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val alpha = projects.create("Alpha", null).projectId
+        val beta = projects.create("Beta", null).projectId
+        testApplication {
+            setUp(db)
+            assertEquals(HttpStatusCode.Created, call(HttpMethod.Put, "/api/projects/$alpha/repos", "operator", """{"repoKey":"kigawa-net/shared"}""").status)
+            assertEquals(HttpStatusCode.Conflict, call(HttpMethod.Put, "/api/projects/$beta/repos", "operator", """{"repoKey":"kigawa-net/shared"}""").status)
+            assertEquals(HttpStatusCode.Conflict, call(HttpMethod.Put, "/api/projects/$alpha/repos", "operator", """{"repoKey":"kigawa-net/shared"}""").status)
+            assertEquals(HttpStatusCode.NotFound, call(HttpMethod.Put, "/api/projects/01AAAAAAAAAAAAAAAAAAAAAAAA/repos", "operator", """{"repoKey":"kigawa-net/other"}""").status)
+            assertEquals(HttpStatusCode.NotFound, call(HttpMethod.Get, "/api/projects/01AAAAAAAAAAAAAAAAAAAAAAAA/repos", "operator").status)
+            for (bad in listOf("no-slash", "a/b/c", "../etc", "kigawa-net/..", "kigawa-net/x.git", " kigawa-net/kivra", "")) {
+                assertEquals(HttpStatusCode.BadRequest, call(HttpMethod.Put, "/api/projects/$beta/repos", "operator", """{"repoKey":"$bad"}""").status, bad)
+            }
+            assertEquals(HttpStatusCode.BadRequest, call(HttpMethod.Delete, "/api/projects/$alpha/repos?repoKey=no-slash", "operator", "{}").status)
+            assertEquals(HttpStatusCode.BadRequest, call(HttpMethod.Delete, "/api/projects/$alpha/repos", "operator", "{}").status)
+            // The mapping is still there and still belongs to alpha.
+            assertEquals(listOf("kigawa-net/shared"), projects.listRepos(alpha))
+            assertEquals(emptyList(), projects.listRepos(beta))
+        }
+    }
+
+    @Test
+    fun `a viewer reads the repositories but cannot change them or run the backfill`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val projectId = projects.create("Viewed", null).projectId
+        projects.addRepo(projectId, "kigawa-net/viewed")
+        testApplication {
+            setUp(db, guard(mapOf("viewer" to Role.VIEWER)))
+            val path = "/api/projects/$projectId/repos"
+            assertEquals(HttpStatusCode.OK, call(HttpMethod.Get, path, "viewer").status)
+            assertEquals(HttpStatusCode.Forbidden, call(HttpMethod.Put, path, "viewer", """{"repoKey":"kigawa-net/denied"}""").status)
+            assertEquals(HttpStatusCode.Forbidden, call(HttpMethod.Delete, "$path?repoKey=kigawa-net%2Fviewed", "viewer", "{}").status)
+            assertEquals(HttpStatusCode.Forbidden, call(HttpMethod.Post, "/api/projects/backfill?dryRun=false", "viewer", "{}").status)
+            assertEquals(listOf("kigawa-net/viewed"), projects.listRepos(projectId))
+        }
+    }
+
+    @Test
+    fun `an unauthenticated request cannot read or change repositories or run the backfill`() = TestDb().use { db ->
+        val projectId = ProjectRepository(db.database, Clock.systemUTC()).create("Hidden", null).projectId
+        testApplication {
+            setUp(db)
+            assertEquals(HttpStatusCode.Unauthorized, call(HttpMethod.Get, "/api/projects/$projectId/repos", null).status)
+            assertEquals(HttpStatusCode.Unauthorized, call(HttpMethod.Put, "/api/projects/$projectId/repos", null, """{"repoKey":"kigawa-net/x"}""").status)
+            assertEquals(HttpStatusCode.Unauthorized, call(HttpMethod.Delete, "/api/projects/$projectId/repos?repoKey=kigawa-net%2Fx", null).status)
+            assertEquals(HttpStatusCode.Unauthorized, call(HttpMethod.Post, "/api/projects/backfill?dryRun=false", null, "{}").status)
+        }
+    }
+
+    @Test
+    fun `the backfill is a dry run by default and writes only when asked to`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val alpha = projects.create("Alpha", null).projectId
+        projects.addRepo(alpha, "kigawa-net/alpha")
+        val taskId = assertIs<SelfDevSubmitResult.Created>(
+            SelfDevOperatorRepository(db.database).submitTask("operator", "route-task", "Task", null, "kigawa-net/alpha", null),
+        ).task.taskId
+        fun projectOfTask(): String? = transaction(db.database) {
+            execQuery("SELECT project_id FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }.first()
+        }
+        testApplication {
+            setUp(db)
+            val dry = call(HttpMethod.Post, "/api/projects/backfill", "operator", "{}")
+            assertEquals(HttpStatusCode.OK, dry.status)
+            val dryJson = Json.parseToJsonElement(dry.bodyAsText()).jsonObject
+            assertTrue(dryJson["dryRun"]!!.jsonPrimitive.content.toBoolean())
+            val tasks = dryJson["tables"]!!.jsonArray.map { it.jsonObject }.first { it["table"]!!.jsonPrimitive.content == "selfdev_tasks" }
+            assertEquals(1, tasks["matched"]!!.jsonPrimitive.int)
+            assertEquals(0, tasks["updated"]!!.jsonPrimitive.int)
+            assertNull(projectOfTask(), "a dry run writes nothing")
+
+            assertEquals(HttpStatusCode.BadRequest, call(HttpMethod.Post, "/api/projects/backfill?dryRun=maybe", "operator", "{}").status)
+            assertNull(projectOfTask())
+
+            val real = call(HttpMethod.Post, "/api/projects/backfill?dryRun=false", "operator", "{}")
+            assertEquals(HttpStatusCode.OK, real.status)
+            assertEquals(alpha, projectOfTask())
+        }
+    }
+
+    @Test
+    fun `the backfill refuses a request that is not JSON, as the other state-changing routes do`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            val response = client.request("/api/projects/backfill?dryRun=false") {
+                method = HttpMethod.Post
+                header("X-Test-Principal", "operator")
+                contentType(ContentType.Text.Plain)
+                setBody("{}")
+            }
+            assertEquals(HttpStatusCode.UnsupportedMediaType, response.status)
         }
     }
 }

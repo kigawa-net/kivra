@@ -1264,6 +1264,239 @@
       if (ev && typeof ev === 'object') ol.appendChild(eventLine(ev, 'Run ' + str(ev.runId)));
     });
     if (ol.firstChild === null) ol.appendChild(h('li', { className: 'empty', text: '最近の活動はありません。' }));
+    renderProjectOps(d);
+  }
+
+  // ---- Operator: the repositories of a project and the backfill of existing rows (ADR 0022, PR-B). The block is shown only when
+  // the dashboard's scope is ALL (an operator). The server decides who may change anything; a viewer never sees these controls.
+
+  var PREPO = { id: null, seq: 0, busy: false, failed: false };
+  var BACKFILL = { dry: null, busy: false };
+  var BACKFILL_TABLE_LABEL = { selfdev_tasks: 'Task', selfdev_orders: 'Order', development_runs: 'Run', selfdev_memory_records: '記憶' };
+  var REPO_KEY_SHAPE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/;
+  var PREPO_MSG = {
+    invalid: 'repo は owner/name の形で入力してください（英数字、ハイフン、ピリオド、アンダースコア）。',
+    conflict: 'この repo は、どれかのプロジェクトに既に登録されています。1 つの repo は 1 つのプロジェクトにだけ登録できます。',
+    notFound: 'このプロジェクトは見つかりません。画面を読み直してから、もう一度お試しください。',
+    forbidden: 'この操作は運用者だけができます。',
+    added: 'repo を登録しました。振り分けは下の「既存データの振り分け」で行います。',
+    removed: 'repo の登録を外しました。',
+    loadFailed: 'repo の一覧を読めませんでした。',
+    empty: '登録された repo はありません。',
+    failed: '操作に失敗しました。時間をおいてもう一度お試しください。'
+  };
+  var BACKFILL_MSG = {
+    failed: '振り分けに失敗しました。時間をおいてもう一度お試しください。',
+    forbidden: 'この操作は運用者だけができます。',
+    nothing: '振り分けるものはありません（確認の結果、対応がつく行がありません）。',
+    dryDone: '確認の結果です（dry-run。何も書き込んでいません）。',
+    runDone: '振り分けを実行しました。'
+  };
+
+  function setPrepoStatus(text, kind) {
+    var el = $('project-repos-status');
+    el.textContent = text;
+    el.className = kind === 'error' ? 'meta error' : 'meta';
+  }
+
+  function setBackfillStatus(text, kind) {
+    var el = $('backfill-status');
+    el.textContent = text;
+    el.className = kind === 'error' ? 'meta error' : 'meta';
+  }
+
+  function showBackfillError(text) {
+    var el = $('backfill-error');
+    el.textContent = text;
+    el.hidden = text === '';
+  }
+
+  /** The message for a failed repository request, by its status only (the body is never shown). */
+  function prepoFailText(r) {
+    if (r.kind === 'session') return MESSAGES.session;
+    if (r.status === 409) return PREPO_MSG.conflict;
+    if (r.status === 400) return PREPO_MSG.invalid;
+    if (r.status === 404) return PREPO_MSG.notFound;
+    if (r.status === 403) return PREPO_MSG.forbidden;
+    return PREPO_MSG.failed;
+  }
+
+  function backfillFailText(r) {
+    if (r.kind === 'session') return MESSAGES.session;
+    if (r.status === 403) return BACKFILL_MSG.forbidden;
+    return BACKFILL_MSG.failed;
+  }
+
+  /** Shows or hides the operator block for the dashboard on screen, and loads its repositories when the project changed. */
+  function renderProjectOps(d) {
+    var ops = $('project-ops');
+    var operator = d.scope === 'ALL';
+    ops.hidden = !operator;
+    if (!operator) return;
+    var id = d.project.projectId;
+    if (PREPO.id !== id || PREPO.failed) loadProjectRepos(id);
+    updateBackfillControls();
+  }
+
+  async function loadProjectRepos(id) {
+    var seq = ++PREPO.seq;
+    PREPO.id = id;
+    PREPO.failed = false;
+    var r = await apiFetch('/api/projects/' + encodeURIComponent(id) + '/repos', 'GET');
+    if (seq !== PREPO.seq) return;
+    if (!r.ok) {
+      PREPO.failed = true;
+      setPrepoStatus(r.kind === 'session' ? MESSAGES.session : PREPO_MSG.loadFailed, 'error');
+      return;
+    }
+    if (!Array.isArray(r.data) || !r.data.every(function (x) { return !!x && typeof x.repoKey === 'string'; })) {
+      PREPO.failed = true;
+      setPrepoStatus(MESSAGES.invalid, 'error');
+      return;
+    }
+    renderProjectRepos(r.data);
+  }
+
+  function renderProjectRepos(list) {
+    var ul = $('project-repos');
+    var id = PREPO.id;
+    clear(ul);
+    list.forEach(function (x) {
+      var key = x.repoKey;
+      var remove = h('button', { type: 'button', className: 'secondary', text: '登録を外す' });
+      remove.addEventListener('click', function () { removeProjectRepo(id, key); });
+      ul.appendChild(h('li', {}, [key, ' ', remove]));
+    });
+    if (ul.firstChild === null) ul.appendChild(h('li', { className: 'empty', text: PREPO_MSG.empty }));
+  }
+
+  /** The repositories changed, so a dry run made before is no longer what a real run would do. */
+  function invalidateBackfill() {
+    BACKFILL.dry = null;
+    renderBackfillResult(null);
+  }
+
+  async function addProjectRepo(id, repoKey) {
+    if (PREPO.busy) return false;
+    PREPO.busy = true;
+    var r = await apiFetch('/api/projects/' + encodeURIComponent(id) + '/repos', 'PUT', { repoKey: repoKey });
+    PREPO.busy = false;
+    if (!r.ok) {
+      setPrepoStatus(prepoFailText(r), 'error');
+      return false;
+    }
+    setPrepoStatus(PREPO_MSG.added, 'ok');
+    invalidateBackfill();
+    await loadProjectRepos(id);
+    return true;
+  }
+
+  async function removeProjectRepo(id, repoKey) {
+    if (PREPO.busy) return;
+    PREPO.busy = true;
+    // The repository is named in the query. The body is an empty JSON object: the server accepts only JSON on a state-changing request.
+    var r = await apiFetch('/api/projects/' + encodeURIComponent(id) + '/repos?repoKey=' + encodeURIComponent(repoKey), 'DELETE', {});
+    PREPO.busy = false;
+    if (!r.ok) {
+      setPrepoStatus(prepoFailText(r), 'error');
+      return;
+    }
+    setPrepoStatus(PREPO_MSG.removed, 'ok');
+    invalidateBackfill();
+    await loadProjectRepos(id);
+  }
+
+  function onProjectRepoSubmit(e) {
+    e.preventDefault();
+    var id = PDASH.id;
+    var input = $('project-repo-input');
+    var repoKey = input.value.trim();
+    if (!id || !PDASH.data || PDASH.data.scope !== 'ALL') return;
+    if (!REPO_KEY_SHAPE.test(repoKey)) {
+      setPrepoStatus(PREPO_MSG.invalid, 'error');
+      return;
+    }
+    addProjectRepo(id, repoKey).then(function (ok) { if (ok) input.value = ''; });
+  }
+
+  function isBackfillBody(d, dryRun) {
+    if (!d || typeof d !== 'object' || d.dryRun !== dryRun || !Array.isArray(d.tables)) return false;
+    return d.tables.every(function (t) {
+      return !!t && typeof t.table === 'string' && ['matched', 'updated', 'unmatched'].every(function (k) { return typeof t[k] === 'number'; });
+    });
+  }
+
+  /** The rows that have a project to be given (the dry run's matched count), over all tables. */
+  function backfillTotal(d) {
+    return d ? d.tables.reduce(function (n, t) { return n + t.matched; }, 0) : 0;
+  }
+
+  function renderBackfillResult(d) {
+    var ul = $('backfill-result');
+    clear(ul);
+    if (d) {
+      d.tables.forEach(function (t) {
+        var label = BACKFILL_TABLE_LABEL[t.table] || 'その他';
+        ul.appendChild(h('li', { text: label + '：対応あり ' + t.matched + ' 件、更新 ' + t.updated + ' 件、対応なし（未設定のまま）' + t.unmatched + ' 件' }));
+      });
+    }
+    updateBackfillControls();
+  }
+
+  function updateBackfillControls() {
+    $('backfill-dry').disabled = BACKFILL.busy;
+    $('backfill-run').disabled = BACKFILL.busy || BACKFILL.dry === null || backfillTotal(BACKFILL.dry) === 0;
+  }
+
+  /** Sends the backfill: a dry run counts, a real run writes. Answers true when the result was shown. */
+  async function runBackfill(dryRun) {
+    if (BACKFILL.busy || state.sessionExpired) return false;
+    BACKFILL.busy = true;
+    updateBackfillControls();
+    var r = await apiFetch('/api/projects/backfill?dryRun=' + (dryRun ? 'true' : 'false'), 'POST', {});
+    BACKFILL.busy = false;
+    if (!r.ok) {
+      setBackfillStatus(backfillFailText(r), 'error');
+      updateBackfillControls();
+      return false;
+    }
+    if (!isBackfillBody(r.data, dryRun)) {
+      setBackfillStatus(MESSAGES.invalid, 'error');
+      updateBackfillControls();
+      return false;
+    }
+    BACKFILL.dry = dryRun ? r.data : null;
+    renderBackfillResult(r.data);
+    setBackfillStatus(dryRun ? BACKFILL_MSG.dryDone : BACKFILL_MSG.runDone, 'ok');
+    return true;
+  }
+
+  function openBackfillDialog() {
+    var d = BACKFILL.dry;
+    if (d === null || BACKFILL.busy) return;
+    if (backfillTotal(d) === 0) {
+      setBackfillStatus(BACKFILL_MSG.nothing, 'error');
+      return;
+    }
+    var parts = d.tables.filter(function (t) { return t.matched > 0; }).map(function (t) {
+      return (BACKFILL_TABLE_LABEL[t.table] || 'その他') + ' ' + t.matched + ' 件';
+    });
+    $('backfill-explain').textContent = '確認の結果、次の行をプロジェクトに振り分けます：' + parts.join('、') +
+      '。プロジェクトが未設定の行だけが対象で、すでにプロジェクトを持つ行は変わりません。対応がない行は未設定のままです。この操作を取り消す機能はありません。';
+    showBackfillError('');
+    $('backfill-confirm').disabled = false;
+    $('backfill-dialog').showModal();
+  }
+
+  async function confirmBackfill() {
+    $('backfill-confirm').disabled = true;
+    var ok = await runBackfill(false);
+    $('backfill-confirm').disabled = false;
+    if (ok) {
+      $('backfill-dialog').close();
+    } else {
+      showBackfillError(BACKFILL_MSG.failed);
+    }
   }
 
   // ---- Release (UNKNOWN, and a PULL_REQUEST without a binding) ----------
@@ -4695,6 +4928,12 @@
         });
       });
     }
+    var projectRepoForm = $('project-repo-form');
+    if (projectRepoForm) projectRepoForm.addEventListener('submit', onProjectRepoSubmit);
+    $('backfill-dry').addEventListener('click', function () { runBackfill(true); });
+    $('backfill-run').addEventListener('click', openBackfillDialog);
+    $('backfill-cancel').addEventListener('click', function () { $('backfill-dialog').close(); });
+    $('backfill-confirm').addEventListener('click', confirmBackfill);
     // Re-entering the sign-in flow is done by the browser reload; the sign-in URL is never built here.
     $('reload-btn').addEventListener('click', function () {
       window.location.reload();

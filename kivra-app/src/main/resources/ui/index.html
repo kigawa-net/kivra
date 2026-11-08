@@ -306,6 +306,26 @@
         <dl id="project-dash-spend" aria-labelledby="h-project-dash-spend"></dl>
         <h3 id="h-project-dash-activity">最近の活動</h3>
         <ol id="project-dash-activity" class="events" aria-labelledby="h-project-dash-activity"></ol>
+        <!-- Operator only (the dashboard's scope is ALL): the repositories of the project, and the backfill of existing rows (ADR 0022). -->
+        <div id="project-ops" hidden>
+          <h3 id="h-project-ops">リポジトリの対応（運用者のみ）</h3>
+          <p class="meta">登録した repo（owner/name）に対応する既存の Task・Order・Run・記憶は、下の振り分けでこのプロジェクトに入ります。1 つの repo は 1 つのプロジェクトにだけ登録できます。</p>
+          <ul id="project-repos" class="run-list" aria-labelledby="h-project-ops"></ul>
+          <p id="project-repos-status" class="meta" role="status"></p>
+          <form id="project-repo-form" class="inline-form">
+            <label for="project-repo-input">repo（owner/name）</label>
+            <input id="project-repo-input" type="text" autocomplete="off" maxlength="140" placeholder="owner/name">
+            <button type="submit" id="project-repo-add">追加</button>
+          </form>
+          <h3 id="h-backfill">既存データの振り分け</h3>
+          <p class="meta">プロジェクトが未設定の既存データだけを、repo の対応で振り分けます（全プロジェクトに効きます）。すでにプロジェクトを持つ行は変わりません。対応がない行は未設定のままです。まず確認（dry-run）をしてください。</p>
+          <div class="actions">
+            <button type="button" class="secondary" id="backfill-dry">確認（dry-run）</button>
+            <button type="button" id="backfill-run" disabled>振り分けを実行…</button>
+          </div>
+          <p id="backfill-status" class="meta" role="status"></p>
+          <ul id="backfill-result" class="run-list" aria-labelledby="h-backfill"></ul>
+        </div>
       </div>
     </section>
   </div>
@@ -320,6 +340,18 @@
   </section>
 </main>
 </div>
+
+<dialog id="backfill-dialog" aria-labelledby="backfill-title">
+  <div class="release-body">
+    <h2 id="backfill-title">既存データの振り分け</h2>
+    <p id="backfill-explain"></p>
+    <p class="error" id="backfill-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="backfill-cancel" autofocus>キャンセル</button>
+      <button type="button" id="backfill-confirm">振り分けを実行する</button>
+    </div>
+  </div>
+</dialog>
 
 <dialog id="release-dialog" aria-labelledby="release-title">
   <div class="release-body">

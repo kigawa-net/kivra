@@ -2,8 +2,10 @@ package net.kigawa.kivra.db
 
 import java.time.Clock
 import java.time.LocalDateTime
+import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
@@ -33,6 +35,9 @@ data class ProjectRow(
     val createdAt: LocalDateTime,
     val updatedAt: LocalDateTime,
 )
+
+/** The result of [ProjectRepository.addRepo]. */
+enum class RepoAddResult { ADDED, CONFLICT, PROJECT_NOT_FOUND }
 
 /** Repository for projects (V38). Provides CRUD and the association between Runs and projects. */
 class ProjectRepository(private val database: Database, private val clock: Clock) {
@@ -139,6 +144,42 @@ class ProjectRepository(private val database: Database, private val clock: Clock
             it[this.projectId] = null
         }
         updated > 0
+    }
+
+    /** The repositories (owner/name) of [projectId], ordered. Empty when the project has none or does not exist. Read only. */
+    fun listRepos(projectId: String): List<String> = transaction(database) {
+        ProjectReposTable.selectAll().where { ProjectReposTable.projectId eq projectId }
+            .orderBy(ProjectReposTable.repoKey)
+            .map { it[ProjectReposTable.repoKey] }
+    }
+
+    /**
+     * Adds [repoKey] to [projectId] (V51). [RepoAddResult.CONFLICT] when the repository already belongs to a project (the same one
+     * included), [RepoAddResult.PROJECT_NOT_FOUND] when the project does not exist.
+     */
+    fun addRepo(projectId: String, repoKey: String): RepoAddResult {
+        val exists = transaction(database) { readProject(projectId) != null }
+        if (!exists) return RepoAddResult.PROJECT_NOT_FOUND
+        return try {
+            transaction(database) {
+                ProjectReposTable.insert {
+                    it[ProjectReposTable.projectId] = projectId
+                    it[ProjectReposTable.repoKey] = repoKey
+                    it[createdAt] = utcNow(clock)
+                }
+            }
+            RepoAddResult.ADDED
+        } catch (e: ExposedSQLException) {
+            // The UNIQUE on repo_key (or the project's row, deleted in between: a foreign key violation) decides the answer.
+            if (e.isUniqueViolation()) RepoAddResult.CONFLICT else throw e
+        }
+    }
+
+    /** Removes [repoKey] from [projectId]. Returns true if the mapping existed. */
+    fun removeRepo(projectId: String, repoKey: String): Boolean = transaction(database) {
+        ProjectReposTable.deleteWhere {
+            (ProjectReposTable.projectId eq projectId) and (ProjectReposTable.repoKey eq repoKey)
+        } > 0
     }
 
     private fun readProject(projectId: String): ProjectRow? =

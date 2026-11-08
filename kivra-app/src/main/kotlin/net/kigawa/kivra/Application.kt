@@ -23,6 +23,7 @@ import net.kigawa.kivra.db.AssigneeStoreLookup
 import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.DbCodingResultStore
+import net.kigawa.kivra.db.ProjectBackfillRepository
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.config.BudgetConfig
 import net.kigawa.kivra.config.FushaTaskConfigLoader
@@ -601,7 +602,10 @@ internal fun Application.appModule(env: Map<String, String>) {
         if (taskApiIdentityWithSession != null) {
             configureTaskApiRoutes(runs, taskApiIdentityWithSession, selfDevSettings.config?.repo, permissionGuard, projectRepo)
             configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentityWithSession, permissionGuard)
-            configureProjectRoutes(projectRepo, runs, taskApiIdentityWithSession, permissionGuard, selfDevSettings.config?.repo)
+            configureProjectRoutes(
+                projectRepo, runs, taskApiIdentityWithSession, permissionGuard, selfDevSettings.config?.repo,
+                backfill = ProjectBackfillRepository(database),
+            )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()
             configureBudgetAdminRoutes(budgetStore, taskApiIdentityWithSession, fx = fxSettings, operatorView = budgetStore, guard = permissionGuard)

@@ -599,6 +599,33 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 
 **残るリスク(運用で見る)**: マージのあとに `main` の CI が赤になったことを、kivra は自動では検知しない(ADR 0014 §4 の後半は未実装)。赤のあいだ、新しいマージは `MAIN_CI_NOT_GREEN` で保留される。週に 1 回、`AUTO_MERGE_MERGED` の一覧と `main` の CI を人が確認する(U-9)。
 
+### 4.16 既存データをプロジェクトに振り分ける(ADR 0022 PR-B、運用者のみ)
+
+プロジェクトを導入する前からあった Task・Order・Run・記憶は、`project_id` が NULL のままである。対応(どの repo がどのプロジェクトか)は運用者が登録する。kivra は repo から推測しない。対応のない行は NULL のまま残る。デフォルトのプロジェクトは作らない。
+
+手順(この順に行う。どの段階でも、やり直しても壊れない):
+
+1. **repo を登録する。** プロジェクトの画面(`#/projects/<id>/dashboard`)の「リポジトリの対応（運用者のみ）」で `owner/name` を追加する。API では `PUT /api/projects/{id}/repos` に `{"repoKey":"owner/name"}`。1 つの repo は 1 つのプロジェクトにだけ登録できる(別のプロジェクトに登録済みなら 409)。登録の一覧は `GET /api/projects/{id}/repos`、外すのは `DELETE /api/projects/{id}/repos?repoKey=owner/name`(本文は `{}`)。
+2. **dry-run で件数を見る。** `POST /api/projects/backfill?dryRun=true`(既定も dry-run)。何も書かない。応答は、テーブルごとに `matched`(振り分けられる件数)、`updated`(書いた件数。dry-run では 0)、`unmatched`(対応がなく NULL のまま残る件数)。画面では「確認（dry-run）」ボタン。
+3. **実行する。** `POST /api/projects/backfill?dryRun=false`。画面では「振り分けを実行…」(確認ダイアログが出る)。`project_id` が NULL の行だけを書き、値のある行は変えない。大量の行は 500 件ずつ(バッチ)に分けて書く。何度実行しても同じ結果になる(冪等)。取り消す機能はない。
+4. **件数を確認する。** もう一度 dry-run を実行する。`matched` が 0 になっていれば、対応のつく行はすべて振り分け済み。残った `unmatched` が、対応を登録すべき repo の行である(手順 1 に戻る)。
+
+対象と振り分けの基準(`ProjectBackfill.kt` と同じ):
+
+| テーブル | 行の repo の見方 |
+|---|---|
+| `selfdev_tasks` | `target_repo` の対応 |
+| `selfdev_orders` | `target_repo` の対応(子の order は根と同じ repo) |
+| `development_runs` | その Run を持つ Task(`selfdev_tasks.run_id`)の振り分け |
+| `selfdev_memory_records` | 目標(goal)の Task、なければ計画(plan)の Task、なければ Run の順 |
+
+**注意**
+
+- 権限は `ORDER_MANAGE`(運用者)。viewer と AI は 403。
+- 監査は構造化ログ(`net.kigawa.kivra.project.admin`、`action=PROJECT_BACKFILL`)に、件数と実行者のハッシュだけを残す。repo 名は残さない。
+- システムが起票する Task(インシデントの自動修正。`kivra-incident`)は、作成時に `target_repo` の対応からプロジェクトを継承する(対応がなければ NULL)。
+- プロジェクトに属する行(Task、Run、記憶、登録した repo)が残っていると、そのプロジェクトは削除できない(`ON DELETE RESTRICT`、ADR 0022 §4)。削除の前に、repo の登録を外し、残っている Task・記憶の扱いを先に決める(行を別のプロジェクトへ移す手段は PR-B の範囲にない)。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

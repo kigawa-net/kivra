@@ -322,7 +322,9 @@ internal fun Application.appModule(env: Map<String, String>) {
                 val usage = budgetStore.usage(budgetConfig.tenantId)
                 autopilotBudgetAllows(usage.committed, usage.reserved, budgetConfig.monthlyLimitJpy, share)
             },
-            // orderGate and memory parameters temporarily removed pending Task model migration (V40)
+            // The order gate (ADR 0015 section 5.4): a task of a PAUSED, STOP_REQUESTED or STOPPED order is not submitted. Without the
+            // orders there is no such task, so nothing is held.
+            orderGate = { taskId -> orderRepo?.dispatchAllowed(taskId) ?: true },
         ).start(this)
         // The order guards (ADR 0015 section 5.2): the same budget share as the dispatcher, and the FX rate. Only with the orders on.
         orderRepo?.let { repo ->

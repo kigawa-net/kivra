@@ -449,13 +449,16 @@ private suspend fun SelfDevOrderRouteDeps.permit(
 }
 
 /**
- * After the root order's stop is approved, the goal of the cycle in progress is stopped too, through the existing goal stop (ADR 0015
- * section 4.5). The order is already STOPPED, and the dispatcher will not start a Run for it, so a failure here is logged as a code and
- * left for the operator. Its tasks are not changed by it.
+ * After a stop is approved, the cycle in progress of each stopped order is stopped too: its root Task moves to STOPPED (ADR 0015 section 4.5,
+ * V48). The order is already STOPPED, and the dispatcher will not submit a Run for its tasks, so a refusal here is logged as a code and
+ * left for the operator.
  */
 private fun SelfDevOrderRouteDeps.stopCurrentGoal(order: SelfDevOrder) {
-    // Temporarily disabled pending Task model migration (V40)
-    operatorLog.info("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=SKIPPED_V40", order.orderId)
+    when (stopCycleGoalOf(order, operations)) {
+        true -> operatorLog.info("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=STOPPED", order.orderId)
+        false -> operatorLog.warn("order operator action: action=GOAL_STOPPED_WITH_ORDER orderId={} result=REFUSED", order.orderId)
+        null -> Unit
+    }
 }
 
 private fun orderIdOf(call: ApplicationCall): String? = call.parameters["id"]?.takeIf { ORDER_ID_SHAPE.matches(it) }

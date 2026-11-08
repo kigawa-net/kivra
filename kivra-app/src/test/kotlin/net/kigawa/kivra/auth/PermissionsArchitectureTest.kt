@@ -34,7 +34,7 @@ class PermissionsArchitectureTest {
                 "net/kigawa/kivra/selfdev/RolesSettings.kt",
                 "net/kigawa/kivra/routes/PermissionGuard.kt",
                 "net/kigawa/kivra/routes/SelfDevOrderRoutes.kt",
-                // SelfDevGoalRoutes.kt removed in V40
+                "net/kigawa/kivra/routes/SelfDevGoalRoutes.kt",
                 "net/kigawa/kivra/routes/SelfDevMemoryRoutes.kt",
             ),
             users,

@@ -1,5 +1,6 @@
 package net.kigawa.kivra.db
 
+import java.sql.SQLException
 import java.time.Clock
 import java.time.LocalDateTime
 import kotlinx.serialization.builtins.ListSerializer
@@ -12,6 +13,7 @@ import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.core.autopilot.TransitionDecision
 import net.kigawa.kivra.core.autopilot.TransitionRefusal
 import net.kigawa.kivra.core.autopilot.checkTaskTransition
+import net.kigawa.kivra.selfdev.PromotionCounts
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
@@ -39,6 +41,13 @@ sealed interface TaskTransition {
     data class Refused(val reason: TransitionRefusal) : TaskTransition
 }
 
+sealed interface SelfDevSubmitResult {
+    data class Created(val task: SelfDevTask) : SelfDevSubmitResult
+    data class Replayed(val task: SelfDevTask) : SelfDevSubmitResult
+    /** The idempotency key was used before with another title, body or target. */
+    data object KeyConflict : SelfDevSubmitResult
+}
+
 class SelfDevOperatorRepository(private val database: Database, private val clock: Clock = Clock.systemUTC()) {
     fun listTasks(limit: Int): List<SelfDevTask> = transaction(database) {
         SelfDevTasksTable.selectAll()
@@ -46,6 +55,50 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
             .limit(limit).map { taskOf(it) }
     }
     fun task(taskId: String): SelfDevTask? = transaction(database) { taskIn(taskId) }
+
+    /**
+     * Accepts a task from the operator (V40 `selfdev_tasks`, state TASK_SUBMITTED). The pair (created_by, idempotency_key) is unique: the
+     * same key with the same title, body and target is a replay, and with other content it is a conflict. Nothing is planned here.
+     */
+    fun submitTask(createdBy: String, idempotencyKey: String, title: String, body: String?, targetRepo: String): SelfDevSubmitResult {
+        val created = try {
+            transaction(database) {
+                val now = utcNow(clock)
+                val taskId = Ulid.generate(clock)
+                execUpdate(
+                    "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, dependencies, requires_approval, revision, attempts, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'TASK_SUBMITTED', '[]', TRUE, 0, 0, 0, ?, ?)",
+                    taskId, createdBy, idempotencyKey, title, body, targetRepo, now, now,
+                )
+                taskIn(taskId) ?: error("vanished")
+            }
+        } catch (e: Exception) {
+            if (!e.isDuplicateKey()) throw e
+            null
+        }
+        if (created != null) return SelfDevSubmitResult.Created(created)
+        // The key was used before (or a concurrent request took it): compare with the stored task.
+        val existing = transaction(database) {
+            SelfDevTasksTable.selectAll()
+                .where { (SelfDevTasksTable.createdBy eq createdBy) and (SelfDevTasksTable.idempotencyKey eq idempotencyKey) }
+                .firstOrNull()?.let { taskOf(it) }
+        } ?: error("the duplicate key has no row")
+        return if (existing.title == title && existing.body == body && existing.targetRepo == targetRepo) {
+            SelfDevSubmitResult.Replayed(existing)
+        } else {
+            SelfDevSubmitResult.KeyConflict
+        }
+    }
+
+    /** The counts of the stage 1 -> 2 readout, over all of history. Read only. */
+    fun promotionCounts(): PromotionCounts = transaction(database) {
+        PromotionCounts(
+            approvedCompleted = countWhere("approved_by IS NOT NULL AND state = 'COMPLETED'"),
+            approvedPolicyRejected = countWhere("approved_by IS NOT NULL AND state_reason = 'POLICY_REJECTED'"),
+            scopeExceeded = countWhere("state_reason = 'AUTO_SCOPE_EXCEEDED'"),
+        )
+    }
+    private fun Transaction.countWhere(predicate: String): Long =
+        execQuery("SELECT COUNT(*) FROM selfdev_tasks WHERE $predicate") { it.getLong(1) }.single()
 
     fun approveTask(taskId: String, expectedVersion: Long, approver: String): TaskTransition = transaction(database) {
         val current = lockTask(taskId) ?: return@transaction TaskTransition.NotFound
@@ -136,5 +189,8 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         attempts = row[SelfDevTasksTable.attempts], version = row[SelfDevTasksTable.version],
         createdAt = row[SelfDevTasksTable.createdAt], updatedAt = row[SelfDevTasksTable.updatedAt],
         approvedBy = row[SelfDevTasksTable.approvedBy])
+    /** A unique-key violation anywhere in the cause chain: MariaDB 1062, H2 23505. */
+    private fun Throwable.isDuplicateKey(): Boolean =
+        generateSequence(this) { it.cause }.any { it is SQLException && (it.sqlState == "23505" || it.errorCode == 1062 || it.errorCode == 23505) }
     private companion object { val JSON = Json }
 }

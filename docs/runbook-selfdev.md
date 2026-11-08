@@ -512,7 +512,32 @@ SELECT incident_code, reason_code, state, issue_number, created_at
  LIMIT 50;
 ```
 - **止め方**: `KIVRA_SELFDEV_AUTO_ISSUE_ENABLED=false` にして再起動する(新しい起票が止まる)。起票済みの Issue は消さない。
-- **未対応(この段階)**: Kivra が止まっているときの検知(外部の watchdog と通知経路は別の段階)、起票した Issue から Run を作ること(#226)、既存の Issue の open 状態の確認(GitHub の読み取りを増やさないため、窓で代用している)、CI の失敗と CrashLoop の検知(Run の失敗とブレーカーだけが対象)、起票の遡及。
+- **未対応(この段階)**: Kivra が止まっているときの検知(外部の watchdog と通知経路は別の段階)、既存の Issue の open 状態の確認(GitHub の読み取りを増やさないため、窓で代用している)、CI の失敗と CrashLoop の検知(Run の失敗とブレーカーだけが対象)、起票の遡及。起票した Issue から修正を依頼すること(#226)は §4.14。
+
+### 4.14 起票された Incident から Draft PR まで(#226 の第 2 段、既定は無効)
+
+§4.13 で起票された Issue(`selfdev_incident_issues` の `OPENED` の行だけ)に対して、`IncidentFixWatch` がオートパイロットの Task を **1 件** 投入する。Task は人が `POST` するものと同じ経路(`SelfDevOperatorRepository.submitTask`、`created_by = kivra-incident`、キー `incident:<指紋>`)で入り、Planner、承認設定(`KIVRA_SELFDEV_AUTOPILOT_APPROVAL`)、AutoScopeGuard、予算、ブレーカー、日次上限、同時実行の上限をそのまま通る。これらを迂回しない。結果の PR は **Draft** で作られ、マージ、承認、Ready への変更は Kivra の API にない(人が行う)。
+
+- **有効化**: `KIVRA_SELFDEV_AUTO_FIX_ENABLED=true`(`true` と `false` 以外の値は起動に失敗する。空は `false`)。`false` のあいだは何も組み立てず、Task を投入せず、行を書かず、Run の PR も Draft にならない。**オートパイロットが有効(`KIVRA_SELFDEV_AUTOPILOT_ENABLED=true`)でないと起動に失敗する**。この変数だけを新しく足す(k8s の既存の変数は変えない)。
+- **一件ずつ**:
+  - 原因ごとに 1 回だけ。指紋が `selfdev_incident_fixes`(V47)の主キー。修正が終わった後に再発した原因は自動では直さない(人が判断する。新しい修正のループを作らない)。
+  - 同時に進む修正は 1 件。`active_slot` の一意制約で、2 つの Pod でも 1 件になる。枠は、Task の根(計画の根)が終わる(`DONE`、`STOPPED`、`SKIPPED`)まで保持される。根が `PENDING_APPROVAL`(承認待ち)や、Draft PR のマージ待ちの間は、次の修正は始まらない。
+  - 対象は、直近 24 時間に起票された Issue だけ。起票前の古い Issue は拾わない。
+- **投入の入力**: Issue の本文は読まない。固定の題名 `[kivra-incident] <コード> <理由コード>` と、固定の本文(コード、理由コード、Issue 番号、指紋の先頭 12 文字、固定の進め方の指示: 再現テストを先に書く、最小の修正、監視・テスト・安全規則・権限を緩めない)だけ。自由記述、モデルの出力、ログ、秘密は入らない。
+- **失敗時**: 投入が例外で失敗したときは同じキーで再送する(最大 3 回の投入まで)。3 回目も失敗したら `FAILED` で、以後は再送しない。キーの内容が食い違ったときも `FAILED`。どちらも枠は解放される。
+- **Draft**: 修正の Run の PR だけが Draft で作られ、本文の先頭に incident Issue の番号が入る。他の Run の PR は従来どおり(Draft ではない)。自動マージの判定は Draft を拒否する(ADR 0014 C6)。
+- **必要な環境変数**: 新しく足すのは `KIVRA_SELFDEV_AUTO_FIX_ENABLED` の一つだけ(上限と経過時間は固定値)。
+- **確認**(読み取りだけ):
+
+```sql
+SELECT f.fingerprint, f.incident_code, f.reason_code, f.issue_number, f.state, f.attempts, f.root_task_id, f.active_slot
+  FROM selfdev_incident_fixes f
+ ORDER BY f.created_at DESC
+ LIMIT 50;
+```
+- **枠が止まったとき**(根が承認待ちのまま、など): 根の Task を operator の停止(`stopTask`)で `STOPPED` にすると、次の周で枠が解放される。承認すれば、計画された子 Task が進み、Draft PR が開く。
+- **止め方**: `KIVRA_SELFDEV_AUTO_FIX_ENABLED=false` にして再起動する。投入済みの Task は消さない(オートパイロットの従来の操作で止める)。
+- **未対応(この段階)**: Incident の Issue へ Run、PR、CI のリンクを書き戻すこと(#223、#224)、CI の結果による修正の検証(#49 の独立レビューと #220 の再現テストの強制。現状は Task の本文の指示だけ)、PR の作成後の健康確認とロールバックの提案。
 
 ## 5. 動作確認
 

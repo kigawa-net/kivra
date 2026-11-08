@@ -294,6 +294,8 @@ internal fun Application.appModule(env: Map<String, String>) {
     selfDevParts?.prReview?.start(this)
     // Issue #225: the incident issue of a self-development failure. Started only with its switch on (the watch is null otherwise).
     selfDevParts?.incidentIssue?.start(this)
+    // Issue #226: the incident fix. Started only with its switch on and the autopilot on (the watch is null otherwise).
+    selfDevParts?.incidentFix?.start(this)
     // The memory's retention step (ADR 0016 section 9). Started only with the memory switch on.
     memoryRepo?.let { repo -> SelfDevMemoryRetentionWorker({ repo.purgeRetention() }, SelfDevMemoryRetentionWorker.DEFAULT_INTERVAL).start(this) }
     // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD). Nothing runs before this.

@@ -47,6 +47,11 @@ import net.kigawa.kivra.selfdev.incident.DbIncidentSource
 import net.kigawa.kivra.selfdev.incident.DbIncidentStore
 import net.kigawa.kivra.selfdev.incident.IncidentIssueSettings
 import net.kigawa.kivra.selfdev.incident.IncidentIssueWatch
+import net.kigawa.kivra.selfdev.autofix.DbIncidentFixStore
+import net.kigawa.kivra.selfdev.autofix.DbIncidentRunOrigin
+import net.kigawa.kivra.selfdev.autofix.IncidentFixSettings
+import net.kigawa.kivra.selfdev.autofix.IncidentFixWatch
+import net.kigawa.kivra.selfdev.autofix.OperatorIncidentTasks
 import net.kigawa.kivra.selfdev.review.DbPrReviewStore
 import net.kigawa.kivra.selfdev.review.PrReviewSettings
 import net.kigawa.kivra.selfdev.review.PrReviewWatch
@@ -66,6 +71,8 @@ internal class SelfDevParts(
     val prReview: PrReviewWatch? = null,
     /** The incident issue detector (issue #225). Non-null only when KIVRA_SELFDEV_AUTO_ISSUE_ENABLED is true. */
     val incidentIssue: IncidentIssueWatch? = null,
+    /** The incident fix (issue #226): one autopilot task per opened incident. Non-null only when KIVRA_SELFDEV_AUTO_FIX_ENABLED is true. */
+    val incidentFix: IncidentFixWatch? = null,
     /** The Anthropic HTTP client and credential the developer uses. Reused by the LLM stop judgement (ADR 0021 L4); nothing else reads it. */
     val anthropic: AnthropicHandle? = null,
     /** The DeveloperPort instance for code auto-fix worker (C4). */
@@ -189,6 +196,13 @@ internal fun buildSelfDev(
     } else {
         null
     }
+    // Issue #226: the incident fix. Off unless its switch is exactly true. It needs the autopilot, which plans and dispatches the task it submits;
+    // off, the runner gets no origin, so a Run is never marked as a fix.
+    val fixSettings = IncidentFixSettings.fromEnv(env)
+    if (fixSettings.enabled) {
+        check(autopilot.enabled) { "${IncidentFixSettings.ENV_ENABLED}=true requires ${AutopilotSettings.ENV_ENABLED}=true" }
+    }
+    val incidentOrigin = if (fixSettings.enabled) DbIncidentRunOrigin(database) else null
     val runner = SelfDevRunner(
         config = config,
         runs = DbDevelopmentRunStore(runs),
@@ -201,6 +215,7 @@ internal fun buildSelfDev(
         references = TaskReferenceResolvers(listOf(GitHubIssueResolver(github, config.repo))),
         autoScope = PlanTaskAutoScopeGuard(SelfDevOperatorRepository(database)),
         prRebaser = prRebaser,
+        incidentOrigin = incidentOrigin,
     )
     val worker = SelfDevWorker(
         activeRunIds = { runs.activeSelfDevRunIds() },
@@ -255,6 +270,15 @@ internal fun buildSelfDev(
     } else {
         null
     }
+    val incidentFix: IncidentFixWatch? = if (fixSettings.enabled) {
+        IncidentFixWatch(
+            settings = fixSettings,
+            store = DbIncidentFixStore(database),
+            tasks = OperatorIncidentTasks(SelfDevOperatorRepository(database), "${config.repo.owner}/${config.repo.repo}"),
+        )
+    } else {
+        null
+    }
     return SelfDevParts(
         worker = worker,
         routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github),
@@ -262,6 +286,7 @@ internal fun buildSelfDev(
         autoMergeShadow = autoMergeShadow,
         prReview = prReview,
         incidentIssue = incidentIssue,
+        incidentFix = incidentFix,
         anthropic = AnthropicHandle(anthropicClient, anthropicAuth),
         developer = developer,
     )

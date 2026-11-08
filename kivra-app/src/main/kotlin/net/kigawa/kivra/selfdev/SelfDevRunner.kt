@@ -43,6 +43,7 @@ import net.kigawa.kivra.selfdev.AdvanceResult.Advanced
 import net.kigawa.kivra.selfdev.AdvanceResult.Failed
 import net.kigawa.kivra.selfdev.AdvanceResult.Skipped
 import net.kigawa.kivra.selfdev.AdvanceResult.Waiting
+import net.kigawa.kivra.selfdev.autofix.IncidentRunOrigin
 import org.slf4j.LoggerFactory
 
 /**
@@ -116,6 +117,11 @@ class SelfDevRunner(
      * `KIVRA_SELFDEV_PR_REBASE_ENABLED` is off) means the waiting step does exactly what it did before.
      */
     private val prRebaser: PrBranchRebaser? = null,
+    /**
+     * Tells whether a Run belongs to an incident fix (issue #226). Such a Run opens its pull request as a draft, and its body names the
+     * incident issue. Null (the default, and the production value while `KIVRA_SELFDEV_AUTO_FIX_ENABLED` is off) changes nothing.
+     */
+    private val incidentOrigin: IncidentRunOrigin? = null,
 ) {
     init {
         require(config.runtime == SelfDevRuntime.API || coding != null) { "the CLI runtime needs a coding patch source" }
@@ -326,6 +332,8 @@ class SelfDevRunner(
         base: BranchInfo,
     ): AdvanceResult {
         val runId = run.runId.value
+        // Read before the first GitHub write: a lookup that throws leaves the run as it is, and the next pass tries again.
+        val incidentIssue = incidentOrigin?.issueOf(runId)
         renewOrThrow(lease)
         val branch = when (val r = github.ensureRunBranch(config.repo, runId, base.headSha)) {
             is GitHubResult.Success -> r.value
@@ -369,8 +377,10 @@ class SelfDevRunner(
             runId = runId,
             base = config.baseBranch,
             title = "Self-development run $runId",
-            body = sanitizedSummary(patch.summary),
+            body = if (incidentIssue == null) sanitizedSummary(patch.summary) else incidentFixBody(incidentIssue, sanitizedSummary(patch.summary)),
             headSha = commitSha,
+            // A fix is a draft: it is never ready for review and never mergeable by the automatic merge (ADR 0014 C6). Other runs are unchanged.
+            draft = incidentIssue != null,
         )
         val ensured = when (val r = github.ensurePullRequest(config.repo, pullRequest)) {
             is GitHubResult.Success -> r.value
@@ -587,5 +597,9 @@ class SelfDevRunner(
         /** Removes control characters (keeps line breaks and tabs) and bounds the length. The text is model output: it is never trusted. */
         fun sanitizedSummary(summary: String): String =
             summary.filter { it == '\n' || it == '\t' || !it.isISOControl() }.take(MAX_BODY_CHARS)
+
+        /** The body of an incident fix's draft: a fixed line that names the incident issue (a number), then the sanitized summary. */
+        fun incidentFixBody(issueNumber: Long, summary: String): String =
+            "Kivra の自己修復(incident Issue #$issueNumber)による Draft PR です。マージは人間が行います。\n\n$summary"
     }
 }

@@ -158,7 +158,9 @@ private fun KivraAppContent(
     var dropdownExpanded by remember { mutableStateOf(false) }
     var searchOpen by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
+    // プロジェクトの作成の後に増やして、選択の一覧を読み直させる(旧 UI の loadProjects)。
+    var projectsReload by remember { mutableStateOf(0) }
+    LaunchedEffect(projectsReload) {
         try {
             projects = ApiClient.getProjects()
         } catch (e: Exception) {
@@ -273,9 +275,14 @@ private fun KivraAppContent(
                             NavDestination.Approvals -> ApprovalsScreen(projectId)
                             NavDestination.Budget -> BudgetScreen()
                             NavDestination.Memory -> MemoryScreen()
+                            NavDestination.Projects -> ProjectsScreen(
+                                onNavigate = navigate,
+                                onProjectsChanged = { projectsReload += 1 },
+                            )
                             NavDestination.Assignees -> AssigneesScreen(projectId)
                             NavDestination.Autopilot -> AutopilotScreen()
                         }
+                        is Route.ProjectDashboard -> ProjectDashboardScreen(r.projectId, navigate)
                         is Route.RunDetail -> RunDetailScreen(r.runId, navigate)
                         is Route.GoalDetail -> GoalDetailScreen(r.taskId, navigate)
                         is Route.OrderDetail -> OrderDetailScreen(r.orderId, navigate)

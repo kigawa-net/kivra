@@ -20,6 +20,7 @@ import net.kigawa.kivra.selfdev.NewTask
 import net.kigawa.kivra.selfdev.autofix.INCIDENT_FIX_PRINCIPAL
 import net.kigawa.kivra.selfdev.PromotionCounts
 import org.jetbrains.exposed.sql.Database
+import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
@@ -83,8 +84,10 @@ internal fun dependenciesInScope(taskProjectId: String?, dependencyProjectIds: L
     dependencyProjectIds.all { it == taskProjectId }
 
 class SelfDevOperatorRepository(private val database: Database, private val clock: Clock = Clock.systemUTC()) {
-    fun listTasks(limit: Int): List<SelfDevTask> = transaction(database) {
+    /** The newest-updated tasks, narrowed to [project] (ADR 0022 PR-D). The autonomous loops call the unnarrowed form. */
+    fun listTasks(limit: Int, project: ProjectFilter = ProjectFilter.All): List<SelfDevTask> = transaction(database) {
         SelfDevTasksTable.selectAll()
+            .where { project.condition(SelfDevTasksTable.projectId) ?: Op.TRUE }
             .orderBy(SelfDevTasksTable.updatedAt to SortOrder.DESC, SelfDevTasksTable.taskId to SortOrder.DESC)
             .limit(limit).map { taskOf(it) }
     }

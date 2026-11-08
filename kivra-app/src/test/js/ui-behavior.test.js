@@ -4119,3 +4119,75 @@ test('a backfill with nothing to give is refused without a real request', async 
   assert.equal(dom.byId('backfill-dialog').open, false);
   assert.equal(backfillCalls(dom.calls).filter((c) => c.path.endsWith('dryRun=false')).length, 0);
 });
+
+// ---- Project scope of the lists (ADR 0022, PR-D): the server narrows each list to the selected project -------------------------
+
+const RUN_ALPHA = '01ALPHARUNAAAAAAAAAAAAAAAA';
+const RUN_ORPHAN = '01ORPHANRUNAAAAAAAAAAAAAA';
+
+/** The Runs as the server gives them: the project's rows for its id, the rows with no project for `unassigned`, every row otherwise. */
+function scopedRunsFor(p) {
+  const alpha = selfRun('DEVELOPING', { runId: RUN_ALPHA, title: 'ALPHA-ROW', projectId: PROJECT_ID });
+  const orphan = selfRun('DEVELOPING', { runId: RUN_ORPHAN, title: 'ORPHAN-ROW', projectId: null });
+  if (p.includes('projectId=unassigned')) return [orphan];
+  if (p.includes('projectId=' + PROJECT_ID)) return [alpha];
+  return [alpha, orphan];
+}
+
+function scopedResponder() {
+  const base = defaults(true);
+  return (p, init) => {
+    if (p === '/api/projects') return { status: 200, data: PROJECTS };
+    if (p === '/api/selfdev/autopilot') return { status: 200, data: AP_STATUS };
+    if (p.startsWith('/api/runs') || p.startsWith('/api/admin/runs?')) return { status: 200, data: scopedRunsFor(p) };
+    if (p.startsWith('/api/selfdev/goals') || p.startsWith('/api/selfdev/orders') || p.startsWith('/api/selfdev/stop-requests')) {
+      return { status: 200, data: [] };
+    }
+    return base(p, init);
+  };
+}
+
+function getsTo(calls, prefix) { return calls.filter((c) => c.method === 'GET' && c.path.startsWith(prefix)); }
+
+function clickProject(dom, index = 0) {
+  dom.byId('side-project-list').querySelectorAll('.side-project-link')[index].fire('click', { preventDefault() {} });
+}
+
+test('nothing is narrowed without a selected project, and the unassigned choice and a project are sent as projectId', async () => {
+  const dom = load(scopedResponder());
+  await flush();
+  const runGets = () => getsTo(dom.calls, '/api/runs').concat(getsTo(dom.calls, '/api/admin/runs?'));
+  assert.ok(runGets().length > 0, 'the Runs are read');
+  assert.ok(runGets().every((c) => !c.path.includes('projectId')), 'no projectId without a selection');
+  assert.match(dom.byId('runs-list').textContent, /ALPHA-ROW/);
+  assert.match(dom.byId('runs-list').textContent, /ORPHAN-ROW/);
+
+  dom.byId('nav-project-unassigned').fire('click', { preventDefault() {} });
+  await flush();
+  assert.equal(runGets().at(-1).path.endsWith('projectId=unassigned'), true, 'the unassigned choice asks for the rows with no project');
+  assert.match(dom.byId('runs-list').textContent, /ORPHAN-ROW/);
+  assert.doesNotMatch(dom.byId('runs-list').textContent, /ALPHA-ROW/, 'the rows of a project are not shown under unassigned');
+  assert.equal(dom.byId('nav-project-unassigned').getAttribute('aria-current'), 'page');
+
+  clickProject(dom);
+  await flush();
+  assert.equal(runGets().at(-1).path.endsWith('projectId=' + PROJECT_ID), true, 'a project asks for its own rows');
+  assert.match(dom.byId('runs-list').textContent, /ALPHA-ROW/);
+  assert.doesNotMatch(dom.byId('runs-list').textContent, /ORPHAN-ROW/);
+});
+
+test('the goals, orders, approvals and memory are read for the selected project too, and not before one is chosen', async () => {
+  const dom = load(scopedResponder());
+  await flush();
+  const prefixes = ['/api/selfdev/goals', '/api/selfdev/orders', '/api/selfdev/stop-requests', '/api/selfdev/memory'];
+  for (const prefix of prefixes) {
+    assert.ok(getsTo(dom.calls, prefix).length > 0, prefix + ' is read');
+    assert.ok(getsTo(dom.calls, prefix).every((c) => !c.path.includes('projectId')), prefix + ' is not narrowed without a selection');
+  }
+  clickProject(dom);
+  await flush();
+  for (const prefix of prefixes) {
+    const last = getsTo(dom.calls, prefix).at(-1);
+    assert.ok(last.path.includes('projectId=' + PROJECT_ID), prefix + ' is read for the project: ' + last.path);
+  }
+});

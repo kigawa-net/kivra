@@ -626,6 +626,26 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 - システムが起票する Task(インシデントの自動修正。`kivra-incident`)は、作成時に `target_repo` の対応からプロジェクトを継承する(対応がなければ NULL)。
 - プロジェクトに属する行(Task、Run、記憶、登録した repo)が残っていると、そのプロジェクトは削除できない(`ON DELETE RESTRICT`、ADR 0022 §4)。削除の前に、repo の登録を外し、残っている Task・記憶の扱いを先に決める(行を別のプロジェクトへ移す手段は PR-B の範囲にない)。
 
+### 4.17 プロジェクトで一覧を絞る・プロジェクト単位の権限を影で見る(ADR 0022 PR-D、運用者のみ)
+
+**一覧の絞り込み(設定なし)**: 画面(`/ui`)で左のプロジェクトを選ぶと、Run・開発目標・order・承認待ち・記憶・担当の一覧が、そのプロジェクトの行だけになる。「未分類」は `project_id` が NULL の行(対応が付かず振り分けられなかった行)。「すべて」は従来どおり全件。API では各一覧に `?projectId=<ID>` または `?projectId=unassigned` を付ける(表は README)。絞り込みは人が見る一覧だけに入る。自律ループ(Planner、Dispatcher、周回、停止の確認、自動マージ、インシデントの修正)は絞らないので、NULL の行も従来どおり処理される。
+
+**プロジェクト単位の権限(`KIVRA_SELFDEV_PROJECT_MODE`、既定 `off`)**: 変数は `KIVRA_SELFDEV_ROLES_MODE` が `shadow` か `enforce` のときだけ使える(ロールが off のまま設定すると起動に失敗する)。
+
+| 値 | 動き |
+|---|---|
+| `off`(既定) | 何も読まない。従来どおり |
+| `shadow` | 応答は現行のロール判定のまま。プロジェクトのメンバーでない操作(現行は許可)を、固定の code だけで構造化ログに出す（`project shadow: wouldDeny permission=... code=PROJECT_NOT_MEMBER ...`）。人の識別子とプロジェクト ID は出さない |
+| `enforce` | 現行の判定に加えて、プロジェクトのメンバーであり、そのプロジェクトのロールが権限を持つことを要求する。グローバル ADMIN は除く。拒否は 403 `forbidden` |
+
+対象の操作は、Task の投入（`POST /api/selfdev/tasks`、`POST /api/selfdev/goals`）、order の作成、停止要求の作成・承認・却下・取消、目標の承認・停止、Task の承認・却下。プロジェクトを特定できない行（NULL）は、どの値でも現行の判定だけ。
+
+**注意（enforce の前に必ず確認する）**
+
+- メンバーの登録（`project_members`）は、この PR では API がない。`enforce` にすると、メンバーのいないプロジェクトでは、グローバル ADMIN 以外の全員が操作できなくなる。`enforce` は、メンバーの登録の手段ができ、必要な担当が登録されてから使う（ADR 0022 の PR-D の後続）。
+- shadow のログで `PROJECT_NOT_MEMBER` が出る操作は、enforce にすると拒否される操作である。運用者の操作が出ていないかを、shadow で確かめる。
+- 戻し方: `KIVRA_SELFDEV_PROJECT_MODE` を `off`（または削除）にして再起動する。データは変えない。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

@@ -123,6 +123,7 @@ private const val CODE_UNAUTHORIZED = "UNAUTHORIZED"
 private const val CODE_RATE_LIMITED = "RATE_LIMITED"
 private const val CODE_INVALID_BODY = "INVALID_BODY"
 private const val CODE_INVALID_ROLE = "INVALID_ROLE"
+private const val CODE_INVALID_PROJECT = "INVALID_PROJECT"
 private const val CODE_INVALID_SUB = "INVALID_SUB"
 private const val CODE_INVALID_VERSION = "INVALID_VERSION"
 private const val CODE_NOT_FOUND = "NOT_FOUND"
@@ -148,7 +149,10 @@ internal fun Route.configureSelfDevAssigneeRoutes(deps: SelfDevAssigneeRouteDeps
     get("/api/selfdev/assignees") {
         val caller = deps.caller(call) ?: return@get
         if (!deps.manageable(call, caller, Permission.ASSIGNEE_MANAGE)) return@get
-        call.respond(deps.assignees().listSummaries().map { it.response() })
+        // The project narrowing (ADR 0022 PR-D): the members of a project, or with `unassigned` the assignees of no project.
+        val project = projectFilterOf(call.request.queryParameters["projectId"])
+            ?: return@get call.refuse(HttpStatusCode.BadRequest, CODE_INVALID_PROJECT)
+        call.respond(deps.assignees().listSummaries(project).map { it.response() })
     }
 
     post("/api/selfdev/assignees") {

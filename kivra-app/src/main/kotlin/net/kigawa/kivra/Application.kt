@@ -20,6 +20,7 @@ import net.kigawa.kivra.coding.buildCodingCostLedger
 import net.kigawa.kivra.coding.CodingTaskSource
 import net.kigawa.kivra.coding.DbCodingRunPort
 import net.kigawa.kivra.db.AssigneeStoreLookup
+import net.kigawa.kivra.db.ProjectMemberStore
 import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.DbCodingResultStore
@@ -223,7 +224,13 @@ internal fun Application.appModule(env: Map<String, String>) {
     // Seeding runs before the permission service is built. A failure fails the startup: with the roles on, an unseeded store can make a stop unapprovable.
     bootstrapRolesIfEnabled(rolesSettings, orderSettings.rootApprover, aiPrincipal) { assigneeRepo!! }
     val permissionGuard = PermissionGuard(
-        rolesSettings.service(orderSettings, aiPrincipal, assigneeRepo?.let { AssigneeStoreLookup(it) }),
+        // The project membership (ADR 0022 PR-D) is read only while the roles and the project mode are on; with the roles off there is no store.
+        rolesSettings.service(
+            orderSettings,
+            aiPrincipal,
+            assigneeRepo?.let { AssigneeStoreLookup(it) },
+            projects = if (rolesSettings.projectMode == PermissionMode.OFF) null else ProjectMemberStore(database),
+        ),
     )
     // The autopilot's operator API (ADR 0011 section 1). Registered with the Task API identity, so the OIDC operator role is required. Its
     // agent-role setting is read only while the autopilot is enabled. Every goal endpoint answers 503 while it is disabled.

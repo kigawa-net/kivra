@@ -66,3 +66,14 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - 監査は構造化ログ(`net.kigawa.kivra.project.admin`)に、固定の code と件数、実行者のハッシュだけを残す。repo 名は残さない。
 - 画面(プロジェクトのダッシュボード)に、運用者だけの「リポジトリの対応」と「既存データの振り分け」(dry-run、確認ダイアログ付きの実行)を足した。運用の手順は `docs/runbook-selfdev.md` 4.16。
 - 残り(後続): PR-D(権限を `project_members` で判定)、PR-E(予算)、PR-F(NULL の行を消す)。プロジェクトの削除は、登録済みの repo や行があると FK RESTRICT で失敗する(今は 500 になる。扱いは後続で決める)。
+
+## 進捗(PR-D1: 読み取りの絞り込みと、プロジェクト単位の認可の影、ブランチ `feat/project-scope-read`)
+
+- マイグレーションは追加しない。
+- 読み取り: 人が見る一覧(Run の `GET /api/runs`、`GET /api/admin/runs`、`GET /api/selfdev/runs`、目標、order、承認待ちの停止要求、記憶の検索、担当)に任意の `projectId` クエリを足した。省略は従来どおり全件。ULID は、そのプロジェクトの行だけ。`unassigned` は `project_id` が NULL の行だけ。それ以外は 400(値は返さない)。未知のプロジェクトの一覧は空。単体取得は他プロジェクトの行を 404 にしない(shadow の間の挙動は変えない)。応答には `projectId` を含める。別名ルート(`/api/projects/{id}/tasks` など)は作らない(任意)。旧 `/api/selfdev/*` の路径は変えない。
+- 自律ループは絞らない。Planner、Dispatcher(`taskIdsInStates`)、周回、停止の確認、自動マージ、インシデントの修正は、全行(NULL を含む)を従来どおり処理する。絞り込みの入口は、一覧の関数の引数 `project`(既定は `ProjectFilter.All`)だけで、自律ループは既定のまま呼ぶ。テストで確かめる(`ProjectScopeReadTest`)。
+- 認可: `KIVRA_SELFDEV_PROJECT_MODE`(既定 `off`、ロールが off なら設定を拒む)。`off` は何も読まない。`shadow` は現行のロール判定の結果を変えず、プロジェクトのメンバーでない操作を固定の code(`PROJECT_NOT_MEMBER`、`PROJECT_PERMISSION_DENIED`、`PROJECT_LOOKUP_FAILED`)の構造化ログに出すだけ。`enforce` は現行の判定に加えて、メンバーであり、そのプロジェクトのロールが権限を持つことを要求する(グローバル ADMIN は常に通す。store の失敗は拒否)。
+  - 対象: `POST /api/selfdev/tasks`、`POST /api/selfdev/goals`、`POST /api/selfdev/orders`、停止要求の作成・承認・却下・取消、目標の承認・停止、Task の承認・却下。プロジェクトを特定できない行(NULL)は現行の判定だけ。MCP のツール(`kivra_selfdev_start` など)は対象外(後続)。
+  - `project_members` の読み取りは `ProjectMemberStore`。書き込みの API はまだない(後続)。そのため、メンバーの登録手段ができるまで `enforce` は使わない(runbook 4.17)。
+- 画面: サイドバーに「未分類」を足し、プロジェクトを選ぶと Run・目標・order・承認待ち・記憶・担当の一覧をサーバーの絞り込みで読み直す。クライアントでは絞らない。読み込み中に選択が変わった場合は古い応答を捨てて読み直す。
+- 残り(後続): 担当の所属の登録 API と画面、MCP の一覧と Task 投入の判定、PR-D2(予算)、PR-E(予算の判定)、PR-F(NULL の行を消す)。

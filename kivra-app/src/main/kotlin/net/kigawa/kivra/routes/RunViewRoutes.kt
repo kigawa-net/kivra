@@ -94,7 +94,12 @@ internal fun Route.configureRunViewRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.BadRequest, RunViewError("limit must be 1-$MAX_OPERATOR_LIMIT"))
             return@get
         }
-        call.respond(runs.listAllTasks(limit).map { runs.viewOf(it, targetRepo, createdBy = it.principal, projectRepo = projectRepo) })
+        // The project narrowing (ADR 0022 PR-D): absent is every run, as before. A run with no project is `unassigned`.
+        val project = projectFilterOf(call.request.queryParameters["projectId"])
+            ?: return@get call.respond(HttpStatusCode.BadRequest, RunViewError(PROJECT_FILTER_INVALID))
+        call.respond(
+            runs.listAllTasks(limit, project = project).map { runs.viewOf(it, targetRepo, createdBy = it.principal, projectRepo = projectRepo) },
+        )
     }
 
     get("/api/admin/runs/{id}") {

@@ -115,9 +115,22 @@ class SelfDevAssigneeRepository(
         execQuery("SELECT $COLUMNS FROM selfdev_assignees ORDER BY created_at, assignee_id") { it.toAssignee() }
     }
 
-    fun listSummaries(): List<AssigneeSummary> = transaction(database) {
+    /**
+     * The summaries, narrowed by project membership (ADR 0022 PR-D): [ProjectFilter.Only] lists the members of that project,
+     * [ProjectFilter.Unassigned] the assignees that belong to no project. The membership is `project_members` (V51).
+     */
+    fun listSummaries(project: ProjectFilter = ProjectFilter.All): List<AssigneeSummary> = transaction(database) {
         val at = utcNow(clock)
-        execQuery("SELECT $COLUMNS FROM selfdev_assignees ORDER BY created_at, assignee_id") { it.toAssignee() }.map { summaryIn(it, at) }
+        val (where, params) = when (project) {
+            ProjectFilter.All -> "" to emptyList<Any?>()
+            ProjectFilter.Unassigned ->
+                " WHERE NOT EXISTS (SELECT 1 FROM project_members pm WHERE pm.assignee_id = selfdev_assignees.assignee_id)" to emptyList<Any?>()
+            is ProjectFilter.Only ->
+                " WHERE EXISTS (SELECT 1 FROM project_members pm WHERE pm.assignee_id = selfdev_assignees.assignee_id AND pm.project_id = ?)" to
+                    listOf<Any?>(project.projectId)
+        }
+        execQuery("SELECT $COLUMNS FROM selfdev_assignees$where ORDER BY created_at, assignee_id", *params.toTypedArray()) { it.toAssignee() }
+            .map { summaryIn(it, at) }
     }
 
     fun summaryOf(assigneeId: String): AssigneeSummary? = transaction(database) {

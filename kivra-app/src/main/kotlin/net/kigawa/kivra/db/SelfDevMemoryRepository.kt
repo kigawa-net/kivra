@@ -39,6 +39,8 @@ data class MemoryRecordView(
     val code: String?,
     val countValue: Int?,
     val createdAt: LocalDateTime,
+    /** The project of the record (ADR 0022), or null. */
+    val projectId: String? = null,
 )
 
 /** An event as read back. Holds no text. */
@@ -134,32 +136,39 @@ class SelfDevMemoryRepository(
      * ACTIVE records that match [filter], newest first, at most [limit], after the first [offset]. A tombstone and a deleted fact
      * never appear.
      */
-    fun search(filter: MemoryFilter, limit: Int, offset: Int = 0): List<MemoryRecordView> {
+    fun search(filter: MemoryFilter, limit: Int, offset: Int = 0, project: ProjectFilter = ProjectFilter.All): List<MemoryRecordView> {
         require(limit in 1..MAX_SEARCH_LIMIT) { "limit must be from 1 to $MAX_SEARCH_LIMIT" }
         require(offset >= 0) { "offset must not be negative" }
         if (!enabled) return emptyList()
         return transaction(database) {
             val where = filterSql(filter)
+            val scope = project.sql("project_id")
             execQuery(
-                "SELECT record_id, kind, source_kind, trust_tier, goal_id, body, code, count_value, created_at " +
-                    "FROM selfdev_memory_records WHERE status = 'ACTIVE'${where.sql} ORDER BY created_at DESC, record_id DESC LIMIT ? OFFSET ?",
-                *(where.params + listOf<Any?>(limit, offset)).toTypedArray(),
+                "SELECT record_id, kind, source_kind, trust_tier, goal_id, body, code, count_value, created_at, project_id " +
+                    "FROM selfdev_memory_records WHERE status = 'ACTIVE'${where.sql}${scope.first} " +
+                    "ORDER BY created_at DESC, record_id DESC LIMIT ? OFFSET ?",
+                *(where.params + scope.second + listOf<Any?>(limit, offset)).toTypedArray(),
             ) { rs ->
                 MemoryRecordView(
                     recordId = rs.getString(1), kind = rs.getString(2), source = rs.getString(3), tier = rs.getString(4),
                     goalId = rs.getString(5), body = rs.getString(6), code = rs.getString(7),
                     countValue = rs.getObject(8)?.let { (it as Number).toInt() }, createdAt = rs.getTimestamp(9).toLocalDateTime(),
+                    projectId = rs.getString(10),
                 )
             }
         }
     }
 
-    /** How many ACTIVE records match [filter]. Read-only. */
-    fun count(filter: MemoryFilter): Int {
+    /** How many ACTIVE records match [filter], narrowed to [project] (ADR 0022 PR-D). Read-only. */
+    fun count(filter: MemoryFilter, project: ProjectFilter = ProjectFilter.All): Int {
         if (!enabled) return 0
         return transaction(database) {
             val where = filterSql(filter)
-            countOf("SELECT COUNT(*) FROM selfdev_memory_records WHERE status = 'ACTIVE'${where.sql}", *where.params.toTypedArray())
+            val scope = project.sql("project_id")
+            countOf(
+                "SELECT COUNT(*) FROM selfdev_memory_records WHERE status = 'ACTIVE'${where.sql}${scope.first}",
+                *(where.params + scope.second).toTypedArray(),
+            )
         }
     }
 

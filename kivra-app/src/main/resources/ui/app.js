@@ -360,6 +360,8 @@
     // Client-side guard only: it saves unneeded requests and is not an authorization check. The server still
     // enforces auth on every request. Only a page reload clears sessionExpired (the sign-in happens on reload).
     if (isApi(path) && state.sessionExpired) return { ok: false, kind: 'session' };
+    // The operator's lists are narrowed to the selected project here (ADR 0022 PR-D). The callers keep their literal paths.
+    if (method === 'GET' && state.projectFilter && PROJECT_SCOPED_GET.test(path)) path = withProject(path);
     var init = {
       method: method,
       credentials: 'same-origin',
@@ -593,15 +595,11 @@
     var ul = $('runs-list');
     clear(ul);
     if (!state.runs) return;
+    // The list is narrowed by the server to the selected project (withProject, ADR 0022 PR-D); nothing is filtered here.
     var filtered = state.runs;
-    // Filter by project if a project is selected
-    if (state.projectFilter) {
-      filtered = state.runs.filter(function (run) {
-        return run && run.projectId === state.projectFilter;
-      });
-    }
     if (filtered.length === 0) {
-      var msg = state.projectFilter ? 'このプロジェクトには Run がありません。' : 'まだ Run はありません。上のフォームから Task を投入できます。';
+      var msg = state.projectFilter === 'unassigned' ? '未分類の Run はありません。'
+        : state.projectFilter ? 'このプロジェクトには Run がありません。' : 'まだ Run はありません。上のフォームから Task を投入できます。';
       ul.appendChild(h('li', { className: 'empty', text: msg }));
       return;
     }
@@ -657,12 +655,15 @@
     state.runsLoading = true;
     state.runsLastAttemptAt = Date.now();
     var scope = state.scope;
+    var project = state.projectFilter;
     try {
       var r = scope === 'all'
         ? await apiFetch('/api/admin/runs?limit=100', 'GET')
         : await apiFetch('/api/runs', 'GET');
-      // The answer to a scope that is no longer selected is dropped.
+      // The answer to a scope or a project that is no longer selected is dropped; the new one was asked for while this one was in flight.
       if (scope !== state.scope) return;
+      // A project selected while this one was in flight: its answer is dropped, and the list was asked for again.
+      if (project !== state.projectFilter) return;
       if (r.ok && Array.isArray(r.data)) {
         state.runs = r.data;
         state.runsOkAt = Date.now();
@@ -784,6 +785,10 @@
     if (allLink) {
       allLink.setAttribute('aria-current', state.projectFilter === null ? 'page' : '');
     }
+    var unassignedLink = $('nav-project-unassigned');
+    if (unassignedLink) {
+      unassignedLink.setAttribute('aria-current', state.projectFilter === 'unassigned' ? 'page' : '');
+    }
     list.querySelectorAll('.side-project-link').forEach(function (el) {
       el.setAttribute('aria-current', el.getAttribute('data-project-filter') === state.projectFilter ? 'page' : '');
     });
@@ -832,6 +837,19 @@
     return r;
   }
 
+  /**
+   * The projectId query of a list (ADR 0022 PR-D). Nothing when no project is selected (every row, as before); unassigned for the rows
+   * with no project; otherwise the selected project's id. The server narrows the list, so the client shows what it is given.
+   */
+  /** The list paths that take the projectId query (exact paths; a single run or goal is not narrowed). */
+  var PROJECT_SCOPED_GET = /^\/api\/(?:runs|admin\/runs\?limit=100|selfdev\/goals|selfdev\/orders|selfdev\/assignees|selfdev\/stop-requests\?state=PENDING|selfdev\/memory\?.*)$/;
+
+  function withProject(url) {
+    if (!state.projectFilter) return url;
+    var base = url.replace(/[?&]$/, '');
+    return base + (base.indexOf('?') === -1 ? '?' : '&') + 'projectId=' + encodeURIComponent(state.projectFilter);
+  }
+
   function selectProjectFilter(projectId) {
     state.projectFilter = projectId;
     // Reset "all" link
@@ -839,8 +857,14 @@
     if (allLink) allLink.setAttribute('aria-current', projectId === null ? 'page' : '');
     // Re-render sidebar active state
     renderProjectSidebar();
-    // Re-render runs with the new filter
+    // The lists are read again for the selected project. The old rows are cleared first, so none of the old project stays on screen.
+    state.runs = null;
     renderRuns();
+    refreshRuns();
+    refreshGoals();
+    refreshOrders();
+    refreshMemory();
+    refreshAssignees();
   }
 
   // ---- Self-development status (the banner above the list) ---------------
@@ -2378,7 +2402,13 @@
     state.goalsLoading = true;
     state.goalsLastAttemptAt = Date.now();
     try {
+      var project = state.projectFilter;
       var r = await apiFetch('/api/selfdev/goals', 'GET');
+      // An answer for a project that is no longer selected is dropped, and the list is read again (goalsPending).
+      if (project !== state.projectFilter) {
+        state.goalsPending = true;
+        return;
+      }
       if (r.ok && Array.isArray(r.data)) {
         state.tasks = r.data;
         state.goalsOkAt = Date.now();
@@ -2817,7 +2847,12 @@
     MEMS.loading = true;
     MEMS.lastAttemptAt = Date.now();
     try {
+      var project = state.projectFilter;
       var r = await apiFetch('/api/selfdev/memory?' + memFilterQuery(), 'GET');
+      if (project !== state.projectFilter) {
+        MEMS.stale = true;
+        return;
+      }
       if (r.ok && memValidList(r.data)) {
         MEMS.enabled = true;
         MEMS.okAt = Date.now();
@@ -2836,6 +2871,11 @@
       NAV.settled.memory = true;
       renderMemory();
       renderNav();
+      // The project changed while the list was read: read it again for the project now selected.
+      if (MEMS.stale) {
+        MEMS.stale = false;
+        refreshMemory();
+      }
     }
   }
 
@@ -3834,7 +3874,13 @@
     var asked = state.autopilotEnabled === true;
     try {
       // The order API answers 503 while the autopilot is off, so nothing is read until the autopilot is known to be on.
+      var project = state.projectFilter;
       var r = state.autopilotEnabled ? await apiFetch('/api/selfdev/orders', 'GET') : { ok: false };
+      // An answer for a project that is no longer selected is dropped, and the lists are read again (listPending).
+      if (project !== state.projectFilter) {
+        ORD.listPending = true;
+        return;
+      }
       if (r.ok && Array.isArray(r.data)) {
         ORD.enabled = true;
         ORD.list = r.data.filter(ordValidSummary);
@@ -4454,7 +4500,12 @@
     }
     ASG.loading = true;
     try {
+      var project = state.projectFilter;
       var r = await apiFetch('/api/selfdev/assignees', 'GET');
+      if (project !== state.projectFilter) {
+        ASG.pending = true;
+        return;
+      }
       if (r.ok && Array.isArray(r.data)) {
         ASG.list = r.data.filter(asgValid);
         ASG.okAt = Date.now();
@@ -4879,6 +4930,14 @@
       allProjectLink.addEventListener('click', function (e) {
         e.preventDefault();
         selectProjectFilter(null);
+      });
+    }
+    // "unassigned" link: the rows that belong to no project (ADR 0022 PR-D)
+    var unassignedProjectLink = $('nav-project-unassigned');
+    if (unassignedProjectLink) {
+      unassignedProjectLink.addEventListener('click', function (e) {
+        e.preventDefault();
+        selectProjectFilter('unassigned');
       });
     }
     // Project create: show form, cancel, submit

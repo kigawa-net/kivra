@@ -108,4 +108,23 @@ class RolesSettingsTest {
         // off: a bad value is not even read
         assertEquals(PermissionMode.OFF, load(mapOf(RolesSettings.ENV_RECOVER_ADMIN to "SECRETVALUE")).mode)
     }
+
+    @Test
+    fun `the project mode is off by default, valid with the roles on, and refused with the roles off`() {
+        assertEquals(PermissionMode.OFF, load(mapOf(RolesSettings.ENV_MODE to "shadow")).projectMode)
+        assertEquals(PermissionMode.SHADOW, load(mapOf(RolesSettings.ENV_MODE to "shadow", RolesSettings.ENV_PROJECT_MODE to "shadow")).projectMode)
+        assertEquals(
+            PermissionMode.ENFORCE,
+            load(mapOf(RolesSettings.ENV_MODE to "enforce", RolesSettings.ENV_PROJECT_MODE to "enforce")).projectMode,
+        )
+        // the project mode needs the roles: with the roles off it is a startup failure that names the variable
+        val off = assertFailsWith<IllegalStateException> { load(mapOf(RolesSettings.ENV_PROJECT_MODE to "shadow")) }
+        assertTrue(off.message!!.contains(RolesSettings.ENV_PROJECT_MODE))
+        // a bad value names only the variable
+        val bad = assertFailsWith<IllegalStateException> {
+            load(mapOf(RolesSettings.ENV_MODE to "shadow", RolesSettings.ENV_PROJECT_MODE to "SECRETVALUE"))
+        }
+        assertTrue(bad.message!!.contains(RolesSettings.ENV_PROJECT_MODE))
+        assertFalse(bad.message!!.contains("SECRETVALUE"))
+    }
 }

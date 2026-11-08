@@ -223,7 +223,10 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.Forbidden, TaskApiError("forbidden"))
             return@get
         }
-        call.respond(runs.listTasks(principal, limit = 50).map { runs.viewOf(it, targetRepo, projectRepo = projectRepo) })
+        // The project narrowing (ADR 0022 PR-D): absent is every run, as before. A run with no project is `unassigned`.
+        val project = projectFilterOf(call.request.queryParameters["projectId"])
+            ?: return@get call.respond(HttpStatusCode.BadRequest, TaskApiError(PROJECT_FILTER_INVALID))
+        call.respond(runs.listTasks(principal, limit = 50, project = project).map { runs.viewOf(it, targetRepo, projectRepo = projectRepo) })
     }
 
     post("/api/runs/{id}/comments") {

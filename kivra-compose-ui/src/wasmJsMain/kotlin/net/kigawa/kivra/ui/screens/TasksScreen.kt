@@ -10,6 +10,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
+import net.kigawa.kivra.ui.GatedOperation
+import net.kigawa.kivra.ui.LocalCallerPermissions
 import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiRun
@@ -29,6 +31,7 @@ fun TasksScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
     var submitResult by remember { mutableStateOf<String?>(null) }
     
     val scopeLauncher = rememberCoroutineScope()
+    val perms = LocalCallerPermissions.current
 
     LaunchedEffect(scope, selectedProjectId) {
         loading = true
@@ -90,8 +93,8 @@ fun TasksScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Task submit form
-        Card(modifier = Modifier.fillMaxWidth()) {
+        // Task submit form. SPEND_START が無い人には出さない(UX の出し分け。サーバーも投入を 403 で拒否する)。
+        if (perms.can(GatedOperation.SUBMIT_TASK)) Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Task を投入", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(8.dp))

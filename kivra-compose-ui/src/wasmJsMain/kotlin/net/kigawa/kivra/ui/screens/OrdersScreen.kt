@@ -12,6 +12,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import net.kigawa.kivra.ui.ActionNotice
+import net.kigawa.kivra.ui.GatedOperation
+import net.kigawa.kivra.ui.LocalCallerPermissions
 import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
@@ -98,6 +100,7 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
     var pendingApprove by remember { mutableStateOf<ApiStopRequest?>(null) }
     var approveError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val perms = LocalCallerPermissions.current
 
     LaunchedEffect(selectedProjectId, reloadKey) {
         loading = true
@@ -174,7 +177,8 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
                             Text("対象の order: ${approval.orderId} | 理由: ${approval.reasonCode}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Row(modifier = Modifier.padding(top = 8.dp)) {
+                            // 承認・却下は STOP_DECIDE の人だけ出す(旧 UI と同じ。サーバーも 403 で拒否する)。
+                            if (perms.can(GatedOperation.DECIDE_STOP_REQUEST)) Row(modifier = Modifier.padding(top = 8.dp)) {
                                 Button(
                                     enabled = !busy && digestOk,
                                     onClick = {

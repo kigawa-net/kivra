@@ -5,10 +5,18 @@ import io.ktor.client.call.*
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
+import io.ktor.http.ContentType
+import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+
+@Serializable private class SubmitTaskRequest(val title: String, val idempotencyKey: String)
+
+@Serializable private class SubmitSelfDevRequest(val title: String, val body: String?, val idempotencyKey: String)
+
+@Serializable private class CreateProjectRequest(val name: String, val description: String?)
 
 /**
  * A failed API call: a non-2xx answer, or a body that does not match the model.
@@ -61,22 +69,43 @@ object ApiClient {
         return ERROR_FIELD.find(text)?.groupValues?.get(1) ?: response.status.description
     }
 
+    /**
+     * scope "mine" = 自分の Run(`/api/runs`、サーバー側で最大 50 件)。"all" = 運用者向けの全 Run(`/api/admin/runs`、最大 100 件)。
+     * "all" は運用者以外では 403 の [ApiException] になる。サーバーは scope パラメータを解釈しない。
+     */
     suspend fun getRuns(scope: String = "mine"): List<ApiRun> =
-        getJson("/api/runs?scope=$scope")
+        if (scope == "all") getJson("/api/admin/runs?limit=100") else getJson("/api/runs")
 
     suspend fun getRun(runId: String): ApiRun =
         getJson("/api/runs/$runId")
 
+    /**
+     * Task を投入する。サーバーは idempotencyKey を必須とし、JSON の Content-Type を要求する(`SubmitTaskRequest` / `SubmitGoalRequest`)。
+     * kind が "SELF_DEV" なら `/api/selfdev/tasks`(本文あり)、それ以外は `/api/tasks`(本文は送らない。旧 UI と同じ)。
+     * 2xx なら true。同じ呼び出しの再送は新しい key になるため、二重投入の防止は呼び出し側で行う。
+     */
     suspend fun submitTask(title: String, body: String? = null, kind: String = "SIMULATED"): Boolean {
         return try {
-            val response = client.post("/api/tasks") {
-                setBody(mapOf("title" to title, "kind" to kind, "body" to (body ?: "")))
+            val key = newIdempotencyKey()
+            val response = if (kind == "SELF_DEV") {
+                client.post("/api/selfdev/tasks") {
+                    contentType(ContentType.Application.Json)
+                    setBody(SubmitSelfDevRequest(title, body?.takeIf { it.isNotBlank() }, key))
+                }
+            } else {
+                client.post("/api/tasks") {
+                    contentType(ContentType.Application.Json)
+                    setBody(SubmitTaskRequest(title, key))
+                }
             }
-            response.status.value in 200..299
+            response.status.isSuccess()
         } catch (e: Exception) {
             false
         }
     }
+
+    private fun newIdempotencyKey(): String =
+        "compose-" + (1..24).map { "0123456789abcdef".random() }.joinToString("")
 
     suspend fun getProjects(): List<ApiProject> =
         getJson("/api/projects")
@@ -84,9 +113,10 @@ object ApiClient {
     suspend fun createProject(name: String, description: String? = null): Boolean {
         return try {
             val response = client.post("/api/projects") {
-                setBody(mapOf("name" to name, "description" to (description ?: "")))
+                contentType(ContentType.Application.Json)
+                setBody(CreateProjectRequest(name, description?.takeIf { it.isNotBlank() }))
             }
-            response.status.value in 200..299
+            response.status.isSuccess()
         } catch (e: Exception) {
             false
         }

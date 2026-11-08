@@ -2,7 +2,8 @@ name: fx-refresh
 
 # kivra dev の為替(KIVRA_FX_USD_JPY / KIVRA_FX_AS_OF)を更新する PR を kigawa-net-k8s に作る。
 # 週 2 回(月・木 01:00 UTC)。基準日から 7 日で USD の呼び出しが止まるため、それより短い間隔にしている。
-# マージは人が行う(自動マージはしない)。値の決め方は docs/runbook-selfdev.md §4.8 を参照。
+# 大きな変動の警告(WARN_BIG_MOVE)が無いときだけ自動で squash マージする。警告があるときは人が確認してマージする。
+# 値の決め方は docs/runbook-selfdev.md §4.8 を参照。
 on:
   schedule:
     - cron: "0 1 * * 1,4"
@@ -88,6 +89,7 @@ jobs:
           echo "name=$existing" >> "$GITHUB_OUTPUT"
 
       - name: Create or update manifest pull request
+        id: fx-pr
         if: steps.fx.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
@@ -100,3 +102,13 @@ jobs:
           title: "chore(kivra-dev): 為替を更新 USD/JPY ${{ steps.fx.outputs.old_rate }} -> ${{ steps.fx.outputs.new_rate }}${{ steps.fx.outputs.warn == 'true' && ' (大きな変動の警告あり)' || '' }}"
           body-path: ${{ runner.temp }}/pr-body.md
           delete-branch: true
+
+      # 為替が失効すると USD の呼び出しが UNKNOWN_COST で止まり、自己開発が動かなくなる。
+      # 大きな変動の警告が無いときだけ、人を待たずにマージする。
+      - name: Merge FX pull request (no big-move warning)
+        if: steps.fx.outputs.changed == 'true' && steps.fx.outputs.warn != 'true' && steps.fx-pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.k8s-token.outputs.token }}
+          PR_NUMBER: ${{ steps.fx-pr.outputs.pull-request-number }}
+        run: |
+          gh pr merge "$PR_NUMBER" --repo "${{ env.manifestRepository }}" --squash

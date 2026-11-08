@@ -37,6 +37,7 @@ import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.ProjectBackfillRepository
+import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevSubmitResult
@@ -60,7 +61,13 @@ class ProjectRoutesTest {
         val projects = ProjectRepository(db.database, Clock.systemUTC())
         application {
             install(ContentNegotiation) { json() }
-            routing { configureProjectRoutes(projects, db.runs, identity, guard, backfill = ProjectBackfillRepository(db.database)) }
+            routing {
+                configureProjectRoutes(
+                    projects, db.runs, identity, guard,
+                    backfill = ProjectBackfillRepository(db.database),
+                    members = ProjectMemberRepository(db.database, Clock.systemUTC()),
+                )
+            }
         }
     }
 

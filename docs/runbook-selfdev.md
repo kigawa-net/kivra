@@ -642,9 +642,30 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 
 **注意（enforce の前に必ず確認する）**
 
-- メンバーの登録（`project_members`）は、この PR では API がない。`enforce` にすると、メンバーのいないプロジェクトでは、グローバル ADMIN 以外の全員が操作できなくなる。`enforce` は、メンバーの登録の手段ができ、必要な担当が登録されてから使う（ADR 0022 の PR-D の後続）。
+- メンバーのいないプロジェクトで `enforce` にすると、グローバル ADMIN 以外の全員が操作できなくなる。`enforce` にする前に、下の「enforce へ進む手順」でメンバーを登録する（メンバーの登録の API は PR-D2 で入った）。
 - shadow のログで `PROJECT_NOT_MEMBER` が出る操作は、enforce にすると拒否される操作である。運用者の操作が出ていないかを、shadow で確かめる。
 - 戻し方: `KIVRA_SELFDEV_PROJECT_MODE` を `off`（または削除）にして再起動する。データは変えない。
+
+**メンバーの登録（ADR 0022 PR-D2、運用者のみ）**
+
+`project_members` の書き込みは次の API と画面（プロジェクトのダッシュボードの「メンバー（運用者のみ）」）で行う。権限は `ORDER_MANAGE`。
+
+| 操作 | API | 注意 |
+|---|---|---|
+| 一覧 | `GET /api/projects/{id}/members` | 担当の `assigneeId`・表示名・role・state |
+| 追加・role 変更 | `PUT /api/projects/{id}/members/{assigneeId}` の `{"role":"..."}` | 追加は 201。同じ role の再送は 200 で何も変えない（冪等）。role は `ADMIN` `OPERATOR` `APPROVER` `AI` `VIEWER` のいずれか（`AI_APPROVER` は不可、400） |
+| 外す | `DELETE /api/projects/{id}/members/{assigneeId}`（本文は `{}`） | メンバーでなければ 404 |
+| 全担当の取り込み | `POST /api/projects/{id}/members/import-all?dryRun=true\|false` の `{"role":"..."}` | 既定は dry-run。有効な担当で未登録の人を指定の role で追加する。既存メンバーの role は変えない。無効（DISABLED）の担当は対象外 |
+
+- **最後の ADMIN は守られる。** そのプロジェクトのメンバー ADMIN が 0 人になる外す・降格は 409 で拒否し、何も変えない。グローバル ADMIN であっても、この拒否は変わらない（判定はプロジェクトのメンバーだけで行う）。メンバーのいないプロジェクトには守るべき ADMIN がいないので、この拒否は起きない。
+- 担当の一覧（画面の追加の候補）は既存の `GET /api/selfdev/assignees` を使う。これは `ASSIGNEE_MANAGE` の権限が要る。運用者の権限が `ORDER_MANAGE` だけの場合、候補は出ない。
+
+**enforce へ進む手順（この順に行う）**
+
+1. **全担当を取り込む。** 画面の「全担当を取り込む（dry-run）」、または `POST .../members/import-all?dryRun=true` で `candidates`（追加される人）を確かめる。`candidates` が想定どおりなら、`dryRun=false` で実行する（画面では「全担当を取り込む…」で確認ダイアログが出る）。role は最小の `VIEWER` で取り込み、必要な人だけ後から `PUT` で上げる。取り込みは冪等で、何度実行しても既存メンバーの role は変わらない。
+2. **役割を直す。** 操作が必要な人の role を `PUT` で上げる（例: 運用する人は `OPERATOR`、承認する人は `APPROVER`、AI の担当は `AI`）。このプロジェクトに `ADMIN` を一人は残す（残すように拒否される）。
+3. **shadow で確かめる。** `KIVRA_SELFDEV_PROJECT_MODE=shadow` にして再起動し、運用の操作（Task の投入、承認、停止の要求など）を一通り行う。構造化ログ `project shadow: wouldDeny ... code=PROJECT_NOT_MEMBER` が出なくなれば、enforce にしても拒否される操作はない。出る場合は、その人の登録（手順 1、2）に戻る。
+4. **enforce にする。** `KIVRA_SELFDEV_PROJECT_MODE=enforce` にして再起動する。グローバル ADMIN は従来どおり、メンバーでなくても通る。戻すときは `shadow` か `off` にして再起動する（データは変えない）。
 
 ## 5. 動作確認
 

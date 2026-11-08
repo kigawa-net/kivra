@@ -77,3 +77,13 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
   - `project_members` の読み取りは `ProjectMemberStore`。書き込みの API はまだない(後続)。そのため、メンバーの登録手段ができるまで `enforce` は使わない(runbook 4.17)。
 - 画面: サイドバーに「未分類」を足し、プロジェクトを選ぶと Run・目標・order・承認待ち・記憶・担当の一覧をサーバーの絞り込みで読み直す。クライアントでは絞らない。読み込み中に選択が変わった場合は古い応答を捨てて読み直す。
 - 残り(後続): 担当の所属の登録 API と画面、MCP の一覧と Task 投入の判定、PR-D2(予算)、PR-E(予算の判定)、PR-F(NULL の行を消す)。
+
+## 進捗(PR-D2: メンバーの登録、ブランチ `feat/project-members`)
+
+- マイグレーションは追加しない。V51 の `project_members` への書き込み経路を作る。PR-D1 の「担当の所属の登録 API と画面」にあたる。
+- API(ORDER_MANAGE、CSRF の JSON ガード)。`GET /api/projects/{id}/members`、`PUT /api/projects/{id}/members/{assigneeId}`(body `{role}`。追加は 201、同じ role の再送と変更は 200)、`DELETE /api/projects/{id}/members/{assigneeId}`(本文は `{}`。204)、`POST /api/projects/{id}/members/import-all?dryRun=true|false`(既定は dry-run。有効な担当で未登録の人を指定の role で追加。既存の role は変えない。無効な担当は対象外。件数を返す)。
+- 不変条件: そのプロジェクトのメンバー ADMIN が 0 人になる外し・降格は 409 で拒否する。判定はプロジェクトのメンバーだけで行い、グローバル ADMIN も例外にしない。プロジェクトの行を `FOR UPDATE` で固定してから数えるので、同時の降格も両方は通らない。メンバーが 0 人のプロジェクトは対象外。
+- 監査は構造化ログ(`net.kigawa.kivra.project.admin`)に固定の code、プロジェクト ID、実行者と担当のハッシュ、role だけを残す。表示名は残さない。
+- 画面(運用者の欄): メンバーの一覧、追加(担当の選択と role。候補は既存の `GET /api/selfdev/assignees` で、この一覧だけはプロジェクトの絞り込みを掛けずに読む)、role の変更、外す(確認つき)、全担当の取り込み(dry-run、確認つきの実行)。
+- 運用の手順は `docs/runbook-selfdev.md` 4.17 の「enforce へ進む手順」(取り込み、役割の調整、shadow で `PROJECT_NOT_MEMBER` が 0 件になるのを確かめる、enforce)。
+- 残り(後続): MCP の一覧と Task 投入の判定、PR-E(予算。表の PR-E と同じ)、PR-F(NULL の行を消す)。PR-D1 の節の「PR-D2(予算)」の表記は、予算を PR-E とする上の表に合わせて読む。

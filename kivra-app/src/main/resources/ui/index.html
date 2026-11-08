@@ -318,6 +318,37 @@
             <input id="project-repo-input" type="text" autocomplete="off" maxlength="140" placeholder="owner/name">
             <button type="submit" id="project-repo-add">追加</button>
           </form>
+          <h3 id="h-project-members">メンバー（運用者のみ）</h3>
+          <p class="meta">担当をこのプロジェクトのメンバーにし、役割（role）を決めます。プロジェクトの最後の管理者（ADMIN）は外せず、role も変えられません。</p>
+          <ul id="project-members" class="run-list" aria-labelledby="h-project-members"></ul>
+          <p id="project-members-status" class="meta" role="status"></p>
+          <form id="project-member-form" class="inline-form">
+            <label for="project-member-assignee">担当</label>
+            <select id="project-member-assignee"></select>
+            <label for="project-member-role">役割（role）</label>
+            <select id="project-member-role">
+              <option value="ADMIN">ADMIN</option>
+              <option value="OPERATOR">OPERATOR</option>
+              <option value="APPROVER">APPROVER</option>
+              <option value="AI">AI</option>
+              <option value="VIEWER" selected>VIEWER</option>
+            </select>
+            <button type="submit" id="project-member-add">追加</button>
+          </form>
+          <div class="actions">
+            <label for="members-import-role">取り込みの役割（role）</label>
+            <select id="members-import-role">
+              <option value="ADMIN">ADMIN</option>
+              <option value="OPERATOR">OPERATOR</option>
+              <option value="APPROVER">APPROVER</option>
+              <option value="AI">AI</option>
+              <option value="VIEWER" selected>VIEWER</option>
+            </select>
+            <button type="button" class="secondary" id="members-import-dry">全担当を取り込む（dry-run）</button>
+            <button type="button" id="members-import-run" disabled>全担当を取り込む…</button>
+          </div>
+          <p id="members-import-status" class="meta" role="status"></p>
+          <ul id="members-import-result" class="run-list" aria-labelledby="h-project-members"></ul>
           <h3 id="h-backfill">既存データの振り分け</h3>
           <p class="meta">プロジェクトが未設定の既存データだけを、repo の対応で振り分けます（全プロジェクトに効きます）。すでにプロジェクトを持つ行は変わりません。対応がない行は未設定のままです。まず確認（dry-run）をしてください。</p>
           <div class="actions">
@@ -350,6 +381,18 @@
     <div class="dialog-actions">
       <button type="button" class="secondary" id="backfill-cancel" autofocus>キャンセル</button>
       <button type="button" id="backfill-confirm">振り分けを実行する</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="members-dialog" aria-labelledby="members-title">
+  <div class="release-body">
+    <h2 id="members-title">メンバー</h2>
+    <p id="members-explain"></p>
+    <p class="error" id="members-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="secondary" id="members-cancel" autofocus>キャンセル</button>
+      <button type="button" id="members-confirm">実行する</button>
     </div>
   </div>
 </dialog>

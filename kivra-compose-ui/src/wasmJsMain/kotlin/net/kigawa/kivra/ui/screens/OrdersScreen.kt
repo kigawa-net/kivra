@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiOrder
+import net.kigawa.kivra.ui.api.ApiStopRequest
 
 /**
  * Orders screen: Order list.
@@ -22,6 +23,8 @@ fun OrdersScreen(selectedProjectId: String? = null) {
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(selectedProjectId) {
+        loading = true
+        error = null
         try {
             val allOrders = ApiClient.getOrders()
             orders = if (selectedProjectId != null) {
@@ -51,9 +54,12 @@ fun OrdersScreen(selectedProjectId: String? = null) {
                 items(orders, key = { it.orderId }) { order ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text("タイプ: ${order.type}", style = MaterialTheme.typography.titleMedium)
+                            Text("order ${order.orderId}", style = MaterialTheme.typography.titleMedium)
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text("状態: ${order.state} | Run: ${order.runId ?: "なし"}", 
+                            Text("状態: ${order.state} | 深さ: ${order.depth} | 周: ${order.cyclesStarted} / ${order.maxCycles}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("使用: ${order.spentJpy} 円 / 予算: ${order.orderBudgetJpy} 円",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
@@ -66,19 +72,23 @@ fun OrdersScreen(selectedProjectId: String? = null) {
 }
 
 /**
- * Approvals screen: Stop approval list.
+ * Approvals screen: Stop approval list (pending stop requests of the orders).
  */
 @Composable
 fun ApprovalsScreen(selectedProjectId: String? = null) {
-    var approvals by remember { mutableStateOf<List<ApiOrder>>(emptyList()) }
+    var approvals by remember { mutableStateOf<List<ApiStopRequest>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(selectedProjectId) {
+        loading = true
+        error = null
         try {
             val allApprovals = ApiClient.getApprovals()
             approvals = if (selectedProjectId != null) {
-                allApprovals.filter { it.projectId == selectedProjectId }
+                // A stop request has no project of its own: it belongs to its order's project.
+                val projectOf = ApiClient.getOrders().associate { it.orderId to it.projectId }
+                allApprovals.filter { projectOf[it.orderId] == selectedProjectId }
             } else {
                 allApprovals
             }
@@ -101,12 +111,12 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
             Text("承認待ちの項目はありません")
         } else {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(approvals, key = { it.orderId }) { approval ->
+                items(approvals, key = { it.requestId }) { approval ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text("承認待ち", style = MaterialTheme.typography.titleMedium)
+                            Text("停止の承認待ち", style = MaterialTheme.typography.titleMedium)
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text("Run: ${approval.runId ?: "なし"}", 
+                            Text("対象の order: ${approval.orderId} | 理由: ${approval.reasonCode}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Row(modifier = Modifier.padding(top = 8.dp)) {

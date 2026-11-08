@@ -45,18 +45,25 @@ fun BudgetScreen() {
             Text("予算情報が見つかりません")
         } else {
             val b = budget!!
+            val limit = b.limitValue
+            val used = b.usedValue
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("月: ${b.month}", style = MaterialTheme.typography.titleMedium)
+                    Text("月: ${b.period}", style = MaterialTheme.typography.titleMedium)
                     Spacer(modifier = Modifier.height(8.dp))
-                    
-                    Text("上限: ${b.limit}")
+
+                    Text("上限: ${b.limitJpy} 円")
                     LinearProgressIndicator(
-                        progress = (b.used / b.limit).coerceIn(0.0, 1.0).toFloat(),
+                        progress = if (limit != null && used != null && limit > 0) {
+                            (used / limit).coerceIn(0.0, 1.0).toFloat()
+                        } else {
+                            0f
+                        },
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Text("使用: ${b.used} / ${b.limit}")
-                    Text("未確定予約: ${b.pending}")
+                    Text("確定: ${b.committedJpy} 円 / 予約中: ${b.reservedJpy} 円 / 残り: ${b.remainingJpy} 円")
+                    Text("確定(API): ${b.paths.api.committedJpy} 円 / 確定(CLI): ${b.paths.cli.committedJpy} 円")
+                    Text("未確定の予約: ${b.unpricedCount} 件")
                 }
             }
         }
@@ -94,14 +101,18 @@ fun MemoryScreen() {
             Text("記憶が見つかりません")
         } else {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(memories, key = { it.memoryId }) { mem ->
+                items(memories, key = { it.recordId }) { mem ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text(mem.key, style = MaterialTheme.typography.titleMedium)
+                            Text(mem.code ?: mem.kind, style = MaterialTheme.typography.titleMedium)
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text(mem.value, style = MaterialTheme.typography.bodyMedium)
+                            // The body is null for an untrusted note (bodyWithheld tells whether one exists) and for a fact.
+                            Text(
+                                mem.body ?: if (mem.bodyWithheld) "（本文は表示されません）" else "（本文はありません）",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text("スコープ: ${mem.scope}", 
+                            Text("種類: ${mem.kind} | 出所: ${mem.source} | 層: ${mem.tier}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
@@ -123,6 +134,8 @@ fun AssigneesScreen(selectedProjectId: String? = null) {
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(selectedProjectId) {
+        loading = true
+        error = null
         try {
             val allAssignees = ApiClient.getAssignees()
             assignees = if (selectedProjectId != null) {
@@ -152,9 +165,9 @@ fun AssigneesScreen(selectedProjectId: String? = null) {
                 items(assignees, key = { it.assigneeId }) { asgn ->
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text(asgn.name, style = MaterialTheme.typography.titleMedium)
+                            Text(asgn.displayName, style = MaterialTheme.typography.titleMedium)
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text("ID: ${asgn.assigneeId}", 
+                            Text("ID: ${asgn.assigneeId} | 役割: ${asgn.role} | 状態: ${asgn.state}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

@@ -203,11 +203,11 @@ class SelfDevGoalRoutesTest {
     fun `the operator switches the pause on and off and the state is read back`() = testApplication {
         val db = newDb()
         setUp(db, enabledAutopilot())
-        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/autopilot/pause", body = null).status)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/autopilot/pause").status)
         assertEquals(true, send(HttpMethod.Get, "/api/selfdev/autopilot", body = null).obj().getValue("paused").jsonPrimitive.boolean)
-        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/autopilot/resume", body = null).status)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/autopilot/resume").status)
         assertEquals(false, send(HttpMethod.Get, "/api/selfdev/autopilot", body = null).obj().getValue("paused").jsonPrimitive.boolean)
-        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/autopilot/reset-breaker", body = null).status)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Post, "/api/selfdev/autopilot/reset-breaker").status)
         assertEquals(0, send(HttpMethod.Get, "/api/selfdev/autopilot", body = null).obj().getValue("consecutiveFailures").jsonPrimitive.int)
     }
 

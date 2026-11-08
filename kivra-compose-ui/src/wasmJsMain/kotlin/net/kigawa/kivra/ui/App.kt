@@ -43,6 +43,7 @@ fun KivraApp() {
     var projects by remember { mutableStateOf<List<ApiProject>>(emptyList()) }
     var selectedProjectId by remember { mutableStateOf<String?>(null) }
     var dropdownExpanded by remember { mutableStateOf(false) }
+    var searchOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         try {
@@ -53,6 +54,13 @@ fun KivraApp() {
     }
 
     MaterialTheme {
+        if (searchOpen) {
+            SearchDialog(
+                projectId = selectedProjectId,
+                onDismiss = { searchOpen = false },
+                onNavigate = { currentRoute = it.route }
+            )
+        }
         Surface(modifier = Modifier.fillMaxSize()) {
             Row(modifier = Modifier.fillMaxSize()) {
                 // Sidebar: グループ見出し + 配下項目
@@ -106,6 +114,8 @@ fun KivraApp() {
                             onDropdownExpandedChange = { dropdownExpanded = it }
                         )
                         
+                        TextButton(onClick = { searchOpen = true }) { Text("検索") }
+
                         Text(
                             text = "接続: 未確認",
                             modifier = Modifier.padding(16.dp)

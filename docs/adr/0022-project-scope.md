@@ -55,3 +55,14 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - 読み取りと自律ループは NULL の行を引き続き扱う(フィルタは入れていない)。
 - 画面(`/ui`)は、目的(goal)と order の作成フォームにプロジェクトの選択を足した。選ぶまで送信しない。
 - 未対応(後続): システムが起票する Task(インシデントの自動修正など)は、プロジェクトを持たないので NULL のまま。PR-B の振り分けで扱う。
+
+## 進捗(PR-B: 既存データの振り分け、ブランチ `feat/project-scope-backfill`)
+
+- マイグレーションは追加しない。V50、V51 の列と表だけを使う。デフォルトのプロジェクトは作らない。
+- 対応(`project_repos`)の登録は運用者が行う。API は `GET/PUT /api/projects/{id}/repos`、`DELETE /api/projects/{id}/repos?repoKey=`。repo_key は owner/name の形式、UNIQUE 違反は 409、存在しない project は 404。権限は `ORDER_MANAGE`。
+- 振り分けは `POST /api/projects/backfill?dryRun=true|false`(既定は dry-run)。`project_id` が NULL の行だけを、repo の対応で更新する。値のある行は変えない。対応がない行は NULL のまま。テーブルごとに `matched` `updated` `unmatched` を返す。500 件のバッチ(LIMIT)で書き、各バッチは別のトランザクション。何度実行しても結果は同じ(冪等)。
+  - 行の対応の見方: Task は `target_repo`、order は `target_repo`(子の order は根と同じ repo)、Run はその Task(`selfdev_tasks.run_id`)、記憶は goal の Task、plan の Task、Run の順(PR-C の `projectOfContext` と同じ順)。dry-run と実行で同じ式を使う。
+- システムが起票する Task(`kivra-incident`)は、作成時に `target_repo` の対応からプロジェクトを継承する。対応がなければ NULL。冪等の再送では、継承した値を比較しない。
+- 監査は構造化ログ(`net.kigawa.kivra.project.admin`)に、固定の code と件数、実行者のハッシュだけを残す。repo 名は残さない。
+- 画面(プロジェクトのダッシュボード)に、運用者だけの「リポジトリの対応」と「既存データの振り分け」(dry-run、確認ダイアログ付きの実行)を足した。運用の手順は `docs/runbook-selfdev.md` 4.16。
+- 残り(後続): PR-D(権限を `project_members` で判定)、PR-E(予算)、PR-F(NULL の行を消す)。プロジェクトの削除は、登録済みの repo や行があると FK RESTRICT で失敗する(今は 500 になる。扱いは後続で決める)。

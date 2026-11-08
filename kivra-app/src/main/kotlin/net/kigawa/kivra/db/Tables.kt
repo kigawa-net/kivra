@@ -217,6 +217,14 @@ object ProjectsTable : Table("projects") {
     override val primaryKey = PrimaryKey(projectId)
 }
 
+/** Repositories a project owns (V51, ADR 0022). repo_key is owner/name, UNIQUE: a repository belongs to one project at most. */
+object ProjectReposTable : Table("project_repos") {
+    val projectId = char("project_id", 26)
+    val repoKey = varchar("repo_key", 200)
+    val createdAt = datetime("created_at")
+    override val primaryKey = PrimaryKey(projectId, repoKey)
+}
+
 /** Orchestrator leader lease (V41). Single-row table for leader election. */
 object LeaderLeasesTable : Table("orchestrator_leader_lease") {
     val id = integer("id").default(0)

@@ -17,6 +17,7 @@ import net.kigawa.kivra.core.autopilot.TransitionDecision
 import net.kigawa.kivra.core.autopilot.TransitionRefusal
 import net.kigawa.kivra.core.autopilot.checkTaskTransition
 import net.kigawa.kivra.selfdev.NewTask
+import net.kigawa.kivra.selfdev.autofix.INCIDENT_FIX_PRINCIPAL
 import net.kigawa.kivra.selfdev.PromotionCounts
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
@@ -106,9 +107,11 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
             transaction(database) {
                 val now = utcNow(clock)
                 val taskId = Ulid.generate(clock)
+                // ADR 0022 PR-B: a task the system files takes the project of its repository (project_repos), else none.
+                val project = projectId ?: if (createdBy in SYSTEM_TASK_PRINCIPALS) projectIdOfRepo(targetRepo) else null
                 execUpdate(
                     "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, dependencies, requires_approval, revision, attempts, version, created_at, updated_at, project_id) VALUES (?, ?, ?, ?, ?, ?, 'TASK_SUBMITTED', '[]', TRUE, 0, 0, 0, ?, ?, ?)",
-                    taskId, createdBy, idempotencyKey, title, body, targetRepo, now, now, projectId,
+                    taskId, createdBy, idempotencyKey, title, body, targetRepo, now, now, project,
                 )
                 taskIn(taskId) ?: error("vanished")
             }
@@ -123,7 +126,9 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                 .where { (SelfDevTasksTable.createdBy eq createdBy) and (SelfDevTasksTable.idempotencyKey eq idempotencyKey) }
                 .firstOrNull()?.let { taskOf(it) }
         } ?: error("the duplicate key has no row")
-        return if (existing.title == title && existing.body == body && existing.targetRepo == targetRepo && existing.projectId == projectId) {
+        // A system task without a project in the request takes the one its repository has now: the replay does not compare it.
+        val sameProject = existing.projectId == projectId || (projectId == null && createdBy in SYSTEM_TASK_PRINCIPALS)
+        return if (existing.title == title && existing.body == body && existing.targetRepo == targetRepo && sameProject) {
             SelfDevSubmitResult.Replayed(existing)
         } else {
             SelfDevSubmitResult.KeyConflict
@@ -565,5 +570,10 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
     /** A unique-key violation anywhere in the cause chain: MariaDB 1062, H2 23505. */
     private fun Throwable.isDuplicateKey(): Boolean =
         generateSequence(this) { it.cause }.any { it is SQLException && (it.sqlState == "23505" || it.errorCode == 1062 || it.errorCode == 23505) }
-    private companion object { val JSON = Json }
+    private companion object {
+        val JSON = Json
+
+        /** The principals the system files tasks as (their project comes from the repository, ADR 0022 PR-B). */
+        val SYSTEM_TASK_PRINCIPALS: Set<String> = setOf(INCIDENT_FIX_PRINCIPAL)
+    }
 }

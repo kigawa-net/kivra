@@ -43,6 +43,9 @@ import net.kigawa.kivra.selfdev.automerge.AutoMergeShadowWatch
 import net.kigawa.kivra.selfdev.automerge.DbAutoMergeShadowStore
 import net.kigawa.kivra.selfdev.automerge.GitHubAutoMergeShadowPort
 import net.kigawa.kivra.selfdev.automerge.buildAutoMergeShadowWatch
+import net.kigawa.kivra.selfdev.review.DbPrReviewStore
+import net.kigawa.kivra.selfdev.review.PrReviewSettings
+import net.kigawa.kivra.selfdev.review.PrReviewWatch
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import net.kigawa.kivra.selfdev.memory.SuppressShadow
 import org.jetbrains.exposed.sql.Database
@@ -55,6 +58,8 @@ internal class SelfDevParts(
     val planWorker: PlannerWorker? = null,
     /** The shadow judgement of the automatic merge (ADR 0014 S1). Non-null only with the autopilot and its shadow switch on. */
     val autoMergeShadow: AutoMergeShadowWatch? = null,
+    /** The AI review of self-development pull requests (comment only). Non-null only when KIVRA_SELFDEV_PR_REVIEW_ENABLED is true. */
+    val prReview: PrReviewWatch? = null,
     /** The Anthropic HTTP client and credential the developer uses. Reused by the LLM stop judgement (ADR 0021 L4); nothing else reads it. */
     val anthropic: AnthropicHandle? = null,
     /** The DeveloperPort instance for code auto-fix worker (C4). */
@@ -214,11 +219,28 @@ internal fun buildSelfDev(
         baseBranch = config.baseBranch,
         botAuthorId = botUserId.reveal().toLong(),
     )
+    // ADR 0008 addendum: the AI review of the bot's pull requests, a comment only. Off unless its switch is exactly true: the settings read
+    // no other variable then, and nothing is built. The result is recorded; it is not an input of the automatic merge (ADR 0014).
+    val prReviewSettings = PrReviewSettings.fromEnv(env)
+    val prReview: PrReviewWatch? = if (prReviewSettings.enabled) {
+        PrReviewWatch(
+            settings = prReviewSettings,
+            store = DbPrReviewStore(database, runs, SelfDevOperatorRepository(database), AuditRepository()),
+            github = github,
+            gateway = gateway,
+            repo = config.repo,
+            botUserId = botUserId.reveal().toLong(),
+            budgetScopes = listOf(tenantId),
+        )
+    } else {
+        null
+    }
     return SelfDevParts(
         worker = worker,
         routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github),
         planWorker = planWorker,
         autoMergeShadow = autoMergeShadow,
+        prReview = prReview,
         anthropic = AnthropicHandle(anthropicClient, anthropicAuth),
         developer = developer,
     )

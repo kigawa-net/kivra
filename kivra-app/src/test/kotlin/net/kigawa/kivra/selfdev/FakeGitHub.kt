@@ -11,7 +11,6 @@ import net.kigawa.kivra.github.EnsuredPullRequest
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubPort
 import net.kigawa.kivra.github.GitHubResult
-
 import net.kigawa.kivra.github.PullRequest
 import net.kigawa.kivra.github.PullRequestState
 import net.kigawa.kivra.github.RepoFileContent
@@ -251,6 +250,38 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
     override suspend fun listTree(repo: RepoRef, ref: String): GitHubResult<RepoTree> = unused()
 
     override suspend fun readFile(repo: RepoRef, ref: String, path: String, maxBytes: Int): GitHubResult<RepoFileContent?> = unused()
+
+    /** The diff returned by [getPullRequestDiff] (the same text for every pull request). */
+    var diff: String = ""
+
+    /** When set, [getPullRequestDiff] fails with this kind (TOO_LARGE for a diff over the limit). */
+    var diffFailure: GitHubFailureKind? = null
+
+    /** Comments posted by [createPullRequestComment], in call order: (pull request number, body). */
+    val comments = ArrayList<Pair<Int, String>>()
+
+    /** The next comment post answers UNKNOWN after storing the comment when true (a lost response). Consumed once. */
+    var commentLost: Boolean = false
+
+    override suspend fun getPullRequestDiff(repo: RepoRef, number: Int, maxBytes: Int): GitHubResult<String> {
+        touch("getPullRequestDiff")
+        if (repo != this.repo) return foreign()
+        diffFailure?.let { return GitHubResult.Failure(it, it.code) }
+        if (diff.toByteArray(Charsets.UTF_8).size > maxBytes) return GitHubResult.Failure(GitHubFailureKind.TOO_LARGE, GitHubFailureKind.TOO_LARGE.code)
+        return GitHubResult.Success(diff)
+    }
+
+    override suspend fun createPullRequestComment(repo: RepoRef, number: Int, body: String): GitHubResult<Long> {
+        touch("createPullRequestComment")
+        if (repo != this.repo) return foreign()
+        writes += "createPullRequestComment"
+        comments += number to body
+        if (commentLost) {
+            commentLost = false
+            return GitHubResult.Unknown("createPullRequestComment", "response lost")
+        }
+        return GitHubResult.Success(comments.size.toLong())
+    }
 
     override suspend fun commitFiles(repo: RepoRef, request: CommitFilesRequest): GitHubResult<CommittedFiles> {
         touch("commitFiles")

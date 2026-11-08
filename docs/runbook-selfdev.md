@@ -456,6 +456,36 @@ SELECT occurred_at, run_id, result, payload
 - **ダッシュボード**: 判定の一覧の画面は、部品 C の仕事で、この段階には無い。
 
 
+### 4.12 自己開発 PR の AI レビュー(コメントのみ、既定は無効、PR `feat/pr-ai-review`)
+
+自己開発の PR(bot が作者の、open の PR)について、`PrReviewWatch` が Run の目的(タスクの題名と本文)と差分をモデルに渡し、結果を **PR のコメントとして投稿する**。承認(approve)、変更の要求(request changes)、マージ、ラベル、PR の編集、ブランチの更新は行わない。GitHub への書き込みは `createPullRequestComment` の 1 種類だけ(アーキテクチャテストで固定)。
+
+- **有効化**: `KIVRA_SELFDEV_PR_REVIEW_ENABLED=true`(`true` と `false` 以外の値は起動に失敗する。空は `false`)。`false` のあいだは、下の変数を一つも読まず、何も組み立てず、何も呼ばない。自己開発(`KIVRA_SELFDEV_ENABLED`)が有効なときだけ意味がある。
+- **必要な環境変数**(有効化のときだけ読む):
+  - `KIVRA_SELFDEV_PR_REVIEW_MODEL`(必須。有効時に空なら起動に失敗する)。モデルの名前(英数字と `._:-`、100 字以内)。モデルレジストリに有効なモデルとして載っている必要がある。
+  - `KIVRA_SELFDEV_PR_REVIEW_MAX_PER_HOUR`(既定 `5`、0 から 100)。1 時間あたりのレビュー(モデル呼び出し)の上限。全 PR で数える。
+  - `KIVRA_SELFDEV_PR_REVIEW_MAX_PER_PR`(既定 `2`、0 から 10)。1 つの PR あたりの上限。head が変わっても数える。
+  - `KIVRA_SELFDEV_PR_REVIEW_MAX_DIFF_BYTES`(既定 `60000`、1000 から 200000)。これを超える差分はモデルに渡さず、`SKIPPED` として記録する。
+  - 予算は既存のモデル経路(`ModelGateway`、`BudgetPort`、ADR 0004)の予算に従う。出力の上限は 2000 トークン。
+- **1 周**: 5 分ごと。1 周に古い順で最大 10 件の PULL_REQUEST の Run を見る(Run ごとに GitHub の読み取りが 1 回)。人のマージを待つ PR が 10 件を超えると、新しい PR は後回しになる。Run ごとに、束縛された PR を GitHub で読み(`GET pulls/{n}`)、次を満たすものだけを対象にする: open、マージ済みでない、作者の `user.id` が bot の id、束縛のリポジトリが設定のリポジトリ。
+- **冪等**: `selfdev_pr_reviews`(V45)の (リポジトリ、PR 番号、head SHA) が主キー。モデルを呼ぶ前に行を作る(claim)。同じ head には、結果が何であっても 2 度目は無い(再起動をまたいでも)。コメントの応答が不明(`UNKNOWN`)のときも再送しない。
+- **状態**: `CLAIMED`(途中で止まった。再レビューしない)、`POSTED`(コメント済み)、`FAILED`(呼び出しや投稿の失敗。`CALL_*`、`COMMENT_*`、`DIFF_UNREADABLE`)、`UNKNOWN`(投稿の応答が不明)、`INVALID`(モデルの応答の形式が違う)、`SKIPPED`(差分が大きすぎる)。`SKIPPED` 以外の行は上限の数に入る。
+- **モデルの出力の扱い**: 出力は信頼しない。JSON として厳密に読み、`verdict` は `PASS` か `CONCERNS` だけ、`findings` は最大 10 件、`severity` は `HIGH`、`MEDIUM`、`LOW` だけ。投稿前に、HTML の記号、メンション(`@`)、リンク、コードブロック、改行を無害化し、長さを切る(題名 120 字、本文 400 字、コメント全体 6000 字)。コメントの末尾に `<!-- kivra-pr-review head=<SHA> -->` の印を付ける。
+- **結果の参照**: 判定の結果は次の 2 か所に残る。どちらも読むだけ。**自動マージの判定(§4.10、§4.11)にはまだ繋いでいない。** 判定を緩める入力にはしない。
+  - `selfdev_pr_reviews`(head SHA ごとの `verdict`、`finding_count`、`state`)。
+  - 監査の `PR_AI_REVIEW`(結果は状態。`payload` は `prNumber`、`headSha`、`state`、`reason`(固定コード)、`verdict`、`findings`)。
+- **記録しないもの**: 差分、PR の題名と本文、タスクの題名と本文、モデルの応答の本文、トークン。ログは ID と固定コードだけ。
+- **確認**(読み取りだけ):
+
+```sql
+SELECT pr_number, head_sha, state, verdict, finding_count, created_at
+  FROM selfdev_pr_reviews
+ ORDER BY created_at DESC
+ LIMIT 50;
+```
+- **止め方**: `KIVRA_SELFDEV_PR_REVIEW_ENABLED=false` にして再起動する(新しいレビューが止まる)。投稿済みのコメントと行は消さない。
+- **未対応**: 承認やマージへの接続、判定の一覧画面、差分が大きいときの分割レビュー、既存の PR に対する遡及レビュー(有効化の後の PR だけが対象)。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

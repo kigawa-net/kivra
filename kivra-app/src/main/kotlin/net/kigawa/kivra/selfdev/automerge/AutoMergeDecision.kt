@@ -3,11 +3,15 @@ package net.kigawa.kivra.selfdev.automerge
 import java.time.Duration
 import java.time.Instant
 import net.kigawa.kivra.core.DevelopmentRunState
+import net.kigawa.kivra.core.patch.PatchPolicy
 import net.kigawa.kivra.github.RunBranch
 
 /*
- * ADR 0014 part 1: the pure judgement of whether a self-development PR may be merged automatically (C1 to C9). It reads nothing,
- * writes nothing and calls nothing. The caller reads the facts first and passes them in. It is not wired into the application yet.
+ * ADR 0014 part 1: the pure judgement of whether a self-development PR may be merged automatically (C1 to C9, and the conditions of the
+ * active addendum: the policy, the head's AI review, the incident fix exclusion, the re-bound exclusion and the hourly rate). It reads
+ * nothing, writes nothing and calls nothing. The caller reads the facts first and passes them in.
+ *
+ * The active addendum only adds refusals and holds. No condition here is loosened (ADR 0014 section 2: no rule beyond the ADR is relaxed).
  *
  * Reasons are a fixed enum. They never carry a PR title or body, a path, or file content. The input has no PR title or body at all.
  */
@@ -32,6 +36,8 @@ enum class AutoMergeReason {
     // C2: approval
     OPERATOR_APPROVED_TASK,
     NOT_AUTO_APPROVED,
+    /** The Run is an incident fix (ADR 0014 active addendum): a person decides, never the automatic merge. */
+    INCIDENT_FIX,
 
     // C3: actual diff
     FILES_OUT_OF_RANGE,
@@ -41,9 +47,19 @@ enum class AutoMergeReason {
     PATH_UNSAFE,
     PATH_OUT_OF_SCOPE,
     MODE_NOT_REGULAR,
+    /** The policy revision of the binding is not the current one, or a changed path is denied by PatchPolicy. */
+    POLICY_VIOLATION,
 
     // C4: head
     HEAD_MISMATCH,
+    /** The Run's head was re-bound (issue #351, item 1, option C): its body marker is the old head, so it is never merged automatically. */
+    REBOUND_NOT_ELIGIBLE,
+
+    // AI review of the head (ADR 0014 active addendum)
+    /** No review of this head is recorded yet, or it is still running. Held. */
+    REVIEW_PENDING,
+    /** The review did not end as PASS (CONCERNS, a failure, or a skipped review). Refused. */
+    REVIEW_NOT_PASS,
 
     // C5: required checks
     CHECK_MISSING,
@@ -67,8 +83,22 @@ enum class AutoMergeReason {
 
     // C9: rate
     CONCURRENCY_LIMIT,
+    /** The attempts of the last hour reached the hourly cap (ADR 0014 active addendum). Held. */
+    HOURLY_LIMIT,
     DAILY_LIMIT,
 }
+
+/**
+ * The AI review of the PR's head, from `selfdev_pr_reviews` (V45). [state] is the row state (`CLAIMED`, `POSTED`, `FAILED`, `UNKNOWN`,
+ * `INVALID`, `SKIPPED`), and [verdict] is `PASS` or `CONCERNS` when the model answered. Null in the input means no row.
+ */
+data class AutoMergeReviewFact(val state: String, val verdict: String?)
+
+/** The PatchPolicy revision the binding must carry (the value the runner writes at binding time, `SelfDevRunner`). */
+const val PATCH_POLICY_REVISION = "patchpolicy-v1"
+
+/** The path rules of PatchPolicy. Used for the policy check of [decideAutoMerge]; it never permits a write. */
+private val PATH_POLICY = PatchPolicy()
 
 /** The outcome of one judgement. */
 sealed interface AutoMergeDecision {
@@ -104,7 +134,12 @@ data class AutoMergePrFacts(
 /** The binding of the Run to its PR, as stored at approval time. */
 data class AutoMergeBinding(val repo: String, val prNumber: Int, val nodeId: String?, val headSha: String?)
 
-/** The facts of the Run. [markerHeadSha] is the value of the `kivra-head-sha:` marker in the PR body, null when absent. */
+/**
+ * The facts of the Run. [markerHeadSha] is the value of the `kivra-head-sha:` marker in the PR body, null when absent.
+ * [rebound] is true when the Run's head was moved by a re-bind (`PR_REBASE_REBOUND`). [incidentFix] is true when the Run is an incident
+ * fix. [policyRevision] is the binding's PatchPolicy revision, null when there is no binding. [review] is the head's AI review, null when
+ * no row exists.
+ */
 data class AutoMergeRunFacts(
     val state: DevelopmentRunState,
     val runId: String,
@@ -112,6 +147,10 @@ data class AutoMergeRunFacts(
     val markerHeadSha: String?,
     /** Null when the Run is not linked to a task, which fails C2. */
     val approval: AutoMergeTaskApproval?,
+    val rebound: Boolean = false,
+    val incidentFix: Boolean = false,
+    val policyRevision: String? = null,
+    val review: AutoMergeReviewFact? = null,
 )
 
 /** One entry of the PR's files API, plus the mode the caller read from the head tree. */
@@ -153,10 +192,12 @@ data class AutoMergeGlobalFacts(
     val selfDevPaused: Boolean,
     val breakerOpen: Boolean,
     val mainCi: MainCiResult,
-    /** Automatic merges in progress, not counting this PR. */
+    /** Automatic merge attempts in progress (the single slot is held), not counting this PR. */
     val inFlight: Int,
-    /** Automatic merges on the current UTC day. */
+    /** Automatic merge attempts started on the current UTC day, failed ones included. */
     val mergedToday: Int,
+    /** Automatic merge attempts started in the last hour, failed ones included (ADR 0014 active addendum). */
+    val mergedLastHour: Int = 0,
 )
 
 data class AutoMergeInput(
@@ -180,6 +221,8 @@ data class AutoMergeSettings(
     val maxFiles: Int = 3,
     val maxLines: Long = 200,
     val maxConcurrent: Int = 1,
+    /** Attempts per clock hour (UTC). A provisional value of the active addendum. */
+    val maxPerHour: Int = 1,
     val maxPerDay: Int = 3,
     val maxPendingMinutes: Long = 60,
 )
@@ -201,7 +244,9 @@ fun decideAutoMerge(input: AutoMergeInput, settings: AutoMergeSettings): AutoMer
         { origin(input, settings) },
         { approval(input.run) },
         { diff(input.files, settings) },
+        { policy(input) },
         { head(input) },
+        { review(input.run) },
         { prState(input.pr) },
         { mergeable(input.pr) },
         { requiredChecks(input, settings) },
@@ -236,7 +281,9 @@ private fun hasInvalidFacts(input: AutoMergeInput, settings: AutoMergeSettings):
         input.files.any { it.additions < 0 || it.deletions < 0 } ||
         input.files.map { it.path }.toSet().size != input.files.size ||
         global.inFlight < 0 ||
-        global.mergedToday < 0
+        global.mergedToday < 0 ||
+        global.mergedLastHour < 0 ||
+        settings.maxPerHour < 0
 }
 
 /** Whole-system stops (C8). Each one is a refusal, so the operator decides when to resume. */
@@ -270,13 +317,28 @@ private fun origin(input: AutoMergeInput, settings: AutoMergeSettings): AutoMerg
     return null
 }
 
-/** C2: only a task approved by the auto-approval rule. An operator-approved task is never merged automatically (U-8). */
-private fun approval(run: AutoMergeRunFacts): AutoMergeDecision? =
-    when (run.approval) {
+/**
+ * C2: only a task approved by the auto-approval rule. An operator-approved task is never merged automatically (U-8). An incident fix is
+ * never merged automatically either (ADR 0014 active addendum): a person decides.
+ */
+private fun approval(run: AutoMergeRunFacts): AutoMergeDecision? {
+    if (run.incidentFix) return AutoMergeDecision.Refuse(AutoMergeReason.INCIDENT_FIX)
+    return when (run.approval) {
         null -> AutoMergeDecision.Refuse(AutoMergeReason.NOT_AUTO_APPROVED)
         AutoMergeTaskApproval.OPERATOR_APPROVED -> AutoMergeDecision.Refuse(AutoMergeReason.OPERATOR_APPROVED_TASK)
         AutoMergeTaskApproval.AUTO_APPROVED -> null
     }
+}
+
+/**
+ * The policy of ADR 0014 active addendum: the binding carries the current PatchPolicy revision, and every changed path is allowed by
+ * PatchPolicy's path rules. It is one more refusal on top of C3, and it never permits a path that C3 refuses.
+ */
+private fun policy(input: AutoMergeInput): AutoMergeDecision? {
+    if (input.run.policyRevision != PATCH_POLICY_REVISION) return AutoMergeDecision.Refuse(AutoMergeReason.POLICY_VIOLATION)
+    if (input.files.any { !PATH_POLICY.allowsPath(it.path) }) return AutoMergeDecision.Refuse(AutoMergeReason.POLICY_VIOLATION)
+    return null
+}
 
 /** C3: the actual diff from the files API, in scope, plain, and small. */
 private fun diff(files: List<AutoMergeFileFact>, settings: AutoMergeSettings): AutoMergeDecision? {
@@ -298,11 +360,28 @@ private fun diff(files: List<AutoMergeFileFact>, settings: AutoMergeSettings): A
     return null
 }
 
-/** C4: the head SHA of the PR, the binding, and the body marker are the same SHA. */
+/**
+ * C4: the head SHA of the PR, the binding, and the body marker are the same SHA. A re-bound Run is refused with its own code first
+ * (issue #351, item 1, option C): its marker is the old head, so the comparison would only say HEAD_MISMATCH without the cause.
+ */
 private fun head(input: AutoMergeInput): AutoMergeDecision? {
+    if (input.run.rebound) return AutoMergeDecision.Refuse(AutoMergeReason.REBOUND_NOT_ELIGIBLE)
     val sha = input.pr.headSha
     val same = input.run.markerHeadSha == sha && input.run.binding?.headSha == sha
     return if (same) null else AutoMergeDecision.Refuse(AutoMergeReason.HEAD_MISMATCH)
+}
+
+/**
+ * The AI review of the head (ADR 0014 active addendum). PASS is the only passing state. No row or a running review holds the PR. Any
+ * other finished state (CONCERNS, a failure, a skipped review) refuses it, so a person decides.
+ */
+private fun review(run: AutoMergeRunFacts): AutoMergeDecision? {
+    val review = run.review
+    return when {
+        review == null || review.state == "CLAIMED" -> AutoMergeDecision.Hold(AutoMergeReason.REVIEW_PENDING)
+        review.state == "POSTED" && review.verdict == "PASS" -> null
+        else -> AutoMergeDecision.Refuse(AutoMergeReason.REVIEW_NOT_PASS)
+    }
 }
 
 /** C7 and the draft rule of C6. */
@@ -362,9 +441,10 @@ private fun mainCi(global: AutoMergeGlobalFacts): AutoMergeDecision? =
         MainCiResult.FAILURE -> AutoMergeDecision.Refuse(AutoMergeReason.MAIN_CI_NOT_GREEN)
     }
 
-/** C9: one automatic merge in progress at a time, and a daily cap. Both wait for the next tick. */
+/** C9: one automatic merge in progress at a time, an hourly cap, and a daily cap. All three wait for the next tick. */
 private fun rates(global: AutoMergeGlobalFacts, settings: AutoMergeSettings): AutoMergeDecision? {
     if (global.inFlight >= settings.maxConcurrent) return AutoMergeDecision.Hold(AutoMergeReason.CONCURRENCY_LIMIT)
+    if (global.mergedLastHour >= settings.maxPerHour) return AutoMergeDecision.Hold(AutoMergeReason.HOURLY_LIMIT)
     if (global.mergedToday >= settings.maxPerDay) return AutoMergeDecision.Hold(AutoMergeReason.DAILY_LIMIT)
     return null
 }

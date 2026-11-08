@@ -6,6 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.selfdev.automerge.AutoMergeCheckConclusion as Conclusion
 import net.kigawa.kivra.selfdev.automerge.AutoMergeCheckStatus as Status
@@ -43,6 +44,8 @@ private val OK_RUN = AutoMergeRunFacts(
     binding = AutoMergeBinding(repo = REPO, prNumber = 7, nodeId = "PR_node_7", headSha = SHA),
     markerHeadSha = SHA,
     approval = AutoMergeTaskApproval.AUTO_APPROVED,
+    policyRevision = PATCH_POLICY_REVISION,
+    review = AutoMergeReviewFact(state = "POSTED", verdict = "PASS"),
 )
 
 private val OK_FILES = listOf(AutoMergeFileFact(IN_SCOPE, "modified", additions = 10, deletions = 2, mode = "100644"))
@@ -397,5 +400,53 @@ class AutoMergeDecisionTest {
     fun `empty required set is never eligible and malformed settings refuse`() {
         assertEquals(Refuse(AutoMergeReason.CHECK_MISSING), decide(input(), SETTINGS.copy(requiredChecks = emptySet())))
         assertEquals(Refuse(AutoMergeReason.INVALID_FACTS), decide(input(), SETTINGS.copy(maxFiles = 0)))
+    }
+
+    // ADR 0014 active addendum: each added condition, alone, refuses or holds the PR (the others hold).
+
+    @Test
+    fun `the AI review must be PASS on this head, missing or running holds and any other end refuses`() {
+        assertEquals(Hold(AutoMergeReason.REVIEW_PENDING), decide(input(run = OK_RUN.copy(review = null))))
+        assertEquals(Hold(AutoMergeReason.REVIEW_PENDING), decide(input(run = OK_RUN.copy(review = AutoMergeReviewFact("CLAIMED", null)))))
+        assertEquals(Refuse(AutoMergeReason.REVIEW_NOT_PASS), decide(input(run = OK_RUN.copy(review = AutoMergeReviewFact("POSTED", "CONCERNS")))))
+        assertEquals(Refuse(AutoMergeReason.REVIEW_NOT_PASS), decide(input(run = OK_RUN.copy(review = AutoMergeReviewFact("POSTED", null)))))
+        for (state in listOf("FAILED", "UNKNOWN", "INVALID", "SKIPPED")) {
+            assertEquals(
+                Refuse(AutoMergeReason.REVIEW_NOT_PASS),
+                decide(input(run = OK_RUN.copy(review = AutoMergeReviewFact(state, null)))),
+                state,
+            )
+        }
+        assertEquals(Eligible, decide(input(run = OK_RUN.copy(review = AutoMergeReviewFact("POSTED", "PASS")))))
+    }
+
+    @Test
+    fun `an incident fix is never eligible, even when everything else holds`() {
+        assertEquals(Refuse(AutoMergeReason.INCIDENT_FIX), decide(input(run = OK_RUN.copy(incidentFix = true))))
+    }
+
+    @Test
+    fun `a re-bound run is refused with its own code, before the head comparison`() {
+        assertEquals(Refuse(AutoMergeReason.REBOUND_NOT_ELIGIBLE), decide(input(run = OK_RUN.copy(rebound = true))))
+        // Even when the marker and the binding name the new head, the re-bound Run is not merged automatically (issue #351 item 1, option C).
+        val sameHead = OK_RUN.copy(rebound = true, markerHeadSha = SHA, binding = OK_RUN.binding!!.copy(headSha = SHA))
+        assertEquals(Refuse(AutoMergeReason.REBOUND_NOT_ELIGIBLE), decide(input(run = sameHead)))
+    }
+
+    @Test
+    fun `the policy revision must be the current one, and every changed path must be allowed by PatchPolicy`() {
+        assertEquals(Refuse(AutoMergeReason.POLICY_VIOLATION), decide(input(run = OK_RUN.copy(policyRevision = null))))
+        assertEquals(Refuse(AutoMergeReason.POLICY_VIOLATION), decide(input(run = OK_RUN.copy(policyRevision = "patchpolicy-v0"))))
+        // A path that the AutoMerge scope accepts but PatchPolicy refuses (its path shape: at most 200 characters) is refused as well.
+        val tooLong = "kivra-app/src/test/kotlin/net/kigawa/kivra/" + "a".repeat(200) + "Test.kt"
+        assertTrue(AutoMergePaths.isInScope(tooLong, AutoMergePaths.DEFAULT_SCOPE))
+        assertEquals(Refuse(AutoMergeReason.POLICY_VIOLATION), decide(input(files = fileOf(tooLong))))
+    }
+
+    @Test
+    fun `the hourly cap holds at one attempt in the last hour`() {
+        assertEquals(Eligible, decide(input(global = OK_GLOBAL.copy(mergedLastHour = 0))))
+        assertEquals(Hold(AutoMergeReason.HOURLY_LIMIT), decide(input(global = OK_GLOBAL.copy(mergedLastHour = 1))))
+        assertEquals(Hold(AutoMergeReason.HOURLY_LIMIT), decide(input(), SETTINGS.copy(maxPerHour = 0)))
     }
 }

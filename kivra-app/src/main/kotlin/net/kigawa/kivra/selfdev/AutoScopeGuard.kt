@@ -4,7 +4,7 @@ import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.patch.Delete
 import net.kigawa.kivra.core.patch.PatchSet
 import net.kigawa.kivra.core.patch.Write
-// SelfDevPlanRepository removed in V40
+import net.kigawa.kivra.db.SelfDevOperatorRepository
 import org.slf4j.LoggerFactory
 
 /**
@@ -74,15 +74,26 @@ private fun lineCount(content: String): Long {
     return if (content.endsWith('\n')) newlines else newlines + 1
 }
 
-/** The guard backed by the plan tables. Stubbed pending Task model migration (V40). */
-class PlanTaskAutoScopeGuard : AutoScopeGuard {
+/**
+ * The guard backed by the task table (V40). A Run is in scope of this guard only when its task was approved by the stage rules: no
+ * `approved_by`. An operator-approved task, and a Run of no task, are [AutoScopeVerdict.NotSubject].
+ */
+class PlanTaskAutoScopeGuard(private val operations: SelfDevOperatorRepository) : AutoScopeGuard {
 
     override fun check(runId: RunId, patch: PatchSet, sizeOf: (String) -> Long?): AutoScopeVerdict {
-        // Stubbed: always returns NotSubject pending Task model migration (V40)
-        return AutoScopeVerdict.NotSubject
+        val task = operations.taskOfRun(runId.value) ?: return AutoScopeVerdict.NotSubject
+        if (task.approvedBy != null) return AutoScopeVerdict.NotSubject
+        return autoScopeOf(patch, sizeOf)
     }
 
     override fun settle(runId: RunId) {
-        // Stubbed: no-op pending Task model migration (V40)
+        // The runner calls this only after an OutOfScope verdict. The task is moved before the Run ends (ADR 0011 section 2.8d).
+        if (operations.settleScopeExceeded(runId.value)) {
+            logger.info("autopilot scope exceeded: runId={} state=PENDING_APPROVAL reason=AUTO_SCOPE_EXCEEDED", runId.value)
+        }
+    }
+
+    private companion object {
+        val logger = LoggerFactory.getLogger(PlanTaskAutoScopeGuard::class.java)
     }
 }

@@ -1732,7 +1732,7 @@ ADR から変えた点(PR A での判断、ADR §2.8 に記録):
 
 ### 7.6 自己開発の order(ADR 0015 段階 1、Issue #273、既定は無効)
 
-order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 は**ルートの order 1 件**だけで、子の order、周の自動の開始、複数周はまだ無い(最大 1 周。周は運用者が開始する)。操作は HTTP、MCP(§8.8)、`/ui` の画面(§7.6.7)である。
+order は、Task を 1 周ずつ回す長く生きる指示である(V40 以降、周の実体は `selfdev_tasks` の 1 行。V49)。周の開始は運用者の操作か、既定で無効の自動の開始(`KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED`)である。操作は HTTP、MCP(§8.8)、`/ui` の画面(§7.6.7)である。
 
 #### 7.6.1 有効化の前提(起動時に検査される)
 
@@ -1748,8 +1748,19 @@ order は、Goal を 1 周ずつ回す長く生きる指示である。段階 1 
 #### 7.6.2 ルートの作成と周の開始(運用者)
 
 - 作成: `POST /api/selfdev/orders` `{"title": "...", "policy": "...", "maxCycles": n}`。`maxCycles` は任意で、未指定は 1。1 以上、`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`(既定 1、最大 10)以下でなければ 400(`code` は `MAX_CYCLES_INVALID`)。作成後は変えられない(ADR 0015 §2.6)。ルートは 1 件だけ(2 件目は 409)。`policy` は方針の文で、作成後は変えられない。AI の主体は作成できない(403)。
-- 周の開始: `POST /api/selfdev/orders/{id}/cycles` `{"version": n}`。Goal が 1 件作られ(`order_id` と `cycle_no` = 1)、既存の Planner と Plan の承認に進む。進行中の周があるとき、上限(既定 1 周)に達したとき、期限切れのとき、全体の一時停止中のときは 409。
+- 周の開始: `POST /api/selfdev/orders/{id}/cycles` `{"version": n}`。周の根の Task が 1 件作られ(`selfdev_tasks` の `order_id` と `cycle_no` = 1、状態 `TASK_SUBMITTED`)、既存の Planner と Plan の承認に進む。進行中の周があるとき、上限に達したとき、期限切れのとき、全体の一時停止中のときは 409。
 - 状況: `GET /api/selfdev/orders/{id}`(状態、理由、周の数、保留中の停止の要求。方針と題名は運用者だけに返る)、`GET /api/selfdev/orders/{id}/cycles`。一覧 `GET /api/selfdev/orders` には題名と方針を含めない。
+
+#### 7.6.2a 周の実体と周の終わり(V49)
+
+- **周 = 根の Task**: `selfdev_tasks` の 1 行。`order_id` と `cycle_no` が周を指す(`(order_id, cycle_no)` は一意)。`parent_task_id` は NULL(計画の根。V44)。計画された子の Task が作業を持つ。`selfdev_orders.current_goal_id` は、進行中の周の根の Task の ID(外部キーは無い)。冪等キーは `order:{order_id}:cycle:{n}`。
+- **周の終わり**: 根が `DONE`(全ての子が `COMPLETED`)なら成功。`FAILED`、`STOPPED`、`CANCELLED`、`SKIPPED` なら失敗。成功で連続失敗が 0 に戻り、失敗で 1 増える。周の結果は `OrderWatch` の tick で記録され、`current_goal_id` は NULL に戻る。`BLOCKED` の計画段階(`PLAN_INVALID` など)の根は終わらない。運用者が再計画するまで周は進まず、`TREE_BUSY` で次の周も始まらない。
+- **連続失敗**: 2 周続けて失敗すると、order は `PAUSED`(理由 `CYCLE_FAILURES`)。周の上限に達すると `PAUSED`(`LIMIT_REACHED`)。
+- **自動の開始の条件**(`KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED`、既定は無効): ACTIVE、進行中の周がない、木の中に進行中の周がない(`TREE_BUSY`)、連続失敗が上限未満、前の周の開始から 60 分以上(`TOO_SOON`)、UTC の 1 日に 3 周まで(`DAILY_LIMIT`)、予算が足りる(`ORDER_BUDGET`)、未確認の UNPRICED がない(`ORDER_UNPRICED`)、ブレーカーが開いていない(`BREAKER_OPEN`)。
+- **投入の止め方**: Dispatcher は、order または祖先が ACTIVE でない Task を投入しない(`orderGate`。QUEUED のまま残る)。order を PAUSED にすると、その周の未投入の子は止まり、RESUME で続く。
+- **UNKNOWN の Run**: 周の根か計画された子の Run が `UNKNOWN` なら、ガードが order を `PAUSED`(理由 `UNKNOWN_RUN`)にする。
+- **停止の承認**: 承認された停止は、order を STOPPED にし、進行中の周の根を `STOPPED`(理由 `OPERATOR_STOPPED`)にする。未投入の子は `SKIPPED`(`TASK_STOPPED`)。投入済みの子は終わるまで走る。失敗の数は次の評価で数えられる。
+- **費用**: 周の費用は、根の Task の計画(`planner-<根の task_id>-…`)と、子の Run(`developer-<run_id>-…`)の予算台帳の行を合計する。`spent_jpy` に入り、予算の上限を超えると次の周は始まらない。周の費用が最終になるまで、tick は同じ周を数え直す。
 
 #### 7.6.2b 子の作成(段階 2 の PR 3a。既定では作れない)
 

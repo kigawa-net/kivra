@@ -48,6 +48,11 @@ class AutopilotDispatcher(
     private val maxActiveSelfDev: Int,
     /** True when the monthly budget still has the autopilot's share left (`share` is the percent). Read once per check. */
     private val budgetAllows: (Int) -> Boolean,
+    /**
+     * True when the task may be submitted from its order's point of view (ADR 0015 section 5.4): its order and the ancestors are ACTIVE. A
+     * task with no order is allowed. Checked before any guard, so a held task is not blocked, only left QUEUED until its order runs again.
+     */
+    private val orderGate: (taskId: String) -> Boolean = { true },
 ) {
     private val operations = SelfDevOperatorRepository(database)
     private val control = SelfDevAutopilotControlRepository(database)
@@ -127,7 +132,7 @@ class AutopilotDispatcher(
     private fun resubmitInterrupted() {
         for (taskId in operations.interruptedSubmissionIds(BATCH)) {
             val task = operations.task(taskId) ?: continue
-            if (task.state == TaskState.SUBMITTING) submit(task)
+            if (task.state == TaskState.SUBMITTING && orderGate(taskId)) submit(task)
         }
     }
 
@@ -136,6 +141,7 @@ class AutopilotDispatcher(
         for (taskId in operations.queuedTaskIds(BATCH)) {
             val task = operations.task(taskId) ?: continue
             if (task.state != TaskState.QUEUED || !dependenciesCompleted(task)) continue
+            if (!orderGate(taskId)) continue
             val guard = when {
                 ctl.breakerOpen -> AutopilotReason.CIRCUIT_OPEN
                 pendingPrRuns() >= config.maxPendingPrs.toLong() -> AutopilotReason.PENDING_PR_LIMIT

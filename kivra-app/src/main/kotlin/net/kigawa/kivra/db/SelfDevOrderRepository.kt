@@ -5,7 +5,6 @@ import java.sql.SQLException
 import java.time.Clock
 import java.time.Duration
 import java.time.LocalDateTime
-// GoalState removed in V40; OrderCycle.goalState is now a plain String
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.OrderReason
 import net.kigawa.kivra.core.autopilot.OrderRefusal
@@ -22,8 +21,7 @@ import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
 
 /*
- * Persistence of self-development orders (ADR 0015 stage 1; V23). Raw SQL through [execUpdate] and [execQuery], as in
- * [SelfDevGoalRepository]: every write is a conditional UPDATE (compare and set on `version` or on a row state), and a write that is
+ * Persistence of self-development orders (ADR 0015 stage 1; V23). Raw SQL through [execUpdate] and [execQuery]: every write is a conditional UPDATE (compare and set on `version` or on a row state), and a write that is
  * refused after some other write has already run is rolled back by throwing [Rollback], so a refusal never leaves a partial change.
  *
  * The state rule is [checkOrderTransition] (kivra-core). A stop is approved in one transaction: the request moves PENDING -> CONSUMED and
@@ -88,7 +86,10 @@ data class SelfDevOrderStopRequest(
     val targetIsRoot: Boolean,
 )
 
-/** One goal of an order: the cycle number, the goal, and its state. */
+/**
+ * One cycle of an order (V49): the cycle number, the ID of its root Task in `goalId` (`selfdev_tasks.task_id`, also held in `current_goal_id`
+ * while it runs), the Task's state in `goalState`, and when the cycle started. The field names are the API's (kept for its clients).
+ */
 data class OrderCycle(val cycleNo: Int, val goalId: String, val goalState: String, val stateReason: String?, val createdAt: LocalDateTime)
 
 /** The fixed reason a write was refused. Each name is a [OrderRefusal] or a code of this repository. */
@@ -143,7 +144,7 @@ sealed interface AutoCycleResult {
     data object NotFound : AutoCycleResult
 }
 
-/** The outcome of a successful cycle start: the order and the new goal. */
+/** The outcome of a successful cycle start: the order, the cycle's root Task ([goalId]) and the cycle number. */
 data class CycleStarted(val order: SelfDevOrder, val goalId: String, val cycleNo: Int)
 
 /** The fixed refusal codes of a child creation (ADR 0015 section 2.7). When one holds, nothing is written. */
@@ -174,7 +175,7 @@ enum class AutoStopSkip {
 /**
  * The facts of CHILD_BUDGET_EXHAUSTED (ADR 0015 section 4.4 (2), addendum K.1) for one order X: the cost counted against X (`spent_jpy`,
  * which includes the RESERVED amounts, K.1 (A)), X's budget, the cycles of X's part (X and its descendants) that are not final yet (a cycle
- * with a goal and no spend row counts as not final), and the Runs of the part that are not terminal. Read only; nothing is written.
+ * with a root task and no spend row counts as not final), and the Runs of the part that are not terminal. Read only; nothing is written.
  */
 data class BudgetExhaustedFacts(
     val spentJpy: Long,
@@ -269,16 +270,45 @@ class SelfDevOrderRepository(
         ) { it.toRequest() }
     }
 
-    fun cyclesOf(orderId: String): List<OrderCycle> = emptyList()
+    /** The cycles of the order, oldest first. Each is its root Task (`order_id`, `cycle_no`). */
+    fun cyclesOf(orderId: String): List<OrderCycle> = transaction(database) {
+        execQuery(
+            "SELECT cycle_no, task_id, state, state_reason, created_at FROM selfdev_tasks WHERE order_id = ? ORDER BY cycle_no",
+            orderId,
+        ) { rs ->
+            OrderCycle(rs.getInt(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getObject(5, LocalDateTime::class.java))
+        }
+    }
 
     /**
-     * True when the goal may be dispatched from the order's point of view: the goal has no order (the existing flow), or its order is
-     * ACTIVE. Read by the dispatcher before a Run is created for the goal's tasks (ADR 0015 section 5.4).
+     * True when a task may be dispatched from its order's point of view (ADR 0015 section 5.4). A task that belongs to no order (the
+     * operator's own task) is allowed. A planned task belongs to its plan root's order. The order and every ancestor must be ACTIVE; a
+     * PAUSED, STOP_REQUESTED or STOPPED one holds the task back, so nothing is submitted for it. False also when the task does not exist.
      */
-    fun dispatchAllowed(goalId: String): Boolean = true
+    fun dispatchAllowed(taskId: String): Boolean = transaction(database) {
+        val rootId = execQuery("SELECT COALESCE(parent_task_id, task_id) FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }
+            .firstOrNull() ?: return@transaction false
+        var next: String? = execQuery("SELECT order_id FROM selfdev_tasks WHERE task_id = ?", rootId) { it.getString(1) }.firstOrNull()
+            ?: return@transaction true
+        while (next != null) {
+            val order = getIn(next) ?: return@transaction false
+            if (order.state != OrderState.ACTIVE) return@transaction false
+            next = order.parentOrderId
+        }
+        true
+    }
 
-    /** True when a Run of a task of the goal is UNKNOWN (the safety guard of ADR 0015 section 5.2, row 8). */
-    fun hasUnknownRun(goalId: String): Boolean = false
+    /**
+     * True when a Run of the cycle's task, or of one of its planned tasks, is UNKNOWN (the safety guard of ADR 0015 section 5.2, row 8).
+     * [taskId] is the cycle's root task.
+     */
+    fun hasUnknownRun(taskId: String): Boolean = transaction(database) {
+        execQuery(
+            "SELECT COUNT(*) FROM selfdev_tasks t JOIN development_runs r ON r.run_id = t.run_id " +
+                "WHERE (t.task_id = ? OR t.parent_task_id = ?) AND r.state = 'UNKNOWN'",
+            taskId, taskId,
+        ) { it.getInt(1) }.single() > 0
+    }
 
     // ---- creation ----------------------------------------------------------------------------------------------------------------
 
@@ -442,9 +472,9 @@ class SelfDevOrderRepository(
     // ---- cycles ------------------------------------------------------------------------------------------------------------------
 
     /**
-     * Starts the next cycle: creates the goal (`order_id`, `cycle_no`) in GOAL_SUBMITTED, so the existing Planner and Dispatcher take it from
-     * there, and records the cycle on the order. The order must be ACTIVE, have no cycle in progress, be under its cycle limit and its
-     * lifetime, and the autopilot must not be paused for everything. The goal's text is the order's policy and title, copied as typed.
+     * Starts the next cycle: creates its root Task (`order_id`, `cycle_no`) in TASK_SUBMITTED, so the Planner takes it from there, and records
+     * the cycle on the order (`current_goal_id` is the Task's ID). The order must be ACTIVE, have no cycle in progress, be under its cycle
+     * limit and its lifetime, and the autopilot must not be paused for everything. The Task's text is the order's policy and title, as typed.
      *
      * The budget check (ADR 0015 section 2.7): every order on the path from this one to the root must have `order_budget_jpy - spent_jpy`
      * at least its own `cycle_budget_jpy`. The first one that does not refuses the start with [OrderConflict.ORDER_BUDGET] and its ID; nothing
@@ -469,8 +499,8 @@ class SelfDevOrderRepository(
      * under the same locks (the path from the root down), plus the rules that only the automatic start has: the breaker, the failure limit,
      * the minimum interval since the previous cycle's start, the daily cycle count, and one cycle at a time in a tree. [cap] is
      * `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`: an ACTIVE order that has started [cap] cycles (and has more in `max_cycles`) is paused with
-     * LIMIT_REACHED, as it would be at `max_cycles`. The audit event has actor_kind SYSTEM and reason code [AUTO_CYCLE_STARTED]; the goal is
-     * created in the order creator's name, as an automatically approved task already runs as the goal's creator (ADR 0011 section 2.6).
+     * LIMIT_REACHED, as it would be at `max_cycles`. The audit event has actor_kind SYSTEM and reason code [AUTO_CYCLE_STARTED]; the Task is
+     * created in the order creator's name, as an automatically approved task already runs as its creator (ADR 0011 section 2.6).
      * No version is expected: the order is read under its lock, so a pause or a stop that won the lock first is seen as not ACTIVE.
      */
     fun startCycleAutomatically(orderId: String, cap: Int): AutoCycleResult = try {
@@ -515,8 +545,8 @@ class SelfDevOrderRepository(
         ) { it.getString(1) }
     }
 
-    /** Who starts a cycle: the actor of the audit event, the creator of the goal, and whether the automatic-only rules apply. */
-    private class CycleStarter(val actor: OrderActor, val actorKey: String?, val goalCreator: String, val reasonCode: String?, val auto: Boolean)
+    /** Who starts a cycle: the actor of the audit event, the creator of the cycle's Task, and whether the automatic-only rules apply. */
+    private class CycleStarter(val actor: OrderActor, val actorKey: String?, val taskCreator: String, val reasonCode: String?, val auto: Boolean)
 
     /**
      * The checks and the writes of a cycle start, shared by the operator's [startCycle] and the automatic [startCycleAutomatically]. [path] is
@@ -543,31 +573,37 @@ class SelfDevOrderRepository(
         if (path.any { unpricedCycleOf(it.orderId) }) throw Rollback(OrderResult.Refused(OrderConflict.ORDER_UNPRICED))
 
         val cycleNo = current.cyclesStarted + 1
-        val goalId = Ulid.generate(clock)
-        execUpdate(
-            """
-            INSERT INTO selfdev_goals (goal_id, created_by, idempotency_key, title, body, target_repo, state, revision, version,
-                created_at, updated_at, order_id, cycle_no)
-            VALUES (?, ?, ?, ?, ?, ?, 'GOAL_SUBMITTED', 0, 0, ?, ?, ?, ?)
-            """.trimIndent(),
-            goalId, by.goalCreator, "order:$orderId:cycle:$cycleNo", current.title, current.policy, current.targetRepo, now, now,
-            orderId, cycleNo,
-        )
+        val taskId = Ulid.generate(clock)
+        try {
+            execUpdate(
+                """
+                INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, dependencies,
+                    requires_approval, revision, attempts, version, created_at, updated_at, order_id, cycle_no)
+                VALUES (?, ?, ?, ?, ?, ?, 'TASK_SUBMITTED', '[]', TRUE, 0, 0, 0, ?, ?, ?, ?)
+                """.trimIndent(),
+                taskId, by.taskCreator, "order:$orderId:cycle:$cycleNo", current.title, current.policy, current.targetRepo, now, now,
+                orderId, cycleNo,
+            )
+        } catch (e: Exception) {
+            // The cycle's number or its idempotency key is taken: the cycle already exists, so none is started twice.
+            if (e.hasUniqueViolation()) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_IN_PROGRESS))
+            throw e
+        }
         val changed = execUpdate(
             """
             UPDATE selfdev_orders SET cycles_started = cycles_started + 1, current_goal_id = ?, version = version + 1, updated_at = ?
              WHERE order_id = ? AND version = ?
             """.trimIndent(),
-            goalId, now, orderId, current.version,
+            taskId, now, orderId, current.version,
         )
         if (changed != 1) throw Rollback(OrderResult.StaleVersion)
         appendEvent(orderId, cycleNo, "CYCLE_STARTED", OrderState.ACTIVE, OrderState.ACTIVE, by.reasonCode, by.actor, by.actorKey, null, now)
-        return OrderResult.Moved(CycleStarted(getIn(orderId) ?: error("order vanished after cycle start"), goalId, cycleNo))
+        return OrderResult.Moved(CycleStarted(getIn(orderId) ?: error("order vanished after cycle start"), taskId, cycleNo))
     }
 
     /**
-     * The rules that only the automatic start has (ADR 0015 section 3.2). The previous cycle's start time is the newest goal of the order
-     * (the goal is created in the same transaction as the start, so there is no separate column), and the day is the UTC day. A cycle an
+     * The rules that only the automatic start has (ADR 0015 section 3.2). The previous cycle's start time is the newest root task of the order
+     * (the cycle's Task is created in the same transaction as the start, so there is no separate column), and the day is the UTC day. A cycle an
      * operator started counts too: the interval and the daily count are about the order, not about who started the cycle.
      */
     private fun Transaction.checkAutomaticRules(path: List<SelfDevOrder>, breakerOpen: Boolean, now: LocalDateTime) {
@@ -576,12 +612,12 @@ class SelfDevOrderRepository(
         if (current.consecutiveFailedCycles >= CYCLE_FAILURE_LIMIT) throw AutoSkip(AutoCycleSkip.CYCLE_FAILURES)
         // One cycle at a time in a tree. Every start locks the root first, so this read cannot race with another start.
         if (subtreeIn(path.last().orderId).any { it.currentGoalId != null }) throw AutoSkip(AutoCycleSkip.TREE_BUSY)
-        val last = execQuery("SELECT MAX(created_at) FROM selfdev_goals WHERE order_id = ?", current.orderId) {
+        val last = execQuery("SELECT MAX(created_at) FROM selfdev_tasks WHERE order_id = ?", current.orderId) {
             it.getObject(1, LocalDateTime::class.java)
         }.firstOrNull()
         if (last != null && now.isBefore(last.plus(AUTO_CYCLE_MIN_INTERVAL))) throw AutoSkip(AutoCycleSkip.TOO_SOON)
         val today = execQuery(
-            "SELECT COUNT(*) FROM selfdev_goals WHERE order_id = ? AND created_at >= ?",
+            "SELECT COUNT(*) FROM selfdev_tasks WHERE order_id = ? AND created_at >= ?",
             current.orderId, now.toLocalDate().atStartOfDay(),
         ) { it.getInt(1) }.single()
         if (today >= AUTO_CYCLE_DAILY_MAX) throw AutoSkip(AutoCycleSkip.DAILY_LIMIT)
@@ -594,59 +630,66 @@ class SelfDevOrderRepository(
      */
     private fun Transaction.unpricedCycleOf(orderId: String): Boolean {
         val cycleNos = execQuery(
-            """
-            SELECT g.cycle_no
-              FROM selfdev_goals g
-              JOIN selfdev_order_cycle_spend s ON s.order_id = g.order_id AND s.cycle_no = g.cycle_no
-             WHERE g.order_id = ? AND s.final = FALSE
-            """.trimIndent(),
-            orderId,
+            "SELECT cycle_no FROM selfdev_order_cycle_spend WHERE order_id = ? AND final = FALSE", orderId,
         ) { it.getInt(1) }
         return cycleNos.any { cycleNo -> with(spendReader) { spendOf(orderId, cycleNo).hasUnconfirmedUnpriced } }
     }
 
     /**
-     * Records the outcome of every cycle whose goal has ended (DONE or STOPPED), and clears the order's current goal. A success resets the
-     * failure count; a failure adds one. When the cycle limit is reached, or the failures reach [CYCLE_FAILURE_LIMIT], an ACTIVE order is
-     * paused with that reason. An order in STOP_REQUESTED is left alone: its version is the approval's binding. Returns the number evaluated.
+     * Records the outcome of every cycle whose root Task has ended (ADR 0015 section 3.2), and clears the order's current cycle. A cycle that
+     * ended in [CYCLE_SUCCESS_STATES] resets the failure count; one that ended in [CYCLE_FAILURE_STATES] adds one. An ACTIVE order is paused
+     * when the cycle limit is reached (LIMIT_REACHED) or the failures reach [CYCLE_FAILURE_LIMIT] (CYCLE_FAILURES). A cycle still in progress
+     * is left alone, and so is an order in STOP_REQUESTED: its version is the approval's binding. Returns the number of cycles evaluated.
      */
-    fun evaluateEndedCycles(limit: Int): Int = 0
-
-    private fun evaluateOne(orderId: String): OrderResult<SelfDevOrder> = transaction(database) {
-        val current = lockOrder(orderId) ?: return@transaction OrderResult.NotFound
-        val goalId = current.currentGoalId ?: return@transaction OrderResult.Refused(OrderConflict.NOT_ACTIVE)
-        if (current.state != OrderState.ACTIVE && current.state != OrderState.PAUSED) {
-            return@transaction OrderResult.Refused(OrderConflict.NOT_ACTIVE)
+    fun evaluateEndedCycles(limit: Int): Int {
+        val ids = transaction(database) {
+            execQuery(
+                "SELECT order_id FROM selfdev_orders WHERE current_goal_id IS NOT NULL AND state <> 'STOP_REQUESTED' ORDER BY updated_at, order_id LIMIT ?",
+                limit,
+            ) { it.getString(1) }
         }
-        val goal = execQuery("SELECT state, state_reason FROM selfdev_goals WHERE goal_id = ?", goalId) { rs ->
-            rs.getString(1) to rs.getString(2)
-        }.singleOrNull() ?: return@transaction OrderResult.Refused(OrderConflict.NOT_ACTIVE)
-        val (goalState, goalReason) = goal
-        if (goalState != "DONE" && goalState != "STOPPED") return@transaction OrderResult.Refused(OrderConflict.NOT_ACTIVE)
+        return ids.count { evaluateOne(it) }
+    }
 
-        val now = utcNow(clock)
-        val failures = if (goalState == "DONE") 0 else current.consecutiveFailedCycles + 1
-        if (!updateCycleOutcome(orderId, current.version, failures, now)) throw Rollback(OrderResult.StaleVersion)
-        val cycleNo = current.cyclesStarted
-        appendEvent(orderId, cycleNo, "CYCLE_EVALUATED", current.state, current.state, goalReason, OrderActor.SYSTEM, null, null, now)
+    /** Evaluates one order's cycle. False when the cycle has not ended, or nothing was written. */
+    private fun evaluateOne(orderId: String): Boolean = try {
+        transaction(database) {
+            val current = lockOrder(orderId) ?: return@transaction false
+            val taskId = current.currentGoalId ?: return@transaction false
+            if (current.state == OrderState.STOP_REQUESTED) return@transaction false
+            val (taskState, taskReason) = execQuery("SELECT state, state_reason FROM selfdev_tasks WHERE task_id = ?", taskId) { rs ->
+                rs.getString(1) to rs.getString(2)
+            }.singleOrNull() ?: return@transaction false
+            val success = when (taskState) {
+                in CYCLE_SUCCESS_STATES -> true
+                in CYCLE_FAILURE_STATES -> false
+                else -> return@transaction false
+            }
+            val now = utcNow(clock)
+            val failures = if (success) 0 else current.consecutiveFailedCycles + 1
+            if (!updateCycleOutcome(orderId, current.version, failures, now)) return@transaction false
+            appendEvent(orderId, current.cyclesStarted, "CYCLE_EVALUATED", current.state, current.state, taskReason ?: taskState, OrderActor.SYSTEM, null, null, now)
 
-        if (current.state == OrderState.ACTIVE) {
-            val pauseReason = when {
-                current.cyclesStarted >= current.maxCycles -> OrderReason.LIMIT_REACHED
-                failures >= CYCLE_FAILURE_LIMIT -> OrderReason.CYCLE_FAILURES
-                else -> null
+            if (current.state == OrderState.ACTIVE) {
+                val pauseReason = when {
+                    current.cyclesStarted >= current.maxCycles -> OrderReason.LIMIT_REACHED
+                    failures >= CYCLE_FAILURE_LIMIT -> OrderReason.CYCLE_FAILURES
+                    else -> null
+                }
+                if (pauseReason != null) {
+                    if (!updateState(orderId, current.version + 1, OrderState.PAUSED, pauseReason, now)) throw Rollback(OrderResult.StaleVersion)
+                    appendEvent(orderId, current.cyclesStarted, "PAUSED", OrderState.ACTIVE, OrderState.PAUSED, pauseReason.name, OrderActor.SYSTEM, null, null, now)
+                }
             }
-            if (pauseReason != null) {
-                if (!updateState(orderId, current.version + 1, OrderState.PAUSED, pauseReason, now)) throw Rollback(OrderResult.StaleVersion)
-                appendEvent(orderId, cycleNo, "PAUSED", OrderState.ACTIVE, OrderState.PAUSED, pauseReason.name, OrderActor.SYSTEM, null, null, now)
-            }
+            true
         }
-        OrderResult.Moved(getIn(orderId) ?: error("order vanished after cycle evaluation"))
+    } catch (_: Rollback) {
+        false
     }
 
     // ---- cycle spend (ADR 0015 addendum 2026-10-23, stage 3g) --------------------------------------------------------------------
 
-    /** One cycle whose cost is still to be counted: its goal, its order and its number. */
+    /** One cycle whose cost is still to be counted: its root task (the `goal_id` column of its spend row), its order and its number. */
     data class SpendCycle(val goalId: String, val orderId: String, val cycleNo: Int)
 
     private val spendReader = SelfDevCycleSpendReader(database)
@@ -655,7 +698,18 @@ class SelfDevOrderRepository(
      * The cycles to count (section F, 3g): every cycle whose spend row is not final, and every cycle that has a goal but no spend row yet
      * (its first count). Not filtered by the order's state, so the cost of a stopped order's cycle is still counted until it is final (U-38).
      */
-    fun unfinishedSpendCycles(limit: Int): List<SpendCycle> = emptyList()
+    fun unfinishedSpendCycles(limit: Int): List<SpendCycle> = transaction(database) {
+        execQuery(
+            """
+            SELECT root.task_id, root.order_id, root.cycle_no
+              FROM selfdev_tasks root
+              LEFT JOIN selfdev_order_cycle_spend s ON s.order_id = root.order_id AND s.cycle_no = root.cycle_no
+             WHERE root.order_id IS NOT NULL AND (s.order_id IS NULL OR s.final = FALSE)
+             ORDER BY root.created_at, root.order_id, root.cycle_no LIMIT ?
+            """.trimIndent(),
+            limit,
+        ) { rs -> SpendCycle(rs.getString(1), rs.getString(2), rs.getInt(3)) }
+    }
 
     /**
      * Counts the cost of one cycle (section C.2), in one transaction: the order path is locked from the root down, the cycle's spend row is
@@ -711,14 +765,18 @@ class SelfDevOrderRepository(
     }
 
     /**
-     * A cycle is final when its goal has ended, no attempt of it is active, and the ledger holds no RESERVED or LAPSED row that can still
+     * A cycle is final when its root task has ended, no planned task is submitted, no attempt of it is active, and the ledger holds no RESERVED or LAPSED row that can still
      * change, and no UNPRICED row waiting for an operator (section C.2). The rows are counted, not the amounts: a zero-yen RESERVED or LAPSED
      * row can gain an amount later (true-up), so it keeps the cycle open (ADR 0015 addendum 2026-10-23, K.2). Until then the cycle is
      * counted again on every tick.
      */
-    private fun Transaction.isSpendFinal(goalId: String, spend: CycleSpend): Boolean {
-        val state = execQuery("SELECT state FROM selfdev_goals WHERE goal_id = ?", goalId) { it.getString(1) }.firstOrNull()
-        return (state == "DONE" || state == "STOPPED") &&
+    private fun Transaction.isSpendFinal(taskId: String, spend: CycleSpend): Boolean {
+        val state = execQuery("SELECT state FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }.firstOrNull()
+        // A planned task still running (SUBMITTING or SUBMITTED) after its root ended is still spending: the cycle is not final.
+        val inFlight = execQuery(
+            "SELECT COUNT(*) FROM selfdev_tasks WHERE parent_task_id = ? AND state IN ('SUBMITTING', 'SUBMITTED')", taskId,
+        ) { it.getInt(1) }.single()
+        return state != null && (state in CYCLE_SUCCESS_STATES || state in CYCLE_FAILURE_STATES) && inFlight == 0 &&
             spend.attemptsActive == 0 && spend.reservedRows == 0 && spend.lapsedRows == 0 && !spend.hasUnconfirmedUnpriced
     }
 
@@ -1371,6 +1429,13 @@ class SelfDevOrderRepository(
             "order_budget_jpy, allocated_jpy, child_count, spent_jpy, cycle_budget_jpy, project_id"
         const val REQUEST_COLUMNS = "request_id, order_id, requested_by, requester_kind, reason_code, order_version, digest, state, " +
             "decided_by, expires_at, created_at, target_is_root"
+
+        /**
+         * The states of a cycle's root Task that count as a success (ADR 0011 section 2.8b): DONE (every planned task COMPLETED) and
+         * COMPLETED. The end states in [CYCLE_FAILURE_STATES] count as a failure. A Task in neither set is still running.
+         */
+        val CYCLE_SUCCESS_STATES: Set<String> = setOf("DONE", "COMPLETED")
+        val CYCLE_FAILURE_STATES: Set<String> = setOf("FAILED", "STOPPED", "CANCELLED", "SKIPPED")
 
         /** The audit kind of a cost count (stage 3g). Its `amount_jpy` is the change of the counted yen. */
         const val SPEND_COUNTED = "SPEND_COUNTED"

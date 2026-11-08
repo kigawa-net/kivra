@@ -31,10 +31,10 @@ data class CycleSpend(
  * Reads the cost of one cycle (order, cycle_no) from the budget ledger. Stage 3f of the addendum: read only. It writes no row and takes
  * no lock, so it cannot change the lock order (order rows first, then the tenant budget rows; see SelfDevBudgetLockOrderTest).
  *
- * The chain (section B): selfdev_goals (order_id, cycle_no) -> selfdev_plans (goal_id) -> selfdev_plan_tasks (plan_id, run_id) ->
- * coding_attempts (run_id). The ledger key of a CLI attempt is `coding:<attempt_id>:<lease_generation>`, an exact match on the chain.
- * The API calls have no column that links them, so they are matched by the key prefix (section C.5, C.6): the Planner's
- * `planner-<goal_id>-` and the Developer's `developer-<run_id>-`. The key forms are pinned by SelfDevCycleSpendContractTest.
+ * The chain (V49, the Task model): the cycle's root task (selfdev_tasks: order_id, cycle_no) -> its planned tasks (parent_task_id) -> their
+ * runs (run_id) -> coding_attempts (run_id). The ledger key of a CLI attempt is `coding:<attempt_id>:<lease_generation>`, an exact match on
+ * the chain. The API calls have no column that links them, so they are matched by the key prefix (section C.5, C.6): the Planner's
+ * `planner-<root task id>-` and the Developer's `developer-<run_id>-`. The key forms are pinned by SelfDevCycleSpendContractTest.
  */
 class SelfDevCycleSpendReader(private val database: Database) {
 
@@ -100,31 +100,28 @@ class SelfDevCycleSpendReader(private val database: Database) {
               FROM budget_reservations r
              WHERE r.reservation_key IN (
                    SELECT CONCAT('${DbBudgetStore.CODING_KEY_PREFIX}', a.attempt_id, ':', a.lease_generation)
-                     FROM selfdev_goals g
-                     JOIN selfdev_plans p ON p.goal_id = g.goal_id
-                     JOIN selfdev_plan_tasks t ON t.plan_id = p.plan_id
+                     FROM selfdev_tasks root
+                     JOIN selfdev_tasks t ON t.parent_task_id = root.task_id
                      JOIN coding_attempts a ON a.run_id = t.run_id
-                    WHERE g.order_id = ? AND g.cycle_no = ?)
+                    WHERE root.order_id = ? AND root.cycle_no = ?)
                 OR EXISTS (
-                   SELECT 1 FROM selfdev_goals g
-                    WHERE g.order_id = ? AND g.cycle_no = ?
-                      AND r.reservation_key LIKE CONCAT(?, g.goal_id, '-%'))
+                   SELECT 1 FROM selfdev_tasks root
+                    WHERE root.order_id = ? AND root.cycle_no = ?
+                      AND r.reservation_key LIKE CONCAT(?, root.task_id, '-%'))
                 OR EXISTS (
-                   SELECT 1 FROM selfdev_goals g
-                     JOIN selfdev_plans p ON p.goal_id = g.goal_id
-                     JOIN selfdev_plan_tasks t ON t.plan_id = p.plan_id
-                    WHERE g.order_id = ? AND g.cycle_no = ? AND t.run_id IS NOT NULL
+                   SELECT 1 FROM selfdev_tasks root
+                     JOIN selfdev_tasks t ON t.parent_task_id = root.task_id
+                    WHERE root.order_id = ? AND root.cycle_no = ? AND t.run_id IS NOT NULL
                       AND r.reservation_key LIKE CONCAT(?, t.run_id, '-%'))
             """.trimIndent()
 
         /** Attempts of the cycle that have not finished. Each counts once, even when a Run appears in two tasks. */
         private val ACTIVE_ATTEMPTS_SQL = """
             SELECT COUNT(DISTINCT a.attempt_id)
-              FROM selfdev_goals g
-              JOIN selfdev_plans p ON p.goal_id = g.goal_id
-              JOIN selfdev_plan_tasks t ON t.plan_id = p.plan_id
+              FROM selfdev_tasks root
+              JOIN selfdev_tasks t ON t.parent_task_id = root.task_id
               JOIN coding_attempts a ON a.run_id = t.run_id
-             WHERE g.order_id = ? AND g.cycle_no = ? AND a.active_flag = 1
+             WHERE root.order_id = ? AND root.cycle_no = ? AND a.active_flag = 1
             """.trimIndent()
     }
 }

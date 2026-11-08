@@ -8,6 +8,7 @@ import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.date
 import org.jetbrains.exposed.sql.javatime.datetime
+import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 
@@ -113,24 +114,7 @@ class SelfDevAutopilotControlRepository(
      * The breaker assignment is listed before the count so that both databases compare against the old count.
      */
     fun recordRunOutcome(succeeded: Boolean, maxConsecutiveFailures: Int) {
-        require(maxConsecutiveFailures >= 1) { "the failure limit must be at least 1" }
-        transaction(database) {
-            if (succeeded) {
-                execUpdate(
-                    "UPDATE selfdev_autopilot_control SET consecutive_failures = 0, version = version + 1 WHERE control_id = 1",
-                )
-            } else {
-                execUpdate(
-                    """
-                    UPDATE selfdev_autopilot_control
-                       SET breaker_open = CASE WHEN consecutive_failures + 1 >= ? THEN TRUE ELSE breaker_open END,
-                           consecutive_failures = consecutive_failures + 1, version = version + 1
-                     WHERE control_id = 1
-                    """.trimIndent(),
-                    maxConsecutiveFailures,
-                )
-            }
-        }
+        transaction(database) { recordRunOutcomeIn(succeeded, maxConsecutiveFailures) }
     }
 
     /** Operator resume of the circuit breaker: the count goes back to 0 and the breaker closes (ADR section 5.4). */
@@ -182,5 +166,28 @@ class SelfDevAutopilotControlRepository(
 
     private companion object {
         const val CONTROL_ID: Byte = 1
+    }
+}
+
+/**
+ * The breaker's count of one Run outcome, in the caller's transaction. The dispatcher calls it in the same transaction as the task's move
+ * (SelfDevOperatorRepository.settleRunOutcome), so the count and the move are kept together or lost together.
+ * A failure adds one to the consecutive count and opens the breaker at [maxConsecutiveFailures]; a success resets the count to 0.
+ * The breaker assignment is listed before the count so that both databases compare against the old count.
+ */
+internal fun Transaction.recordRunOutcomeIn(succeeded: Boolean, maxConsecutiveFailures: Int) {
+    require(maxConsecutiveFailures >= 1) { "the failure limit must be at least 1" }
+    if (succeeded) {
+        execUpdate("UPDATE selfdev_autopilot_control SET consecutive_failures = 0, version = version + 1 WHERE control_id = 1")
+    } else {
+        execUpdate(
+            """
+            UPDATE selfdev_autopilot_control
+               SET breaker_open = CASE WHEN consecutive_failures + 1 >= ? THEN TRUE ELSE breaker_open END,
+                   consecutive_failures = consecutive_failures + 1, version = version + 1
+             WHERE control_id = 1
+            """.trimIndent(),
+            maxConsecutiveFailures,
+        )
     }
 }

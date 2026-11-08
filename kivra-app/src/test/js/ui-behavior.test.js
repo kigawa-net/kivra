@@ -830,6 +830,25 @@ test('a finished task has no stop button, and a task still in progress has one',
   }
 });
 
+test('a plan root waiting for approval has no approve or reject button (the server answers 409), but can still be stopped', async () => {
+  const root = taskSummary({ state: 'PENDING_APPROVAL', revision: 1, version: 3 });
+  const dom = load(apResponder(apState({ tasks: [root], detail: detailOf(root) })));
+  await flush();
+  buttonIn(dom.byId('plans-list'), '詳細').fire('click');
+  await flush();
+  assert.equal(hasButton(dom.byId('plans-list'), 'このタスクを承認'), false, 'root: no approve button');
+  assert.equal(hasButton(dom.byId('plans-list'), '見送る'), false, 'root: no reject button');
+  assert.equal(hasButton(dom.byId('plans-list'), '中止…'), true, 'root: the stop button stays');
+
+  const child = taskSummary({ state: 'PENDING_APPROVAL', revision: 0, version: 2 });
+  const plain = load(apResponder(apState({ tasks: [child], detail: detailOf(child) })));
+  await flush();
+  buttonIn(plain.byId('plans-list'), '詳細').fire('click');
+  await flush();
+  assert.equal(hasButton(plain.byId('plans-list'), 'このタスクを承認'), true, 'a planned task: approve button');
+  assert.equal(hasButton(plain.byId('plans-list'), '見送る'), true, 'a planned task: reject button');
+});
+
 test('a stop dialog cancelled and opened again sends the request once (the listeners of the first opening are removed)', async () => {
   const task = taskSummary({ state: 'QUEUED', version: 4 });
   const s = apState({ tasks: [task], detail: detailOf(task) });

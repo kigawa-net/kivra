@@ -31,7 +31,9 @@ import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiOrder
 import net.kigawa.kivra.ui.api.ApiStopRequest
+import net.kigawa.kivra.ui.autopilotAvailabilityOf
 import net.kigawa.kivra.ui.isValidStopDigest
+import net.kigawa.kivra.ui.showsOrderCreateForm
 import net.kigawa.kivra.ui.writeFailureOf
 import net.kigawa.kivra.ui.writeFailureText
 
@@ -41,22 +43,33 @@ import net.kigawa.kivra.ui.writeFailureText
  */
 @Composable
 fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
-    val autopilotOn = LocalAutopilotAvailability.current == AutopilotAvailability.ENABLED
-    val loaded = rememberLoad(Pair(selectedProjectId, autopilotOn)) {
+    val availability = LocalAutopilotAvailability.current
+    val autopilotOn = availability == AutopilotAvailability.ENABLED
+    // 作成の後に増やして、一覧を読み直させる。
+    var listReload by remember { mutableStateOf(0) }
+    val loaded = rememberLoad(Triple(selectedProjectId, autopilotOn, listReload)) {
         if (!autopilotOn) return@rememberLoad emptyList()
         val allOrders = ApiClient.getOrders()
         if (selectedProjectId != null) allOrders.filter { it.projectId == selectedProjectId } else allOrders
     }
+    val perms = LocalCallerPermissions.current
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("order", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (autopilotOn) LoadedList(loaded, emptyText = "orderが見つかりません") { orders ->
-            LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                items(orderTreeOf(orders), key = { it.order.orderId }) { row ->
-                    OrderCard(row, onClick = { onNavigate(Route.OrderDetail(row.order.orderId)) })
-                    HorizontalDivider()
+        if (showsOrderCreateForm(availability, perms)) {
+            OrderCreateCard(onChanged = { listReload += 1 })
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        if (autopilotOn) Column(modifier = Modifier.weight(1f)) {
+            LoadedList(loaded, emptyText = "orderが見つかりません") { orders ->
+                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                    items(orderTreeOf(orders), key = { it.order.orderId }) { row ->
+                        OrderCard(row, onClick = { onNavigate(Route.OrderDetail(row.order.orderId)) })
+                        HorizontalDivider()
+                    }
                 }
             }
         }

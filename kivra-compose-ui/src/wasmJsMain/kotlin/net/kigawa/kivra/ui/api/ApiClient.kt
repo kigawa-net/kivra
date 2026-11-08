@@ -7,6 +7,7 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
@@ -16,10 +17,13 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import net.kigawa.kivra.ui.MemoryListFilter
 import net.kigawa.kivra.ui.ReleaseKind
 import net.kigawa.kivra.ui.SubmitFailure
 import net.kigawa.kivra.ui.SubmitKind
 import net.kigawa.kivra.ui.SubmitResult
+import net.kigawa.kivra.ui.isValidAssigneeRef
+import net.kigawa.kivra.ui.memoryListQuery
 import net.kigawa.kivra.ui.percentEncode
 import net.kigawa.kivra.ui.releasePath
 import net.kigawa.kivra.ui.submitFailureOf
@@ -171,16 +175,67 @@ object ApiClient {
     suspend fun getProjects(): List<ApiProject> =
         getJson("/api/projects")
 
-    suspend fun createProject(name: String, description: String? = null): Boolean {
+    /**
+     * プロジェクトの作成。`POST /api/projects`、本文 `{"name", "description"?}`(空の説明は送らない)。失敗は [ApiException]。
+     * 403 は ORDER_MANAGE の無い利用者。
+     */
+    suspend fun createProject(name: String, description: String? = null) =
+        postWrite("/api/projects", CreateProjectRequest(name, description?.takeIf { it.isNotBlank() }))
+
+    /** プロジェクトの詳細(ダッシュボード)。`GET /api/projects/{id}/dashboard`。404 は無い id。scope は ALL か OWN。 */
+    suspend fun getProjectDashboard(projectId: String): ApiProjectDashboard =
+        getJson("/api/projects/${percentEncode(projectId)}/dashboard")
+
+    /** 運用者: プロジェクトの repo の一覧。`GET /api/projects/{id}/repos`。 */
+    suspend fun getProjectRepos(projectId: String): List<ApiProjectRepo> =
+        getJson("/api/projects/${percentEncode(projectId)}/repos")
+
+    /**
+     * 運用者: repo の登録。`PUT /api/projects/{id}/repos`、本文 `{"repoKey": "owner/name"}`。409 は別のプロジェクトに登録済み、
+     * 400 は形式、404 は無いプロジェクト、403 は権限(ORDER_MANAGE)。
+     */
+    suspend fun addProjectRepo(projectId: String, repoKey: String) =
+        writeWith(HttpMethod.Put, "/api/projects/${percentEncode(projectId)}/repos", ProjectRepoBody(repoKey))
+
+    /**
+     * 運用者: repo の登録を外す。`DELETE /api/projects/{id}/repos?repoKey=owner/name`。本文は空の JSON オブジェクト `{}`
+     * (サーバーは状態を変える要求に JSON だけを受ける)。404 は登録されていない repo。
+     */
+    suspend fun removeProjectRepo(projectId: String, repoKey: String) =
+        writeWith(
+            HttpMethod.Delete,
+            "/api/projects/${percentEncode(projectId)}/repos?repoKey=${percentEncode(repoKey)}",
+            EmptyJsonBody(),
+        )
+
+    /**
+     * 既存データの振り分け。`POST /api/projects/backfill?dryRun=true|false`、本文 `{}`。dryRun は数えるだけ、実行は
+     * プロジェクトが未設定の行だけを書く。403 は運用者でない。応答の形が違えば [ApiException]。
+     */
+    suspend fun backfillProjects(dryRun: Boolean): ApiBackfillReport {
+        val text = postWriteText("/api/projects/backfill?dryRun=${if (dryRun) "true" else "false"}", EmptyJsonBody())
         return try {
-            postWriteText("/api/projects", CreateProjectRequest(name, description?.takeIf { it.isNotBlank() }))
-            true
+            replyJson.decodeFromString<ApiBackfillReport>(text)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            false
+            throw ApiException(null, "response is not the expected format")
         }
     }
+
+    /**
+     * Goal の再計画。`POST /api/selfdev/goals/{id}/replan`、本文 `{"version": n}`(読んだ version)。BLOCKED で計画の失敗のときだけ。
+     * 409 は状態・version の競合、403 は権限(GOAL_WRITE)、503 は自律運転が無効。
+     */
+    suspend fun replanGoal(taskId: String, version: Long) =
+        postWrite("/api/selfdev/goals/${percentEncode(taskId)}/replan", VersionRequest(version))
+
+    /**
+     * order の作成(ルートの order)。`POST /api/selfdev/orders`、本文 `{title, policy, maxCycles, projectId}`。
+     * 冪等キーは送らない(サーバーの本文は厳密で、知らないフィールドは 400 になる)。ルートは一つだけ(2 つ目は 409)。
+     */
+    suspend fun createOrder(title: String, policy: String, maxCycles: Int, projectId: String) =
+        postWrite("/api/selfdev/orders", CreateOrderBody(title, policy, maxCycles, projectId))
 
     /**
      * 呼び出し者の役割と権限。`GET /api/selfdev/me`。どの運用者にも 200 で返る。失敗は [ApiException]
@@ -234,6 +289,21 @@ object ApiClient {
      */
     suspend fun getBudget(): ApiBudget =
         getJson("/api/admin/budget/status", quiet = true)
+
+    /** 為替の期限。`GET /api/admin/budget/fx`(運用者向け)。quiet: 401 / 403 / 404 は「この利用者には見せない」で、セッションは切らない。 */
+    suspend fun getBudgetFx(): ApiBudgetFxResponse =
+        getJson("/api/admin/budget/fx", quiet = true)
+
+    /** 段階 1 → 2 の昇格条件。`GET /api/selfdev/autopilot/promotion`(運用者だけ。自律運転が無効なら 503)。読み取りのみ。 */
+    suspend fun getPromotion(): ApiPromotionReadout =
+        getJson("/api/selfdev/autopilot/promotion")
+
+    /**
+     * 実行の経過(CLI 経路の Run)。`GET /api/admin/runs/{id}/execution`。quiet: 401 / 403 / 404 は「この Run には節を出さない」
+     * (旧 UI の apiFetch と同じく、セッションは切らない)。
+     */
+    suspend fun getRunExecution(runId: String): ApiRunExecution =
+        getJson("/api/admin/runs/${percentEncode(runId)}/execution", quiet = true)
 
     /** Assignees. `GET /api/selfdev/assignees`. 403 unless the caller may manage assignees; 503 while roles are off. */
     suspend fun getAssignees(): List<ApiAssignee> =
@@ -320,16 +390,25 @@ object ApiClient {
     private suspend inline fun <reified B : Any> postWriteText(path: String, body: B): String =
         postWriteReply(path, body).text
 
+    /** 書き込みの動詞を選べる版(PUT / DELETE。応答の本文は読まない)。 */
+    private suspend inline fun <reified B : Any> writeWith(verb: HttpMethod, path: String, body: B) {
+        postWriteReply(path, body, verb)
+    }
+
+    private suspend inline fun <reified B : Any> writeReply(verb: HttpMethod, path: String, body: B): WriteReply =
+        postWriteReply(path, body, verb)
+
     /**
      * [postWrite] の本文とステータスを返す版。セッション切れの後は送らない。送信中は [ApiSession.hold] で定期更新を止める。
      * 204 は本文なしの成功。2xx で JSON でない応答はサインイン画面への追従とみなし、セッション切れにする(旧 UI と同じ)。
      */
-    private suspend inline fun <reified B : Any> postWriteReply(path: String, body: B): WriteReply {
+    private suspend inline fun <reified B : Any> postWriteReply(path: String, body: B, verb: HttpMethod = HttpMethod.Post): WriteReply {
         checkSession()
         ApiSession.hold()
         try {
             val response = try {
-                client.post(path) {
+                client.request(path) {
+                    method = verb
                     contentType(ContentType.Application.Json)
                     setBody(body)
                 }
@@ -435,6 +514,99 @@ object ApiClient {
         return ACK_STATUS_ALREADY.containsMatchIn(text)
     }
 
+    // ---- 担当(Assignee)の管理。サーバーは SelfDevAssigneeRoutes.kt。トークンの平文は発行の応答にだけある ----
+
+    /** 担当の一覧。[projectId] が null なら全部、あれば `?projectId=` で絞る(旧 UI の PROJECT_SCOPED_GET と同じ)。 */
+    suspend fun getAssigneesIn(projectId: String?): List<ApiAssignee> =
+        getJson(if (projectId == null) "/api/selfdev/assignees" else "/api/selfdev/assignees?projectId=${percentEncode(projectId)}")
+
+    /** 担当の作成。`POST /api/selfdev/assignees`、本文 `{displayName, role}`。201。 */
+    suspend fun createAssignee(displayName: String, role: String) =
+        postWrite("/api/selfdev/assignees", CreateAssigneeBody(displayName, role))
+
+    /** ロールの変更。`POST .../{id}/role`、本文 `{role, version}`。409 は version の競合。 */
+    suspend fun changeAssigneeRole(assigneeId: String, role: String, version: Long) =
+        postWrite("/api/selfdev/assignees/${percentEncode(assigneeId)}/role", ChangeRoleBody(role, version))
+
+    /** 有効化・無効化。`POST .../{id}/enable` または `.../disable`、本文 `{version}`。無効化はトークンを全部失効する。 */
+    suspend fun setAssigneeEnabled(assigneeId: String, enabled: Boolean, version: Long) {
+        val action = if (enabled) "enable" else "disable"
+        postWrite("/api/selfdev/assignees/${percentEncode(assigneeId)}/$action", VersionRequest(version))
+    }
+
+    /**
+     * 担当の詳細(メンバーとトークン)。`GET .../{id}/members` と `GET .../{id}/tokens`。形の合わない参照は除く。
+     * どちらかが失敗したら例外(呼び出し側が文言を出す)。
+     */
+    suspend fun getAssigneeDetail(assigneeId: String): ApiAssigneeDetail {
+        val id = percentEncode(assigneeId)
+        val members: List<ApiMemberRef> = getJson("/api/selfdev/assignees/$id/members")
+        val tokens: List<ApiAssigneeToken> = getJson("/api/selfdev/assignees/$id/tokens")
+        return ApiAssigneeDetail(
+            memberRefs = members.map { it.memberRef }.filter { isValidAssigneeRef(it) },
+            tokens = tokens.filter { isValidAssigneeRef(it.tokenRef) },
+        )
+    }
+
+    /** 人(Keycloak の sub)の紐付け。`POST .../{id}/members`、本文 `{sub}`。201(応答の memberRef は使わない)。 */
+    suspend fun bindAssigneeMember(assigneeId: String, sub: String) =
+        postWrite("/api/selfdev/assignees/${percentEncode(assigneeId)}/members", BindMemberBody(sub))
+
+    /** 紐付けの解除。`DELETE .../{id}/members/{memberRef}`、本文は `{}`(サーバーは JSON の Content-Type を要求する)。204。 */
+    suspend fun unbindAssigneeMember(assigneeId: String, memberRef: String) {
+        postWriteReply(
+            "/api/selfdev/assignees/${percentEncode(assigneeId)}/members/${percentEncode(memberRef)}",
+            EmptyJsonBody(),
+            HttpMethod.Delete,
+        )
+    }
+
+    /**
+     * トークンの発行。`POST .../{id}/tokens`、本文 `{ttlDays}`。201 の応答に平文が入る。
+     * 戻り値の平文は呼び出し側が 1 度だけ使い、保持しない。
+     */
+    suspend fun issueAssigneeToken(assigneeId: String, ttlDays: Int): ApiIssuedToken {
+        val text = postWriteText("/api/selfdev/assignees/${percentEncode(assigneeId)}/tokens", IssueTokenBody(ttlDays))
+        return try {
+            replyJson.decodeFromString<ApiIssuedToken>(text)
+        } catch (e: Exception) {
+            throw ApiException(null, "response is not the expected format")
+        }
+    }
+
+    /** トークンの失効。`POST .../{id}/tokens/{tokenRef}/revoke`、本文 `{}`。204。 */
+    suspend fun revokeAssigneeToken(assigneeId: String, tokenRef: String) =
+        postWrite("/api/selfdev/assignees/${percentEncode(assigneeId)}/tokens/${percentEncode(tokenRef)}/revoke", EmptyJsonBody())
+
+    // ---- 記憶の操作。サーバーは SelfDevMemoryRoutes.kt。一覧は本文を返さない未検証の文章を含む(本文は null) ----
+
+    /** 記憶の 1 ページ。`GET /api/selfdev/memory?limit=20&offset=N[&kind][&tier][&projectId]`。 */
+    suspend fun getMemoryPage(filter: MemoryListFilter, offset: Int, projectId: String?): ApiMemoryPage =
+        getJson("/api/selfdev/memory?" + memoryListQuery(filter, offset, projectId))
+
+    /** 個別の削除。`POST /api/selfdev/memory/{id}/delete`、本文 `{reason}`(理由は trim 済み)。404 は既に無い。 */
+    suspend fun deleteMemory(recordId: String, reason: String) =
+        postWrite("/api/selfdev/memory/${percentEncode(recordId)}/delete", ReasonRequest(reason))
+
+    /**
+     * 条件での削除。`POST /api/selfdev/memory/delete-by-condition`。本文は条件(kind・tier のうち選んだもの)と dryRun。
+     * 本削除(dryRun = false)には理由が要る。dryRun は件数だけを返す。409 は上限超え(matched を含む)。
+     */
+    suspend fun deleteMemoriesByCondition(filter: MemoryListFilter, dryRun: Boolean, reason: String?): ApiMemoryCondition {
+        val body = buildJsonObject {
+            filter.kind?.let { put("kind", it) }
+            filter.tier?.let { put("tier", it) }
+            put("dryRun", dryRun)
+            if (reason != null) put("reason", reason)
+        }
+        val text = postWriteText("/api/selfdev/memory/delete-by-condition", body)
+        return try {
+            replyJson.decodeFromString<ApiMemoryCondition>(text)
+        } catch (e: Exception) {
+            throw ApiException(null, "response is not the expected format")
+        }
+    }
+
     private val replyJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val ERROR_FIELD = Regex("\"error\"\\s*:\\s*\"([^\"]{0,200})\"")
@@ -452,11 +624,29 @@ object ApiClient {
 
 @Serializable private class VersionRequest(val version: Long)
 
+/** repo の登録の本文(server `ProjectRepoRequest`)。 */
+@Serializable private class ProjectRepoBody(val repoKey: String)
+
+/** order の作成の本文(server `CreateOrderRequest`)。冪等キーは持たない(サーバーは知らないフィールドを拒否する)。 */
+@Serializable private class CreateOrderBody(val title: String, val policy: String, val maxCycles: Int, val projectId: String)
+
 /** order の停止要求の本文(server `RequestStopRequest`)。フィールドは厳密に検査されるので、この二つだけ送る。 */
 @Serializable private class OrderStopRequest(val version: Long, val reasonCode: String)
 
 /** 本文が空の JSON オブジェクト `{}`(フィールドなし)。 */
 @Serializable private class EmptyJsonBody
+
+/** 担当の作成の本文(server `CreateAssigneeRequest`)。 */
+@Serializable private class CreateAssigneeBody(val displayName: String, val role: String)
+
+/** ロールの変更の本文(server `ChangeAssigneeRoleRequest`)。 */
+@Serializable private class ChangeRoleBody(val role: String, val version: Long)
+
+/** 人の紐付けの本文(server `BindMemberRequest`)。 */
+@Serializable private class BindMemberBody(val sub: String)
+
+/** トークンの発行の本文(server `IssueTokenRequest`)。 */
+@Serializable private class IssueTokenBody(val ttlDays: Int)
 
 /** `GET /health` の本文(`status` だけ読む)。 */
 @Serializable private class HealthBody(val status: String? = null)

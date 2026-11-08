@@ -30,6 +30,7 @@ import net.kigawa.kivra.ui.canStopGoal
 import net.kigawa.kivra.ui.releaseKindOf
 import net.kigawa.kivra.ui.releaseTextsOf
 import net.kigawa.kivra.ui.safePullRequestUrl
+import net.kigawa.kivra.ui.showsExecutionSection
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiGoal
@@ -108,6 +109,11 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
                 Spacer(Modifier.height(12.dp))
             }
             PullRequestSection(run)
+            // 実行の経過(自己開発の Run だけ。読み取りの定期更新。詳細を離れると止まる)。
+            if (showsExecutionSection(run.mode, run.runId)) {
+                Spacer(Modifier.height(12.dp))
+                RunExecutionSection(run.runId)
+            }
             Spacer(Modifier.height(16.dp))
             Text("状態の経過", style = MaterialTheme.typography.titleMedium)
             val events = run.events
@@ -331,6 +337,8 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
                     )
                 }
             }
+            // 計画の失敗で止まった Goal の再計画(旧 UI の「再計画する」)。GOAL_WRITE の人だけ。
+            ReplanGoalAction(goal = goal, onChanged = { reloadKey++ })
             goal.runId?.let { runId ->
                 OutlinedButton(onClick = { onNavigate(Route.RunDetail(runId)) }) { Text("関連する Run を開く") }
                 Spacer(Modifier.height(12.dp))

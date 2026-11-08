@@ -50,8 +50,14 @@ enum class GatedOperation(val permission: SelfDevPermission) {
     /** Goal の投入(app.js: can('GOAL_WRITE') で goal-form を出す / サーバー: POST /api/selfdev/goals は GOAL_WRITE)。 */
     SUBMIT_GOAL(SelfDevPermission.GOAL_WRITE),
 
-    /** プロジェクトの作成(サーバー: project_create は ORDER_MANAGE。app.js は出し分けていない。Compose 版の画面はまだ無い)。 */
+    /** プロジェクトの作成(サーバー: project_create は ORDER_MANAGE。プロジェクトの画面の作成フォームを出す)。 */
     CREATE_PROJECT(SelfDevPermission.ORDER_MANAGE),
+
+    /** order の作成(app.js: can('ORDER_MANAGE') で order-create を出す / サーバー: order.create は ORDER_MANAGE)。 */
+    CREATE_ORDER(SelfDevPermission.ORDER_MANAGE),
+
+    /** Goal の再計画(app.js: can('GOAL_WRITE') で「再計画する」を出す / サーバー: goal.goal_replan は GOAL_WRITE)。 */
+    REPLAN_GOAL(SelfDevPermission.GOAL_WRITE),
 
     /** 記憶の一覧とナビ(app.js: memory-section の can('READ_TEXT')。サーバー: memory.list)。 */
     READ_MEMORY(SelfDevPermission.READ_TEXT),
@@ -64,6 +70,12 @@ enum class GatedOperation(val permission: SelfDevPermission) {
 
     /** order の停止要求と、要求の取り消し(app.js: can('STOP_REQUEST') / サーバー: order.stop.request・order.stop.cancel)。 */
     REQUEST_ORDER_STOP(SelfDevPermission.STOP_REQUEST),
+
+    /** 記憶の個別の削除と条件での削除(app.js: can('GOAL_WRITE') / サーバー: memory.delete・memory.delete_by_condition)。 */
+    DELETE_MEMORY(SelfDevPermission.GOAL_WRITE),
+
+    /** 担当の管理(作成・ロール・有効化/無効化・メンバー・トークン)。担当の画面を見せる条件と同じ(サーバー: ASSIGNEE_MANAGE)。 */
+    MANAGE_ASSIGNEE(SelfDevPermission.ASSIGNEE_MANAGE),
 }
 
 private val ROLE_NAME = Regex("[A-Z_]{1,32}")

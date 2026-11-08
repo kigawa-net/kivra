@@ -10,6 +10,7 @@ import androidx.compose.ui.unit.dp
 import net.kigawa.kivra.ui.NavDestination
 import net.kigawa.kivra.ui.api.ApiBudget
 import net.kigawa.kivra.ui.api.ApiClient
+import net.kigawa.kivra.ui.api.ApiException
 
 private data class HomeSummary(
     val approvals: Int,
@@ -25,26 +26,34 @@ private val TERMINAL_STATES = setOf("FAILED", "COMPLETED", "CANCELLED", "NOT_EXE
 @Composable
 fun HomeScreen(projectId: String?, onNavigate: (NavDestination) -> Unit) {
     var summary by remember { mutableStateOf<HomeSummary?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(projectId) {
         loading = true
-        val runs = ApiClient.getRuns().filter { projectId == null || it.projectId == projectId }
-        val approvals = ApiClient.getApprovals().filter { projectId == null || it.projectId == projectId }
-        summary = HomeSummary(
-            approvals = approvals.size,
-            failedRuns = runs.count { it.state in FAILED_STATES },
-            activeRuns = runs.count { it.state !in TERMINAL_STATES },
-            budget = ApiClient.getBudget(),
-        )
-        loading = false
+        error = null
+        try {
+            val runs = ApiClient.getRuns().filter { projectId == null || it.projectId == projectId }
+            val approvals = approvalsOf(projectId)
+            summary = HomeSummary(
+                approvals = approvals,
+                failedRuns = runs.count { it.state in FAILED_STATES },
+                activeRuns = runs.count { it.state !in TERMINAL_STATES },
+                budget = budgetOrNull(),
+            )
+        } catch (e: Exception) {
+            summary = null
+            error = e.message ?: "エラーが発生しました"
+        } finally {
+            loading = false
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         val s = summary
         when {
             loading -> CircularProgressIndicator()
-            s == null -> Text("読み込めませんでした")
+            s == null -> Text("読み込めませんでした: ${error ?: ""}")
             else -> {
                 val attention = s.approvals + s.failedRuns
                 Text(
@@ -56,13 +65,42 @@ fun HomeScreen(projectId: String?, onNavigate: (NavDestination) -> Unit) {
                 SummaryCard("失敗 / 要解放の Run", "${s.failedRuns} 件", s.failedRuns > 0) { onNavigate(NavDestination.Tasks) }
                 SummaryCard("実行中の Run", "${s.activeRuns} 件", false) { onNavigate(NavDestination.Tasks) }
                 s.budget?.let { b ->
-                    val ratio = if (b.limit > 0) b.used / b.limit else 0.0
-                    SummaryCard("予算(${b.month})", "${b.used} / ${b.limit}", ratio >= 0.8) { onNavigate(NavDestination.Budget) }
+                    val limit = b.limitValue
+                    val used = b.usedValue
+                    val ratio = if (limit != null && used != null && limit > 0) used / limit else 0.0
+                    SummaryCard("予算(${b.period})", "${b.usedValue?.toLong() ?: "不明"} / ${b.limitJpy} 円", ratio >= 0.8) { onNavigate(NavDestination.Budget) }
                 }
             }
         }
     }
 }
+
+/**
+ * The count of pending approvals (stop requests of the orders) for the project. The approvals are answered per order, so the project
+ * comes from the order. 503 (autopilot off) and 403 (not the root approver) mean there are none for this caller, as in the old UI,
+ * which hides the page then. Any other failure is thrown.
+ */
+private suspend fun approvalsOf(projectId: String?): Int {
+    val requests = unavailableAsEmpty { ApiClient.getApprovals() }
+    if (projectId == null || requests.isEmpty()) return requests.size
+    val projectOf = unavailableAsEmpty { ApiClient.getOrders() }.associate { it.orderId to it.projectId }
+    return requests.count { projectOf[it.orderId] == projectId }
+}
+
+/** The budget card is hidden (null) when the caller may not see it (403/404), as in the old UI. Other failures are thrown. */
+private suspend fun budgetOrNull(): ApiBudget? =
+    try {
+        ApiClient.getBudget()
+    } catch (e: ApiException) {
+        if (e.status == 403 || e.status == 404) null else throw e
+    }
+
+private suspend fun <T> unavailableAsEmpty(load: suspend () -> List<T>): List<T> =
+    try {
+        load()
+    } catch (e: ApiException) {
+        if (e.status == 503 || e.status == 403) emptyList() else throw e
+    }
 
 @Composable
 private fun SummaryCard(title: String, value: String, highlight: Boolean, onClick: () -> Unit) {

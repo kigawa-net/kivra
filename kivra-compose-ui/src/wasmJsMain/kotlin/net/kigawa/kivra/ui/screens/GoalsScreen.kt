@@ -9,6 +9,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.clickable
+import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiGoal
 
@@ -16,7 +18,7 @@ import net.kigawa.kivra.ui.api.ApiGoal
  * Goals screen: Goal list.
  */
 @Composable
-fun GoalsScreen(selectedProjectId: String? = null) {
+fun GoalsScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
     var goals by remember { mutableStateOf<List<ApiGoal>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -44,7 +46,7 @@ fun GoalsScreen(selectedProjectId: String? = null) {
         } else {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(goals) { goal ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+                    Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onNavigate(Route.GoalDetail(goal.taskId)) }) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text(goal.title, style = MaterialTheme.typography.titleMedium)
                             Spacer(modifier = Modifier.height(4.dp))

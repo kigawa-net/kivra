@@ -9,6 +9,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.clickable
+import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiRun
 
@@ -16,7 +18,7 @@ import net.kigawa.kivra.ui.api.ApiRun
  * Tasks screen: Run list and Task submit form.
  */
 @Composable
-fun TasksScreen(selectedProjectId: String? = null) {
+fun TasksScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
     var runs by remember { mutableStateOf<List<ApiRun>>(emptyList()) }
     var scope by remember { mutableStateOf("mine") }
     var loading by remember { mutableStateOf(true) }
@@ -80,7 +82,7 @@ fun TasksScreen(selectedProjectId: String? = null) {
         } else {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(runs) { run ->
-                    RunCard(run)
+                    RunCard(run, onClick = { onNavigate(Route.RunDetail(run.runId)) })
                     Divider()
                 }
             }
@@ -133,8 +135,8 @@ fun TasksScreen(selectedProjectId: String? = null) {
 }
 
 @Composable
-private fun RunCard(run: ApiRun) {
-    Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+private fun RunCard(run: ApiRun, onClick: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable(onClick = onClick)) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),

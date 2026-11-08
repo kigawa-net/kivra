@@ -11,6 +11,7 @@ import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import net.kigawa.kivra.ui.percentEncode
 
 @Serializable private class SubmitTaskRequest(val title: String, val idempotencyKey: String)
 
@@ -76,8 +77,21 @@ object ApiClient {
     suspend fun getRuns(scope: String = "mine"): List<ApiRun> =
         if (scope == "all") getJson("/api/admin/runs?limit=100") else getJson("/api/runs")
 
+    /** Run の詳細(イベントを含む)。`GET /api/runs/{id}`。404 は存在しない/他人の Run。 */
     suspend fun getRun(runId: String): ApiRun =
-        getJson("/api/runs/$runId")
+        getJson("/api/runs/${percentEncode(runId)}")
+
+    /** 開発目標の詳細。`GET /api/selfdev/goals/{id}`。404 は存在しない id、503 は自律運転が off。 */
+    suspend fun getGoal(taskId: String): ApiGoalDetail =
+        getJson("/api/selfdev/goals/${percentEncode(taskId)}")
+
+    /** order の詳細。`GET /api/selfdev/orders/{id}`。 */
+    suspend fun getOrder(orderId: String): ApiOrderDetail =
+        getJson("/api/selfdev/orders/${percentEncode(orderId)}")
+
+    /** order の周の一覧(周番号順)。`GET /api/selfdev/orders/{id}/cycles`。 */
+    suspend fun getOrderCycles(orderId: String): List<ApiOrderCycle> =
+        getJson("/api/selfdev/orders/${percentEncode(orderId)}/cycles")
 
     /**
      * Task を投入する。サーバーは idempotencyKey を必須とし、JSON の Content-Type を要求する(`SubmitTaskRequest` / `SubmitGoalRequest`)。

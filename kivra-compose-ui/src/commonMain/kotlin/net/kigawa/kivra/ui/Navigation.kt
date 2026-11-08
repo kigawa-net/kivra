@@ -25,14 +25,19 @@ sealed class NavDestination(val route: String, val label: String, val group: Nav
     object Assignees : NavDestination("assignees", "担当", NavGroup.Admin)
 
     companion object {
-        val all = listOf(Home, Tasks, Goals, Orders, Approvals, Budget, Memory, Assignees)
+        // lazy: the nested objects refer to the class while it is being initialized. Built on first use, every object exists.
+        val all: List<NavDestination> by lazy { listOf(Home, Tasks, Goals, Orders, Approvals, Budget, Memory, Assignees) }
 
         /** グループ順に並べた (グループ, 項目一覧)。空のグループは含めない。 */
-        val grouped: List<Pair<NavGroup, List<NavDestination>>> =
+        val grouped: List<Pair<NavGroup, List<NavDestination>>> by lazy {
             NavGroup.entries.map { g -> g to all.filter { it.group == g } }.filter { it.second.isNotEmpty() }
+        }
 
         fun fromRoute(route: String): NavDestination {
             return all.find { it.route == route } ?: Home
         }
+
+        /** グループの先頭項目(パンくずのグループ見出しの遷移先)。 */
+        fun firstIn(group: NavGroup): NavDestination? = all.firstOrNull { it.group == group }
     }
 }

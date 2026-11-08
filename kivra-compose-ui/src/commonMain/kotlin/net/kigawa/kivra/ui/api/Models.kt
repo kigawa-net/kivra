@@ -28,6 +28,19 @@ data class ApiRun(
     val createdBy: String? = null,
     val projectId: String? = null,
     val projectName: String? = null,
+    /** Only in a detail response (`GET /api/runs/{id}`): the run's audit events, in order. Null in a list. */
+    val events: List<ApiRunEvent>? = null,
+)
+
+/** Server `RunEventResponse`: one audit event of a run. [toState] and [reasonCode] are set only for a state transition. */
+@Serializable
+data class ApiRunEvent(
+    val seq: Long,
+    val occurredAt: String,
+    val action: String,
+    val result: String,
+    val toState: String? = null,
+    val reasonCode: String? = null,
 )
 
 @Serializable
@@ -55,6 +68,35 @@ data class ApiGoal(
     val attempts: Int,
     val createdAt: String,
     val updatedAt: String,
+)
+
+/**
+ * `GET /api/selfdev/goals/{id}` = server `TaskDetailResponse`: the goal ([task]) and its body (the plan text, null when empty).
+ */
+@Serializable
+data class ApiGoalDetail(
+    val task: ApiGoal,
+    val body: String? = null,
+)
+
+/**
+ * `GET /api/selfdev/orders/{id}` = server `OrderDetailResponse`. The server's title and policy are not listed: the old UI does not
+ * show them on this screen either.
+ */
+@Serializable
+data class ApiOrderDetail(
+    val order: ApiOrder,
+    val pendingStopRequest: ApiStopRequest? = null,
+)
+
+/** `GET /api/selfdev/orders/{id}/cycles` element = server `CycleResponse`. [goalId] is the goal the cycle started. */
+@Serializable
+data class ApiOrderCycle(
+    val cycleNo: Int,
+    val goalId: String,
+    val goalState: String,
+    val stateReason: String? = null,
+    val createdAt: String,
 )
 
 /**

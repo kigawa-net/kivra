@@ -17,12 +17,26 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import net.kigawa.kivra.ui.ReleaseKind
+import net.kigawa.kivra.ui.SubmitFailure
+import net.kigawa.kivra.ui.SubmitKind
+import net.kigawa.kivra.ui.SubmitResult
 import net.kigawa.kivra.ui.percentEncode
 import net.kigawa.kivra.ui.releasePath
+import net.kigawa.kivra.ui.submitFailureOf
+import net.kigawa.kivra.ui.submitResultOfSuccess
 
 @Serializable private class SubmitTaskRequest(val title: String, val idempotencyKey: String)
 
-@Serializable private class SubmitSelfDevRequest(val title: String, val body: String?, val idempotencyKey: String)
+@Serializable private class SubmitSelfDevRequest(val title: String, val body: String?, val idempotencyKey: String, val projectId: String)
+
+/** `POST /api/selfdev/goals` の本文(server `SubmitGoalRequest`)。projectId は必須。 */
+@Serializable private class SubmitGoalRequest(val title: String, val body: String?, val idempotencyKey: String, val projectId: String)
+
+/** 投入の応答のうち使う値。Run の投入は runId、Goal の投入は taskId(どちらも状態の state を持つ)。 */
+@Serializable private class SubmitReply(val runId: String? = null, val taskId: String? = null, val state: String? = null)
+
+/** 書き込みの応答。[status] は HTTP のステータス(204 は本文なしの成功)、[text] は本文。 */
+private class WriteReply(val status: Int, val text: String)
 
 @Serializable private class CreateProjectRequest(val name: String, val description: String?)
 
@@ -102,28 +116,57 @@ object ApiClient {
         getJson("/api/selfdev/orders/${percentEncode(orderId)}/cycles")
 
     /**
-     * Task を投入する。サーバーは idempotencyKey を必須とし、JSON の Content-Type を要求する(`SubmitTaskRequest` / `SubmitGoalRequest`)。
-     * kind が "SELF_DEV" なら `/api/selfdev/tasks`(本文あり)、それ以外は `/api/tasks`(本文は送らない。旧 UI と同じ)。
-     * 2xx なら true。同じ呼び出しの再送は新しい key になるため、二重投入の防止は呼び出し側で行う。
+     * Task を投入する。種別 [SubmitKind.SIMULATED] は `POST /api/tasks`(本文とプロジェクトは送らない。旧 UI と同じ)。
+     * [SubmitKind.SELF_DEV] は `POST /api/selfdev/tasks`(本文は空なら送らない。プロジェクトは必須で、欠けていれば送らずに 400 扱い)。
+     * 同じ内容の再送には同じ [idempotencyKey] を渡す(キーの管理は呼び出し側の [net.kigawa.kivra.ui.IdempotencyKeys])。
      */
-    suspend fun submitTask(title: String, body: String? = null, kind: String = "SIMULATED"): Boolean {
-        val key = newIdempotencyKey()
-        return try {
-            if (kind == "SELF_DEV") {
-                postWriteText("/api/selfdev/tasks", SubmitSelfDevRequest(title, body?.takeIf { it.isNotBlank() }, key))
-            } else {
-                postWriteText("/api/tasks", SubmitTaskRequest(title, key))
-            }
-            true
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            false
+    suspend fun submitTask(
+        title: String,
+        body: String?,
+        kind: SubmitKind,
+        projectId: String?,
+        idempotencyKey: String,
+    ): SubmitResult {
+        if (kind == SubmitKind.SELF_DEV) {
+            if (projectId == null) return SubmitResult.Failed(SubmitFailure.BAD_REQUEST)
+            return submitRequest(
+                "/api/selfdev/tasks",
+                SubmitSelfDevRequest(title, body?.takeIf { it.isNotBlank() }, idempotencyKey, projectId),
+            )
         }
+        return submitRequest("/api/tasks", SubmitTaskRequest(title, idempotencyKey))
     }
 
-    private fun newIdempotencyKey(): String =
-        "compose-" + (1..24).map { "0123456789abcdef".random() }.joinToString("")
+    /**
+     * Goal を投入する。`POST /api/selfdev/goals`。projectId は必須(ADR 0022)。503 は自律運転が無効。
+     */
+    suspend fun submitGoal(title: String, body: String?, projectId: String, idempotencyKey: String): SubmitResult =
+        submitRequest("/api/selfdev/goals", SubmitGoalRequest(title, body?.takeIf { it.isNotBlank() }, idempotencyKey, projectId))
+
+    /**
+     * 投入の共通処理。成功は 202(作成)か 200(再送)で、応答の id と state を読む。失敗は [ApiException] の status から
+     * [SubmitFailure] にする。サーバーの本文は表示に使わない。
+     */
+    private suspend inline fun <reified B : Any> submitRequest(path: String, body: B): SubmitResult =
+        try {
+            val reply = postWriteReply(path, body)
+            val parsed = parseSubmitReply(reply.text)
+            submitResultOfSuccess(reply.status, parsed?.runId ?: parsed?.taskId, parsed?.state)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ApiException) {
+            SubmitResult.Failed(submitFailureOf(e.status))
+        } catch (e: Exception) {
+            // 送信の途中で例外になった。結果が確かめられないので、通信の失敗として扱う(送信中のまま止まらないように)。
+            SubmitResult.Failed(SubmitFailure.NETWORK)
+        }
+
+    private fun parseSubmitReply(text: String): SubmitReply? =
+        try {
+            replyJson.decodeFromString<SubmitReply>(text)
+        } catch (e: Exception) {
+            null
+        }
 
     suspend fun getProjects(): List<ApiProject> =
         getJson("/api/projects")
@@ -273,12 +316,15 @@ object ApiClient {
         postWriteText(path, body)
     }
 
+    /** [postWriteReply] の本文の文字列だけを返す版。応答の本文の `status` などを読む時に使う。 */
+    private suspend inline fun <reified B : Any> postWriteText(path: String, body: B): String =
+        postWriteReply(path, body).text
+
     /**
-     * [postWrite] の本文の文字列を返す版。応答の本文の `status` などを読む時に使う。
-     * セッション切れの後は送らない。送信中は [ApiSession.hold] で定期更新を止める。
+     * [postWrite] の本文とステータスを返す版。セッション切れの後は送らない。送信中は [ApiSession.hold] で定期更新を止める。
      * 204 は本文なしの成功。2xx で JSON でない応答はサインイン画面への追従とみなし、セッション切れにする(旧 UI と同じ)。
      */
-    private suspend inline fun <reified B : Any> postWriteText(path: String, body: B): String {
+    private suspend inline fun <reified B : Any> postWriteReply(path: String, body: B): WriteReply {
         checkSession()
         ApiSession.hold()
         try {
@@ -296,18 +342,19 @@ object ApiClient {
                 throw failureOf(response, quiet = false)
             }
             if (response.status == HttpStatusCode.NoContent) {
-                return ""
+                return WriteReply(response.status.value, "")
             }
             if (!isJson(response)) {
                 throw sessionLost(quiet = false)
             }
-            return try {
+            val text = try {
                 response.bodyAsText()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 ""
             }
+            return WriteReply(response.status.value, text)
         } finally {
             ApiSession.unhold()
         }
@@ -387,6 +434,8 @@ object ApiClient {
         val text = postWriteText("/api/admin/budget/acknowledge", body)
         return ACK_STATUS_ALREADY.containsMatchIn(text)
     }
+
+    private val replyJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val ERROR_FIELD = Regex("\"error\"\\s*:\\s*\"([^\"]{0,200})\"")
     private val CODE_FIELD = Regex("\"code\"\\s*:\\s*\"([A-Z_]{1,32})\"")

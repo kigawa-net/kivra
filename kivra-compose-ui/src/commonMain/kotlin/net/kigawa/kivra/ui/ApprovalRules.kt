@@ -79,6 +79,6 @@ fun writeFailureText(failure: WriteFailure): String = when (failure) {
 data class ActionNotice(val text: String, val ok: Boolean)
 
 /** UTF-16 の文字列のコードポイント数(サロゲートペアは 1 と数える。common ソースで使える形)。 */
-private fun codePointCount(text: String): Int = text.count { !it.isLowSurrogate() }
+fun codePointCount(text: String): Int = text.count { !it.isLowSurrogate() }
 
 private fun isControlChar(c: Char): Boolean = c in '\u0000'..'\u001f' || c in '\u007f'..'\u009f'

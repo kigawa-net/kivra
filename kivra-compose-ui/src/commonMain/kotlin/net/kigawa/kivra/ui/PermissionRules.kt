@@ -47,6 +47,9 @@ enum class GatedOperation(val permission: SelfDevPermission) {
     /** Task の投入(サーバー: /api/tasks と /api/selfdev/tasks の submit は SPEND_START。app.js は出し分けていない)。 */
     SUBMIT_TASK(SelfDevPermission.SPEND_START),
 
+    /** Goal の投入(app.js: can('GOAL_WRITE') で goal-form を出す / サーバー: POST /api/selfdev/goals は GOAL_WRITE)。 */
+    SUBMIT_GOAL(SelfDevPermission.GOAL_WRITE),
+
     /** プロジェクトの作成(サーバー: project_create は ORDER_MANAGE。app.js は出し分けていない。Compose 版の画面はまだ無い)。 */
     CREATE_PROJECT(SelfDevPermission.ORDER_MANAGE),
 

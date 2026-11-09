@@ -134,7 +134,8 @@ class RolesCoverageArchitectureTest {
 
     /** Routes that need no permission, on purpose: public pages and probes, the agent's own API (its own token), and the dev-only routes. */
     private val OPEN_ROUTES: Map<String, String> = buildMap {
-        for (r in listOf("GET /health", "GET /ready", "GET /metrics", "GET /", "GET /ui", "GET /ui/", "GET /ui/app.js", "GET /ui/app.css",
+        // /ui and /ui/ only redirect to /ui/compose (the legacy vanilla UI assets /ui/app.js and /ui/app.css were removed).
+        for (r in listOf("GET /health", "GET /ready", "GET /metrics", "GET /", "GET /ui", "GET /ui/",
             "GET /ui/compose", "GET /ui/compose/", "GET /ui/compose/kivra-web.js",
             "GET /ui/compose/{wasmFile}", "GET /ui/compose/composeResources/{file}")) put(r, "PUBLIC")
         for (r in listOf(

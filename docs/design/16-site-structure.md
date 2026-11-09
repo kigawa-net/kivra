@@ -1,6 +1,6 @@
 # 16. サイト構成(運用者向け Web UI の情報設計)
 
-状態: 草案(2026-11-08)。**正は Compose Wasm 版(`/ui/compose`)**。vanilla JS 版(`/ui`)は移行中の旧版で、新規の画面・機能はここに追加しない。画面・URL・ナビゲーションの構成を定める。
+状態: 段階 4 完了(旧版撤去)。**正は Compose Wasm 版(`/ui/compose`)**。vanilla JS 版は撤去済みで、`/ui` と `/ui/` は `/ui/compose` へ 302 で転送する。画面・URL・ナビゲーションの構成を定める。
 
 ## 1. 前提と方針
 
@@ -100,11 +100,11 @@
 1. `Navigation.kt` の `NavDestination` に `group` を追加し、サイドナビを 4 グループ描画へ。`fromRoute` の既定をホームに。
 2. `NavDestination` に `Projects` / `StopRequests` / `Autopilot` / `System` を追加し、`screens/` に対応画面を足す。ハッシュと選択状態の双方向同期を `App.kt` に入れる。
 3. ホームは新規 API を作らず、既存の status・approvals・stop-requests・budget の読み取りを束ねる(`kivra-ui-api` の ReadModel に `HomeSummary` を足す場合は別 PR)。
-4. 旧 `/ui` 側は機能追加せず、Compose 版が同等になった時点で `/ui` を `/ui/compose` へリダイレクトして撤去する。`dashboard-audit.md` の課題(`app.js` 肥大・ダイアログ重複)は撤去で解消する扱いとし、旧版は修正しない。
-5. 段階: ① ナビ再編 → ② ホーム → ③ 検索(クライアント側絞り込み。結果は詳細画面へ遷移。Run・Goal・order の読み取り詳細とパンくずは Compose 版に実装済み) → ④ 旧 `/ui` 撤去。
+4. 旧 `/ui` 側は機能追加せず、Compose 版が同等になった時点で `/ui` を `/ui/compose` へリダイレクトして撤去する。`dashboard-audit.md` の課題(`app.js` 肥大・ダイアログ重複)は撤去で解消する扱いとし、旧版は修正しない。(完了: 旧版の `index.html`、`app.js`、`app.css` とそのテストを削除し、`/ui` と `/ui/` を `/ui/compose` への転送にした)
+5. 段階: ① ナビ再編 → ② ホーム → ③ 検索(クライアント側絞り込み。結果は詳細画面へ遷移。Run・Goal・order の読み取り詳細とパンくずは Compose 版に実装済み) → ④ 旧 `/ui` 撤去(完了)。
 
 ## 6. 未決事項
 
-- 旧 `/ui` の撤去条件(Compose 版で何の画面が揃えば切り替えるか。承認・予算解除・解放など理由必須ダイアログ系が先)。
+- ~~旧 `/ui` の撤去条件~~(解決: 撤去済み。撤去は Compose 版の機能移植の完了後に行った。承認・予算解除・解放などの理由必須ダイアログも Compose 版に移植済み)。
 - 「システム」画面は metrics リンクだけなら独立画面にせず、フッターで足りるか。
 - Run を独立項目にするか、タスク配下に含めるか。

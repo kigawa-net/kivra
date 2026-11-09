@@ -10,17 +10,12 @@ import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 
 /**
- * Minimal web UI (`/ui`): static files from the classpath (`resources/ui/`). No build step, no CDN.
+ * Web UI: the Compose Wasm UI at `/ui/compose`, served from the classpath (`resources/ui/compose/`, copied there by the
+ * `copyComposeWebDist` task). `/ui` and `/ui/` redirect to it; the legacy vanilla UI was removed.
  *
  * The pages hold no secrets. The API they call (`/api/...`) is protected by the Task API's authentication. This is
  * registered only when `KIVRA_AUTH_MODE` is set (see [net.kigawa.kivra.appModule]); otherwise `/ui` is a 404.
- *
- * Scripts and styles come from separate files, so the CSP needs no hashes and no inline code.
  */
-internal const val UI_CONTENT_SECURITY_POLICY =
-    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; " +
-        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-
 /** CSP for Compose Wasm UI: allows wasm loading from self. */
 internal const val COMPOSE_UI_CSP =
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; " +
@@ -28,7 +23,6 @@ internal const val COMPOSE_UI_CSP =
 
 private val HTML_TYPE = ContentType.parse("text/html; charset=utf-8")
 private val JS_TYPE = ContentType.parse("text/javascript; charset=utf-8")
-private val CSS_TYPE = ContentType.parse("text/css; charset=utf-8")
 private val WASM_TYPE = ContentType.parse("application/wasm")
 
 private object UiResources
@@ -51,7 +45,8 @@ private fun discoverComposeResources(): List<ComposeResource> {
     )
     
     for ((path, contentType) in patterns) {
-        loadUiResourceOrNull(path)?.let { bytes ->
+        // loadUiResourceOrNull adds the "/ui/" prefix itself, so the classpath name is relative to it.
+        loadUiResourceOrNull(path.removePrefix("/ui/"))?.let { bytes ->
             results.add(ComposeResource(path, bytes))
         }
     }
@@ -73,27 +68,31 @@ private fun loadWasmFile(filename: String): ByteArray? {
     }
 }
 
-/** Loads every file at registration, so a missing resource fails at startup instead of on the first request. */
+/**
+ * Compose resources are looked up at registration. A missing `/ui/compose` page is not registered (so it is a 404), but `/ui` and `/ui/`
+ * still redirect to it.
+ */
 internal fun Route.configureUiRoutes() {
-    val index = loadUiResource("index.html")
-    val appJs = loadUiResource("app.js")
-    val appCss = loadUiResource("app.css")
-    
     // Discover Compose Wasm resources dynamically
     val composeResources = discoverComposeResources()
     val composeIndex = composeResources.find { it.path == "/ui/compose/index.html" }
     val composeJs = composeResources.find { it.path == "/ui/compose/kivra-web.js" }
-    
+
     // The site root has no page of its own. Send people to the UI (a fixed relative path, so there is no open redirect).
     get("/") {
         call.response.header("Cache-Control", "no-store")
-        call.respondRedirect("/ui", permanent = false)
+        call.respondRedirect("/ui/compose", permanent = false)
     }
-    get("/ui") { call.respondUi(index, HTML_TYPE) }
-    get("/ui/") { call.respondUi(index, HTML_TYPE) }
-    get("/ui/app.js") { call.respondUi(appJs, JS_TYPE) }
-    get("/ui/app.css") { call.respondUi(appCss, CSS_TYPE) }
-    
+    // The legacy vanilla UI is gone. Old bookmarks and links land on the Compose UI. The URL fragment (#/...) is kept by the browser.
+    get("/ui") {
+        call.response.header("Cache-Control", "no-store")
+        call.respondRedirect("/ui/compose", permanent = false)
+    }
+    get("/ui/") {
+        call.response.header("Cache-Control", "no-store")
+        call.respondRedirect("/ui/compose", permanent = false)
+    }
+
     // Compose Wasm UI at /ui/compose
     composeIndex?.let { res ->
         get("/ui/compose") { call.respondCompose(res.bytes, HTML_TYPE) }
@@ -130,24 +129,10 @@ internal fun Route.configureUiRoutes() {
     }
 }
 
-private fun loadUiResource(name: String): ByteArray {
-    val stream = UiResources::class.java.getResourceAsStream("/ui/$name")
-        ?: error("UI resource is missing from the classpath: ui/$name")
-    return stream.use { it.readBytes() }
-}
-
 private fun loadUiResourceOrNull(name: String): ByteArray? {
     val stream = UiResources::class.java.getResourceAsStream("/ui/$name")
         ?: return null
     return stream.use { it.readBytes() }
-}
-
-private suspend fun ApplicationCall.respondUi(bytes: ByteArray, contentType: ContentType) {
-    response.header("Content-Security-Policy", UI_CONTENT_SECURITY_POLICY)
-    response.header("X-Content-Type-Options", "nosniff")
-    response.header("Referrer-Policy", "no-referrer")
-    response.header("Cache-Control", "no-store")
-    respondBytes(bytes, contentType)
 }
 
 private suspend fun ApplicationCall.respondCompose(bytes: ByteArray, contentType: ContentType) {

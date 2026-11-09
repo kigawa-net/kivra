@@ -17,7 +17,7 @@ import net.kigawa.kivra.selfdev.GitHubAuth
 import net.kigawa.kivra.selfdev.SelfDevSettings
 
 /**
- * Read-only views for the Web UI (`/ui`). Registered with the Task API identity, so every route needs an authenticated caller
+ * Read-only views for the Web UI (`/ui/compose`). Registered with the Task API identity, so every route needs an authenticated caller
  * (401 otherwise). Responses are allow-lists: no token, key, app id, WIF id or file path is ever returned.
  *
  * - `GET /api/admin/runs`: every Task API run of every principal (the operator view). Each run carries `createdBy`.

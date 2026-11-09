@@ -1,5 +1,7 @@
 # ADR 0009: UNKNOWN の自己開発 Run は、運用者専用の経路だけで CANCELLED に解放する
 
+> 注記(2026-11-09): 旧 vanilla UI(`/ui`、`kivra-app/src/main/resources/ui/`)は撤去済み。現在の画面は Compose UI(`/ui/compose`)。本文の旧 UI への記述は当時の記録として残す。
+
 - ステータス: 採用(Accepted)
 - 日付: 2026-10-16
 - 関連: Issue #56(Self-Development Integration Runner)、ADR 0005(結果の分類と UNKNOWN)、ADR 0008(PR 作成までの自己開発ループ)、ADR 0003(UNKNOWN_COST の acknowledge)

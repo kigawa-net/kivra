@@ -1,5 +1,7 @@
 # ADR 0020: 「担当」とロールで権限を管理する(認証と認可の分離。段階導入、既定 off)
 
+> 注記(2026-11-09): 旧 vanilla UI(`/ui`、`kivra-app/src/main/resources/ui/`)は撤去済み。現在の画面は Compose UI(`/ui/compose`)。本文の旧 UI への記述は当時の記録として残す。
+
 - ステータス: 提案(Proposed)。実装は PR 1〜7 で段階的に行う(この PR 0 は文書だけ)。PR 7(k8s と Keycloak の変更)は、ユーザーの承認と作業が要る
 - 日付: 2026-10-24
 - 関連: ADR 0011(オートパイロット)、ADR 0013(MCP サーバー。トークンの scope)、ADR 0015(order。§4.1 と §4.6 の承認者は、この ADR で複数人にする。追補を参照)、ADR 0019(MCP の Goal ツール)、ADR 0016(記憶)

@@ -1,5 +1,7 @@
 # ADR 0019: Goal の投入と中止を MCP からも行えるようにするか(提案。段階導入、既定 off)
 
+> 注記(2026-11-09): 旧 vanilla UI(`/ui`、`kivra-app/src/main/resources/ui/`)は撤去済み。現在の画面は Compose UI(`/ui/compose`)。本文の旧 UI への記述は当時の記録として残す。 ADR 0011 の「Goal の入力は `/ui` の Goal フォームだけ」は、現在は Compose 版の Goal フォームを指す。
+
 - ステータス: 提案(Proposed)。ユーザーの承認待ち。承認まで実装は始めない
 - 日付: 2026-10-20
 - 関連: Issue #181(MCP サーバー)、#233(オートパイロット)、ADR 0011(Goal の入力は /ui の Goal フォームだけ、と決めた)、ADR 0012(Run の取消し。PR 5 が未実装)、ADR 0013(MCP サーバー。書き込みの保護)、ADR 0009(UNKNOWN の Run の解放)、ADR 0015(order。AI の主体は停止を要求し、人が承認する)、ADR 0016(記憶)

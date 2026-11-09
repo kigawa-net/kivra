@@ -4,6 +4,8 @@ sessionId: session-261028-000244-f4ff
 
 # Requirements
 
+> 注記(2026-11-09): 完了。旧 vanilla UI（`/ui`）は撤去し、`/ui` と `/ui/` は `/ui/compose` への 302 転送にした。以下は当時の計画の記録。
+
 ### Overview & Goals
 Compose Multiplatform for Web のコード実装（`kivra-compose-ui`, `kivra-web`, 7画面のコンポーネント実装、`copyComposeWebDist` タスク）は完了しましたが、本番環境（`/ui/compose`）で 404 が発生しています。
 主な原因は Docker ビルド時に Wasm 成果物が生成・同梱されていないこと、および `main` ブランチにおける DB マイグレーション（V40〜V43）とテストスイートの不整合により PR がマージできない状態にあることです。

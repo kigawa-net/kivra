@@ -57,3 +57,18 @@ data class ApiBackfillReport(val dryRun: Boolean, val tables: List<ApiBackfillTa
 /** 表ごとの件数: matched(振り分け先がある)、updated(書いた)、unmatched(対応なし、未設定のまま)。 */
 @Serializable
 data class ApiBackfillTable(val table: String, val matched: Long, val updated: Long, val unmatched: Long)
+
+/** `GET /api/projects/{id}/members`(server `ProjectMemberResponse`)の一人分。state は ACTIVE か DISABLED。 */
+@Serializable
+data class ApiProjectMember(val assigneeId: String, val displayName: String, val role: String, val state: String)
+
+/** `POST /api/projects/{id}/members/import-all`(server `ImportAllResponse`)。件数だけ。 */
+@Serializable
+data class ApiMemberImportReport(
+    val dryRun: Boolean,
+    val role: String,
+    val candidates: Long,
+    val added: Long,
+    val alreadyMember: Long,
+    val disabled: Long,
+)

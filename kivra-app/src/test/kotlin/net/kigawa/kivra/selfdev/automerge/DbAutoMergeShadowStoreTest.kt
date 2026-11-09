@@ -36,13 +36,15 @@ class DbAutoMergeShadowStoreTest {
     private fun newRun(): RunId = db.runs.create("task-1", "test", RunCompletionMode.PR_ONLY).runId
 
     /** Inserts a V40 task row linked to [runId]. [approvedBy] null and [requiresApproval] are the two inputs of the approval kind. */
+    private val project: String = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()).create("Shadow", null).projectId
+
     private fun insertTask(runId: RunId, requiresApproval: Boolean, approvedBy: String?, id: String) = transaction(db.database) {
         val now = LocalDateTime.of(2026, 1, 1, 0, 0)
         execUpdate(
             "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, target_repo, state, dependencies, requires_approval, " +
-                "run_id, approved_by, revision, attempts, version, created_at, updated_at) " +
-                "VALUES (?, 'test', ?, 'title', 'kigawa-net/kivra', 'SUBMITTED', '[]', ?, ?, ?, 0, 1, 0, ?, ?)",
-            id, "key-$id", requiresApproval, runId.value, approvedBy, now, now,
+                "run_id, approved_by, revision, attempts, version, created_at, updated_at, project_id) " +
+                "VALUES (?, 'test', ?, 'title', 'kigawa-net/kivra', 'SUBMITTED', '[]', ?, ?, ?, 0, 1, 0, ?, ?, ?)",
+            id, "key-$id", requiresApproval, runId.value, approvedBy, now, now, project,
         )
     }
 

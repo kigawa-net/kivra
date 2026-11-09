@@ -69,6 +69,7 @@ enum class MemoryRefusal {
     REF_NOT_FOUND, // V10
     QUOTA_EXCEEDED, // V12
     FACT_SHAPE_INVALID, // V13
+    NO_PROJECT, // not a validator rule: ADR 0022 PR-F, the context has no project, so nothing is written (not audited)
     NOT_OPERATOR, // V14
 }
 

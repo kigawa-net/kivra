@@ -122,8 +122,11 @@ class AutopilotTaskFlowTest {
             budgetAllows = { budget },
         )
 
+        /** Every task of these tests belongs to one project (ADR 0022 PR-F: a task without one is refused). */
+        val project: String = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()).create("Autopilot", null).projectId
+
         fun submitRoot(key: String = "key-${System.nanoTime()}"): SelfDevTask =
-            (ops.submitTask("operator", key, "Root task", "Improve the docs", "kigawa-net/kivra") as SelfDevSubmitResult.Created).task
+            (ops.submitTask("operator", key, "Root task", "Improve the docs", "kigawa-net/kivra", project) as SelfDevSubmitResult.Created).task
 
         fun planned(rootId: String): List<SelfDevTask> = ops.listTasks(500).filter { it.parentTaskId == rootId }
 

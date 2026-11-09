@@ -111,7 +111,9 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                 val now = utcNow(clock)
                 val taskId = Ulid.generate(clock)
                 // ADR 0022 PR-B: a task the system files takes the project of its repository (project_repos), else none.
-                val project = projectId ?: if (createdBy in SYSTEM_TASK_PRINCIPALS) projectIdOfRepo(targetRepo) else null
+                // ADR 0022 PR-F: a task without a project is never written (V52 makes the column NOT NULL). Nothing is inserted then.
+                val project = (projectId ?: if (createdBy in SYSTEM_TASK_PRINCIPALS) projectIdOfRepo(targetRepo) else null)
+                    ?: throw ProjectRequiredException("a task needs a project (ADR 0022)")
                 execUpdate(
                     "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, dependencies, requires_approval, revision, attempts, version, created_at, updated_at, project_id) VALUES (?, ?, ?, ?, ?, ?, 'TASK_SUBMITTED', '[]', TRUE, 0, 0, 0, ?, ?, ?)",
                     taskId, createdBy, idempotencyKey, title, body, targetRepo, now, now, project,
@@ -265,6 +267,8 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
             val current = lockTask(fence.taskId) ?: return@transaction PlanCommit.Stale
             if (!fenceMatches(current, fence)) return@transaction PlanCommit.Stale
             check(checkTaskTransition(TaskState.PLANNING, TaskState.PENDING_APPROVAL, null, contextOf(current)) is TransitionDecision.Allowed)
+            // ADR 0022 PR-F: the planned tasks take the root's project. A root without one would give NULL rows, so nothing is written.
+            val project = current.projectId ?: throw ProjectRequiredException("a plan's root needs a project (ADR 0022)")
             val revision = current.revision + 1
             val now = utcNow(clock)
             val ids = tasks.map { Ulid.generate(clock) }
@@ -282,7 +286,7 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                     ids[index], current.createdBy, "plan:${current.taskId}:r$revision:${index + 1}", plan.title, plan.body, current.targetRepo,
                     plan.initialState.name, if (queued) AutopilotReason.AUTO_APPROVED.name else null,
                     JSON.encodeToString(ListSerializer(String.serializer()), dependencies), plan.requiresApproval, current.taskId, now, now,
-                    current.projectId,
+                    project,
                 )
             }
             val changed = execUpdate(

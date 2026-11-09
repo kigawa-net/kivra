@@ -62,6 +62,20 @@ data class MemoryFilter(
 /** Counts for the operator's view (ADR 0016 P2). [tombstones] are the DELETED notes; [deletionAudit] sums the DELETED audit rows. */
 data class MemoryAuditSummary(val tombstones: Int, val deletionAudit: Int)
 
+/**
+ * The rows of `selfdev_memory_records` with no project (ADR 0022 PR-F, the check before V52). Counts only. This file is the only one that
+ * names the memory tables (SelfDevMemoryArchitectureTest).
+ */
+internal fun countUnassignedMemoryRecords(dataSource: javax.sql.DataSource): Long =
+    dataSource.connection.use { connection ->
+        connection.createStatement().use { statement ->
+            statement.executeQuery("SELECT COUNT(*) FROM selfdev_memory_records WHERE project_id IS NULL").use { rs ->
+                rs.next()
+                rs.getLong(1)
+            }
+        }
+    }
+
 sealed interface MemorySaveResult {
     data class Written(val recordId: String) : MemorySaveResult
     data class Duplicate(val recordId: String) : MemorySaveResult
@@ -123,8 +137,10 @@ class SelfDevMemoryRepository(
                     MemorySaveResult.Duplicate(verdict.recordId)
                 }
                 is MemoryVerdict.Accept -> {
+                    // ADR 0022 PR-F: a record with no project context is refused, not written (V52 makes the column NOT NULL).
+                    val project = projectOfContext(candidate) ?: return@transaction MemorySaveResult.Refused(MemoryRefusal.NO_PROJECT)
                     val id = Ulid.generate(clock)
-                    insertRecord(id, candidate, verdict.normalized, now)
+                    insertRecord(id, candidate, verdict.normalized, now, project)
                     insertEvent(EVENT_WRITTEN, id, null, null, null, verdict.normalized.bodyChars, verdict.normalized.actorHash, now)
                     MemorySaveResult.Written(id)
                 }
@@ -451,13 +467,19 @@ class SelfDevMemoryRepository(
     }
 
     /** The only INSERT into `selfdev_memory_records`. Called only by [save], after the validator accepted the candidate. */
-    private fun org.jetbrains.exposed.sql.Transaction.insertRecord(id: String, c: MemoryCandidate, n: NormalizedMemory, now: LocalDateTime) {
+    private fun org.jetbrains.exposed.sql.Transaction.insertRecord(
+        id: String,
+        c: MemoryCandidate,
+        n: NormalizedMemory,
+        now: LocalDateTime,
+        project: String,
+    ) {
         execUpdate(
             "INSERT INTO selfdev_memory_records (record_id, kind, source_kind, trust_tier, goal_id, plan_id, run_id, task_ordinal, body, " +
                 "body_sha256, body_chars, code, count_value, identity_sha256, status, created_by_hash, created_at, deleted_at, delete_reason_code, project_id) " +
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, NULL, NULL, ?)",
             id, n.kind.name, n.source.name, n.tier.name, c.goalId, c.planId, c.runId, c.taskOrdinal, n.body, n.bodySha256, n.bodyChars,
-            n.code, n.countValue, n.identitySha256, n.actorHash, now, projectOfContext(c),
+            n.code, n.countValue, n.identitySha256, n.actorHash, now, project,
         )
     }
 

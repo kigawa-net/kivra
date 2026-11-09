@@ -72,11 +72,12 @@ internal val MIGRATION_FILES = mapOf(
     49 to "V49__order_cycle_on_tasks.sql",
     50 to "V50__project_scope_columns.sql",
     51 to "V51__project_members_repos_budgets.sql",
+    52 to "V52__project_scope_not_null.sql",
 )
 
 /** The versions applied on the full chain. V22 and V30 are never used on this branch (reserved gaps), so the list skips them. */
 internal val EXPECTED_APPLIED_VERSIONS: List<String> =
-    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51")
+    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52")
 
 /**
  * Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved; V30 is left
@@ -206,10 +207,11 @@ class MigrationChainTest {
     /**
      * V50 and V51 (ADR 0022, expand only). A task or memory row written with the pre-V50 column list is accepted and keeps
      * project_id NULL. The new project tables take rows, and a project that still owns a task cannot be deleted (RESTRICT).
+     * Built up to V51: from V52 on, a NULL project is refused (see the V52 tests below).
      */
     @Test
-    fun `V50 and V51 keep pre-V50 rows unassigned and restrict deleting a project that owns rows`() = TestDb().use { db ->
-        classpathFlyway(db.dataSource).validate()
+    fun `V50 and V51 keep pre-V50 rows unassigned and restrict deleting a project that owns rows`() =
+        TestDb { ds -> migrateOnly(ds, *MIGRATION_FILES.keys.filter { it <= 51 }.toIntArray()) }.use { db ->
         val projectId = Ulid.generate()
         val assigneeId = Ulid.generate()
         val taskId = Ulid.generate()
@@ -267,6 +269,54 @@ class MigrationChainTest {
             execQuery("SELECT project_id FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }.single()
         })
     }
+
+    /**
+     * V52 (ADR 0022 PR-F). While a task or memory row has no project, [runMigrations] stops at V51 and does not fail: the app still starts and
+     * the row is kept. Once no such row is left, the next run applies V52, and the column refuses NULL.
+     */
+    @Test
+    fun `V52 waits while a task or memory row has no project, then applies once none is left`() =
+        TestDb { ds -> migrateOnly(ds, *MIGRATION_FILES.keys.filter { it <= 51 }.toIntArray()) }.use { db ->
+            val taskId = Ulid.generate()
+            transaction(db.database) {
+                execUpdate(
+                    """
+                    INSERT INTO selfdev_tasks
+                        (task_id, created_by, idempotency_key, title, target_repo, state, dependencies, created_at, updated_at)
+                    VALUES (?, 'operator', ?, 'title', 'owner/repo', 'TASK_SUBMITTED', '[]', NOW(6), NOW(6))
+                    """.trimIndent(),
+                    taskId, "idem-$taskId",
+                )
+                execUpdate(
+                    "INSERT INTO selfdev_memory_records (record_id, kind, source_kind, trust_tier, status, count_value, created_at) " +
+                        "VALUES (?, 'COST_FACT', 'SYSTEM', 'UNTRUSTED', 'ACTIVE', 1, NOW(6))",
+                    Ulid.generate(),
+                )
+            }
+
+            // Held: no failure, V52 not applied, the NULL rows are kept.
+            runMigrations(db.dataSource)
+            assertTrue("52" !in appliedVersions(db.dataSource))
+            assertEquals(1, db.count("selfdev_tasks", "project_id IS NULL"))
+            assertEquals(1, db.count("selfdev_memory_records", "project_id IS NULL"))
+
+            // Assigned (the backfill does this in production): the next run applies V52.
+            val projectId = Ulid.generate()
+            transaction(db.database) {
+                execUpdate("INSERT INTO projects (project_id, name, created_at, updated_at) VALUES (?, 'p', NOW(6), NOW(6))", projectId)
+                execUpdate("UPDATE selfdev_tasks SET project_id = ? WHERE task_id = ?", projectId, taskId)
+                execUpdate("UPDATE selfdev_memory_records SET project_id = ?", projectId)
+            }
+            runMigrations(db.dataSource)
+            classpathFlyway(db.dataSource).validate()
+            assertEquals(EXPECTED_APPLIED_VERSIONS, appliedVersions(db.dataSource))
+            assertFailsWith<Exception> {
+                transaction(db.database) { execUpdate("UPDATE selfdev_tasks SET project_id = NULL WHERE task_id = ?", taskId) }
+            }
+            assertEquals(projectId, transaction(db.database) {
+                execQuery("SELECT project_id FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }.single()
+            })
+        }
 
     @Test
     fun `a late migration is applied out of order without skipping or repairing history`() {
@@ -404,6 +454,13 @@ internal fun classpathFlyway(dataSource: DataSource): Flyway =
 
 internal fun appliedVersions(dataSource: DataSource): List<String> =
     classpathFlyway(dataSource).info().applied().map { it.version.version }
+
+/**
+ * The schema before the ADR 0022 PR-F contract (V1 to V51). Tests that need rows with no project (the legacy rows that the backfill
+ * assigns) build the schema with this, because from V52 the column refuses NULL. Use with `TestDb(::migrateBeforeContract)`.
+ */
+internal fun migrateBeforeContract(dataSource: DataSource) =
+    migrateOnly(dataSource, *MIGRATION_FILES.keys.filter { it <= 51 }.toIntArray())
 
 /** Applies only the given versions, in order, from copies of the real migration files. */
 internal fun migrateOnly(dataSource: DataSource, vararg versions: Int) {

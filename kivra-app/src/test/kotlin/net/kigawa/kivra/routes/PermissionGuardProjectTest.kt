@@ -48,6 +48,12 @@ class PermissionGuardProjectTest {
             if (fail) throw IllegalStateException("store down")
             return map[projectId to assigneeId]
         }
+
+        override fun projectsOf(assigneeId: String): Set<String> {
+            calls++
+            if (fail) throw IllegalStateException("store down")
+            return map.keys.filter { it.second == assigneeId }.map { it.first }.toSet()
+        }
     }
 
     private val assignees = mapOf(

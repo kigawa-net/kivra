@@ -644,7 +644,7 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 
 **注意（enforce の前に必ず確認する）**
 
-- メンバーのいないプロジェクトで `enforce` にすると、グローバル ADMIN 以外の全員が操作できなくなる。`enforce` にする前に、下の「enforce へ進む手順」でメンバーを登録する（メンバーの登録の API は PR-D2 で入った）。
+- メンバーのいないプロジェクトで `enforce` にすると、グローバル ADMIN 以外の全員が操作できなくなる。読み取りも同じで、そのプロジェクトは一覧から消え、単体は 404 になる（PR-D3）。`enforce` にする前に、下の「enforce へ進む手順」でメンバーを登録する（メンバーの登録の API は PR-D2 で入った）。
 - shadow のログで `PROJECT_NOT_MEMBER` が出る操作は、enforce にすると拒否される操作である。運用者の操作が出ていないかを、shadow で確かめる。
 - 戻し方: `KIVRA_SELFDEV_PROJECT_MODE` を `off`（または削除）にして再起動する。データは変えない。
 
@@ -666,8 +666,30 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 
 1. **全担当を取り込む。** 画面の「全担当を取り込む（dry-run）」、または `POST .../members/import-all?dryRun=true` で `candidates`（追加される人）を確かめる。`candidates` が想定どおりなら、`dryRun=false` で実行する（画面では「全担当を取り込む…」で確認ダイアログが出る）。role は最小の `VIEWER` で取り込み、必要な人だけ後から `PUT` で上げる。取り込みは冪等で、何度実行しても既存メンバーの role は変わらない。
 2. **役割を直す。** 操作が必要な人の role を `PUT` で上げる（例: 運用する人は `OPERATOR`、承認する人は `APPROVER`、AI の担当は `AI`）。このプロジェクトに `ADMIN` を一人は残す（残すように拒否される）。
-3. **shadow で確かめる。** `KIVRA_SELFDEV_PROJECT_MODE=shadow` にして再起動し、運用の操作（Task の投入、承認、停止の要求など）を一通り行う。構造化ログ `project shadow: wouldDeny ... code=PROJECT_NOT_MEMBER` が出なくなれば、enforce にしても拒否される操作はない。出る場合は、その人の登録（手順 1、2）に戻る。
+3. **shadow で確かめる。** `KIVRA_SELFDEV_PROJECT_MODE=shadow` にして再起動し、運用の操作（Task の投入、承認、停止の要求など）と、一覧や詳細の読み取り（プロジェクトの画面を開く）を一通り行う。構造化ログ `project shadow: wouldDeny ... code=PROJECT_NOT_MEMBER` と、読み取りの `project read shadow: wouldHide ... code=PROJECT_READ_NOT_MEMBER` / `PROJECT_READ_UNASSIGNED` が出なくなれば、enforce にしても拒否・非表示される操作・読み取りはない。出る場合は、その人の登録（手順 1、2）に戻る。
 4. **enforce にする。** `KIVRA_SELFDEV_PROJECT_MODE=enforce` にして再起動する。グローバル ADMIN は従来どおり、メンバーでなくても通る。戻すときは `shadow` か `off` にして再起動する（データは変えない）。
+
+**読み取りの絞り込み（ADR 0022 PR-D3、enforce のとき）**
+
+`KIVRA_SELFDEV_PROJECT_MODE=enforce` のときは、読み取りも所属で絞る。`off` と `shadow` は応答を変えない。
+
+| 読み取り | enforce の挙動 |
+|---|---|
+| 一覧（`GET /api/projects`、`/api/admin/runs`、`/api/runs`、`/api/selfdev/runs`、`/api/selfdev/goals`、`/api/selfdev/orders`、`/api/selfdev/stop-requests`、`/api/selfdev/memory`） | 所属のプロジェクトの行だけ。global ADMIN は全件（`project_id` が NULL の行を含む）。NULL の行は global ADMIN 以外に見えない |
+| 単体・alias（`GET /api/projects/{id}`、その `dashboard`・`repos`・`budget`・`members`・`tasks`・`orders`・`approvals`・`memory`、`/api/selfdev/goals/{id}`、`/api/selfdev/orders/{id}`、`/api/admin/runs/{id}`、`/api/runs/{id}`、`/api/selfdev/runs/{id}`、Run の実行の詳細） | 所属でなければ 404（未知のプロジェクト・行と同じ本文） |
+
+- **注意。** 所属のないプロジェクトは、global ADMIN 以外の一覧から消え、単体は 404 になる。global OPERATOR（ADMIN ではない運用者）も、所属で絞られる。`enforce` にする前に、画面を使う人が必要なプロジェクトに所属しているかを、手順 1、2 で確かめる。
+- **絞らないもの。** 担当の一覧（`ASSIGNEE_MANAGE` の画面。実質 global ADMIN だけが読める）。MCP の読み取り（`kivra_run_list` など）。集計の値（`/api/selfdev/status` の活動中の件数、記憶の `tombstones`・`deletionAudit` の件数）。これらは後続で扱う。
+- **権限の判定。** alias の承認待ち（`approvals`）と記憶（`memory`）は、所属の判定の後に、役割の判定（STOP_DECIDE、READ_TEXT）を従来どおり掛ける。旧ルート（`/api/selfdev/...?projectId=`）の一覧は、所属で絞るだけで役割の判定はしない（後続）。
+- **shadow のログ。** 固定の code だけで、人・プロジェクト・行の ID は出ない（同じ code は 60 秒に 1 回にまとめる）。
+
+| code | 意味（shadow。enforce にすると起きること） |
+|---|---|
+| `PROJECT_READ_NOT_MEMBER` | 所属でないプロジェクトの行を返した（enforce では見えない・404） |
+| `PROJECT_READ_UNASSIGNED` | `project_id` が NULL の行を返した（enforce では global ADMIN 以外に見えない） |
+| `PROJECT_LOOKUP_FAILED` | 所属の取得に失敗した（enforce では空の一覧・404） |
+
+ログの形: `project read shadow: wouldHide code=<code> source=<source> role=<role> route=<route> via=<rest|mcp> suppressed=<n>`。
 
 ### 4.18 プロジェクトの月の予算(ADR 0022 PR-E、運用者のみ)
 

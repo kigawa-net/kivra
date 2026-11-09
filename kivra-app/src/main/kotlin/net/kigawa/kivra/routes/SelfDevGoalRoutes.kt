@@ -254,7 +254,9 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         if (!deps.requireEnabled(call)) return@get
         if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ")) return@get
         val task = taskIdOf(call)?.let { deps.operations.task(it) }
-        if (task == null) {
+        // A goal of a project the caller may not read is the same 404 as a missing one (ADR 0022 PR-D3).
+        if (task != null) deps.guard.recordReadShadow(caller.access, listOf(task.projectId), "goal.read")
+        if (task == null || !deps.guard.readScope(caller.access).sees(task.projectId)) {
             call.respond(HttpStatusCode.NotFound, GoalError(TASK_NOT_FOUND))
             return@get
         }
@@ -440,12 +442,18 @@ private suspend fun listGoals(deps: SelfDevGoalRouteDeps, call: ApplicationCall)
         call.respond(HttpStatusCode.NotFound, GoalError(PROJECT_NOT_FOUND))
         return
     }
-    if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ", pinned)) return
-    val project = when (val scope = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
-        is ListScope.Refused -> return call.respond(scope.status, GoalError(scope.error))
-        is ListScope.Filtered -> scope.filter
+    if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ")) return
+    // The alias answers 404 for a project the caller may not read, as for an unknown one (ADR 0022 PR-D3). READ is held by every project role,
+    // so the membership is the whole check here.
+    val scope = deps.guard.readScope(caller.access)
+    if (pinned != null && !scope.sees(pinned)) return call.respond(HttpStatusCode.NotFound, GoalError(PROJECT_NOT_FOUND))
+    val project = when (val s = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
+        is ListScope.Refused -> return call.respond(s.status, GoalError(s.error))
+        is ListScope.Filtered -> scope.narrow(s.filter)
     }
-    call.respond(deps.operations.listTasks(LIST_LIMIT, project).map { it.summary() })
+    val rows = deps.operations.listTasks(LIST_LIMIT, project)
+    deps.guard.recordReadShadow(caller.access, rows.map { it.projectId }, "goal.read")
+    call.respond(rows.map { it.summary() })
 }
 
 private const val TASK_FIELDS_INVALID = "title must be 1-200 characters and idempotencyKey 1-128 characters, without control characters"

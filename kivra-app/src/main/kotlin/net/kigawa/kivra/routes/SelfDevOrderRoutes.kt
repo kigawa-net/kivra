@@ -175,12 +175,17 @@ private suspend fun listOrders(deps: SelfDevOrderRouteDeps, call: ApplicationCal
     if (!deps.requireEnabled(call)) return
     val pinned = call.pathProjectId()
     if (pinned != null && !deps.projects.projectExistsForPath(pinned)) return call.respond(HttpStatusCode.NotFound, OrderError(PROJECT_NOT_FOUND))
-    if (!deps.permit(call, caller, Permission.READ, "order.list", projectId = pinned)) return
-    val project = when (val scope = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
-        is ListScope.Refused -> return call.respond(scope.status, OrderError(scope.error))
-        is ListScope.Filtered -> scope.filter
+    if (!deps.permit(call, caller, Permission.READ, "order.list")) return
+    // The alias answers 404 for a project the caller may not read, as for an unknown one (ADR 0022 PR-D3). READ is held by every project role.
+    val scope = deps.guard.readScope(caller.access)
+    if (pinned != null && !scope.sees(pinned)) return call.respond(HttpStatusCode.NotFound, OrderError(PROJECT_NOT_FOUND))
+    val project = when (val s = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
+        is ListScope.Refused -> return call.respond(s.status, OrderError(s.error))
+        is ListScope.Filtered -> scope.narrow(s.filter)
     }
-    call.respond(deps.orders.list(LIST_LIMIT, project).map { it.summary() })
+    val rows = deps.orders.list(LIST_LIMIT, project)
+    deps.guard.recordReadShadow(caller.access, rows.map { it.projectId }, "order.list")
+    call.respond(rows.map { it.summary() })
 }
 
 /** POST a root order: the old route (the body's projectId) or the alias (the path's project; a body projectId must match). */
@@ -216,14 +221,19 @@ private suspend fun listApprovals(deps: SelfDevOrderRouteDeps, call: Application
     if (!deps.requireEnabled(call)) return
     val pinned = call.pathProjectId()
     if (pinned != null && !deps.projects.projectExistsForPath(pinned)) return call.respond(HttpStatusCode.NotFound, OrderError(PROJECT_NOT_FOUND))
+    // The alias answers 404 for a project the caller may not read (ADR 0022 PR-D3). The approver's role in the project is still checked after it.
+    val scope = deps.guard.readScope(caller.access)
+    if (pinned != null && !scope.sees(pinned)) return call.respond(HttpStatusCode.NotFound, OrderError(PROJECT_NOT_FOUND))
     if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.list", projectId = pinned)) return
     val state = call.request.queryParameters["state"]
     if (state != "PENDING") return call.respond(HttpStatusCode.BadRequest, OrderError(STATE_INVALID))
-    val project = when (val scope = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
-        is ListScope.Refused -> return call.respond(scope.status, OrderError(scope.error))
-        is ListScope.Filtered -> scope.filter
+    val project = when (val s = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
+        is ListScope.Refused -> return call.respond(s.status, OrderError(s.error))
+        is ListScope.Filtered -> scope.narrow(s.filter)
     }
-    call.respond(deps.orders.pendingStopRequests(LIST_LIMIT, project).map { it.response(true) })
+    val rows = deps.orders.pendingStopRequests(LIST_LIMIT, project)
+    deps.guard.recordReadShadow(caller.access, rows.map { it.projectId }, "order.stop.list")
+    call.respond(rows.map { it.response(true) })
 }
 
 private const val ORDERS_DISABLED = "self-development orders are disabled"
@@ -268,7 +278,11 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         if (!deps.requireEnabled(call)) return@get
         if (!deps.permit(call, caller, Permission.READ, "order.detail")) return@get
         val order = orderIdOf(call)?.let { deps.orders.get(it) }
-        if (order == null) return@get call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+        // An order of a project the caller may not read is the same 404 as a missing one (ADR 0022 PR-D3).
+        if (order != null) deps.guard.recordReadShadow(caller.access, listOf(order.projectId), "order.detail")
+        if (order == null || !deps.guard.readScope(caller.access).sees(order.projectId)) {
+            return@get call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+        }
         val pending = deps.orders.pendingStopRequestOf(order.orderId)
         // The title and the policy are the operators' text: returned here only, to every operator (the same as the goal detail).
         call.respond(
@@ -286,7 +300,11 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         if (!deps.requireEnabled(call)) return@get
         if (!deps.permit(call, caller, Permission.READ, "order.cycles")) return@get
         val order = orderIdOf(call)?.let { deps.orders.get(it) }
-        if (order == null) return@get call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+        // An order of a project the caller may not read is the same 404 as a missing one (ADR 0022 PR-D3).
+        if (order != null) deps.guard.recordReadShadow(caller.access, listOf(order.projectId), "order.cycles")
+        if (order == null || !deps.guard.readScope(caller.access).sees(order.projectId)) {
+            return@get call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+        }
         call.respond(deps.orders.cyclesOf(order.orderId).map { it.response() })
     }
 

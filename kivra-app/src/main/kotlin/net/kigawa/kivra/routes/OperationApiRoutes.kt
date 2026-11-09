@@ -124,7 +124,11 @@ internal fun Route.configureOperationApiRoutes(
         }
         val runId = RunId(call.pathParam("id").orEmpty())
         // getTask filters by the caller, so a Run owned by someone else is indistinguishable from a missing one.
-        if (runs.getTask(runId, principal) == null) {
+        // A run of a project the caller may not read is the same 404 as a missing one (ADR 0022 PR-D3).
+        val run = runs.getTask(runId, principal)
+        val access = guard.resolve(principal, legacyAdmin = true)
+        if (run != null) guard.recordReadShadow(access, listOf(run.projectId), "run_operations")
+        if (run == null || !guard.readScope(access).sees(run.projectId)) {
             call.respond(HttpStatusCode.NotFound, OperationApiError("run not found"))
             return@get
         }

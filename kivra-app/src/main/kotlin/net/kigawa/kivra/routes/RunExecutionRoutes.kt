@@ -304,12 +304,18 @@ private suspend fun RunExecutionDeps.admit(call: ApplicationCall): RunAccess.All
     return when (val access = gate.check(call.request.headers, runId)) {
         is RunAccess.Allowed -> {
             // After the gate's owner rule, which is unchanged. The caller passed the gate, so it is an operator by today's rule.
-            if (guard.permits(access.principal, Permission.READ, "run_execution")) {
-                access
-            } else {
+            if (!guard.permits(access.principal, Permission.READ, "run_execution")) {
                 call.respond(HttpStatusCode.Forbidden, ExecutionError(FORBIDDEN))
-                null
+                return null
             }
+            // A run of a project the caller may not read is the same 404 as a missing one (ADR 0022 PR-D3). The stream goes through here too.
+            val guardAccess = guard.resolve(access.principal, legacyAdmin = true)
+            guard.recordReadShadow(guardAccess, listOf(access.run.projectId), "run_execution")
+            if (!guard.readScope(guardAccess).sees(access.run.projectId)) {
+                call.respond(HttpStatusCode.NotFound, ExecutionError(RUN_NOT_FOUND))
+                return null
+            }
+            access
         }
         RunAccess.Unauthenticated -> {
             call.respond(HttpStatusCode.Unauthorized, ExecutionError(UNAUTHORIZED))

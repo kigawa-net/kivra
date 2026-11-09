@@ -115,3 +115,56 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - **既存の注意(挙動は変えていない)。** `ProjectRoutes.kt` の `/api/projects/{projectId}/...`(repos、members、budget、dashboard)と、`/api/selfdev/.../{id}` の一部も `call.parameters` を読むため、同名のクエリで path が隠れる(例: `GET /api/projects/A/members?projectId=B` は B のメンバーを返す。運用者の権限は必要)。修正済み(ブランチ `fix/path-param-shadowing`): `routes/` の path パラメータはすべて `pathParam()`(`RoutingRequest.pathVariables`、path の捕捉だけ)で読む。`call.parameters` を `routes/` で使うことは `PathParamArchitectureTest` で禁じる。
 - **Compose UI(`kivra-compose-ui`)は変えていない。** 旧ルートの応答が変わらないので、そのまま動く。
 - **残り(後続)。** PR-F(NULL の行を消す)、`/api/selfdev/runs` と `POST /api/selfdev/tasks` の別名(Run の一覧・投入)と、その Deprecation。
+
+## 進捗(PR-D3: 読み取りの認可、ブランチ `feat/project-scope-read-authz`)
+
+- マイグレーションは追加しない。新しい環境変数も増やさない。`KIVRA_SELFDEV_PROJECT_MODE` の値に従う。既定の `off` は 1 バイトも変えない(応答も、読む先も)。
+- **読み取りの経路と、前後の挙動。** 「前」は PR-D2 までの enforce、「後」は PR-D3 の enforce(shadow は両方とも応答を変えない)。
+
+| 経路 | 前(enforce) | 後(enforce) |
+|---|---|---|
+| `GET /api/projects` | READ があれば全件 | 所属のプロジェクトのみ。global ADMIN は全件 |
+| `GET /api/projects/{id}` | 全件を返す | 所属のみ。それ以外は 404(未知と同じ) |
+| `GET /api/projects/{id}/dashboard`、`/repos` | 全件を返す | 所属のみ。それ以外は 404 |
+| `GET /api/projects/{id}/budget`、`/members`(ORDER_MANAGE) | 運用者なら全件 | 所属のみ(global ADMIN は全件)。それ以外は 404 |
+| `GET /api/admin/runs`、`GET /api/runs`、`GET /api/selfdev/runs`(一覧、`?projectId=`) | 全件(admin)、本人の Run(Task API) | SQL で絞る。所属のみ。NULL は global ADMIN のみ |
+| `GET /api/admin/runs/{id}`、`GET /api/runs/{id}`、`GET /api/selfdev/runs/{id}`、`GET /api/runs/{id}/operations`、`/api/admin/runs/{runId}/execution`(events、stream を含む) | 全件、または本人の Run | 所属の Run のみ。それ以外は 404 |
+| `GET /api/selfdev/goals`(旧)、`GET /api/projects/{id}/tasks`(alias) | 全件。alias は非メンバーに 403 | 旧: 所属で絞る。alias: 非メンバーは 404 |
+| `GET /api/selfdev/goals/{id}` | 全件を返す | 所属の目標のみ。それ以外は 404 |
+| `GET /api/selfdev/orders`(旧)、`/api/projects/{id}/orders`(alias) | 全件。alias は非メンバーに 403 | 旧: 所属で絞る。alias: 非メンバーは 404 |
+| `GET /api/selfdev/orders/{id}`、`/cycles` | 全件を返す | 所属の order のみ。それ以外は 404 |
+| `GET /api/selfdev/stop-requests`(旧)、`/api/projects/{id}/approvals`(alias) | 全件(STOP_DECIDE)。alias は非メンバーに 403 | 旧: 所属で絞る。alias: 非メンバーは 404、役割の STOP_DECIDE は従来どおり判定 |
+| `GET /api/selfdev/memory`(旧)、`/api/projects/{id}/memory`(alias) | 全件(READ_TEXT)。alias は非メンバーに 403 | 旧: 所属で絞る。alias: 非メンバーは 404、役割の READ_TEXT は従来どおり判定 |
+| `GET /api/selfdev/assignees`(旧)、`/api/projects/{id}/assignees`、`/api/selfdev/assignees/{id}/...` | ASSIGNEE_MANAGE(実質 global ADMIN のみ) | 変更なし(担当は運用者の一覧で、プロジェクトの行ではない) |
+| `GET /api/selfdev/me`、`/api/selfdev/autopilot`、`/api/selfdev/autopilot/promotion`、`/api/selfdev/status`、`/api/admin/budget/status`、`/api/admin/budget/fx` | 全体の値 | 変更なし(プロジェクト単位の行ではない) |
+| `GET /api/dev/*` | DB を使わない模擬応答 | 変更なし |
+| MCP の読み取り(`kivra_run_list`、`kivra_run_get`、`kivra_order_list`、`kivra_order_get` など) | 全件 | **変更なし(残り。後続で絞る)** |
+| `GET /api/agent/v1/attempts/{id}/status`(エージェント向け) | エージェントのトークン | **変更なし(残り)** |
+
+- **判定の入口(新しいもの)。** `PermissionService.readScope`(enforce のときだけ絞る。shadow と off は `All`)と `readsAsEnforce`(shadow が「enforce なら隠れる行」を数えるための判定)。`ReadScope` は `All`、`Members(ids)`、`Refused`(store の失敗)。`ProjectMemberLookup.projectsOf` を足した(所属のプロジェクトの ID の集合。1 回の SELECT)。
+- **SQL で絞る。** 一覧は `ProjectFilter.Within(ids)` を `WHERE` に入れ、`LIMIT` の前に効かせる(Kotlin で後から捨てると件数が欠ける)。`Within(empty)` は 0 件。
+- **shadow は応答を変えず、固定の code のログだけ。** `project read shadow: wouldHide code=PROJECT_READ_NOT_MEMBER|PROJECT_READ_UNASSIGNED|PROJECT_LOOKUP_FAILED source=... role=... route=... via=... suppressed=N`。人、プロジェクト、行の ID は出さない。同じ code は 60 秒に 1 回(既存の shadow と同じ抑制)。
+- **自律ループは絞らない。** Planner、Dispatcher、周回、停止の確認、自動マージ、インシデントの修正は、読み取りの経路を通らない。`ProjectScopeReadTest` の「自律ループは NULL の行も取る」を、そのまま通す。
+
+判断した点:
+
+1. **非メンバーには 404 を返す(403 ではない)。** 未知のプロジェクトと同じ本文の 404 にして、存在を漏らさない。書き込みの側は従来どおり非メンバーに 403 を返す(未知は 404、非メンバーは 403 なので、存在は書き込みでは区別できる)。これは残り(下記)。
+2. **「全件を見られる」のは global ADMIN(assignee の role が ADMIN)だけ。** `projectDenial` と同じ判定。global OPERATOR(ORDER_MANAGE)は、ほかの運用者と同じく所属で絞られる。運用者の「全件」は、global ADMIN にだけ残る。
+3. **NULL の行は enforce では global ADMIN だけが見る。** 一般のメンバーに、どのプロジェクトのものか分からない行を見せない。shadow は `PROJECT_READ_UNASSIGNED` を出す(仕様の例の 2 つに加えた。enforce にすると隠れる行を、shadow で確かめられるようにするため)。
+4. **store の失敗は enforce で安全側。** 一覧は空(行を返さない)、単体は 404。shadow は応答を変えず `PROJECT_LOOKUP_FAILED` を出す。global ADMIN は store を読まない。
+5. **alias の読み取りは「所属」で判定する。** READ は全てのプロジェクトのロールが持つ(`ROLE_PERMISSIONS`)ので、READ の一覧は所属の判定だけで足りる。READ_TEXT(memory)と STOP_DECIDE(承認待ち)は、所属の判定の後に、役割の判定(`checkInProject`)を従来どおり掛ける。
+6. **旧ルートの一覧は、所属で絞るだけで、役割の判定はしない。** 従来どおり(旧ルートは `checkInProject` を通らない)。役割で制限したいなら alias を使う。これは残り(役割の判定の揃え)。
+7. **Task API と `/api/selfdev/runs` は、本人の Run にも所属の絞りを掛ける。** 本人が作った Run でも、抜けたプロジェクトの Run は enforce では見えない(所属の判定は「今」の所属で行う)。
+8. **担当の一覧は絞らない。** `ASSIGNEE_MANAGE` は、実質 global ADMIN だけが持つ。担当はプロジェクトの行ではない。
+9. **既存の `ProjectFilter` と `ProjectFilter.Within` の違い。** `Within` は、所属の集合の絞り(読み取りの範囲)専用。旧ルートの `?projectId=` の意味(`unassigned`、ULID、全件)は変えない。
+
+確認: `ProjectReadScopeTest`(route、H2)と `ProjectDenialTest`(`readScope` の単体)、`PermissionGuardProjectTest`(fake の `projectsOf`)。
+
+残り(後続):
+
+- MCP の読み取り(`kivra_run_list`、`kivra_run_get`、`kivra_order_list`、`kivra_order_get`)を絞る。
+- 集計の値: `/api/selfdev/status` の活動中の件数、`/api/selfdev/memory` の `tombstones`・`deletionAudit`(全体の件数)。
+- `/api/agent/v1/attempts/{id}/status`(エージェント向け)。
+- 書き込みの存在の区別(非メンバーの 403 と未知の 404)を、読み取りと同じ 404 に揃えるか。
+- 旧ルートの役割の判定(判断 6)。
+- Compose UI の 404 と空の一覧の扱い(下記の確認結果を PR 本文に書く。UI は別 PR)。

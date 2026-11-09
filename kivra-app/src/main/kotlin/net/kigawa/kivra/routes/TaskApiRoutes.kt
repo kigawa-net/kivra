@@ -209,7 +209,10 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             return@get
         }
         val run = call.pathParam("id")?.let { runs.getTask(RunId(it), principal) }
-        if (run == null) call.respond(HttpStatusCode.NotFound, TaskApiError("run not found"))
+        // A run of a project the caller may not read is the same 404 as a missing one (ADR 0022 PR-D3).
+        val access = guard.resolve(principal, legacyAdmin = true)
+        if (run != null) guard.recordReadShadow(access, listOf(run.projectId), "task_get")
+        if (run == null || !guard.readScope(access).sees(run.projectId)) call.respond(HttpStatusCode.NotFound, TaskApiError("run not found"))
         else call.respond(runs.viewOf(run, targetRepo, withEvents = true, projectRepo = projectRepo))
     }
 
@@ -226,7 +229,11 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
         // The project narrowing (ADR 0022 PR-D): absent is every run, as before. A run with no project is `unassigned`.
         val project = projectFilterOf(call.request.queryParameters["projectId"])
             ?: return@get call.respond(HttpStatusCode.BadRequest, TaskApiError(PROJECT_FILTER_INVALID))
-        call.respond(runs.listTasks(principal, limit = 50, project = project).map { runs.viewOf(it, targetRepo, projectRepo = projectRepo) })
+        // The rows the caller may read (ADR 0022 PR-D3): narrowed in SQL, before the limit.
+        val access = guard.resolve(principal, legacyAdmin = true)
+        val rows = runs.listTasks(principal, limit = 50, project = guard.readScope(access).narrow(project))
+        guard.recordReadShadow(access, rows.map { it.projectId }, "task_list")
+        call.respond(rows.map { runs.viewOf(it, targetRepo, projectRepo = projectRepo) })
     }
 
     post("/api/runs/{id}/comments") {

@@ -89,12 +89,26 @@ internal fun Route.configureProjectRoutes(
         return false
     }
 
+    /**
+     * Whether the caller may read [projectId] (ADR 0022 PR-D3, the read scope). A project it may not read is a 404, the same as an unknown
+     * project, so the answer does not tell them apart. Shadow only logs.
+     */
+    fun mayReadProject(principal: String, projectId: String, route: String): Boolean {
+        val access = guard.resolve(principal, legacyAdmin = true)
+        guard.recordReadShadow(access, listOf(projectId), route)
+        return guard.readScope(access).sees(projectId)
+    }
+
     route("/api/projects") {
         get {
             val principal = call.principalOr401() ?: return@get
             if (!call.permitOr403(principal, Permission.READ, "project_list")) return@get
+            // The projects the caller may read (ADR 0022 PR-D3): every project unless ENFORCE; then its member projects only.
+            val access = guard.resolve(principal, legacyAdmin = true)
+            val scope = guard.readScope(access)
             val projects = projectRepo.listAll()
-            call.respond(projects.map { it.toResponse() })
+            guard.recordReadShadow(access, projects.map { it.projectId }, "project_list")
+            call.respond(projects.filter { scope.sees(it.projectId) }.map { it.toResponse() })
         }
         post {
             val principal = call.principalOr401() ?: return@post
@@ -133,7 +147,9 @@ internal fun Route.configureProjectRoutes(
             if (!call.permitOr403(principal, Permission.READ, "project_repos_list")) return@get
             val projectId = call.pathParam("projectId")
                 ?: return@get call.respond(HttpStatusCode.NotFound)
-            if (projectRepo.get(projectId) == null) return@get call.respond(HttpStatusCode.NotFound)
+            if (projectRepo.get(projectId) == null || !mayReadProject(principal, projectId, "project_repos_list")) {
+                return@get call.respond(HttpStatusCode.NotFound)
+            }
             call.respond(projectRepo.listRepos(projectId).map { ProjectRepoResponse(repoKey = it) })
         }
         put {
@@ -180,7 +196,9 @@ internal fun Route.configureProjectRoutes(
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_members_list")) return@get
             val projectId = call.pathParam("projectId")
                 ?: return@get call.respond(HttpStatusCode.NotFound)
-            if (!members.projectExists(projectId)) return@get call.respond(HttpStatusCode.NotFound)
+            if (!members.projectExists(projectId) || !mayReadProject(principal, projectId, "project_members_list")) {
+                return@get call.respond(HttpStatusCode.NotFound)
+            }
             call.respond(members.list(projectId).map { it.toResponse() })
         }
         // Every ACTIVE assignee that is not a member yet, added with the given role. `dryRun=true` (the default) only counts.
@@ -271,7 +289,9 @@ internal fun Route.configureProjectRoutes(
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_budget_get")) return@get
             val projectId = call.pathParam("projectId")
                 ?: return@get call.respond(HttpStatusCode.NotFound)
-            if (projectRepo.get(projectId) == null) return@get call.respond(HttpStatusCode.NotFound)
+            if (projectRepo.get(projectId) == null || !mayReadProject(principal, projectId, "project_budget_get")) {
+                return@get call.respond(HttpStatusCode.NotFound)
+            }
             call.respond(budgets.projectBudget(projectId).toResponse())
         }
         // Sets the monthly limit (whole yen) and the soft ratio (default 0.8). Both are checked before anything is written: 400 otherwise.
@@ -312,6 +332,7 @@ internal fun Route.configureProjectRoutes(
                 ?: return@get call.respond(HttpStatusCode.NotFound)
             val project = projectRepo.get(projectId)
                 ?: return@get call.respond(HttpStatusCode.NotFound)
+            if (!mayReadProject(principal, projectId, "project_dashboard")) return@get call.respond(HttpStatusCode.NotFound)
             val everyRun = guard.permits(principal, Permission.ORDER_MANAGE, "project_dashboard")
             val scope = if (everyRun) null else principal
             val countsByState = runs.countProjectRunsByState(projectId, scope)
@@ -337,7 +358,7 @@ internal fun Route.configureProjectRoutes(
             val projectId = call.pathParam("projectId")
                 ?: return@get call.respond(HttpStatusCode.NotFound)
             val project = projectRepo.get(projectId)
-            if (project == null) {
+            if (project == null || !mayReadProject(principal, projectId, "project_get")) {
                 call.respond(HttpStatusCode.NotFound)
             } else {
                 call.respond(project.toResponse())

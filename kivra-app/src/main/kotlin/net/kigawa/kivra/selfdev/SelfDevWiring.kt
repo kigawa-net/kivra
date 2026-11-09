@@ -222,7 +222,11 @@ internal fun buildSelfDev(
         taskTexts = DbTaskTextSource,
         coding = coding,
         references = TaskReferenceResolvers(listOf(GitHubIssueResolver(github, config.repo))),
-        autoScope = PlanTaskAutoScopeGuard(SelfDevOperatorRepository(database)),
+        // The approval setting picks the path scope of the re-check (stage 2 or stage 3). Without the autopilot, no task is auto-approved.
+        autoScope = PlanTaskAutoScopeGuard(
+            SelfDevOperatorRepository(database),
+            autopilot.config?.approval ?: AutopilotApproval.REQUIRED,
+        ),
         prRebaser = prRebaser,
         incidentOrigin = incidentOrigin,
     )

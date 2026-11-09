@@ -1644,7 +1644,7 @@ dev での有効化の手順は §7.5。
 | 名前 | 既定 | 内容 |
 |---|---|---|
 | `KIVRA_SELFDEV_AUTOPILOT_ENABLED` | `false` | `true` と `false` 以外は起動に失敗する。`true` は、自己開発が有効(`KIVRA_SELFDEV_ENABLED=true`)で、`KIVRA_SELFDEV_RUNTIME=cli` のときだけ許す |
-| `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` | `required` | `required` は全タスクを運用者が承認する。`auto` は段階 2 の規則に当たるタスクを承認なしで投入する(実際の差分の再検査は未実装。ADR 0011 §6.2)。値は `required` / `auto` のどちらか。**denylist のパスのタスクは、`auto` でも必ず承認が要る**(ADR 0011 §4) |
+| `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` | `required` | `required` は全タスクを運用者が承認する。`auto` は段階 2 の規則に当たるタスクを承認なしで投入する(実際の差分は §7.4b で再検査する。ADR 0011 §6.2)。`full` は段階 3 で、ガード(§5.2)の範囲で全タスクを承認なしで投入する(§7.4d)。値は `required` / `auto` / `full` のどれか。**denylist のパスのタスクは、`auto` と `full` でも必ず承認が要る**(ADR 0011 §4) |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_PENDING_PRS` | `3` | マージ待ちの自己開発 PR の上限。1〜20 |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES` | `3` | 連続失敗でサーキットブレーカーを開く数。1〜20(この範囲は PR A で決めた値。ADR に範囲の記載は無い) |
 | `KIVRA_SELFDEV_AUTOPILOT_MAX_RUNS_PER_DAY` | `5` | 1 日(UTC)に投入する Run の数。1〜100(この範囲も PR A で決めた値) |
@@ -1842,6 +1842,18 @@ dev での有効化の手順は §7.5。
 **注意**:
 - 承認し直す前に、同じ原因が直っているか確かめる。再承認で同じ差分が出ると、承認済みのため再検査されず、そのままコミットされうる。
 - 範囲外の判定は、PatchPolicy より後に行う。PatchPolicy が直接拒否するパス(`.github/**` など)は、再検査の前に `POLICY_REJECTED` で止まり、失敗として数えられる(安全側の動き)。
+
+### 7.4d 段階 3(`approval = full`)の動きと有効化(ADR 0011 §6.1)
+
+`KIVRA_SELFDEV_AUTOPILOT_APPROVAL=full` にすると、計画された全タスクを承認なしで投入する。ガード(§5.2)は全て効いたままである。
+
+- **段階 2 から緩めたもの**: 計画のパスが `docs/**`、テストソース、`README.md` だけという制限、と `sizeEstimate = S` という制限。パスは PatchPolicy の許可リスト(`kivra-*/src/**`、`docs/**`、`README.md`)の範囲なら投入する。
+- **残したもの**: denylist に触れるタスク(`requires_approval`)は、段階 3 でも運用者の承認を待つ(`PENDING_APPROVAL`)。計画のパスが 3 件を超えるタスクも承認を待つ。投入後の差分の再検査(§7.4b と同じ `AUTO_SCOPE_EXCEEDED`)は、denylist、3 パス以下、200 行以下を見る。PatchPolicy は最終ゲートのまま。マージは人が行う(変更なし)。
+- **再検査の範囲の緩め**: `full` の再検査は、パスの範囲を「PatchPolicy の許可リスト、denylist に触れない」にする。`docs` だけ、という制限は外す。
+- **`required` と `auto` の挙動は変えない**。
+- **有効化**: §7.5 の手順のとおり、`KIVRA_SELFDEV_AUTOPILOT_APPROVAL` を `full` にして再起動する。段階 2 から上げるとき、昇格条件(§7.4c、ADR 0011 §6.3 の段階 2 → 3)を満たしていることを確かめる。降格は同じ値を `auto` か `required` に戻して再起動する。
+- **見る点**: 差分の範囲外で止まったタスクは `AUTO_SCOPE_EXCEEDED`(承認待ち)として出る。`full` で投入されたタスクの PR は、従来どおり Draft で作られ、マージは人が行う。
+- **注意**: `PromotionReadout`(§7.4c)は段階 1 → 2 の条件だけを表示する。段階 2 → 3 の条件は画面に出ない。`full` のときも、その表示は変わらない。
 
 ### 7.4c 段階 1 → 2 の昇格条件の見方(ADR 0011 §6.3、Issue #233)
 

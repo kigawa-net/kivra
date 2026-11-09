@@ -8,8 +8,13 @@ import org.slf4j.LoggerFactory
 enum class AutopilotApproval {
     /** Every task waits for the operator. The default. */
     REQUIRED,
-    /** Tasks that the stage rules allow are submitted without asking. Denylisted tasks still wait (see [AutopilotConfig.requiresApproval]). */
+    /** Tasks that the stage 2 rules allow are submitted without asking. Denylisted tasks still wait (see [AutopilotConfig.requiresApproval]). */
     AUTO,
+    /**
+     * Stage 3 (ADR 0011 section 6.1): every task is submitted without asking, within the guards of section 5.2. Denylisted tasks and tasks
+     * with more than three paths still wait (see [AutopilotConfig.requiresApproval]). Merge stays with the operator.
+     */
+    FULL,
 }
 
 /**
@@ -50,8 +55,8 @@ data class AutopilotConfig(
  *   The FX rate's age is not checked here: an expired rate stops the USD calls at run time, and [net.kigawa.kivra.fx.FxExpiryWatcher] logs it.
  * - When enabled, the limits are logged once (numbers only). A pending pull request limit above the concurrent Run limit is logged as
  *   a WARN: a PULL_REQUEST Run counts as an active Run, so the concurrent limit is the one that holds first.
- * - `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` is `required` (default) or `auto`. A denylisted task is always approved by the operator,
- *   under `auto` too ([AutopilotConfig.requiresApproval]).
+ * - `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` is `required` (default), `auto` (stage 2) or `full` (stage 3). A denylisted task is always
+ *   approved by the operator, under `auto` and `full` too ([AutopilotConfig.requiresApproval]).
  * - Numbers are bounded; an out-of-range value is a startup failure. Every failure message names the variable, never its value.
  *   None of these values is a secret.
  */
@@ -125,10 +130,11 @@ class AutopilotSettings private constructor(
             check(missing.isEmpty()) {
                 "$ENV_ENABLED=true requires the CLI cost ledger (ADR 0011 section 5.3, #230); missing: ${missing.joinToString(", ")}"
             }
-            val approval = when (val raw = env[ENV_APPROVAL]?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_APPROVAL) {
+            val approval = when (env[ENV_APPROVAL]?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_APPROVAL) {
                 "required" -> AutopilotApproval.REQUIRED
                 "auto" -> AutopilotApproval.AUTO
-                else -> throw IllegalStateException("$ENV_APPROVAL must be required or auto")
+                "full" -> AutopilotApproval.FULL
+                else -> throw IllegalStateException("$ENV_APPROVAL must be required, auto or full")
             }
             val shadow = autoMergeShadow(env)
             val config = AutopilotConfig(

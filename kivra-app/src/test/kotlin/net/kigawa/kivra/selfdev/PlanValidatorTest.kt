@@ -2,6 +2,7 @@ package net.kigawa.kivra.selfdev
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import net.kigawa.kivra.core.autopilot.TaskState
@@ -11,6 +12,7 @@ class PlanValidatorTest {
 
     private val required = AutopilotConfig(AutopilotApproval.REQUIRED, 3, 3, 5, 50)
     private val auto = AutopilotConfig(AutopilotApproval.AUTO, 3, 3, 5, 50)
+    private val full = AutopilotConfig(AutopilotApproval.FULL, 3, 3, 5, 50)
 
     private fun task(
         title: String = "Title",
@@ -161,6 +163,42 @@ class PlanValidatorTest {
         ).tasks
         assertEquals(listOf(TaskState.PENDING_APPROVAL, TaskState.PENDING_APPROVAL, TaskState.PENDING_APPROVAL), waiting.map { it.initialState })
         assertTrue(waiting.all { it.requiresApproval })
+    }
+
+    @Test
+    fun `under full a task outside the stage 2 scope is queued - any size, any allowed path, up to three paths`() {
+        val queued = valid(
+            plan(
+                task(paths = """["kivra-app/src/main/kotlin/A.kt"]""", size = "\"L\""),
+                task(paths = """["kivra-app/src/main/kotlin/A.kt","kivra-app/src/main/kotlin/B.kt","docs/a.md"]""", size = "\"M\""),
+                task(paths = """["docs/a.md"]""", size = "\"S\""),
+            ),
+            full,
+        ).tasks
+        assertEquals(listOf(TaskState.QUEUED, TaskState.QUEUED, TaskState.QUEUED), queued.map { it.initialState })
+        assertTrue(queued.none { it.requiresApproval })
+    }
+
+    @Test
+    fun `under full a denylisted task and a task over three paths still wait for the operator`() {
+        val waiting = valid(
+            plan(
+                task(paths = """["kivra-app/src/main/kotlin/net/kigawa/kivra/auth/Login.kt"]""", size = "\"S\""),
+                task(paths = """[".github/workflows/ci.yml"]""", size = "\"S\""),
+                task(paths = """["kivra-app/src/main/kotlin/A.kt","kivra-app/src/main/kotlin/B.kt","kivra-app/src/main/kotlin/C.kt","kivra-app/src/main/kotlin/D.kt"]""", size = "\"S\""),
+            ),
+            full,
+        ).tasks
+        assertEquals(List(3) { TaskState.PENDING_APPROVAL }, waiting.map { it.initialState })
+        assertTrue(waiting.all { it.requiresApproval })
+        // The flag itself: a denylisted path always needs approval under full, and nothing else does.
+        assertTrue(full.requiresApproval(denylisted = true))
+        assertFalse(full.requiresApproval(denylisted = false))
+    }
+
+    @Test
+    fun `under full the allowlist still applies - a path outside it is refused, not queued`() {
+        assertEquals(PlanRejectReason.PATH_NOT_ALLOWED, invalid(plan(task(paths = """["src/x.kt"]""", size = "\"S\"")), full))
     }
 
     @Test

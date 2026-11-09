@@ -38,15 +38,20 @@ sealed interface AutoScopeVerdict {
 }
 
 /**
- * The rule of section 6.2 on a change set. In scope when every path is in the stage-2 scope ([PlanValidator.isAutoScopePath]: docs,
- * kivra test sources, README.md, not denylisted), there are at most [MAX_PATHS] distinct paths, and the changed lines are at most
- * [MAX_LINES].
+ * The rule of section 6.2 on a change set. In scope when every path is in the scope of [approval]: the stage-2 scope
+ * ([PlanValidator.isAutoScopePath]: docs, kivra test sources, README.md, not denylisted) for `required` and `auto`, and the stage-3 scope
+ * ([PlanValidator.isFullScopePath]: the PatchPolicy allowlist, not denylisted) for `full`. Under every mode there are at most [MAX_PATHS]
+ * distinct paths, and the changed lines are at most [MAX_LINES]. The line and path caps are guards of section 5.2, so `full` keeps them.
  *
  * Lines are counted from what the patch carries: a write counts the lines of its new content, and a delete counts the bytes of the
  * deleted file (a file has at least one byte per line, so this is an upper bound). The old content of a written file is not in the
  * patch, so the lines it removed are not counted. The file count and the path rules still apply to it.
  */
-internal fun autoScopeOf(patch: PatchSet, sizeOf: (String) -> Long?): AutoScopeVerdict {
+internal fun autoScopeOf(
+    patch: PatchSet,
+    sizeOf: (String) -> Long?,
+    approval: AutopilotApproval = AutopilotApproval.AUTO,
+): AutoScopeVerdict {
     val paths = patch.files.map { it.path }.toSet()
     val lines = patch.files.sumOf { file ->
         when (file) {
@@ -54,8 +59,13 @@ internal fun autoScopeOf(patch: PatchSet, sizeOf: (String) -> Long?): AutoScopeV
             is Delete -> sizeOf(file.path) ?: (AutoScopeRule.MAX_LINES + 1)
         }
     }
+    // `required` never reaches this rule with an auto-approved task, so it keeps the stage-2 rule, as before.
+    val pathsInScope = when (approval) {
+        AutopilotApproval.FULL -> paths.all { PlanValidator.isFullScopePath(it) }
+        AutopilotApproval.REQUIRED, AutopilotApproval.AUTO -> paths.all { PlanValidator.isAutoScopePath(it) }
+    }
     val inScope = paths.size <= AutoScopeRule.MAX_PATHS &&
-        paths.all { PlanValidator.isAutoScopePath(it) } &&
+        pathsInScope &&
         lines <= AutoScopeRule.MAX_LINES
     return if (inScope) AutoScopeVerdict.InScope else AutoScopeVerdict.OutOfScope(paths.size, lines)
 }
@@ -78,12 +88,16 @@ private fun lineCount(content: String): Long {
  * The guard backed by the task table (V40). A Run is in scope of this guard only when its task was approved by the stage rules: no
  * `approved_by`. An operator-approved task, and a Run of no task, are [AutoScopeVerdict.NotSubject].
  */
-class PlanTaskAutoScopeGuard(private val operations: SelfDevOperatorRepository) : AutoScopeGuard {
+class PlanTaskAutoScopeGuard(
+    private val operations: SelfDevOperatorRepository,
+    /** The autopilot's approval setting. Chooses the path scope of the re-check (stage 2 or stage 3). */
+    private val approval: AutopilotApproval = AutopilotApproval.AUTO,
+) : AutoScopeGuard {
 
     override fun check(runId: RunId, patch: PatchSet, sizeOf: (String) -> Long?): AutoScopeVerdict {
         val task = operations.taskOfRun(runId.value) ?: return AutoScopeVerdict.NotSubject
         if (task.approvedBy != null) return AutoScopeVerdict.NotSubject
-        return autoScopeOf(patch, sizeOf)
+        return autoScopeOf(patch, sizeOf, approval)
     }
 
     override fun settle(runId: RunId) {

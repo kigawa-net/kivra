@@ -24,6 +24,7 @@ internal const val COMPOSE_UI_CSP =
 private val HTML_TYPE = ContentType.parse("text/html; charset=utf-8")
 private val JS_TYPE = ContentType.parse("text/javascript; charset=utf-8")
 private val WASM_TYPE = ContentType.parse("application/wasm")
+private val CSS_TYPE = ContentType.parse("text/css; charset=utf-8")
 
 private object UiResources
 
@@ -111,6 +112,14 @@ internal fun Route.configureUiRoutes() {
                 call.respondCompose(bytes, WASM_TYPE)
             } else {
                 call.respondBytes(byteArrayOf(), WASM_TYPE, status = HttpStatusCode.NotFound)
+            }
+        } else if (wasmFile == "kivra-web.css") {
+            // index.html は CSP(style-src 'self')のためインライン style を持てず、この CSS を読む。
+            val bytes = loadUiResourceOrNull("compose/kivra-web.css")
+            if (bytes != null) {
+                call.respondCompose(bytes, CSS_TYPE)
+            } else {
+                call.respondBytes(byteArrayOf(), CSS_TYPE, status = HttpStatusCode.NotFound)
             }
         } else {
             call.respondBytes(byteArrayOf(), ContentType.Application.OctetStream, status = HttpStatusCode.NotFound)

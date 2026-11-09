@@ -14,6 +14,7 @@ val copyComposeWebDist = tasks.register("copyComposeWebDist", Copy::class) {
     // Only copy essential files: index.html, JS, wasm, and composeResources
     include("index.html")
     include("*.js")
+    include("*.css")
     include("*.wasm")
     include("composeResources/**")
 }

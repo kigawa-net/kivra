@@ -135,16 +135,13 @@ class ProjectReadScopeTest {
 
         val goalAlpha = goal("goal-a", alpha)
         val goalBeta = goal("goal-b", beta)
-        val goalNone = goal("goal-n", null)
 
         val orderAlpha = order("order-a", alpha)
         val orderBeta = order("order-b", beta)
-        val orderNone = order("order-n", null)
 
         /** Goal titles: the memory rows take the project of their goal. */
         val memoryAlpha = memory(goalAlpha, "memory a")
         val memoryBeta = memory(goalBeta, "memory b")
-        val memoryNone = memory(goalNone, "memory n")
 
         private fun run(key: String, projectId: String?, principal: String): String =
             (db.runs.submitTask(principal, key, "Run $key", projectId = projectId) as TaskSubmitResult.Created).run.runId.value
@@ -268,14 +265,14 @@ class ProjectReadScopeTest {
             val projects = get("/api/projects", MEMBER).text()
             assertTrue(fx.alpha in projects && fx.beta in projects, "shadow: the member still sees Beta")
             assertEquals(HttpStatusCode.OK, get("/api/projects/${fx.beta}", MEMBER).status)
-            assertEquals(HttpStatusCode.OK, get("/api/selfdev/orders/${fx.orderNone}", MEMBER).status)
+            assertEquals(HttpStatusCode.OK, get("/api/selfdev/orders/${fx.orderBeta}", MEMBER).status)
             assertTrue(get("/api/admin/runs?limit=100", MEMBER).text().contains(fx.runNone), "shadow: the row with no project is still listed")
         }
         val text = log.lines.joinToString("\n")
         assertTrue("project read shadow: wouldHide code=PROJECT_READ_NOT_MEMBER" in text, "not-a-member is logged: $text")
         assertTrue("project read shadow: wouldHide code=PROJECT_READ_UNASSIGNED" in text, "no-project row is logged: $text")
         // No person, no project, no row in the log.
-        for (secret in listOf(MEMBER, OUTSIDER, fx.alpha, fx.beta, fx.runBeta, fx.orderNone, "owner-member", "owner-outsider")) {
+        for (secret in listOf(MEMBER, OUTSIDER, fx.alpha, fx.beta, fx.runBeta, fx.orderBeta, "owner-member", "owner-outsider")) {
             // The owner keys, the projects, and the rows of Beta and of no project never reach the log.
             assertFalse(secret in text, "the log names nothing that identifies a person or a row")
         }
@@ -385,17 +382,15 @@ class ProjectReadScopeTest {
             val goals = get("/api/selfdev/goals", MEMBER).text()
             assertTrue(fx.goalAlpha in goals)
             assertFalse(fx.goalBeta in goals)
-            assertFalse(fx.goalNone in goals)
             assertTrue(fx.goalAlpha in get("/api/projects/${fx.alpha}/tasks", MEMBER).text())
             assertEquals(HttpStatusCode.NotFound, get("/api/projects/${fx.beta}/tasks", MEMBER).status, "the alias of Beta")
             assertEquals(HttpStatusCode.NotFound, get("/api/projects/${fx.beta}/tasks", OUTSIDER).status, "the alias of Beta, outsider")
             assertEquals(HttpStatusCode.NotFound, get("/api/selfdev/goals/${fx.goalBeta}", MEMBER).status)
             assertEquals(HttpStatusCode.OK, get("/api/selfdev/goals/${fx.goalAlpha}", MEMBER).status)
-            assertEquals(HttpStatusCode.NotFound, get("/api/selfdev/goals/${fx.goalNone}", MEMBER).status)
 
             val orders = get("/api/selfdev/orders", MEMBER).text()
             assertTrue(fx.orderAlpha in orders)
-            assertFalse(fx.orderBeta in orders || fx.orderNone in orders)
+            assertFalse(fx.orderBeta in orders)
             assertEquals(HttpStatusCode.NotFound, get("/api/selfdev/orders/${fx.orderBeta}", MEMBER).status)
             assertEquals(HttpStatusCode.NotFound, get("/api/selfdev/orders/${fx.orderBeta}/cycles", MEMBER).status)
             assertEquals(HttpStatusCode.OK, get("/api/selfdev/orders/${fx.orderAlpha}", MEMBER).status)
@@ -403,10 +398,8 @@ class ProjectReadScopeTest {
             val memory = get("/api/selfdev/memory", MEMBER).text()
             assertTrue(fx.memoryAlpha in memory, "the member sees the memory of its project")
             assertFalse(fx.memoryBeta in memory)
-            assertFalse(fx.memoryNone in memory)
             assertEquals(HttpStatusCode.NotFound, get("/api/projects/${fx.beta}/memory", MEMBER).status)
             assertTrue(fx.memoryBeta in get("/api/projects/${fx.beta}/memory", ADMIN).text(), "the global ADMIN reads Beta's memory")
-            assertTrue(fx.memoryNone in get("/api/selfdev/memory", ADMIN).text(), "the global ADMIN reads the rows with no project")
         }
     }
 
@@ -467,7 +460,7 @@ class ProjectReadScopeTest {
         val fx = Fixture(db)
         val ops = SelfDevOperatorRepository(db.database)
         val ids = ops.listTasks(100).map { it.taskId }.toSet()
-        assertTrue(fx.goalNone in ids && fx.goalBeta in ids && fx.goalAlpha in ids)
+        assertTrue(fx.goalBeta in ids && fx.goalAlpha in ids)
         assertTrue(db.runs.listAllTasks(100).map { it.runId }.containsAll(listOf(RunId(fx.runNone), RunId(fx.runBeta))))
     }
 

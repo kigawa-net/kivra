@@ -219,7 +219,8 @@ private fun KivraAppContent(
         }
     }
 
-    MaterialTheme {
+    // フォント(日本語)の読み込みを待ってから描く。テーマは KivraTheme が MaterialTheme に渡す。
+    KivraTheme {
         if (searchOpen) {
             SearchDialog(
                 projectId = projectId,

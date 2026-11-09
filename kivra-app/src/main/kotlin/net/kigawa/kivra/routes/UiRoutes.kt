@@ -7,6 +7,7 @@ import io.ktor.server.response.header
 import io.ktor.server.response.respondRedirect
 import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.Route
+import io.ktor.server.routing.RoutingRequest
 import io.ktor.server.routing.get
 
 /**
@@ -25,6 +26,26 @@ private val HTML_TYPE = ContentType.parse("text/html; charset=utf-8")
 private val JS_TYPE = ContentType.parse("text/javascript; charset=utf-8")
 private val WASM_TYPE = ContentType.parse("application/wasm")
 private val CSS_TYPE = ContentType.parse("text/css; charset=utf-8")
+
+/** Types served from composeResources/. Fonts use the registered font types (font/ttf and so on); anything else is not served. */
+private val COMPOSE_RESOURCE_TYPES: Map<String, ContentType> = mapOf(
+    "ttf" to ContentType.parse("font/ttf"),
+    "otf" to ContentType.parse("font/otf"),
+    "woff" to ContentType.parse("font/woff"),
+    "woff2" to ContentType.parse("font/woff2"),
+    "txt" to ContentType.parse("text/plain; charset=utf-8"),
+)
+
+/**
+ * The content type for a composeResources path (the segments after `composeResources/`), or null when it must not be
+ * served: an empty or dot segment (no traversal out of the directory), a backslash or NUL, or a type not in the list.
+ */
+internal fun composeResourceContentType(segments: List<String>): ContentType? {
+    if (segments.isEmpty()) return null
+    val unsafe = segments.any { it.isEmpty() || it == "." || it == ".." || '\\' in it || '\u0000' in it }
+    if (unsafe) return null
+    return COMPOSE_RESOURCE_TYPES[segments.last().substringAfterLast('.', "")]
+}
 
 private object UiResources
 
@@ -126,14 +147,24 @@ internal fun Route.configureUiRoutes() {
         }
     }
     
-    // Serve composeResources (Skiko fonts, etc.)
-    get("/ui/compose/composeResources/{file}") {
-        val file = call.pathParam("file") ?: return@get
-        val bytes = loadUiResourceOrNull("compose/composeResources/$file")
-        if (bytes != null) {
-            call.respondCompose(bytes, ContentType.Application.OctetStream)
-        } else {
-            call.respondBytes(byteArrayOf(), ContentType.Application.OctetStream, status = HttpStatusCode.NotFound)
+    // Serve composeResources: the bundled font (under font/, a .ttf) and license files. Compose puts them under a package
+    // directory, so the path is deeper than one level. Only the types in COMPOSE_RESOURCE_TYPES are served.
+    // Compose fetches "./composeResources/..." relative to the page. At /ui/compose/ that is /ui/compose/composeResources/,
+    // but at /ui/compose (no trailing slash, which must keep working) it is /ui/composeResources/. Both serve the same files.
+    for (template in listOf("/ui/compose/composeResources/{path...}", "/ui/composeResources/{path...}")) {
+        get(template) {
+            val segments = call.tailSegments("path")
+            val contentType = composeResourceContentType(segments)
+            val bytes = if (contentType != null) {
+                loadUiResourceOrNull("compose/composeResources/" + segments.joinToString("/"))
+            } else {
+                null
+            }
+            if (bytes != null && contentType != null) {
+                call.respondCompose(bytes, contentType)
+            } else {
+                call.respondBytes(byteArrayOf(), ContentType.Application.OctetStream, status = HttpStatusCode.NotFound)
+            }
         }
     }
 }
@@ -143,6 +174,13 @@ private fun loadUiResourceOrNull(name: String): ByteArray? {
         ?: return null
     return stream.use { it.readBytes() }
 }
+
+/**
+ * The `{name...}` capture of the matched route (the segments of a tail path). Read from the route's captures, not the
+ * query string, the same as [pathParam] (see PathParams.kt).
+ */
+private fun ApplicationCall.tailSegments(name: String): List<String> =
+    (request as? RoutingRequest)?.pathVariables?.getAll(name).orEmpty()
 
 private suspend fun ApplicationCall.respondCompose(bytes: ByteArray, contentType: ContentType) {
     response.header("Content-Security-Policy", COMPOSE_UI_CSP)

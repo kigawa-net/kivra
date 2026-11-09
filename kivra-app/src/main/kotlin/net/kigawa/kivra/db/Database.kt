@@ -5,7 +5,9 @@ import com.zaxxer.hikari.HikariDataSource
 import javax.sql.DataSource
 import net.kigawa.kivra.config.DatabaseConfig
 import org.flywaydb.core.Flyway
+import org.flywaydb.core.api.MigrationVersion
 import org.jetbrains.exposed.sql.Database
+import org.slf4j.LoggerFactory
 
 /**
  * Creates the application pool (application credentials). The driver is inferred from the URL so MariaDB (production)
@@ -47,16 +49,41 @@ fun migrateDatabase(
     }
 }
 
+/**
+ * Runs the migrations, with the ADR 0022 PR-F gate. V52 (NOT NULL on the project columns) is applied only when no row of
+ * the two project-scoped tables (tasks and memory) has a NULL project. While such a row exists the gate stops at V51 and logs the counts:
+ * the app still starts (the V51 schema accepts every write it makes), and V52 runs on a later start, after the backfill. A failed
+ * migration would stop the Pod, which is what the gate avoids. Nothing is deleted, guessed, or repaired.
+ */
 fun runMigrations(dataSource: DataSource) {
-    Flyway.configure()
+    migrationConfig(dataSource, target = PROJECT_CONTRACT_PREVIOUS_VERSION).migrate()
+    if (migrationConfig(dataSource, target = null).info().pending().isEmpty()) return
+    val unassigned = countUnassignedScopedRows(dataSource)
+    if (unassigned.values.any { it > 0 }) {
+        migrationLogger.warn(
+            "project scope contract held at V{}: unassigned rows tasks={} memory={}. " +
+                "Run the backfill dry-run and the backfill (docs/runbook-selfdev.md 4.20); V52 applies on a later start once both are 0.",
+            PROJECT_CONTRACT_PREVIOUS_VERSION,
+            unassigned.getValue("tasks"),
+            unassigned.getValue("memory"),
+        )
+        return
+    }
+    migrationConfig(dataSource, target = null).migrate()
+}
+
+private val migrationLogger = LoggerFactory.getLogger("net.kigawa.kivra.db.Migration")
+
+private fun migrationConfig(dataSource: DataSource, target: String?): Flyway {
+    val builder = Flyway.configure()
         .dataSource(dataSource)
         .locations("classpath:db/migration")
         .validateMigrationNaming(true)
         // V40 was added after V41–V43 had already shipped to dev. Apply it on
         // those databases instead of rejecting the history as out of order.
         .outOfOrder(true)
-        .load()
-        .migrate()
+    if (target != null) builder.target(MigrationVersion.fromVersion(target))
+    return builder.load()
 }
 
 fun connectDatabase(dataSource: DataSource): Database = Database.connect(dataSource)

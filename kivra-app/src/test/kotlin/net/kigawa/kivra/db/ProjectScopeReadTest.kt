@@ -25,10 +25,18 @@ class ProjectScopeReadTest {
 
     private fun TestDb.projectA(): String = ProjectRepository(database, Clock.systemUTC()).create("Alpha", null).projectId
 
-    private fun TestDb.task(key: String, projectId: String?): String =
-        assertIs<SelfDevSubmitResult.Created>(
-            SelfDevOperatorRepository(database).submitTask(operator, key, "Task $key", null, "kigawa-net/kivra", projectId),
+    /**
+     * A Task with no [projectId] is a legacy row: written with a placeholder project, then set to NULL (the schema is before V52, the
+     * write path refuses NULL since PR-F). See [migrateBeforeContract].
+     */
+    private fun TestDb.task(key: String, projectId: String?): String {
+        val placeholder = projectId ?: ProjectRepository(database, Clock.systemUTC()).create("Legacy", null).projectId
+        val id = assertIs<SelfDevSubmitResult.Created>(
+            SelfDevOperatorRepository(database).submitTask(operator, key, "Task $key", null, "kigawa-net/kivra", placeholder),
         ).task.taskId
+        if (projectId == null) exec("UPDATE selfdev_tasks SET project_id = NULL WHERE task_id = ?", id)
+        return id
+    }
 
     private fun TestDb.order(title: String, projectId: String?): String =
         assertIs<CreateRootResult.Created>(
@@ -39,7 +47,7 @@ class ProjectScopeReadTest {
         (runs.submitTask(operator, key, "Run $key", projectId = projectId) as TaskSubmitResult.Created).run.runId
 
     @Test
-    fun `the run list is narrowed to a project, to the rows with no project, or not at all`() = TestDb().use { db ->
+    fun `the run list is narrowed to a project, to the rows with no project, or not at all`() = TestDb(::migrateBeforeContract).use { db ->
         val alpha = db.projectA()
         val inAlpha = db.run("in-alpha", alpha)
         val unassigned = db.run("unassigned", null)
@@ -53,7 +61,7 @@ class ProjectScopeReadTest {
     }
 
     @Test
-    fun `the task and order lists are narrowed the same way, and an unknown project is an empty list`() = TestDb().use { db ->
+    fun `the task and order lists are narrowed the same way, and an unknown project is an empty list`() = TestDb(::migrateBeforeContract).use { db ->
         val alpha = db.projectA()
         val taskAlpha = db.task("a", alpha)
         val taskNone = db.task("n", null)
@@ -74,7 +82,7 @@ class ProjectScopeReadTest {
     }
 
     @Test
-    fun `the autonomous loops still take the rows with no project, because they are never narrowed`() = TestDb().use { db ->
+    fun `the autonomous loops still take the rows with no project, because they are never narrowed`() = TestDb(::migrateBeforeContract).use { db ->
         val alpha = db.projectA()
         val taskNone = db.task("loop-n", null)
         val taskAlpha = db.task("loop-a", alpha)
@@ -96,7 +104,7 @@ class ProjectScopeReadTest {
     }
 
     @Test
-    fun `the stop requests of pending orders are narrowed by the order's project, with the project id on each`() = TestDb().use { db ->
+    fun `the stop requests of pending orders are narrowed by the order's project, with the project id on each`() = TestDb(::migrateBeforeContract).use { db ->
         val alpha = db.projectA()
         val orderAlpha = db.order("alpha order", alpha)
         db.order("none order", null)
@@ -116,7 +124,7 @@ class ProjectScopeReadTest {
     }
 
     @Test
-    fun `the memory search and count are narrowed by the record's project`() = TestDb().use { db ->
+    fun `the memory search and count are narrowed by the record's project`() = TestDb(::migrateBeforeContract).use { db ->
         val alpha = db.projectA()
         val goalAlpha = db.task("goal-a", alpha)
         val goalNone = db.task("goal-n", null)
@@ -130,7 +138,11 @@ class ProjectScopeReadTest {
             ),
         ).recordId
         val recAlpha = save(goalAlpha, "CI を速くする")
+        // The record of the legacy goal: its context needs a project to be written, then both are set back to NULL.
+        db.exec("UPDATE selfdev_tasks SET project_id = ? WHERE task_id = ?", alpha, goalNone)
         val recNone = save(goalNone, "ログを減らす")
+        db.exec("UPDATE selfdev_tasks SET project_id = NULL WHERE task_id = ?", goalNone)
+        db.exec("UPDATE selfdev_memory_records SET project_id = NULL WHERE record_id = ?", recNone)
 
         val filter = MemoryFilter()
         assertEquals(setOf(recAlpha, recNone), memory.search(filter, 50).map { it.recordId }.toSet(), "no choice: every record")
@@ -143,7 +155,7 @@ class ProjectScopeReadTest {
     }
 
     @Test
-    fun `the assignees are narrowed by project membership, and the unassigned are those of no project`() = TestDb().use { db ->
+    fun `the assignees are narrowed by project membership, and the unassigned are those of no project`() = TestDb(::migrateBeforeContract).use { db ->
         val alpha = db.projectA()
         val repo = SelfDevAssigneeRepository(db.database)
         val member = assertIs<AssigneeResult.Moved<Assignee>>(repo.create("member", AssigneeRole.OPERATOR, operator)).value.assigneeId
@@ -156,7 +168,7 @@ class ProjectScopeReadTest {
     }
 
     @Test
-    fun `the membership store reads the role of a member, and no role for anyone else`() = TestDb().use { db ->
+    fun `the membership store reads the role of a member, and no role for anyone else`() = TestDb(::migrateBeforeContract).use { db ->
         val alpha = db.projectA()
         val member = assertIs<AssigneeResult.Moved<Assignee>>(
             SelfDevAssigneeRepository(db.database).create("member", AssigneeRole.APPROVER, operator),

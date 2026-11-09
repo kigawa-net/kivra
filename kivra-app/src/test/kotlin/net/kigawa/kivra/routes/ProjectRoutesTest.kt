@@ -43,8 +43,10 @@ import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevSubmitResult
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.db.migrateBeforeContract
 import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.newDbStore
+import net.kigawa.kivra.db.execUpdate
 import org.jetbrains.exposed.sql.transactions.transaction
 
 class ProjectRoutesTest {
@@ -388,13 +390,16 @@ class ProjectRoutesTest {
     }
 
     @Test
-    fun `the backfill is a dry run by default and writes only when asked to`() = TestDb().use { db ->
+    fun `the backfill is a dry run by default and writes only when asked to`() = TestDb(::migrateBeforeContract).use { db ->
         val projects = ProjectRepository(db.database, Clock.systemUTC())
         val alpha = projects.create("Alpha", null).projectId
         projects.addRepo(alpha, "kigawa-net/alpha")
+        // A legacy row: written with a placeholder project, then NULL (the write path refuses NULL since PR-F; this schema is before V52).
+        val placeholder = projects.create("Legacy", null).projectId
         val taskId = assertIs<SelfDevSubmitResult.Created>(
-            SelfDevOperatorRepository(db.database).submitTask("operator", "route-task", "Task", null, "kigawa-net/alpha", null),
+            SelfDevOperatorRepository(db.database).submitTask("operator", "route-task", "Task", null, "kigawa-net/alpha", placeholder),
         ).task.taskId
+        transaction(db.database) { execUpdate("UPDATE selfdev_tasks SET project_id = NULL WHERE task_id = ?", taskId) }
         fun projectOfTask(): String? = transaction(db.database) {
             execQuery("SELECT project_id FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }.first()
         }

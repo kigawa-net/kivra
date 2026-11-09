@@ -3,6 +3,7 @@ package net.kigawa.kivra.db
 import java.time.Clock
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -26,10 +27,19 @@ class ProjectBackfillTest {
 
     private fun TestDb.exec(sql: String, vararg params: Any?) = transaction(database) { execUpdate(sql, *params) }
 
-    private fun TestDb.task(key: String, repo: String, projectId: String? = null): String =
-        assertIs<SelfDevSubmitResult.Created>(
-            SelfDevOperatorRepository(database).submitTask(operator, key, "Task $key", null, repo, projectId),
+    /**
+     * A Task of the legacy shape (ADR 0022 PR-B): with no [projectId] it has NULL project. Since PR-F the write refuses NULL, so it is written
+     * with a placeholder project and the column is set back to NULL (the schema is before V52, where NULL is still allowed).
+     */
+    private fun TestDb.task(key: String, repo: String, projectId: String? = null): String {
+        val id = assertIs<SelfDevSubmitResult.Created>(
+            SelfDevOperatorRepository(database).submitTask(operator, key, "Task $key", null, repo, projectId ?: placeholderProject()),
         ).task.taskId
+        if (projectId == null) exec("UPDATE selfdev_tasks SET project_id = NULL WHERE task_id = ?", id)
+        return id
+    }
+
+    private fun TestDb.placeholderProject(): String = ProjectRepository(database, Clock.systemUTC()).create("Legacy", null).projectId
 
     private fun TestDb.order(title: String, repo: String): String =
         assertIs<net.kigawa.kivra.db.CreateRootResult.Created>(
@@ -66,7 +76,9 @@ class ProjectBackfillTest {
         val linkedRun = runOf("linked")
         exec("UPDATE selfdev_tasks SET run_id = ? WHERE task_id = ?", linkedRun, mappedTask)
         val unlinkedRun = runOf("unlinked")
-        // A goal memory: its goal is the mapped Task, which has no project yet, so the record is written with NULL.
+        // A goal memory of the mapped Task. A record needs its context's project to be written, so the goal's Task has one for the save,
+        // and both the Task and the record are set back to NULL afterwards (the legacy shape).
+        exec("UPDATE selfdev_tasks SET project_id = ? WHERE task_id = ?", beta, mappedTask)
         val memory = SelfDevMemoryRepository(database, enabled = true).save(
             MemoryCandidate(
                 kind = "GOAL_TITLE", channel = MemoryChannel.HTTP_OPERATOR, operatorAuthenticated = true, operatorId = operator,
@@ -74,6 +86,8 @@ class ProjectBackfillTest {
             ),
         )
         val memoryRecord = assertIs<MemorySaveResult.Written>(memory).recordId
+        exec("UPDATE selfdev_tasks SET project_id = NULL WHERE task_id = ?", mappedTask)
+        exec("UPDATE selfdev_memory_records SET project_id = NULL WHERE record_id = ?", memoryRecord)
         assertNull(projectOf("selfdev_memory_records", "record_id", memoryRecord))
         return Scenario(alpha, beta, mappedTask, unmappedTask, explicitTask, mappedOrder, unmappedOrder, linkedRun, unlinkedRun, memoryRecord)
     }
@@ -90,7 +104,7 @@ class ProjectBackfillTest {
     }
 
     @Test
-    fun `a dry run counts what a real run would assign and writes nothing`() = TestDb().use { db ->
+    fun `a dry run counts what a real run would assign and writes nothing`() = TestDb(::migrateBeforeContract).use { db ->
         val s = db.scenario()
         val report = ProjectBackfillRepository(db.database).run(dryRun = true)
 
@@ -106,7 +120,7 @@ class ProjectBackfillTest {
     }
 
     @Test
-    fun `a real run assigns the mapped rows, keeps assigned rows and leaves unmapped rows NULL`() = TestDb().use { db ->
+    fun `a real run assigns the mapped rows, keeps assigned rows and leaves unmapped rows NULL`() = TestDb(::migrateBeforeContract).use { db ->
         val s = db.scenario()
         val report = ProjectBackfillRepository(db.database).run(dryRun = false)
 
@@ -118,7 +132,7 @@ class ProjectBackfillTest {
     }
 
     @Test
-    fun `a second run changes nothing and reports the same unmatched rows`() = TestDb().use { db ->
+    fun `a second run changes nothing and reports the same unmatched rows`() = TestDb(::migrateBeforeContract).use { db ->
         val s = db.scenario()
         val backfill = ProjectBackfillRepository(db.database)
         backfill.run(dryRun = false)
@@ -132,7 +146,7 @@ class ProjectBackfillTest {
     }
 
     @Test
-    fun `a row keeps its project when its repository now maps to another one`() = TestDb().use { db ->
+    fun `a row keeps its project when its repository now maps to another one`() = TestDb(::migrateBeforeContract).use { db ->
         val projects = ProjectRepository(db.database, Clock.systemUTC())
         val alpha = projects.create("Alpha", null).projectId
         val beta = projects.create("Beta", null).projectId
@@ -149,7 +163,7 @@ class ProjectBackfillTest {
     }
 
     @Test
-    fun `every mapped row is assigned when the batch is one row`() = TestDb().use { db ->
+    fun `every mapped row is assigned when the batch is one row`() = TestDb(::migrateBeforeContract).use { db ->
         val alpha = ProjectRepository(db.database, Clock.systemUTC()).create("Alpha", null).projectId
         ProjectRepository(db.database, Clock.systemUTC()).addRepo(alpha, "kigawa-net/batch")
         val ids = (1..3).map { db.task("batch-$it", "kigawa-net/batch") }
@@ -161,7 +175,7 @@ class ProjectBackfillTest {
     }
 
     @Test
-    fun `a task filed by the incident fix takes the project of its repository and keeps it on replay`() = TestDb().use { db ->
+    fun `a task filed by the incident fix takes the project of its repository and keeps it on replay`() = TestDb(::migrateBeforeContract).use { db ->
         val alpha = ProjectRepository(db.database, Clock.systemUTC()).create("Alpha", null).projectId
         ProjectRepository(db.database, Clock.systemUTC()).addRepo(alpha, "kigawa-net/alpha")
         val operations = SelfDevOperatorRepository(db.database)
@@ -170,20 +184,19 @@ class ProjectBackfillTest {
             operations.submitTask(INCIDENT_FIX_PRINCIPAL, "incident:fp-mapped", "Fix", null, "kigawa-net/alpha", null),
         ).task
         assertEquals(alpha, mapped.projectId)
-        val unmapped = assertIs<SelfDevSubmitResult.Created>(
-            operations.submitTask(INCIDENT_FIX_PRINCIPAL, "incident:fp-unmapped", "Fix", null, "kigawa-net/unmapped", null),
-        ).task
-        assertNull(unmapped.projectId)
+        // A repository with no mapping gives no project, so nothing is written (ADR 0022 PR-F: no NULL row).
+        assertFailsWith<ProjectRequiredException> {
+            operations.submitTask(INCIDENT_FIX_PRINCIPAL, "incident:fp-unmapped", "Fix", null, "kigawa-net/unmapped", null)
+        }
 
         // The same key again (a retry after a lost response) is the same task, not a conflict, although the project is not in the request.
         assertIs<SelfDevSubmitResult.Replayed>(
             operations.submitTask(INCIDENT_FIX_PRINCIPAL, "incident:fp-mapped", "Fix", null, "kigawa-net/alpha", null),
         )
-        // An operator's task without a project stays without one: only the system's tasks take their repository's project.
-        val byOperator = assertIs<SelfDevSubmitResult.Created>(
-            operations.submitTask(operator, "operator-no-project", "Task", null, "kigawa-net/alpha", null),
-        ).task
-        assertNull(byOperator.projectId)
+        // An operator's task without a project is refused: only the system's tasks take their repository's project.
+        assertFailsWith<ProjectRequiredException> {
+            operations.submitTask(operator, "operator-no-project", "Task", null, "kigawa-net/alpha", null)
+        }
         assertNotNull(db.projectOf("selfdev_tasks", "task_id", mapped.taskId))
     }
 }

@@ -66,8 +66,11 @@ class OrderCycleOnTasksTest {
             orderGate = { orders.dispatchAllowed(it) },
         )
 
+        /** Every order and task of these tests belongs to one project (ADR 0022 PR-F: a cycle of an order with no project is refused). */
+        val project: String = net.kigawa.kivra.db.ProjectRepository(db.database, clock).create("Cycles", null).projectId
+
         fun newOrder(maxCycles: Int = 3): SelfDevOrder =
-            (orders.createRoot("operator", "Order title", "Improve the docs", "kigawa-net/kivra", maxCycles) as CreateRootResult.Created).order
+            (orders.createRoot("operator", "Order title", "Improve the docs", "kigawa-net/kivra", maxCycles, project) as CreateRootResult.Created).order
 
         fun versionOf(orderId: String): Long = assertNotNull(orders.get(orderId)).version
 
@@ -224,7 +227,7 @@ class OrderCycleOnTasksTest {
     @Test
     fun aTaskOutsideAnyOrderIsNotHeldByTheGate() = TestDb().use { db ->
         val h = Harness(db)
-        val operatorTask = (h.ops.submitTask("operator", "plain-key", "Plain", "body", "kigawa-net/kivra") as SelfDevSubmitResult.Created).task
+        val operatorTask = (h.ops.submitTask("operator", "plain-key", "Plain", "body", "kigawa-net/kivra", h.project) as SelfDevSubmitResult.Created).task
         assertTrue(h.orders.dispatchAllowed(operatorTask.taskId))
         assertFalse(h.orders.dispatchAllowed("01UNKNOWNTASKIDXXXXXXXXXX"))
     }

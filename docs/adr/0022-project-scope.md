@@ -168,3 +168,34 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - 書き込みの存在の区別(非メンバーの 403 と未知の 404)を、読み取りと同じ 404 に揃えるか。
 - 旧ルートの役割の判定(判断 6)。
 - Compose UI の 404 と空の一覧の扱い(下記の確認結果を PR 本文に書く。UI は別 PR)。
+
+## 進捗(PR-F: Contract、ブランチ `feat/project-scope-contract`)
+
+- **マイグレーション。** V52 で `selfdev_tasks.project_id` と `selfdev_memory_records.project_id` を `NOT NULL` にする(`MODIFY COLUMN`)。V51 までの表は変えない。`MigrationExpandOnlyTest` の `KNOWN_CONTRACT_REQUIRED` に、この MODIFY を理由つきで 2 件だけ足した(他の expand の規則は変えていない)。
+- **NULL が残る間は保留する(ゲート)。** `runMigrations` は、まず `target = 51` で V51 までを適用し、V52 が保留中なら 2 つの表の NULL の件数を数える。件数がゼロなら V52 を適用する。1 件でも残っていれば V52 を適用せず、件数をログ(`project scope contract held at V51`)に出して起動を続ける。Pod は止まらない。次の起動で件数がゼロになっていれば V52 が適用される。保留は履歴を変えない(V52 は未適用のまま)。
+  - 理由: 起動時の Flyway の失敗は Pod を起動不能にする。NULL の行は PR-B で振り分けるまで残りうるので、その間に V52 の MODIFY が失敗してはならない。
+  - 代替案(採用しない):
+    - (a) V52 を単純に適用し、NULL があれば失敗させる。Pod が起動しなくなるので却下。
+    - (b) V52 を作らず、運用者が手で `ALTER` する。履歴と DB の状態が一致せず、`validate` と「適用済みの版」が合わなくなるので却下。
+    - (c) NULL の行を「未分類」の専用プロジェクトへ入れて、そのまま NOT NULL にする。決定 1(デフォルトのプロジェクトは作らない)に反するので却下。
+    - (d) Flyway の Java migration で中身を分岐する。保留にすると、その版は成功として記録され、後で再試行できない。却下。
+    - 採用: 件数を見てから適用する(ゲート)。保留中も、新しい書き込みは NULL を作らない(下の拒否)ので、件数は減る方向にしか動かない。
+- **NULL を作る書き込みを止めた(V51 の間も同じ規則)。** 洗い出しの結果は次のとおり。
+
+  | 書き込み | 場所 | 変更 |
+  |---|---|---|
+  | Task の投入(API、MCP、画面) | `SelfDevOperatorRepository.submitTask` | project は必須(PR-C)。変更なし |
+  | Task の投入(システム。`kivra-incident`) | 同上、`IncidentFixWatch` | repo の対応から継承(PR-B)。対応がなければ `ProjectRequiredException`(何も書かない)。インシデントの修正は既存の再試行で `CLAIMED` に戻り、上限で `FAILED` |
+  | 計画の子 Task | `commitPlan` | 根から継承。根が NULL なら `ProjectRequiredException` |
+  | 周回の Task | `startCycleIn`(`SelfDevOrderRepository`) | order から継承。order が NULL なら `Refused(NO_PROJECT)`(`OrderConflict.NO_PROJECT` を追加) |
+  | 記憶 | `SelfDevMemoryRepository.save` | 文脈(goal、plan、run)から継承。文脈になければ `Refused(NO_PROJECT)`(`MemoryRefusal.NO_PROJECT` を追加。監査は書かない) |
+  | Run(`development_runs`) | `DevelopmentRunRepository.submitTask`、`AutopilotDispatcher`、Task API(`/api/tasks`) | 変更なし。Run の列は NULL 可のまま(下の「NULL 可の列」) |
+  | order(`selfdev_orders`) | `createRoot`、`createChild` | 変更なし。根は project 必須(PR-C)、子は継承 |
+  | 担当(`selfdev_assignees`) | 担当の作成 | 変更なし。列は NULL 可のまま |
+
+  - MCP に order を作るツールはない。MCP の Task 投入(`kivra_selfdev_start`)は `project_id` が必須。
+  - UPDATE で `project_id` を NULL に戻す経路はない(`ProjectBackfill` は NULL の行だけを更新する)。FK は `ON DELETE RESTRICT`。
+- **NULL 可の列(判断)。** `selfdev_orders`、`development_runs`、`selfdev_assignees` の `project_id` は NULL 可のまま残す。段階表は PR-F を「NULL の行を消す」としたが、これらの列の NULL は「未分類」を表す(`ProjectFilter.Unassigned`、画面の「未分類」)。V38、V42 の `ON DELETE SET NULL` も変えない。NOT NULL にするなら未分類の表し方を別に決める必要があり、この PR の範囲を超える。
+- **テスト。** `MigrationChainTest` は V52 を含む完全な連鎖を確かめる。V50 と V51 の test は V51 までの版を作って、V51 の時点の挙動(NULL が残る)を確かめる。新しい test `V52 waits while a task or memory row has no project, then applies once none is left` は、保留中に起動が失敗せず、行が残り、振り分け後に V52 が適用され、NULL が拒否されることを確かめる。
+- **残り(後続)。** Task API(`/api/tasks`)が作る Run に project を付けるか(Run の列は NULL 可のまま)。`/api/selfdev/runs` と `POST /api/selfdev/tasks`(PR-only の Run)の別名と Deprecation。旧版の Pod を止める順序は運用で行う(runbook 4.20)。
+- 運用の手順は `docs/runbook-selfdev.md` 4.20。

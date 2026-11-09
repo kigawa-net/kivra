@@ -750,6 +750,44 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 
 `kivra_selfdev_start` の応答(`project_id`)、`kivra_run_get` と `kivra_run_list` の Run(`project_id`)、`kivra_order_get` と `kivra_order_list` の order(`project_id`)に、プロジェクトの ID を含める。入力は従来どおり(`kivra_selfdev_start` は `project_id` 必須)。
 
+### 4.20 NOT NULL 化(V52)の前の確認(ADR 0022 PR-F、運用者のみ)
+
+V52 は `selfdev_tasks.project_id` と `selfdev_memory_records.project_id` を NOT NULL にする。NULL の行が 1 つでも残っている間は、V52 は適用されない。起動は止まらず、ログに件数が出る(`project scope contract held at V51: unassigned rows selfdev_tasks=<n> selfdev_memory_records=<n>`)。NULL の行は削除もされず、推測で割り当てられることもない。
+
+`selfdev_orders`、`development_runs`、`selfdev_assignees` の `project_id` は NULL 可のまま残す(未分類の行を表すため。V52 の対象ではない)。
+
+**手順(この順に行う)**
+
+1. **NULL の件数を見る**(DB に直接接続して実行。読み取りだけ):
+
+   ```sql
+   SELECT 'selfdev_tasks' AS table_name, COUNT(*) AS null_rows FROM selfdev_tasks WHERE project_id IS NULL
+   UNION ALL
+   SELECT 'selfdev_memory_records', COUNT(*) FROM selfdev_memory_records WHERE project_id IS NULL;
+   ```
+
+   適用済みかどうかは `SELECT version, success FROM flyway_schema_history ORDER BY installed_rank DESC LIMIT 3;` で見る(V52 が無ければ未適用)。起動ログの `project scope contract held` の有無でも分かる。
+2. **振り分けの dry-run で、どの行が振り分けられるかを見る。** `POST /api/projects/backfill?dryRun=true`(4.16 と同じ。何も書かない)。応答の `matched` が振り分けられる件数、`unmatched` が対応のない件数。画面では「確認（dry-run）」ボタン。
+3. **対応のない repo を登録する。** `unmatched` が残っていれば、その行の repo を 4.16 の手順 1 で登録する。repo を登録できない行(対応を付けられない行)が残れば、V52 は保留のままになる。その行は推測で割り当てない。
+4. **振り分けを実行する。** `POST /api/projects/backfill?dryRun=false`。結果が 0 件なら終わり。もう一度 1 の SQL と 2 の dry-run を実行し、どちらも 0 になっていることを確かめる(`matched` も `unmatched` も 0 で、NULL の行がない)。
+5. **旧版の Pod をすべて止める。** V52 の後も旧版(この PR より前のコード)が動いていると、NULL の項目を書こうとして失敗する。新版だけが動いている状態にしてから、新版を起動する。起動時に V52 が適用され、`flyway_schema_history` に 52 が入る(ログの `held` が出なくなる)。
+
+**この PR で、NULL の行を作る書き込みを止めた(V51 の間も同じ)**
+
+| 書き込み | NULL のとき | 理由と見え方 |
+|---|---|---|
+| Task の投入(`submitTask`)。システムの投入(`kivra-incident`)で repo の対応がない | `ProjectRequiredException`。何も書かない | インシデントの修正は再試行し、上限で `FAILED`。repo を登録すれば次の再試行で通る |
+| 計画の子 Task(`commitPlan`)。計画の根に project がない | `ProjectRequiredException`。何も書かない | 根に project を付けるまで計画は進まない(ログに出る) |
+| 周回の Task(`startCycleIn`)。order に project がない | `Refused(NO_PROJECT)`。何も書かない | order を project に入れるまで周回は始まらない |
+| 記憶(`save`)。文脈(goal、plan、run)のどれにも project がない | `Refused(NO_PROJECT)`。監査イベントも書かない | ログ `selfdev memory refused` に出る。記憶は保存されない |
+
+API と MCP の投入は、従来どおり `projectId`(MCP は `project_id`)が必須なので、この表の拒否には当たらない。
+
+**注意**
+
+- V52 が保留の間は、NULL の行が残っている Task も自律ループが従来どおり読む(絞り込みはしない)。ただし、その Task の計画の子や周回は NULL を作れないので、拒否されてログに出る。振り分けを先に済ませる。
+- 振り分けの取り消しはない(4.16 と同じ)。V52 の適用後は、この表の列に NULL を書く経路がない。NULL に戻す SQL は、この列の制約で失敗する。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

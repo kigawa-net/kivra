@@ -112,6 +112,11 @@ enum class OrderConflict {
      * [OrderResult.Refused.orderId] is null for this reason.
      */
     ORDER_UNPRICED,
+    /**
+     * A cycle start: the order has no project (ADR 0022). Its cycle's Task would have no project, which the NOT NULL column (V52) refuses.
+     * Nothing is written. The order must be assigned to a project first (the backfill, or an order created with one).
+     */
+    NO_PROJECT,
 }
 
 sealed interface OrderResult<out T> {
@@ -587,6 +592,7 @@ class SelfDevOrderRepository(
         val orderId = current.orderId
         if (expectedVersion != null && current.version != expectedVersion) return OrderResult.StaleVersion
         if (current.state != OrderState.ACTIVE) throw Rollback(OrderResult.Refused(OrderConflict.NOT_ACTIVE))
+        if (current.projectId == null) throw Rollback(OrderResult.Refused(OrderConflict.NO_PROJECT))
         firstStoppingAncestor(path.drop(1))?.let { throw Rollback(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, it.orderId)) }
         if (current.currentGoalId != null) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_IN_PROGRESS))
         if (current.cyclesStarted >= current.maxCycles) throw Rollback(OrderResult.Refused(OrderConflict.CYCLE_LIMIT_REACHED))

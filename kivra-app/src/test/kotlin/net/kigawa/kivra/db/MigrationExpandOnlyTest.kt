@@ -162,6 +162,13 @@ class MigrationExpandOnlyTest {
             // V43: allow multiple root orders
             "V43:DROP (ALTER TABLE SELFDEV_ORDERS DROP CONSTRAINT UK_SELFDEV_ORDERS_ROOT)" to
                 "V43 removes the single-root UNIQUE constraint to allow multiple independent root orders.",
+            // V52 (ADR 0022 PR-F): the Contract step for the project columns. The old Writers (V50 and before) are drained first, and the
+            // migration is held (runMigrations) while any row has a NULL project, so the MODIFY never meets a NULL row.
+            "V52:MODIFY (ALTER TABLE SELFDEV_TASKS MODIFY COLUMN PROJECT_ID CHAR(26) NOT NULL)" to
+                "V52 makes selfdev_tasks.project_id NOT NULL. Held by the gate in runMigrations while a NULL row exists; the write paths " +
+                "refuse a NULL project (ProjectRequiredException), so the old Writers are the only risk and are drained before V52.",
+            "V52:MODIFY (ALTER TABLE SELFDEV_MEMORY_RECORDS MODIFY COLUMN PROJECT_ID CHAR(26) NOT NULL)" to
+                "V52 makes selfdev_memory_records.project_id NOT NULL. The same gate and drain as the tasks column.",
         )
     }
 }

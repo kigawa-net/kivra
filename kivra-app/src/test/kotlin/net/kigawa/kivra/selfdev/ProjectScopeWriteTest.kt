@@ -111,7 +111,7 @@ class ProjectScopeWriteTest {
     }
 
     @Test
-    fun `a task whose dependency is in another project is refused, and so is a mix with an unassigned one, but two unassigned tasks are not`() {
+    fun `a task whose dependency is in another project is refused, and one in the same project is not`() {
         TestDb().use { db ->
             val p1 = db.project("P1")
             val p2 = db.project("P2")
@@ -132,14 +132,6 @@ class ProjectScopeWriteTest {
             val sameProject = queued("same", p1, listOf(dep1))
             assertIs<TaskTransition.Refused>(ops.beginSubmission(crossProject, ops.task(crossProject)!!.version))
             assertIs<TaskTransition.Moved>(ops.beginSubmission(sameProject, ops.task(sameProject)!!.version))
-
-            // Unassigned: a dependency with no project is fine for an unassigned task, and refused for an assigned one.
-            val depNull = submit("depnull", null)
-            db.exec("UPDATE selfdev_tasks SET state = 'COMPLETED' WHERE task_id = ?", depNull)
-            val nullOnNull = queued("nullnull", null, listOf(depNull))
-            val assignedOnNull = queued("assignednull", p1, listOf(depNull))
-            assertIs<TaskTransition.Moved>(ops.beginSubmission(nullOnNull, ops.task(nullOnNull)!!.version))
-            assertIs<TaskTransition.Refused>(ops.beginSubmission(assignedOnNull, ops.task(assignedOnNull)!!.version))
         }
     }
 }

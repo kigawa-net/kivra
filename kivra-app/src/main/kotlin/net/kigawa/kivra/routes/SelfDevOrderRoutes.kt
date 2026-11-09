@@ -620,6 +620,7 @@ internal fun refusedText(reason: OrderConflict): String = when (reason) {
     OrderConflict.ORDER_BUDGET -> "an order on the path to the root has less budget left than one cycle needs"
     OrderConflict.ANCESTOR_NOT_ACTIVE -> "an order on the path to the root is not active; it must be resumed first"
     OrderConflict.ORDER_UNPRICED -> "an order on the path to the root has a cycle with an unconfirmed UNPRICED cost; an operator must acknowledge it"
+    OrderConflict.NO_PROJECT -> "the order has no project; it must be assigned to a project before a cycle can start"
     OrderConflict.NOT_ACTIVE -> "the order is not active"
     OrderConflict.RESUME_NOT_ALLOWED -> "this order cannot be resumed; a new order is needed"
     OrderConflict.ACTOR_NOT_ALLOWED -> "this caller may not make this change"

@@ -21,7 +21,10 @@ class DbIncidentRunOriginTest {
         val otherRun = (db.runs.submitTask("operator", "other-run", "Other", selfDev = true, maxActiveSelfDev = null) as TaskSubmitResult.Created).run
         val root = (
             SelfDevOperatorRepository(db.database)
-                .submitTask("kivra-incident", "incident:root", "[kivra-incident] RUN_FAILED MERGE_CONFLICT", "body", "kigawa-net/kivra")
+                .submitTask(
+                    "kivra-incident", "incident:root", "[kivra-incident] RUN_FAILED MERGE_CONFLICT", "body", "kigawa-net/kivra",
+                    net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()).create("Incident", null).projectId,
+                )
                 as SelfDevSubmitResult.Created
             ).task
         val now = LocalDateTime.ofInstant(Instant.parse("2026-11-08T00:00:00Z"), ZoneOffset.UTC)
@@ -34,9 +37,9 @@ class DbIncidentRunOriginTest {
             // The child the planner writes under the root, with the run it was dispatched as.
             execUpdate(
                 "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, target_repo, state, dependencies, requires_approval, " +
-                    "run_id, parent_task_id, revision, attempts, version, created_at, updated_at) " +
-                    "VALUES (?, 'kivra-incident', 'plan:child', 'child', 'kigawa-net/kivra', 'SUBMITTED', '[]', TRUE, ?, ?, 0, 1, 0, ?, ?)",
-                "CHILD".padEnd(26, '0'), fixRun.runId.value, root.taskId, now, now,
+                    "run_id, parent_task_id, revision, attempts, version, created_at, updated_at, project_id) " +
+                    "VALUES (?, 'kivra-incident', 'plan:child', 'child', 'kigawa-net/kivra', 'SUBMITTED', '[]', TRUE, ?, ?, 0, 1, 0, ?, ?, ?)",
+                "CHILD".padEnd(26, '0'), fixRun.runId.value, root.taskId, now, now, root.projectId,
             )
         }
         val origin = DbIncidentRunOrigin(db.database)

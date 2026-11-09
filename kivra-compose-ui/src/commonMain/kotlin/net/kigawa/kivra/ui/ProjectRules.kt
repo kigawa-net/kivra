@@ -185,6 +185,10 @@ const val REPO_REMOVED_MESSAGE = "repo の登録を外しました。"
 const val REPO_EMPTY_MESSAGE = "登録された repo はありません。"
 const val REPO_LOAD_FAILED_MESSAGE = "repo の一覧を読めませんでした。"
 
+/** repo の登録を外すの確認ダイアログの説明。登録だけを外し、すでに振り分けた行の所属は変えない。 */
+fun projectRepoRemoveExplain(repoKey: String): String =
+    "この repo（$repoKey）の登録を、このプロジェクトから外します。すでにこのプロジェクトに振り分けた行は、プロジェクトのまま変わりません。"
+
 /** repo の登録・解除の失敗の文言(HTTP のステータスだけで決める。サーバーの本文は出さない)。 */
 fun projectRepoFailureText(status: Int?): String = when (status) {
     401 -> SESSION_EXPIRED_MESSAGE

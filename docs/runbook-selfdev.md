@@ -607,7 +607,7 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 
 手順(この順に行う。どの段階でも、やり直しても壊れない):
 
-1. **repo を登録する。** プロジェクトの画面(`#/projects/<id>/dashboard`)の「リポジトリの対応（運用者のみ）」で `owner/name` を追加する。API では `PUT /api/projects/{id}/repos` に `{"repoKey":"owner/name"}`。1 つの repo は 1 つのプロジェクトにだけ登録できる(別のプロジェクトに登録済みなら 409)。登録の一覧は `GET /api/projects/{id}/repos`、外すのは `DELETE /api/projects/{id}/repos?repoKey=owner/name`(本文は `{}`)。
+1. **repo を登録する。** プロジェクトの画面(`#/projects/<id>/dashboard`)の「リポジトリの対応（運用者のみ）」で `owner/name` を追加する。API では `PUT /api/projects/{id}/repos` に `{"repoKey":"owner/name"}`。1 つの repo は 1 つのプロジェクトにだけ登録できる(別のプロジェクトに登録済みなら 409)。登録の一覧は `GET /api/projects/{id}/repos`、外すのは `DELETE /api/projects/{id}/repos?repoKey=owner/name`(本文は `{}`)。画面では各行の「登録を外す…」から確認ダイアログを経て外す。外しても、すでに振り分けた行の所属は変わらない。
 2. **dry-run で件数を見る。** `POST /api/projects/backfill?dryRun=true`(既定も dry-run)。何も書かない。応答は、テーブルごとに `matched`(振り分けられる件数)、`updated`(書いた件数。dry-run では 0)、`unmatched`(対応がなく NULL のまま残る件数)。画面では「確認（dry-run）」ボタン。
 3. **実行する。** `POST /api/projects/backfill?dryRun=false`。画面では「振り分けを実行…」(確認ダイアログが出る)。`project_id` が NULL の行だけを書き、値のある行は変えない。大量の行は 500 件ずつ(バッチ)に分けて書く。何度実行しても同じ結果になる(冪等)。取り消す機能はない。
 4. **件数を確認する。** もう一度 dry-run を実行する。`matched` が 0 になっていれば、対応のつく行はすべて振り分け済み。残った `unmatched` が、対応を登録すべき repo の行である(手順 1 に戻る)。

@@ -197,6 +197,12 @@ Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込み
 | `GET /api/projects/{id}/budget` | プロジェクトの今月の予算（ORDER_MANAGE）。`{projectId, period, monthlyLimitJpy, softRatio, softLimitJpy, committedJpy, reservedJpy, remainingJpy, softExceeded}`（円の文字列。上限が無ければ上限系は null）。対象の月は日本時間の暦月。存在しないプロジェクトは 404（ADR 0022 PR-E） |
 | `PUT /api/projects/{id}/budget` | body `{"monthlyLimitJpy": 10000, "softRatio": 0.8}` で月の上限（円、0 以上の整数）と警告の基準（0 より大きく 1 以下、小数 3 桁まで。省略は 0.8）を設定（ORDER_MANAGE、JSON）。200 で設定後の状態を返す。値が不正なら 400 で何も変えない。存在しないプロジェクトは 404。上限を超えると、そのプロジェクトの Run のコーディング CLI の割り当てだけが拒否される（他のプロジェクトと全体には影響しない） |
 | `DELETE /api/projects/{id}/budget` | 月の上限を解除する（ORDER_MANAGE、JSON、本文は `{}`）。204（上限が無くても 204）。消化額は残る。存在しないプロジェクトは 404。手順は `docs/runbook-selfdev.md` 4.18 |
+| `GET` / `POST /api/projects/{id}/tasks` | 開発目標（`/api/selfdev/goals` と同じ応答）の一覧・投入（ADR 0022 PR-E2）。投入の body の `projectId` は省略可で、あれば path と一致が必要（不一致は 400）。path のプロジェクトが存在しなければ 404。認可は path のプロジェクトで判定する |
+| `GET` / `POST /api/projects/{id}/orders` | order の一覧・作成（`/api/selfdev/orders` と同じ応答）。body の `projectId` の規則は tasks と同じ（PR-E2） |
+| `GET /api/projects/{id}/approvals?state=PENDING` | 承認待ちの停止要求（`/api/selfdev/stop-requests` と同じ応答）。`state=PENDING` は必須（PR-E2） |
+| `GET /api/projects/{id}/memory` | 記憶の一覧（`/api/selfdev/memory` と同じ検索条件と応答）（PR-E2） |
+| `GET /api/projects/{id}/assignees` | そのプロジェクトのメンバー（担当）の一覧（`/api/selfdev/assignees` と同じ応答）（PR-E2） |
+| 旧 `/api/selfdev/goals`、`/api/selfdev/orders`、`/api/selfdev/stop-requests`、`/api/selfdev/memory`、`/api/selfdev/assignees`（projectId を受け付ける GET と POST の一部） | 応答は変えない。`Deprecation: true` と `Link: <…/api/projects/{id}/…>; rel="successor-version"` を付ける（PR-E2）。`/api/selfdev/runs` と `POST /api/selfdev/tasks` は移行先がまだないので対象外。手順は `docs/runbook-selfdev.md` 4.19 |
 | `GET /api/runs/{id}/operations` | 自分の Run の Operation を作成順に最大 100 件（読み取り専用）。他人の Run・存在しない Run は同じ 404。`{schemaVersion, runId, operations, limit, truncated}`。`?after=<operationId>` で次ページを取得でき、`truncated=true` のとき応答の `nextAfter` がその値（不正な `after` は 400）。`state` は Journal の状態名をそのまま返す（UNKNOWN / RECONCILIATION_REQUIRED を成功・完了とは表示しない）。トークン、request hash、外部参照、生のエラー、Evidence は含まない |
 
 応答（Run のスナップショット）: `{runId, taskId, title, state, mode, executed, effect, reasonCode, createdAt, updatedAt, ...}`。投入は `state` が `CREATED`、`mode` が `SIMULATED`、`executed` が `false`。自己開発の Run は `mode` が `SELF_DEV` で、`title` と `executed` は null（タイトルは返さない）、`effect` は `CREATES_PULL_REQUEST`。PR の番号とリンクは DB の binding から作る（GitHub は呼ばない）。

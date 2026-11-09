@@ -22,6 +22,7 @@ import net.kigawa.kivra.db.MemoryConditionDeleteResult
 import net.kigawa.kivra.db.MemoryDeleteResult
 import net.kigawa.kivra.db.MemoryFilter
 import net.kigawa.kivra.db.MemoryRecordView
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevMemoryRepository
 import net.kigawa.kivra.selfdev.memory.MemoryKind
 import net.kigawa.kivra.selfdev.memory.MemorySource
@@ -48,6 +49,8 @@ class SelfDevMemoryRouteDeps(
     val memory: SelfDevMemoryRepository?,
     /** The AI principal's owner key (`KIVRA_SELFDEV_AI_PRINCIPAL`), or null. Only the default [guard] reads it. */
     val aiPrincipal: String?,
+    /** The projects, for the alias under a project (ADR 0022 PR-E): the path's project must exist. Null: the alias answers 404. */
+    val projects: ProjectRepository? = null,
     /** The permission entrance. The default is the roles off and no store: today's rules, from [aiPrincipal]. */
     val guard: PermissionGuard = PermissionGuard(PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, aiPrincipal, null, null)),
 )
@@ -117,6 +120,53 @@ private const val MAX_LIST_LIMIT = 100
 private const val MAX_LIST_OFFSET = 100_000
 
 private const val ACTION_DELETE = "MEMORY_DELETE"
+/** GET the memory records: the old route (its `projectId` query) or the alias (the path's project; ADR 0022 PR-E). */
+private suspend fun listMemory(deps: SelfDevMemoryRouteDeps, call: ApplicationCall) {
+    val caller = deps.requireOperator(call) ?: return
+    val repo = deps.requireEnabled(call) ?: return
+    val pinned = call.pathProjectId()
+    if (pinned != null) {
+        // The alias (ADR 0022 PR-E) names a project: it must exist, before the permission check. Without the projects repository nothing can be
+        // found, so the alias answers 404 (fail closed).
+        val exists = deps.projects?.projectExistsForPath(pinned) ?: false
+        if (!exists) return call.respond(HttpStatusCode.NotFound, MemoryError(PROJECT_NOT_FOUND))
+    }
+    if (!deps.permit(call, caller, Permission.READ_TEXT, "memory.list", ACTION_LIST, pinned)) return
+    val params = call.request.queryParameters
+    val filter = filterOf(
+        kind = params["kind"],
+        source = params["source"],
+        tier = params["tier"],
+        goalId = params["goalId"],
+        createdAfter = params["createdAfter"],
+        createdBefore = params["createdBefore"],
+    )
+    val limit = intParam(params["limit"], DEFAULT_LIST_LIMIT, 1..MAX_LIST_LIMIT)
+    val offset = intParam(params["offset"], 0, 0..MAX_LIST_OFFSET)
+    if (filter == null || limit == null || offset == null) {
+        call.respond(HttpStatusCode.BadRequest, MemoryError(INVALID_QUERY))
+        return
+    }
+    // The project narrowing (ADR 0022 PR-D): absent is every record, as before. A record with no project is `unassigned`.
+    val project = when (val scope = listScopeOf(pinned, params["projectId"])) {
+        is ListScope.Refused -> return call.respond(scope.status, MemoryError(scope.error))
+        is ListScope.Filtered -> scope.filter
+    }
+    val rows = repo.search(filter, limit, offset, project)
+    val total = repo.count(filter, project)
+    val audit = repo.auditSummary()
+    call.respond(
+        MemoryListResponse(
+            items = rows.map { it.toOperatorItem() },
+            total = total,
+            limit = limit,
+            offset = offset,
+            tombstones = audit.tombstones,
+            deletionAudit = audit.deletionAudit,
+        ),
+    )
+}
+
 private const val ACTION_CONDITION_DELETE = "MEMORY_CONDITION_DELETE"
 private const val ACTION_LIST = "MEMORY_LIST"
 
@@ -133,45 +183,13 @@ private const val FORBIDDEN = "forbidden"
 private val memoryLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.memory.operator")
 
 internal fun Route.configureSelfDevMemoryRoutes(deps: SelfDevMemoryRouteDeps) {
+
+    // The old route keeps its answer and announces the alias (ADR 0022 PR-E).
     get("/api/selfdev/memory") {
-        val caller = deps.requireOperator(call) ?: return@get
-        val repo = deps.requireEnabled(call) ?: return@get
-        if (!deps.permit(call, caller, Permission.READ_TEXT, "memory.list", ACTION_LIST)) return@get
-        val params = call.request.queryParameters
-        val filter = filterOf(
-            kind = params["kind"],
-            source = params["source"],
-            tier = params["tier"],
-            goalId = params["goalId"],
-            createdAfter = params["createdAfter"],
-            createdBefore = params["createdBefore"],
-        )
-        val limit = intParam(params["limit"], DEFAULT_LIST_LIMIT, 1..MAX_LIST_LIMIT)
-        val offset = intParam(params["offset"], 0, 0..MAX_LIST_OFFSET)
-        if (filter == null || limit == null || offset == null) {
-            call.respond(HttpStatusCode.BadRequest, MemoryError(INVALID_QUERY))
-            return@get
-        }
-        // The project narrowing (ADR 0022 PR-D): absent is every record, as before. A record with no project is `unassigned`.
-        val project = projectFilterOf(params["projectId"])
-        if (project == null) {
-            call.respond(HttpStatusCode.BadRequest, MemoryError(PROJECT_FILTER_INVALID))
-            return@get
-        }
-        val rows = repo.search(filter, limit, offset, project)
-        val total = repo.count(filter, project)
-        val audit = repo.auditSummary()
-        call.respond(
-            MemoryListResponse(
-                items = rows.map { it.toOperatorItem() },
-                total = total,
-                limit = limit,
-                offset = offset,
-                tombstones = audit.tombstones,
-                deletionAudit = audit.deletionAudit,
-            ),
-        )
+        call.deprecatedBy("/api/projects/{projectId}/memory", call.request.queryParameters["projectId"])
+        listMemory(deps, call)
     }
+    get("/api/projects/{projectId}/memory") { listMemory(deps, call) }
 
     post("/api/selfdev/memory/{id}/delete") {
         val caller = deps.requireOperator(call) ?: return@post
@@ -351,8 +369,10 @@ private suspend fun SelfDevMemoryRouteDeps.permit(
     permission: Permission,
     route: String,
     action: String,
+    /** The request's project (ADR 0022 PR-E, the alias). Null: the plain check, as before. */
+    projectId: String? = null,
 ): Boolean {
-    val result = guard.check(caller.access, permission, route)
+    val result = if (projectId == null) guard.check(caller.access, permission, route) else guard.checkInProject(caller.access, projectId, permission, route)
     if (result is GuardResult.Allow) return true
     val code = (result as GuardResult.Deny).code
     memoryLog.info("selfdev memory operator refused: action={} actor={} result={}", action, if (caller.access.isAi) "AI" else "OPERATOR", if (caller.access.isAi) FORBIDDEN else code)

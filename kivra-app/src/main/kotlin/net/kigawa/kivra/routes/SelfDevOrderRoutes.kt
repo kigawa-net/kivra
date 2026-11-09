@@ -169,6 +169,63 @@ private const val MAX_CHILD_KEY_CODE_POINTS = 128
 /** The largest value of DECIMAL(12,0), the budget columns' type. */
 private const val MAX_BUDGET_JPY = 999_999_999_999L
 
+/** GET the orders of a project: the old route (its `projectId` query) or the alias (the path's project). */
+private suspend fun listOrders(deps: SelfDevOrderRouteDeps, call: ApplicationCall) {
+    val caller = deps.caller(call) ?: return
+    if (!deps.requireEnabled(call)) return
+    val pinned = call.pathProjectId()
+    if (pinned != null && !deps.projects.projectExistsForPath(pinned)) return call.respond(HttpStatusCode.NotFound, OrderError(PROJECT_NOT_FOUND))
+    if (!deps.permit(call, caller, Permission.READ, "order.list", projectId = pinned)) return
+    val project = when (val scope = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
+        is ListScope.Refused -> return call.respond(scope.status, OrderError(scope.error))
+        is ListScope.Filtered -> scope.filter
+    }
+    call.respond(deps.orders.list(LIST_LIMIT, project).map { it.summary() })
+}
+
+/** POST a root order: the old route (the body's projectId) or the alias (the path's project; a body projectId must match). */
+private suspend fun createOrder(deps: SelfDevOrderRouteDeps, call: ApplicationCall) {
+    val pinned = call.pathProjectId()
+    val caller = deps.caller(call) ?: return
+    if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return
+    if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create")) return
+    val request = decodeOr<CreateOrderRequest>(call) ?: return
+    val title = validatedText(request.title, MAX_TITLE_CODE_POINTS)
+    val policy = validatedPolicy(request.policy)
+    if (title == null) return call.respond(HttpStatusCode.BadRequest, OrderError(TITLE_INVALID))
+    if (policy == null) return call.respond(HttpStatusCode.BadRequest, OrderError(POLICY_INVALID))
+    val maxCycles = request.maxCycles ?: 1
+    if (maxCycles !in 1..deps.orderSettings.maxCyclesCap) {
+        return call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
+    }
+    val repo = deps.targetRepo ?: return call.respond(HttpStatusCode.ServiceUnavailable, OrderError(ORDERS_DISABLED))
+    // The alias (ADR 0022 PR-E) takes the path's project; the body's projectId, when given, must be the same.
+    val projectId = when (val scope = pinned?.let { deps.projects.scopeOfPath(it, request.projectId) } ?: deps.projects.scopeOf(request.projectId)) {
+        is ProjectScope.Refused -> return call.respond(scope.status, OrderError(scope.error))
+        is ProjectScope.Assigned -> scope.projectId
+    }
+    if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create", projectId = projectId)) return
+    val created = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles, projectId) as CreateRootResult.Created
+    operatorLog.info("order operator action: action=ORDER_CREATED actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), created.order.orderId)
+    call.respond(HttpStatusCode.Created, created.order.summary())
+}
+
+/** GET the pending stop requests of a project: the old route or the alias (the path's project). */
+private suspend fun listApprovals(deps: SelfDevOrderRouteDeps, call: ApplicationCall) {
+    val caller = deps.caller(call) ?: return
+    if (!deps.requireEnabled(call)) return
+    val pinned = call.pathProjectId()
+    if (pinned != null && !deps.projects.projectExistsForPath(pinned)) return call.respond(HttpStatusCode.NotFound, OrderError(PROJECT_NOT_FOUND))
+    if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.list", projectId = pinned)) return
+    val state = call.request.queryParameters["state"]
+    if (state != "PENDING") return call.respond(HttpStatusCode.BadRequest, OrderError(STATE_INVALID))
+    val project = when (val scope = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
+        is ListScope.Refused -> return call.respond(scope.status, OrderError(scope.error))
+        is ListScope.Filtered -> scope.filter
+    }
+    call.respond(deps.orders.pendingStopRequests(LIST_LIMIT, project).map { it.response(true) })
+}
+
 private const val ORDERS_DISABLED = "self-development orders are disabled"
 private const val INVALID_BODY = "invalid request body"
 private const val TITLE_INVALID = "title must be 1-200 characters without control characters"
@@ -192,38 +249,19 @@ private const val KEY_CONFLICT = "idempotency key was already used with a differ
 private val operatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.order.operator")
 
 internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
-    get("/api/selfdev/orders") {
-        val caller = deps.caller(call) ?: return@get
-        if (!deps.requireEnabled(call)) return@get
-        if (!deps.permit(call, caller, Permission.READ, "order.list")) return@get
-        val project = projectFilterOf(call.request.queryParameters["projectId"])
-            ?: return@get call.respond(HttpStatusCode.BadRequest, OrderError(PROJECT_FILTER_INVALID))
-        call.respond(deps.orders.list(LIST_LIMIT, project).map { it.summary() })
-    }
 
-    post("/api/selfdev/orders") {
-        val caller = deps.caller(call) ?: return@post
-        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create")) return@post
-        val request = decodeOr<CreateOrderRequest>(call) ?: return@post
-        val title = validatedText(request.title, MAX_TITLE_CODE_POINTS)
-        val policy = validatedPolicy(request.policy)
-        if (title == null) return@post call.respond(HttpStatusCode.BadRequest, OrderError(TITLE_INVALID))
-        if (policy == null) return@post call.respond(HttpStatusCode.BadRequest, OrderError(POLICY_INVALID))
-        val maxCycles = request.maxCycles ?: 1
-        if (maxCycles !in 1..deps.orderSettings.maxCyclesCap) {
-            return@post call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
-        }
-        val repo = deps.targetRepo ?: return@post call.respond(HttpStatusCode.ServiceUnavailable, OrderError(ORDERS_DISABLED))
-        val projectId = when (val scope = deps.projects.scopeOf(request.projectId)) {
-            is ProjectScope.Refused -> return@post call.respond(scope.status, OrderError(scope.error))
-            is ProjectScope.Assigned -> scope.projectId
-        }
-        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create", projectId = projectId)) return@post
-        val created = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles, projectId) as CreateRootResult.Created
-        operatorLog.info("order operator action: action=ORDER_CREATED actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), created.order.orderId)
-        call.respond(HttpStatusCode.Created, created.order.summary())
+    // The old routes keep their answers; they only announce the alias (ADR 0022 PR-E).
+    get("/api/selfdev/orders") {
+        call.deprecatedBy("/api/projects/{projectId}/orders", call.request.queryParameters["projectId"])
+        listOrders(deps, call)
     }
+    post("/api/selfdev/orders") {
+        call.deprecatedBy("/api/projects/{projectId}/orders", null)
+        createOrder(deps, call)
+    }
+    // The alias of the list and the creation under a project (ADR 0022 PR-E). The same handlers; the path's project is the project.
+    get("/api/projects/{projectId}/orders") { listOrders(deps, call) }
+    post("/api/projects/{projectId}/orders") { createOrder(deps, call) }
 
     get("/api/selfdev/orders/{id}") {
         val caller = deps.caller(call) ?: return@get
@@ -359,16 +397,12 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         }
     }
 
+    // The old route keeps its answer and announces the alias (ADR 0022 PR-E): the pending stop requests of a project.
     get("/api/selfdev/stop-requests") {
-        val caller = deps.caller(call) ?: return@get
-        if (!deps.requireEnabled(call)) return@get
-        if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.list")) return@get
-        val state = call.request.queryParameters["state"]
-        if (state != "PENDING") return@get call.respond(HttpStatusCode.BadRequest, OrderError(STATE_INVALID))
-        val project = projectFilterOf(call.request.queryParameters["projectId"])
-            ?: return@get call.respond(HttpStatusCode.BadRequest, OrderError(PROJECT_FILTER_INVALID))
-        call.respond(deps.orders.pendingStopRequests(LIST_LIMIT, project).map { it.response(true) })
+        call.deprecatedBy("/api/projects/{projectId}/approvals", call.request.queryParameters["projectId"])
+        listApprovals(deps, call)
     }
+    get("/api/projects/{projectId}/approvals") { listApprovals(deps, call) }
 
     post("/api/selfdev/stop-requests/{id}/approve") {
         val caller = deps.caller(call) ?: return@post

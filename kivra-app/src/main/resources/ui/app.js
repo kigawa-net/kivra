@@ -362,7 +362,7 @@
     if (isApi(path) && state.sessionExpired) return { ok: false, kind: 'session' };
     // The operator's lists are narrowed to the selected project here (ADR 0022 PR-D). The callers keep their literal paths.
     // The unscoped flag keeps a list whole when the project filter would narrow it (the member picker needs every assignee).
-    if (method === 'GET' && state.projectFilter && !unscoped && PROJECT_SCOPED_GET.test(path)) path = withProject(path);
+    if (!unscoped && state.projectFilter) path = scopedPath(path, method, body);
     var init = {
       method: method,
       credentials: 'same-origin',
@@ -763,13 +763,13 @@
         if (!p || typeof p !== 'object' || !p.projectId || !p.name) return;
         var link = h('a', {
           className: 'side-project-link',
-          href: '#/',
+          href: projectPageHash(p.projectId, 'tasks'),
           text: p.name,
           'data-project-filter': p.projectId
         });
         link.addEventListener('click', function (e) {
           e.preventDefault();
-          selectProjectFilter(p.projectId);
+          chooseProjectContext(p.projectId);
         });
         var dash = h('a', {
           className: 'side-project-dash',
@@ -851,6 +851,36 @@
     return base + (base.indexOf('?') === -1 ? '?' : '&') + 'projectId=' + encodeURIComponent(state.projectFilter);
   }
 
+  /**
+   * The old list path that a selected project reads from its own route instead (ADR 0022 PR-E), or null when there is none. The alias
+   * takes the project from its path, so the query is not repeated there.
+   */
+  function projectAliasOf(path, projectId) {
+    var base = '/api/projects/' + encodeURIComponent(projectId);
+    if (path === '/api/selfdev/goals') return base + '/tasks';
+    if (path === '/api/selfdev/orders') return base + '/orders';
+    if (path === '/api/selfdev/stop-requests?state=PENDING') return base + '/approvals?state=PENDING';
+    if (path === '/api/selfdev/assignees') return base + '/assignees';
+    var memory = /^\/api\/selfdev\/memory(\?.*)$/.exec(path);
+    if (memory) return base + '/memory' + memory[1];
+    return null;
+  }
+
+  /**
+   * The path a request is sent to, for the selected project (ADR 0022 PR-E). A project's reads and its creations of goals and orders use the
+   * project's own routes. The other lists keep the old route, with the projectId query (the runs, and the unassigned rows).
+   */
+  function scopedPath(path, method, body) {
+    var projectId = state.projectFilter;
+    if (isProjectContext(projectId)) {
+      // A creation moves only when its body names the same project; a body for another project keeps the old route, as before.
+      var moves = method === 'GET' || (method === 'POST' && body && body.projectId === projectId);
+      var alias = moves ? projectAliasOf(path, projectId) : null;
+      if (alias !== null) return alias;
+    }
+    return method === 'GET' && PROJECT_SCOPED_GET.test(path) ? withProject(path) : path;
+  }
+
   function selectProjectFilter(projectId) {
     state.projectFilter = projectId;
     // Reset "all" link
@@ -858,6 +888,8 @@
     if (allLink) allLink.setAttribute('aria-current', projectId === null ? 'page' : '');
     // Re-render sidebar active state
     renderProjectSidebar();
+    // The header's tabs point into the selected project (or back to the old pages): their links change with it.
+    renderNav();
     // The lists are read again for the selected project. The old rows are cleared first, so none of the old project stays on screen.
     state.runs = null;
     renderRuns();
@@ -866,6 +898,16 @@
     refreshOrders();
     refreshMemory();
     refreshAssignees();
+  }
+
+  /**
+   * The sidebar's choice of a context (ADR 0022 PR-E): the lists are read for it, and the URL moves to the same page under it (the project's
+   * page, or the old page for "all" and "unassigned"). The page the user is on stays the same.
+   */
+  function chooseProjectContext(projectId) {
+    var page = currentPageKey();
+    selectProjectFilter(projectId);
+    navigateTo(pageHash(page, projectId));
   }
 
   // ---- Self-development status (the banner above the list) ---------------
@@ -1054,26 +1096,65 @@
   // Set once a page's API answer is known, so a deep link is not sent back to #/ before the answer arrives.
   var NAV = { settled: {} };
 
-  /** For #/projects/<id>/dashboard: { id } (the id is '' when it cannot be decoded). Otherwise null. */
+  // The pages under a project (ADR 0022 PR-E): #/projects/<id>/<page>. The header's tabs are these, while a project is selected.
+  // 'budget' is not a page of its own: the project's budget is on its dashboard, so that hash goes to the dashboard.
+  var PROJECT_PAGE_RE = /^#\/projects\/([^\/?#]+)\/(dashboard|tasks|goals|orders|approvals|budget|memory|assignees)$/;
+
+  /** For #/projects/<id>/<page>: { id, page } (the id is '' when it cannot be decoded). Otherwise null. */
   function parseProjectRoute() {
-    var m = /^#\/projects\/([^\/?#]+)\/dashboard$/.exec(window.location.hash);
+    var m = PROJECT_PAGE_RE.exec(window.location.hash);
     if (!m) return null;
     try {
-      return { id: decodeURIComponent(m[1]) };
+      return { id: decodeURIComponent(m[1]), page: m[2] };
     } catch (e) {
-      return { id: '' };
+      return { id: '', page: m[2] };
     }
   }
 
+  function projectPageHash(projectId, page) {
+    return '#/projects/' + encodeURIComponent(projectId) + '/' + page;
+  }
+
   function projectDashboardHash(projectId) {
-    return '#/projects/' + encodeURIComponent(projectId) + '/dashboard';
+    return projectPageHash(projectId, 'dashboard');
+  }
+
+  /** True when a selected project is a project id (not "all" (null) and not "unassigned"). */
+  function isProjectContext(projectFilter) {
+    return typeof projectFilter === 'string' && projectFilter !== 'unassigned' && projectFilter !== '';
+  }
+
+  /**
+   * The hash of a page in the current context (ADR 0022 PR-E): under a selected project, the project's own hash; otherwise the page's own
+   * hash (the old one, as before). pageKey is a page id, or 'dashboard' for the project's dashboard.
+   */
+  function pageHash(pageKey, projectFilter) {
+    if (isProjectContext(projectFilter)) {
+      return projectPageHash(projectFilter, pageKey === 'project' || pageKey === 'budget' ? 'dashboard' : pageKey);
+    }
+    if (pageKey === 'project' || pageKey === 'dashboard') return '#/';
+    var p = PAGES.filter(function (x) { return x.id === pageKey; })[0];
+    return p && p.hash ? p.hash : '#/';
+  }
+
+  /** The page the user is on, as a pageHash key: the project's dashboard keeps its place when the project changes. */
+  function currentPageKey() {
+    var cur = currentPageId();
+    if (cur === 'project') return 'dashboard';
+    return cur;
+  }
+
+  /** Sets the hash unless it is already that one (a hashchange then runs route). */
+  function navigateTo(h) {
+    if (window.location.hash !== h) window.location.hash = h;
   }
 
   /** The page id for the current hash: a run detail belongs to 'tasks'; anything unknown is null (route sends it to #/). */
   function pageIdForHash() {
     var h = window.location.hash;
     if (parseRoute() !== null) return 'tasks';
-    if (parseProjectRoute() !== null) return 'project';
+    var pr = parseProjectRoute();
+    if (pr !== null) return pr.page === 'dashboard' || pr.page === 'budget' ? 'project' : pr.page;
     if (h === '' || h === '#') return 'tasks';
     for (var i = 0; i < PAGES.length; i++) {
       if (PAGES[i].hash === h) return PAGES[i].id;
@@ -1104,7 +1185,7 @@
     PAGES.forEach(function (p) {
       if (p.id !== cur || p.gate === null || detail) return;
       if ($(p.gate).hidden && NAV.settled[p.id] === true) {
-        replaceHash('#/');
+        replaceHash(pageHash('tasks', state.projectFilter));
         cur = 'tasks';
       }
     });
@@ -1114,6 +1195,8 @@
       var shown = p.gate === null || !$(p.gate).hidden;
       var link = $('nav-' + p.id);
       link.hidden = !shown;
+      // The tab is the page of the selected project, or the old page while no project is selected (ADR 0022 PR-E).
+      link.setAttribute('href', pageHash(p.id, state.projectFilter));
       if (p.id === cur) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     });
@@ -1125,6 +1208,7 @@
     if (n === null) badge.removeAttribute('aria-label');
     else badge.setAttribute('aria-label', label);
     var head = $('header-approvals');
+    head.setAttribute('href', pageHash('approvals', state.projectFilter));
     head.hidden = n === null || n < 1;
     head.textContent = n === null ? '' : '承認待ち ' + n + ' 件';
     if (n === null) head.removeAttribute('aria-label');
@@ -1136,6 +1220,14 @@
   function route() {
     if (window.location.hash === '#main') return;
     stopExecution();
+    // The old budget hash of a project goes to its dashboard, where the project's budget is (ADR 0022 PR-E).
+    var pr = parseProjectRoute();
+    if (pr !== null && pr.page === 'budget') {
+      replaceHash(projectDashboardHash(pr.id));
+      pr = parseProjectRoute();
+    }
+    // A project's own page selects the project (the lists are read for it), unless it is already selected. The URL is the context.
+    if (pr !== null && pr.id !== '' && pr.id !== state.projectFilter) selectProjectFilter(pr.id);
     if (pageIdForHash() === null) replaceHash('#/');
     var r = parseRoute();
     var showDetail = r !== null;
@@ -1143,9 +1235,8 @@
     $('view-detail').hidden = !showDetail;
     $('detail-notice').textContent = '';
     renderNav();
-    var project = parseProjectRoute();
-    if (project !== null) {
-      loadProjectDashboard(project.id);
+    if (pr !== null && pr.page === 'dashboard') {
+      loadProjectDashboard(pr.id);
       window.scrollTo(0, 0);
     } else if (showDetail) {
       loadDetail(r.id, r.all);
@@ -5380,15 +5471,15 @@
     if (allProjectLink) {
       allProjectLink.addEventListener('click', function (e) {
         e.preventDefault();
-        selectProjectFilter(null);
+        chooseProjectContext(null);
       });
     }
-    // "unassigned" link: the rows that belong to no project (ADR 0022 PR-D)
+    // "unassigned" link: the rows that belong to no project (ADR 0022 PR-D). It keeps the old pages and their projectId query.
     var unassignedProjectLink = $('nav-project-unassigned');
     if (unassignedProjectLink) {
       unassignedProjectLink.addEventListener('click', function (e) {
         e.preventDefault();
-        selectProjectFilter('unassigned');
+        chooseProjectContext('unassigned');
       });
     }
     // Project create: show form, cancel, submit

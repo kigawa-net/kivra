@@ -137,7 +137,7 @@ class RolesCoverageArchitectureTest {
         // /ui and /ui/ only redirect to /ui/compose (the legacy vanilla UI assets /ui/app.js and /ui/app.css were removed).
         for (r in listOf("GET /health", "GET /ready", "GET /metrics", "GET /", "GET /ui", "GET /ui/",
             "GET /ui/compose", "GET /ui/compose/", "GET /ui/compose/kivra-web.js",
-            "GET /ui/compose/{wasmFile}", "GET /ui/compose/composeResources/{file}")) put(r, "PUBLIC")
+            "GET /ui/compose/{wasmFile}")) put(r, "PUBLIC")
         for (r in listOf(
             "POST /api/agent/v1/claim",
             "POST /api/agent/v1/attempts/{attemptId}/heartbeat",

@@ -59,6 +59,17 @@ OUT=/path/to/out.png node projects-error-check.mjs   # /api/projects を 500 に
 ONLY=home,goals OUT=/path/to/out node crawl.mjs     # 一部だけ
 ```
 
+- 巡回の対象(`crawl.mjs` の `screens`)は、改訂 2 の構成(docs/design/16-site-structure.md)に合わせてある。
+  - 入口と全体: `home`(`#/`)、`projects`、`budget`・`autopilot`・`assignees`(全体)。
+  - 旧 URL: `legacy-tasks`・`legacy-goals`・`legacy-approvals`(`#/tasks` など)。プロジェクトが 1 つに決まれば、その配下の URL に
+    置き換わる。決まらなければ、プロジェクト一覧が案内文つきで出る。
+  - プロジェクト配下: `proj-dashboard`・`proj-tasks`・`proj-goals`・`proj-orders`・`proj-approvals`・`proj-memory`・
+    `proj-assignees`・`proj-budget`(`#/projects/<id>/<page>`)。
+  - プロジェクトの中の詳細: `proj-goal-detail`・`proj-order-detail`・`proj-order-cycles`・`proj-run-detail`。
+    旧い詳細 `legacy-goal-detail`・`legacy-run-detail`(`#/goals/<id>` など)も同じ画面を開く。
+  - 壊れたリンク `invalid`(`#/projects/%ZZ/tasks`)は「リンクが正しくありません」。
+  - 各スクリーンショットで確認すること: 左のナビが「ホーム・プロジェクト」「そのプロジェクトの節」「全体」の 2 層になっていること、
+    上のパンくずが「プロジェクト › <名前> › <ページ> › <詳細>」になっていること、URL(ハッシュ)が上の表どおりであること。
 - `CHROME`(既定 `/usr/bin/google-chrome`)で Chrome を指定できる。
 - 各画面を開くときは `Authorization: Bearer` を全リクエストに付ける(本番の oauth2-proxy の代わり)。
 - 出力: `<画面>.png`(スクリーンショット)、`summary.json`(API の 4xx/5xx と本文、ページの例外、コンソールのエラー)。

@@ -42,15 +42,15 @@ import net.kigawa.kivra.ui.writeFailureText
  * 自律運転が無効のときは一覧ごと出さない(旧 UI の orders-section と同じ。読みにも行かない)。
  */
 @Composable
-fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
+fun OrdersScreen(projectId: String, onNavigate: (Route) -> Unit) {
     val availability = LocalAutopilotAvailability.current
     val autopilotOn = availability == AutopilotAvailability.ENABLED
     // 作成の後に増やして、一覧を読み直させる。
     var listReload by remember { mutableStateOf(0) }
-    val loaded = rememberLoad(Triple(selectedProjectId, autopilotOn, listReload)) {
+    val loaded = rememberLoad(Triple(projectId, autopilotOn, listReload)) {
         if (!autopilotOn) return@rememberLoad emptyList()
         // 選んだプロジェクトの order だけ(別名ルート)。全体のときは全部。
-        ApiClient.getOrders(selectedProjectId)
+        ApiClient.getOrders(projectId)
     }
     val perms = LocalCallerPermissions.current
 
@@ -59,7 +59,7 @@ fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit)
         Spacer(modifier = Modifier.height(16.dp))
 
         if (showsOrderCreateForm(availability, perms)) {
-            OrderCreateCard(onChanged = { listReload += 1 })
+            OrderCreateCard(projectId = projectId, onChanged = { listReload += 1 })
             Spacer(modifier = Modifier.height(16.dp))
         }
 
@@ -118,7 +118,7 @@ private fun OrderCard(row: OrderTreeRow, onClick: () -> Unit) {
  * 書き込みの後は一覧を読み直す。プロジェクトの絞り込みは読み込みのたびに効く。
  */
 @Composable
-fun ApprovalsScreen(selectedProjectId: String? = null) {
+fun ApprovalsScreen(projectId: String) {
     // 書き込みの後に増やして、一覧を読み直させる。
     var reloadKey by remember { mutableStateOf(0) }
     var notice by remember { mutableStateOf<ActionNotice?>(null) }
@@ -132,10 +132,10 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
     // 一覧。書き込みの後の読み直し(reloadKey)でも前の一覧を残す。
     // 承認の一覧は自律運転が有効なときだけ(旧 UI の approval-section と同じ)。
     val autopilotOn = LocalAutopilotAvailability.current == AutopilotAvailability.ENABLED
-    val loaded = rememberLoad(Pair(selectedProjectId, autopilotOn), reloadKey) {
+    val loaded = rememberLoad(Pair(projectId, autopilotOn), reloadKey) {
         if (!autopilotOn) return@rememberLoad emptyList()
         // 選んだプロジェクトの停止要求だけ(別名ルート。停止要求は order の project に属する)。全体のときは全部。
-        ApiClient.getApprovals(selectedProjectId)
+        ApiClient.getApprovals(projectId)
     }
 
     // 送信を一つだけ走らせる。busy は送信の前に立てるので、連打しても二重に送られない。

@@ -73,7 +73,7 @@ private class MemoryDeleteTarget(val recordId: String?, val filter: MemoryListFi
  * [projectId] は選んだプロジェクトで絞る(旧 UI の PROJECT_SCOPED_GET と同じ)。
  */
 @Composable
-fun MemoryScreen(projectId: String? = null) {
+fun MemoryScreen(projectId: String) {
     val perms = LocalCallerPermissions.current
     val scope = rememberCoroutineScope()
     val canRead = perms.can(GatedOperation.READ_MEMORY)

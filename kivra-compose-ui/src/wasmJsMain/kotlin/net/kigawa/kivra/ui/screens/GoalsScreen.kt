@@ -39,19 +39,18 @@ import net.kigawa.kivra.ui.validatedBody
 import net.kigawa.kivra.ui.validatedTaskTitle
 
 /**
- * Goals screen: Goal の投入フォーム(自律運転が有効で GOAL_WRITE があるときだけ)と Goal 一覧。
+ * Goals screen (プロジェクトの中): Goal の投入フォーム(自律運転が有効で GOAL_WRITE があるときだけ)と、このプロジェクトの Goal 一覧。
  */
 @Composable
-fun GoalsScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
+fun GoalsScreen(projectId: String, onNavigate: (Route) -> Unit) {
     val perms = LocalCallerPermissions.current
     var listReload by remember { mutableStateOf(0) }
     var autopilotReload by remember { mutableStateOf(0) }
 
     // 一覧は自律運転が有効なときだけ(旧 UI の plans-section と同じ。無効なら一覧ごと出さず、読みにも行かない)。
     val autopilotOn = LocalAutopilotAvailability.current == AutopilotAvailability.ENABLED
-    val loaded = rememberLoad(Pair(selectedProjectId, autopilotOn), reload = listReload) {
-        // 選んだプロジェクトの目標だけ(別名ルート)。全体のときは全部。
-        if (autopilotOn) ApiClient.getGoals(selectedProjectId) else emptyList()
+    val loaded = rememberLoad(Pair(projectId, autopilotOn), reload = listReload) {
+        if (autopilotOn) ApiClient.getGoals(projectId) else emptyList()
     }
     // 投入フォームを出すかの元になる、自律運転の有無と対象リポジトリ。読めない・無効なら何も出さない(旧 UI の goal-section と同じ)。
     val autopilot = rememberLoad(Unit, reload = autopilotReload) { readGoalAutopilot() }
@@ -63,6 +62,7 @@ fun GoalsScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
 
         if (showsGoalForm(read.availability, perms)) {
             GoalFormCard(
+                projectId = projectId,
                 targetRepo = read.targetRepo,
                 onSubmitted = { listReload += 1 },
                 onAutopilotChanged = { autopilotReload += 1 },
@@ -112,18 +112,16 @@ private suspend fun readGoalAutopilot(): GoalAutopilot =
     }
 
 /**
- * Goal の投稿フォーム(旧 UI の goal-form)。目的、背景・制約・受け入れ条件(任意)、プロジェクト(必須)、送信。
- * 失敗時は入力を残し、成功時だけ目的と本文を消す(プロジェクトは残す)。自律運転が無効と分かった時は [onAutopilotChanged] で読み直す。
+ * Goal の投稿フォーム(旧 UI の goal-form)。目的、背景・制約・受け入れ条件(任意)、送信。作成先はこの画面のプロジェクト([projectId]、選べない)。
+ * 失敗時は入力を残し、成功時だけ目的と本文を消す。自律運転が無効と分かった時は [onAutopilotChanged] で読み直す。
  */
 @Composable
-private fun GoalFormCard(targetRepo: String?, onSubmitted: () -> Unit, onAutopilotChanged: () -> Unit) {
+private fun GoalFormCard(projectId: String, targetRepo: String?, onSubmitted: () -> Unit, onAutopilotChanged: () -> Unit) {
     val coroutineScope = rememberCoroutineScope()
     val keys = remember { IdempotencyKeys() }
-    val projects = rememberLoad(Unit) { ApiClient.getProjects() }
 
     var title by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
-    var projectId by remember { mutableStateOf<String?>(null) }
     var submitting by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
     val blocked = submitBlocked(submitting, ApiSession.expired)
@@ -136,17 +134,12 @@ private fun GoalFormCard(targetRepo: String?, onSubmitted: () -> Unit, onAutopil
             result = GOAL_BAD_MESSAGE to false
             return
         }
-        val chosen = projectId
-        if (chosen == null || !isProjectId(chosen)) {
-            result = PROJECT_REQUIRED_MESSAGE to false
-            return
-        }
-        val key = keys.keyFor(GoalSignature(validTitle, validBody, chosen))
+        val key = keys.keyFor(GoalSignature(validTitle, validBody, projectId))
         submitting = true
         result = "送信中です…" to true
         coroutineScope.launch {
             val outcome = try {
-                ApiClient.submitGoal(validTitle, validBody.takeIf { it.isNotEmpty() }, chosen, key)
+                ApiClient.submitGoal(validTitle, validBody.takeIf { it.isNotEmpty() }, projectId, key)
             } finally {
                 submitting = false
             }
@@ -199,12 +192,7 @@ private fun GoalFormCard(targetRepo: String?, onSubmitted: () -> Unit, onAutopil
                 minLines = 3,
             )
             Spacer(modifier = Modifier.height(8.dp))
-            ProjectChoice(
-                projects = projects,
-                selected = projectId,
-                enabled = !blocked,
-                onSelect = { projectId = it },
-            )
+            ProjectFixedLabel(projectId)
             Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = { send() },

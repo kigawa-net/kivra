@@ -70,10 +70,11 @@ class ShellRulesTest {
 
     @Test
     fun titleFollowsThePageAndTheRunDetailRule() {
-        assertEquals("Kivra — タスク", documentTitleOf(Route.Page(NavDestination.Tasks)))
-        assertEquals("Kivra — 承認", documentTitleOf(Route.Page(NavDestination.Approvals)))
+        assertEquals("Kivra — タスク", documentTitleOf(Route.ProjectPage("p1", NavDestination.Tasks)))
+        assertEquals("Kivra — 承認", documentTitleOf(Route.ProjectPage("p1", NavDestination.Approvals)))
+        assertEquals("Kivra — プロジェクト", documentTitleOf(Route.ProjectChooser(NavDestination.Goals)))
         assertEquals("Kivra — Run の詳細", documentTitleOf(Route.RunDetail("01ARZ")))
-        assertEquals("Kivra — 開発目標", documentTitleOf(Route.GoalDetail("01ARZ")))
+        assertEquals("Kivra — 開発目標", documentTitleOf(Route.GoalDetail("01ARZ", "p1")))
         assertEquals("Kivra — order", documentTitleOf(Route.OrderCycles("01ARZ")))
         assertEquals("Kivra", documentTitleOf(Route.Invalid("#/x/")))
     }

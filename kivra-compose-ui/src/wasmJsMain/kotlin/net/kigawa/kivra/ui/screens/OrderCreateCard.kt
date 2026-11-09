@@ -50,14 +50,12 @@ import net.kigawa.kivra.ui.validatedOrderTitle
  * 失敗時は入力を残し、成功時は題名・方針・周の数を消す(プロジェクトは残す)。409 は一覧を読み直す(既存のルートを見せるため)。
  */
 @Composable
-internal fun OrderCreateCard(onChanged: () -> Unit) {
+internal fun OrderCreateCard(projectId: String, onChanged: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val projects = rememberLoad(Unit) { ApiClient.getProjects() }
 
     var title by remember { mutableStateOf("") }
     var policy by remember { mutableStateOf("") }
     var maxCycles by remember { mutableStateOf("1") }
-    var projectId by remember { mutableStateOf<String?>(null) }
     var submitting by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<ActionNotice?>(null) }
     val blocked = submitBlocked(submitting, ApiSession.expired)
@@ -75,17 +73,12 @@ internal fun OrderCreateCard(onChanged: () -> Unit) {
             notice = ActionNotice(ORDER_MAX_CYCLES_MESSAGE, ok = false)
             return
         }
-        val chosen = projectId
-        if (chosen == null || !isProjectId(chosen)) {
-            notice = ActionNotice(ORDER_NO_PROJECT_MESSAGE, ok = false)
-            return
-        }
         submitting = true
         notice = ActionNotice(ORDER_SENDING_MESSAGE, ok = true)
         scope.launch {
             var created = false
             try {
-                ApiClient.createOrder(validTitle, validPolicy, cycles, chosen)
+                ApiClient.createOrder(validTitle, validPolicy, cycles, projectId)
                 created = true
             } catch (e: CancellationException) {
                 throw e
@@ -148,12 +141,7 @@ internal fun OrderCreateCard(onChanged: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(modifier = Modifier.height(8.dp))
-            ProjectChoice(
-                projects = projects,
-                selected = projectId,
-                enabled = !blocked,
-                onSelect = { projectId = it },
-            )
+            ProjectFixedLabel(projectId)
             Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = { send() },

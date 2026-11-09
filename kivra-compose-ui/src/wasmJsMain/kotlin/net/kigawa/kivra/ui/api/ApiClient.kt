@@ -104,6 +104,15 @@ object ApiClient {
     suspend fun getRuns(scope: String = "mine"): List<ApiRun> =
         if (scope == "all") getJson("/api/admin/runs?limit=100") else getJson("/api/runs")
 
+    /**
+     * プロジェクトの中の Run の一覧(scope は [getRuns] と同じ)。サーバーの `projectId` で絞る(ADR 0022。未分類の Run は含まれない)。
+     * プロジェクトの中の画面はこれを読む(全体の一覧を読んで画面で絞らない)。
+     */
+    suspend fun getRunsIn(projectId: String, scope: String = "mine"): List<ApiRun> {
+        val filter = "projectId=${percentEncode(projectId)}"
+        return if (scope == "all") getJson("/api/admin/runs?limit=100&$filter") else getJson("/api/runs?$filter")
+    }
+
     /** Run の詳細(イベントを含む)。`GET /api/runs/{id}`。404 は存在しない/他人の Run。 */
     suspend fun getRun(runId: String): ApiRun =
         getJson("/api/runs/${percentEncode(runId)}")

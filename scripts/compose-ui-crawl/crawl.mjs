@@ -44,17 +44,21 @@ const goals = await getJson('/api/selfdev/goals');
 const orders = await getJson('/api/selfdev/orders');
 const runs = await getJson('/api/runs');
 
+// 改訂 2(docs/design/16-site-structure.md)の構成。プロジェクトが入口で、ページと詳細はプロジェクトの中に置く。
+// 旧 URL(legacy-*)は、プロジェクトが 1 つに決まればその配下へ置き換わり、決まらなければプロジェクト一覧へ行く。
 const screens = [
+  // ホームと入口
   ['home', '#/'],
-  ['tasks', '#/tasks'],
-  ['goals', '#/goals'],
-  ['orders', '#/orders'],
-  ['approvals', '#/approvals'],
-  ['budget', '#/budget'],
-  ['memory', '#/memory'],
   ['projects', '#/projects'],
-  ['assignees', '#/assignees'],
+  // 全体
+  ['budget', '#/budget'],
   ['autopilot', '#/autopilot'],
+  ['assignees', '#/assignees'],
+  // 旧 URL(プロジェクトを持たない一覧)。置き換えの結果を見る
+  ['legacy-tasks', '#/tasks'],
+  ['legacy-goals', '#/goals'],
+  ['legacy-approvals', '#/approvals'],
+  // プロジェクト配下
   ['proj-dashboard', pid && `#/projects/${pid}/dashboard`],
   ['proj-tasks', pid && `#/projects/${pid}/tasks`],
   ['proj-goals', pid && `#/projects/${pid}/goals`],
@@ -62,11 +66,17 @@ const screens = [
   ['proj-approvals', pid && `#/projects/${pid}/approvals`],
   ['proj-memory', pid && `#/projects/${pid}/memory`],
   ['proj-assignees', pid && `#/projects/${pid}/assignees`],
-  ['goal-detail', goals[0]?.taskId && `#/goals/${goals[0].taskId}`],
-  ['order-detail', orders[0]?.orderId && `#/orders/${orders[0].orderId}`],
-  ['order-cycles', orders[0]?.orderId && `#/orders/${orders[0].orderId}/cycles`],
-  ['run-detail', runs[0]?.runId && `#/runs/${runs[0].runId}`],
-  ['invalid', '#/nope'],
+  ['proj-budget', pid && `#/projects/${pid}/budget`],
+  // プロジェクトの中の詳細
+  ['proj-goal-detail', pid && goals[0]?.taskId && `#/projects/${pid}/goals/${goals[0].taskId}`],
+  ['proj-order-detail', pid && orders[0]?.orderId && `#/projects/${pid}/orders/${orders[0].orderId}`],
+  ['proj-order-cycles', pid && orders[0]?.orderId && `#/projects/${pid}/orders/${orders[0].orderId}/cycles`],
+  ['proj-run-detail', pid && runs[0]?.runId && `#/projects/${pid}/runs/${runs[0].runId}`],
+  // 旧い詳細(プロジェクトを持たない URL は同じ画面を開く)
+  ['legacy-goal-detail', goals[0]?.taskId && `#/goals/${goals[0].taskId}`],
+  ['legacy-run-detail', runs[0]?.runId && `#/runs/${runs[0].runId}`],
+  // 壊れたリンク
+  ['invalid', '#/projects/%ZZ/tasks'],
 ].filter(([name, hash]) => hash && (!ONLY || ONLY.has(name)));
 
 const browser = await puppeteer.launch({

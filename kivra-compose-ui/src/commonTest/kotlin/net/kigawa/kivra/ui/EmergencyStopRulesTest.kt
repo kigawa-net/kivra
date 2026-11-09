@@ -48,11 +48,11 @@ class EmergencyStopRulesTest {
     }
 
     @Test
-    fun autopilotRouteIsInTheAdminGroup() {
+    fun autopilotRouteIsInTheGlobalSection() {
         assertEquals(Route.Page(NavDestination.Autopilot), parseRoute("#/autopilot"))
         assertEquals("#/autopilot", Route.Page(NavDestination.Autopilot).toHash())
-        val admin = NavDestination.grouped.first { it.first == NavGroup.Admin }.second
-        assertTrue(NavDestination.Autopilot in admin)
+        val global = sidebarSections(projectId = null, projectName = null).first { it.title == "全体" }
+        assertTrue(global.items.any { it.dest == NavDestination.Autopilot })
     }
 
     @Test

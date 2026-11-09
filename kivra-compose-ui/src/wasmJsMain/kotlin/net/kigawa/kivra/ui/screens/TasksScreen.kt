@@ -44,19 +44,18 @@ import net.kigawa.kivra.ui.PROJECT_REQUIRED_MESSAGE
 import net.kigawa.kivra.ui.SESSION_EXPIRED_MESSAGE
 
 /**
- * Tasks screen: Run list and Task submit form.
+ * Tasks screen (プロジェクトの中): そのプロジェクトの Run の一覧と、Task の投入フォーム。
  */
 @Composable
-fun TasksScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) {
+fun TasksScreen(projectId: String, onNavigate: (Route) -> Unit) {
     var scope by remember { mutableStateOf("mine") }
     // 投入が成功したら一覧を読み直す(旧 UI の refreshRuns)。
     var listReload by remember { mutableStateOf(0) }
     val perms = LocalCallerPermissions.current
 
-    // 一覧。読み直しの間は前の一覧を残す。入力中のフォーム(下)は読み直しで消えない。
-    val loaded = rememberLoad(listOf(scope, selectedProjectId), reload = listReload) {
-        val allRuns = ApiClient.getRuns(scope)
-        if (selectedProjectId != null) allRuns.filter { it.projectId == selectedProjectId } else allRuns
+    // 一覧。このプロジェクトの Run だけ(サーバーで絞る)。読み直しの間は前の一覧を残す。入力中のフォーム(下)は読み直しで消えない。
+    val loaded = rememberLoad(listOf(scope, projectId), reload = listReload) {
+        ApiClient.getRunsIn(projectId, scope)
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -99,26 +98,25 @@ fun TasksScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
         // Task submit form. SPEND_START が無い人には出さない(UX の出し分け。サーバーも投入を 403 で拒否する)。
         if (perms.can(GatedOperation.SUBMIT_TASK)) {
             Spacer(modifier = Modifier.height(12.dp))
-            SubmitTaskCard(onAccepted = { listReload += 1 })
+            SubmitTaskCard(projectId, onAccepted = { listReload += 1 })
         }
     }
 }
 
 /**
- * Task の投入フォーム(旧 UI の submit-form)。種別、タイトル、本文(自己開発のみ)、自己開発のプロジェクト、投入。
+ * Task の投入フォーム(旧 UI の submit-form)。種別、タイトル、本文(自己開発のみ)、投入。
+ * 自己開発の投入先は、この画面のプロジェクト([projectId]、選べない)。シミュレーションはプロジェクトを持たない。
  * 失敗時は入力を残し、成功時だけ入力を消す。投入キーは内容(種別・タイトル・本文・プロジェクト)ごとに管理する。
  */
 @Composable
-private fun SubmitTaskCard(onAccepted: () -> Unit) {
+private fun SubmitTaskCard(projectId: String, onAccepted: () -> Unit) {
     val availability = LocalSelfDevAvailability.current
     val coroutineScope = rememberCoroutineScope()
     val keys = remember { IdempotencyKeys() }
-    val projects = rememberLoad(Unit) { ApiClient.getProjects() }
 
     var requestedKind by remember { mutableStateOf(SubmitKind.SIMULATED) }
     var title by remember { mutableStateOf("") }
     var body by remember { mutableStateOf("") }
-    var projectId by remember { mutableStateOf<String?>(null) }
     var submitting by remember { mutableStateOf(false) }
     // 結果の文言と、成功かどうか(色に使う)。
     var result by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
@@ -139,10 +137,6 @@ private fun SubmitTaskCard(onAccepted: () -> Unit) {
             return
         }
         val chosen = if (kind == SubmitKind.SELF_DEV) projectId else null
-        if (kind == SubmitKind.SELF_DEV && chosen == null) {
-            result = PROJECT_REQUIRED_MESSAGE to false
-            return
-        }
         val key = keys.keyFor(TaskSignature(kind, validTitle, validBody, chosen))
         submitting = true
         result = "送信中です…" to true
@@ -218,12 +212,7 @@ private fun SubmitTaskCard(onAccepted: () -> Unit) {
             }
             if (kind == SubmitKind.SELF_DEV) {
                 Spacer(modifier = Modifier.height(8.dp))
-                ProjectChoice(
-                    projects = projects,
-                    selected = projectId,
-                    enabled = !blocked,
-                    onSelect = { projectId = it },
-                )
+                ProjectFixedLabel(projectId)
             }
             Spacer(modifier = Modifier.height(8.dp))
             Button(

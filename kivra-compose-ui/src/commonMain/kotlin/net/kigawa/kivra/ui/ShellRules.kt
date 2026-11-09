@@ -50,7 +50,8 @@ fun navVisibleForSections(
 ): Boolean = when (destination) {
     NavDestination.Goals, NavDestination.Orders -> autopilot == AutopilotAvailability.ENABLED
     NavDestination.Approvals -> autopilot == AutopilotAvailability.ENABLED && approvalsPending != null
-    NavDestination.Budget -> budgetVisible
+    // 予算(全体の予算・FX と、プロジェクトの予算)は運用者だけが読める。
+    NavDestination.Budget, NavDestination.ProjectBudget -> budgetVisible
     else -> true
 }
 

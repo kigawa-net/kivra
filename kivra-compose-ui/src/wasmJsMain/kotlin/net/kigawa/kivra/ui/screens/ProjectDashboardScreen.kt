@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +30,7 @@ import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.BACKFILL_DRY_DONE_MESSAGE
 import net.kigawa.kivra.ui.BACKFILL_RUN_DONE_MESSAGE
+import net.kigawa.kivra.ui.NavDestination
 import net.kigawa.kivra.ui.PROJECT_SPEND_NOTE
 import net.kigawa.kivra.ui.REPO_ADDED_MESSAGE
 import net.kigawa.kivra.ui.REPO_EMPTY_MESSAGE
@@ -68,27 +70,26 @@ import net.kigawa.kivra.ui.yenText
  */
 @Composable
 fun ProjectDashboardScreen(projectId: String, onNavigate: (Route) -> Unit) {
-    // 予算の設定・解除の後に増やして、ダッシュボードを読み直させる。
-    var reload by remember { mutableStateOf(0) }
-    val loaded = rememberLoad(projectId, reload) { loadProjectDashboard(projectId) }
+    val loaded = rememberLoad(projectId) { loadProjectDashboard(projectId) }
     DetailPage {
         LoadedView(loaded) { d ->
-            ProjectDashboardBody(projectId, d, onNavigate, onBudgetChanged = { reload += 1 })
+            ProjectDashboardBody(projectId, d, onNavigate)
         }
     }
 }
 
 /**
  * ダッシュボードの読み取り。運用者の予算の形が合わなければ、ダッシュボード全体を失敗にする(旧 UI の判定と同じ。一部だけ出さない)。
+ * ダッシュボードと、プロジェクトの予算の画面([ProjectBudgetScreen])で共有する。
  */
-private suspend fun loadProjectDashboard(projectId: String): ApiProjectDashboard {
+internal suspend fun loadProjectDashboard(projectId: String): ApiProjectDashboard {
     val d = ApiClient.getProjectDashboard(projectId)
     d.budget?.let { if (!isProjectBudgetBody(it)) throw ApiException(null, "response is not the expected format") }
     return d
 }
 
 @Composable
-private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNavigate: (Route) -> Unit, onBudgetChanged: () -> Unit) {
+private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNavigate: (Route) -> Unit) {
     val operator = showsProjectOperator(d.scope)
     Text(d.project.name, style = MaterialTheme.typography.headlineSmall)
     d.project.description?.takeIf { it.isNotBlank() }?.let { description ->
@@ -140,7 +141,11 @@ private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNa
 
     if (operator) {
         Spacer(Modifier.height(16.dp))
-        ProjectOperatorSection(projectId, d.budget, onBudgetChanged)
+        // 今月の予算は、プロジェクトの「予算」のページにある(設定と解除もそこで行う)。
+        TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectBudget)) }) {
+            Text("今月の予算を見る（運用者のみ）")
+        }
+        ProjectOperatorSection(projectId)
     }
 }
 
@@ -171,7 +176,7 @@ private fun ProjectRunRow(run: ApiRun, showCreator: Boolean, onClick: () -> Unit
  * repo を変えたら、それまでの確認の結果は捨てる(実行の対象が変わるため)。権限の最終判定はサーバーが行う。
  */
 @Composable
-private fun ProjectOperatorSection(projectId: String, budget: ApiProjectBudget?, onBudgetChanged: () -> Unit) {
+private fun ProjectOperatorSection(projectId: String) {
     val scope = rememberCoroutineScope()
     // 登録の変更の後に増やして、一覧を読み直させる。
     var repoReload by remember { mutableStateOf(0) }
@@ -303,10 +308,6 @@ private fun ProjectOperatorSection(projectId: String, budget: ApiProjectBudget?,
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            if (budget != null) {
-                ProjectBudgetSection(budget, onBudgetChanged)
-                Spacer(Modifier.height(16.dp))
-            }
             Text("リポジトリの対応（運用者のみ）", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
             LoadedList(repos, emptyText = REPO_EMPTY_MESSAGE) { list ->

@@ -29,6 +29,7 @@ import net.kigawa.kivra.db.MemberPutResult
 import net.kigawa.kivra.db.MemberRemoveResult
 import net.kigawa.kivra.db.PROJECT_MEMBER_ROLES
 import net.kigawa.kivra.db.ProjectBackfillRepository
+import net.kigawa.kivra.db.ProjectDeleteResult
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectMemberRow
 import net.kigawa.kivra.db.ProjectRepository
@@ -40,6 +41,10 @@ import org.slf4j.LoggerFactory
 
 @Serializable
 private data class ProjectError(val error: String)
+
+/** The 409 of a project that still has rows: a fixed code and the count of each kind. No ids and no names. */
+@Serializable
+private data class ProjectNotEmptyError(val error: String, val counts: Map<String, Long>)
 
 /**
  * Project routes (V38): CRUD for projects and Run assignment.
@@ -378,17 +383,29 @@ internal fun Route.configureProjectRoutes(
                 call.respond(project.toResponse())
             }
         }
+        // Only an empty project is deleted (ADR 0022): nothing is cascaded or unassigned. A project that still has rows is a 409 with the
+        // count of each kind; the caller removes them first (see docs/runbook-selfdev.md).
         delete {
             val principal = call.principalOr401() ?: return@delete
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_delete")) return@delete
             if (!call.requireJsonSameOrigin()) return@delete
             val projectId = call.pathParam("projectId")
                 ?: return@delete call.respond(HttpStatusCode.NotFound)
-            val deleted = projectRepo.delete(projectId)
-            if (!deleted) {
-                call.respond(HttpStatusCode.NotFound)
-            } else {
-                call.respond(HttpStatusCode.NoContent)
+            when (val result = projectRepo.deleteIfEmpty(projectId)) {
+                ProjectDeleteResult.Deleted -> {
+                    projectAdminLog.info("project admin action: action=PROJECT_DELETED actor={} projectId={}", operatorTag(principal), projectId)
+                    call.respond(HttpStatusCode.NoContent)
+                }
+                ProjectDeleteResult.NotFound -> call.respond(HttpStatusCode.NotFound)
+                is ProjectDeleteResult.NotEmpty -> {
+                    projectAdminLog.info(
+                        "project admin action: action=PROJECT_DELETE_BLOCKED actor={} projectId={} counts={}",
+                        operatorTag(principal),
+                        projectId,
+                        result.counts.toMap().entries.joinToString(",") { (kind, n) -> "$kind=$n" },
+                    )
+                    call.respond(HttpStatusCode.Conflict, ProjectNotEmptyError(error = "PROJECT_NOT_EMPTY", counts = result.counts.toMap()))
+                }
             }
         }
     }

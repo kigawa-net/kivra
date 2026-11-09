@@ -806,6 +806,40 @@ API と MCP の投入は、従来どおり `projectId`(MCP は `project_id`)が�
 
 登録(と `RolesCoverageArchitectureTest` の表の行、README の行)を消すのは、次の両方を満たしてから: (a) 本番のログ `net.kigawa.kivra.routes.retired` に、廃止から 30 日の間、1 件も出ていない。(b) 運用者が、他のシステムや手元のスクリプトに旧 POST が残っていないことを確かめた。消すと応答は 404 に変わる。410 の段階を飛ばして直接消すのは避ける。
 
+### 4.22 プロジェクトを削除できないとき(ADR 0022、運用者のみ)
+
+`DELETE /api/projects/{id}`(ORDER_MANAGE、JSON の CSRF ガード)は、**空のプロジェクトだけ**を消す(204)。repo、メンバー、予算、または行(tasks・orders・memory・runs・assignees)が 1 つでも残っていれば **409** で、何も消さない。子の行を消す(CASCADE)こと、未分類に戻す(SET NULL)こと、force 削除は、どれもしない。
+
+409 の本文は固定の code と件数だけ。repo 名や ID は返らない。
+
+```
+{"error":"PROJECT_NOT_EMPTY","counts":{"repos":1,"members":0,"budget":0,"tasks":0,"orders":0,"memory":0,"runs":0,"assignees":0}}
+```
+
+存在しない ID は 404。数えてから消すまでの間に行が増えても、判定は同じ 409 になる(プロジェクトの行をロックして数えるので、増える書き込みは判定の後まで待つ。外部キーの RESTRICT が最後の防衛)。
+
+**先に外すもの。** 件数が 0 でない種類について、次の操作で外す。
+
+| 件数 | 外す操作 | 注意 |
+|---|---|---|
+| `repos` | `DELETE /api/projects/{id}/repos?repoKey=owner/name`(repo ごと) | 一覧は `GET /api/projects/{id}/repos` |
+| `members` | `DELETE /api/projects/{id}/members/{assigneeId}`(本文 `{}`) | ADMIN は最後の 1 人を外せない(409 `last_admin`)。下の制限を見る |
+| `budget` | `DELETE /api/projects/{id}/budget`(本文 `{}`) | 上限の解除(4.18)。消化額は残る |
+| `runs` | `DELETE /api/runs/{runId}/project` | Run を未分類に戻す。Run 自体は残る(Run の一覧は `GET /api/projects/{id}/dashboard`) |
+| `tasks` / `orders` / `assignees` | **この API には外す操作がない。** 別のプロジェクトへ移す API も、消す API もない | このプロジェクトは削除できない |
+| `memory` | 個別削除 `POST /api/selfdev/memory/{id}/delete`(4.17 の画面)。ただし覚え書き(note)は墨消しの行(`DELETED`)が `project_id` を持ったまま残るので、件数は減らない | このプロジェクトは削除できない |
+
+手順: (1) 409 の `counts` を見て、0 でない種類を上の表で外す。(2) 再度 `DELETE /api/projects/{id}`。204 なら完了。
+
+**削除できない既知の制限(要判断、コードは変えていない)。**
+
+- **ADMIN のメンバーがいるプロジェクトは、API では空にできない。** 最後の ADMIN は外せず、役割も変えられない(`MemberRemoveResult.LAST_ADMIN`、ADR 0022 PR-D2 の「ADMIN を少なくとも 1 人残す」)。このため ADMIN を含むプロジェクトは、メンバーが 1 人でも 409 のままになる。空にするには、ADMIN の扱いを決め直す必要がある。
+- **tasks・orders・assignees・memory の行は、この API では移せない。** これらが 1 件でもあるプロジェクトは、削除できない状態が続く。それで正しい(行は消さない方針)が、削除したいプロジェクトに行があるなら、DB の直接操作ではなく運用の判断として扱う。
+
+**監査。** 削除と拒否は `net.kigawa.kivra.project.admin` の構造化ログに、固定の code(`PROJECT_DELETED`、`PROJECT_DELETE_BLOCKED`)、実行者、プロジェクト ID、`PROJECT_DELETE_BLOCKED` のときだけ種類ごとの件数(`counts=repos=1,members=0,...`)を残す。repo 名は残さない。
+
+**確認。** `curl -si -X DELETE -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/json' -d '{}' '<BASE>/api/projects/<ID>'` が、行のあるプロジェクトで `409` と上の本文を返し、`GET /api/projects/<ID>/repos` などの件数が変わらないこと。空のプロジェクトで `204` を返すこと。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

@@ -190,6 +190,7 @@ Agent の起動、LLM の呼び出し、exkes / GitHub / recl への書き込み
 | `GET /api/projects/{id}/repos` | プロジェクトの repo（owner/name）の一覧（READ 権限）。存在しないプロジェクトは 404 |
 | `PUT /api/projects/{id}/repos` | body `{"repoKey": "owner/name"}` で repo を登録（ORDER_MANAGE、JSON）。登録は 201。形式が違えば 400、既に別の（または同じ）プロジェクトに登録済みなら 409、存在しないプロジェクトは 404 |
 | `DELETE /api/projects/{id}/repos?repoKey=owner/name` | repo の登録を外す（ORDER_MANAGE、JSON、本文は `{}`）。204。登録がなければ 404 |
+| `DELETE /api/projects/{id}` | プロジェクトを削除する（ORDER_MANAGE、JSON、本文は `{}`）。空のプロジェクト（repo・メンバー・予算・行がない）だけ 204。何か残っていれば 409 `{"error":"PROJECT_NOT_EMPTY","counts":{…種類ごとの件数}}` で、何も消さない（子の行は消さず、未分類にも戻さない）。存在しなければ 404。手順は `docs/runbook-selfdev.md` 4.22 |
 | `POST /api/projects/backfill?dryRun=true` | 既存データの振り分け（ORDER_MANAGE、JSON）。既定は dry-run（何も書かない）。`dryRun=false` で実行。`project_id` が NULL の行だけを repo の対応で更新する。テーブルごとに `matched`（対応あり）・`updated`（書いた件数）・`unmatched`（対応なしで NULL のまま）を返す。冪等。手順は `docs/runbook-selfdev.md` 4.16 |
 | `GET /api/projects/{id}/members` | プロジェクトのメンバー（担当の `assigneeId`、表示名、role、state）の一覧（ORDER_MANAGE）。存在しないプロジェクトは 404 |
 | `PUT /api/projects/{id}/members/{assigneeId}` | body `{"role": "ADMIN\|OPERATOR\|APPROVER\|AI\|VIEWER"}` で担当を追加、または role を変える（ORDER_MANAGE、JSON）。追加は 201、同じ role の再送と role の変更は 200（冪等）。role が不正なら 400、存在しない project・担当は 404、そのプロジェクトの最後の ADMIN を降格するなら 409（ADR 0022 PR-D2） |

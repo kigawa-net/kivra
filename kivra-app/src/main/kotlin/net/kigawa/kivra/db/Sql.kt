@@ -49,6 +49,12 @@ fun ExposedSQLException.isUniqueViolation(): Boolean {
     return sql.sqlState == "23505" || sql.errorCode == 1062 || sql.errorCode == 23505
 }
 
+/** True for a foreign key violation on a parent delete: MariaDB 1451 (SQLSTATE 23000) or H2 23503. */
+fun ExposedSQLException.isForeignKeyViolation(): Boolean {
+    val sql = (cause as? SQLException) ?: return false
+    return sql.sqlState == "23503" || sql.errorCode == 1451 || sql.errorCode == 23503
+}
+
 /** Exposed mirror of V40 `selfdev_tasks`. */
 internal object SelfDevTasksTable : Table("selfdev_tasks") {
     val taskId = char("task_id", 26)

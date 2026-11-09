@@ -5,6 +5,7 @@ import java.time.LocalDateTime
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
@@ -39,6 +40,39 @@ data class ProjectRow(
 /** The result of [ProjectRepository.addRepo]. */
 enum class RepoAddResult { ADDED, CONFLICT, PROJECT_NOT_FOUND }
 
+/** How many rows of each kind still refer to a project (ADR 0022). Counts only: no ids and no names. */
+data class ProjectChildCounts(
+    val repos: Long,
+    val members: Long,
+    val budget: Long,
+    val tasks: Long,
+    val orders: Long,
+    val memory: Long,
+    val runs: Long,
+    val assignees: Long,
+) {
+    val total: Long get() = repos + members + budget + tasks + orders + memory + runs + assignees
+
+    /** The kinds in a fixed order, for the API and the audit line. */
+    fun toMap(): Map<String, Long> = linkedMapOf(
+        "repos" to repos,
+        "members" to members,
+        "budget" to budget,
+        "tasks" to tasks,
+        "orders" to orders,
+        "memory" to memory,
+        "runs" to runs,
+        "assignees" to assignees,
+    )
+}
+
+/** The result of [ProjectRepository.deleteIfEmpty]. */
+sealed interface ProjectDeleteResult {
+    data object Deleted : ProjectDeleteResult
+    data object NotFound : ProjectDeleteResult
+    data class NotEmpty(val counts: ProjectChildCounts) : ProjectDeleteResult
+}
+
 /** Repository for projects (V38). Provides CRUD and the association between Runs and projects. */
 class ProjectRepository(private val database: Database, private val clock: Clock) {
 
@@ -70,9 +104,27 @@ class ProjectRepository(private val database: Database, private val clock: Clock
         toProject(row).copy(name = name, description = description, updatedAt = now)
     }
 
-    /** Delete a project. Runs are unassigned (FK ON DELETE SET NULL). Returns true if deleted. */
-    fun delete(projectId: String): Boolean = transaction(database) {
-        ProjectsTable.deleteWhere { ProjectsTable.projectId eq projectId } > 0
+    /**
+     * Deletes [projectId] only when no row refers to it (ADR 0022). Nothing is cascaded or unassigned: a repository, a member, a budget,
+     * or a row of tasks, orders, memory, runs or assignees makes the answer [ProjectDeleteResult.NotEmpty], with the count of each kind.
+     * The project row is locked (FOR UPDATE, as the member writes are) while the counts are read, so a child added by a concurrent write
+     * waits for the outcome. The foreign keys stay the last defence: a violation at the delete is [ProjectDeleteResult.NotEmpty] too.
+     */
+    fun deleteIfEmpty(projectId: String): ProjectDeleteResult = try {
+        transaction<ProjectDeleteResult>(database) {
+            if (!projectRowExists(projectId, lock = true)) return@transaction ProjectDeleteResult.NotFound
+            val counts = childCounts(projectId)
+            if (counts.total > 0) return@transaction ProjectDeleteResult.NotEmpty(counts)
+            ProjectsTable.deleteWhere { ProjectsTable.projectId eq projectId }
+            ProjectDeleteResult.Deleted
+        }
+    } catch (e: ExposedSQLException) {
+        if (!e.isForeignKeyViolation()) throw e
+        // The transaction is rolled back. Read the answer again: the project may be gone, or a child row was added after the count.
+        transaction<ProjectDeleteResult>(database) {
+            if (!projectRowExists(projectId, lock = false)) ProjectDeleteResult.NotFound
+            else ProjectDeleteResult.NotEmpty(childCounts(projectId))
+        }
     }
 
     /** Get a project by id. */
@@ -181,6 +233,25 @@ class ProjectRepository(private val database: Database, private val clock: Clock
             (ProjectReposTable.projectId eq projectId) and (ProjectReposTable.repoKey eq repoKey)
         } > 0
     }
+
+    /** Whether the project row exists; with [lock], the row is locked until the transaction ends. */
+    private fun Transaction.projectRowExists(projectId: String, lock: Boolean): Boolean =
+        execQuery("SELECT project_id FROM projects WHERE project_id = ?" + if (lock) " FOR UPDATE" else "", projectId) { it.getString(1) }
+            .isNotEmpty()
+
+    /** The rows that refer to [projectId], by kind: the RESTRICT foreign keys and the SET NULL ones (runs, orders, assignees) alike. */
+    private fun Transaction.childCounts(projectId: String) = ProjectChildCounts(
+        repos = countOf("SELECT COUNT(*) FROM project_repos WHERE project_id = ?", projectId),
+        members = countOf("SELECT COUNT(*) FROM project_members WHERE project_id = ?", projectId),
+        budget = countOf("SELECT COUNT(*) FROM project_budgets WHERE project_id = ?", projectId),
+        tasks = countOf("SELECT COUNT(*) FROM selfdev_tasks WHERE project_id = ?", projectId),
+        orders = countOf("SELECT COUNT(*) FROM selfdev_orders WHERE project_id = ?", projectId),
+        memory = countMemoryRecordsOfProject(projectId),
+        runs = countOf("SELECT COUNT(*) FROM development_runs WHERE project_id = ?", projectId),
+        assignees = countOf("SELECT COUNT(*) FROM selfdev_assignees WHERE project_id = ?", projectId),
+    )
+
+    private fun Transaction.countOf(sql: String, vararg params: Any?): Long = execQuery(sql, *params) { it.getLong(1) }.first()
 
     private fun readProject(projectId: String): ProjectRow? =
         ProjectsTable.selectAll().where { ProjectsTable.projectId eq projectId }.firstOrNull()?.let { toProject(it) }

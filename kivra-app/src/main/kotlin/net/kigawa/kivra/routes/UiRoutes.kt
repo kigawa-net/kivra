@@ -105,7 +105,7 @@ internal fun Route.configureUiRoutes() {
     
     // Serve any .wasm file under /ui/compose/ (lazy loading)
     get("/ui/compose/{wasmFile}") {
-        val wasmFile = call.parameters["wasmFile"] ?: return@get
+        val wasmFile = call.pathParam("wasmFile") ?: return@get
         if (wasmFile.endsWith(".wasm")) {
             val bytes = loadWasmFile(wasmFile)
             if (bytes != null) {
@@ -120,7 +120,7 @@ internal fun Route.configureUiRoutes() {
     
     // Serve composeResources (Skiko fonts, etc.)
     get("/ui/compose/composeResources/{file}") {
-        val file = call.parameters["file"] ?: return@get
+        val file = call.pathParam("file") ?: return@get
         val bytes = loadUiResourceOrNull("compose/composeResources/$file")
         if (bytes != null) {
             call.respondCompose(bytes, ContentType.Application.OctetStream)

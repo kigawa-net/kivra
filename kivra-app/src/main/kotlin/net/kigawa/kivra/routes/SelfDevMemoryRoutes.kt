@@ -207,7 +207,7 @@ internal fun Route.configureSelfDevMemoryRoutes(deps: SelfDevMemoryRouteDeps) {
             call.respond(HttpStatusCode.BadRequest, MemoryError(REASON_INVALID))
             return@post
         }
-        val id = call.parameters["id"]?.takeIf { MEMORY_ID_SHAPE.matches(it) }
+        val id = call.pathParam("id")?.takeIf { MEMORY_ID_SHAPE.matches(it) }
         if (id == null) {
             call.respond(HttpStatusCode.NotFound, MemoryError(RECORD_NOT_FOUND))
             return@post

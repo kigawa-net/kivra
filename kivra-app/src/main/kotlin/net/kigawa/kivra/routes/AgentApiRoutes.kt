@@ -271,7 +271,7 @@ private suspend fun AgentApiDeps.authenticate(call: ApplicationCall): String? = 
 
 /** The attempt id from the path, or a 404 when it is not shaped like one. Returns null after responding. */
 private suspend fun ApplicationCall.attemptIdOrNotFound(): String? {
-    val id = parameters["attemptId"]?.takeIf { ATTEMPT_ID_SHAPE.matches(it) }
+    val id = pathParam("attemptId")?.takeIf { ATTEMPT_ID_SHAPE.matches(it) }
     if (id == null) respond(HttpStatusCode.NotFound, AgentError("not found"))
     return id
 }

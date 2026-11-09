@@ -208,7 +208,7 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.Forbidden, TaskApiError("forbidden"))
             return@get
         }
-        val run = call.parameters["id"]?.let { runs.getTask(RunId(it), principal) }
+        val run = call.pathParam("id")?.let { runs.getTask(RunId(it), principal) }
         if (run == null) call.respond(HttpStatusCode.NotFound, TaskApiError("run not found"))
         else call.respond(runs.viewOf(run, targetRepo, withEvents = true, projectRepo = projectRepo))
     }
@@ -250,7 +250,7 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.BadRequest, TaskApiError("body must be 1-2000 characters and idempotencyKey 1-128 characters, without control characters"))
             return@post
         }
-        val runId = call.parameters["id"]
+        val runId = call.pathParam("id")
         if (runId == null) {
             call.respond(HttpStatusCode.BadRequest, TaskApiError("missing run id"))
             return@post

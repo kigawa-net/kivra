@@ -122,7 +122,7 @@ internal fun Route.configureOperationApiRoutes(
             call.respond(HttpStatusCode.Forbidden, OperationApiError("forbidden"))
             return@get
         }
-        val runId = RunId(call.parameters["id"].orEmpty())
+        val runId = RunId(call.pathParam("id").orEmpty())
         // getTask filters by the caller, so a Run owned by someone else is indistinguishable from a missing one.
         if (runs.getTask(runId, principal) == null) {
             call.respond(HttpStatusCode.NotFound, OperationApiError("run not found"))

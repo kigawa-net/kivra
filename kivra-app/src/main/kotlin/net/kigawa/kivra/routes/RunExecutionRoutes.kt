@@ -9,7 +9,6 @@ import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.sse.ServerSSESession
 import io.ktor.server.sse.SSEServerContent
-import io.ktor.server.util.getOrFail
 import io.ktor.sse.ServerSentEvent
 import java.math.BigDecimal
 import java.time.Clock
@@ -297,7 +296,7 @@ private suspend fun RunExecutionDeps.admitStream(call: ApplicationCall): StreamA
 
 /** Checks the caller for the Run in the path and answers the refusal itself. Null means the call was answered. */
 private suspend fun RunExecutionDeps.admit(call: ApplicationCall): RunAccess.Allowed? {
-    val runId = call.parameters.getOrFail("runId").takeIf { RUN_ID_SHAPE.matches(it) }
+    val runId = call.pathParam("runId")?.takeIf { RUN_ID_SHAPE.matches(it) }
     if (runId == null) {
         call.respond(HttpStatusCode.NotFound, ExecutionError(RUN_NOT_FOUND))
         return null

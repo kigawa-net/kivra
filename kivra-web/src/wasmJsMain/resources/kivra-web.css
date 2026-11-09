@@ -1,2 +1,4 @@
-body { margin: 0; padding: 0; font-family: sans-serif; }
-#ComposeTarget { width: 100vw; height: 100vh; }
+/* Page chrome for the Compose canvas. Loaded as a same-origin stylesheet because CSP is style-src 'self' (no inline styles).
+   overflow:hidden and outline:none were previously injected by CanvasBasedWindow; ComposeViewport does not inject them. */
+body { margin: 0; padding: 0; font-family: sans-serif; overflow: hidden; }
+#ComposeTarget { width: 100vw; height: 100vh; outline: none; }

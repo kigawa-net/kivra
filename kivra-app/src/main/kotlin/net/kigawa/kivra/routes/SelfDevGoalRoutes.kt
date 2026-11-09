@@ -235,62 +235,19 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         call.respond(HttpStatusCode.OK, mapOf("breakerOpen" to false))
     }
 
+    // The old routes keep their answers; they only announce the alias (ADR 0022 PR-E).
+    get("/api/selfdev/goals") {
+        call.deprecatedBy("/api/projects/{projectId}/tasks", call.request.queryParameters["projectId"])
+        listGoals(deps, call)
+    }
     post("/api/selfdev/goals") {
-        val caller = deps.requireOperator(call) ?: return@post
-        val principal = caller.principal
-        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_submit", "GOAL_SUBMIT")) return@post
-        val request = try {
-            strictJson.decodeFromString(SubmitGoalRequest.serializer(), call.receiveText())
-        } catch (_: Exception) {
-            call.respond(HttpStatusCode.BadRequest, GoalError(INVALID_BODY))
-            return@post
-        }
-        val title = validatedText(request.title, MAX_TASK_TITLE_CODE_POINTS)
-        val key = validatedText(request.idempotencyKey, MAX_IDEMPOTENCY_KEY_CODE_POINTS)
-        if (title == null || key == null) {
-            call.respond(HttpStatusCode.BadRequest, GoalError(TASK_FIELDS_INVALID))
-            return@post
-        }
-        // Same rule as the Task submission (Issue #229): a blank body is none; a non-blank body must pass validatedBody.
-        val rawBody = request.body
-        val body = validatedBody(rawBody)
-        if (rawBody != null && body == null && rawBody.isNotBlank()) {
-            call.respond(HttpStatusCode.BadRequest, GoalError(BODY_INVALID))
-            return@post
-        }
-        val repo = deps.targetRepo ?: run {
-            call.respond(HttpStatusCode.ServiceUnavailable, GoalError(AUTOPILOT_DISABLED))
-            return@post
-        }
-        val projectId = when (val scope = deps.projects.scopeOf(request.projectId)) {
-            is ProjectScope.Refused -> {
-                call.respond(scope.status, GoalError(scope.error))
-                return@post
-            }
-            is ProjectScope.Assigned -> scope.projectId
-        }
-        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_submit", "GOAL_SUBMIT", projectId)) return@post
-        when (val result = deps.operations.submitTask(principal, key, title, body, repo, projectId)) {
-            is SelfDevSubmitResult.Created -> {
-                operatorLog.info("autopilot operator action: action=GOAL_SUBMITTED actor={} taskId={} result=GOAL_SUBMITTED", operatorTag(principal), result.task.taskId)
-                // The title only (ADR 0016 U-6). The body is never recorded.
-                deps.memory.goalTitle(result.task.taskId, title, principal)
-                call.respond(HttpStatusCode.Accepted, result.task.summary())
-            }
-            is SelfDevSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, result.task.summary())
-            SelfDevSubmitResult.KeyConflict -> call.respond(HttpStatusCode.Conflict, GoalError(KEY_CONFLICT))
-        }
+        call.deprecatedBy("/api/projects/{projectId}/tasks", null)
+        submitGoal(deps, call)
     }
 
-    get("/api/selfdev/goals") {
-        val caller = deps.requireOperator(call) ?: return@get
-        if (!deps.requireEnabled(call)) return@get
-        if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ")) return@get
-        val project = projectFilterOf(call.request.queryParameters["projectId"])
-            ?: return@get call.respond(HttpStatusCode.BadRequest, GoalError(PROJECT_FILTER_INVALID))
-        call.respond(deps.operations.listTasks(LIST_LIMIT, project).map { it.summary() })
-    }
+    // The alias of the list and the submission under a project (ADR 0022 PR-E). The same handlers; the path's project is the project.
+    get("/api/projects/{projectId}/tasks") { listGoals(deps, call) }
+    post("/api/projects/{projectId}/tasks") { submitGoal(deps, call) }
 
     get("/api/selfdev/goals/{id}") {
         val caller = deps.requireOperator(call) ?: return@get
@@ -418,6 +375,77 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
             else -> call.respondTransition(r)
         }
     }
+}
+
+/** POST the goal (task) of the project: the old route (the body's projectId) or the alias (the path's project). */
+private suspend fun submitGoal(deps: SelfDevGoalRouteDeps, call: ApplicationCall) {
+    val pinned = call.pathProjectId()
+    val caller = deps.requireOperator(call) ?: return
+    val principal = caller.principal
+    if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return
+    if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_submit", "GOAL_SUBMIT")) return
+    val request = try {
+        strictJson.decodeFromString(SubmitGoalRequest.serializer(), call.receiveText())
+    } catch (_: Exception) {
+        call.respond(HttpStatusCode.BadRequest, GoalError(INVALID_BODY))
+        return
+    }
+    val title = validatedText(request.title, MAX_TASK_TITLE_CODE_POINTS)
+    val key = validatedText(request.idempotencyKey, MAX_IDEMPOTENCY_KEY_CODE_POINTS)
+    if (title == null || key == null) {
+        call.respond(HttpStatusCode.BadRequest, GoalError(TASK_FIELDS_INVALID))
+        return
+    }
+    // Same rule as the Task submission (Issue #229): a blank body is none; a non-blank body must pass validatedBody.
+    val rawBody = request.body
+    val body = validatedBody(rawBody)
+    if (rawBody != null && body == null && rawBody.isNotBlank()) {
+        call.respond(HttpStatusCode.BadRequest, GoalError(BODY_INVALID))
+        return
+    }
+    val repo = deps.targetRepo ?: run {
+        call.respond(HttpStatusCode.ServiceUnavailable, GoalError(AUTOPILOT_DISABLED))
+        return
+    }
+    // The alias (ADR 0022 PR-E) takes the path's project; the body's projectId, when given, must be the same.
+    val projectId = when (val scope = pinned?.let { deps.projects.scopeOfPath(it, request.projectId) } ?: deps.projects.scopeOf(request.projectId)) {
+        is ProjectScope.Refused -> {
+            call.respond(scope.status, GoalError(scope.error))
+            return
+        }
+        is ProjectScope.Assigned -> scope.projectId
+    }
+    if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_submit", "GOAL_SUBMIT", projectId)) return
+    when (val result = deps.operations.submitTask(principal, key, title, body, repo, projectId)) {
+        is SelfDevSubmitResult.Created -> {
+            operatorLog.info("autopilot operator action: action=GOAL_SUBMITTED actor={} taskId={} result=GOAL_SUBMITTED", operatorTag(principal), result.task.taskId)
+            // The title only (ADR 0016 U-6). The body is never recorded.
+            deps.memory.goalTitle(result.task.taskId, title, principal)
+            call.respond(HttpStatusCode.Accepted, result.task.summary())
+        }
+        is SelfDevSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, result.task.summary())
+        SelfDevSubmitResult.KeyConflict -> call.respond(HttpStatusCode.Conflict, GoalError(KEY_CONFLICT))
+    }
+}
+
+/**
+ * GET the goals (tasks) of a project: the old route with its `projectId` query, or the alias with the path's project (ADR 0022 PR-E). The alias
+ * answers 404 for a project that does not exist, before the permission check; the check then runs with the project.
+ */
+private suspend fun listGoals(deps: SelfDevGoalRouteDeps, call: ApplicationCall) {
+    val caller = deps.requireOperator(call) ?: return
+    if (!deps.requireEnabled(call)) return
+    val pinned = call.pathProjectId()
+    if (pinned != null && !deps.projects.projectExistsForPath(pinned)) {
+        call.respond(HttpStatusCode.NotFound, GoalError(PROJECT_NOT_FOUND))
+        return
+    }
+    if (!deps.permit(call, caller, Permission.READ, "goal.read", "READ", pinned)) return
+    val project = when (val scope = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
+        is ListScope.Refused -> return call.respond(scope.status, GoalError(scope.error))
+        is ListScope.Filtered -> scope.filter
+    }
+    call.respond(deps.operations.listTasks(LIST_LIMIT, project).map { it.summary() })
 }
 
 private const val TASK_FIELDS_INVALID = "title must be 1-200 characters and idempotencyKey 1-128 characters, without control characters"

@@ -24,6 +24,7 @@ import net.kigawa.kivra.db.AssigneeResult
 import net.kigawa.kivra.db.AssigneeRole
 import net.kigawa.kivra.db.AssigneeState
 import net.kigawa.kivra.db.AssigneeSummary
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAssigneeRepository
 import net.kigawa.kivra.db.SelfDevAssigneeTokenRepository
 import net.kigawa.kivra.db.TokenRefusal
@@ -56,6 +57,8 @@ class SelfDevAssigneeRouteDeps(
     /** Writes per principal per minute. */
     val writeLimiter: McpRateLimiter = McpRateLimiter(WRITES_PER_MINUTE),
     val clock: Clock = Clock.systemUTC(),
+    /** The projects, for the alias under a project (ADR 0022 PR-E): the path's project must exist. Null: the alias answers 404. */
+    val projects: ProjectRepository? = null,
 ) {
     companion object {
         const val WRITES_PER_MINUTE = 5
@@ -147,13 +150,10 @@ internal fun Route.configureSelfDevAssigneeRoutes(deps: SelfDevAssigneeRouteDeps
     }
 
     get("/api/selfdev/assignees") {
-        val caller = deps.caller(call) ?: return@get
-        if (!deps.manageable(call, caller, Permission.ASSIGNEE_MANAGE)) return@get
-        // The project narrowing (ADR 0022 PR-D): the members of a project, or with `unassigned` the assignees of no project.
-        val project = projectFilterOf(call.request.queryParameters["projectId"])
-            ?: return@get call.refuse(HttpStatusCode.BadRequest, CODE_INVALID_PROJECT)
-        call.respond(deps.assignees().listSummaries(project).map { it.response() })
+        call.deprecatedBy("/api/projects/{projectId}/assignees", call.request.queryParameters["projectId"])
+        listAssignees(deps, call)
     }
+    get("/api/projects/{projectId}/assignees") { listAssignees(deps, call) }
 
     post("/api/selfdev/assignees") {
         val caller = deps.caller(call) ?: return@post
@@ -370,6 +370,30 @@ private suspend fun SelfDevAssigneeRouteDeps.manageable(
         return false
     }
     return true
+}
+
+/**
+ * GET the assignees of a project: the old route (its `projectId` query, the project's members, or `unassigned`) or the alias (the path's
+ * project, ADR 0022 PR-E). The alias answers 404 for a project that does not exist, and runs the project check with the path's project.
+ */
+private suspend fun listAssignees(deps: SelfDevAssigneeRouteDeps, call: ApplicationCall) {
+    val caller = deps.caller(call) ?: return
+    val pinned = call.pathProjectId()
+    if (pinned != null) {
+        // Without the projects repository nothing can be found, so the alias answers 404 (fail closed), as the memory alias does.
+        val exists = deps.projects?.projectExistsForPath(pinned) ?: false
+        if (!exists) return call.refuse(HttpStatusCode.NotFound, CODE_NOT_FOUND)
+    }
+    if (!deps.manageable(call, caller, Permission.ASSIGNEE_MANAGE)) return
+    if (pinned != null && deps.guard.checkInProject(caller.access, pinned, Permission.ASSIGNEE_MANAGE, "assignee_list") is GuardResult.Deny) {
+        return call.refuse(HttpStatusCode.Forbidden, CODE_FORBIDDEN)
+    }
+    // The project narrowing (ADR 0022 PR-D): the members of a project, or with `unassigned` the assignees of no project.
+    val project = when (val scope = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
+        is ListScope.Refused -> return call.refuse(scope.status, CODE_INVALID_PROJECT)
+        is ListScope.Filtered -> scope.filter
+    }
+    call.respond(deps.assignees().listSummaries(project).map { it.response() })
 }
 
 private fun assigneeIdOf(call: ApplicationCall): String? = call.parameters["id"]?.takeIf { ASSIGNEE_ID_SHAPE.matches(it) }

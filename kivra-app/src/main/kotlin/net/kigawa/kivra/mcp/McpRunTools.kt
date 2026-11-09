@@ -99,6 +99,8 @@ class McpRunTools(
             put("state", run.state.name)
             put("stage", run.currentStage)
             put("reason_code", run.stateReason)
+            // The run's project (ADR 0022), null when it has none. Read-only here.
+            put("project_id", run.projectId)
             put("pr_url", binding?.let { pullRequestUrlOf(it, targetRepo) })
             put("created_at", run.createdAt.toInstant(ZoneOffset.UTC).toString())
             put("updated_at", run.updatedAt.toInstant(ZoneOffset.UTC).toString())

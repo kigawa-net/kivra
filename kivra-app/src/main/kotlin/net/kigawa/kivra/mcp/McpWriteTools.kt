@@ -119,6 +119,7 @@ class McpWriteTools(
             run.currentStage?.let { put("stage", it) }
             put("replayed", replayed)
             run.stateReason?.let { put("reason_code", it) }
+            put("project_id", run.projectId)
         }
         val text = if (replayed) "existing run returned" else "run created"
         return ToolOutcome(false, text, structured, if (replayed) "REPLAYED" else "CREATED", runId)

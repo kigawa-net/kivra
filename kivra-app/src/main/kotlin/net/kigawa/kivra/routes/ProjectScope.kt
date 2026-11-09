@@ -1,6 +1,8 @@
 package net.kigawa.kivra.routes
 
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
+import io.ktor.server.request.path
 import net.kigawa.kivra.db.ProjectFilter
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.UNASSIGNED_PROJECT_ID
@@ -44,4 +46,63 @@ internal fun ProjectRepository.scopeOf(projectId: String?): ProjectScope {
     if (!PROJECT_ID_SHAPE.matches(projectId)) return ProjectScope.Refused(HttpStatusCode.BadRequest, PROJECT_INVALID)
     if (get(projectId) == null) return ProjectScope.Refused(HttpStatusCode.NotFound, PROJECT_NOT_FOUND)
     return ProjectScope.Assigned(projectId)
+}
+
+/**
+ * The project of an alias route (`/api/projects/<id>/...`), read from the request path only, or null on any other path (an old route). Ktor's
+ * `call.parameters` puts the query first and drops the path's value when the query has the same name, so a `?projectId=` would win there.
+ * The id is checked by its shape where it is used; a path that is not a project's is a 404 there, never the old route's answer.
+ */
+internal fun ApplicationCall.pathProjectId(): String? {
+    val segments = request.path().split('/')
+    // "", "api", "projects", "<id>", ... for the alias routes.
+    return if (segments.size >= 5 && segments[1] == "api" && segments[2] == "projects") segments[3] else null
+}
+
+/** The body `projectId` of an alias route (`/api/projects/{projectId}/...`) must equal the path's project. Fixed text; never echoed. */
+internal const val PROJECT_MISMATCH = "projectId must be the project in the path"
+
+/**
+ * The scope of a creation on an alias route (ADR 0022 PR-E): the path's project is the scope. A body `projectId` is optional there, but when it
+ * is given it must equal the path (400). A path that names no project is 404, as in [scopeOf]. The body is checked after the path.
+ */
+internal fun ProjectRepository.scopeOfPath(pinned: String, bodyProjectId: String?): ProjectScope {
+    if (!projectExistsForPath(pinned)) return ProjectScope.Refused(HttpStatusCode.NotFound, PROJECT_NOT_FOUND)
+    if (bodyProjectId != null && bodyProjectId != pinned) return ProjectScope.Refused(HttpStatusCode.BadRequest, PROJECT_MISMATCH)
+    return ProjectScope.Assigned(pinned)
+}
+
+/** True when the path's [pinned] id names a project. A malformed id names none. */
+internal fun ProjectRepository.projectExistsForPath(pinned: String): Boolean =
+    PROJECT_ID_SHAPE.matches(pinned) && get(pinned) != null
+
+/** The narrowing of a list: the rows of one project, or every row (no project named at all). */
+internal sealed interface ListScope {
+    data class Filtered(val filter: ProjectFilter) : ListScope
+    data class Refused(val status: HttpStatusCode, val error: String) : ListScope
+}
+
+/**
+ * The narrowing of a list (ADR 0022 PR-D/PR-E). On an old route ([pinned] null) it is the `projectId` query, as before: absent or
+ * `unassigned` or a project id, anything else 400. On an alias route the path's project is the narrowing (it must exist: the caller checks
+ * that first, see [projectExistsForPath]); a `projectId` query that is given and differs is 400.
+ */
+internal fun listScopeOf(pinned: String?, query: String?): ListScope {
+    if (pinned == null) {
+        val filter = projectFilterOf(query) ?: return ListScope.Refused(HttpStatusCode.BadRequest, PROJECT_FILTER_INVALID)
+        return ListScope.Filtered(filter)
+    }
+    if (!query.isNullOrBlank() && query != pinned) return ListScope.Refused(HttpStatusCode.BadRequest, PROJECT_MISMATCH)
+    return ListScope.Filtered(ProjectFilter.Only(pinned))
+}
+
+/**
+ * The header of an old route that takes a `projectId` (ADR 0022 PR-E): `Deprecation: true` and a `successor-version` link to the alias. The
+ * answer itself is unchanged. [successor] is the alias's path with `{projectId}` as its placeholder; the placeholder is filled with the query's
+ * project id when it is a project id, and otherwise stays encoded as a template.
+ */
+internal fun ApplicationCall.deprecatedBy(successor: String, query: String?) {
+    val id = query?.takeIf { PROJECT_ID_SHAPE.matches(it) } ?: "%7BprojectId%7D"
+    response.headers.append("Deprecation", "true")
+    response.headers.append("Link", "<" + successor.replace("{projectId}", id) + ">; rel=\"successor-version\"")
 }

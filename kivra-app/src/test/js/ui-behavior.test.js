@@ -4177,19 +4177,121 @@ test('nothing is narrowed without a selected project, and the unassigned choice 
 });
 
 test('the goals, orders, approvals and memory are read for the selected project too, and not before one is chosen', async () => {
-  const dom = load(scopedResponder());
+  const dom = load(projectRoutesResponder());
   await flush();
   const prefixes = ['/api/selfdev/goals', '/api/selfdev/orders', '/api/selfdev/stop-requests', '/api/selfdev/memory'];
   for (const prefix of prefixes) {
     assert.ok(getsTo(dom.calls, prefix).length > 0, prefix + ' is read');
     assert.ok(getsTo(dom.calls, prefix).every((c) => !c.path.includes('projectId')), prefix + ' is not narrowed without a selection');
   }
+  const before = dom.calls.length;
   clickProject(dom);
   await flush();
-  for (const prefix of prefixes) {
-    const last = getsTo(dom.calls, prefix).at(-1);
-    assert.ok(last.path.includes('projectId=' + PROJECT_ID), prefix + ' is read for the project: ' + last.path);
-  }
+  // A selected project reads them from its own routes (ADR 0022 PR-E), not from the old ones with a projectId query.
+  const after = dom.calls.slice(before);
+  assert.ok(after.some((c) => c.path === PROJ + '/tasks'), 'the goals are read from the project');
+  assert.ok(after.some((c) => c.path === PROJ + '/orders'), 'the orders are read from the project');
+  assert.ok(after.some((c) => c.path === PROJ + '/approvals?state=PENDING'), 'the approvals are read from the project');
+  assert.ok(after.some((c) => c.path.startsWith(PROJ + '/memory?')), 'the memory is read from the project');
+  assert.ok(after.every((c) => !prefixes.some((p) => c.path.startsWith(p))), 'the old routes are not read for a selected project');
+});
+
+// ---- The project's own routes and pages (ADR 0022, PR-E): the lists move under /api/projects/<id>, the URL is the project's page ----
+
+const PROJ = '/api/projects/' + encodeURIComponent(PROJECT_ID);
+const OTHER_PROJECT_ID = '01OTHER' + 'B'.repeat(19);
+
+/** The scoped responder, and an empty answer for the project's own list routes (the page reads them as lists). */
+function projectRoutesResponder() {
+  const base = scopedResponder();
+  return (p, init) => {
+    if (p.startsWith(PROJ + '/tasks') || p.startsWith(PROJ + '/orders') || p.startsWith(PROJ + '/approvals')) return { status: 200, data: [] };
+    return base(p, init);
+  };
+}
+
+test('a selected project reads its runs with the projectId query, and the unassigned rows from the old routes', async () => {
+  const dom = load(projectRoutesResponder());
+  await flush();
+  const before = dom.calls.length;
+  clickProject(dom);
+  await flush();
+  const after = dom.calls.slice(before);
+  assert.ok(after.some((c) => c.path === '/api/runs?projectId=' + PROJECT_ID), 'the Runs keep the old route with the project');
+  dom.byId('nav-project-unassigned').fire('click', { preventDefault() {} });
+  await flush();
+  const unassigned = dom.calls.slice(before + after.length);
+  assert.ok(unassigned.some((c) => c.path === '/api/selfdev/goals?projectId=unassigned'), 'unassigned keeps the old goals route');
+  assert.ok(unassigned.some((c) => c.path === '/api/selfdev/orders?projectId=unassigned'), 'unassigned keeps the old orders route');
+  assert.ok(unassigned.every((c) => !c.path.startsWith(PROJ)), 'no project route is read for unassigned');
+});
+
+test('the URL of a project page selects the project and shows that page; an old hash keeps the selected project', async () => {
+  const dom = load(projectRoutesResponder(), { hash: '#/projects/' + PROJECT_ID + '/goals' });
+  await flush();
+  assert.equal(dom.byId('page-goals').hidden, false, 'the goals page is shown');
+  assert.equal(dom.byId('page-tasks').hidden, true, 'the Runs page is not');
+  assert.ok(getsTo(dom.calls, PROJ + '/tasks').length > 0, 'the goals are read for the project');
+  assert.equal(dom.byId('nav-goals').getAttribute('aria-current'), 'page');
+  // An old hash while the project is selected: the page shows the project's rows.
+  dom.window.location.hash = '#/orders';
+  dom.hashListeners.forEach((fn) => fn());
+  await flush();
+  assert.equal(dom.byId('page-orders').hidden, false, 'the old orders hash is shown');
+  assert.ok(getsTo(dom.calls, PROJ + '/orders').length > 0, 'the old hash reads the selected project');
+});
+
+test('the header tabs link into the selected project, and to the old pages without one or with unassigned', async () => {
+  const dom = load(projectRoutesResponder());
+  await flush();
+  assert.equal(dom.byId('nav-goals').getAttribute('href'), '#/goals');
+  assert.equal(dom.byId('nav-budget').getAttribute('href'), '#/budget');
+  clickProject(dom);
+  await flush();
+  assert.equal(dom.byId('nav-goals').getAttribute('href'), '#/projects/' + PROJECT_ID + '/goals');
+  assert.equal(dom.byId('nav-approvals').getAttribute('href'), '#/projects/' + PROJECT_ID + '/approvals');
+  assert.equal(dom.byId('nav-memory').getAttribute('href'), '#/projects/' + PROJECT_ID + '/memory');
+  assert.equal(dom.byId('nav-assignees').getAttribute('href'), '#/projects/' + PROJECT_ID + '/assignees');
+  assert.equal(dom.byId('nav-budget').getAttribute('href'), '#/projects/' + PROJECT_ID + '/dashboard', 'the budget is on the dashboard');
+  dom.byId('nav-project-unassigned').fire('click', { preventDefault() {} });
+  await flush();
+  assert.equal(dom.byId('nav-goals').getAttribute('href'), '#/goals', 'unassigned keeps the old pages');
+  assert.equal(dom.byId('header-approvals').getAttribute('href'), '#/approvals');
+});
+
+test('a project chosen in the sidebar keeps the page the user is on', async () => {
+  const dom = load(projectRoutesResponder(), { hash: '#/orders' });
+  await flush();
+  clickProject(dom);
+  await flush();
+  assert.equal(dom.window.location.hash, '#/projects/' + PROJECT_ID + '/orders', 'the same page under the project');
+  assert.equal(dom.byId('page-orders').hidden, false);
+});
+
+test('the old budget hash of a project opens its dashboard, where the project budget is', async () => {
+  const dom = load(projectResponder({ status: 200, data: dashboardOf({ scope: 'ALL', budget: null }) }), { hash: '#/projects/' + PROJECT_ID + '/budget' });
+  await flush();
+  assert.equal(dom.window.location.hash, DASH_HASH, 'the budget hash becomes the dashboard');
+  assert.equal(dom.byId('page-project').hidden, false, 'the dashboard is shown');
+});
+
+test('a goal is created on the project route when its project is the selected one, and on the old route for another project', async () => {
+  const s = apState();
+  const dom = load(apResponder(s), { hash: '#/projects/' + PROJECT_ID + '/goals' });
+  await flush();
+  dom.byId('goal-title').value = '選択中のプロジェクトの目標';
+  dom.byId('goal-project').value = PROJECT_ID;
+  dom.byId('goal-form').fire('submit', { preventDefault() {} });
+  await flush();
+  assert.equal(postsTo(dom.calls, PROJ + '/tasks').length, 1, 'the goal of the selected project goes to its route');
+  assert.equal(postsTo(dom.calls, '/api/selfdev/goals').length, 0);
+  dom.byId('goal-title').value = '別のプロジェクトの目標';
+  dom.byId('goal-project').value = OTHER_PROJECT_ID;
+  dom.byId('goal-form').fire('submit', { preventDefault() {} });
+  await flush();
+  const other = postsTo(dom.calls, '/api/selfdev/goals');
+  assert.equal(other.length, 1, 'a goal of another project keeps the old route');
+  assert.equal(other[0].body.projectId, OTHER_PROJECT_ID);
 });
 
 // ---- Project members (ADR 0022, PR-D2): the operator block, the picker, the role change, the removal and the bulk import ----

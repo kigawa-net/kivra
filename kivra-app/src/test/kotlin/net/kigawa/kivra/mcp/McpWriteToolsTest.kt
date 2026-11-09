@@ -279,6 +279,8 @@ class McpWriteToolsTest {
                 val runId = s["run_id"]!!.jsonPrimitive.content
                 assertEquals("CREATED", s["state"]!!.jsonPrimitive.content)
                 assertEquals(false, s["replayed"]!!.jsonPrimitive.content.toBoolean())
+                // The run's project is in the answer too (ADR 0022 PR-E2); the input is the same project_id as before.
+                assertEquals(projectId, s["project_id"]!!.jsonPrimitive.content)
                 assertEquals(false, r.result()["isError"]!!.jsonPrimitive.content.toBoolean())
                 val run = db.runs.getTask(RunId(runId), aliceOwner)!!
                 assertTrue(run.taskId.startsWith("selfdev:"))

@@ -19,7 +19,7 @@ private fun composeResource(name: String): String =
         ?: error("ui/compose/$name is missing from the test classpath (copyComposeWebDist runs before processResources)")
 
 private val EXPECTED_COMPOSE_CSP =
-    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; " +
+    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self'; connect-src 'self'; " +
         "worker-src 'self'; child-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 /** Parses a CSP header into directive name to source list. */
@@ -83,7 +83,8 @@ class UiRoutesTest {
         val csp = parseCsp(COMPOSE_UI_CSP)
         // The directives the UI depends on, exactly. Anything else stays denied by default-src 'none'.
         assertEquals(listOf("'none'"), csp["default-src"])
-        assertEquals(listOf("'self'"), csp["script-src"])
+        // Wasm needs 'wasm-unsafe-eval' to compile (not 'unsafe-eval': JS eval and inline scripts stay blocked).
+        assertEquals(listOf("'self'", "'wasm-unsafe-eval'"), csp["script-src"])
         assertEquals(listOf("'self'"), csp["style-src"])
         assertEquals(listOf("'self'"), csp["img-src"])
         assertEquals(listOf("'self'"), csp["connect-src"])

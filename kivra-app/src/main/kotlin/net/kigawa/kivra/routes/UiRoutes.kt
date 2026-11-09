@@ -16,9 +16,9 @@ import io.ktor.server.routing.get
  * The pages hold no secrets. The API they call (`/api/...`) is protected by the Task API's authentication. This is
  * registered only when `KIVRA_AUTH_MODE` is set (see [net.kigawa.kivra.appModule]); otherwise `/ui` is a 404.
  */
-/** CSP for Compose Wasm UI: allows wasm loading from self. */
+/** CSP for Compose Wasm UI: same-origin only; script-src also needs 'wasm-unsafe-eval' to compile the wasm module. */
 internal const val COMPOSE_UI_CSP =
-    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; " +
+    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self'; connect-src 'self'; " +
         "worker-src 'self'; child-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 private val HTML_TYPE = ContentType.parse("text/html; charset=utf-8")

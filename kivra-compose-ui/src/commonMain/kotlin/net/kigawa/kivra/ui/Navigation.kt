@@ -40,6 +40,11 @@ sealed class NavDestination(val route: String, val label: String) {
          * 「タスク」は Run の一覧なので、`#/runs`(旧 Run の一覧)もこの一覧として扱う。
          */
         val legacyProjectPages: List<NavDestination> by lazy { listOf(Tasks, Goals, Orders, Approvals, Memory) }
+
+        /**
+         * 未分類(疑似プロジェクト)の項目。データの一覧だけ。ダッシュボード・担当・予算は、プロジェクトの実体が要るので出さない([pagesOf])。
+         */
+        val unassignedPages: List<NavDestination> by lazy { listOf(Tasks, Goals, Orders, Approvals, Memory) }
     }
 }
 
@@ -63,8 +68,8 @@ fun sidebarSections(projectId: String?, projectName: String?): List<NavSection> 
     )
     val project = projectId?.let { id ->
         NavSection(
-            title = projectName ?: id,
-            items = NavDestination.projectPages.map { NavItem(it, Route.ProjectPage(id, it)) },
+            title = projectLabel(id, projectName),
+            items = pagesOf(id).map { NavItem(it, Route.ProjectPage(id, it)) },
         )
     }
     val global = NavSection(

@@ -1,6 +1,5 @@
 package net.kigawa.kivra.ui
 
-import net.kigawa.kivra.ui.NavDestination.Dashboard
 import net.kigawa.kivra.ui.NavDestination.Goals
 import net.kigawa.kivra.ui.NavDestination.Home
 import net.kigawa.kivra.ui.NavDestination.Orders
@@ -104,11 +103,14 @@ fun parseRoute(hash: String): Route {
     return globalDetailRoute(segments[0], id, segments.drop(2)) ?: Route.Invalid(hash)
 }
 
-/** `#/projects/<id>` の後ろ(rest)を解釈する。rest が空はダッシュボード。 */
+/**
+ * `#/projects/<id>` の後ろ(rest)を解釈する。rest が空はダッシュボード(未分類はタスク)。
+ * 未分類では、ダッシュボード・担当・予算の項目は無い(その形は解釈できないリンク)。
+ */
 private fun projectRoute(projectId: String, rest: List<String>): Route? {
-    if (rest.isEmpty()) return Route.ProjectPage(projectId, Dashboard)
+    if (rest.isEmpty()) return Route.ProjectPage(projectId, landingPageOf(projectId))
     if (rest.size == 1) {
-        return NavDestination.projectPages.find { it.route == rest[0] }?.let { Route.ProjectPage(projectId, it) }
+        return pagesOf(projectId).find { it.route == rest[0] }?.let { Route.ProjectPage(projectId, it) }
     }
     val detailId = percentDecode(rest[1])?.takeIf { it.isNotEmpty() } ?: return null
     return when {
@@ -130,14 +132,14 @@ private fun globalDetailRoute(kind: String, id: String, rest: List<String>): Rou
 }
 
 /**
- * 旧い一覧の URL の行き先。最後に選んだプロジェクト([lastProjectId])が今のプロジェクトの中にあればそれ、
+ * 旧い一覧の URL の行き先。最後に選んだプロジェクト([lastProjectId])が今のプロジェクトの中にあればそれ(未分類は常に有効)、
  * なければプロジェクトが 1 つだけならそれ、どちらでもなければ [Route.ProjectChooser]。
- * [knownIds] が null は一覧の取得に失敗したとき(確かめられないので、[lastProjectId] をそのまま使う)。
+ * [knownIds] が null は一覧の取得に失敗したとき(確かめられないので、[lastProjectId] をそのまま使う)。[lastProjectId] は [validLastProjectId] で検証済みであること。
  */
 fun resolveLegacy(dest: NavDestination, knownIds: List<String>?, lastProjectId: String?): Route {
     val chosen = when {
         knownIds == null -> lastProjectId
-        lastProjectId != null && lastProjectId in knownIds -> lastProjectId
+        lastProjectId != null && (isUnassigned(lastProjectId) || lastProjectId in knownIds) -> lastProjectId
         knownIds.size == 1 -> knownIds[0]
         else -> null
     }
@@ -189,7 +191,7 @@ fun Route.withProjectOf(current: Route): Route {
  * 項目がプロジェクト配下の一覧ならその一覧、詳細はその詳細の属する一覧、全体の画面と解釈できないリンクはダッシュボード。
  */
 fun Route.inProjectContext(projectId: String): Route {
-    val dest = nav?.takeIf { it in NavDestination.projectPages } ?: Dashboard
+    val dest = nav?.takeIf { it in pagesOf(projectId) } ?: landingPageOf(projectId)
     return Route.ProjectPage(projectId, dest)
 }
 
@@ -202,7 +204,7 @@ fun Route.breadcrumbs(projectName: (String) -> String? = { null }): List<Crumb> 
     val projectsCrumb = Crumb("プロジェクト", Route.Page(Projects))
     fun projectHead(projectId: String) = listOf(
         projectsCrumb,
-        Crumb(projectName(projectId) ?: projectId, Route.ProjectPage(projectId, Dashboard)),
+        Crumb(projectLabel(projectId, projectName(projectId)), Route.ProjectPage(projectId, landingPageOf(projectId))),
     )
     fun detail(projectId: String?, page: NavDestination, leaf: List<Crumb>): List<Crumb> {
         val head = if (projectId == null) listOf(projectsCrumb) else projectHead(projectId)

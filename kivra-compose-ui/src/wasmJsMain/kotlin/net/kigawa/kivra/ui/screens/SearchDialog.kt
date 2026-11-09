@@ -9,6 +9,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import net.kigawa.kivra.ui.Route
+import net.kigawa.kivra.ui.isUnassigned
 import net.kigawa.kivra.ui.api.ApiClient
 
 private data class SearchHit(val route: Route, val kind: String, val label: String, val id: String, val state: String)
@@ -29,7 +30,10 @@ fun SearchDialog(projectId: String?, onDismiss: () -> Unit, onNavigate: (Route) 
         val hits = mutableListOf<SearchHit>()
         val errors = mutableListOf<String>()
         try {
-            ApiClient.getRuns("all").filter { projectId == null || it.projectId == projectId }
+            // 未分類は project_id が無い Run だけ。
+            ApiClient.getRuns("all").filter {
+                projectId == null || (if (isUnassigned(projectId)) it.projectId == null else it.projectId == projectId)
+            }
                 .forEach { hits += SearchHit(Route.RunDetail(it.runId), "Run", it.title, it.runId, it.state) }
         } catch (e: Exception) { errors += "Run" }
         try {

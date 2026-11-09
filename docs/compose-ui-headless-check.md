@@ -39,6 +39,9 @@ curl -s http://127.0.0.1:18080/health              # {"status":"ok"}
 - H2 は `testImplementation` のみなので、スクリプトが H2 の jar(Gradle キャッシュ内の `h2-2.3.232.jar`、または `H2_JAR`)を
   classpath に足す。本体のビルドは変えない。
 - 起動時に JWKS(`http://127.0.0.1:18090/certs`)を別プロセスで立てる。既に動いていれば立てない。
+  **同じマシンで別の起動が 18090 を使っていると、その JWKS を流用して 401 になる。** その場合は `PORT`・`OIDC_PORT` で
+  別のポートにし、トークンを作るコマンド(`seed-local.sh`・`crawl.mjs`)にも `OIDC_ISSUER=http://127.0.0.1:<OIDC_PORT>/realms/local` を渡す。
+  他の起動のプロセスは止めない(止めるのは自分が起動した PID だけ)。
 - 再起動のたびに FX の基準日は今日になる(期限切れの警告を避けるため)。
 
 ### A-3. サンプルデータを入れる
@@ -47,7 +50,21 @@ curl -s http://127.0.0.1:18080/health              # {"status":"ok"}
 scripts/compose-ui-crawl/seed-local.sh
 ```
 
-プロジェクト 2 件、開発目標 3 件、order 1 件、Run 1 件を API の POST で入れる。空の DB に一度だけ流す。
+プロジェクト 2 件、開発目標 3 件、order 2 件、Run 1 件を API の POST で入れる。空の DB に一度だけ流す。
+
+### A-3b. 未分類(project_id が NULL)のデータを作る
+
+API は project_id の無い作成を拒否する(ADR 0022 PR-C)ため、未分類のデータは H2 の UPDATE で作る。**サーバを止めた状態**で一度だけ実行する
+(H2 のファイルは、サーバが開いている間は使えない)。
+
+```bash
+kill <サーバの PID>                                 # PID を指定して止める(pkill -f は使わない)
+scripts/compose-ui-crawl/seed-unassigned-local.sh   # 開発目標「監視を追加」と order「未分類に回る order(検証用)」を NULL にする
+scripts/compose-ui-crawl/run-local-server.sh &      # 同じ作業ディレクトリで起動し直す(再シードはしない)
+```
+
+Run は、シードの「シミュレーション」の Run が最初から NULL(プロジェクトを持たない)。記憶は API で作れないので、未分類の記憶は 0 件のまま。
+確認: `GET /api/runs?projectId=unassigned`・`/api/selfdev/goals?projectId=unassigned`・`/api/selfdev/orders?projectId=unassigned` が 1 件以上返ること。
 
 ### A-4. 巡回する
 
@@ -63,6 +80,9 @@ ONLY=home,goals OUT=/path/to/out node crawl.mjs     # 一部だけ
   - 入口と全体: `home`(`#/`)、`projects`、`budget`・`autopilot`・`assignees`(全体)。
   - 旧 URL: `legacy-tasks`・`legacy-goals`・`legacy-approvals`(`#/tasks` など)。プロジェクトが 1 つに決まれば、その配下の URL に
     置き換わる。決まらなければ、プロジェクト一覧が案内文つきで出る。
+  - 未分類(疑似プロジェクト。`#/projects/unassigned/<page>`): `unassigned-tasks`・`unassigned-goals`・`unassigned-orders`・
+    `unassigned-approvals`・`unassigned-memory`・`unassigned-run-detail`。作成フォームは出さず、理由の一文が出ること。
+    `unassigned-dashboard`(`#/projects/unassigned/dashboard`)は「このリンクは開けません」になること。
   - プロジェクト配下: `proj-dashboard`・`proj-tasks`・`proj-goals`・`proj-orders`・`proj-approvals`・`proj-memory`・
     `proj-assignees`・`proj-budget`(`#/projects/<id>/<page>`)。
   - プロジェクトの中の詳細: `proj-goal-detail`・`proj-order-detail`・`proj-order-cycles`・`proj-run-detail`。
@@ -70,6 +90,7 @@ ONLY=home,goals OUT=/path/to/out node crawl.mjs     # 一部だけ
   - 壊れたリンク `invalid`(`#/projects/%ZZ/tasks`)は「リンクが正しくありません」。
   - 各スクリーンショットで確認すること: 左のナビが「ホーム・プロジェクト」「そのプロジェクトの節」「全体」の 2 層になっていること、
     上のパンくずが「プロジェクト › <名前> › <ページ> › <詳細>」になっていること、URL(ハッシュ)が上の表どおりであること。
+    パンくずは折り返す(横スクロールにしない)。1280px 幅で末尾の id が切れないこと。
 - `CHROME`(既定 `/usr/bin/google-chrome`)で Chrome を指定できる。
 - 各画面を開くときは `Authorization: Bearer` を全リクエストに付ける(本番の oauth2-proxy の代わり)。
 - 出力: `<画面>.png`(スクリーンショット)、`summary.json`(API の 4xx/5xx と本文、ページの例外、コンソールのエラー)。

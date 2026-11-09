@@ -4,6 +4,8 @@
 
 改訂 1(旧版)は「データ種別(タスク・開発目標・order・承認・予算・記憶・担当)で並べ、プロジェクトは絞り込み」だった。改訂 2 では、**プロジェクトを最上位の概念**にし、プロジェクトの中にすべてを置く。
 
+改訂 2 の追補(未分類): `project_id` が NULL のデータ(PR-F までに残る既存の Run・開発目標・order・記憶)は、**疑似プロジェクト「未分類」**(固定 id `unassigned`)として扱う。§2・§3・§6・§8 の「未分類」を参照。
+
 ## 1. 前提と方針
 
 - 利用者は運用者(kigawa とその担当 Assignee)。公開サイトではない。認証は `KIVRA_AUTH_MODE` 有効時のみ UI を出す(現行どおり)。
@@ -33,6 +35,17 @@
 │       ├─ 記憶          #/projects/<id>/memory       selfdev memory(ADR 0016)の検索・削除
 │       ├─ 担当          #/projects/<id>/assignees    このプロジェクトのメンバー(ADR 0020)
 │       └─ 予算          #/projects/<id>/budget       今月の上限と使用量(運用者だけ。設定と解除)
+
+未分類(疑似プロジェクト・id は `unassigned`。プロジェクトの実体が無いので、一覧のデータだけ)
+    ├─ タスク        #/projects/unassigned/tasks        project_id が NULL の Run の一覧(作成なし)
+    │   └─ Run 詳細  #/projects/unassigned/runs/<runId>
+    ├─ 開発目標      #/projects/unassigned/goals        NULL の Goal の一覧(作成なし)
+    │   └─ 詳細      #/projects/unassigned/goals/<taskId>
+    ├─ order         #/projects/unassigned/orders       NULL の order の一覧(作成なし)
+    │   ├─ 詳細      #/projects/unassigned/orders/<orderId>
+    │   └─ 周の一覧  #/projects/unassigned/orders/<orderId>/cycles
+    ├─ 承認          #/projects/unassigned/approvals    NULL の order の停止要求の承認待ち
+    └─ 記憶          #/projects/unassigned/memory       project_id が NULL の記憶
 │
 └─ 全体(プロジェクトを持たない。運用者向け)
     ├─ 予算・FX          #/budget                     全体の予算と為替(運用者だけ)
@@ -42,6 +55,7 @@
 
 - 「担当」は全体と配下の両方にある。全体は Assignee とトークンの管理(横断)、配下はそのプロジェクトのメンバー。同じ画面の部品を、絞り込みの有無で使い分ける。
 - 「承認」は配下にあり、件数バッジはヘッダーとサイドナビに出す(全体の件数)。
+- 「未分類」の項目は、プロジェクトの項目のうち、タスク・開発目標・order・承認・記憶だけ。ダッシュボード・担当・予算・リポジトリの対応は、プロジェクトの実体が要るので出さない。
 
 ## 3. URL 体系
 
@@ -56,6 +70,7 @@
 | 旧い一覧(互換) | `#/tasks` `#/goals` `#/orders` `#/approvals` `#/memory` `#/runs` | §4 のとおり置き換える |
 
 - `<id>` は ULID を `encodeURIComponent` 相当で符号化する。壊れた符号化・余分な区切りは「リンクが正しくありません」。
+- 未分類の id は `unassigned`(ULID ではない)。`#/projects/unassigned` は未分類のタスク。`#/projects/unassigned/dashboard`・`…/assignees`・`…/budget` は解釈できないリンク(「リンクが正しくありません」)。
 - `#/projects/<id>` はダッシュボードと同じ画面を開く。
 
 ## 4. 旧 URL との互換
@@ -75,7 +90,7 @@
 
 旧い一覧の URL は、次の順でプロジェクトを決めて `#/projects/<id>/<page>` に置き換える(履歴に残さない)。
 
-1. **最後に選んだプロジェクト**(この端末のブラウザに保存。プロジェクトの中の画面を開くたびに更新)が、今のプロジェクト一覧にあれば、それ。
+1. **最後に選んだプロジェクト**(この端末のブラウザに保存。プロジェクトの中の画面を開くたびに更新。保存値は ULID か `unassigned` の形を検証してから使う)が、今のプロジェクト一覧にあれば、それ。未分類(`unassigned`)は一覧に依らず有効。
 2. なければ、**プロジェクトが 1 つだけ**ならそれ。
 3. どちらでもなければ、**プロジェクト一覧**(`ProjectChooser`)を出す。案内文「「開発目標」はプロジェクトごとのページです。プロジェクトを選んでください。」を添える。URL は `#/projects` になる。
 4. 一覧の取得に失敗したときは、保存しているプロジェクトだけを使う(なければ 3)。
@@ -101,9 +116,12 @@
 
 - **ホーム(全体)**: 全プロジェクトの要約を足した件数(承認待ち・失敗/解放待ち・実行中・予算の超過)。その下に、プロジェクトごとの行。行の各ボタンは、そのプロジェクトの該当ページへ行く(承認 → 承認、失敗・解放待ち/実行中 → タスク、予算 → 予算、「開く」→ ダッシュボード)。
 - **プロジェクト一覧(全体)**: 一覧と作成。各行に要約(承認待ち・実行中・失敗/解放待ち・今月の費用と上限)。読めなかった項目は「取得できません」と出し、他の項目は出す。
+- **未分類の行**: ホームの「プロジェクト別」の最後と、プロジェクト一覧の一覧の上に出す(プロジェクトが 1 つも無くても出す)。「開く」はタスク(Run の一覧)。データが 0 件なら薄く出し、「未分類のデータはありません」と添える。予算の行は無い。
 - **プロジェクトを選んでいないとき**: サイドナビは「ホーム・プロジェクト・全体」だけ。ホームとプロジェクト一覧が入口。プロジェクト配下のページは、旧 URL からだけ開く(§4.1)。
 
 要約は既存の API だけで作る(新しい API は足さない)。承認待ちは `/api/projects/{id}/approvals?state=PENDING`、Run の件数と予算はダッシュボード(`/api/projects/{id}/dashboard`)。失敗は `FAILED` と `UNKNOWN`(運用者の解放待ち、ADR 0009)、実行中は終わった状態(`FAILED` `COMPLETED` `CANCELLED` `NOT_EXECUTED`)以外。
+
+未分類の要約はダッシュボードが無いので、一覧の API から数える: 承認待ちは `GET /api/selfdev/stop-requests?state=PENDING&projectId=unassigned`、Run は `GET /api/admin/runs?projectId=unassigned`(運用者)、それ以外は `GET /api/runs?projectId=unassigned`(運用者以外は 403 の後に自分の分)、目標と order は `…?projectId=unassigned`。**件数は一覧の上限(最大 100 件)の範囲**。0 件かどうかは、読めた行の合計(Run・目標・order・承認)で決める。記憶は数えない。
 
 ## 7. 権限と見える範囲
 
@@ -133,14 +151,17 @@
 
 - 理由入力ダイアログ(解放・中止・予算解除)は共通コンポーネント 1 つに寄せる(`docs/dashboard-audit.md` 課題 2)。
 - 作成フォーム(開発目標・order・Task の自己開発)の作成先は、そのプロジェクトに固定する。選ばせない。表示だけする。
+- **未分類では作成フォームを出さない**(開発目標・order・タスク)。代わりに、画面の一文で理由を示す(「未分類は、プロジェクトに属さない既存のデータの一覧です。…作成フォームは出しません」)。未分類にデータを増やさないため。
 
 ## 9. 実装への落とし込み(Compose 版)
 
 - `Navigation.kt`: `NavDestination` は全体(`globalPages`)とプロジェクト配下(`projectPages`)に分ける。`sidebarSections(projectId, projectName)` が 2 層のサイドナビを作る。
 - `Route.kt`: `Route.Page`(全体)、`Route.ProjectPage`(配下)、`Route.Legacy`(旧い一覧の中間状態)、`Route.ProjectChooser`(置き換えの結果、決まらないとき)、詳細(`RunDetail` `GoalDetail` `OrderDetail` `OrderCycles`、`projectId` は null 可)、`Route.Invalid`。純粋関数: `parseRoute` / `toHash` / `resolveLegacy` / `withProjectOf` / `inProjectContext` / `breadcrumbs`。
+- `Unassigned.kt`: 未分類の規則。`isUnassigned` / `pagesOf`(未分類は `NavDestination.unassignedPages`)/ `landingPageOf` / `projectLabel` / `validLastProjectId`。
+- `ProjectApi.kt`: 未分類の一覧は旧ルート + `?projectId=unassigned`(`withQuery` で query を続ける)。未分類への作成の path は作らない(`require` で拒否)。
 - `App.kt`: 2 層のサイドナビ、今いるプロジェクトの切替、旧い一覧の置き換え(`LaunchedEffect`)、最後に選んだプロジェクトの保存(`localStorage`、読めなければ無視)。
 - 件数の判定は `ProjectSummaryRules.kt`(純粋)。読み込みは `screens/ProjectSummary.kt`。
-- サーバーの API は変えない。既存の `/api/projects/{id}/...` と、`GET /api/runs?projectId=`・`GET /api/admin/runs?projectId=`(既存の projectId フィルタ)を使う。
+- サーバーの API は変えない。既存の `/api/projects/{id}/...` と、`GET /api/runs?projectId=`・`GET /api/admin/runs?projectId=`(既存の projectId フィルタ)を使う。未分類は、別名ルート(ULID 専用)ではなく旧ルートの `projectId=unassigned` を使う。
 
 ## 10. 判断した点と未決事項
 
@@ -153,10 +174,11 @@
 5. ホームの件数は、プロジェクトごとの要約を足したもの(新しい API は足さない)。全体の予算(運用者)はホームに出さず、全体の「予算・FX」にだけ置く。
 6. タスクの投入で「シミュレーション」は、プロジェクトに属さないまま残す(旧 UI の既存の動作を変えない)。自己開発はプロジェクトに入る。
 7. `project_members` の画面(メンバーの登録)は、ダッシュボードの運用者欄に残す(担当のページは一覧)。
+8. 未分類は疑似プロジェクト(固定 id `unassigned`)として、プロジェクトの一覧・ホーム・ヘッダーの切替に出す。作成はしない。API は既存の `projectId=unassigned`(サーバーは変えない)。
 
 未決事項(後続):
 
 - 一覧 API(`GET /api/projects`)を、メンバーのプロジェクトだけに絞るか(§7)。サーバー変更が要るため、この改訂では行わない。
 - 旧い詳細(`#/goals/<id>` など)を、開いたときに所属のプロジェクトの URL へ置き換えるか。今は URL を変えない。
 - 「システム」画面(health・metrics のリンク)は、フッターで足りるか。
-- 未分類(`project_id` が NULL の Run・目標)を、どこに出すか。旧 UI の未分類の一覧は旧 UI にだけある。
+- 未分類の記憶の件数は、ホームとプロジェクト一覧の要約に入れていない(記憶の一覧は API が件数を返さないため。画面で開けば見える)。

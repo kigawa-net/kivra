@@ -10,6 +10,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
+import net.kigawa.kivra.ui.isUnassigned
 import net.kigawa.kivra.ui.GatedOperation
 import net.kigawa.kivra.ui.IdempotencyKeys
 import net.kigawa.kivra.ui.LocalCallerPermissions
@@ -96,7 +97,10 @@ fun TasksScreen(projectId: String, onNavigate: (Route) -> Unit) {
         }
 
         // Task submit form. SPEND_START が無い人には出さない(UX の出し分け。サーバーも投入を 403 で拒否する)。
-        if (perms.can(GatedOperation.SUBMIT_TASK)) {
+        if (isUnassigned(projectId)) {
+            Spacer(modifier = Modifier.height(12.dp))
+            UnassignedCreateNote()
+        } else if (perms.can(GatedOperation.SUBMIT_TASK)) {
             Spacer(modifier = Modifier.height(12.dp))
             SubmitTaskCard(projectId, onAccepted = { listReload += 1 })
         }

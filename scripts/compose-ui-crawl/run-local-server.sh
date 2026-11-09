@@ -10,7 +10,8 @@
 #
 # 使い方: scripts/compose-ui-crawl/run-local-server.sh   (フォアグラウンドで起動。止めるときは Ctrl-C)
 # 環境変数: KIVRA_LOCAL_DIR(作業ディレクトリ。既定 $HOME/.cache/kivra-local)、PORT(既定 18080)、
-#           H2_JAR(H2 の jar。既定は Gradle キャッシュから探す)
+#           H2_JAR(H2 の jar。既定は Gradle キャッシュから探す)、OIDC_PORT(JWKS の待ち受け。既定 18090)
+#           ※ OIDC_PORT を変えたときは、トークンを作る側にも OIDC_ISSUER=http://127.0.0.1:<OIDC_PORT>/realms/local を渡す。
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +19,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 APP="$REPO/kivra-app/build/install/kivra-app"
 WORK="${KIVRA_LOCAL_DIR:-$HOME/.cache/kivra-local}"
 PORT="${PORT:-18080}"
-OIDC_PORT=18090
+OIDC_PORT="${OIDC_PORT:-18090}"   # JWKS の待ち受け。同じマシンで別の起動が使っているときは OIDC_PORT で変える(ISSUER も変わる)
 ISS="http://127.0.0.1:${OIDC_PORT}/realms/local"
 
 if [ ! -d "$APP/lib" ]; then

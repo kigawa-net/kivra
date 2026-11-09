@@ -39,21 +39,43 @@
     └─ システム    #/system            health / ready / metrics リンク、バージョン
 ```
 
+### プロジェクト配下の URL(ADR 0022 PR-E2)
+
+選択中のプロジェクトは URL に現れる。一覧は `#/projects/<id>/<page>`、ダッシュボードは `#/projects/<id>/dashboard`。
+
+| 画面 | 全体(未選択) | 選択中のプロジェクト |
+|---|---|---|
+| タスク | `#/tasks` | `#/projects/<id>/tasks` |
+| 開発目標 | `#/goals` | `#/projects/<id>/goals` |
+| order | `#/orders` | `#/projects/<id>/orders` |
+| 承認 | `#/approvals` | `#/projects/<id>/approvals` |
+| 記憶 | `#/memory` | `#/projects/<id>/memory` |
+| 担当 | `#/assignees` | `#/projects/<id>/assignees` |
+| 予算 | `#/budget` | `#/projects/<id>/dashboard`(予算はダッシュボードにある。`#/projects/<id>/budget` は開くとダッシュボードへ置き換える) |
+| プロジェクト | `#/projects`(一覧)/ `#/projects/<id>/dashboard` | 変更なし |
+
+- サイドナビ・ヘッダーの項目は、選択中のプロジェクトがあればその配下の URL へ向く。全体の選択に戻すと、同じ一覧の全体の URL へ戻る(詳細は属する一覧へ)。
+- 選択は URL が正。プロジェクト配下の URL を開くと、そのプロジェクトが選ばれる。プロジェクト配下でない URL(`#/goals` 等)では選択を保つ。
+- 未分類(`?projectId=unassigned`)は Compose 版にまだ選択肢がない(旧 UI の未分類の一覧は旧 UI に残る)。
+- 一覧・作成の API は、選択中のプロジェクトがあるとき別名ルート(`/api/projects/<id>/tasks` `orders` `approvals` `memory` `assignees`)を使う。runs と `POST /api/selfdev/tasks` には別名がなく、旧ルートのまま。
+- 旧 URL との互換: `#/goals/<id>` 等の詳細と `#/projects/<id>/dashboard` は変更なし。
+
 ### 旧 URL との対応(互換)
 
 | 旧 | 新 |
 |---|---|
 | `#/`(タスク) | `#/tasks`(`#/` はホームへ) |
-| `#/goals` `#/orders` `#/approvals` `#/budget` `#/memory` `#/assignees` | 変更なし |
+| `#/goals` `#/orders` `#/approvals` `#/budget` `#/memory` `#/assignees` | 変更なし(全体の選択のとき) |
 | `#/runs/<id>` | 変更なし |
+| `#/projects/<id>/budget` | `#/projects/<id>/dashboard` へ置き換え |
 
 旧 `#/` はタスク画面だったため、ホーム導入時はブックマーク影響を避けて、ホームが空(要対応 0 件)のときのみタスク一覧を併記する。
 
 ## 3. ナビゲーション
 
-- **ヘッダー(常設)**: ロゴ / グローバル検索(Run id・Goal・order) / 承認待ちバッジ(`#/approvals` へ) / ユーザー(`/api/auth/me`)。
+- **ヘッダー(常設)**: ロゴ / グローバル検索(Run id・Goal・order) / 承認待ちバッジ(承認へ。選択中のプロジェクトがあればその承認) / ユーザー(`/api/auth/me`)。
 - **サイドナビ**: 4 グループ見出し + 配下項目。API で無効なセクション(自律運転 off、運用者以外の予算 等)は項目ごと非表示(現行方針を継続)。
-- **プロジェクトフィルタ**: サイド最上部。選択はクエリ `?project=<id>` で保持し、全一覧に適用。
+- **プロジェクトフィルタ**: サイド最上部のドロップダウン。選択は URL(§2 の `#/projects/<id>/<page>`)で表す。選んだプロジェクトの一覧・作成に適用する。
 - **パンくず**: 詳細画面のみ(例: 作業 › order › #12 › cycle 3)。
 - 狭い画面ではサイドナビをドロワー化(現行 371 行目のブレークポイントを流用)。
 

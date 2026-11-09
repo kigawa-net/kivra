@@ -49,8 +49,8 @@ fun OrdersScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit)
     var listReload by remember { mutableStateOf(0) }
     val loaded = rememberLoad(Triple(selectedProjectId, autopilotOn, listReload)) {
         if (!autopilotOn) return@rememberLoad emptyList()
-        val allOrders = ApiClient.getOrders()
-        if (selectedProjectId != null) allOrders.filter { it.projectId == selectedProjectId } else allOrders
+        // 選んだプロジェクトの order だけ(別名ルート)。全体のときは全部。
+        ApiClient.getOrders(selectedProjectId)
     }
     val perms = LocalCallerPermissions.current
 
@@ -134,14 +134,8 @@ fun ApprovalsScreen(selectedProjectId: String? = null) {
     val autopilotOn = LocalAutopilotAvailability.current == AutopilotAvailability.ENABLED
     val loaded = rememberLoad(Pair(selectedProjectId, autopilotOn), reloadKey) {
         if (!autopilotOn) return@rememberLoad emptyList()
-        val allApprovals = ApiClient.getApprovals()
-        if (selectedProjectId != null) {
-            // A stop request has no project of its own: it belongs to its order's project.
-            val projectOf = ApiClient.getOrders().associate { it.orderId to it.projectId }
-            allApprovals.filter { projectOf[it.orderId] == selectedProjectId }
-        } else {
-            allApprovals
-        }
+        // 選んだプロジェクトの停止要求だけ(別名ルート。停止要求は order の project に属する)。全体のときは全部。
+        ApiClient.getApprovals(selectedProjectId)
     }
 
     // 送信を一つだけ走らせる。busy は送信の前に立てるので、連打しても二重に送られない。

@@ -18,6 +18,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import net.kigawa.kivra.ui.MemoryListFilter
+import net.kigawa.kivra.ui.ProjectApi
 import net.kigawa.kivra.ui.ReleaseKind
 import net.kigawa.kivra.ui.SubmitFailure
 import net.kigawa.kivra.ui.SubmitKind
@@ -142,10 +143,11 @@ object ApiClient {
     }
 
     /**
-     * Goal を投入する。`POST /api/selfdev/goals`。projectId は必須(ADR 0022)。503 は自律運転が無効。
+     * Goal を投入する。`POST /api/projects/{projectId}/tasks`(別名。本文の projectId は path と同じ)。projectId は必須(ADR 0022)。
+     * 503 は自律運転が無効。
      */
     suspend fun submitGoal(title: String, body: String?, projectId: String, idempotencyKey: String): SubmitResult =
-        submitRequest("/api/selfdev/goals", SubmitGoalRequest(title, body?.takeIf { it.isNotBlank() }, idempotencyKey, projectId))
+        submitRequest(ProjectApi.goalSubmit(projectId), SubmitGoalRequest(title, body?.takeIf { it.isNotBlank() }, idempotencyKey, projectId))
 
     /**
      * 投入の共通処理。成功は 202(作成)か 200(再送)で、応答の id と state を読む。失敗は [ApiException] の status から
@@ -292,11 +294,11 @@ object ApiClient {
         postWrite("/api/selfdev/goals/${percentEncode(taskId)}/replan", VersionRequest(version))
 
     /**
-     * order の作成(ルートの order)。`POST /api/selfdev/orders`、本文 `{title, policy, maxCycles, projectId}`。
+     * order の作成(ルートの order)。`POST /api/projects/{projectId}/orders`(別名)、本文 `{title, policy, maxCycles, projectId}`。
      * 冪等キーは送らない(サーバーの本文は厳密で、知らないフィールドは 400 になる)。ルートは一つだけ(2 つ目は 409)。
      */
     suspend fun createOrder(title: String, policy: String, maxCycles: Int, projectId: String) =
-        postWrite("/api/selfdev/orders", CreateOrderBody(title, policy, maxCycles, projectId))
+        postWrite(ProjectApi.orderCreate(projectId), CreateOrderBody(title, policy, maxCycles, projectId))
 
     /**
      * 呼び出し者の役割と権限。`GET /api/selfdev/me`。どの運用者にも 200 で返る。失敗は [ApiException]
@@ -325,20 +327,24 @@ object ApiClient {
             false
         }
 
-    /** Goals (= selfdev tasks). `GET /api/selfdev/goals`. 503 `AUTOPILOT_DISABLED` while the autopilot is off. */
-    suspend fun getGoals(): List<ApiGoal> =
-        getJson("/api/selfdev/goals")
+    /**
+     * Goals (= selfdev tasks). [projectId] が null なら `GET /api/selfdev/goals`、あれば別名 `GET /api/projects/{id}/tasks`。
+     * 503 `AUTOPILOT_DISABLED` while the autopilot is off.
+     */
+    suspend fun getGoals(projectId: String? = null): List<ApiGoal> =
+        getJson(ProjectApi.goals(projectId))
 
-    /** Orders. `GET /api/selfdev/orders`. 503 while the autopilot is off. */
-    suspend fun getOrders(): List<ApiOrder> =
-        getJson("/api/selfdev/orders")
+    /** Orders. [projectId] が null なら `GET /api/selfdev/orders`、あれば別名 `GET /api/projects/{id}/orders`。503 while the autopilot is off. */
+    suspend fun getOrders(projectId: String? = null): List<ApiOrder> =
+        getJson(ProjectApi.orders(projectId))
 
     /**
-     * The approvals page's data: the pending stop requests of the orders. `GET /api/selfdev/stop-requests?state=PENDING`.
+     * The approvals page's data: the pending stop requests of the orders. `GET /api/selfdev/stop-requests?state=PENDING`,
+     * or with [projectId] the alias `GET /api/projects/{id}/approvals?state=PENDING` (the project's orders' requests).
      * 403 when the caller is not the root approver (the old UI hides the page then).
      */
-    suspend fun getApprovals(): List<ApiStopRequest> =
-        getJson("/api/selfdev/stop-requests?state=PENDING")
+    suspend fun getApprovals(projectId: String? = null): List<ApiStopRequest> =
+        getJson(ProjectApi.approvals(projectId))
 
     /** Memory notes (first page, up to the server's maximum of 100 items). `GET /api/selfdev/memory`. 503 while memory is off. */
     suspend fun getMemories(): List<ApiMemory> =
@@ -577,9 +583,9 @@ object ApiClient {
 
     // ---- 担当(Assignee)の管理。サーバーは SelfDevAssigneeRoutes.kt。トークンの平文は発行の応答にだけある ----
 
-    /** 担当の一覧。[projectId] が null なら全部、あれば `?projectId=` で絞る(旧 UI の PROJECT_SCOPED_GET と同じ)。 */
+    /** 担当の一覧。[projectId] が null なら全部、あれば別名 `GET /api/projects/{id}/assignees`(そのプロジェクトのメンバー)。 */
     suspend fun getAssigneesIn(projectId: String?): List<ApiAssignee> =
-        getJson(if (projectId == null) "/api/selfdev/assignees" else "/api/selfdev/assignees?projectId=${percentEncode(projectId)}")
+        getJson(ProjectApi.assignees(projectId))
 
     /** 担当の作成。`POST /api/selfdev/assignees`、本文 `{displayName, role}`。201。 */
     suspend fun createAssignee(displayName: String, role: String) =
@@ -641,9 +647,12 @@ object ApiClient {
 
     // ---- 記憶の操作。サーバーは SelfDevMemoryRoutes.kt。一覧は本文を返さない未検証の文章を含む(本文は null) ----
 
-    /** 記憶の 1 ページ。`GET /api/selfdev/memory?limit=20&offset=N[&kind][&tier][&projectId]`。 */
+    /**
+     * 記憶の 1 ページ。`GET /api/selfdev/memory?limit=20&offset=N[&kind][&tier]`。[projectId] があれば別名
+     * `GET /api/projects/{id}/memory?...`(project は path で渡す)。
+     */
     suspend fun getMemoryPage(filter: MemoryListFilter, offset: Int, projectId: String?): ApiMemoryPage =
-        getJson("/api/selfdev/memory?" + memoryListQuery(filter, offset, projectId))
+        getJson(ProjectApi.memory(projectId) + "?" + memoryListQuery(filter, offset, null))
 
     /** 個別の削除。`POST /api/selfdev/memory/{id}/delete`、本文 `{reason}`(理由は trim 済み)。404 は既に無い。 */
     suspend fun deleteMemory(recordId: String, reason: String) =

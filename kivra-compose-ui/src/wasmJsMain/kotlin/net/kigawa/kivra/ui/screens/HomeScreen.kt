@@ -60,12 +60,8 @@ fun HomeScreen(projectId: String?, onNavigate: (NavDestination) -> Unit) {
  * comes from the order. 503 (autopilot off) and 403 (not the root approver) mean there are none for this caller, as in the old UI,
  * which hides the page then. Any other failure is thrown.
  */
-private suspend fun approvalsOf(projectId: String?): Int {
-    val requests = unavailableAsEmpty { ApiClient.getApprovals() }
-    if (projectId == null || requests.isEmpty()) return requests.size
-    val projectOf = unavailableAsEmpty { ApiClient.getOrders() }.associate { it.orderId to it.projectId }
-    return requests.count { projectOf[it.orderId] == projectId }
-}
+private suspend fun approvalsOf(projectId: String?): Int =
+    unavailableAsEmpty { ApiClient.getApprovals(projectId) }.size
 
 /** ホームの読み取り。予算は [loadBudgetOrHidden](見せない利用者は予算の欄を出さない)。失敗は投げる。 */
 private suspend fun loadHomeSummary(projectId: String?): HomeSummary {

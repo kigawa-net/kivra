@@ -605,9 +605,9 @@ class AgentApiRoutesTest {
     @Test
     fun `when the ledger cannot record the cost, the fail is 503 and the attempt stays claimed`() = TestDb().use { db ->
         val refusing = object : CodingCostPort {
-            override fun claimDenial(): String? = null
-            override fun recordReported(attemptId: String, leaseGeneration: Long, usage: CliUsage): Boolean = false
-            override fun recordEstimated(attemptId: String, leaseGeneration: Long): Boolean = false
+            override fun claimDenial(projectId: String?): String? = null
+            override fun recordReported(attemptId: String, leaseGeneration: Long, usage: CliUsage, projectId: String?): Boolean = false
+            override fun recordEstimated(attemptId: String, leaseGeneration: Long, projectId: String?): Boolean = false
         }
         testApplication {
             val env = Env(db, refusing)

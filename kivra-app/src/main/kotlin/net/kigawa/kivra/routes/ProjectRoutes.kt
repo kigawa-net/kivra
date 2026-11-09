@@ -13,11 +13,16 @@ import io.ktor.server.routing.route
 import java.math.BigDecimal
 import java.time.ZoneOffset
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.BackfillReport
+import net.kigawa.kivra.db.DbBudgetStore
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectBudgetStatus
 import net.kigawa.kivra.db.ProjectActivityEntry
 import net.kigawa.kivra.db.ImportAllResult
 import net.kigawa.kivra.db.MemberPutResult
@@ -67,6 +72,8 @@ internal fun Route.configureProjectRoutes(
     backfill: ProjectBackfillRepository,
     /** The members of a project (ADR 0022, PR-D2): `/api/projects/{id}/members`. */
     members: ProjectMemberRepository,
+    /** The monthly budget of a project (ADR 0022, PR-E): `/api/projects/{id}/budget` and the dashboard's budget. */
+    budgets: DbBudgetStore,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -256,6 +263,47 @@ internal fun Route.configureProjectRoutes(
         }
     }
 
+    // The monthly budget of a project (ADR 0022, PR-E). Everything here needs ORDER_MANAGE: the limit and the consumption are the operator's
+    // view, and the dashboard shows them to the operator only. A project without a row has no limit. Audit lines carry no amounts.
+    route("/api/projects/{projectId}/budget") {
+        get {
+            val principal = call.principalOr401() ?: return@get
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_budget_get")) return@get
+            val projectId = call.parameters["projectId"]
+                ?: return@get call.respond(HttpStatusCode.NotFound)
+            if (projectRepo.get(projectId) == null) return@get call.respond(HttpStatusCode.NotFound)
+            call.respond(budgets.projectBudget(projectId).toResponse())
+        }
+        // Sets the monthly limit (whole yen) and the soft ratio (default 0.8). Both are checked before anything is written: 400 otherwise.
+        put {
+            val principal = call.principalOr401() ?: return@put
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_budget_put")) return@put
+            if (!call.requireJsonSameOrigin()) return@put
+            val projectId = call.parameters["projectId"]
+                ?: return@put call.respond(HttpStatusCode.NotFound)
+            val input = call.parseBudgetRequest()
+                ?: return@put call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_budget"))
+            val status = budgets.setProjectBudget(projectId, input.monthlyLimitJpy, input.softRatio)
+                ?: return@put call.respond(HttpStatusCode.NotFound)
+            projectAdminLog.info("project admin action: action=PROJECT_BUDGET_SET actor={} projectId={}", operatorTag(principal), projectId)
+            call.respond(status.toResponse())
+        }
+        // Removes the limit. The consumption is still booked. Idempotent: a project without a limit is 204 as well.
+        delete {
+            val principal = call.principalOr401() ?: return@delete
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_budget_delete")) return@delete
+            if (!call.requireJsonSameOrigin()) return@delete
+            val projectId = call.parameters["projectId"]
+                ?: return@delete call.respond(HttpStatusCode.NotFound)
+            if (budgets.clearProjectBudget(projectId) == null) {
+                call.respond(HttpStatusCode.NotFound)
+            } else {
+                projectAdminLog.info("project admin action: action=PROJECT_BUDGET_CLEARED actor={} projectId={}", operatorTag(principal), projectId)
+                call.respond(HttpStatusCode.NoContent)
+            }
+        }
+    }
+
     route("/api/projects/{projectId}") {
         get("dashboard") {
             val principal = call.principalOr401() ?: return@get
@@ -278,6 +326,8 @@ internal fun Route.configureProjectRoutes(
                     },
                     spend = projectRepo.runSpend(projectId, scope).toResponse(),
                     activity = runs.projectActivity(projectId, scope, DASHBOARD_ACTIVITY).map { it.toResponse() },
+                    // The operator's view only: a viewer sees no limit and no consumption of the project.
+                    budget = if (everyRun) budgets.projectBudget(projectId).toResponse() else null,
                 ),
             )
         }
@@ -433,7 +483,29 @@ data class ProjectDashboardResponse(
     val recentRuns: List<TaskRunResponse>,
     val spend: ProjectSpendResponse,
     val activity: List<ProjectActivityResponse>,
+    /** The project's monthly budget (ADR 0022, PR-E). Only for the operator (scope "ALL"); null for everyone else. */
+    val budget: ProjectBudgetResponse? = null,
 )
+
+/**
+ * A project's budget for the current JST month (ADR 0022, PR-E). Money is decimal yen as a string. [monthlyLimitJpy], [softRatio],
+ * [softLimitJpy] and [remainingJpy] are null when the project has no limit. [softExceeded] is a warning only.
+ */
+@Serializable
+data class ProjectBudgetResponse(
+    val projectId: String,
+    val period: String,
+    val monthlyLimitJpy: String?,
+    val softRatio: String?,
+    val softLimitJpy: String?,
+    val committedJpy: String,
+    val reservedJpy: String,
+    val remainingJpy: String?,
+    val softExceeded: Boolean,
+)
+
+/** The body of `PUT /api/projects/{id}/budget`: the limit in whole yen, and the soft ratio (0 < ratio <= 1; default 0.8). */
+internal data class ProjectBudgetInput(val monthlyLimitJpy: BigDecimal, val softRatio: BigDecimal)
 
 /** The Runs of the dashboard's scope: their total and the count per state (only states that occur). */
 @Serializable
@@ -520,3 +592,40 @@ private fun ProjectRow.toResponse() = ProjectResponse(
     name = name,
     description = description,
 )
+
+private fun ProjectBudgetStatus.toResponse(): ProjectBudgetResponse {
+    val limit = monthlyLimitJpy
+    val ratio = softRatio
+    return ProjectBudgetResponse(
+        projectId = projectId,
+        period = period,
+        monthlyLimitJpy = limit?.toPlainString(),
+        softRatio = ratio?.stripTrailingZeros()?.toPlainString(),
+        softLimitJpy = if (limit != null && ratio != null) limit.multiply(ratio).stripTrailingZeros().toPlainString() else null,
+        committedJpy = microYenToJpy(committedMicroYen),
+        reservedJpy = microYenToJpy(reservedMicroYen),
+        remainingJpy = remainingMicroYen?.let { microYenToJpy(it) },
+        softExceeded = softExceeded,
+    )
+}
+
+private val BUDGET_FIELDS = setOf("monthlyLimitJpy", "softRatio")
+private val DEFAULT_SOFT_RATIO = BigDecimal("0.8")
+
+/**
+ * The body of a budget PUT, or null: not an object, an unknown field, a value that is not a JSON number, or a value the store would refuse.
+ * Nothing from the body is echoed back. A missing `softRatio` is the default 0.8.
+ */
+private suspend fun ApplicationCall.parseBudgetRequest(): ProjectBudgetInput? {
+    val body = runCatching { receive<JsonObject>() }.getOrNull() ?: return null
+    if (body.keys.any { it !in BUDGET_FIELDS }) return null
+    val monthly = body["monthlyLimitJpy"]?.jsonNumber() ?: return null
+    val ratio = body["softRatio"]?.let { it.jsonNumber() ?: return null } ?: DEFAULT_SOFT_RATIO
+    return runCatching { DbBudgetStore.requireProjectBudget(monthly, ratio) }
+        .map { ProjectBudgetInput(monthly, ratio) }
+        .getOrNull()
+}
+
+/** A JSON number (never a string or a boolean), as a decimal, or null. */
+private fun JsonElement.jsonNumber(): BigDecimal? =
+    (this as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toBigDecimalOrNull()

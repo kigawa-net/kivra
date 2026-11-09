@@ -88,6 +88,14 @@ class RolesCoverageArchitectureTest {
         "POST /api/selfdev/orders/{id}/resume" to Permission.ORDER_MANAGE,
         "POST /api/selfdev/orders/{id}/stop-requests" to Permission.STOP_REQUEST,
         "GET /api/selfdev/stop-requests" to Permission.STOP_DECIDE,
+        // The project-scoped aliases (ADR 0022 PR-E2) run the same handlers as the old routes above, so they need the same permission.
+        "GET /api/projects/{projectId}/tasks" to Permission.READ,
+        "POST /api/projects/{projectId}/tasks" to Permission.GOAL_WRITE,
+        "GET /api/projects/{projectId}/orders" to Permission.READ,
+        "POST /api/projects/{projectId}/orders" to Permission.ORDER_MANAGE,
+        "GET /api/projects/{projectId}/approvals" to Permission.STOP_DECIDE,
+        "GET /api/projects/{projectId}/memory" to Permission.READ_TEXT,
+        "GET /api/projects/{projectId}/assignees" to Permission.ASSIGNEE_MANAGE,
         "POST /api/selfdev/stop-requests/{id}/approve" to Permission.STOP_DECIDE,
         "POST /api/selfdev/stop-requests/{id}/reject" to Permission.STOP_DECIDE,
         "POST /api/selfdev/stop-requests/{id}/cancel" to Permission.STOP_REQUEST,
@@ -158,6 +166,23 @@ class RolesCoverageArchitectureTest {
         }
     }
 
+    /**
+     * The registration's text, followed by the text of the same file's functions it hands the call to (`name(deps, call)`). A route may share
+     * its handler with its alias (ADR 0022 PR-E2), so the permission is named in that function.
+     */
+    private fun Registration.withHandlers(): String {
+        val text = file.readText()
+        val called = Regex("\\b([a-z][A-Za-z]+)\\(deps, call\\)").findAll(body).map { it.groupValues[1] }.toSet()
+        return body + called.joinToString("") { name -> functionText(text, name) }
+    }
+
+    /** The source of the top-level `private suspend fun name(` in [text], up to its closing brace in column 0; empty when there is none. */
+    private fun functionText(text: String, name: String): String {
+        val start = Regex("(?m)^private suspend fun $name\\(").find(text)?.range?.first ?: return ""
+        val end = Regex("(?m)^}$").find(text, start)?.range?.last ?: text.length - 1
+        return text.substring(start, end + 1)
+    }
+
     @Test
     fun `every route registration is in the permission table or the open list`() {
         val found = registrations()
@@ -178,7 +203,7 @@ class RolesCoverageArchitectureTest {
         val sharedGate = setOf("routes/RunExecutionRoutes.kt")
         for (r in registrations()) {
             val expected = ROUTE_PERMISSIONS[r.key] ?: continue
-            val named = permissionName.find(r.body)?.groupValues?.get(1)
+            val named = permissionName.find(r.withHandlers())?.groupValues?.get(1)
             if (r.file.rel() in sharedGate) {
                 assertTrue(r.file.readText().contains("Permission.${expected.name}"), "${r.key}: ${r.file.rel()} must check ${expected.name}")
             } else {

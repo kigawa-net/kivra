@@ -248,6 +248,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             assignees = assigneeRepo,
             tokens = assigneeRepo?.let { SelfDevAssigneeTokenRepository(database) },
             oidcIssuer = env["KIVRA_OIDC_ISSUER"]?.trim()?.takeIf { it.isNotEmpty() },
+            projects = projectRepo,
         )
     }
     // The autopilot's operator API (ADR 0011) on the Task model (V40), registered with the operator check like the memory and order routes.
@@ -268,7 +269,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     // The memory's operator routes (ADR 0016 P2). Registered with the operator check; the repository is null while the memory switch is off,
     // and then every endpoint answers 503.
     val memoryRoutes = operatorVerifier?.let { verifier ->
-        SelfDevMemoryRouteDeps(operators = verifier, memory = memoryRepo, aiPrincipal = aiPrincipal, guard = permissionGuard)
+        SelfDevMemoryRouteDeps(operators = verifier, memory = memoryRepo, aiPrincipal = aiPrincipal, projects = projectRepo, guard = permissionGuard)
     }
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
     val orderRoutes = if (orderRepo != null && operatorVerifier != null) {
@@ -614,6 +615,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                 projectRepo, runs, taskApiIdentityWithSession, permissionGuard, selfDevSettings.config?.repo,
                 backfill = ProjectBackfillRepository(database),
                 members = ProjectMemberRepository(database, java.time.Clock.systemUTC()),
+                budgets = budgetStore,
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

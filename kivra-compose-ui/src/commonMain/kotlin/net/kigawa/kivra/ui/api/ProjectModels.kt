@@ -19,6 +19,25 @@ data class ApiProjectDashboard(
     val recentRuns: List<ApiRun>,
     val spend: ApiProjectSpend,
     val activity: List<ApiProjectActivity>,
+    /** 運用者(scope ALL)だけ。他の利用者は null。 */
+    val budget: ApiProjectBudget? = null,
+)
+
+/**
+ * 今月の予算(server `ProjectBudgetResponse`)。金額は十進の円の文字列。上限が無い月は [monthlyLimitJpy]・[softRatio]・
+ * [softLimitJpy]・[remainingJpy] が null。[softExceeded] は警告だけ(止めない)。
+ */
+@Serializable
+data class ApiProjectBudget(
+    val projectId: String,
+    val period: String,
+    val monthlyLimitJpy: String? = null,
+    val softRatio: String? = null,
+    val softLimitJpy: String? = null,
+    val committedJpy: String,
+    val reservedJpy: String,
+    val remainingJpy: String? = null,
+    val softExceeded: Boolean,
 )
 
 /** Run の件数(scope の中)。byState は出現した状態だけ。 */
@@ -57,3 +76,18 @@ data class ApiBackfillReport(val dryRun: Boolean, val tables: List<ApiBackfillTa
 /** 表ごとの件数: matched(振り分け先がある)、updated(書いた)、unmatched(対応なし、未設定のまま)。 */
 @Serializable
 data class ApiBackfillTable(val table: String, val matched: Long, val updated: Long, val unmatched: Long)
+
+/** `GET /api/projects/{id}/members`(server `ProjectMemberResponse`)の一人分。state は ACTIVE か DISABLED。 */
+@Serializable
+data class ApiProjectMember(val assigneeId: String, val displayName: String, val role: String, val state: String)
+
+/** `POST /api/projects/{id}/members/import-all`(server `ImportAllResponse`)。件数だけ。 */
+@Serializable
+data class ApiMemberImportReport(
+    val dryRun: Boolean,
+    val role: String,
+    val candidates: Long,
+    val added: Long,
+    val alreadyMember: Long,
+    val disabled: Long,
+)

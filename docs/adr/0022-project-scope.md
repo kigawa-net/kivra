@@ -27,6 +27,7 @@
 | PR-C | 新規作成で `projectId` を必須にする(欠けたら 400) | 新規作成の API |
 | PR-D | 権限の判定を `project_members` で行う | 権限 |
 | PR-E | 予算を `project_budgets` で行う | 予算の判定 |
+| PR-E2 | API と画面をプロジェクト配下へ移す(`/api/projects/{id}/...`、画面は `#/projects/{id}/...`)。PR-E の予算とは別の段階 | 新しいルートと画面。旧ルートは応答を変えない |
 | PR-F | NULL の行を消す(Contract)。NULL のまま残す行がなくなった後にだけ行う | 不変条件の強化 |
 
 PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割り当てないためである。
@@ -78,7 +79,7 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
   - 対象: `POST /api/selfdev/tasks`、`POST /api/selfdev/goals`、`POST /api/selfdev/orders`、停止要求の作成・承認・却下・取消、目標の承認・停止、Task の承認・却下。プロジェクトを特定できない行(NULL)は現行の判定だけ。MCP のツール(`kivra_selfdev_start` など)は対象外(後続)。
   - `project_members` の読み取りは `ProjectMemberStore`。書き込みの API はまだない(後続)。そのため、メンバーの登録手段ができるまで `enforce` は使わない(runbook 4.17)。
 - 画面: サイドバーに「未分類」を足し、プロジェクトを選ぶと Run・目標・order・承認待ち・記憶・担当の一覧をサーバーの絞り込みで読み直す。クライアントでは絞らない。読み込み中に選択が変わった場合は古い応答を捨てて読み直す。
-- 残り(後続): 担当の所属の登録 API と画面、MCP の一覧と Task 投入の判定、PR-D2(予算)、PR-E(予算の判定)、PR-F(NULL の行を消す)。
+- 残り(後続): 担当の所属の登録 API と画面、MCP の一覧と Task 投入の判定、PR-E(予算の判定)、PR-F(NULL の行を消す)。
 
 ## 進捗(PR-D2: メンバーの登録、ブランチ `feat/project-members`)
 
@@ -88,4 +89,29 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - 監査は構造化ログ(`net.kigawa.kivra.project.admin`)に固定の code、プロジェクト ID、実行者と担当のハッシュ、role だけを残す。表示名は残さない。
 - 画面(運用者の欄): メンバーの一覧、追加(担当の選択と role。候補は既存の `GET /api/selfdev/assignees` で、この一覧だけはプロジェクトの絞り込みを掛けずに読む)、role の変更、外す(確認つき)、全担当の取り込み(dry-run、確認つきの実行)。
 - 運用の手順は `docs/runbook-selfdev.md` 4.17 の「enforce へ進む手順」(取り込み、役割の調整、shadow で `PROJECT_NOT_MEMBER` が 0 件になるのを確かめる、enforce)。
-- 残り(後続): MCP の一覧と Task 投入の判定、PR-E(予算。表の PR-E と同じ)、PR-F(NULL の行を消す)。PR-D1 の節の「PR-D2(予算)」の表記は、予算を PR-E とする上の表に合わせて読む。
+- 残り(後続): MCP の一覧と Task 投入の判定、PR-E(予算)、PR-F(NULL の行を消す)。
+
+## 進捗(PR-E: 予算、ブランチ `feat/project-budget`)
+
+- マイグレーションは追加しない。V51 の `project_budgets` と既存の `budget_*` の表だけを使う。スコープは `project:<projectId>`。
+- 上限は `project_budgets` の行。行が無い project は上限なし(経路に入らず、従来どおり全体の上限だけで判定される)。API は `GET/PUT/DELETE /api/projects/{id}/budget`(ORDER_MANAGE、JSON)。`monthlyLimitJpy` は 0 以上の整数(円)、`softRatio` は 0 より大きく 1 以下(小数 3 桁まで、省略は 0.8)。不正値は 400、存在しない project は 404。
+- 期間は tenant と同じ JST の暦月。予約パスは `[tenant, project:<id>]`(上限がある project だけ)。決済(`recordSpend`)は上限の有無によらず project の行にも計上する。上限を後から設定しても、その月の消化額が見えるようにするため(導入前の消化は数えない)。
+- 台帳の経路はコーディング CLI(`CodingCostLedger`)。claim は候補 Run の project の上限で判定し、拒否はその attempt だけを保留する(ほかの project と全体は影響しない)。報告・見積もり・失敗の計上は Run の project に計上する。Run の project が NULL なら tenant だけ。Planner の費用と、API 経由のモデル呼び出し(`budgetScopes = [tenant]`)は、この段階では tenant だけ。
+- ロック順は tenant → project → run(各々 scope id、period でソート)。`lockOrder` の単体テスト(`BudgetLockOrderTest`)で固定する。上限の設定・解除は tenant のロックの下で行い、判定と直列化する。
+- 進行中の予約は予約時のスコープ(`budget_reservation_scopes`)のまま決済される。上限を外すと、その後の新しい経路は `BUDGET_POLICY_MISSING` で拒否される(安全側)。
+- soft は警告のみ。ダッシュボードの `softExceeded` と、決済時のログ `project budget soft limit reached`(ID と月だけ)。
+- ダッシュボードは運用者(scope `ALL`)にだけ `budget` を返す。画面には「今月の予算(運用者のみ)」と、確認つきの設定・解除を置いた。手順は `docs/runbook-selfdev.md` 4.18。
+- 残り(後続): API 経由のモデル呼び出し(ModelGateway)と Planner の費用の project 対応、MCP の経路、導入前の消化の遡及(必要なら集計の移行を別途)。
+
+## 進捗(PR-E2: API と画面をプロジェクト配下へ、ブランチ `feat/project-scope-api`)
+
+- マイグレーションは追加しない。PR-A から PR-E までの列と表だけを使う。
+- **別名ルート(新)。** `GET`・`POST /api/projects/{id}/tasks`(開発目標)、`GET`・`POST /api/projects/{id}/orders`、`GET /api/projects/{id}/approvals?state=PENDING`(承認待ちの停止要求)、`GET /api/projects/{id}/memory`、`GET /api/projects/{id}/assignees`。実体は旧ルートと同じ関数を使い、重複の実装はない。path の `projectId` が正で、作成の body の `projectId` は省略可、あれば一致が必要(不一致は 400)。存在しない・形式の違う project は 404。認可は path のプロジェクトで `checkInProject` を通す(shadow はログのみ、enforce は拒否)。
+  - path の値は `request.path()` の先頭 `/api/projects/<id>/` から読む。Ktor の `call.parameters` はクエリを先に並べ、同名のクエリがあると path の値が出てこない(`?projectId=` で path を差し替えられる)ため。テスト `a query cannot name the project of an alias...` で確かめる。
+- **旧ルート(挙動は変えない)。** projectId を受け付ける `GET`・`POST /api/selfdev/goals`、`GET`・`POST /api/selfdev/orders`、`GET /api/selfdev/stop-requests`、`GET /api/selfdev/memory`、`GET /api/selfdev/assignees` に `Deprecation: true` と `Link: <.../api/projects/{id}/...>; rel="successor-version"` を付ける。`projectId` が無いときの Link は `{projectId}` を含むテンプレート(エンコード済み)。
+  - `GET /api/selfdev/runs` と `POST /api/selfdev/tasks`(PR-only の Run)は projectId を受け付けるが、移行先の別名ルートをこの段階で作っていないので、ヘッダは付けない(後続で、Run の別名を作ってから付ける)。
+- **画面。** 選択中のプロジェクトのページは `#/projects/{id}/tasks|goals|orders|approvals|memory|assignees|dashboard`。一覧は別名ルートを読む(`apiFetch` の `scopedPath`)。ヘッダのタブは選択中のプロジェクトのページへのリンク、未選択と「未分類」は従来のハッシュ。予算のタブはダッシュボード(予算はそこにある)。`#/projects/{id}/budget` はダッシュボードへ置き換える。旧ハッシュ(`#/goals` など)は、選択中のプロジェクトの行を表示する。「未分類」は旧ルートに `?projectId=unassigned` を付けて読む(従来どおり)。実行(Run)の一覧は、従来どおり `GET /api/runs?projectId=` を読む。
+- **MCP。** 出力に `project_id` を足した(`kivra_selfdev_start`、`kivra_run_get` と `kivra_run_list` の Run、`kivra_order_get` と `kivra_order_list` の order)。入力は変えない(`kivra_selfdev_start` は `project_id` 必須のまま)。停止要求の出力は、order の `project_id` で足りるので変えていない。
+- **既存の注意(挙動は変えていない)。** `ProjectRoutes.kt` の `/api/projects/{projectId}/...`(repos、members、budget、dashboard)と、`/api/selfdev/.../{id}` の一部も `call.parameters` を読むため、同名のクエリで path が隠れる(例: `GET /api/projects/A/members?projectId=B` は B のメンバーを返す。運用者の権限は必要)。直すのは後続の別の変更とし、この段階では触らない。
+- **Compose UI(`kivra-compose-ui`)は変えていない。** 旧ルートの応答が変わらないので、そのまま動く。
+- **残り(後続)。** PR-F(NULL の行を消す)、`/api/selfdev/runs` と `POST /api/selfdev/tasks` の別名(Run の一覧・投入)と、その Deprecation、旧 `/api/selfdev/.../{id}` と `ProjectRoutes` の path の読み方の修正。

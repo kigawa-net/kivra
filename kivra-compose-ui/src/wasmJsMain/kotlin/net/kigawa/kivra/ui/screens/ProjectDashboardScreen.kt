@@ -40,6 +40,7 @@ import net.kigawa.kivra.ui.api.ApiBackfillReport
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiProjectActivity
+import net.kigawa.kivra.ui.api.ApiProjectBudget
 import net.kigawa.kivra.ui.api.ApiProjectDashboard
 import net.kigawa.kivra.ui.api.ApiRun
 import net.kigawa.kivra.ui.api.ApiSession
@@ -47,6 +48,7 @@ import net.kigawa.kivra.ui.backfillExplain
 import net.kigawa.kivra.ui.backfillFailureText
 import net.kigawa.kivra.ui.backfillTableLine
 import net.kigawa.kivra.ui.canRunBackfill
+import net.kigawa.kivra.ui.isProjectBudgetBody
 import net.kigawa.kivra.ui.isRepoKeyShape
 import net.kigawa.kivra.ui.projectActivityText
 import net.kigawa.kivra.ui.projectRepoFailureText
@@ -65,16 +67,27 @@ import net.kigawa.kivra.ui.yenText
  */
 @Composable
 fun ProjectDashboardScreen(projectId: String, onNavigate: (Route) -> Unit) {
-    val loaded = rememberLoad(projectId) { ApiClient.getProjectDashboard(projectId) }
+    // 予算の設定・解除の後に増やして、ダッシュボードを読み直させる。
+    var reload by remember { mutableStateOf(0) }
+    val loaded = rememberLoad(projectId, reload) { loadProjectDashboard(projectId) }
     DetailPage {
         LoadedView(loaded) { d ->
-            ProjectDashboardBody(projectId, d, onNavigate)
+            ProjectDashboardBody(projectId, d, onNavigate, onBudgetChanged = { reload += 1 })
         }
     }
 }
 
+/**
+ * ダッシュボードの読み取り。運用者の予算の形が合わなければ、ダッシュボード全体を失敗にする(旧 UI の判定と同じ。一部だけ出さない)。
+ */
+private suspend fun loadProjectDashboard(projectId: String): ApiProjectDashboard {
+    val d = ApiClient.getProjectDashboard(projectId)
+    d.budget?.let { if (!isProjectBudgetBody(it)) throw ApiException(null, "response is not the expected format") }
+    return d
+}
+
 @Composable
-private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNavigate: (Route) -> Unit) {
+private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNavigate: (Route) -> Unit, onBudgetChanged: () -> Unit) {
     val operator = showsProjectOperator(d.scope)
     Text(d.project.name, style = MaterialTheme.typography.headlineSmall)
     d.project.description?.takeIf { it.isNotBlank() }?.let { description ->
@@ -126,7 +139,7 @@ private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNa
 
     if (operator) {
         Spacer(Modifier.height(16.dp))
-        ProjectOperatorSection(projectId)
+        ProjectOperatorSection(projectId, d.budget, onBudgetChanged)
     }
 }
 
@@ -157,7 +170,7 @@ private fun ProjectRunRow(run: ApiRun, showCreator: Boolean, onClick: () -> Unit
  * repo を変えたら、それまでの確認の結果は捨てる(実行の対象が変わるため)。権限の最終判定はサーバーが行う。
  */
 @Composable
-private fun ProjectOperatorSection(projectId: String) {
+private fun ProjectOperatorSection(projectId: String, budget: ApiProjectBudget?, onBudgetChanged: () -> Unit) {
     val scope = rememberCoroutineScope()
     // 登録の変更の後に増やして、一覧を読み直させる。
     var repoReload by remember { mutableStateOf(0) }
@@ -283,6 +296,10 @@ private fun ProjectOperatorSection(projectId: String) {
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
+            if (budget != null) {
+                ProjectBudgetSection(budget, onBudgetChanged)
+                Spacer(Modifier.height(16.dp))
+            }
             Text("リポジトリの対応（運用者のみ）", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
             LoadedList(repos, emptyText = REPO_EMPTY_MESSAGE) { list ->
@@ -322,6 +339,8 @@ private fun ProjectOperatorSection(projectId: String) {
                 )
             }
 
+            Spacer(Modifier.height(16.dp))
+            ProjectMembersSection(projectId)
             Spacer(Modifier.height(16.dp))
             Text("既存データの振り分け", style = MaterialTheme.typography.titleMedium)
             Text(

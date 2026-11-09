@@ -441,6 +441,6 @@ class McpOrderToolsTest {
 
     private val summaryKeys = setOf(
         "order_id", "parent_order_id", "depth", "state", "state_reason", "cycles_started", "max_cycles", "current_goal_id",
-        "consecutive_failed_cycles", "child_count", "order_budget_jpy", "spent_jpy", "expires_at", "version", "created_at", "updated_at",
+        "consecutive_failed_cycles", "child_count", "order_budget_jpy", "spent_jpy", "expires_at", "version", "created_at", "updated_at", "project_id",
     )
 }

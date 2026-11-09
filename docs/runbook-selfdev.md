@@ -669,6 +669,65 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 3. **shadow で確かめる。** `KIVRA_SELFDEV_PROJECT_MODE=shadow` にして再起動し、運用の操作（Task の投入、承認、停止の要求など）を一通り行う。構造化ログ `project shadow: wouldDeny ... code=PROJECT_NOT_MEMBER` が出なくなれば、enforce にしても拒否される操作はない。出る場合は、その人の登録（手順 1、2）に戻る。
 4. **enforce にする。** `KIVRA_SELFDEV_PROJECT_MODE=enforce` にして再起動する。グローバル ADMIN は従来どおり、メンバーでなくても通る。戻すときは `shadow` か `off` にして再起動する（データは変えない）。
 
+### 4.18 プロジェクトの月の予算(ADR 0022 PR-E、運用者のみ)
+
+プロジェクトごとの月の上限を、運用者が設定・解除する。上限に達すると、**そのプロジェクトの Run の**コーディング CLI の割り当てだけが止まる。ほかのプロジェクトと全体の上限には影響しない。上限を設定していないプロジェクトは、従来どおり全体の上限だけで判定される。
+
+| 操作 | API（ORDER_MANAGE、JSON） | 画面 |
+|---|---|---|
+| 今月の状態 | `GET /api/projects/{id}/budget` | ダッシュボードの「今月の予算（運用者のみ）」 |
+| 設定 | `PUT /api/projects/{id}/budget` の `{"monthlyLimitJpy": 10000, "softRatio": 0.8}`（`softRatio` は省略可、既定 0.8） | 上限と警告の基準を入力し「上限を設定…」（確認ダイアログ） |
+| 解除 | `DELETE /api/projects/{id}/budget`（本文は `{}`） | 「上限を解除…」（確認ダイアログ） |
+
+- **対象の月は日本時間の暦月。** 全体の上限と同じ月の区切りで、毎月 1 日に 0 から数える。消化額は「確定」と「予約中」の合計で判定する。
+- **何が数えられるか。** Run に紐づくコーディング CLI の費用（`coding:<attempt>:<generation>` の台帳行）だけ。Planner の費用はプロジェクトに属さないので、全体の上限にだけ数える。API 経由のモデル呼び出しも、この段階では全体の上限にだけ数える。
+- **上限を設定していなくても、消化額は数える。** 上限を後から設定しても、その月の消化額はそのまま見える。ただし、この機能を導入する前の消化は数えない（導入後の消化だけ）。
+- **警告の基準（soft）は警告だけ。** 確定と予約中の合計が上限 × 基準に達すると、ダッシュボードに警告が出て、サーバのログ（`project budget soft limit reached`）に出る。止まるのは上限に達したときだけ。
+- **値の制約。** `monthlyLimitJpy` は 0 以上の整数（円）。0 は「何も割り当てない」上限になる。`softRatio` は 0 より大きく 1 以下で、小数は 3 桁まで。不正な値は 400 で、何も変えない。存在しないプロジェクトは 404。
+- **上限を変えたとき。** 進行中の割り当ては、作られたときのスコープのまま決済される（上限を外しても、その分は消化額に残る）。上限を下げても、進行中のものは取り消されない。下げた後の新しい割り当てだけが判定される。
+- **上限を解除したとき。** 以後このプロジェクトは全体の上限だけで判定される。今月までの消化額は残る。解除の後に、上限が無いことを理由に拒否されることはない。ただし、判定の途中で上限が外れた場合は、その割り当ては拒否される（安全側。`BUDGET_POLICY_MISSING`。すぐに再試行されるので、運用上の影響はない）。
+- **監査。** 設定・解除は構造化ログ（`net.kigawa.kivra.project.admin`）に固定の code（`PROJECT_BUDGET_SET`、`PROJECT_BUDGET_CLEARED`）、実行者、プロジェクト ID だけを残す。金額は残さない。
+- **見えるのは運用者だけ。** 閲覧者（VIEWER）のダッシュボードには、予算の項目は出ない（`budget` は null）。
+
+確認の手順: 上限を小さく（例: 100 円）設定し、Run を一つ投入して割り当ての拒否（`coding claim refused: code=BUDGET`）が出るのを見る。同じ時間に、上限のない別のプロジェクトの Run は割り当てられることを見る。確認後に上限を解除する。
+
+### 4.19 プロジェクトを最上位にした API と画面(ADR 0022 PR-E2、運用者のみ)
+
+プロジェクトの配下の正式なルートは `/api/projects/{id}/...` になった。旧 `/api/selfdev/...` は応答を変えず、projectId を指定できるものには `Deprecation: true` と `Link: <...>; rel="successor-version"` を付ける(ヘッダのみ。既存のクライアントは壊れない)。
+
+| 新ルート | 旧ルート(同じ応答) | 注意 |
+|---|---|---|
+| `GET` / `POST /api/projects/{id}/tasks` | `GET` / `POST /api/selfdev/goals` | 開発目標の一覧・投入。投入の body の `projectId` は省略可。あれば path と一致が必要(不一致は 400) |
+| `GET` / `POST /api/projects/{id}/orders` | `GET` / `POST /api/selfdev/orders` | order の一覧・作成。同じ規則 |
+| `GET /api/projects/{id}/approvals?state=PENDING` | `GET /api/selfdev/stop-requests?state=PENDING` | 承認待ちの停止要求。`state` は必須(従来どおり) |
+| `GET /api/projects/{id}/memory` | `GET /api/selfdev/memory` | 検索の条件は旧ルートと同じ |
+| `GET /api/projects/{id}/assignees` | `GET /api/selfdev/assignees` | そのプロジェクトのメンバー(担当) |
+
+- **path のプロジェクトが正。** 存在しない(または形式が違う)プロジェクトは 404。一覧の `?projectId=` は path と同じか省略のみ(違えば 400)。
+- **認可は path のプロジェクトで判定する。** 運用者の認証(トークン)は従来どおり必須(無ければ 401)。`KIVRA_SELFDEV_PROJECT_MODE` の shadow・enforce は path のプロジェクトに対して働く(4.17)。
+- **旧ルートの `Link` の宛先。** `projectId` の指定がある旧ルートは、その ID を入れた宛先を返す。指定がない場合(旧 POST の body 指定を含む)は `/api/projects/%7BprojectId%7D/tasks` のようなテンプレートになる。`%7BprojectId%7D` は `{projectId}` の置き換えであり、そのまま使わない。
+- **`/api/selfdev/runs` と `POST /api/selfdev/tasks`(PR-only の Run)は移していない。** projectId は受け付けるが、移行先のルートがまだないので `Deprecation` は付けない。画面の「タスク」は、従来どおり `GET /api/runs?projectId=`(Task API)を読む。
+
+**画面(`/ui`)**
+
+- 左のプロジェクトを選ぶと、そのプロジェクトのページの URL になる。`#/projects/<ID>/tasks`、`#/projects/<ID>/goals`、`#/projects/<ID>/orders`、`#/projects/<ID>/approvals`、`#/projects/<ID>/memory`、`#/projects/<ID>/assignees`、`#/projects/<ID>/dashboard`。今いるページは、プロジェクトを変えても同じページのまま開く。
+- ヘッダのタブ(タスク・開発目標・order・承認・記憶・担当)は、選択中のプロジェクトのページへのリンクになる。予算のタブは、プロジェクトの予算があるダッシュボードへのリンクになる(予算はダッシュボードの「今月の予算(運用者のみ)」にある)。
+- `#/projects/<ID>/budget` は、ダッシュボードに置き換えられる(予算はダッシュボードにある)。
+- 「未分類」は従来どおり `#/goals` などの旧ページを使い、旧ルートに `?projectId=unassigned` を付けて読む。「すべて」は旧ページのまま、絞り込みなし。
+- 旧ハッシュ(`#/goals` など)は、選択中のプロジェクトがあればそのプロジェクトの行を、なければ従来どおりの全件を表示する。ブックマークはそのまま開ける。
+- 戻る・進むは、ブラウザの履歴のとおりに動く。
+
+**確認の手順**
+
+1. 旧ルートの応答に `Deprecation: true` と `Link` が付くことを確かめる: `curl -sI -H 'Authorization: Bearer <JWT>' '<BASE>/api/selfdev/goals?projectId=<ID>'`。
+2. 同じプロジェクトで `GET /api/projects/<ID>/tasks` と `GET /api/selfdev/goals?projectId=<ID>` の一覧が同じ。
+3. `GET /api/projects/<存在しないID>/tasks` が 404。`POST /api/projects/<ID>/tasks` の body の `projectId` を別の ID にすると 400 で、何も作られない。
+4. 画面で左のプロジェクトを選び、タブが `#/projects/<ID>/...` になること、旧ハッシュ `#/goals` で同じプロジェクトの行が出ることを見る。
+
+**MCP**
+
+`kivra_selfdev_start` の応答(`project_id`)、`kivra_run_get` と `kivra_run_list` の Run(`project_id`)、`kivra_order_get` と `kivra_order_list` の order(`project_id`)に、プロジェクトの ID を含める。入力は従来どおり(`kivra_selfdev_start` は `project_id` 必須)。
+
 ## 5. 動作確認
 
 トークンはプレースホルダである。認証は Task API と同じで、`Authorization: Bearer <JWT>`(無ければ `X-Forwarded-Access-Token`)。

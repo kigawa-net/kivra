@@ -32,13 +32,20 @@ import org.slf4j.LoggerFactory
  * Durable budget ledger in Kivra MariaDB (Issue #109, B1). Same semantics as the in-memory [net.kigawa.kivra.modelgateway.BudgetController],
  * but the state is shared by every replica that uses the same database.
  *
- * Scopes: [tenantScope] (monthly hard limit, JST calendar month) and any `run:<id>` scope (lifetime limit [runLimit], optional).
+ * Scopes: [tenantScope] (monthly hard limit, JST calendar month), `project:<id>` (ADR 0022 PR-E: monthly limit read from
+ * `project_budgets` at each admission, JST calendar month) and any `run:<id>` scope (lifetime limit [runLimit], optional).
  * A reservation path must contain [tenantScope]. Amounts are stored as BIGINT micro-yen; costs are rounded up.
+ *
+ * A project scope without a `project_budgets` row has no limit. It is kept out of an admission path by [scopesFor], so such a
+ * project behaves exactly as before. Settled spend ([recordSpend]) is still booked to its project scope, so the month's consumption
+ * is visible even before a limit is set. A reservation keeps the scopes it was made with, whatever the limit does later.
  *
  * Locking and atomicity:
  * - Every operation first takes `SELECT ... FOR UPDATE` on all `budget_periods` rows of [tenantScope], in one transaction.
  *   Only the tenant scope and this order are used for locking across replicas, so no two operations can wait on each other
- *   in a cycle. Run rows are locked after the tenant rows, sorted by scope id.
+ *   in a cycle. The other rows are locked after the tenant rows, in the order of [lockOrder]: project rows first, then run
+ *   rows, each sorted by (scope id, period). A change of a project's limit takes the tenant lock too, so it is ordered with
+ *   every admission.
  * - Period rows are created in their own short transaction before the locked transaction, so an insert never waits on
  *   the locked transaction. A concurrent creation of the same row is a duplicate key and is ignored.
  * - A reservation is inserted in the same transaction as the check that admitted it. An exception rolls back the
@@ -64,7 +71,9 @@ class DbBudgetStore(
     private val reservationTtl: Duration = Duration.ofMinutes(5),
 ) : BudgetPort, BudgetOperatorView {
     init {
-        require(tenantScope.isNotBlank() && !tenantScope.startsWith(RUN_PREFIX)) { "tenantScope must not be blank or start with run:" }
+        require(tenantScope.isNotBlank() && !tenantScope.startsWith(RUN_PREFIX) && !tenantScope.startsWith(PROJECT_PREFIX)) {
+            "tenantScope must not be blank or start with run: or project:"
+        }
         requireJpy(tenantLimit, "tenant")
         runLimit?.let { requireJpy(it, "run") }
         require(reservationTtl.isPositive) { "reservationTtl must be positive" }
@@ -161,7 +170,7 @@ class DbBudgetStore(
             val known = actual?.let { knownMicro(it) }
             when (r.state) {
                 RESERVED -> {
-                    lockRunRows(r.scopes)
+                    lockScopeRows(r.scopes)
                     for ((id, period) in r.scopes) {
                         addToPeriod(id, period, known ?: r.amount, unpriced = if (known == null) 1L else 0L)
                     }
@@ -170,7 +179,7 @@ class DbBudgetStore(
                 // The estimate was charged and counted as unpriced at lapse. A known actual trues up the amount only; the
                 // unpriced count stays (a late actual does not clear it), so the reservation remains UNPRICED until released.
                 LAPSED -> {
-                    lockRunRows(r.scopes)
+                    lockScopeRows(r.scopes)
                     if (known != null) {
                         for ((id, period) in r.scopes) addToPeriod(id, period, known - r.amount, unpriced = 0L)
                         execUpdate("UPDATE budget_reservations SET amount_micro_yen = ? WHERE reservation_key = ?", known, key)
@@ -190,7 +199,7 @@ class DbBudgetStore(
             when (r.state) {
                 RESERVED -> settle(key, RELEASED)
                 LAPSED -> {
-                    lockRunRows(r.scopes)
+                    lockScopeRows(r.scopes)
                     // Definitively not billed: undo the lapse charge and its unpriced count.
                     for ((id, period) in r.scopes) addToPeriod(id, period, -r.amount, unpriced = -1L)
                     settle(key, RELEASED)
@@ -211,37 +220,53 @@ class DbBudgetStore(
      * also carries the booked period, the booked micro-yen and the month's committed total after the booking (read in the same
      * locked transaction; null if it cannot be read).
      */
-    fun recordSpend(key: String, amount: BudgetAmount, unpriced: Boolean): SpendOutcome {
+    fun recordSpend(key: String, amount: BudgetAmount, unpriced: Boolean, projectId: String? = null): SpendOutcome {
         val micro = (if (amount.currency == tenantLimit.currency && amount.unit == tenantLimit.unit) microOrNull(amount) else null)
             ?: return SpendOutcome(SpendResult.FAILURE)
-        ensurePeriodRows(listOf(tenantScope), clock.instant())
+        // The tenant always; the project too when the Run has one (ADR 0022 PR-E). The project's limit does not gate a booking.
+        val scopes = listOfNotNull(tenantScope, projectId?.let { projectScope(it) })
+        ensurePeriodRows(scopes, clock.instant())
         return try {
             transaction<SpendOutcome>(database) {
                 lockTenant()
                 expireDue(clock.instant())
                 if (reservationExists(key)) return@transaction SpendOutcome(SpendResult.ALREADY_RECORDED)
                 val now = clock.instant()
-                val period = periodFor(tenantScope, now)
+                val pairs = scopes.map { it to periodFor(it, now) }
+                lockScopeRows(pairs)
                 val at = utcNow(clock)
                 execUpdate(
                     "INSERT INTO budget_reservations (reservation_key, amount_micro_yen, state, expires_at, created_at, settled_at) VALUES (?, ?, ?, ?, ?, ?)",
                     key, micro, if (unpriced) UNPRICED else COMMITTED, at, at, at,
                 )
-                execUpdate(
-                    "INSERT INTO budget_reservation_scopes (reservation_key, scope_id, period) VALUES (?, ?, ?)",
-                    key, tenantScope, period,
-                )
-                addToPeriod(tenantScope, period, micro, unpriced = if (unpriced) 1L else 0L)
+                for ((id, period) in pairs) {
+                    execUpdate(
+                        "INSERT INTO budget_reservation_scopes (reservation_key, scope_id, period) VALUES (?, ?, ?)",
+                        key, id, period,
+                    )
+                }
+                for ((id, period) in pairs) addToPeriod(id, period, micro, unpriced = if (unpriced) 1L else 0L)
+                if (projectId != null) warnIfProjectSoftReached(projectId, now)
+                val tenantPeriod = pairs.first().second
                 SpendOutcome(
                     SpendResult.RECORDED,
-                    period = period,
+                    period = tenantPeriod,
                     amountMicroYen = micro,
-                    monthCommittedMicroYen = periodRow(tenantScope, period)?.committed,
+                    monthCommittedMicroYen = periodRow(tenantScope, tenantPeriod)?.committed,
                 )
             }
         } catch (e: Exception) {
             SpendOutcome(if (e.isDuplicateKey()) SpendResult.ALREADY_RECORDED else SpendResult.FAILURE)
         }
+    }
+
+    /** Logs (no amounts) when a project's month has reached its soft threshold. A warning only: nothing is refused. Inside the lock. */
+    private fun Transaction.warnIfProjectSoftReached(projectId: String, now: Instant) {
+        val id = projectScope(projectId)
+        val soft = limitFor(id)?.soft ?: return
+        val period = periodFor(id, now)
+        val used = Math.addExact(periodRow(id, period)?.committed ?: 0L, reservedFor(id, period))
+        if (used >= microFloor(soft)) logger.warn("project budget soft limit reached: projectId={} period={}", projectId, period)
     }
 
     /**
@@ -266,7 +291,7 @@ class DbBudgetStore(
                     m
                 }
                 val settled = actualMicro ?: r.amount
-                lockRunRows(r.scopes)
+                lockScopeRows(r.scopes)
                 for ((id, period) in r.scopes) {
                     // An unpriced count must exist for every scope of an UNPRICED or LAPSED reservation. Otherwise the data is
                     // inconsistent: refuse (rolls back) rather than drive a counter negative.
@@ -352,6 +377,96 @@ class DbBudgetStore(
         )
     }
 
+    // ---- project budgets (ADR 0022 PR-E) -------------------------------------------------------------------------------
+
+    /**
+     * The scopes of an admission for a Run in [projectId] (null: the cost has no project, e.g. the Planner's). The tenant always; the
+     * project scope only when the project has a limit row. A project without one is not limited, so it stays out of the path. A limit
+     * removed after this check makes the admission fail closed (BUDGET_POLICY_MISSING), it does not pass unchecked.
+     */
+    fun scopesFor(projectId: String?): List<String> {
+        if (projectId == null) return listOf(tenantScope)
+        val limited = transaction(database) { projectBudgetRow(projectId) != null }
+        return if (limited) listOf(tenantScope, projectScope(projectId)) else listOf(tenantScope)
+    }
+
+    /** The budget of [projectId] for the current JST month. Read only, under the tenant lock. */
+    fun projectBudget(projectId: String): ProjectBudgetStatus = transaction(database) {
+        val now = clock.instant()
+        lockTenant()
+        expireDue(now)
+        projectBudgetStatusIn(projectId, now)
+    }
+
+    /**
+     * Sets the monthly limit (whole yen) and the soft ratio of [projectId], under the tenant lock, so it is ordered with every admission.
+     * Returns the budget after the change, or null when the project does not exist. Amounts are checked here too (see [requireProjectBudget]).
+     */
+    fun setProjectBudget(projectId: String, monthlyLimitJpy: BigDecimal, softRatio: BigDecimal): ProjectBudgetStatus? {
+        requireProjectBudget(monthlyLimitJpy, softRatio)
+        val monthly = monthlyLimitJpy.setScale(0)
+        val ratio = softRatio.setScale(3)
+        return transaction<ProjectBudgetStatus?>(database) {
+            val now = clock.instant()
+            lockTenant()
+            expireDue(now)
+            if (!projectExists(projectId)) return@transaction null
+            val updated = execUpdate(
+                "UPDATE project_budgets SET monthly_limit_jpy = ?, soft_ratio = ?, updated_at = ? WHERE project_id = ?",
+                monthly, ratio, utcNow(clock), projectId,
+            )
+            if (updated == 0) {
+                execUpdate(
+                    "INSERT INTO project_budgets (project_id, monthly_limit_jpy, soft_ratio, updated_at) VALUES (?, ?, ?, ?)",
+                    projectId, monthly, ratio, utcNow(clock),
+                )
+            }
+            projectBudgetStatusIn(projectId, now)
+        }
+    }
+
+    /**
+     * Removes the monthly limit of [projectId]. Its consumption is still booked, and reservations already made keep their scopes.
+     * Returns the budget after the change, or null when the project does not exist.
+     */
+    fun clearProjectBudget(projectId: String): ProjectBudgetStatus? = transaction<ProjectBudgetStatus?>(database) {
+        val now = clock.instant()
+        lockTenant()
+        expireDue(now)
+        if (!projectExists(projectId)) return@transaction null
+        execUpdate("DELETE FROM project_budgets WHERE project_id = ?", projectId)
+        projectBudgetStatusIn(projectId, now)
+    }
+
+    private fun Transaction.projectBudgetStatusIn(projectId: String, now: Instant): ProjectBudgetStatus {
+        val scope = projectScope(projectId)
+        val period = periodFor(scope, now)
+        val row = projectBudgetRow(projectId)
+        val committed = periodRow(scope, period)?.committed ?: 0L
+        val reserved = reservedFor(scope, period)
+        val used = Math.addExact(committed, reserved)
+        val limit = row?.let { BudgetLimit(hard = it.monthlyLimitJpy, soft = it.monthlyLimitJpy.multiply(it.softRatio), currency = tenantLimit.currency, unit = tenantLimit.unit) }
+        return ProjectBudgetStatus(
+            projectId = projectId,
+            period = period,
+            monthlyLimitJpy = row?.monthlyLimitJpy,
+            softRatio = row?.softRatio,
+            committedMicroYen = committed,
+            reservedMicroYen = reserved,
+            unpricedCalls = periodRow(scope, period)?.unpriced ?: 0L,
+            remainingMicroYen = limit?.let { maxOf(0L, microFloor(it.hard) - used) },
+            softExceeded = limit?.soft?.let { used >= microFloor(it) } ?: false,
+        )
+    }
+
+    /** The `project_budgets` row of [projectId], or null when it has none (no limit). */
+    private fun Transaction.projectBudgetRow(projectId: String): ProjectBudgetRow? = execQuery(
+        "SELECT monthly_limit_jpy, soft_ratio FROM project_budgets WHERE project_id = ?", projectId,
+    ) { ProjectBudgetRow(it.getBigDecimal(1), it.getBigDecimal(2)) }.singleOrNull()
+
+    private fun Transaction.projectExists(projectId: String): Boolean =
+        execQuery("SELECT 1 FROM projects WHERE project_id = ?", projectId) { it.getInt(1) }.isNotEmpty()
+
     // ---- admission --------------------------------------------------------------------------------------------------
 
     /** Checks that do not need the database: scope presence, price known, currency/unit, limits configured. */
@@ -365,7 +480,11 @@ class DbBudgetStore(
             return ReserveResult.Denied(scopes.first(), "cost is negative or too large", BudgetDenial.UNKNOWN_COST, UnknownCostReason.AMOUNT_INVALID)
         }
         for (id in scopes) {
-            val limit = limitFor(id) ?: return ReserveResult.Denied(id, "unknown budget scope", BudgetDenial.BUDGET_POLICY_MISSING)
+            val limit = when {
+                // A project limit is JPY, as the tenant's. Whether the project has a limit row is read in the locked transaction.
+                isProjectScope(id) -> tenantLimit
+                else -> staticLimitFor(id) ?: return ReserveResult.Denied(id, "unknown budget scope", BudgetDenial.BUDGET_POLICY_MISSING)
+            }
             if (a.currency != limit.currency || a.unit != limit.unit) {
                 return ReserveResult.Denied(
                     id, "cost currency/unit does not match the budget", BudgetDenial.UNKNOWN_COST, UnknownCostReason.CURRENCY_MISMATCH,
@@ -375,8 +494,15 @@ class DbBudgetStore(
         return null
     }
 
-    /** Must be called inside a transaction that holds the tenant lock. Missing period rows count as zero. */
+    /**
+     * Must be called inside a transaction that holds the tenant lock. Missing period rows count as zero. A scope with no limit here
+     * (a project whose limit row was removed after the path was chosen) is denied with BUDGET_POLICY_MISSING: fail closed.
+     */
     private fun Transaction.admissionDenial(scopes: List<String>, micro: Long, now: Instant): ReserveResult.Denied? {
+        val limits = scopes.associateWith { limitFor(it) }
+        limits.forEach { (id, limit) ->
+            if (limit == null) return ReserveResult.Denied(id, "unknown budget scope", BudgetDenial.BUDGET_POLICY_MISSING)
+        }
         for (id in scopes) {
             val row = periodRow(id, periodFor(id, now))
             if ((row?.unpriced ?: 0L) > 0L) {
@@ -384,7 +510,7 @@ class DbBudgetStore(
             }
         }
         for (id in scopes) {
-            val hard = microFloor(limitFor(id)!!.hard)
+            val hard = microFloor(limits.getValue(id)!!.hard)
             val period = periodFor(id, now)
             val projected = Math.addExact(
                 Math.addExact(periodRow(id, period)?.committed ?: 0L, reservedFor(id, period)),
@@ -410,9 +536,10 @@ class DbBudgetStore(
         for (id in scopes) {
             val period = periodFor(id, now)
             if (transaction(database) { periodRow(id, period) != null }) continue
-            val hard = microFloor(limitFor(id)!!.hard)
             try {
                 transaction(database) {
+                    // The hard value is informational for a project (its limit is read from project_budgets); 0 when it has none.
+                    val hard = limitFor(id)?.let { microFloor(it.hard) } ?: 0L
                     execUpdate(
                         "INSERT INTO budget_periods (scope_id, period, hard_micro_yen, committed_micro_yen, unpriced_calls, created_at) VALUES (?, ?, ?, 0, 0, ?)",
                         id, period, hard, utcNow(clock),
@@ -429,9 +556,12 @@ class DbBudgetStore(
         execQuery("SELECT period FROM budget_periods WHERE scope_id = ? ORDER BY period FOR UPDATE", tenantScope) { it.getString(1) }
     }
 
-    /** Locks the run period rows of [pairs] in (scope, period) order. The tenant rows must already be locked. */
-    private fun Transaction.lockRunRows(pairs: List<Pair<String, String>>) {
-        pairs.filter { it.first != tenantScope }.distinct().sortedWith(compareBy({ it.first }, { it.second })).forEach { (id, period) ->
+    /**
+     * Locks the non-tenant period rows of [pairs] in [lockOrder]: project rows, then run rows, each sorted by (scope, period). The tenant
+     * rows must already be locked (see [lockTenant]).
+     */
+    private fun Transaction.lockScopeRows(pairs: List<Pair<String, String>>) {
+        lockOrder(tenantScope, pairs).forEach { (id, period) ->
             execQuery("SELECT committed_micro_yen FROM budget_periods WHERE scope_id = ? AND period = ? FOR UPDATE", id, period) { it.getLong(1) }
         }
     }
@@ -451,7 +581,7 @@ class DbBudgetStore(
             RESERVED, LocalDateTime.ofInstant(now, java.time.ZoneOffset.UTC),
         ) { Triple(it.getString(1), it.getLong(2), it.getString(3) to it.getString(4)) }
         if (due.isEmpty()) return
-        lockRunRows(due.map { it.third })
+        lockScopeRows(due.map { it.third })
         for ((key, amount, pair) in due) {
             addToPeriod(pair.first, pair.second, amount, unpriced = 1L)
             execUpdate("UPDATE budget_reservations SET state = ? WHERE reservation_key = ? AND state = ?", LAPSED, key, RESERVED)
@@ -505,15 +635,25 @@ class DbBudgetStore(
 
     // ---- scopes, periods, money -----------------------------------------------------------------------------------
 
-    private fun limitFor(scopeId: String): BudgetLimit? = when {
+    /** The limit of a scope that has one in the configuration (tenant, run). Project limits are in the database: see [limitFor]. */
+    private fun staticLimitFor(scopeId: String): BudgetLimit? = when {
         scopeId == tenantScope -> tenantLimit
         scopeId.startsWith(RUN_PREFIX) -> runLimit
         else -> null
     }
 
-    /** The period a scope is charged to at [now]: the JST calendar month for the tenant, lifetime for runs. */
+    /** The limit of [scopeId] now, or null when it has none. A project's limit is read from `project_budgets` in the caller's transaction. */
+    private fun Transaction.limitFor(scopeId: String): BudgetLimit? {
+        if (!isProjectScope(scopeId)) return staticLimitFor(scopeId)
+        val row = projectBudgetRow(scopeId.removePrefix(PROJECT_PREFIX)) ?: return null
+        return BudgetLimit(hard = row.monthlyLimitJpy, soft = row.monthlyLimitJpy.multiply(row.softRatio), currency = tenantLimit.currency, unit = tenantLimit.unit)
+    }
+
+    private fun isProjectScope(scopeId: String): Boolean = scopeId.startsWith(PROJECT_PREFIX)
+
+    /** The period a scope is charged to at [now]: the JST calendar month for the tenant and project scopes, lifetime for runs. */
     private fun periodFor(scopeId: String, now: Instant): String =
-        if (scopeId == tenantScope) YearMonth.from(now.atZone(JST)).toString() else PERIOD_ALL
+        if (scopeId == tenantScope || isProjectScope(scopeId)) YearMonth.from(now.atZone(JST)).toString() else PERIOD_ALL
 
     /** A known cost in the limit's currency and unit, or null when it cannot be compared. */
     private fun knownMicro(a: BudgetAmount): Long? {
@@ -533,6 +673,18 @@ class DbBudgetStore(
 
     companion object {
         const val RUN_PREFIX = "run:"
+        /** The scope of one project (ADR 0022 PR-E): `project:<projectId>`. Like `run:`, it can never be the tenant scope. */
+        const val PROJECT_PREFIX = "project:"
+        fun projectScope(projectId: String): String = PROJECT_PREFIX + projectId
+
+        /** Limits of a project's monthly budget: whole yen (DECIMAL(12,0)), below 10^12, and a soft ratio in (0, 1] with at most 3 decimals. */
+        internal fun requireProjectBudget(monthlyLimitJpy: BigDecimal, softRatio: BigDecimal) {
+            require(monthlyLimitJpy.signum() >= 0 && monthlyLimitJpy < BigDecimal.TEN.pow(12)) { "project monthly limit must be 0 to below 10^12 yen" }
+            require(monthlyLimitJpy.stripTrailingZeros().scale() <= 0) { "project monthly limit must be whole yen" }
+            require(softRatio.signum() > 0 && softRatio <= BigDecimal.ONE) { "project soft ratio must be in (0, 1]" }
+            require(softRatio.stripTrailingZeros().scale() <= 3) { "project soft ratio has at most 3 decimals" }
+        }
+
         /** The reservation key prefix of the CLI coding path (`coding:<attemptId>:<generation>`, see CodingCostLedger). */
         const val CODING_KEY_PREFIX = "coding:"
         /** The most unpriced rows the operator screen lists. The count is still exact. */
@@ -611,4 +763,38 @@ data class SpendOutcome(
     val period: String? = null,
     val amountMicroYen: Long? = null,
     val monthCommittedMicroYen: Long? = null,
+)
+
+/**
+ * The lock order of the non-tenant rows of a path (ADR 0022 PR-E): the tenant rows are locked first (by every operation), then the
+ * project rows, then the run rows, each group sorted by (scope id, period). Returns the distinct pairs in that order, without the tenant
+ * rows. Pure: no database access, so the order is fixed by a unit test.
+ */
+internal fun lockOrder(tenantScope: String, pairs: List<Pair<String, String>>): List<Pair<String, String>> =
+    pairs.filter { it.first != tenantScope }.distinct().sortedWith(
+        compareBy<Pair<String, String>>(
+            { if (it.first.startsWith(DbBudgetStore.PROJECT_PREFIX)) 0 else 1 },
+            { it.first },
+            { it.second },
+        ),
+    )
+
+/** A project's `project_budgets` row: whole yen and the soft ratio. */
+internal data class ProjectBudgetRow(val monthlyLimitJpy: BigDecimal, val softRatio: BigDecimal)
+
+/**
+ * A project's budget for the current JST month (ADR 0022 PR-E). [monthlyLimitJpy] and [softRatio] are null when the project has no limit;
+ * then [remainingMicroYen] is null and [softExceeded] is false. Amounts are micro-yen (1 JPY = 1,000,000), except the two limits.
+ * [softExceeded]: committed plus reserved has reached the soft threshold (a warning only; nothing is refused for it).
+ */
+data class ProjectBudgetStatus(
+    val projectId: String,
+    val period: String,
+    val monthlyLimitJpy: BigDecimal?,
+    val softRatio: BigDecimal?,
+    val committedMicroYen: Long,
+    val reservedMicroYen: Long,
+    val unpricedCalls: Long,
+    val remainingMicroYen: Long?,
+    val softExceeded: Boolean,
 )

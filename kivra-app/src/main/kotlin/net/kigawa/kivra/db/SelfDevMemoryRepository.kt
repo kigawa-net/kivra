@@ -188,13 +188,25 @@ class SelfDevMemoryRepository(
         }
     }
 
-    /** The tombstone count and the deletion audit's sum (ADR 0016 P2). Read-only; holds no text. */
-    fun auditSummary(): MemoryAuditSummary {
+    /**
+     * The tombstone count and the deletion audit's sum (ADR 0016 P2). Read-only; holds no text. [project] narrows the tombstones to the
+     * records of those projects (ADR 0022 PR-D3). The deletion audit rows carry no project (and an operator's delete has no record id), so
+     * a narrowed view cannot attribute them: its sum is 0. Only the unnarrowed view (the global ADMIN, or the mode is not ENFORCE) has the sum.
+     */
+    fun auditSummary(project: ProjectFilter = ProjectFilter.All): MemoryAuditSummary {
         if (!enabled) return MemoryAuditSummary(0, 0)
         return transaction(database) {
+            val tombstoneScope = project.sql("project_id")
             MemoryAuditSummary(
-                tombstones = countOf("SELECT COUNT(*) FROM selfdev_memory_records WHERE status = 'DELETED'"),
-                deletionAudit = countOf("SELECT COALESCE(SUM(count_value), 0) FROM selfdev_memory_events WHERE kind = ?", EVENT_DELETED),
+                tombstones = countOf(
+                    "SELECT COUNT(*) FROM selfdev_memory_records WHERE status = 'DELETED'${tombstoneScope.first}",
+                    *tombstoneScope.second.toTypedArray(),
+                ),
+                deletionAudit = if (project == ProjectFilter.All) {
+                    countOf("SELECT COALESCE(SUM(count_value), 0) FROM selfdev_memory_events WHERE kind = ?", EVENT_DELETED)
+                } else {
+                    0
+                },
             )
         }
     }

@@ -12,6 +12,7 @@ import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectFilter
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.selfdev.GitHubAuth
 import net.kigawa.kivra.selfdev.SelfDevSettings
@@ -75,7 +76,9 @@ internal fun Route.configureRunViewRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.Forbidden, RunViewError("forbidden"))
             return@get
         }
-        call.respond(selfDevStatusBody(selfDev) { runs.activeSelfDevRunIds().size })
+        // The active count covers the caller's projects only (ADR 0022 PR-D3). Off or shadow: every run, as before.
+        val scope = guard.readScope(guard.resolve(principal, legacyAdmin = true))
+        call.respond(selfDevStatusBody(selfDev) { runs.activeSelfDevRunIds(project = scope.narrow(ProjectFilter.All)).size })
     }
 
     get("/api/admin/runs") {

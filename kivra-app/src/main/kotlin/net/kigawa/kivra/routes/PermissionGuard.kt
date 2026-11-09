@@ -161,16 +161,23 @@ class PermissionGuard(
      * What the caller may read of the projects (ADR 0022 PR-D3). All unless the project mode is ENFORCE. A read narrows its list to it, or
      * answers 404 for a row it does not see.
      */
-    fun readScope(access: GuardAccess): ReadScope = service.readScope(access.effective)
+    fun readScope(access: GuardAccess, permission: Permission = Permission.READ): ReadScope = service.readScope(access.effective, permission)
 
     /**
      * SHADOW only (ADR 0022 PR-D3): the rows a read returns that ENFORCE would hide, as fixed codes. [projectIds] are the projects of the rows
-     * (null: a row with no project). It changes no answer. Nothing that identifies a person or a project is logged.
+     * (null: a row with no project). [permission] is the list's permission in the project role (see [readScope]). It changes no answer.
+     * Nothing that identifies a person or a project is logged.
      */
-    fun recordReadShadow(access: GuardAccess, projectIds: Collection<String?>, route: String, via: String = VIA_REST) {
+    fun recordReadShadow(
+        access: GuardAccess,
+        projectIds: Collection<String?>,
+        route: String,
+        via: String = VIA_REST,
+        permission: Permission = Permission.READ,
+    ) {
         if (service.mode == PermissionMode.OFF || service.projectMode != PermissionMode.SHADOW) return
         val eff = access.effective
-        val codes: List<String> = when (val scope = service.readsAsEnforce(eff)) {
+        val codes: List<String> = when (val scope = service.readsAsEnforce(eff, permission)) {
             ReadScope.All -> return
             ReadScope.Refused -> listOf(DENY_PROJECT_LOOKUP)
             is ReadScope.Members -> buildList {

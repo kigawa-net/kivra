@@ -94,8 +94,11 @@ interface ProjectMemberLookup {
     /** The role of [assigneeId] in [projectId]; null when it is not a member. May throw; the service then denies (fail closed). */
     fun roleIn(projectId: String, assigneeId: String): Role?
 
-    /** The projects [assigneeId] is a member of (ADR 0022 PR-D3, the read scope). May throw; the service then refuses the read (fail closed). */
-    fun projectsOf(assigneeId: String): Set<String>
+    /**
+     * The projects [assigneeId] is a member of, with its role in each (ADR 0022 PR-D3, the read scope). May throw; the service then refuses
+     * the read (fail closed).
+     */
+    fun rolesOf(assigneeId: String): Map<String, Role>
 }
 
 /**
@@ -262,22 +265,24 @@ class PermissionService(
 
     /**
      * What [access] may read of the projects (ADR 0022 PR-D3): [ReadScope.All] unless the project mode is ENFORCE, in which case it is
-     * [readsAsEnforce]. Reads nothing when the project mode is not ENFORCE.
+     * [readsAsEnforce]. Reads nothing when the project mode is not ENFORCE. [permission] is what the list needs in the member's project role
+     * (READ for most reads, READ_TEXT for the memory, STOP_DECIDE for the stop requests). The global ADMIN is not asked.
      */
-    fun readScope(access: PrincipalAccess): ReadScope =
-        if (mode == PermissionMode.OFF || projectMode != PermissionMode.ENFORCE) ReadScope.All else readsAsEnforce(access)
+    fun readScope(access: PrincipalAccess, permission: Permission = Permission.READ): ReadScope =
+        if (mode == PermissionMode.OFF || projectMode != PermissionMode.ENFORCE) ReadScope.All else readsAsEnforce(access, permission)
 
     /**
      * What [access] may read under ENFORCE, whatever the mode (SHADOW uses it to record what ENFORCE would hide). The global ADMIN (the
-     * assignee role ADMIN, as in [projectDenial]) reads every row. Any other caller reads the rows of the projects it is a member of, and a
-     * caller with no assignee reads none. A failed store is [ReadScope.Refused].
+     * assignee role ADMIN, as in [projectDenial]) reads every row. Any other caller reads the rows of the projects it is a member of in a
+     * role that holds [permission], and a caller with no assignee reads none. A failed store is [ReadScope.Refused].
      */
-    fun readsAsEnforce(access: PrincipalAccess): ReadScope {
+    fun readsAsEnforce(access: PrincipalAccess, permission: Permission = Permission.READ): ReadScope {
         if (access.role == Role.ADMIN && access.source == AccessSource.ASSIGNEE) return ReadScope.All
         val assigneeId = access.assigneeId ?: return ReadScope.Members(emptySet())
         val store = projects ?: return ReadScope.Members(emptySet())
         return try {
-            ReadScope.Members(store.projectsOf(assigneeId))
+            val roles = store.rolesOf(assigneeId)
+            ReadScope.Members(roles.filterValues { permission in ROLE_PERMISSIONS.getValue(it) }.keys)
         } catch (_: Exception) {
             ReadScope.Refused
         }

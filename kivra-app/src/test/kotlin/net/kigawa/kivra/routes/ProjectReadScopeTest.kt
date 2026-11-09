@@ -80,10 +80,10 @@ class ProjectReadScopeTest {
         var fail = false
         var reads = 0
         override fun roleIn(projectId: String, assigneeId: String): Role? = inner.roleIn(projectId, assigneeId)
-        override fun projectsOf(assigneeId: String): Set<String> {
+        override fun rolesOf(assigneeId: String): Map<String, Role> {
             reads++
             if (fail) throw IllegalStateException("store down")
-            return inner.projectsOf(assigneeId)
+            return inner.rolesOf(assigneeId)
         }
     }
 

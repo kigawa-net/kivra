@@ -227,12 +227,15 @@ private suspend fun listApprovals(deps: SelfDevOrderRouteDeps, call: Application
     if (!deps.permit(call, caller, Permission.STOP_DECIDE, "order.stop.list", projectId = pinned)) return
     val state = call.request.queryParameters["state"]
     if (state != "PENDING") return call.respond(HttpStatusCode.BadRequest, OrderError(STATE_INVALID))
+    // The rows are those of the projects where the caller's role holds STOP_DECIDE (ADR 0022 PR-D3). The old route has no project role
+    // check of its own, so this keeps an OPERATOR member of a project from seeing its stop requests.
+    val rowScope = deps.guard.readScope(caller.access, Permission.STOP_DECIDE)
     val project = when (val s = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
         is ListScope.Refused -> return call.respond(s.status, OrderError(s.error))
-        is ListScope.Filtered -> scope.narrow(s.filter)
+        is ListScope.Filtered -> rowScope.narrow(s.filter)
     }
     val rows = deps.orders.pendingStopRequests(LIST_LIMIT, project)
-    deps.guard.recordReadShadow(caller.access, rows.map { it.projectId }, "order.stop.list")
+    deps.guard.recordReadShadow(caller.access, rows.map { it.projectId }, "order.stop.list", permission = Permission.STOP_DECIDE)
     call.respond(rows.map { it.response(true) })
 }
 

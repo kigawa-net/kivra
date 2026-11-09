@@ -19,6 +19,25 @@ data class ApiProjectDashboard(
     val recentRuns: List<ApiRun>,
     val spend: ApiProjectSpend,
     val activity: List<ApiProjectActivity>,
+    /** 運用者(scope ALL)だけ。他の利用者は null。 */
+    val budget: ApiProjectBudget? = null,
+)
+
+/**
+ * 今月の予算(server `ProjectBudgetResponse`)。金額は十進の円の文字列。上限が無い月は [monthlyLimitJpy]・[softRatio]・
+ * [softLimitJpy]・[remainingJpy] が null。[softExceeded] は警告だけ(止めない)。
+ */
+@Serializable
+data class ApiProjectBudget(
+    val projectId: String,
+    val period: String,
+    val monthlyLimitJpy: String? = null,
+    val softRatio: String? = null,
+    val softLimitJpy: String? = null,
+    val committedJpy: String,
+    val reservedJpy: String,
+    val remainingJpy: String? = null,
+    val softExceeded: Boolean,
 )
 
 /** Run の件数(scope の中)。byState は出現した状態だけ。 */

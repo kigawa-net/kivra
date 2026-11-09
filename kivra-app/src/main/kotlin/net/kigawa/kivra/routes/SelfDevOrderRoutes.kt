@@ -260,14 +260,17 @@ private val operatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.orde
 
 internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
 
-    // The old routes keep their answers; they only announce the alias (ADR 0022 PR-E).
+    // The old list keeps its answer and announces the alias (ADR 0022 PR-E). The old creation is retired (PR-G): 410 with the alias in Link.
+    // It still checks the caller and the write permission first, so the answers to a caller without them do not change.
     get("/api/selfdev/orders") {
         call.deprecatedBy("/api/projects/{projectId}/orders", call.request.queryParameters["projectId"])
         listOrders(deps, call)
     }
     post("/api/selfdev/orders") {
-        call.deprecatedBy("/api/projects/{projectId}/orders", null)
-        createOrder(deps, call)
+        val caller = deps.caller(call) ?: return@post
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create")) return@post
+        call.retiredBy("/api/projects/{projectId}/orders")
+        call.respond(HttpStatusCode.Gone, OrderError(ROUTE_RETIRED))
     }
     // The alias of the list and the creation under a project (ADR 0022 PR-E). The same handlers; the path's project is the project.
     get("/api/projects/{projectId}/orders") { listOrders(deps, call) }

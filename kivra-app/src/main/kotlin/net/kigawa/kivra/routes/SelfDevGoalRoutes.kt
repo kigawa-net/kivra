@@ -235,14 +235,17 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
         call.respond(HttpStatusCode.OK, mapOf("breakerOpen" to false))
     }
 
-    // The old routes keep their answers; they only announce the alias (ADR 0022 PR-E).
+    // The old list keeps its answer and announces the alias (ADR 0022 PR-E). The old submission is retired (PR-G): 410 with the alias in Link.
+    // It still checks the operator and the write permission first, so the answers to a caller without them do not change.
     get("/api/selfdev/goals") {
         call.deprecatedBy("/api/projects/{projectId}/tasks", call.request.queryParameters["projectId"])
         listGoals(deps, call)
     }
     post("/api/selfdev/goals") {
-        call.deprecatedBy("/api/projects/{projectId}/tasks", null)
-        submitGoal(deps, call)
+        val caller = deps.requireOperator(call) ?: return@post
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.goal_submit", "GOAL_SUBMIT")) return@post
+        call.retiredBy("/api/projects/{projectId}/tasks")
+        call.respond(HttpStatusCode.Gone, GoalError(ROUTE_RETIRED))
     }
 
     // The alias of the list and the submission under a project (ADR 0022 PR-E). The same handlers; the path's project is the project.

@@ -719,8 +719,8 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 
 | 新ルート | 旧ルート(同じ応答) | 注意 |
 |---|---|---|
-| `GET` / `POST /api/projects/{id}/tasks` | `GET` / `POST /api/selfdev/goals` | 開発目標の一覧・投入。投入の body の `projectId` は省略可。あれば path と一致が必要(不一致は 400) |
-| `GET` / `POST /api/projects/{id}/orders` | `GET` / `POST /api/selfdev/orders` | order の一覧・作成。同じ規則 |
+| `GET` / `POST /api/projects/{id}/tasks` | `GET` / `POST /api/selfdev/goals` | 開発目標の一覧・投入。投入の body の `projectId` は省略可。あれば path と一致が必要(不一致は 400)。旧 `POST` は 4.21 で廃止(410) |
+| `GET` / `POST /api/projects/{id}/orders` | `GET` / `POST /api/selfdev/orders` | order の一覧・作成。同じ規則。旧 `POST` は 4.21 で廃止(410) |
 | `GET /api/projects/{id}/approvals?state=PENDING` | `GET /api/selfdev/stop-requests?state=PENDING` | 承認待ちの停止要求。`state` は必須(従来どおり) |
 | `GET /api/projects/{id}/memory` | `GET /api/selfdev/memory` | 検索の条件は旧ルートと同じ |
 | `GET /api/projects/{id}/assignees` | `GET /api/selfdev/assignees` | そのプロジェクトのメンバー(担当) |
@@ -787,6 +787,24 @@ API と MCP の投入は、従来どおり `projectId`(MCP は `project_id`)が�
 
 - V52 が保留の間は、NULL の行が残っている Task も自律ループが従来どおり読む(絞り込みはしない)。ただし、その Task の計画の子や周回は NULL を作れないので、拒否されてログに出る。振り分けを先に済ませる。
 - 振り分けの取り消しはない(4.16 と同じ)。V52 の適用後は、この表の列に NULL を書く経路がない。NULL に戻す SQL は、この列の制約で失敗する。
+
+### 4.21 旧ルートの廃止(ADR 0022 PR-G、運用者のみ)
+
+`POST /api/selfdev/goals` と `POST /api/selfdev/orders` は廃止した。応答は `410 Gone`(本文は固定の `{"error":"this route is retired; use the alias named in the Link header"}`)で、`Deprecation: true` と `Link: <…/api/projects/%7BprojectId%7D/tasks>`(または `/orders`)を付ける。何も作られない。移行先は `POST /api/projects/{id}/tasks`・`POST /api/projects/{id}/orders`(4.19)。認証と権限は従来どおり先に判定するので、トークンのない呼び出しは 401、AI や権限のない運用者は 403 のまま。
+
+- 廃止の対象は、移行先の別名があり、リポジトリの中に呼び出し元が残っていない旧ルートだけ。Compose UI は作成を別名で行っている(`ProjectApi.goalSubmit`、`orderCreate`)。
+- **残した旧 GET。** `GET /api/selfdev/goals`、`GET /api/selfdev/orders`、`GET /api/selfdev/stop-requests?state=PENDING`、`GET /api/selfdev/memory`、`GET /api/selfdev/assignees` は廃止しない。Compose UI が「全体」(プロジェクトを選ばない)と「未分類」(`?projectId=unassigned`)の一覧でこれらを読む。別名は ULID の project を path で要求するので、この 2 つの表示に移せない。`scripts/compose-ui-crawl/crawl.mjs` と `scripts/selfdev-check.sh` も `GET /api/selfdev/orders`(と goals)を読む。`Deprecation` と `Link` は従来どおり(全体の呼び出しには移行先がないことに注意)。
+- **外部の呼び出し元は確認できない。** MCP(`kivra_*`)はサーバー内のリポジトリを直接呼ぶので HTTP の旧ルートを使わない。自律ループ、Planner、エージェント API も HTTP を使わない。他のシステムや手元のスクリプトが `POST /api/selfdev/goals` や `POST /api/selfdev/orders` を使っていれば、その呼び出しは 410 になる。
+
+**廃止の確認**
+
+1. 旧 POST を一度送る: `curl -si -X POST -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/json' -d '{}' '<BASE>/api/selfdev/goals'` が `410` と `Link` を返し、何も作られない(`GET /api/projects/<ID>/tasks` の件数が変わらない)。
+2. 別名で投入が通る: `POST /api/projects/<ID>/tasks`(本文 `{"title":"…","idempotencyKey":"…"}`)が 202。
+3. ログ `net.kigawa.kivra.routes.retired` に `retired route called: method=POST path=/api/selfdev/goals` が出る。
+
+**いつ旧ルートの登録を削除するか**
+
+登録(と `RolesCoverageArchitectureTest` の表の行、README の行)を消すのは、次の両方を満たしてから: (a) 本番のログ `net.kigawa.kivra.routes.retired` に、廃止から 30 日の間、1 件も出ていない。(b) 運用者が、他のシステムや手元のスクリプトに旧 POST が残っていないことを確かめた。消すと応答は 404 に変わる。410 の段階を飛ばして直接消すのは避ける。
 
 ## 5. 動作確認
 

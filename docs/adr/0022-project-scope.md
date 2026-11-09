@@ -29,6 +29,7 @@
 | PR-E | 予算を `project_budgets` で行う | 予算の判定 |
 | PR-E2 | API と画面をプロジェクト配下へ移す(`/api/projects/{id}/...`、画面は `#/projects/{id}/...`)。PR-E の予算とは別の段階 | 新しいルートと画面。旧ルートは応答を変えない |
 | PR-F | NULL の行を消す(Contract)。NULL のまま残す行がなくなった後にだけ行う | 不変条件の強化 |
+| PR-G | 旧ルートの廃止。別名があり呼び出し元が残らない旧 POST(`/api/selfdev/goals`、`/api/selfdev/orders`)を 410 Gone にする。旧 GET は全体・未分類の画面が使うので残す | 旧 POST の応答(410 と Link) |
 
 PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割り当てないためである。
 
@@ -200,3 +201,34 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - **テスト。** `MigrationChainTest` は V52 を含む完全な連鎖を確かめる。V50 と V51 の test は V51 までの版を作って、V51 の時点の挙動(NULL が残る)を確かめる。新しい test `V52 waits while a task or memory row has no project, then applies once none is left` は、保留中に起動が失敗せず、行が残り、振り分け後に V52 が適用され、NULL が拒否されることを確かめる。
 - **残り(後続)。** Task API(`/api/tasks`)が作る Run に project を付けるか(Run の列は NULL 可のまま)。`/api/selfdev/runs` と `POST /api/selfdev/tasks`(PR-only の Run)の別名と Deprecation。旧版の Pod を止める順序は運用で行う(runbook 4.20)。
 - 運用の手順は `docs/runbook-selfdev.md` 4.20。
+
+## 進捗(PR-G: 旧ルートの廃止、ブランチ `feat/retire-legacy-selfdev-paths`)
+
+- マイグレーションは追加しない。ルートの登録と応答だけを変える。
+
+**監査(Deprecation と Link を付けていた旧ルートの全件)。**
+
+| 旧ルート | 別名 | 呼び出し元(リポジトリ内) | 扱い |
+|---|---|---|---|
+| `GET /api/selfdev/goals` | `GET /api/projects/{id}/tasks` | Compose UI の「全体」(`ProjectApi.goals(null)`)と「未分類」(`?projectId=unassigned`)、`scripts/compose-ui-crawl/crawl.mjs` | **残す。** 別名は ULID の project を要求し、全体・未分類の表示に移せない |
+| `POST /api/selfdev/goals` | `POST /api/projects/{id}/tasks` | Compose UI は別名だけ(`goalSubmit`)。テストのフィクスチャ(移した) | **410 Gone**(下の判断 1) |
+| `GET /api/selfdev/orders` | `GET /api/projects/{id}/orders` | Compose UI の「全体」「未分類」、`scripts/selfdev-check.sh`、`crawl.mjs` | **残す**(GET goals と同じ) |
+| `POST /api/selfdev/orders` | `POST /api/projects/{id}/orders` | Compose UI は別名だけ(`orderCreate`)。テストのフィクスチャ(移した) | **410 Gone**(判断 1) |
+| `GET /api/selfdev/stop-requests` | `GET /api/projects/{id}/approvals` | Compose UI の「全体」(`ProjectApi.approvals(null)`) | **残す**(全体の承認待ちに移せない) |
+| `GET /api/selfdev/memory` | `GET /api/projects/{id}/memory` | Compose UI の「全体」と「未分類」(`memory(null)`、`?projectId=unassigned`) | **残す**(同上) |
+| `GET /api/selfdev/assignees` | `GET /api/projects/{id}/assignees` | Compose UI の担当の画面(`projectId` を渡さない、担当は全体) | **残す**。担当の一覧はプロジェクトの行ではない(判断 8 of PR-D3) |
+
+別名がない旧ルート(`GET /api/selfdev/runs`、`POST /api/selfdev/tasks`)は、この PR では触らない(Deprecation を付けていない。移行先の Run の別名が後続)。MCP(`kivra_*`)、自律ループ、エージェント API は、サーバー内のリポジトリを直接呼ぶか、HTTP の旧ルートを使わないので、この表の呼び出し元には入らない。`docs/` の記述は runbook と README だけを更新した。
+
+**判断。**
+
+1. **旧 POST は 410 Gone にする(削除はしない)。** 理由: (a) 削除は、他のシステムや手元のスクリプトが残っていたときに、応答が 404 に変わって原因が分かりにくい。410 は「移った」ことを本文と `Link` で示せる。(b) 旧 POST の呼び出し元は、リポジトリ内では Compose UI のテストだけで、UI はすでに別名を使う。(c) 外部の呼び出し元は確認できない(リポジトリの外は見えない)ので、ログ(`net.kigawa.kivra.routes.retired`、method と path だけ)で呼び出しの件数を測る。
+   - 代替案(採用しない): (a) そのまま残す(Deprecation だけ)。外部の利用が分からず、いつ終えるかの根拠がないので却下。(b) 404 にする。移行先の案内(`Link`)が出せず、呼び出し元が原因を調べにくいので却下。(c) 認証の前に 410 を返す。401・403 の応答が変わり、権限の表(`RolesCoverageArchitectureTest`)の前提が崩れるので却下。
+   - 認証と権限は従来どおり先に判定する(`requireOperator` と `permit`、order は `caller` と `permit`)。よって 401 と 403 は変わらず、表の行(`GOAL_WRITE`、`ORDER_MANAGE`)もそのまま。
+2. **旧 GET は残す。** 別名がなく、Compose UI の「全体」と「未分類」が読む。410 にすると画面の一覧が消える。別名を作るには「全体」の意味を別のルートに置く必要があり、この PR の範囲を超える。
+   - 残る問題: 「全体」の呼び出しにも `Deprecation` と `Link`(テンプレート)が付く。移行先がないのに廃止を示すので、紛らわしい。全体の呼び出しでは `Deprecation` を付けない、という変更は後続で決める(応答の変更なので、この PR では行わない)。
+3. **削除の時期。** 410 の旧 POST の登録は、ログ `net.kigawa.kivra.routes.retired` に廃止から 30 日の間 1 件も出ず、外部の利用がないことを運用者が確かめてから削除する(runbook 4.21)。削除すると応答は 404 になり、表の行・README・テストも消す。
+
+**変更。** `ProjectScope.kt` に `retiredBy`(`Deprecation`、`Link`、ログ)と `ROUTE_RETIRED` を足した。`SelfDevGoalRoutes.kt` と `SelfDevOrderRoutes.kt` の旧 POST は、認証と権限の判定のあとに 410 を返す。`SelfDevGoalRoutesTest` と `SelfDevOrderRoutesTest` の投入は別名で行い、「存在しない・形式が違う project は 404、body の projectId が違うと 400」を別名の規則として確かめる。`ProjectScopedRoutesTest` に、旧 POST が 410 を返し、何も作らず、AI と無トークンは従来どおり 403・401 になるテストを足した。
+
+**残り(後続)。** `/api/selfdev/runs` と `POST /api/selfdev/tasks` の別名(と Deprecation)。全体の呼び出しから `Deprecation` を外すか。旧 POST の登録の削除(runbook 4.21 の条件を満たした後)。

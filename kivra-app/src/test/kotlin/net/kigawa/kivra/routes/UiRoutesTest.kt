@@ -2,14 +2,18 @@ package net.kigawa.kivra.routes
 
 import io.ktor.client.request.get
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsBytes
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.config.MapApplicationConfig
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import net.kigawa.kivra.appModule
 
 private object UiTestResources
@@ -146,6 +150,71 @@ class UiRoutesTest {
         assertEquals(HttpStatusCode.OK, page.status)
         assertEquals("text/html; charset=utf-8", page.headers["Content-Type"])
         assertEquals(HttpStatusCode.OK, client.get("/health").status)
+    }
+
+    /** The composeResources files on the test classpath, as request paths under /ui/compose/ (copyComposeWebDist copies them). */
+    private fun composeResourcePaths(): List<String> {
+        val root = UiTestResources::class.java.classLoader.getResource("ui/compose/composeResources")
+            ?: error("ui/compose/composeResources is missing from the test classpath (copyComposeWebDist runs before processResources)")
+        val base = File(root.toURI())
+        return base.walkTopDown().filter { it.isFile }
+            .map { "composeResources/" + it.relativeTo(base).invariantSeparatorsPath }
+            .toList().sorted()
+    }
+
+    @Test
+    fun `the bundled japanese font is served from its composeResources path as a font with the security headers`() = testApplication {
+        application { routing { configureUiRoutes() } }
+        val fonts = composeResourcePaths().filter { it.endsWith(".ttf") }
+        assertTrue(fonts.isNotEmpty(), "no .ttf under composeResources: the Japanese font was not copied")
+
+        val expectedBytes = fonts.associateWith { name ->
+            UiTestResources::class.java.getResourceAsStream("/ui/compose/$name")!!.use { it.readBytes() }
+        }
+        // Both forms: under /ui/compose/ and the one a page at /ui/compose (no trailing slash) resolves to.
+        for (name in fonts) {
+            for (url in listOf("/ui/compose/$name", "/ui/$name")) {
+                val response = client.get(url)
+                assertEquals(HttpStatusCode.OK, response.status, url)
+                assertEquals("font/ttf", response.headers["Content-Type"], url)
+                assertComposeHeaders(response)
+                assertTrue(expectedBytes.getValue(name).contentEquals(response.bodyAsBytes()), "$url: served bytes differ")
+            }
+        }
+    }
+
+    @Test
+    fun `the font license is served as plain text next to the font`() = testApplication {
+        application { routing { configureUiRoutes() } }
+        val license = composeResourcePaths().single { it.endsWith("/files/licenses/NotoSansJP-OFL.txt") }
+
+        val response = client.get("/ui/compose/$license")
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("text/plain; charset=utf-8", response.headers["Content-Type"])
+        assertTrue(response.bodyAsText().contains("SIL OPEN FONT LICENSE"))
+    }
+
+    @Test
+    fun `composeResources paths are served only for known types and never escape the directory`() {
+        assertEquals("font/ttf", composeResourceContentType(listOf("font", "noto_sans_jp_regular.ttf"))?.toString())
+        assertEquals("font/woff2", composeResourceContentType(listOf("a.woff2"))?.toString())
+        assertNull(composeResourceContentType(emptyList()))
+        assertNull(composeResourceContentType(listOf("..", "kivra-web.js.ttf")))
+        assertNull(composeResourceContentType(listOf("font", "..", "x.ttf")))
+        assertNull(composeResourceContentType(listOf("font", ".", "x.ttf")))
+        assertNull(composeResourceContentType(listOf("font", "", "x.ttf")))
+        assertNull(composeResourceContentType(listOf("font", "x\\..\\y.ttf")))
+        assertNull(composeResourceContentType(listOf("font", "x.html")))
+        assertNull(composeResourceContentType(listOf("font")))
+    }
+
+    @Test
+    fun `composeResources requests that do not name a served file answer 404`() = testApplication {
+        application { routing { configureUiRoutes() } }
+
+        assertEquals(HttpStatusCode.NotFound, client.get("/ui/compose/composeResources/%2E%2E/%2E%2E/kivra-web.js").status)
+        assertEquals(HttpStatusCode.NotFound, client.get("/ui/compose/composeResources/font").status)
+        assertEquals(HttpStatusCode.NotFound, client.get("/ui/compose/composeResources/no-such-file.ttf").status)
     }
 
     private fun h2Config() = MapApplicationConfig(

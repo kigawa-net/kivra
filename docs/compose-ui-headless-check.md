@@ -59,6 +59,8 @@ await browser.close();
 
 ## 既知の注意
 
-- 日本語フォントが入っていない環境では、ナビの日本語が豆腐(□)で表示される。描画そのものは確認できる。
+- 日本語フォントは `composeResources/font/` に同梱している(詳細は `docs/compose-ui-font.md`)。Compose は canvas に描くので、
+  ホストのシステムフォント(このマシンの Noto CJK など)は使われない。日本語が豆腐(□)で出るのは、同梱フォントの
+  読み込みに失敗したときだけ。フォントを外して(404 にして)豆腐になることを見れば、フォントの効きを確認できる。
 - 起動時に `'try' instruction is deprecated` の警告が出るが、無視してよい。
 - Cloudflare の beacon、favicon 404、ソースマップ 404 は無関係のノイズ。

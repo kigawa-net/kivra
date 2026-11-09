@@ -22,6 +22,7 @@ import androidx.compose.material3.PermanentDrawerSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -33,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiMe
@@ -211,11 +213,16 @@ private fun KivraAppContent(
 
     // プロジェクトの作成の後に増やして、選択の一覧を読み直させる(旧 UI の loadProjects)。
     var projectsReload by remember { mutableStateOf(0) }
+    // 一覧の取得に失敗したら、理由を出して再試行できるようにする(以前は握りつぶして選択肢が空に見えていた)。
+    var projectsError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(projectsReload) {
         try {
             projects = ApiClient.getProjects()
+            projectsError = null
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            // ignore
+            projectsError = loadErrorMessage(e)
         }
     }
 
@@ -269,7 +276,8 @@ private fun KivraAppContent(
                         }
                     }
                 }
-                HorizontalDivider()
+                // Row の中の縦の区切り。HorizontalDivider は幅を残り全部取るので、後ろの weight の本文が幅 0 になっていた。
+                VerticalDivider()
 
                 // Main content area
                 Column(modifier = Modifier.weight(1f)) {
@@ -313,6 +321,15 @@ private fun KivraAppContent(
                             dropdownExpanded = dropdownExpanded,
                             onDropdownExpandedChange = { dropdownExpanded = it }
                         )
+                        projectsError?.let { message ->
+                            Text(
+                                text = "プロジェクト一覧: $message",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(horizontal = 8.dp)
+                            )
+                            TextButton(onClick = { projectsReload += 1 }) { Text("再試行") }
+                        }
 
                         TextButton(onClick = { searchOpen = true }) { Text("検索") }
 

@@ -1,0 +1,9 @@
+{
+  "name": "kivra-compose-ui-crawl",
+  "private": true,
+  "type": "module",
+  "description": "Local verification crawler for /ui/compose (not part of the app build)",
+  "dependencies": {
+    "puppeteer-core": "^25.16.0"
+  }
+}

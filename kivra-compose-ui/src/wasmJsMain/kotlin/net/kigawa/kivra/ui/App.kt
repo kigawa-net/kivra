@@ -54,6 +54,9 @@ val LocalSelfDevAvailability = compositionLocalOf { SelfDevAvailability.LOADING 
 /** 自律運転の有無(節と、その画面の一覧を出すかに使う)。読み直しの度に [KivraApp] が読む。 */
 val LocalAutopilotAvailability = compositionLocalOf { AutopilotAvailability.LOADING }
 
+/** プロジェクトの一覧(id から名前を引く。作成フォームの表示などに使う)。[KivraAppContent] が入れる。 */
+val LocalProjects = compositionLocalOf { emptyList<ApiProject>() }
+
 /** 時刻の表示(端末の地域の `HH:MM:SS`)。 */
 private val clockText: (Long) -> String = { formatClock(it.toDouble()) }
 
@@ -180,41 +183,31 @@ private fun KivraAppContent(
     budgetVisible: Boolean,
 ) {
     val perms = LocalCallerPermissions.current
-    // 画面のルート。ブラウザのハッシュ(#/runs/<id> 等)と双方向に同期する: 読み込み時に解釈し、遷移時に書き、戻る/進むで読み直す。
-    var route by remember { mutableStateOf(parseRoute(canonicalHash(currentLocationHash()))) }
+    // 画面のルート。ブラウザのハッシュと双方向に同期する: 読み込み時に解釈し、遷移時に書き、戻る/進むで読み直す。
+    var route by remember { mutableStateOf(parseRoute(currentLocationHash())) }
     val navigate: (Route) -> Unit = { target ->
-        route = target
-        setLocationHash(target.toHash())
+        // プロジェクトの中の詳細は、今のプロジェクトを引き継ぐ(一覧から開いた詳細は、その一覧のプロジェクトの中に残る)。
+        val next = target.withProjectOf(route)
+        route = next
+        setLocationHash(next.toHash())
     }
     LaunchedEffect(Unit) {
-        route = settleLocationHash()
-        addHashChangeListener { route = settleLocationHash() }
+        // 戻る・進む・直接入力。今の画面と同じハッシュ(遷移の直後の通知や、置き換えた旧 URL)は無視する。
+        addHashChangeListener {
+            val hash = currentLocationHash()
+            if (hash != route.toHash()) route = parseRoute(hash)
+        }
     }
     // ページタイトル(旧 UI の renderNav の document.title)。画面が変わるたびに入れる。
     LaunchedEffect(route) {
         setDocumentTitle(documentTitleOf(route))
     }
-    var projects by remember { mutableStateOf<List<ApiProject>>(emptyList()) }
-    // 選択中のプロジェクト(null は全体)。プロジェクト配下の画面(#/projects/<id>/<page>)を開くと、その画面のプロジェクトになる。
-    var selectedProjectId by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(route) {
-        route.projectIdOrNull?.let { selectedProjectId = it }
-    }
-    // 表示に使うプロジェクト: 開いている画面の URL のプロジェクト、なければ選択中。
-    val projectId = route.projectIdOrNull ?: selectedProjectId
-    // 選択を変える。今の画面の続き(同じ一覧)を、そのプロジェクトのページで開く(旧 UI の chooseProjectContext と同じ)。
-    val chooseProject: (String?) -> Unit = { id ->
-        selectedProjectId = id
-        val target = route.inProjectContext(id)
-        if (target != route) navigate(target)
-    }
-    var dropdownExpanded by remember { mutableStateOf(false) }
-    var searchOpen by remember { mutableStateOf(false) }
 
-    // プロジェクトの作成の後に増やして、選択の一覧を読み直させる(旧 UI の loadProjects)。
-    var projectsReload by remember { mutableStateOf(0) }
-    // 一覧の取得に失敗したら、理由を出して再試行できるようにする(以前は握りつぶして選択肢が空に見えていた)。
+    // プロジェクトの一覧。作成の後と再試行のときに読み直す(旧 UI の loadProjects)。
+    var projects by remember { mutableStateOf<List<ApiProject>>(emptyList()) }
     var projectsError by remember { mutableStateOf<String?>(null) }
+    var projectsReady by remember { mutableStateOf(false) }
+    var projectsReload by remember { mutableStateOf(0) }
     LaunchedEffect(projectsReload) {
         try {
             projects = ApiClient.getProjects()
@@ -224,187 +217,206 @@ private fun KivraAppContent(
         } catch (e: Exception) {
             projectsError = loadErrorMessage(e)
         }
+        projectsReady = true
     }
 
-    // フォント(日本語)の読み込みを待ってから描く。テーマは KivraTheme が MaterialTheme に渡す。
-    KivraTheme {
-        if (searchOpen) {
-            SearchDialog(
-                projectId = projectId,
-                onDismiss = { searchOpen = false },
-                onNavigate = navigate
-            )
+    // 最後に選んだプロジェクト(この端末の記憶)。プロジェクトの中の画面を開くたびに覚える。旧い URL の行き先に使う。
+    var lastProjectId by remember { mutableStateOf(loadLastProjectId()) }
+    LaunchedEffect(route) {
+        route.projectIdOrNull?.let { id ->
+            lastProjectId = id
+            saveLastProjectId(id)
         }
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Row(modifier = Modifier.fillMaxSize()) {
-                // Sidebar: グループ見出し + 配下項目
-                PermanentDrawerSheet(modifier = Modifier.width(200.dp)) {
-                    Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
-                        Text("Kivra", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(8.dp))
-                        NavigationDrawerItem(
-                            selected = route.nav == NavDestination.Home,
-                            onClick = { navigate(Route.Page(NavDestination.Home)) },
-                            label = { Text(NavDestination.Home.label) }
-                        )
-                        val approvalsBadge = approvalsBadgeText(pendingApprovals)
-                        NavDestination.grouped.forEach { (group, allItems) ->
-                            // 権限と自律運転・API の結果で隠す項目を外し、残りが無いグループは見出しごと出さない。
-                            val items = allItems.filter {
-                                perms.navVisible(it) &&
-                                    navVisibleForAutopilot(it, autopilot) &&
-                                    navVisibleForSections(it, autopilot, budgetVisible, pendingApprovals)
+    }
+    // 旧い一覧の URL(`#/goals` など)は、プロジェクトが決まったらプロジェクトの配下へ置き換える(履歴には残さない)。
+    LaunchedEffect(route, projectsReady) {
+        val current = route
+        if (current is Route.Legacy && projectsReady) {
+            val known = if (projectsError == null) projects.map { it.projectId } else null
+            val target = resolveLegacy(current.dest, known, lastProjectId)
+            route = target
+            replaceLocationHash(target.toHash())
+        }
+    }
+
+    val projectId = route.projectIdOrNull
+    val nameOf: (String) -> String? = { id -> projects.find { it.projectId == id }?.name }
+    var dropdownExpanded by remember { mutableStateOf(false) }
+    var searchOpen by remember { mutableStateOf(false) }
+
+    CompositionLocalProvider(LocalProjects provides projects) {
+        // フォント(日本語)の読み込みを待ってから描く。テーマは KivraTheme が MaterialTheme に渡す。
+        KivraTheme {
+            if (searchOpen) {
+                SearchDialog(
+                    projectId = projectId,
+                    onDismiss = { searchOpen = false },
+                    onNavigate = navigate
+                )
+            }
+            Surface(modifier = Modifier.fillMaxSize()) {
+                Row(modifier = Modifier.fillMaxSize()) {
+                    // サイドナビ: 2 層(プロジェクト選択中はそのプロジェクトの節、最後に全体の節)。
+                    PermanentDrawerSheet(modifier = Modifier.width(200.dp)) {
+                        Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
+                            Text("Kivra", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(8.dp))
+                            val approvalsBadge = approvalsBadgeText(pendingApprovals)
+                            sidebarSections(projectId, projectId?.let { nameOf(it) }).forEach { section ->
+                                // 権限と自律運転・API の結果で隠す項目を外し、残りが無い節は見出しごと出さない。
+                                val items = section.items.filter {
+                                    perms.navVisible(it.dest) &&
+                                        navVisibleForAutopilot(it.dest, autopilot) &&
+                                        navVisibleForSections(it.dest, autopilot, budgetVisible, pendingApprovals)
+                                }
+                                if (items.isEmpty()) return@forEach
+                                section.title?.let { title ->
+                                    Text(
+                                        text = title,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp)
+                                    )
+                                }
+                                items.forEach { item ->
+                                    NavigationDrawerItem(
+                                        selected = route.nav == item.dest && route.projectIdOrNull == item.target.projectIdOrNull,
+                                        onClick = { navigate(item.target) },
+                                        label = { Text(item.dest.label) },
+                                        // 承認の件数のバッジ(旧 UI の nav-approvals-badge)。件数が読めている時だけ。
+                                        badge = approvalsBadge.takeIf { item.dest == NavDestination.Approvals }?.let { text ->
+                                            @Composable { Text(text) }
+                                        },
+                                    )
+                                }
                             }
-                            if (items.isEmpty()) return@forEach
-                            Text(
-                                text = group.label,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp)
-                            )
-                            items.forEach { dest ->
-                                NavigationDrawerItem(
-                                    selected = route.nav == dest,
-                                    // 選択中のプロジェクトがあれば、そのプロジェクトのページへ(旧 UI のヘッダのタブと同じ)。
-                                    onClick = { navigate(dest.routeFor(projectId)) },
-                                    label = { Text(dest.label) },
-                                    // 承認の件数のバッジ(旧 UI の nav-approvals-badge)。件数が読めている時だけ。
-                                    badge = approvalsBadge.takeIf { dest == NavDestination.Approvals }?.let { text ->
-                                        @Composable { Text(text) }
-                                    },
+                        }
+                    }
+                    // Row の中の縦の区切り。HorizontalDivider は幅を残り全部取るので、後ろの weight の本文が幅 0 になっていた。
+                    VerticalDivider()
+
+                    // Main content area
+                    Column(modifier = Modifier.weight(1f)) {
+                        // セッションが切れた時の案内。入力中の内容は残る(再読み込みするまで送信しない)。
+                        if (ApiSession.expired) SessionBanner()
+                        // ヘッダー: パンくず(プロジェクト › ページ › 詳細)、今いるプロジェクトの切替、検索、承認待ち、役割、更新。
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            when (val r = route) {
+                                is Route.Invalid -> Text(
+                                    text = "リンクが正しくありません",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                                is Route.Legacy -> Text(
+                                    text = "読み込み中…",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    modifier = Modifier.padding(16.dp)
+                                )
+                                else -> Breadcrumb(
+                                    crumbs = r.breadcrumbs(nameOf),
+                                    onNavigate = navigate,
+                                    modifier = Modifier.weight(1f)
                                 )
                             }
-                        }
-                    }
-                }
-                // Row の中の縦の区切り。HorizontalDivider は幅を残り全部取るので、後ろの weight の本文が幅 0 になっていた。
-                VerticalDivider()
 
-                // Main content area
-                Column(modifier = Modifier.weight(1f)) {
-                    // セッションが切れた時の案内。入力中の内容は残る(再読み込みするまで送信しない)。
-                    if (ApiSession.expired) SessionBanner()
-                    // Top header with project selector
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // 一覧はタイトル、詳細はパンくず(作業 › 一覧 › 詳細)。
-                        when (val r = route) {
-                            is Route.Page -> Text(
-                                text = r.dest.label,
-                                style = MaterialTheme.typography.headlineSmall,
-                                modifier = Modifier.padding(16.dp)
+                            // 今いるプロジェクトの切替(絞り込みではない)。全体の画面では「プロジェクトを選ぶ」。
+                            ProjectSelectorDropdown(
+                                currentName = projectId?.let { nameOf(it) ?: it },
+                                projects = projects,
+                                onProjectSelected = { id -> navigate(route.inProjectContext(id)) },
+                                onOverview = { navigate(Route.Page(NavDestination.Projects)) },
+                                dropdownExpanded = dropdownExpanded,
+                                onDropdownExpandedChange = { dropdownExpanded = it }
                             )
-                            is Route.ProjectPage -> Text(
-                                text = r.dest.label,
-                                style = MaterialTheme.typography.headlineSmall,
-                                modifier = Modifier.padding(16.dp)
-                            )
-                            is Route.Invalid -> Text(
-                                text = "リンクが正しくありません",
-                                style = MaterialTheme.typography.headlineSmall,
-                                modifier = Modifier.padding(16.dp)
-                            )
-                            else -> Breadcrumb(
-                                crumbs = r.breadcrumbs(),
-                                onNavigate = navigate,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
+                            projectsError?.let { message ->
+                                Text(
+                                    text = "プロジェクト一覧: $message",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(horizontal = 8.dp)
+                                )
+                                TextButton(onClick = { projectsReload += 1 }) { Text("再試行") }
+                            }
 
-                        // Project selector dropdown
-                        ProjectSelectorDropdown(
-                            selectedProjectId = projectId,
-                            projects = projects,
-                            onProjectSelected = chooseProject,
-                            dropdownExpanded = dropdownExpanded,
-                            onDropdownExpandedChange = { dropdownExpanded = it }
-                        )
-                        projectsError?.let { message ->
+                            TextButton(onClick = { searchOpen = true }) { Text("検索") }
+
                             Text(
-                                text = "プロジェクト一覧: $message",
+                                text = connection,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.padding(horizontal = 8.dp)
                             )
-                            TextButton(onClick = { projectsReload += 1 }) { Text("再試行") }
-                        }
-
-                        TextButton(onClick = { searchOpen = true }) { Text("検索") }
-
-                        Text(
-                            text = connection,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(horizontal = 8.dp)
-                        )
-                        // 承認待ちの件数(1 件以上のとき。押すと承認の画面へ)。
-                        headerApprovalsText(pendingApprovals)?.let { text ->
-                            TextButton(onClick = { navigate(NavDestination.Approvals.routeFor(projectId)) }) { Text(text) }
-                        }
-                        // 役割と、判定の状態の補足(読めた時だけ)。
-                        roleHeader?.let { role ->
-                            Column(modifier = Modifier.padding(horizontal = 8.dp)) {
-                                Text(role.roleText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                role.note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                            // 承認待ちの件数(1 件以上のとき)。プロジェクトの中なら、そのプロジェクトの承認へ。全体ならホームの要対応へ。
+                            headerApprovalsText(pendingApprovals)?.let { text ->
+                                TextButton(onClick = {
+                                    navigate(if (projectId != null) Route.ProjectPage(projectId, NavDestination.Approvals) else Route.Page(NavDestination.Home))
+                                }) { Text(text) }
                             }
+                            // 役割と、判定の状態の補足(読めた時だけ)。
+                            roleHeader?.let { role ->
+                                Column(modifier = Modifier.padding(horizontal = 8.dp)) {
+                                    Text(role.roleText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    role.note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                }
+                            }
+                            OutlinedButton(onClick = onRefresh) { Text("更新") }
+                            Text(
+                                text = lastRefreshText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 8.dp, end = 16.dp)
+                            )
                         }
-                        OutlinedButton(onClick = onRefresh) { Text("更新") }
-                        Text(
-                            text = lastRefreshText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 8.dp, end = 16.dp)
-                        )
-                    }
-                    HorizontalDivider()
+                        HorizontalDivider()
 
-                    // Main content
-                    // 一覧の画面(プロジェクト配下の一覧も同じ画面。プロジェクトは projectId で渡す)。
-                    val pageDest = (route as? Route.Page)?.dest ?: (route as? Route.ProjectPage)?.dest
-                    when (val r = route) {
-                        is Route.Page, is Route.ProjectPage -> when (pageDest) {
-                            NavDestination.Home -> HomeScreen(projectId) { navigate(it.routeFor(projectId)) }
-                            NavDestination.Tasks -> TasksScreen(projectId, navigate)
-                            NavDestination.Goals -> GoalsScreen(projectId, navigate)
-                            NavDestination.Orders -> OrdersScreen(projectId, navigate)
-                            NavDestination.Approvals -> ApprovalsScreen(projectId)
-                            NavDestination.Budget -> BudgetScreen()
-                            NavDestination.Memory -> MemoryScreen(projectId)
-                            NavDestination.Projects -> ProjectsScreen(
+                        // Main content
+                        when (val r = route) {
+                            is Route.Page -> when (r.dest) {
+                                NavDestination.Home -> HomeScreen(projects, projectsError) { navigate(it) }
+                                NavDestination.Projects -> ProjectsScreen(
+                                    notice = null,
+                                    onNavigate = navigate,
+                                    onProjectsChanged = { projectsReload += 1 },
+                                )
+                                NavDestination.Budget -> BudgetScreen()
+                                NavDestination.Autopilot -> AutopilotScreen()
+                                NavDestination.Assignees -> AssigneesScreen(null)
+                                else -> Unit
+                            }
+                            is Route.ProjectPage -> when (r.dest) {
+                                NavDestination.Dashboard -> ProjectDashboardScreen(r.projectId, navigate)
+                                NavDestination.Tasks -> TasksScreen(r.projectId, navigate)
+                                NavDestination.Goals -> GoalsScreen(r.projectId, navigate)
+                                NavDestination.Orders -> OrdersScreen(r.projectId, navigate)
+                                NavDestination.Approvals -> ApprovalsScreen(r.projectId)
+                                NavDestination.Memory -> MemoryScreen(r.projectId)
+                                NavDestination.Assignees -> AssigneesScreen(r.projectId)
+                                NavDestination.ProjectBudget -> ProjectBudgetScreen(r.projectId)
+                                else -> Unit
+                            }
+                            is Route.ProjectChooser -> ProjectsScreen(
+                                notice = "「${r.dest.label}」はプロジェクトごとのページです。プロジェクトを選んでください。",
                                 onNavigate = navigate,
                                 onProjectsChanged = { projectsReload += 1 },
                             )
-                            NavDestination.Assignees -> AssigneesScreen(projectId)
-                            NavDestination.Autopilot -> AutopilotScreen()
-                            null -> Unit
+                            is Route.Legacy -> Unit
+                            is Route.RunDetail -> RunDetailScreen(r.runId, navigate)
+                            is Route.GoalDetail -> GoalDetailScreen(r.taskId, navigate)
+                            is Route.OrderDetail -> OrderDetailScreen(r.orderId, navigate)
+                            is Route.OrderCycles -> OrderCyclesScreen(r.orderId, navigate)
+                            is Route.Invalid -> Text(
+                                text = "このリンクは開けません。一覧から選び直してください。",
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(16.dp)
+                            )
                         }
-                        is Route.ProjectDashboard -> ProjectDashboardScreen(r.projectId, navigate)
-                        is Route.RunDetail -> RunDetailScreen(r.runId, navigate)
-                        is Route.GoalDetail -> GoalDetailScreen(r.taskId, navigate)
-                        is Route.OrderDetail -> OrderDetailScreen(r.orderId, navigate)
-                        is Route.OrderCycles -> OrderCyclesScreen(r.orderId, navigate)
-                        is Route.Invalid -> Text(
-                            text = "このリンクは開けません。一覧から選び直してください。",
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(16.dp)
-                        )
                     }
                 }
             }
         }
     }
-}
-
-/**
- * 今のハッシュを読んでルートにする。旧い形(`#/projects/<id>/budget`)は、ブラウザの URL もダッシュボードのハッシュへ置き換える
- * (旧 UI の route と同じ。履歴には残さない)。
- */
-private fun settleLocationHash(): Route {
-    val raw = currentLocationHash()
-    val canonical = canonicalHash(raw)
-    if (canonical != raw) replaceLocationHash(canonical)
-    return parseRoute(canonical)
 }
 
 /** セッション切れの案内(旧 UI の session-banner と同じ趣旨)。再読み込みでサインインし直す。 */
@@ -423,11 +435,16 @@ private fun SessionBanner() {
     }
 }
 
+/**
+ * ヘッダーのプロジェクト切替。表示は今いるプロジェクトの名前(全体の画面では「プロジェクトを選ぶ」)。
+ * 中身は「プロジェクト一覧へ」と、プロジェクトの一覧(選ぶと、今の画面と同じ種類の画面をそのプロジェクトで開く)。
+ */
 @Composable
 fun ProjectSelectorDropdown(
-    selectedProjectId: String?,
+    currentName: String?,
     projects: List<ApiProject>,
-    onProjectSelected: (String?) -> Unit,
+    onProjectSelected: (String) -> Unit,
+    onOverview: () -> Unit,
     dropdownExpanded: Boolean,
     onDropdownExpandedChange: (Boolean) -> Unit
 ) {
@@ -436,8 +453,7 @@ fun ProjectSelectorDropdown(
             onClick = { onDropdownExpandedChange(!dropdownExpanded) }
         ) {
             Text(
-                text = if (selectedProjectId == null) "全プロジェクト"
-                       else projects.find { it.projectId == selectedProjectId }?.name ?: "選択",
+                text = currentName ?: "プロジェクトを選ぶ",
                 style = MaterialTheme.typography.bodyMedium
             )
         }
@@ -446,9 +462,9 @@ fun ProjectSelectorDropdown(
             onDismissRequest = { onDropdownExpandedChange(false) }
         ) {
             DropdownMenuItem(
-                text = { Text("全プロジェクト") },
+                text = { Text("プロジェクト一覧へ") },
                 onClick = {
-                    onProjectSelected(null)
+                    onOverview()
                     onDropdownExpandedChange(false)
                 }
             )

@@ -1,49 +1,76 @@
 package net.kigawa.kivra.ui
 
 /**
- * サイドナビのグループ(docs/design/16-site-structure.md)。
+ * 画面の項目(docs/design/16-site-structure.md §2〜3)。
+ *
+ * - 全体の項目([globalPages]): プロジェクトを持たない。ホーム、プロジェクト一覧、全体の予算・FX、自動化、全体の担当。
+ * - プロジェクト配下の項目([projectPages]): `#/projects/<id>/<page>` で開く。ダッシュボード、タスク、開発目標、order、承認、記憶、担当、予算。
+ *
+ * 「担当」は全体(トークンと全プロジェクト横断の管理)とプロジェクト配下(そのプロジェクトのメンバー)の両方にある。
+ * 同じ object を使い、どちらかは [Route] の projectId で決める。
  */
-enum class NavGroup(val label: String) {
-    Work("作業"),
-    Decide("判断"),
-    Resources("資源"),
-    Admin("管理"),
-}
+sealed class NavDestination(val route: String, val label: String) {
+    object Home : NavDestination("home", "ホーム")
+    object Projects : NavDestination("projects", "プロジェクト")
+    object Budget : NavDestination("budget", "予算・FX")
+    object Autopilot : NavDestination("autopilot", "自動化")
+    object Assignees : NavDestination("assignees", "担当")
 
-/**
- * Navigation destinations for the Kivra app.
- */
-sealed class NavDestination(val route: String, val label: String, val group: NavGroup?) {
-    /** グループに属さない最上位項目(要対応サマリ)。 */
-    object Home : NavDestination("home", "ホーム", null)
-    object Tasks : NavDestination("tasks", "タスク", NavGroup.Work)
-    object Goals : NavDestination("goals", "開発目標", NavGroup.Work)
-    object Orders : NavDestination("orders", "order", NavGroup.Work)
-    object Approvals : NavDestination("approvals", "承認", NavGroup.Decide)
-    object Budget : NavDestination("budget", "予算", NavGroup.Resources)
-    object Memory : NavDestination("memory", "記憶", NavGroup.Resources)
+    object Dashboard : NavDestination("dashboard", "ダッシュボード")
+    object Tasks : NavDestination("tasks", "タスク")
+    object Goals : NavDestination("goals", "開発目標")
+    object Orders : NavDestination("orders", "order")
+    object Approvals : NavDestination("approvals", "承認")
+    object Memory : NavDestination("memory", "記憶")
 
-    /** プロジェクトの一覧・作成(資源)。ダッシュボードは [Route.ProjectDashboard] で、この項目に属する。 */
-    object Projects : NavDestination("projects", "プロジェクト", NavGroup.Resources)
-    object Assignees : NavDestination("assignees", "担当", NavGroup.Admin)
-
-    /** 自律運転の状態と操作。自律運転が有効なときだけ出す([navVisibleForAutopilot])。 */
-    object Autopilot : NavDestination("autopilot", "自動化", NavGroup.Admin)
+    /** プロジェクトの予算(今月の上限と使用量)。運用者だけが見られる。 */
+    object ProjectBudget : NavDestination("budget", "予算")
 
     companion object {
-        // lazy: the nested objects refer to the class while it is being initialized. Built on first use, every object exists.
-        val all: List<NavDestination> by lazy { listOf(Home, Tasks, Goals, Orders, Approvals, Budget, Memory, Projects, Assignees, Autopilot) }
+        /** 全体の項目(route が一意になる。`#/<route>` で開く)。 */
+        val globalPages: List<NavDestination> by lazy { listOf(Home, Projects, Budget, Autopilot, Assignees) }
 
-        /** グループ順に並べた (グループ, 項目一覧)。空のグループは含めない。 */
-        val grouped: List<Pair<NavGroup, List<NavDestination>>> by lazy {
-            NavGroup.entries.map { g -> g to all.filter { it.group == g } }.filter { it.second.isNotEmpty() }
+        /** プロジェクト配下の項目(`#/projects/<id>/<route>` で開く)。サイドナビの並び順でもある。 */
+        val projectPages: List<NavDestination> by lazy {
+            listOf(Dashboard, Tasks, Goals, Orders, Approvals, Memory, Assignees, ProjectBudget)
         }
 
-        fun fromRoute(route: String): NavDestination {
-            return all.find { it.route == route } ?: Home
-        }
-
-        /** グループの先頭項目(パンくずのグループ見出しの遷移先)。 */
-        fun firstIn(group: NavGroup): NavDestination? = all.firstOrNull { it.group == group }
+        /**
+         * 旧 URL(`#/tasks` 等)でプロジェクトを持っていた一覧。プロジェクトが決まるまでの間だけ使う([resolveLegacy])。
+         * 「タスク」は Run の一覧なので、`#/runs`(旧 Run の一覧)もこの一覧として扱う。
+         */
+        val legacyProjectPages: List<NavDestination> by lazy { listOf(Tasks, Goals, Orders, Approvals, Memory) }
     }
+}
+
+/** サイドナビの 1 項目。[target] は押したときのルート。 */
+data class NavItem(val dest: NavDestination, val target: Route)
+
+/** サイドナビの節。[title] が null の節は見出しを出さない。 */
+data class NavSection(val title: String?, val items: List<NavItem>)
+
+/**
+ * サイドナビの 2 層(docs/design/16-site-structure.md §3)。
+ * - 常に: ホーム、プロジェクト一覧。
+ * - プロジェクトを選んでいるとき: そのプロジェクト名の節(プロジェクト配下の項目)。
+ * - 常に最後: 「全体」の節(全体の予算・FX、自動化、担当)。プロジェクトを選んでいても、ここから全体へ出られる。
+ * 権限や API の結果による出し分けは呼び出し側が行う([CallerPermissions.navVisible] など)。
+ */
+fun sidebarSections(projectId: String?, projectName: String?): List<NavSection> {
+    val top = NavSection(
+        title = null,
+        items = listOf(NavDestination.Home, NavDestination.Projects).map { NavItem(it, Route.Page(it)) },
+    )
+    val project = projectId?.let { id ->
+        NavSection(
+            title = projectName ?: id,
+            items = NavDestination.projectPages.map { NavItem(it, Route.ProjectPage(id, it)) },
+        )
+    }
+    val global = NavSection(
+        title = "全体",
+        items = listOf(NavDestination.Budget, NavDestination.Autopilot, NavDestination.Assignees)
+            .map { NavItem(it, Route.Page(it)) },
+    )
+    return listOfNotNull(top, project, global)
 }

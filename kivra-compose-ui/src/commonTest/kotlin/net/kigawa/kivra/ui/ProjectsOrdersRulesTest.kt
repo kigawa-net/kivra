@@ -257,26 +257,25 @@ class ProjectsOrdersRulesTest {
     @Test
     fun projectDashboardRouteRoundTripsAndBelongsToProjects() {
         val route = parseRoute("#/projects/01ABC/dashboard")
-        assertEquals(Route.ProjectDashboard("01ABC"), route)
+        assertEquals(Route.ProjectPage("01ABC", NavDestination.Dashboard), route)
         assertEquals("#/projects/01ABC/dashboard", route.toHash())
-        assertEquals(NavDestination.Projects, route.nav)
-        assertEquals(Route.ProjectDashboard("01ABC"), parseRoute(route.toHash()))
+        assertEquals(NavDestination.Dashboard, route.nav)
+        assertEquals(route, parseRoute(route.toHash()))
         assertEquals("ダッシュボード", route.breadcrumbs().last().label)
     }
 
     @Test
-    fun projectsListRouteAndInvalidDashboardLinks() {
+    fun projectsListRouteAndInvalidProjectLinks() {
         assertEquals(Route.Page(NavDestination.Projects), parseRoute("#/projects"))
         assertEquals("#/projects", Route.Page(NavDestination.Projects).toHash())
-        assertIsInvalid(parseRoute("#/projects/01ABC"))
+        assertEquals(Route.ProjectPage("01ABC", NavDestination.Dashboard), parseRoute("#/projects/01ABC"))
         assertIsInvalid(parseRoute("#/projects/01ABC/other"))
     }
 
     @Test
-    fun projectsIsAResourceItem() {
-        assertTrue(NavDestination.all.contains(NavDestination.Projects))
-        assertEquals(NavGroup.Resources, NavDestination.Projects.group)
-        assertEquals(NavDestination.Projects, NavDestination.fromRoute("projects"))
+    fun projectsIsTheEntryOfTheGlobalSection() {
+        assertTrue(NavDestination.Projects in NavDestination.globalPages)
+        assertEquals(Route.Page(NavDestination.Projects), parseRoute("#/projects"))
     }
 
     private fun assertIsInvalid(route: Route) {

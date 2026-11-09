@@ -1,58 +1,77 @@
 package net.kigawa.kivra.ui
 
+import net.kigawa.kivra.ui.NavDestination.Dashboard
+import net.kigawa.kivra.ui.NavDestination.Goals
+import net.kigawa.kivra.ui.NavDestination.Home
+import net.kigawa.kivra.ui.NavDestination.Orders
+import net.kigawa.kivra.ui.NavDestination.Projects
+import net.kigawa.kivra.ui.NavDestination.Tasks
+
 /**
- * 画面のルート。一覧(項目そのもの)と詳細(id 付き)を表す。ハッシュ表現は docs/design/16-site-structure.md §2 に従う。
+ * 画面のルート。ハッシュ表現は docs/design/16-site-structure.md §2 に従う。
  *
- * - `#/`、`#/<一覧>`(`#/tasks` `#/goals` `#/orders` `#/approvals` `#/budget` `#/memory` `#/assignees`)
- * - `#/runs` は Run 一覧(タスク画面に含まれる)、`#/runs/<id>` は Run 詳細
- * - `#/goals/<id>` は開発目標の詳細、`#/orders/<id>` は order の詳細、`#/orders/<id>/cycles` は order の周の一覧
- * - `#/projects/<id>/dashboard` はプロジェクトのダッシュボード(旧 UI と同じ形)
- * - `#/projects/<id>/<page>` は選択中のプロジェクトの一覧(page は [projectPages] のいずれか)。ADR 0022 PR-E2 と同じ形。
- *   `#/projects/<id>/budget` は予算がダッシュボードにあるので、ダッシュボードのルートとして解釈する([canonicalHash] で URL も置き換える)。
+ * - 全体: `#/`(ホーム)、`#/projects`(プロジェクト一覧)、`#/budget`、`#/autopilot`、`#/assignees`(全体の担当)。
+ * - プロジェクト配下: `#/projects/<id>`(ダッシュボードへ)、`#/projects/<id>/<page>`(page は [NavDestination.projectPages] の route)。
+ * - 詳細: `#/projects/<id>/goals/<taskId>`、`#/projects/<id>/orders/<orderId>`、`#/projects/<id>/orders/<orderId>/cycles`、
+ *   `#/projects/<id>/runs/<runId>`。旧い形(プロジェクトを持たない `#/goals/<id>` など)も同じ画面を開く。
+ * - 旧い一覧(`#/tasks` `#/goals` `#/orders` `#/approvals` `#/memory`、`#/runs`)は [Route.Legacy]。プロジェクトが決まったら
+ *   [resolveLegacy] で [Route.ProjectPage] に置き換え、決まらなければ [Route.ProjectChooser] にする。
  *
  * 解釈と生成は純粋関数([parseRoute] / [toHash])。ブラウザとの同期は呼び出し側(App.kt)が行う。
  */
 sealed interface Route {
-    /** 属する一覧項目(サイドナビの選択と、パンくずの一覧に使う)。不正なリンクは null。 */
+    /** 属するサイドナビの項目(選択の表示と、ページタイトルに使う)。不正なリンクは null。 */
     val nav: NavDestination?
 
+    /** 全体の画面([NavDestination.globalPages] のいずれか)。 */
     data class Page(val dest: NavDestination) : Route {
-        override val nav: NavDestination? get() = dest
-    }
-
-    /** Run 詳細。Run の一覧はタスク画面にあるので、属する項目はタスク。 */
-    data class RunDetail(val runId: String) : Route {
-        override val nav: NavDestination? get() = NavDestination.Tasks
-    }
-
-    data class GoalDetail(val taskId: String) : Route {
-        override val nav: NavDestination? get() = NavDestination.Goals
-    }
-
-    data class OrderDetail(val orderId: String) : Route {
-        override val nav: NavDestination? get() = NavDestination.Orders
-    }
-
-    /** order の周(cycles)の一覧。 */
-    data class OrderCycles(val orderId: String) : Route {
-        override val nav: NavDestination? get() = NavDestination.Orders
-    }
-
-    /** プロジェクトのダッシュボード(`#/projects/<id>/dashboard`、旧 UI と同じ形)。属する項目はプロジェクト。 */
-    data class ProjectDashboard(val projectId: String) : Route {
-        override val nav: NavDestination? get() = NavDestination.Projects
-    }
-
-    /**
-     * 選択中のプロジェクトの一覧(`#/projects/<id>/<page>`)。[dest] は [projectPages] のいずれか。
-     * 表示は [Page] と同じ画面に、そのプロジェクトの id を渡す。
-     */
-    data class ProjectPage(val projectId: String, val dest: NavDestination) : Route {
         init {
-            require(dest in projectPages) { "$dest is not a page under a project" }
+            require(dest in NavDestination.globalPages) { "$dest is not a global page" }
         }
 
         override val nav: NavDestination? get() = dest
+    }
+
+    /** 選択中のプロジェクトの画面([NavDestination.projectPages] のいずれか)。 */
+    data class ProjectPage(val projectId: String, val dest: NavDestination) : Route {
+        init {
+            require(dest in NavDestination.projectPages) { "$dest is not a project page" }
+        }
+
+        override val nav: NavDestination? get() = dest
+    }
+
+    /**
+     * プロジェクトを持たない旧い一覧の URL(`#/goals` など)。中間状態で、App が [resolveLegacy] で置き換える。
+     * 置き換えるまでは「読み込み中」を出す。
+     */
+    data class Legacy(val dest: NavDestination) : Route {
+        override val nav: NavDestination? get() = dest
+    }
+
+    /** 旧い一覧の行き先が 1 つに決まらなかったときの画面。プロジェクト一覧を出し、どの画面の入口かを示す。 */
+    data class ProjectChooser(val dest: NavDestination) : Route {
+        override val nav: NavDestination? get() = Projects
+    }
+
+    /** Run 詳細。[projectId] があれば、そのプロジェクトの配下の Run。 */
+    data class RunDetail(val runId: String, val projectId: String? = null) : Route {
+        override val nav: NavDestination? get() = Tasks
+    }
+
+    /** 開発目標の詳細。 */
+    data class GoalDetail(val taskId: String, val projectId: String? = null) : Route {
+        override val nav: NavDestination? get() = Goals
+    }
+
+    /** order の詳細。 */
+    data class OrderDetail(val orderId: String, val projectId: String? = null) : Route {
+        override val nav: NavDestination? get() = Orders
+    }
+
+    /** order の周(cycles)の一覧。 */
+    data class OrderCycles(val orderId: String, val projectId: String? = null) : Route {
+        override val nav: NavDestination? get() = Orders
     }
 
     /** 解釈できないハッシュ(id のパーセント符号化が壊れている等)。画面に「リンクが正しくありません」と出す。 */
@@ -70,119 +89,144 @@ data class Crumb(val label: String, val route: Route?)
  */
 fun parseRoute(hash: String): Route {
     val path = hash.removePrefix("#").substringBefore('?').trim('/')
-    if (path.isEmpty()) return Route.Page(NavDestination.Home)
+    if (path.isEmpty()) return Route.Page(Home)
     val segments = path.split('/')
     if (segments.size == 1) {
         val head = segments[0]
-        if (head == "runs") return Route.Page(NavDestination.Tasks)
-        return Route.Page(NavDestination.all.find { it.route == head } ?: NavDestination.Home)
+        if (head == "runs") return Route.Legacy(Tasks)
+        NavDestination.globalPages.find { it.route == head }?.let { return Route.Page(it) }
+        NavDestination.legacyProjectPages.find { it.route == head }?.let { return Route.Legacy(it) }
+        return Route.Page(Home)
     }
     val id = percentDecode(segments[1])
     if (id.isNullOrEmpty()) return Route.Invalid(hash)
+    if (segments[0] == "projects") return projectRoute(id, segments.drop(2)) ?: Route.Invalid(hash)
+    return globalDetailRoute(segments[0], id, segments.drop(2)) ?: Route.Invalid(hash)
+}
+
+/** `#/projects/<id>` の後ろ(rest)を解釈する。rest が空はダッシュボード。 */
+private fun projectRoute(projectId: String, rest: List<String>): Route? {
+    if (rest.isEmpty()) return Route.ProjectPage(projectId, Dashboard)
+    if (rest.size == 1) {
+        return NavDestination.projectPages.find { it.route == rest[0] }?.let { Route.ProjectPage(projectId, it) }
+    }
+    val detailId = percentDecode(rest[1])?.takeIf { it.isNotEmpty() } ?: return null
     return when {
-        segments.size == 2 && segments[0] == "runs" -> Route.RunDetail(id)
-        segments.size == 2 && segments[0] == "goals" -> Route.GoalDetail(id)
-        segments.size == 2 && segments[0] == "orders" -> Route.OrderDetail(id)
-        segments.size == 3 && segments[0] == "orders" && segments[2] == "cycles" -> Route.OrderCycles(id)
-        segments.size == 3 && segments[0] == "projects" -> projectRouteOf(id, segments[2]) ?: Route.Invalid(hash)
-        else -> Route.Invalid(hash)
+        rest.size == 2 && rest[0] == "goals" -> Route.GoalDetail(detailId, projectId)
+        rest.size == 2 && rest[0] == "orders" -> Route.OrderDetail(detailId, projectId)
+        rest.size == 2 && rest[0] == "runs" -> Route.RunDetail(detailId, projectId)
+        rest.size == 3 && rest[0] == "orders" && rest[2] == "cycles" -> Route.OrderCycles(detailId, projectId)
+        else -> null
     }
 }
 
-/** プロジェクト配下の項目(`#/projects/<id>/<page>`)として表すもの。予算はダッシュボードにあるので含めない。 */
-val projectPages: Set<NavDestination> = setOf(
-    NavDestination.Tasks,
-    NavDestination.Goals,
-    NavDestination.Orders,
-    NavDestination.Approvals,
-    NavDestination.Memory,
-    NavDestination.Assignees,
-)
-
-/** `#/projects/<id>/<page>` の page を解釈する。知らない page は null(呼び出し側で [Route.Invalid])。 */
-private fun projectRouteOf(projectId: String, page: String): Route? = when (page) {
-    "dashboard", "budget" -> Route.ProjectDashboard(projectId)
-    else -> NavDestination.all.find { it.route == page }
-        ?.takeIf { it in projectPages }
-        ?.let { Route.ProjectPage(projectId, it) }
+/** プロジェクトを持たない詳細(`#/goals/<id>` など)。旧い形の URL で、同じ画面を開く。 */
+private fun globalDetailRoute(kind: String, id: String, rest: List<String>): Route? = when {
+    rest.isEmpty() && kind == "runs" -> Route.RunDetail(id)
+    rest.isEmpty() && kind == "goals" -> Route.GoalDetail(id)
+    rest.isEmpty() && kind == "orders" -> Route.OrderDetail(id)
+    rest == listOf("cycles") && kind == "orders" -> Route.OrderCycles(id)
+    else -> null
 }
 
-/** ルートをハッシュ(`#/...`)へ変換する。[parseRoute] と往復で同じルートになる(Home は `#/`)。 */
+/**
+ * 旧い一覧の URL の行き先。最後に選んだプロジェクト([lastProjectId])が今のプロジェクトの中にあればそれ、
+ * なければプロジェクトが 1 つだけならそれ、どちらでもなければ [Route.ProjectChooser]。
+ * [knownIds] が null は一覧の取得に失敗したとき(確かめられないので、[lastProjectId] をそのまま使う)。
+ */
+fun resolveLegacy(dest: NavDestination, knownIds: List<String>?, lastProjectId: String?): Route {
+    val chosen = when {
+        knownIds == null -> lastProjectId
+        lastProjectId != null && lastProjectId in knownIds -> lastProjectId
+        knownIds.size == 1 -> knownIds[0]
+        else -> null
+    }
+    return if (chosen == null) Route.ProjectChooser(dest) else Route.ProjectPage(chosen, dest)
+}
+
+/** ルートをハッシュ(`#/...`)へ変換する。[parseRoute] と往復で同じルートになる(例外: [Route.ProjectChooser] は `#/projects`)。 */
 fun Route.toHash(): String = when (this) {
-    is Route.Page -> if (dest == NavDestination.Home) "#/" else "#/${dest.route}"
-    is Route.RunDetail -> "#/runs/${percentEncode(runId)}"
-    is Route.GoalDetail -> "#/goals/${percentEncode(taskId)}"
-    is Route.OrderDetail -> "#/orders/${percentEncode(orderId)}"
-    is Route.OrderCycles -> "#/orders/${percentEncode(orderId)}/cycles"
-    is Route.ProjectDashboard -> "#/projects/${percentEncode(projectId)}/dashboard"
+    is Route.Page -> if (dest == Home) "#/" else "#/${dest.route}"
     is Route.ProjectPage -> "#/projects/${percentEncode(projectId)}/${dest.route}"
+    is Route.Legacy -> "#/${dest.route}"
+    is Route.ProjectChooser -> "#/projects"
+    is Route.RunDetail -> detailHash(projectId, "runs", runId)
+    is Route.GoalDetail -> detailHash(projectId, "goals", taskId)
+    is Route.OrderDetail -> detailHash(projectId, "orders", orderId)
+    is Route.OrderCycles -> detailHash(projectId, "orders", orderId) + "/cycles"
     is Route.Invalid -> "#/"
 }
 
-/**
- * ブラウザに出すハッシュの正。旧い形の `#/projects/<id>/budget` はダッシュボードのハッシュへ置き換える(旧 UI と同じ)。
- * それ以外は同じ文字列を返す。id が壊れている場合も同じ文字列(解釈は [Route.Invalid])。
- */
-fun canonicalHash(hash: String): String {
-    val segments = hash.removePrefix("#").substringBefore('?').trim('/').split('/')
-    if (segments.size == 3 && segments[0] == "projects" && segments[2] == "budget") {
-        val route = parseRoute(hash)
-        if (route is Route.ProjectDashboard) return route.toHash()
-    }
-    return hash
-}
+private fun detailHash(projectId: String?, kind: String, id: String): String =
+    if (projectId == null) "#/$kind/${percentEncode(id)}"
+    else "#/projects/${percentEncode(projectId)}/$kind/${percentEncode(id)}"
 
-/** 選択中のプロジェクトでこの項目を開くときのルート。項目が [projectPages] なら項目のページ、予算はダッシュボード、それ以外は全体のまま。 */
-fun NavDestination.routeFor(projectId: String?): Route = when {
-    projectId == null -> Route.Page(this)
-    this == NavDestination.Budget -> Route.ProjectDashboard(projectId)
-    this in projectPages -> Route.ProjectPage(projectId, this)
-    else -> Route.Page(this)
-}
-
-/**
- * プロジェクトの選択を [projectId] に変えたときに開くルート(旧 UI の chooseProjectContext と同じく、今の画面の続きを開く)。
- * 全体(null)にすると、プロジェクト配下の一覧は全体の一覧へ、ダッシュボードはホームへ戻る。
- * 詳細は属する一覧へ移す(旧 UI が現在の一覧を開くのと同じ)。
- */
-fun Route.inProjectContext(projectId: String?): Route = when (this) {
-    is Route.Page -> if (projectId == null) this else dest.routeFor(projectId)
-    is Route.ProjectPage -> dest.routeFor(projectId)
-    is Route.ProjectDashboard -> if (projectId == null) Route.Page(NavDestination.Home) else Route.ProjectDashboard(projectId)
-    else -> nav?.routeFor(projectId) ?: Route.Page(NavDestination.Home)
-}
-
-/** この画面が指しているプロジェクトの id(プロジェクト配下のルートだけ)。全体の画面や詳細は null。 */
+/** この画面が指しているプロジェクトの id(プロジェクト配下の画面と、プロジェクトの中の詳細だけ)。全体の画面は null。 */
 val Route.projectIdOrNull: String?
     get() = when (this) {
         is Route.ProjectPage -> projectId
-        is Route.ProjectDashboard -> projectId
+        is Route.RunDetail -> projectId
+        is Route.GoalDetail -> projectId
+        is Route.OrderDetail -> projectId
+        is Route.OrderCycles -> projectId
         else -> null
     }
 
-/**
- * パンくず: 「グループ › 一覧 › 詳細」。グループ見出しは、そのグループの先頭項目へ遷移する。
- * 例: order の cycles は 作業 › order › <id> › cycles。Home と不正なリンクは空。
- */
-fun Route.breadcrumbs(): List<Crumb> {
-    val dest = nav ?: return emptyList()
-    val group = dest.group?.let { g ->
-        NavDestination.firstIn(g)?.let { Crumb(g.label, Route.Page(it)) }
-    }
-    val head = listOfNotNull(group)
+/** 詳細(プロジェクトを持たない)を、今のプロジェクトの中の詳細にする。プロジェクトを持つ詳細や他の画面はそのまま。 */
+fun Route.withProjectOf(current: Route): Route {
+    val projectId = current.projectIdOrNull ?: return this
     return when (this) {
-        is Route.Page -> head + Crumb(dest.label, null)
-        is Route.ProjectPage -> head + Crumb(dest.label, null)
-        is Route.RunDetail -> head + Crumb(NavDestination.Tasks.label, Route.Page(NavDestination.Tasks)) + Crumb(runId, null)
-        is Route.GoalDetail -> head + Crumb(NavDestination.Goals.label, Route.Page(NavDestination.Goals)) + Crumb(taskId, null)
-        is Route.OrderDetail -> head + Crumb(NavDestination.Orders.label, Route.Page(NavDestination.Orders)) + Crumb(orderId, null)
-        is Route.OrderCycles -> head +
-            Crumb(NavDestination.Orders.label, Route.Page(NavDestination.Orders)) +
-            Crumb(orderId, Route.OrderDetail(orderId)) +
-            Crumb("cycles", null)
-        is Route.ProjectDashboard -> head + Crumb(NavDestination.Projects.label, Route.Page(NavDestination.Projects)) +
-            Crumb(projectId, null) + Crumb("ダッシュボード", null)
+        is Route.RunDetail -> if (this.projectId == null) copy(projectId = projectId) else this
+        is Route.GoalDetail -> if (this.projectId == null) copy(projectId = projectId) else this
+        is Route.OrderDetail -> if (this.projectId == null) copy(projectId = projectId) else this
+        is Route.OrderCycles -> if (this.projectId == null) copy(projectId = projectId) else this
+        else -> this
+    }
+}
+
+/**
+ * プロジェクトの切替(ヘッダー)で開くルート。今の画面と同じ種類の画面を、そのプロジェクトで開く。
+ * 項目がプロジェクト配下の一覧ならその一覧、詳細はその詳細の属する一覧、全体の画面と解釈できないリンクはダッシュボード。
+ */
+fun Route.inProjectContext(projectId: String): Route {
+    val dest = nav?.takeIf { it in NavDestination.projectPages } ?: Dashboard
+    return Route.ProjectPage(projectId, dest)
+}
+
+/**
+ * パンくず: 「プロジェクト › プロジェクト名 › ページ › 詳細」。全体の画面は「全体 › 項目」か「プロジェクト」。
+ * [projectName] はプロジェクトの id から表示名を引く(読めていないときは null で、id をそのまま出す)。
+ * Home と不正なリンクは空。
+ */
+fun Route.breadcrumbs(projectName: (String) -> String? = { null }): List<Crumb> {
+    val projectsCrumb = Crumb("プロジェクト", Route.Page(Projects))
+    fun projectHead(projectId: String) = listOf(
+        projectsCrumb,
+        Crumb(projectName(projectId) ?: projectId, Route.ProjectPage(projectId, Dashboard)),
+    )
+    fun detail(projectId: String?, page: NavDestination, leaf: List<Crumb>): List<Crumb> {
+        val head = if (projectId == null) listOf(projectsCrumb) else projectHead(projectId)
+        val pageRoute = if (projectId == null) Route.Legacy(page) else Route.ProjectPage(projectId, page)
+        return head + Crumb(page.label, pageRoute) + leaf
+    }
+    return when (this) {
         is Route.Invalid -> emptyList()
+        is Route.Page -> when (dest) {
+            Home -> emptyList()
+            Projects -> listOf(Crumb("プロジェクト", null))
+            else -> listOf(Crumb("全体", null), Crumb(dest.label, null))
+        }
+        is Route.ProjectChooser -> listOf(Crumb("プロジェクト", null))
+        is Route.Legacy -> listOf(projectsCrumb, Crumb(dest.label, null))
+        is Route.ProjectPage -> projectHead(projectId) + Crumb(dest.label, null)
+        is Route.RunDetail -> detail(projectId, Tasks, listOf(Crumb(runId, null)))
+        is Route.GoalDetail -> detail(projectId, Goals, listOf(Crumb(taskId, null)))
+        is Route.OrderDetail -> detail(projectId, Orders, listOf(Crumb(orderId, null)))
+        is Route.OrderCycles -> detail(
+            projectId,
+            Orders,
+            listOf(Crumb(orderId, Route.OrderDetail(orderId, projectId)), Crumb("cycles", null)),
+        )
     }
 }
 

@@ -29,6 +29,7 @@ import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.GatedOperation
 import net.kigawa.kivra.ui.LocalCallerPermissions
+import net.kigawa.kivra.ui.NavDestination
 import net.kigawa.kivra.ui.PROJECT_DESCRIPTION_MAX
 import net.kigawa.kivra.ui.PROJECT_NAME_MAX
 import net.kigawa.kivra.ui.PROJECT_CREATED_MESSAGE
@@ -39,21 +40,30 @@ import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiSession
 import net.kigawa.kivra.ui.projectCreateFailureText
 import net.kigawa.kivra.ui.submitBlocked
+import net.kigawa.kivra.ui.yenText
 import net.kigawa.kivra.ui.validatedProjectDescription
 import net.kigawa.kivra.ui.validatedProjectName
 
 /**
- * プロジェクトの画面(資源): 一覧と、作成フォーム(CREATE_PROJECT の人だけ)。行を開くとダッシュボードへ進む。
- * 作成の後は一覧を読み直し、[onProjectsChanged] で画面上部のプロジェクト選択も読み直させる。
+ * プロジェクトの一覧(全体の入口)。行を開くとそのプロジェクトのダッシュボードへ進み、各行に要約(承認待ち・実行中・失敗/解放待ち・予算)を出す。
+ * [notice] は旧い URL からここへ誘導されたときの案内。作成フォームは CREATE_PROJECT の人だけ。
+ * 作成の後は一覧を読み直し、[onProjectsChanged] で画面上部のプロジェクト切替も読み直させる。
  */
 @Composable
-fun ProjectsScreen(onNavigate: (Route) -> Unit, onProjectsChanged: () -> Unit) {
+fun ProjectsScreen(notice: String?, onNavigate: (Route) -> Unit, onProjectsChanged: () -> Unit) {
     val perms = LocalCallerPermissions.current
     var reload by remember { mutableStateOf(0) }
     val loaded = rememberLoad(Unit, reload) { ApiClient.getProjects() }
+    val summaries = rememberLoad(loaded.value?.map { it.projectId }) {
+        loaded.value.orEmpty().associate { it.projectId to loadProjectSummary(it.projectId) }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
+        notice?.let {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+        }
         Spacer(modifier = Modifier.height(16.dp))
 
         if (perms.can(GatedOperation.CREATE_PROJECT)) {
@@ -69,7 +79,7 @@ fun ProjectsScreen(onNavigate: (Route) -> Unit, onProjectsChanged: () -> Unit) {
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
                     items(projects, key = { it.projectId }) { project ->
                         Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable {
-                            onNavigate(Route.ProjectDashboard(project.projectId))
+                            onNavigate(Route.ProjectPage(project.projectId, NavDestination.Dashboard))
                         }) {
                             Column(modifier = Modifier.padding(16.dp)) {
                                 Text(project.name, style = MaterialTheme.typography.titleMedium)
@@ -79,6 +89,12 @@ fun ProjectsScreen(onNavigate: (Route) -> Unit, onProjectsChanged: () -> Unit) {
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    summaryLine(summaries.value?.get(project.projectId)),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
                         }
                         HorizontalDivider()
@@ -87,6 +103,19 @@ fun ProjectsScreen(onNavigate: (Route) -> Unit, onProjectsChanged: () -> Unit) {
             }
         }
     }
+}
+
+/** 一行の要約の文言。読み込み中・読めなかったものは、その旨を出す。 */
+private fun summaryLine(s: ProjectSummary?): String {
+    if (s == null) return "要約: 読み込み中"
+    val approvals = s.approvals?.let { "承認待ち $it" } ?: "承認待ち 取得できません"
+    val running = s.running?.let { "実行中 $it" } ?: "実行中 取得できません"
+    val attention = s.attention?.let { "失敗・解放待ち $it" } ?: "失敗・解放待ち 取得できません"
+    val budget = s.budget?.let { b ->
+        "今月 ${yenText(b.committedJpy)}" + (b.monthlyLimitJpy?.let { " / 上限 ${yenText(it)}" } ?: "") +
+            if (b.softExceeded) "（超過の警告）" else ""
+    }
+    return listOfNotNull(approvals, running, attention, budget).joinToString(" ・ ")
 }
 
 /**

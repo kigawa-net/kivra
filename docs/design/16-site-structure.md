@@ -1,110 +1,162 @@
 # 16. サイト構成(運用者向け Web UI の情報設計)
 
-状態: 段階 4 完了(旧版撤去)。**正は Compose Wasm 版(`/ui/compose`)**。vanilla JS 版は撤去済みで、`/ui` と `/ui/` は `/ui/compose` へ 302 で転送する。画面・URL・ナビゲーションの構成を定める。
+状態: 改訂 2(プロジェクトを最上位にする)。**正は Compose Wasm 版(`/ui/compose`)**。vanilla JS 版は撤去済みで、`/ui` と `/ui/` は `/ui/compose` へ 302 で転送する。画面・URL・ナビゲーションの構成を定める。
+
+改訂 1(旧版)は「データ種別(タスク・開発目標・order・承認・予算・記憶・担当)で並べ、プロジェクトは絞り込み」だった。改訂 2 では、**プロジェクトを最上位の概念**にし、プロジェクトの中にすべてを置く。
 
 ## 1. 前提と方針
 
 - 利用者は運用者(kigawa とその担当 Assignee)。公開サイトではない。認証は `KIVRA_AUTH_MODE` 有効時のみ UI を出す(現行どおり)。
-- 現行の 7 タブ(タスク / 開発目標 / order / 承認 / 予算 / 記憶 / 担当)は「データ種別」で並んでおり、運用者の「やりたいこと」と対応していない。**目的別に 4 グループへ再編**し、タブ数を増やさずに階層で整理する。
-- プロジェクト(`/api/projects`)を最上位の絞り込み軸にする(現行サイドの `data-project-filter` を踏襲)。
-- URL は引き続きハッシュルーティング(ビルド工程なし方針を維持)。Compose 版が正で、ハッシュ(`#/goals` 等)をブラウザ履歴と同期させてリンクを共有可能にする。旧 `/ui` のハッシュ URL は Compose 側が同じ形式を解釈して互換を保つ。
+- **入口はプロジェクト一覧。** プロジェクトを選ぶと、ダッシュボード・タスク・開発目標・order・承認・記憶・担当・予算が、すべてそのプロジェクトの中のページになる。
+- **全体**(プロジェクトを持たないもの)は別にまとめる。全体の予算・FX、自動化(Autopilot・自動マージ・kill-switch)、全プロジェクト横断の担当(Assignee・トークン)。
+- **ホーム**は全プロジェクト横断の要対応サマリ。各項目から該当プロジェクトのページへ行く。
+- URL はハッシュルーティング(ビルド工程なし方針を維持)。ハッシュをブラウザ履歴と同期させ、リンクを共有できるようにする。
+- 旧 URL(プロジェクトを持たない `#/goals` など)は壊さない(§4)。
 
 ## 2. サイトマップ
 
 ```
-/ui
-├─ ホーム(#/)                    … 要対応サマリ(承認待ち・停止要求・失敗 Run・予算警告)
+/ui/compose
+├─ ホーム(#/)                          … 全プロジェクト横断の要対応(承認待ち・失敗/解放待ち・実行中・予算の超過)
 │
-├─ 作業 (Work)
-│   ├─ タスク      #/tasks             一覧 + 投入フォーム
-│   ├─ 開発目標    #/goals             Goal 一覧
-│   │   └─ 詳細   #/goals/<id>        計画・承認・中止
-│   ├─ order       #/orders            一覧(周回状況)
-│   │   └─ 詳細   #/orders/<id>       cycles(#/orders/<id>/cycles)
-│   └─ Run        #/runs              一覧
-│       └─ 詳細   #/runs/<id>         イベント(ライブ監視)・Operation・解放
+├─ プロジェクト(#/projects)            … 入口。一覧と作成(CREATE_PROJECT の人だけ)。各行に要約
+│   └─ プロジェクト(#/projects/<id>) … ダッシュボードへ置き換え
+│       ├─ ダッシュボード  #/projects/<id>/dashboard   Run 状態別件数・最近の Run・費用・活動。運用者はリポジトリの対応と振り分け
+│       ├─ タスク        #/projects/<id>/tasks        このプロジェクトの Run の一覧 + Task の投入(自己開発はこのプロジェクトに入る)
+│       │   └─ Run 詳細  #/projects/<id>/runs/<runId>
+│       ├─ 開発目標      #/projects/<id>/goals        Goal の一覧 + 投入(自律運転が有効なとき)
+│       │   └─ 詳細      #/projects/<id>/goals/<taskId>
+│       ├─ order         #/projects/<id>/orders       order の一覧 + 作成
+│       │   ├─ 詳細      #/projects/<id>/orders/<orderId>
+│       │   └─ 周の一覧  #/projects/<id>/orders/<orderId>/cycles
+│       ├─ 承認          #/projects/<id>/approvals    停止要求の承認待ちキュー
+│       ├─ 記憶          #/projects/<id>/memory       selfdev memory(ADR 0016)の検索・削除
+│       ├─ 担当          #/projects/<id>/assignees    このプロジェクトのメンバー(ADR 0020)
+│       └─ 予算          #/projects/<id>/budget       今月の上限と使用量(運用者だけ。設定と解除)
 │
-├─ 判断 (Decide)
-│   ├─ 承認        #/approvals         承認待ちキュー(バッジ表示)
-│   └─ 停止要求    #/stop-requests     LLM 停止承認(ADR 0021)
-│
-├─ 資源 (Resources)
-│   ├─ 予算        #/budget            状態・FX・未確定予約の解除(運用者のみ)
-│   ├─ 記憶        #/memory            selfdev memory(ADR 0016)
-│   └─ プロジェクト #/projects          一覧・作成・Run との紐付け
-│
-└─ 管理 (Admin)
-    ├─ 担当        #/assignees         Assignee / メンバー / トークン(ADR 0020)
-    ├─ 自動化      #/autopilot         Autopilot・自動マージ(ADR 0011 / 0014)・kill-switch
-    └─ システム    #/system            health / ready / metrics リンク、バージョン
+└─ 全体(プロジェクトを持たない。運用者向け)
+    ├─ 予算・FX          #/budget                     全体の予算と為替(運用者だけ)
+    ├─ 自動化            #/autopilot                  自律運転・自動マージ・kill-switch(自律運転が有効なときだけ出す)
+    └─ 担当(全体)        #/assignees                  Assignee・トークン(全プロジェクト横断)
 ```
 
-### プロジェクト配下の URL(ADR 0022 PR-E2)
+- 「担当」は全体と配下の両方にある。全体は Assignee とトークンの管理(横断)、配下はそのプロジェクトのメンバー。同じ画面の部品を、絞り込みの有無で使い分ける。
+- 「承認」は配下にあり、件数バッジはヘッダーとサイドナビに出す(全体の件数)。
 
-選択中のプロジェクトは URL に現れる。一覧は `#/projects/<id>/<page>`、ダッシュボードは `#/projects/<id>/dashboard`。
+## 3. URL 体系
 
-| 画面 | 全体(未選択) | 選択中のプロジェクト |
+| 種別 | 形 | 例 |
 |---|---|---|
-| タスク | `#/tasks` | `#/projects/<id>/tasks` |
-| 開発目標 | `#/goals` | `#/projects/<id>/goals` |
-| order | `#/orders` | `#/projects/<id>/orders` |
-| 承認 | `#/approvals` | `#/projects/<id>/approvals` |
-| 記憶 | `#/memory` | `#/projects/<id>/memory` |
-| 担当 | `#/assignees` | `#/projects/<id>/assignees` |
-| 予算 | `#/budget` | `#/projects/<id>/dashboard`(予算はダッシュボードにある。`#/projects/<id>/budget` は開くとダッシュボードへ置き換える) |
-| プロジェクト | `#/projects`(一覧)/ `#/projects/<id>/dashboard` | 変更なし |
+| ホーム | `#/` | `#/` |
+| 全体の画面 | `#/<項目>`(`projects` `budget` `autopilot` `assignees`) | `#/budget` |
+| プロジェクト(入口) | `#/projects` | |
+| プロジェクト配下のページ | `#/projects/<id>/<page>`(`dashboard` `tasks` `goals` `orders` `approvals` `memory` `assignees` `budget`) | `#/projects/01J…/orders` |
+| プロジェクト配下の詳細 | `#/projects/<id>/goals/<taskId>`、`…/orders/<orderId>`、`…/orders/<orderId>/cycles`、`…/runs/<runId>` | `#/projects/01J…/runs/01K…` |
+| 旧い詳細(互換) | `#/goals/<id>`、`#/orders/<id>`、`#/orders/<id>/cycles`、`#/runs/<id>` | 同じ画面を開く。プロジェクトは URL に入らない |
+| 旧い一覧(互換) | `#/tasks` `#/goals` `#/orders` `#/approvals` `#/memory` `#/runs` | §4 のとおり置き換える |
 
-- サイドナビ・ヘッダーの項目は、選択中のプロジェクトがあればその配下の URL へ向く。全体の選択に戻すと、同じ一覧の全体の URL へ戻る(詳細は属する一覧へ)。
-- 選択は URL が正。プロジェクト配下の URL を開くと、そのプロジェクトが選ばれる。プロジェクト配下でない URL(`#/goals` 等)では選択を保つ。
-- 未分類(`?projectId=unassigned`)は Compose 版にまだ選択肢がない(旧 UI の未分類の一覧は旧 UI に残る)。
-- 一覧・作成の API は、選択中のプロジェクトがあるとき別名ルート(`/api/projects/<id>/tasks` `orders` `approvals` `memory` `assignees`)を使う。runs と `POST /api/selfdev/tasks` には別名がなく、旧ルートのまま。
-- 旧 URL との互換: `#/goals/<id>` 等の詳細と `#/projects/<id>/dashboard` は変更なし。
+- `<id>` は ULID を `encodeURIComponent` 相当で符号化する。壊れた符号化・余分な区切りは「リンクが正しくありません」。
+- `#/projects/<id>` はダッシュボードと同じ画面を開く。
 
-### 旧 URL との対応(互換)
+## 4. 旧 URL との互換
 
-| 旧 | 新 |
-|---|---|
-| `#/`(タスク) | `#/tasks`(`#/` はホームへ) |
-| `#/goals` `#/orders` `#/approvals` `#/budget` `#/memory` `#/assignees` | 変更なし(全体の選択のとき) |
-| `#/runs/<id>` | 変更なし |
-| `#/projects/<id>/budget` | `#/projects/<id>/dashboard` へ置き換え |
+| 旧 | 新 | 動き |
+|---|---|---|
+| `#/` | `#/`(ホーム) | 変えない(旧 `#/` は tasks だったが、ホームに移した) |
+| `#/tasks` `#/goals` `#/orders` `#/approvals` `#/memory` `#/runs` | プロジェクトの同じページ | **置き換え**(§4.1) |
+| `#/budget` | `#/budget`(全体の予算・FX) | 変えない(旧版でも全体の予算だった。プロジェクトの予算は `#/projects/<id>/budget`) |
+| `#/autopilot` | `#/autopilot` | 変えない |
+| `#/assignees` | `#/assignees`(全体の担当) | 変えない |
+| `#/projects/<id>/budget` | 予算のページ | 旧版ではダッシュボードへ置き換えていたが、予算は独立したページになった(設計の決定に従う) |
+| `#/projects/<id>/dashboard` | 変えない | |
+| `#/goals/<id>` `#/orders/<id>` `#/runs/<id>` 等 | 変えない(同じ画面) | プロジェクトは URL に入らない。ブックマークはそのまま開く |
 
-旧 `#/` はタスク画面だったため、ホーム導入時はブックマーク影響を避けて、ホームが空(要対応 0 件)のときのみタスク一覧を併記する。
+### 4.1 旧い一覧の置き換え(`resolveLegacy`)
 
-## 3. ナビゲーション
+旧い一覧の URL は、次の順でプロジェクトを決めて `#/projects/<id>/<page>` に置き換える(履歴に残さない)。
 
-- **ヘッダー(常設)**: ロゴ / グローバル検索(Run id・Goal・order) / 承認待ちバッジ(承認へ。選択中のプロジェクトがあればその承認) / ユーザー(`/api/auth/me`)。
-- **サイドナビ**: 4 グループ見出し + 配下項目。API で無効なセクション(自律運転 off、運用者以外の予算 等)は項目ごと非表示(現行方針を継続)。
-- **プロジェクトフィルタ**: サイド最上部のドロップダウン。選択は URL(§2 の `#/projects/<id>/<page>`)で表す。選んだプロジェクトの一覧・作成に適用する。
-- **パンくず**: 詳細画面のみ(例: 作業 › order › #12 › cycle 3)。
-- 狭い画面ではサイドナビをドロワー化(現行 371 行目のブレークポイントを流用)。
+1. **最後に選んだプロジェクト**(この端末のブラウザに保存。プロジェクトの中の画面を開くたびに更新)が、今のプロジェクト一覧にあれば、それ。
+2. なければ、**プロジェクトが 1 つだけ**ならそれ。
+3. どちらでもなければ、**プロジェクト一覧**(`ProjectChooser`)を出す。案内文「「開発目標」はプロジェクトごとのページです。プロジェクトを選んでください。」を添える。URL は `#/projects` になる。
+4. 一覧の取得に失敗したときは、保存しているプロジェクトだけを使う(なければ 3)。
 
-## 4. 画面ごとの責務(要点)
+置き換えるまでは「読み込み中…」を出す。
 
-| 画面 | 主目的 | 主な操作 | 主 API |
+## 5. ナビゲーション
+
+- **ヘッダー(常設)**: パンくず / 今いるプロジェクトの切替 / 検索 / 承認待ちの件数 / 役割(`/api/selfdev/me`)/ 更新。
+  - 切替は「絞り込み」ではなく**「今いるプロジェクト」の切替**。選ぶと、今の画面と同じ種類の画面をそのプロジェクトで開く(例: `#/projects/A/orders` → `#/projects/B/orders`)。全体の画面からは、そのプロジェクトのダッシュボードを開く。「プロジェクト一覧へ」も選べる。
+  - 承認待ちの件数は、プロジェクトの中ならそのプロジェクトの承認へ、全体ならホームへ行く。
+- **サイドナビ(2 層)**:
+  - 常に: ホーム、プロジェクト。
+  - プロジェクトを選んでいるとき: そのプロジェクト名の節(ダッシュボード・タスク・開発目標・order・承認・記憶・担当・予算)。
+  - 常に最後: 「全体」の節(予算・FX、自動化、担当)。プロジェクトを選んでいても、ここから全体へ出られる。
+  - 権限や API の結果で隠す項目は、項目ごと隠す(§7)。残りのない節は見出しごと出さない。
+- **パンくず**: 「プロジェクト › <プロジェクト名> › <ページ> › <詳細>」。
+  - 全体の画面: 「全体 › <項目>」(プロジェクト一覧だけは「プロジェクト」)。
+  - 旧い詳細(プロジェクトを持たない URL): 「プロジェクト › <ページ> › <詳細>」(ページはプロジェクトの一覧へ置き換えて開く)。
+- 狭い画面ではサイドナビをドロワー化する(現行の方針を継続)。
+
+## 6. ホームとプロジェクト一覧、プロジェクト未選択のとき
+
+- **ホーム(全体)**: 全プロジェクトの要約を足した件数(承認待ち・失敗/解放待ち・実行中・予算の超過)。その下に、プロジェクトごとの行。行の各ボタンは、そのプロジェクトの該当ページへ行く(承認 → 承認、失敗・解放待ち/実行中 → タスク、予算 → 予算、「開く」→ ダッシュボード)。
+- **プロジェクト一覧(全体)**: 一覧と作成。各行に要約(承認待ち・実行中・失敗/解放待ち・今月の費用と上限)。読めなかった項目は「取得できません」と出し、他の項目は出す。
+- **プロジェクトを選んでいないとき**: サイドナビは「ホーム・プロジェクト・全体」だけ。ホームとプロジェクト一覧が入口。プロジェクト配下のページは、旧 URL からだけ開く(§4.1)。
+
+要約は既存の API だけで作る(新しい API は足さない)。承認待ちは `/api/projects/{id}/approvals?state=PENDING`、Run の件数と予算はダッシュボード(`/api/projects/{id}/dashboard`)。失敗は `FAILED` と `UNKNOWN`(運用者の解放待ち、ADR 0009)、実行中は終わった状態(`FAILED` `COMPLETED` `CANCELLED` `NOT_EXECUTED`)以外。
+
+## 7. 権限と見える範囲
+
+- 運用者(ORDER_MANAGE など)は、全プロジェクトのダッシュボード(scope ALL)、予算、リポジトリの対応、全体の項目を見られる。
+- 運用者以外は、ダッシュボードが scope OWN(自分の Run だけ)になり、予算・リポジトリの対応・全体の項目は出さない(API が拒否するか、画面が見せない)。
+- **目標: 運用者以外が見られるのは、メンバーとして属するプロジェクトだけ。** 担当の登録(`project_members`)を、プロジェクトの一覧と項目の出し分けに使う。
+  - 現状: `GET /api/projects` はプロジェクトを絞らない(READ があれば全件を返す)。`project_members` による読み取りの絞りは、まだ入っていない(ADR 0022 PR-D は書き込みの判定まで)。UI だけでは絞れない。**後続の課題**(サーバー変更を伴うため、この PR ではサーバーを変えない)。
+
+## 8. 画面ごとの責務(要点)
+
+| 画面 | 主目的 | 主な操作 | 読む API |
 |---|---|---|---|
-| ホーム | 今すぐ対処すべきものを 1 画面で | 各項目から該当詳細へ | status / approvals / stop-requests / budget status |
-| タスク | Task 投入と状況把握 | 投入(idempotencyKey) | `/api/dev/tasks` `/api/runs` |
-| 開発目標 | Goal の作成・計画承認・中止 | 承認 / 中止(理由必須) | `/api/selfdev/goals` |
-| order | 継続ループの周回確認 | 停止要求 | `/api/selfdev/orders` `…/cycles` |
-| Run 詳細 | 1 Run の追跡 | Hold / Cancel / 解放(理由必須) | `/api/runs/{id}` `…/operations` |
-| 承認 | 人の承認が要る操作のキュー | 承認 / 却下 | approvals |
-| 予算 | 支出の把握と例外処理 | 未確定予約の解除(理由必須) | `/api/admin/budget/*` |
-| 担当 | 役割・トークン管理 | 追加 / 失効 | `/api/selfdev/assignees` |
+| ホーム | 今すぐ対処すべきものを、プロジェクト別に | 該当プロジェクトのページへ | 各プロジェクトの approvals・dashboard |
+| プロジェクト一覧 | 入口。作成と要約 | 開く・作成 | `/api/projects`、要約(approvals・dashboard) |
+| ダッシュボード | 1 プロジェクトの状態 | リポジトリの対応・振り分け(運用者) | `/api/projects/{id}/dashboard`、`…/repos` |
+| タスク | このプロジェクトの Run と投入 | 投入(自己開発は このプロジェクトに入る) | `/api/projects/{id}/...` は無いので `GET /api/runs?projectId=`、`POST /api/selfdev/tasks` |
+| 開発目標 | Goal の作成・計画承認・中止 | 投入・承認・中止(理由必須) | `/api/projects/{id}/tasks`(別名)、`POST /api/projects/{id}/tasks` |
+| order | 継続ループの周回確認・作成 | 作成・一時停止・停止要求 | `/api/projects/{id}/orders`(別名) |
+| 承認 | 人の承認が要る停止要求 | 承認・却下 | `/api/projects/{id}/approvals?state=PENDING` |
+| 記憶 | selfdev memory の検索と削除 | 検索・削除(理由必須) | `/api/projects/{id}/memory` |
+| 担当(配下) | このプロジェクトのメンバー | 一覧 | `/api/projects/{id}/assignees` |
+| 予算(配下) | 今月の上限と使用量(運用者) | 上限の設定・解除(確認の後) | dashboard の budget、`PUT/DELETE /api/projects/{id}/budget` |
+| 予算・FX(全体) | 全体の予算と為替 | 未確定予約の解除(理由必須) | `/api/admin/budget/*` |
+| 自動化(全体) | 自律運転の状態と操作 | 一時停止・再開・ブレーカー | `/api/selfdev/autopilot` |
+| 担当(全体) | Assignee・トークン | 追加・失効(運用者) | `/api/selfdev/assignees` |
+| Run 詳細 / 目標の詳細 / order の詳細 | 1 件の追跡 | Hold・Cancel・解放、中止、再計画 | `/api/runs/{id}`、`/api/selfdev/goals/{id}`、`/api/selfdev/orders/{id}`(id で読む) |
 
-理由入力ダイアログ(解放・中止・予算解除)は共通コンポーネント 1 つに寄せる(`docs/dashboard-audit.md` 課題 2)。
-プロジェクト詳細の運用者欄にある「今月の予算」(`PUT` / `DELETE /api/projects/{id}/budget`)は、上限の設定と解除を確認の後だけ送る(理由は取らない)。
+- 理由入力ダイアログ(解放・中止・予算解除)は共通コンポーネント 1 つに寄せる(`docs/dashboard-audit.md` 課題 2)。
+- 作成フォーム(開発目標・order・Task の自己開発)の作成先は、そのプロジェクトに固定する。選ばせない。表示だけする。
 
-## 5. 実装への落とし込み(Compose 版が対象)
+## 9. 実装への落とし込み(Compose 版)
 
-1. `Navigation.kt` の `NavDestination` に `group` を追加し、サイドナビを 4 グループ描画へ。`fromRoute` の既定をホームに。
-2. `NavDestination` に `Projects` / `StopRequests` / `Autopilot` / `System` を追加し、`screens/` に対応画面を足す。ハッシュと選択状態の双方向同期を `App.kt` に入れる。
-3. ホームは新規 API を作らず、既存の status・approvals・stop-requests・budget の読み取りを束ねる(`kivra-ui-api` の ReadModel に `HomeSummary` を足す場合は別 PR)。
-4. 旧 `/ui` 側は機能追加せず、Compose 版が同等になった時点で `/ui` を `/ui/compose` へリダイレクトして撤去する。`dashboard-audit.md` の課題(`app.js` 肥大・ダイアログ重複)は撤去で解消する扱いとし、旧版は修正しない。(完了: 旧版の `index.html`、`app.js`、`app.css` とそのテストを削除し、`/ui` と `/ui/` を `/ui/compose` への転送にした)
-5. 段階: ① ナビ再編 → ② ホーム → ③ 検索(クライアント側絞り込み。結果は詳細画面へ遷移。Run・Goal・order の読み取り詳細とパンくずは Compose 版に実装済み) → ④ 旧 `/ui` 撤去(完了)。
+- `Navigation.kt`: `NavDestination` は全体(`globalPages`)とプロジェクト配下(`projectPages`)に分ける。`sidebarSections(projectId, projectName)` が 2 層のサイドナビを作る。
+- `Route.kt`: `Route.Page`(全体)、`Route.ProjectPage`(配下)、`Route.Legacy`(旧い一覧の中間状態)、`Route.ProjectChooser`(置き換えの結果、決まらないとき)、詳細(`RunDetail` `GoalDetail` `OrderDetail` `OrderCycles`、`projectId` は null 可)、`Route.Invalid`。純粋関数: `parseRoute` / `toHash` / `resolveLegacy` / `withProjectOf` / `inProjectContext` / `breadcrumbs`。
+- `App.kt`: 2 層のサイドナビ、今いるプロジェクトの切替、旧い一覧の置き換え(`LaunchedEffect`)、最後に選んだプロジェクトの保存(`localStorage`、読めなければ無視)。
+- 件数の判定は `ProjectSummaryRules.kt`(純粋)。読み込みは `screens/ProjectSummary.kt`。
+- サーバーの API は変えない。既存の `/api/projects/{id}/...` と、`GET /api/runs?projectId=`・`GET /api/admin/runs?projectId=`(既存の projectId フィルタ)を使う。
 
-## 6. 未決事項
+## 10. 判断した点と未決事項
 
-- ~~旧 `/ui` の撤去条件~~(解決: 撤去済み。撤去は Compose 版の機能移植の完了後に行った。承認・予算解除・解放などの理由必須ダイアログも Compose 版に移植済み)。
-- 「システム」画面は metrics リンクだけなら独立画面にせず、フッターで足りるか。
-- Run を独立項目にするか、タスク配下に含めるか。
+判断した点(この改訂で決めたこと):
+
+1. 「担当」は全体と配下の両方に置く(同じ `NavDestination.Assignees`。配下は `projectId` で絞る)。全体のトークン管理を残すため。
+2. `#/budget` は全体のまま(旧版の意味を変えない)。プロジェクトの予算は `#/projects/<id>/budget` の独立したページにした(旧版のダッシュボードへの置き換えは、ユーザーの決定「予算もプロジェクトのページ」により取り下げ)。
+3. 詳細 URL(Run・開発目標・order)は、プロジェクトを持つ形(`#/projects/<id>/…`)と、持たない旧い形の両方を解釈する。画面から開くときは、今のプロジェクトを引き継ぐ。旧い詳細は URL を変えない。
+4. 旧い一覧の置き換えは、最後に選んだプロジェクト → 1 つだけのプロジェクト → プロジェクト一覧 の順。最後に選んだプロジェクトは端末ごとの記憶(サーバーには持たない)。
+5. ホームの件数は、プロジェクトごとの要約を足したもの(新しい API は足さない)。全体の予算(運用者)はホームに出さず、全体の「予算・FX」にだけ置く。
+6. タスクの投入で「シミュレーション」は、プロジェクトに属さないまま残す(旧 UI の既存の動作を変えない)。自己開発はプロジェクトに入る。
+7. `project_members` の画面(メンバーの登録)は、ダッシュボードの運用者欄に残す(担当のページは一覧)。
+
+未決事項(後続):
+
+- 一覧 API(`GET /api/projects`)を、メンバーのプロジェクトだけに絞るか(§7)。サーバー変更が要るため、この改訂では行わない。
+- 旧い詳細(`#/goals/<id>` など)を、開いたときに所属のプロジェクトの URL へ置き換えるか。今は URL を変えない。
+- 「システム」画面(health・metrics のリンク)は、フッターで足りるか。
+- 未分類(`project_id` が NULL の Run・目標)を、どこに出すか。旧 UI の未分類の一覧は旧 UI にだけある。

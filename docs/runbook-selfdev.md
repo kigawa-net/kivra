@@ -710,9 +710,9 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 
 **画面(`/ui`)**
 
-- 左のプロジェクトを選ぶと、そのプロジェクトのページの URL になる。`#/projects/<ID>/tasks`、`#/projects/<ID>/goals`、`#/projects/<ID>/orders`、`#/projects/<ID>/approvals`、`#/projects/<ID>/memory`、`#/projects/<ID>/assignees`、`#/projects/<ID>/dashboard`。今いるページは、プロジェクトを変えても同じページのまま開く。
-- ヘッダのタブ(タスク・開発目標・order・承認・記憶・担当)は、選択中のプロジェクトのページへのリンクになる。予算のタブは、プロジェクトの予算があるダッシュボードへのリンクになる(予算はダッシュボードの「今月の予算(運用者のみ)」にある)。
-- `#/projects/<ID>/budget` は、ダッシュボードに置き換えられる(予算はダッシュボードにある)。
+- 入口はプロジェクト一覧(`#/projects`)。プロジェクトを選ぶと、そのプロジェクトのページの URL になる。`#/projects/<ID>/dashboard`、`…/tasks`、`…/goals`、`…/orders`、`…/approvals`、`…/memory`、`…/assignees`、`…/budget`(予算は運用者だけ)。Run・開発目標・order の詳細は `#/projects/<ID>/runs/<id>` などになる(改訂 2。docs/design/16-site-structure.md)。
+- 左のナビは 2 層: プロジェクトを選んでいるときは、そのプロジェクトのページの節と、最後の「全体」の節(予算・FX、自動化、担当)。ヘッダのプロジェクトの切替は、今の画面と同じ種類の画面を別のプロジェクトで開く。
+- 旧 URL(`#/goals` など、プロジェクトを持たない一覧)は、最後に選んだプロジェクト(この端末の記憶)→ プロジェクトが 1 つだけならそれ → それ以外はプロジェクト一覧 の順で、プロジェクトの配下の URL に置き換わる。`#/budget`・`#/autopilot`・`#/assignees` は全体のまま。
 - 「未分類」は従来どおり `#/goals` などの旧ページを使い、旧ルートに `?projectId=unassigned` を付けて読む。「すべて」は旧ページのまま、絞り込みなし。
 - 旧ハッシュ(`#/goals` など)は、選択中のプロジェクトがあればそのプロジェクトの行を、なければ従来どおりの全件を表示する。ブックマークはそのまま開ける。
 - 戻る・進むは、ブラウザの履歴のとおりに動く。

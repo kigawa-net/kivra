@@ -2,11 +2,9 @@ package net.kigawa.kivra.ui
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
-import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 class RouteTest {
-
     @Test
     fun emptyAndRootHashAreHome() {
         assertEquals(Route.Page(NavDestination.Home), parseRoute(""))
@@ -15,16 +13,11 @@ class RouteTest {
     }
 
     @Test
-    fun listRoutesKeepTheirNames() {
-        assertEquals(Route.Page(NavDestination.Tasks), parseRoute("#/tasks"))
-        assertEquals(Route.Page(NavDestination.Goals), parseRoute("#/goals"))
-        assertEquals(Route.Page(NavDestination.Orders), parseRoute("#/orders"))
-        assertEquals(Route.Page(NavDestination.Approvals), parseRoute("#/approvals"))
+    fun globalListRoutesKeepTheirNames() {
+        assertEquals(Route.Page(NavDestination.Projects), parseRoute("#/projects"))
         assertEquals(Route.Page(NavDestination.Budget), parseRoute("#/budget"))
-        assertEquals(Route.Page(NavDestination.Memory), parseRoute("#/memory"))
+        assertEquals(Route.Page(NavDestination.Autopilot), parseRoute("#/autopilot"))
         assertEquals(Route.Page(NavDestination.Assignees), parseRoute("#/assignees"))
-        // The run list lives inside the task screen.
-        assertEquals(Route.Page(NavDestination.Tasks), parseRoute("#/runs"))
     }
 
     @Test
@@ -33,43 +26,40 @@ class RouteTest {
     }
 
     @Test
-    fun detailRoutesParseTheirIds() {
-        assertEquals(Route.RunDetail("run-1"), parseRoute("#/runs/run-1"))
-        assertEquals(Route.GoalDetail("goal-1"), parseRoute("#/goals/goal-1"))
-        assertEquals(Route.OrderDetail("ord-1"), parseRoute("#/orders/ord-1"))
-        assertEquals(Route.OrderCycles("ord-1"), parseRoute("#/orders/ord-1/cycles"))
+    fun detailRoutesWithoutAProjectParseTheirIds() {
+        assertEquals(Route.RunDetail("r1"), parseRoute("#/runs/r1"))
+        assertEquals(Route.GoalDetail("g1"), parseRoute("#/goals/g1"))
+        assertEquals(Route.OrderDetail("o1"), parseRoute("#/orders/o1"))
+        assertEquals(Route.OrderCycles("o1"), parseRoute("#/orders/o1/cycles"))
     }
 
     @Test
     fun queryStringIsIgnored() {
-        assertEquals(Route.RunDetail("run-1"), parseRoute("#/runs/run-1?scope=all"))
-        assertEquals(Route.Page(NavDestination.Orders), parseRoute("#/orders?project=p1"))
+        assertEquals(Route.GoalDetail("g1"), parseRoute("#/goals/g1?x=1"))
     }
 
     @Test
     fun percentEncodedIdIsDecoded() {
-        assertEquals(Route.GoalDetail("a b/c"), parseRoute("#/goals/a%20b%2Fc"))
-        assertEquals(Route.GoalDetail("目標"), parseRoute("#/goals/%E7%9B%AE%E6%A8%99"))
+        assertEquals(Route.GoalDetail("a b"), parseRoute("#/goals/a%20b"))
     }
 
     @Test
     fun brokenEncodingOrExtraSegmentIsInvalid() {
-        assertIs<Route.Invalid>(parseRoute("#/goals/%ZZ"))
-        assertIs<Route.Invalid>(parseRoute("#/goals/%4"))
-        assertIs<Route.Invalid>(parseRoute("#/orders/ord-1/unknown"))
-        assertIs<Route.Invalid>(parseRoute("#/runs/run-1/extra/more"))
+        assertTrue(parseRoute("#/goals/%ZZ") is Route.Invalid)
+        assertTrue(parseRoute("#/goals/g1/extra") is Route.Invalid)
+        assertTrue(parseRoute("#/orders/o1/cycles/x") is Route.Invalid)
     }
 
     @Test
     fun toHashAndParseRouteRoundTrip() {
         val routes = listOf(
             Route.Page(NavDestination.Home),
-            Route.Page(NavDestination.Tasks),
-            Route.Page(NavDestination.Assignees),
-            Route.RunDetail("run 1/x"),
-            Route.GoalDetail("目標-1"),
-            Route.OrderDetail("ord-1"),
-            Route.OrderCycles("ord-1"),
+            Route.Page(NavDestination.Projects),
+            Route.Page(NavDestination.Budget),
+            Route.RunDetail("r 1"),
+            Route.GoalDetail("g/1"),
+            Route.OrderDetail("o1"),
+            Route.OrderCycles("o1"),
         )
         for (route in routes) {
             assertEquals(route, parseRoute(route.toHash()), "round trip of $route")
@@ -79,46 +69,31 @@ class RouteTest {
     @Test
     fun toHashUsesTheDesignFormat() {
         assertEquals("#/", Route.Page(NavDestination.Home).toHash())
-        assertEquals("#/tasks", Route.Page(NavDestination.Tasks).toHash())
-        assertEquals("#/runs/run-1", Route.RunDetail("run-1").toHash())
-        assertEquals("#/goals/goal-1", Route.GoalDetail("goal-1").toHash())
-        assertEquals("#/orders/ord-1", Route.OrderDetail("ord-1").toHash())
-        assertEquals("#/orders/ord-1/cycles", Route.OrderCycles("ord-1").toHash())
-        assertEquals("#/goals/a%20b%2Fc", Route.GoalDetail("a b/c").toHash())
+        assertEquals("#/budget", Route.Page(NavDestination.Budget).toHash())
+        assertEquals("#/projects", Route.Page(NavDestination.Projects).toHash())
+        assertEquals("#/goals/g%2F1", Route.GoalDetail("g/1").toHash())
+        assertEquals("#/orders/o1/cycles", Route.OrderCycles("o1").toHash())
     }
 
     @Test
-    fun navBelongsToTheListItem() {
-        assertEquals(NavDestination.Tasks, Route.RunDetail("r").nav)
-        assertEquals(NavDestination.Goals, Route.GoalDetail("g").nav)
-        assertEquals(NavDestination.Orders, Route.OrderDetail("o").nav)
-        assertEquals(NavDestination.Orders, Route.OrderCycles("o").nav)
-        assertNull(Route.Invalid("#/x/y/z").nav)
+    fun breadcrumbOfAGlobalPageIsTheGroupAndThePage() {
+        assertEquals(listOf(Crumb("全体", null), Crumb("予算・FX", null)), Route.Page(NavDestination.Budget).breadcrumbs())
+        assertEquals(listOf(Crumb("プロジェクト", null)), Route.Page(NavDestination.Projects).breadcrumbs())
+        assertTrue(Route.Page(NavDestination.Home).breadcrumbs().isEmpty())
     }
 
     @Test
-    fun breadcrumbForOrderCyclesIsGroupListDetailCycles() {
-        val crumbs = Route.OrderCycles("ord-1").breadcrumbs()
-        assertEquals(
-            listOf("作業", "order", "ord-1", "cycles"),
-            crumbs.map { it.label },
-        )
-        // Each element except the current one leads somewhere.
-        assertEquals(Route.Page(NavDestination.Tasks), crumbs[0].route)
-        assertEquals(Route.Page(NavDestination.Orders), crumbs[1].route)
-        assertEquals(Route.OrderDetail("ord-1"), crumbs[2].route)
-        assertNull(crumbs[3].route)
+    fun breadcrumbOfAProjectlessOrderCyclesIsProjectListDetailCycles() {
+        val crumbs = Route.OrderCycles("o1").breadcrumbs()
+        assertEquals("プロジェクト", crumbs[0].label)
+        assertEquals("order", crumbs[1].label)
+        assertEquals("o1", crumbs[2].label)
+        assertEquals("cycles", crumbs.last().label)
     }
 
     @Test
-    fun breadcrumbForRunDetailEndsWithTheRunId() {
-        val crumbs = Route.RunDetail("run-1").breadcrumbs()
-        assertEquals(listOf("作業", "タスク", "run-1"), crumbs.map { it.label })
-        assertNull(crumbs.last().route)
-    }
-
-    @Test
-    fun homeAndInvalidHaveNoDetailCrumbs() {
-        assertEquals(emptyList(), Route.Invalid("#/x/y/z").breadcrumbs())
+    fun invalidHasNoCrumbsAndNoNav() {
+        assertTrue(Route.Invalid("#/x/y/z/w").breadcrumbs().isEmpty())
+        assertEquals(null, Route.Invalid("#/x").nav)
     }
 }

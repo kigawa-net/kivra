@@ -131,6 +131,9 @@ private suspend fun listMemory(deps: SelfDevMemoryRouteDeps, call: ApplicationCa
         val exists = deps.projects?.projectExistsForPath(pinned) ?: false
         if (!exists) return call.respond(HttpStatusCode.NotFound, MemoryError(PROJECT_NOT_FOUND))
     }
+    // The alias answers 404 for a project the caller may not read (ADR 0022 PR-D3). The role in the project is then checked (READ_TEXT).
+    val scope = deps.guard.readScope(caller.access)
+    if (pinned != null && !scope.sees(pinned)) return call.respond(HttpStatusCode.NotFound, MemoryError(PROJECT_NOT_FOUND))
     if (!deps.permit(call, caller, Permission.READ_TEXT, "memory.list", ACTION_LIST, pinned)) return
     val params = call.request.queryParameters
     val filter = filterOf(
@@ -148,12 +151,13 @@ private suspend fun listMemory(deps: SelfDevMemoryRouteDeps, call: ApplicationCa
         return
     }
     // The project narrowing (ADR 0022 PR-D): absent is every record, as before. A record with no project is `unassigned`.
-    val project = when (val scope = listScopeOf(pinned, params["projectId"])) {
-        is ListScope.Refused -> return call.respond(scope.status, MemoryError(scope.error))
-        is ListScope.Filtered -> scope.filter
+    val project = when (val s = listScopeOf(pinned, params["projectId"])) {
+        is ListScope.Refused -> return call.respond(s.status, MemoryError(s.error))
+        is ListScope.Filtered -> scope.narrow(s.filter)
     }
     val rows = repo.search(filter, limit, offset, project)
     val total = repo.count(filter, project)
+    deps.guard.recordReadShadow(caller.access, rows.map { it.projectId }, "memory.list")
     val audit = repo.auditSummary()
     call.respond(
         MemoryListResponse(

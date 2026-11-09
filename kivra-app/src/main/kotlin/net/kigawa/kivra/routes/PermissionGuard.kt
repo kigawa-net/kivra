@@ -7,7 +7,11 @@ import net.kigawa.kivra.auth.Decision
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.PermissionMode
 import net.kigawa.kivra.auth.PermissionService
+import net.kigawa.kivra.auth.DENY_PROJECT_LOOKUP
 import net.kigawa.kivra.auth.PrincipalAccess
+import net.kigawa.kivra.auth.READ_NOT_MEMBER
+import net.kigawa.kivra.auth.READ_UNASSIGNED
+import net.kigawa.kivra.auth.ReadScope
 import net.kigawa.kivra.auth.Role
 import net.kigawa.kivra.auth.RolesDefault
 import org.slf4j.LoggerFactory
@@ -151,6 +155,36 @@ class PermissionGuard(
         if (humanOnly && access.isAi) return null
         if (service.check(eff, permission) is Decision.Deny) return null
         return service.projectDenial(eff, projectId, permission)
+    }
+
+    /**
+     * What the caller may read of the projects (ADR 0022 PR-D3). All unless the project mode is ENFORCE. A read narrows its list to it, or
+     * answers 404 for a row it does not see.
+     */
+    fun readScope(access: GuardAccess): ReadScope = service.readScope(access.effective)
+
+    /**
+     * SHADOW only (ADR 0022 PR-D3): the rows a read returns that ENFORCE would hide, as fixed codes. [projectIds] are the projects of the rows
+     * (null: a row with no project). It changes no answer. Nothing that identifies a person or a project is logged.
+     */
+    fun recordReadShadow(access: GuardAccess, projectIds: Collection<String?>, route: String, via: String = VIA_REST) {
+        if (service.mode == PermissionMode.OFF || service.projectMode != PermissionMode.SHADOW) return
+        val eff = access.effective
+        val codes: List<String> = when (val scope = service.readsAsEnforce(eff)) {
+            ReadScope.All -> return
+            ReadScope.Refused -> listOf(DENY_PROJECT_LOOKUP)
+            is ReadScope.Members -> buildList {
+                if (projectIds.any { it == null }) add(READ_UNASSIGNED)
+                if (projectIds.any { it != null && it !in scope.projectIds }) add(READ_NOT_MEMBER)
+            }
+        }
+        for (code in codes) {
+            throttled("read|$code|${eff.source}|$route|$via")?.let {
+                log.info(
+                    "project read shadow: wouldHide code=$code source=${eff.source} role=${eff.role ?: "NONE"} route=$route via=$via suppressed=$it",
+                )
+            }
+        }
     }
 
     /** One call for a caller that has no [GuardAccess] yet. */

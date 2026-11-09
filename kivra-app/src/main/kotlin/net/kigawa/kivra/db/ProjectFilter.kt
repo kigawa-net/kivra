@@ -6,6 +6,7 @@ import org.jetbrains.exposed.sql.Column
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.isNull
 import org.jetbrains.exposed.sql.transactions.transaction
 
@@ -24,11 +25,18 @@ sealed interface ProjectFilter {
     data object Unassigned : ProjectFilter
     data class Only(val projectId: String) : ProjectFilter
 
+    /**
+     * The rows of any of [projectIds] (ADR 0022 PR-D3: the projects a caller is a member of). A row with no project is never in it, and an
+     * empty set is no row at all. The read scope narrows a list to this in SQL, before the list's limit.
+     */
+    data class Within(val projectIds: Set<String>) : ProjectFilter
+
     /** The Exposed condition on [column] (a nullable project id column), or null for [All]. */
     fun condition(column: Column<String?>): Op<Boolean>? = when (this) {
         All -> null
         Unassigned -> column.isNull()
         is Only -> column eq projectId
+        is Within -> if (projectIds.isEmpty()) Op.FALSE else column inList projectIds
     }
 
     /** The SQL condition on [column] as an `AND` clause and its parameters, for a raw query. Empty for [All]. */
@@ -36,6 +44,9 @@ sealed interface ProjectFilter {
         All -> "" to emptyList()
         Unassigned -> " AND $column IS NULL" to emptyList()
         is Only -> " AND $column = ?" to listOf(projectId)
+        is Within ->
+            if (projectIds.isEmpty()) " AND 1 = 0" to emptyList()
+            else " AND $column IN (${projectIds.joinToString { "?" }})" to projectIds.toList()
     }
 }
 
@@ -48,5 +59,9 @@ class ProjectMemberStore(private val database: Database) : ProjectMemberLookup {
         execQuery("SELECT role FROM project_members WHERE project_id = ? AND assignee_id = ?", projectId, assigneeId) { it.getString(1) }
             .firstOrNull()
             ?.let { Role.valueOf(it) }
+    }
+
+    override fun projectsOf(assigneeId: String): Set<String> = transaction(database) {
+        execQuery("SELECT project_id FROM project_members WHERE assignee_id = ?", assigneeId) { it.getString(1) }.toSet()
     }
 }

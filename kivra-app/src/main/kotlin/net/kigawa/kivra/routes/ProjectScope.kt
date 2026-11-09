@@ -3,6 +3,7 @@ package net.kigawa.kivra.routes
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.path
+import net.kigawa.kivra.auth.ReadScope
 import net.kigawa.kivra.db.ProjectFilter
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.UNASSIGNED_PROJECT_ID
@@ -94,6 +95,21 @@ internal fun listScopeOf(pinned: String?, query: String?): ListScope {
     }
     if (!query.isNullOrBlank() && query != pinned) return ListScope.Refused(HttpStatusCode.BadRequest, PROJECT_MISMATCH)
     return ListScope.Filtered(ProjectFilter.Only(pinned))
+}
+
+/**
+ * The narrowing of a list under [this] read scope (ADR 0022 PR-D3): the filter the list runs with, so the rows it may not read are left out in
+ * SQL, before its limit. A refused read reads nothing. [ReadScope.All] keeps the filter as it is (the list as before).
+ */
+internal fun ReadScope.narrow(filter: ProjectFilter): ProjectFilter = when (this) {
+    ReadScope.All -> filter
+    ReadScope.Refused -> ProjectFilter.Within(emptySet())
+    is ReadScope.Members -> when (filter) {
+        ProjectFilter.All -> ProjectFilter.Within(projectIds)
+        ProjectFilter.Unassigned -> ProjectFilter.Within(emptySet())
+        is ProjectFilter.Only -> ProjectFilter.Within(projectIds.filter { it == filter.projectId }.toSet())
+        is ProjectFilter.Within -> ProjectFilter.Within(filter.projectIds intersect projectIds)
+    }
 }
 
 /**

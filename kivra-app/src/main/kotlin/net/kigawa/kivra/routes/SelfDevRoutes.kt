@@ -161,7 +161,10 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
         }
         val id = call.pathParam("id")?.takeIf { RUN_ID_SHAPE.matches(it) }
         val run = id?.let { deps.runs.getTask(RunId(it), principal) }?.takeIf { it.taskId.startsWith(SELF_DEV_TASK_PREFIX) }
-        if (run == null) {
+        // A run of a project the caller may not read is the same 404 as a missing one (ADR 0022 PR-D3).
+        val access = deps.guard.resolve(principal, legacyAdmin = true)
+        if (run != null) deps.guard.recordReadShadow(access, listOf(run.projectId), "selfdev_run_get")
+        if (run == null || !deps.guard.readScope(access).sees(run.projectId)) {
             // Another caller's run and a missing run are the same 404.
             call.respond(HttpStatusCode.NotFound, SelfDevError("run not found"))
             return@get
@@ -187,7 +190,11 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
         }
         val project = projectFilterOf(call.request.queryParameters["projectId"])
             ?: return@get call.respond(HttpStatusCode.BadRequest, SelfDevError(PROJECT_FILTER_INVALID))
-        call.respond(deps.runs.listTasks(principal, limit = LIST_LIMIT, selfDev = true, project = project).map { it.toSelfDevResponse() })
+        // The rows the caller may read (ADR 0022 PR-D3): narrowed in SQL, before the limit.
+        val access = deps.guard.resolve(principal, legacyAdmin = true)
+        val rows = deps.runs.listTasks(principal, limit = LIST_LIMIT, selfDev = true, project = deps.guard.readScope(access).narrow(project))
+        deps.guard.recordReadShadow(access, rows.map { it.projectId }, "selfdev_run_list")
+        call.respond(rows.map { it.toSelfDevResponse() })
     }
 }
 

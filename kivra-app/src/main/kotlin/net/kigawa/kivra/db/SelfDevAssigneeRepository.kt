@@ -128,6 +128,11 @@ class SelfDevAssigneeRepository(
             is ProjectFilter.Only ->
                 " WHERE EXISTS (SELECT 1 FROM project_members pm WHERE pm.assignee_id = selfdev_assignees.assignee_id AND pm.project_id = ?)" to
                     listOf<Any?>(project.projectId)
+            // The assignees that are members of any of the projects (ADR 0022 PR-D3). Not used by a list today: the assignee list is the operator's.
+            is ProjectFilter.Within ->
+                if (project.projectIds.isEmpty()) " WHERE 1 = 0" to emptyList<Any?>()
+                else " WHERE EXISTS (SELECT 1 FROM project_members pm WHERE pm.assignee_id = selfdev_assignees.assignee_id AND pm.project_id IN (" +
+                    "${project.projectIds.joinToString { "?" }}))" to project.projectIds.toList<Any?>()
         }
         execQuery("SELECT $COLUMNS FROM selfdev_assignees$where ORDER BY created_at, assignee_id", *params.toTypedArray()) { it.toAssignee() }
             .map { summaryIn(it, at) }

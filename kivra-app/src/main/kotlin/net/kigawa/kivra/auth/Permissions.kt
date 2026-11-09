@@ -93,6 +93,30 @@ interface AssigneeLookup {
 interface ProjectMemberLookup {
     /** The role of [assigneeId] in [projectId]; null when it is not a member. May throw; the service then denies (fail closed). */
     fun roleIn(projectId: String, assigneeId: String): Role?
+
+    /** The projects [assigneeId] is a member of (ADR 0022 PR-D3, the read scope). May throw; the service then refuses the read (fail closed). */
+    fun projectsOf(assigneeId: String): Set<String>
+}
+
+/**
+ * What a read may see of the projects (ADR 0022 PR-D3). Only ENFORCE narrows: in OFF and SHADOW every read is [All].
+ */
+sealed interface ReadScope {
+    /** Every row, the rows with no project included. The caller is the global ADMIN, or the project check is not ENFORCE. */
+    data object All : ReadScope
+
+    /** ENFORCE: the rows of these projects only. A row with no project is not visible. */
+    data class Members(val projectIds: Set<String>) : ReadScope
+
+    /** ENFORCE and the membership store failed: nothing is visible (fail closed). */
+    data object Refused : ReadScope
+
+    /** Whether a row of [projectId] (null: a row with no project) is visible. */
+    fun sees(projectId: String?): Boolean = when (this) {
+        All -> true
+        is Members -> projectId != null && projectId in projectIds
+        Refused -> false
+    }
 }
 
 enum class AccessSource {
@@ -151,6 +175,12 @@ const val DENY_PROJECT_PERMISSION = "PROJECT_PERMISSION_DENIED"
 
 /** The project check: the membership store failed. Fail closed in ENFORCE. */
 const val DENY_PROJECT_LOOKUP = "PROJECT_LOOKUP_FAILED"
+
+/** The read check (ADR 0022 PR-D3), SHADOW only: a read returns a row of a project the caller is not a member of. Logged, never refused. */
+const val READ_NOT_MEMBER = "PROJECT_READ_NOT_MEMBER"
+
+/** The read check (ADR 0022 PR-D3), SHADOW only: a read returns a row with no project, which a non-global-ADMIN caller would not see in ENFORCE. */
+const val READ_UNASSIGNED = "PROJECT_READ_UNASSIGNED"
 
 class PermissionService(
     val mode: PermissionMode,
@@ -228,6 +258,29 @@ class PermissionService(
         }
         val role = found ?: return DENY_NOT_MEMBER
         return if (permission in ROLE_PERMISSIONS.getValue(role)) null else DENY_PROJECT_PERMISSION
+    }
+
+    /**
+     * What [access] may read of the projects (ADR 0022 PR-D3): [ReadScope.All] unless the project mode is ENFORCE, in which case it is
+     * [readsAsEnforce]. Reads nothing when the project mode is not ENFORCE.
+     */
+    fun readScope(access: PrincipalAccess): ReadScope =
+        if (mode == PermissionMode.OFF || projectMode != PermissionMode.ENFORCE) ReadScope.All else readsAsEnforce(access)
+
+    /**
+     * What [access] may read under ENFORCE, whatever the mode (SHADOW uses it to record what ENFORCE would hide). The global ADMIN (the
+     * assignee role ADMIN, as in [projectDenial]) reads every row. Any other caller reads the rows of the projects it is a member of, and a
+     * caller with no assignee reads none. A failed store is [ReadScope.Refused].
+     */
+    fun readsAsEnforce(access: PrincipalAccess): ReadScope {
+        if (access.role == Role.ADMIN && access.source == AccessSource.ASSIGNEE) return ReadScope.All
+        val assigneeId = access.assigneeId ?: return ReadScope.Members(emptySet())
+        val store = projects ?: return ReadScope.Members(emptySet())
+        return try {
+            ReadScope.Members(store.projectsOf(assigneeId))
+        } catch (_: Exception) {
+            ReadScope.Refused
+        }
     }
 
     /** [scopeOk]: the MCP token scope allows this operation (the caller computes it). The result is the intersection. */

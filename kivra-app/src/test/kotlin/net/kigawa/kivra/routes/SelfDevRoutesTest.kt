@@ -235,4 +235,23 @@ class SelfDevRoutesTest {
             assertEquals(null, db.runs.listTasks("alice", selfDev = true).single().taskBody)
         }
     }
+
+    /** The `{id}` of a run route is the path's, even when `?id=` names another run (the path shadowing). */
+    @Test
+    fun `the run routes answer for the path's run, not for a same-named query`() = TestDb().use { db ->
+        testApplication {
+            setUp(db, maxActive = 10)
+            val a = submit("alice", "shadow-a").json()["runId"]!!.jsonPrimitive.content
+            val b = submit("alice", "shadow-b").json()["runId"]!!.jsonPrimitive.content
+            assertTrue(a != b)
+
+            val selfDev = client.get("/api/selfdev/runs/$a?id=$b") { header("X-Test-Principal", "alice") }
+            assertEquals(HttpStatusCode.OK, selfDev.status)
+            assertEquals(a, selfDev.json()["runId"]!!.jsonPrimitive.content)
+
+            val taskApi = client.get("/api/runs/$a?id=$b") { header("X-Test-Principal", "alice") }
+            assertEquals(HttpStatusCode.OK, taskApi.status)
+            assertEquals(a, taskApi.json()["runId"]!!.jsonPrimitive.content)
+        }
+    }
 }

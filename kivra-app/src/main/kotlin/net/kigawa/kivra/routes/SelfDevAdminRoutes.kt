@@ -62,7 +62,7 @@ internal fun Route.configureSelfDevAdminRoutes(
         }
         if (!call.requireJsonSameOrigin()) return@post
         val reason = call.readReleaseReason() ?: return@post
-        val id = call.parameters["id"]?.takeIf { ADMIN_RUN_ID_SHAPE.matches(it) }
+        val id = call.pathParam("id")?.takeIf { ADMIN_RUN_ID_SHAPE.matches(it) }
         if (id == null) {
             call.respond(HttpStatusCode.NotFound, SelfDevAdminError("run not found"))
             return@post
@@ -88,7 +88,7 @@ internal fun Route.configureSelfDevAdminRoutes(
         }
         if (!call.requireJsonSameOrigin()) return@post
         val reason = call.readReleaseReason() ?: return@post
-        val id = call.parameters["id"]?.takeIf { ADMIN_RUN_ID_SHAPE.matches(it) }
+        val id = call.pathParam("id")?.takeIf { ADMIN_RUN_ID_SHAPE.matches(it) }
         if (id == null) {
             call.respond(HttpStatusCode.NotFound, SelfDevAdminError("run not found"))
             return@post

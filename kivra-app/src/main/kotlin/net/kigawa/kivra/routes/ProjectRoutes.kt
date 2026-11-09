@@ -131,7 +131,7 @@ internal fun Route.configureProjectRoutes(
         get {
             val principal = call.principalOr401() ?: return@get
             if (!call.permitOr403(principal, Permission.READ, "project_repos_list")) return@get
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@get call.respond(HttpStatusCode.NotFound)
             if (projectRepo.get(projectId) == null) return@get call.respond(HttpStatusCode.NotFound)
             call.respond(projectRepo.listRepos(projectId).map { ProjectRepoResponse(repoKey = it) })
@@ -140,7 +140,7 @@ internal fun Route.configureProjectRoutes(
             val principal = call.principalOr401() ?: return@put
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_repo_add")) return@put
             if (!call.requireJsonSameOrigin()) return@put
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@put call.respond(HttpStatusCode.NotFound)
             val input = call.receive<ProjectRepoRequest>()
             val repoKey = parseRepoKey(input.repoKey)
@@ -158,7 +158,7 @@ internal fun Route.configureProjectRoutes(
             val principal = call.principalOr401() ?: return@delete
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_repo_remove")) return@delete
             if (!call.requireJsonSameOrigin()) return@delete
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@delete call.respond(HttpStatusCode.NotFound)
             // The repository is named in the query (`?repoKey=owner/name`), so the path stays one segment.
             val repoKey = call.request.queryParameters["repoKey"]?.let { parseRepoKey(it) }
@@ -178,7 +178,7 @@ internal fun Route.configureProjectRoutes(
         get {
             val principal = call.principalOr401() ?: return@get
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_members_list")) return@get
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@get call.respond(HttpStatusCode.NotFound)
             if (!members.projectExists(projectId)) return@get call.respond(HttpStatusCode.NotFound)
             call.respond(members.list(projectId).map { it.toResponse() })
@@ -193,7 +193,7 @@ internal fun Route.configureProjectRoutes(
                 "false" -> false
                 else -> return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_dry_run"))
             }
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@post call.respond(HttpStatusCode.NotFound)
             val input = call.receive<ProjectMemberImportRequest>()
             if (input.role !in PROJECT_MEMBER_ROLES) return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_role"))
@@ -213,9 +213,9 @@ internal fun Route.configureProjectRoutes(
                 val principal = call.principalOr401() ?: return@put
                 if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_member_put")) return@put
                 if (!call.requireJsonSameOrigin()) return@put
-                val projectId = call.parameters["projectId"]
+                val projectId = call.pathParam("projectId")
                     ?: return@put call.respond(HttpStatusCode.NotFound)
-                val assigneeId = call.parameters["assigneeId"]
+                val assigneeId = call.pathParam("assigneeId")
                     ?: return@put call.respond(HttpStatusCode.NotFound)
                 val input = call.receive<ProjectMemberRequest>()
                 if (input.role !in PROJECT_MEMBER_ROLES) return@put call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_role"))
@@ -244,9 +244,9 @@ internal fun Route.configureProjectRoutes(
                 val principal = call.principalOr401() ?: return@delete
                 if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_member_remove")) return@delete
                 if (!call.requireJsonSameOrigin()) return@delete
-                val projectId = call.parameters["projectId"]
+                val projectId = call.pathParam("projectId")
                     ?: return@delete call.respond(HttpStatusCode.NotFound)
-                val assigneeId = call.parameters["assigneeId"]
+                val assigneeId = call.pathParam("assigneeId")
                     ?: return@delete call.respond(HttpStatusCode.NotFound)
                 when (members.remove(projectId, assigneeId)) {
                     MemberRemoveResult.REMOVED -> {
@@ -269,7 +269,7 @@ internal fun Route.configureProjectRoutes(
         get {
             val principal = call.principalOr401() ?: return@get
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_budget_get")) return@get
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@get call.respond(HttpStatusCode.NotFound)
             if (projectRepo.get(projectId) == null) return@get call.respond(HttpStatusCode.NotFound)
             call.respond(budgets.projectBudget(projectId).toResponse())
@@ -279,7 +279,7 @@ internal fun Route.configureProjectRoutes(
             val principal = call.principalOr401() ?: return@put
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_budget_put")) return@put
             if (!call.requireJsonSameOrigin()) return@put
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@put call.respond(HttpStatusCode.NotFound)
             val input = call.parseBudgetRequest()
                 ?: return@put call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_budget"))
@@ -293,7 +293,7 @@ internal fun Route.configureProjectRoutes(
             val principal = call.principalOr401() ?: return@delete
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_budget_delete")) return@delete
             if (!call.requireJsonSameOrigin()) return@delete
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@delete call.respond(HttpStatusCode.NotFound)
             if (budgets.clearProjectBudget(projectId) == null) {
                 call.respond(HttpStatusCode.NotFound)
@@ -308,7 +308,7 @@ internal fun Route.configureProjectRoutes(
         get("dashboard") {
             val principal = call.principalOr401() ?: return@get
             if (!call.permitOr403(principal, Permission.READ, "project_dashboard")) return@get
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@get call.respond(HttpStatusCode.NotFound)
             val project = projectRepo.get(projectId)
                 ?: return@get call.respond(HttpStatusCode.NotFound)
@@ -334,7 +334,7 @@ internal fun Route.configureProjectRoutes(
         get {
             val principal = call.principalOr401() ?: return@get
             if (!call.permitOr403(principal, Permission.READ, "project_get")) return@get
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@get call.respond(HttpStatusCode.NotFound)
             val project = projectRepo.get(projectId)
             if (project == null) {
@@ -347,7 +347,7 @@ internal fun Route.configureProjectRoutes(
             val principal = call.principalOr401() ?: return@put
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_update")) return@put
             if (!call.requireJsonSameOrigin()) return@put
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@put call.respond(HttpStatusCode.NotFound)
             val input = call.receive<ProjectUpdateRequest>()
             val project = projectRepo.update(projectId, input.name, input.description)
@@ -361,7 +361,7 @@ internal fun Route.configureProjectRoutes(
             val principal = call.principalOr401() ?: return@delete
             if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_delete")) return@delete
             if (!call.requireJsonSameOrigin()) return@delete
-            val projectId = call.parameters["projectId"]
+            val projectId = call.pathParam("projectId")
                 ?: return@delete call.respond(HttpStatusCode.NotFound)
             val deleted = projectRepo.delete(projectId)
             if (!deleted) {
@@ -375,7 +375,7 @@ internal fun Route.configureProjectRoutes(
     route("/api/runs/{runId}/project") {
         put {
             val principal = call.principalOr401() ?: return@put
-            val runId = call.parameters["runId"]
+            val runId = call.pathParam("runId")
                 ?: return@put call.respond(HttpStatusCode.NotFound)
             val run = runs.getAnyTask(RunId(runId))
                 ?: return@put call.respond(HttpStatusCode.NotFound)
@@ -398,7 +398,7 @@ internal fun Route.configureProjectRoutes(
         }
         delete {
             val principal = call.principalOr401() ?: return@delete
-            val runId = call.parameters["runId"]
+            val runId = call.pathParam("runId")
                 ?: return@delete call.respond(HttpStatusCode.NotFound)
             val run = runs.getAnyTask(RunId(runId))
                 ?: return@delete call.respond(HttpStatusCode.NotFound)

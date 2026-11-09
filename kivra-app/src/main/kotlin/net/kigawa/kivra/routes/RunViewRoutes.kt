@@ -112,7 +112,7 @@ internal fun Route.configureRunViewRoutes(runs: DevelopmentRunRepository, identi
             call.respond(HttpStatusCode.Forbidden, RunViewError("forbidden"))
             return@get
         }
-        val id = call.parameters["id"]?.takeIf { RUN_ID_SHAPE.matches(it) }
+        val id = call.pathParam("id")?.takeIf { RUN_ID_SHAPE.matches(it) }
         val run = id?.let { runs.getAnyTask(RunId(it)) }
         if (run == null) {
             call.respond(HttpStatusCode.NotFound, RunViewError("run not found"))

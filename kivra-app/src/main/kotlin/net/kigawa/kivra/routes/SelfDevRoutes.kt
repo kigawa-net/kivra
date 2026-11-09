@@ -159,7 +159,7 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
             call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
             return@get
         }
-        val id = call.parameters["id"]?.takeIf { RUN_ID_SHAPE.matches(it) }
+        val id = call.pathParam("id")?.takeIf { RUN_ID_SHAPE.matches(it) }
         val run = id?.let { deps.runs.getTask(RunId(it), principal) }?.takeIf { it.taskId.startsWith(SELF_DEV_TASK_PREFIX) }
         if (run == null) {
             // Another caller's run and a missing run are the same 404.

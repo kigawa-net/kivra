@@ -257,7 +257,7 @@ internal fun Route.configureSelfDevAssigneeRoutes(deps: SelfDevAssigneeRouteDeps
         if (!call.requireJsonSameOrigin()) return@delete
         if (!deps.manageable(call, caller, Permission.ASSIGNEE_MANAGE, write = true)) return@delete
         val id = assigneeIdOf(call)
-        val ref = call.parameters["memberRef"]?.takeIf { REF_SHAPE.matches(it) }
+        val ref = call.pathParam("memberRef")?.takeIf { REF_SHAPE.matches(it) }
         if (!call.readEmptyBody()) return@delete
         if (id == null || ref == null) return@delete call.refuse(HttpStatusCode.NotFound, CODE_NOT_FOUND)
         when (val r = deps.assignees().unbindMemberByRef(id, ref, caller.principal)) {
@@ -311,7 +311,7 @@ internal fun Route.configureSelfDevAssigneeRoutes(deps: SelfDevAssigneeRouteDeps
         if (!call.requireJsonSameOrigin()) return@post
         if (!deps.manageable(call, caller, Permission.ASSIGNEE_MANAGE, write = true)) return@post
         val id = assigneeIdOf(call)
-        val ref = call.parameters["tokenRef"]?.takeIf { REF_SHAPE.matches(it) }
+        val ref = call.pathParam("tokenRef")?.takeIf { REF_SHAPE.matches(it) }
         if (!call.readEmptyBody()) return@post
         if (id == null || ref == null) return@post call.refuse(HttpStatusCode.NotFound, CODE_NOT_FOUND)
         // The token must be one of this assignee's: a ref of another assignee's token is a miss.
@@ -396,7 +396,7 @@ private suspend fun listAssignees(deps: SelfDevAssigneeRouteDeps, call: Applicat
     call.respond(deps.assignees().listSummaries(project).map { it.response() })
 }
 
-private fun assigneeIdOf(call: ApplicationCall): String? = call.parameters["id"]?.takeIf { ASSIGNEE_ID_SHAPE.matches(it) }
+private fun assigneeIdOf(call: ApplicationCall): String? = call.pathParam("id")?.takeIf { ASSIGNEE_ID_SHAPE.matches(it) }
 
 private fun roleOf(name: String): AssigneeRole? = AssigneeRole.entries.firstOrNull { it.name == name }
 

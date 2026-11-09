@@ -65,7 +65,7 @@ internal fun Route.configureDevTaskSubmitRoutes(store: DevTaskStore = DevTaskSto
         call.respond(HttpStatusCode.Accepted, run)
     }
     get("/api/dev/runs/{id}") {
-        val run = call.parameters["id"]?.let(store::get)
+        val run = call.pathParam("id")?.let(store::get)
         if (run == null) call.respond(HttpStatusCode.NotFound, DevTaskError("run not found"))
         else call.respond(run)
     }

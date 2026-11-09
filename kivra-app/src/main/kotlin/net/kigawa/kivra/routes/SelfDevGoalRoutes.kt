@@ -509,7 +509,7 @@ private suspend fun SelfDevGoalRouteDeps.permit(
 private class GoalCaller(val principal: String, val access: GuardAccess)
 
 /** The task id from the path (a ULID shape), or null when it is not a ULID shape. */
-private fun taskIdOf(call: ApplicationCall): String? = call.parameters["id"]?.takeIf { TASK_ID_SHAPE.matches(it) }
+private fun taskIdOf(call: ApplicationCall): String? = call.pathParam("id")?.takeIf { TASK_ID_SHAPE.matches(it) }
 
 /**
  * The project of a task, for the project check (ADR 0022 PR-D). Read only while the project check is on; otherwise nothing is read and the

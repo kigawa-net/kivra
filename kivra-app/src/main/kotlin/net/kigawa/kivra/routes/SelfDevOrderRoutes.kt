@@ -530,9 +530,9 @@ private fun SelfDevOrderRouteDeps.stopCurrentGoal(order: SelfDevOrder) {
     }
 }
 
-private fun orderIdOf(call: ApplicationCall): String? = call.parameters["id"]?.takeIf { ORDER_ID_SHAPE.matches(it) }
+private fun orderIdOf(call: ApplicationCall): String? = call.pathParam("id")?.takeIf { ORDER_ID_SHAPE.matches(it) }
 
-private fun requestIdOf(call: ApplicationCall): String? = call.parameters["id"]?.takeIf { ORDER_ID_SHAPE.matches(it) }
+private fun requestIdOf(call: ApplicationCall): String? = call.pathParam("id")?.takeIf { ORDER_ID_SHAPE.matches(it) }
 
 /** Decodes a strict JSON body or responds 400. */
 private suspend inline fun <reified T> decodeOr(call: ApplicationCall): T? {

@@ -13,6 +13,10 @@ internal external fun currentLocationHash(): String
 @JsFun("(hash) => { if (window.location.hash !== hash) { window.location.hash = hash; } }")
 internal external fun setLocationHash(hash: String)
 
+/** ハッシュを置き換える(履歴に残さない)。旧い形の URL(`#/projects/<id>/budget`)を正しい形へ直すのに使う。 */
+@JsFun("(hash) => { window.location.replace(hash); }")
+internal external fun replaceLocationHash(hash: String)
+
 /** ハッシュ変更(戻る/進む/直接入力)の通知を登録する。登録は一度だけ(KivraApp の初回)。 */
 @JsFun("(listener) => { window.addEventListener('hashchange', () => listener()); }")
 internal external fun addHashChangeListener(listener: () -> Unit)

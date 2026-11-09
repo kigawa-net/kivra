@@ -50,7 +50,8 @@ fun GoalsScreen(selectedProjectId: String? = null, onNavigate: (Route) -> Unit) 
     // 一覧は自律運転が有効なときだけ(旧 UI の plans-section と同じ。無効なら一覧ごと出さず、読みにも行かない)。
     val autopilotOn = LocalAutopilotAvailability.current == AutopilotAvailability.ENABLED
     val loaded = rememberLoad(Pair(selectedProjectId, autopilotOn), reload = listReload) {
-        if (autopilotOn) ApiClient.getGoals() else emptyList()
+        // 選んだプロジェクトの目標だけ(別名ルート)。全体のときは全部。
+        if (autopilotOn) ApiClient.getGoals(selectedProjectId) else emptyList()
     }
     // 投入フォームを出すかの元になる、自律運転の有無と対象リポジトリ。読めない・無効なら何も出さない(旧 UI の goal-section と同じ)。
     val autopilot = rememberLoad(Unit, reload = autopilotReload) { readGoalAutopilot() }

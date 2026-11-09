@@ -7,6 +7,8 @@ package net.kigawa.kivra.ui
  * - `#/runs` は Run 一覧(タスク画面に含まれる)、`#/runs/<id>` は Run 詳細
  * - `#/goals/<id>` は開発目標の詳細、`#/orders/<id>` は order の詳細、`#/orders/<id>/cycles` は order の周の一覧
  * - `#/projects/<id>/dashboard` はプロジェクトのダッシュボード(旧 UI と同じ形)
+ * - `#/projects/<id>/<page>` は選択中のプロジェクトの一覧(page は [projectPages] のいずれか)。ADR 0022 PR-E2 と同じ形。
+ *   `#/projects/<id>/budget` は予算がダッシュボードにあるので、ダッシュボードのルートとして解釈する([canonicalHash] で URL も置き換える)。
  *
  * 解釈と生成は純粋関数([parseRoute] / [toHash])。ブラウザとの同期は呼び出し側(App.kt)が行う。
  */
@@ -41,6 +43,18 @@ sealed interface Route {
         override val nav: NavDestination? get() = NavDestination.Projects
     }
 
+    /**
+     * 選択中のプロジェクトの一覧(`#/projects/<id>/<page>`)。[dest] は [projectPages] のいずれか。
+     * 表示は [Page] と同じ画面に、そのプロジェクトの id を渡す。
+     */
+    data class ProjectPage(val projectId: String, val dest: NavDestination) : Route {
+        init {
+            require(dest in projectPages) { "$dest is not a page under a project" }
+        }
+
+        override val nav: NavDestination? get() = dest
+    }
+
     /** 解釈できないハッシュ(id のパーセント符号化が壊れている等)。画面に「リンクが正しくありません」と出す。 */
     data class Invalid(val hash: String) : Route {
         override val nav: NavDestination? get() = null
@@ -70,9 +84,27 @@ fun parseRoute(hash: String): Route {
         segments.size == 2 && segments[0] == "goals" -> Route.GoalDetail(id)
         segments.size == 2 && segments[0] == "orders" -> Route.OrderDetail(id)
         segments.size == 3 && segments[0] == "orders" && segments[2] == "cycles" -> Route.OrderCycles(id)
-        segments.size == 3 && segments[0] == "projects" && segments[2] == "dashboard" -> Route.ProjectDashboard(id)
+        segments.size == 3 && segments[0] == "projects" -> projectRouteOf(id, segments[2]) ?: Route.Invalid(hash)
         else -> Route.Invalid(hash)
     }
+}
+
+/** プロジェクト配下の項目(`#/projects/<id>/<page>`)として表すもの。予算はダッシュボードにあるので含めない。 */
+val projectPages: Set<NavDestination> = setOf(
+    NavDestination.Tasks,
+    NavDestination.Goals,
+    NavDestination.Orders,
+    NavDestination.Approvals,
+    NavDestination.Memory,
+    NavDestination.Assignees,
+)
+
+/** `#/projects/<id>/<page>` の page を解釈する。知らない page は null(呼び出し側で [Route.Invalid])。 */
+private fun projectRouteOf(projectId: String, page: String): Route? = when (page) {
+    "dashboard", "budget" -> Route.ProjectDashboard(projectId)
+    else -> NavDestination.all.find { it.route == page }
+        ?.takeIf { it in projectPages }
+        ?.let { Route.ProjectPage(projectId, it) }
 }
 
 /** ルートをハッシュ(`#/...`)へ変換する。[parseRoute] と往復で同じルートになる(Home は `#/`)。 */
@@ -83,8 +115,50 @@ fun Route.toHash(): String = when (this) {
     is Route.OrderDetail -> "#/orders/${percentEncode(orderId)}"
     is Route.OrderCycles -> "#/orders/${percentEncode(orderId)}/cycles"
     is Route.ProjectDashboard -> "#/projects/${percentEncode(projectId)}/dashboard"
+    is Route.ProjectPage -> "#/projects/${percentEncode(projectId)}/${dest.route}"
     is Route.Invalid -> "#/"
 }
+
+/**
+ * ブラウザに出すハッシュの正。旧い形の `#/projects/<id>/budget` はダッシュボードのハッシュへ置き換える(旧 UI と同じ)。
+ * それ以外は同じ文字列を返す。id が壊れている場合も同じ文字列(解釈は [Route.Invalid])。
+ */
+fun canonicalHash(hash: String): String {
+    val segments = hash.removePrefix("#").substringBefore('?').trim('/').split('/')
+    if (segments.size == 3 && segments[0] == "projects" && segments[2] == "budget") {
+        val route = parseRoute(hash)
+        if (route is Route.ProjectDashboard) return route.toHash()
+    }
+    return hash
+}
+
+/** 選択中のプロジェクトでこの項目を開くときのルート。項目が [projectPages] なら項目のページ、予算はダッシュボード、それ以外は全体のまま。 */
+fun NavDestination.routeFor(projectId: String?): Route = when {
+    projectId == null -> Route.Page(this)
+    this == NavDestination.Budget -> Route.ProjectDashboard(projectId)
+    this in projectPages -> Route.ProjectPage(projectId, this)
+    else -> Route.Page(this)
+}
+
+/**
+ * プロジェクトの選択を [projectId] に変えたときに開くルート(旧 UI の chooseProjectContext と同じく、今の画面の続きを開く)。
+ * 全体(null)にすると、プロジェクト配下の一覧は全体の一覧へ、ダッシュボードはホームへ戻る。
+ * 詳細は属する一覧へ移す(旧 UI が現在の一覧を開くのと同じ)。
+ */
+fun Route.inProjectContext(projectId: String?): Route = when (this) {
+    is Route.Page -> if (projectId == null) this else dest.routeFor(projectId)
+    is Route.ProjectPage -> dest.routeFor(projectId)
+    is Route.ProjectDashboard -> if (projectId == null) Route.Page(NavDestination.Home) else Route.ProjectDashboard(projectId)
+    else -> nav?.routeFor(projectId) ?: Route.Page(NavDestination.Home)
+}
+
+/** この画面が指しているプロジェクトの id(プロジェクト配下のルートだけ)。全体の画面や詳細は null。 */
+val Route.projectIdOrNull: String?
+    get() = when (this) {
+        is Route.ProjectPage -> projectId
+        is Route.ProjectDashboard -> projectId
+        else -> null
+    }
 
 /**
  * パンくず: 「グループ › 一覧 › 詳細」。グループ見出しは、そのグループの先頭項目へ遷移する。
@@ -98,6 +172,7 @@ fun Route.breadcrumbs(): List<Crumb> {
     val head = listOfNotNull(group)
     return when (this) {
         is Route.Page -> head + Crumb(dest.label, null)
+        is Route.ProjectPage -> head + Crumb(dest.label, null)
         is Route.RunDetail -> head + Crumb(NavDestination.Tasks.label, Route.Page(NavDestination.Tasks)) + Crumb(runId, null)
         is Route.GoalDetail -> head + Crumb(NavDestination.Goals.label, Route.Page(NavDestination.Goals)) + Crumb(taskId, null)
         is Route.OrderDetail -> head + Crumb(NavDestination.Orders.label, Route.Page(NavDestination.Orders)) + Crumb(orderId, null)

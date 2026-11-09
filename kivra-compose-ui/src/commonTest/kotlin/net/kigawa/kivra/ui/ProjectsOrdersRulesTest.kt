@@ -49,6 +49,13 @@ class ProjectsOrdersRulesTest {
     }
 
     @Test
+    fun repoRemoveExplainNamesTheRepoAndKeepsRoutedRows() {
+        val text = projectRepoRemoveExplain("kigawa-net/beta")
+        assertTrue(text.contains("kigawa-net/beta"))
+        assertTrue(text.contains("変わりません"))
+    }
+
+    @Test
     fun repoFailureTextsAreFixedByStatus() {
         assertTrue(projectRepoFailureText(409).contains("既に登録"))
         assertEquals(REPO_INVALID_MESSAGE, projectRepoFailureText(400))

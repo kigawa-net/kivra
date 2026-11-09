@@ -52,6 +52,7 @@ import net.kigawa.kivra.ui.isProjectBudgetBody
 import net.kigawa.kivra.ui.isRepoKeyShape
 import net.kigawa.kivra.ui.projectActivityText
 import net.kigawa.kivra.ui.projectRepoFailureText
+import net.kigawa.kivra.ui.projectRepoRemoveExplain
 import net.kigawa.kivra.ui.projectScopeText
 import net.kigawa.kivra.ui.projectStateRows
 import net.kigawa.kivra.ui.projectTotalText
@@ -178,6 +179,9 @@ private fun ProjectOperatorSection(projectId: String, budget: ApiProjectBudget?,
     var repoInput by remember { mutableStateOf("") }
     var repoBusy by remember { mutableStateOf(false) }
     var repoNotice by remember { mutableStateOf<ActionNotice?>(null) }
+    // 外すの確認の対象の repo(開いている間だけ non-null)と、その失敗の文言(ダイアログの中に出す)。
+    var repoRemoveTarget by remember { mutableStateOf<String?>(null) }
+    var repoRemoveError by remember { mutableStateOf<String?>(null) }
 
     // 確認(dry-run)の結果。実行の対象になる。実行の結果は [backfillShown] に出す。
     var backfillDry by remember { mutableStateOf<ApiBackfillReport?>(null) }
@@ -223,10 +227,11 @@ private fun ProjectOperatorSection(projectId: String, budget: ApiProjectBudget?,
         }
     }
 
+    // 登録の解除は確認ダイアログ(ReasonDialog)から呼ぶ。失敗はダイアログの中に出し、開いたままにする。
     fun removeRepo(key: String) {
         if (submitBlocked(repoBusy, ApiSession.expired)) return
         repoBusy = true
-        repoNotice = null
+        repoRemoveError = null
         scope.launch {
             var removed = false
             try {
@@ -235,11 +240,13 @@ private fun ProjectOperatorSection(projectId: String, budget: ApiProjectBudget?,
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                repoNotice = ActionNotice(projectRepoFailureText((e as? ApiException)?.status), ok = false)
+                repoRemoveError = projectRepoFailureText((e as? ApiException)?.status)
             } finally {
                 repoBusy = false
             }
             if (removed) {
+                repoRemoveTarget = null
+                repoRemoveError = null
                 repoNotice = ActionNotice(REPO_REMOVED_MESSAGE, ok = true)
                 repoChanged()
             }
@@ -310,8 +317,14 @@ private fun ProjectOperatorSection(projectId: String, budget: ApiProjectBudget?,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Text(repo.repoKey, modifier = Modifier.weight(1f))
-                        OutlinedButton(enabled = !repoBusy && !ApiSession.expired, onClick = { removeRepo(repo.repoKey) }) {
-                            Text("登録を外す")
+                        OutlinedButton(
+                            enabled = !repoBusy && !ApiSession.expired,
+                            onClick = {
+                                repoRemoveError = null
+                                repoRemoveTarget = repo.repoKey
+                            },
+                        ) {
+                            Text("登録を外す…")
                         }
                     }
                 }
@@ -375,6 +388,26 @@ private fun ProjectOperatorSection(projectId: String, budget: ApiProjectBudget?,
                 Text(backfillTableLine(table), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
             }
         }
+    }
+
+    // repo の登録を外すの確認。対象が無いときは開かない。失敗時は開いたままにする。
+    val removing = repoRemoveTarget
+    if (removing != null) {
+        ReasonDialog(
+            title = "リポジトリの対応",
+            message = projectRepoRemoveExplain(removing),
+            submitLabel = "登録を外す",
+            reasonLabel = null,
+            busy = repoBusy,
+            errorText = repoRemoveError,
+            onSubmit = { removeRepo(removing) },
+            onDismiss = {
+                if (!repoBusy) {
+                    repoRemoveTarget = null
+                    repoRemoveError = null
+                }
+            },
+        )
     }
 
     // 実行の確認(旧 UI の backfill-dialog)。確認の結果が無いときは開かない。失敗時は開いたままにする。

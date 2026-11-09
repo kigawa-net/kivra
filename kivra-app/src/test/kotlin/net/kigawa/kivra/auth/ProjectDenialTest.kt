@@ -17,9 +17,9 @@ class ProjectDenialTest {
             return map[projectId to assigneeId]
         }
 
-        override fun projectsOf(assigneeId: String): Set<String> {
+        override fun rolesOf(assigneeId: String): Map<String, Role> {
             if (fail) throw IllegalStateException("store down")
-            return map.keys.filter { it.second == assigneeId }.map { it.first }.toSet()
+            return map.filterKeys { it.second == assigneeId }.map { (k, role) -> k.first to role }.toMap()
         }
     }
 

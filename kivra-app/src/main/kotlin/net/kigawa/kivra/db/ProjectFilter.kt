@@ -61,7 +61,9 @@ class ProjectMemberStore(private val database: Database) : ProjectMemberLookup {
             ?.let { Role.valueOf(it) }
     }
 
-    override fun projectsOf(assigneeId: String): Set<String> = transaction(database) {
-        execQuery("SELECT project_id FROM project_members WHERE assignee_id = ?", assigneeId) { it.getString(1) }.toSet()
+    override fun rolesOf(assigneeId: String): Map<String, Role> = transaction(database) {
+        execQuery("SELECT project_id, role FROM project_members WHERE assignee_id = ?", assigneeId) { rs ->
+            rs.getString(1) to Role.valueOf(rs.getString(2))
+        }.toMap()
     }
 }

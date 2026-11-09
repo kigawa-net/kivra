@@ -22,6 +22,7 @@ import net.kigawa.kivra.db.MemoryConditionDeleteResult
 import net.kigawa.kivra.db.MemoryDeleteResult
 import net.kigawa.kivra.db.MemoryFilter
 import net.kigawa.kivra.db.MemoryRecordView
+import net.kigawa.kivra.db.ProjectFilter
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevMemoryRepository
 import net.kigawa.kivra.selfdev.memory.MemoryKind
@@ -150,15 +151,18 @@ private suspend fun listMemory(deps: SelfDevMemoryRouteDeps, call: ApplicationCa
         call.respond(HttpStatusCode.BadRequest, MemoryError(INVALID_QUERY))
         return
     }
+    // The rows and the counts are those of the projects where the caller's role holds READ_TEXT (ADR 0022 PR-D3). The old route has no
+    // project role check of its own, so this is what keeps a member without READ_TEXT in a project from reading its memory.
+    val rowScope = deps.guard.readScope(caller.access, Permission.READ_TEXT)
     // The project narrowing (ADR 0022 PR-D): absent is every record, as before. A record with no project is `unassigned`.
     val project = when (val s = listScopeOf(pinned, params["projectId"])) {
         is ListScope.Refused -> return call.respond(s.status, MemoryError(s.error))
-        is ListScope.Filtered -> scope.narrow(s.filter)
+        is ListScope.Filtered -> rowScope.narrow(s.filter)
     }
     val rows = repo.search(filter, limit, offset, project)
     val total = repo.count(filter, project)
-    deps.guard.recordReadShadow(caller.access, rows.map { it.projectId }, "memory.list")
-    val audit = repo.auditSummary()
+    deps.guard.recordReadShadow(caller.access, rows.map { it.projectId }, "memory.list", permission = Permission.READ_TEXT)
+    val audit = repo.auditSummary(rowScope.narrow(ProjectFilter.All))
     call.respond(
         MemoryListResponse(
             items = rows.map { it.toOperatorItem() },

@@ -9,8 +9,10 @@ import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectFilter
 import net.kigawa.kivra.db.SELF_DEV_TASK_PREFIX
 import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.routes.narrow
 import net.kigawa.kivra.routes.pullRequestUrlOf
 
 /** Scope of the read-only tools (ADR 0013 section 4). */
@@ -58,7 +60,9 @@ class McpRunTools(
             runs.getTask(RunId(id), caller.principal)?.takeIf { it.taskId.startsWith(SELF_DEV_TASK_PREFIX) }
                 ?: throw InvalidParamsException("cursor is not valid")
         }
-        val page = runs.listSelfDevPage(caller.principal, limit, after)
+        // The runs of the projects the caller may read (ADR 0022 PR-D3), narrowed in SQL before the limit. Shadow only records what would be hidden.
+        val page = runs.listSelfDevPage(caller.principal, limit, after, caller.readScope.narrow(ProjectFilter.All))
+        caller.recordRead(page.map { it.projectId }, "mcp.run_list")
         val items = buildJsonArray { page.forEach { add(runJson(it)) } }
         val structured = buildJsonObject {
             put("runs", items)
@@ -82,7 +86,10 @@ class McpRunTools(
     ) { caller, args ->
         args.requireOnly("run_id")
         val id = args.requiredString("run_id", RUN_ID_SHAPE)
-        val run = runs.getTask(RunId(id), caller.principal)?.takeIf { it.taskId.startsWith(SELF_DEV_TASK_PREFIX) }
+        val own = runs.getTask(RunId(id), caller.principal)?.takeIf { it.taskId.startsWith(SELF_DEV_TASK_PREFIX) }
+        if (own != null) caller.recordRead(listOf(own.projectId), "mcp.run_get")
+        // A run of a project the caller may not read is the same not-found as a missing one (ADR 0022 PR-D3).
+        val run = own?.takeIf { caller.readScope.sees(it.projectId) }
         if (run == null) {
             ToolOutcome(true, "run not found", buildJsonObject { put("reason_code", "NOT_FOUND") }, "NOT_FOUND")
         } else {

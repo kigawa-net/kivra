@@ -11,6 +11,7 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import net.kigawa.kivra.auth.Permission
+import net.kigawa.kivra.auth.ReadScope
 import net.kigawa.kivra.routes.GuardAccess
 import net.kigawa.kivra.routes.GuardResult
 import net.kigawa.kivra.routes.PermissionGuard
@@ -56,6 +57,13 @@ class McpCaller(
      * its permission comes from the assignee store alone.
      */
     val legacyAdmin: Boolean = true,
+    /**
+     * The rows of the projects this caller may read (ADR 0022 PR-D3). Set by the dispatcher from the guard; [ReadScope.All] unless the project
+     * mode is ENFORCE, so a tool that narrows its rows with it changes nothing while the mode is off.
+     */
+    val readScope: ReadScope = ReadScope.All,
+    /** Records what ENFORCE would hide, for the rows a read returns (SHADOW only; a no-op otherwise). The route names it, never a person. */
+    val recordRead: (projectIds: Collection<String?>, route: String) -> Unit = { _, _ -> },
 )
 
 /**
@@ -225,7 +233,11 @@ class McpDispatcher(
         val access = guard.resolve(caller.principal, legacyAdmin = caller.legacyAdmin, via = VIA_MCP)
         val denied = guard.check(access, tool.permission, tool.name, scopeOk = true, via = VIA_MCP)
         if (denied is GuardResult.Deny) return refused(id, tool, access, denied.code)
-        val acting = McpCaller(caller.principal, caller.scopes, access.isAi, caller.legacyAdmin)
+        val acting = McpCaller(
+            caller.principal, caller.scopes, access.isAi, caller.legacyAdmin,
+            readScope = guard.readScope(access),
+            recordRead = { projectIds, route -> guard.recordReadShadow(access, projectIds, route, VIA_MCP) },
+        )
         val outcome = try {
             tool.handler(acting, arguments)
         } catch (e: InvalidParamsException) {

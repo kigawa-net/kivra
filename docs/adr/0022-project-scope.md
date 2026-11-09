@@ -171,6 +171,22 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - Compose UI の 404 と空の一覧の扱い(下記の確認結果を PR 本文に書く。UI は別 PR)。
 - **PR-F との関係。** PR-F(V52)の後、開発目標・order・記憶は `project_id` が必須で、NULL の行は新しく作れない(読み取りの絞りの「NULL の行はグローバル ADMIN だけ」の扱いは残るが、実際に NULL になり得るのは Run の行だけ)。
 
+### 残りの対応(PR-D3 の続き、ブランチ `feat/project-scope-read-authz-2`)
+
+PR-D3 の「残り」のうち、MCP の読み取り、集計、旧ルートの役割の判定を埋めた。エージェントの status は絞らないと判断した。書き込みの存在の区別と Compose UI は残り。マイグレーションと新しい環境変数は増やさない。`KIVRA_SELFDEV_PROJECT_MODE` が off のときは、どの経路も応答も読む先も変えない(テストで確かめる)。
+
+1. **MCP の読み取り(`kivra_run_list`、`kivra_run_get`、`kivra_order_list`、`kivra_order_get`)。絞る。** `McpCaller` が `readScope`(ディスパッチャが `guard.readScope(access)` から入れる)を持つ。一覧は `ProjectFilter` で SQL に入れ、`LIMIT` の前に効かせる。単体は、他のプロジェクトの行を、存在しない行と同じ NOT_FOUND にする(応答の本文が一致する)。SHADOW は `via=mcp` のログだけ。`kivra_run_list` のカーソルは従来どおり本人の selfdev run に限り、位置を決めるためだけに使い、内容は返さない。テスト: `McpReadScopeTest`。
+2. **`GET /api/agent/v1/attempts/{id}/status` は絞らない(不要)。** 根拠: (a) 呼び出し元は担当(assignee)ではなくエージェントのトークンで、プロジェクトの所属を持たない。(b) `statusOf(attemptId, agentId)` は、そのエージェントが保持する attempt だけを見つける。他のエージェントの attempt と存在しない attempt は同じ 404 になる。(c) 応答は `state` と `cancelRequested` の 2 つだけで、タイトル、本文、プロジェクトは含まない。プロジェクトの絞りは「人がどのプロジェクトの行を読めるか」を決めるもので、この経路の対象ではない。
+3. **集計。** 
+   - `/api/selfdev/status` の `activeRuns`: `ReadScope` で絞った活動中の Run の件数(`activeSelfDevRunIds(project=...)`)。`Refused` は 0。SHADOW は応答を変えず、記録もしない(件数だけで行の ID を持たないため)。
+   - `/api/selfdev/memory`(旧ルートと alias)の `tombstones`: 絞った行の `status = 'DELETED'` を数える。
+   - `deletionAudit`: 絞った見え方では **0 を返す。** 監査の行(`selfdev_memory_events`)には project がなく、オペレータの削除は `record_id` も NULL(`deleteOne`)なので、所属へ帰属できない。全体の値は、絞られない呼び出し元(global ADMIN、または enforce 以外)だけが見る。所属ごとに出すには、イベントに `project_id` を足すマイグレーションが要る(後続。推測で割り当てない)。
+   - テスト: `ProjectReadRoleScopeTest`(status、memory の counts)。
+4. **旧ルートの一覧の役割の確認。欠けていたので追加した。** 旧 `GET /api/selfdev/memory` は global の READ_TEXT だけを見て、そのプロジェクトでの役割を見ていなかった(alias は `permit` の `projectId` で見る)。旧 `GET /api/selfdev/stop-requests` も同じ(STOP_DECIDE)。所属で絞るだけだと、OPERATOR の所属者が STOP_DECIDE を持たないプロジェクトの承認待ちが見えてしまう。対応: `ProjectMemberLookup.projectsOf`(本文 PR-D3 の節)を `rolesOf`(所属プロジェクトと役割の対)に替え、`readScope(access, permission)` で、役割が `permission` を持つプロジェクトだけを `Members` にする。旧 memory 一覧は READ_TEXT、旧 stop-requests 一覧は STOP_DECIDE で絞る。alias の 404 は従来どおり READ で判定し、役割の 403 は `permit` のまま(応答を変えない)。
+   - 確認した他の一覧: 旧 `/api/selfdev/goals` と `/api/selfdev/orders`(alias も)は READ で判定し、READ は全ての役割が持つので、役割の欠けはない。
+   - 残り(判断): 目標の一覧は READ で `title` を返す。ADR 0020 の区分では title は READ_TEXT(AI、VIEWER、APPROVER は持たない)で、この不一致は PR-D3 より前からある。権限の決め方そのものの変更なので、ここでは変えない。単体の旧ルート `GET /api/selfdev/goals/{id}` も同じ理由で残り。
+5. **テスト。** `McpReadScopeTest`(OFF は membership を読まない、SHADOW は応答が同じでログだけ、ENFORCE は絞る、store の失敗は空、他の行は存在しない行と同じ応答)、`ProjectReadRoleScopeTest`(OFF、ENFORCE の役割の絞り、SHADOW、status と memory の counts、store の失敗)。`ProjectDenialTest` と `PermissionGuardProjectTest` の fake は `rolesOf` に替えた。
+
 ## 進捗(PR-F: Contract、ブランチ `feat/project-scope-contract`)
 
 - **マイグレーション。** V52 で `selfdev_tasks.project_id` と `selfdev_memory_records.project_id` を `NOT NULL` にする(`MODIFY COLUMN`)。V51 までの表は変えない。`MigrationExpandOnlyTest` の `KNOWN_CONTRACT_REQUIRED` に、この MODIFY を理由つきで 2 件だけ足した(他の expand の規則は変えていない)。

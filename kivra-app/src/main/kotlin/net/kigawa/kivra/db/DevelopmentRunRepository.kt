@@ -295,10 +295,16 @@ class DevelopmentRunRepository(
             .count()
     }
 
-    /** Ids of the non-terminal self-development runs, oldest first. Used by the self-development worker. */
-    fun activeSelfDevRunIds(limit: Int = 100): List<RunId> = transaction(database) {
+    /**
+     * Ids of the non-terminal self-development runs, oldest first. Used by the self-development worker, which takes every run ([project]
+     * All). The status count narrows it to the caller's projects (ADR 0022 PR-D3).
+     */
+    fun activeSelfDevRunIds(limit: Int = 100, project: ProjectFilter = ProjectFilter.All): List<RunId> = transaction(database) {
         DevelopmentRunsTable.selectAll()
-            .where { (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%") and (DevelopmentRunsTable.state notInList TERMINAL_STATE_NAMES) }
+            .where {
+                val active = (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%") and (DevelopmentRunsTable.state notInList TERMINAL_STATE_NAMES)
+                project.condition(DevelopmentRunsTable.projectId)?.let { active and it } ?: active
+            }
             .orderBy(DevelopmentRunsTable.createdAt to SortOrder.ASC, DevelopmentRunsTable.runId to SortOrder.ASC)
             .limit(limit)
             .map { RunId(it[DevelopmentRunsTable.runId]) }
@@ -395,11 +401,16 @@ class DevelopmentRunRepository(
      * One page of [principal]'s self-development runs, newest first, after [after] (the last run of the previous page, which the caller
      * has already checked to be owned by [principal]). Keyset paging on (createdAt, runId), so a run is never skipped or repeated.
      */
-    fun listSelfDevPage(principal: String, limit: Int, after: DevelopmentRun?): List<DevelopmentRun> = transaction(database) {
+    fun listSelfDevPage(
+        principal: String,
+        limit: Int,
+        after: DevelopmentRun?,
+        project: ProjectFilter = ProjectFilter.All,
+    ): List<DevelopmentRun> = transaction(database) {
         DevelopmentRunsTable.selectAll()
             .where {
                 val owned = (DevelopmentRunsTable.principal eq principal) and (DevelopmentRunsTable.taskId like "$SELF_DEV_TASK_PREFIX%")
-                if (after == null) {
+                val paged = if (after == null) {
                     owned
                 } else {
                     owned and (
@@ -407,6 +418,7 @@ class DevelopmentRunRepository(
                             ((DevelopmentRunsTable.createdAt eq after.createdAt) and (DevelopmentRunsTable.runId less after.runId.value))
                         )
                 }
+                project.condition(DevelopmentRunsTable.projectId)?.let { paged and it } ?: paged
             }
             .orderBy(DevelopmentRunsTable.createdAt to SortOrder.DESC, DevelopmentRunsTable.runId to SortOrder.DESC)
             .limit(limit)

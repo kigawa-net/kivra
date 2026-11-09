@@ -15,10 +15,12 @@ import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.OrderResult
+import net.kigawa.kivra.db.ProjectFilter
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOrderStopRequest
 import net.kigawa.kivra.db.OrderCycle
+import net.kigawa.kivra.routes.narrow
 import net.kigawa.kivra.routes.operatorTag
 import net.kigawa.kivra.routes.refusedText
 import org.slf4j.LoggerFactory
@@ -64,9 +66,12 @@ class McpOrderTools(private val deps: McpOrderDeps) {
         inputSchema = objectSchema(),
         scope = SCOPE_RUNS_READ,
         permission = Permission.READ,
-    ) { _, args ->
+    ) { caller, args ->
         args.requireOnly()
-        val orders = deps.orders.list(ORDER_LIST_LIMIT).map { it.summaryJson() }
+        // The orders of the projects the caller may read (ADR 0022 PR-D3), narrowed in SQL before the limit.
+        val rows = deps.orders.list(ORDER_LIST_LIMIT, caller.readScope.narrow(ProjectFilter.All))
+        caller.recordRead(rows.map { it.projectId }, "mcp.order_list")
+        val orders = rows.map { it.summaryJson() }
         ToolOutcome(false, "${orders.size} order(s)", buildJsonObject { put("orders", JsonArray(orders)) }, "OK")
     }
 
@@ -80,10 +85,13 @@ class McpOrderTools(private val deps: McpOrderDeps) {
         ),
         scope = SCOPE_RUNS_READ,
         permission = Permission.READ,
-    ) { _, args ->
+    ) { caller, args ->
         args.requireOnly("order_id")
         val id = args.requiredString("order_id", ORDER_ID_SHAPE)
-        val order = deps.orders.get(id)
+        val found = deps.orders.get(id)
+        if (found != null) caller.recordRead(listOf(found.projectId), "mcp.order_get")
+        // An order of a project the caller may not read is the same not-found as a missing one (ADR 0022 PR-D3).
+        val order = found?.takeIf { caller.readScope.sees(it.projectId) }
         if (order == null) {
             ToolOutcome(true, "order not found", buildJsonObject { put("reason_code", "NOT_FOUND") }, "NOT_FOUND")
         } else {

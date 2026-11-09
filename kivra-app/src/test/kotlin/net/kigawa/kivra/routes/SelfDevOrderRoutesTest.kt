@@ -120,17 +120,15 @@ class SelfDevOrderRoutesTest {
     private suspend fun HttpResponse.obj(): JsonObject = Json.parseToJsonElement(bodyAsText()).jsonObject
 
     @Test
-    fun `an order needs an existing project - missing and malformed are 400, an unknown id is 404, and nothing is written`() = testApplication {
+    fun `an order needs an existing project in its path - malformed and unknown are 404, a body project that differs is 400, and nothing is written`() = testApplication {
         val db = TestDb().also { openDbs += it }
         val orders = setUp(db)
-        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"Improve the docs"}""").status)
+        val project = ProjectRepository(db.database, Clock.systemUTC()).create("Orders check", null).projectId
+        assertEquals(HttpStatusCode.NotFound, send(HttpMethod.Post, "/api/projects/not-a-ulid/orders", """{"title":"t","policy":"Improve the docs"}""").status)
+        assertEquals(HttpStatusCode.NotFound, send(HttpMethod.Post, "/api/projects/$NO_PROJECT/orders", """{"title":"t","policy":"Improve the docs"}""").status)
         assertEquals(
             HttpStatusCode.BadRequest,
-            send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"Improve the docs","projectId":"not-a-ulid"}""").status,
-        )
-        assertEquals(
-            HttpStatusCode.NotFound,
-            send(HttpMethod.Post, "/api/selfdev/orders", """{"title":"t","policy":"Improve the docs","projectId":"$NO_PROJECT"}""").status,
+            send(HttpMethod.Post, "/api/projects/$project/orders", """{"title":"t","policy":"Improve the docs","projectId":"$NO_PROJECT"}""").status,
         )
         assertTrue(orders.list(10).isEmpty())
     }
@@ -142,7 +140,7 @@ class SelfDevOrderRoutesTest {
         val project = ProjectRepository(db.database, Clock.systemUTC()).create("Orders", null).projectId
         val created = send(
             HttpMethod.Post,
-            "/api/selfdev/orders",
+            "/api/projects/$project/orders",
             """{"title":"t","policy":"Improve the docs","projectId":"$project"}""",
         )
         assertEquals(HttpStatusCode.Created, created.status)

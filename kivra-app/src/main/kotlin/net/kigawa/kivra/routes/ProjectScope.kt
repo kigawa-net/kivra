@@ -7,6 +7,7 @@ import net.kigawa.kivra.auth.ReadScope
 import net.kigawa.kivra.db.ProjectFilter
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.UNASSIGNED_PROJECT_ID
+import org.slf4j.LoggerFactory
 
 /**
  * The project a new entity is created under (ADR 0022, PR-C). Every creation API takes a `projectId`, and it is required: a missing or blank
@@ -121,4 +122,20 @@ internal fun ApplicationCall.deprecatedBy(successor: String, query: String?) {
     val id = query?.takeIf { PROJECT_ID_SHAPE.matches(it) } ?: "%7BprojectId%7D"
     response.headers.append("Deprecation", "true")
     response.headers.append("Link", "<" + successor.replace("{projectId}", id) + ">; rel=\"successor-version\"")
+}
+
+/** The text of a retired old route's 410 answer. Fixed; the successor is in the `Link` header. */
+internal const val ROUTE_RETIRED = "this route is retired; use the alias named in the Link header"
+
+private val retiredLog = LoggerFactory.getLogger("net.kigawa.kivra.routes.retired")
+
+/**
+ * A retired old route's headers (ADR 0022 PR-G): `Deprecation: true` and a `successor-version` link to the alias, as [deprecatedBy] with no
+ * id. The caller then answers 410 with [ROUTE_RETIRED]. Only the method and the path are logged (no id, no caller): the log counts the calls
+ * that still reach a retired route, which decides when its registration can go.
+ */
+internal fun ApplicationCall.retiredBy(successor: String) {
+    response.headers.append("Deprecation", "true")
+    response.headers.append("Link", "<" + successor.replace("{projectId}", "%7BprojectId%7D") + ">; rel=\"successor-version\"")
+    retiredLog.info("retired route called: method={} path={}", request.local.method.value, request.path())
 }

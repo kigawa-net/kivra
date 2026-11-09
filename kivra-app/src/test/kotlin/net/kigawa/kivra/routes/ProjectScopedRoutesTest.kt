@@ -221,6 +221,29 @@ class ProjectScopedRoutesTest {
     }
 
     @Test
+    fun `the old creations are retired (ADR 0022 PR-G) - 410 with the alias in Link, after the caller and the permission, and nothing is stored`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val projectId = setUp(db).create("Iota", null).projectId
+
+        val goal = send(HttpMethod.Post, "/api/selfdev/goals", goalBody("r1", projectId))
+        assertEquals(HttpStatusCode.Gone, goal.status)
+        assertEquals("true", goal.headers["Deprecation"])
+        assertEquals("</api/projects/%7BprojectId%7D/tasks>; rel=\"successor-version\"", goal.headers["Link"])
+        assertEquals(0, send(HttpMethod.Get, "/api/projects/$projectId/tasks").arr().size, "no goal is stored")
+
+        val order = send(HttpMethod.Post, "/api/selfdev/orders", orderBody("r2", projectId))
+        assertEquals(HttpStatusCode.Gone, order.status)
+        assertEquals("</api/projects/%7BprojectId%7D/orders>; rel=\"successor-version\"", order.headers["Link"])
+        assertEquals(0, send(HttpMethod.Get, "/api/projects/$projectId/orders").arr().size, "no order is stored")
+
+        // The caller and the write permission are checked before the 410, as before: the AI principal is refused, no token is 401.
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, "/api/selfdev/goals", goalBody("r3", projectId), principal = AI).status)
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, "/api/selfdev/orders", orderBody("r4", projectId), principal = AI).status)
+        assertEquals(HttpStatusCode.Unauthorized, send(HttpMethod.Post, "/api/selfdev/goals", goalBody("r5", projectId), principal = null).status)
+        assertEquals(HttpStatusCode.Unauthorized, send(HttpMethod.Post, "/api/selfdev/orders", orderBody("r6", projectId), principal = null).status)
+    }
+
+    @Test
     fun `a body projectId that differs from the path is 400, and nothing is stored, on every creation`() = testApplication {
         val db = TestDb().also { openDbs += it }
         val projects = setUp(db)

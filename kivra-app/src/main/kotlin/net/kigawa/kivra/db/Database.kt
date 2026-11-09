@@ -56,6 +56,9 @@ fun migrateDatabase(
  * migration would stop the Pod, which is what the gate avoids. Nothing is deleted, guessed, or repaired.
  */
 fun runMigrations(dataSource: DataSource) {
+    // Before V40 drops the Goal/Plan tables, their rows are archived (LegacyGoalPlanArchive.kt).
+    migrationConfig(dataSource, target = PRE_FLATTEN_VERSION).migrate()
+    archiveLegacyGoalPlanTables(dataSource)
     migrationConfig(dataSource, target = PROJECT_CONTRACT_PREVIOUS_VERSION).migrate()
     if (migrationConfig(dataSource, target = null).info().pending().isEmpty()) return
     val unassigned = countUnassignedScopedRows(dataSource)

@@ -179,20 +179,33 @@ private fun KivraAppContent(
 ) {
     val perms = LocalCallerPermissions.current
     // 画面のルート。ブラウザのハッシュ(#/runs/<id> 等)と双方向に同期する: 読み込み時に解釈し、遷移時に書き、戻る/進むで読み直す。
-    var route by remember { mutableStateOf(parseRoute(currentLocationHash())) }
+    var route by remember { mutableStateOf(parseRoute(canonicalHash(currentLocationHash()))) }
     val navigate: (Route) -> Unit = { target ->
         route = target
         setLocationHash(target.toHash())
     }
     LaunchedEffect(Unit) {
-        addHashChangeListener { route = parseRoute(currentLocationHash()) }
+        route = settleLocationHash()
+        addHashChangeListener { route = settleLocationHash() }
     }
     // ページタイトル(旧 UI の renderNav の document.title)。画面が変わるたびに入れる。
     LaunchedEffect(route) {
         setDocumentTitle(documentTitleOf(route))
     }
     var projects by remember { mutableStateOf<List<ApiProject>>(emptyList()) }
+    // 選択中のプロジェクト(null は全体)。プロジェクト配下の画面(#/projects/<id>/<page>)を開くと、その画面のプロジェクトになる。
     var selectedProjectId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(route) {
+        route.projectIdOrNull?.let { selectedProjectId = it }
+    }
+    // 表示に使うプロジェクト: 開いている画面の URL のプロジェクト、なければ選択中。
+    val projectId = route.projectIdOrNull ?: selectedProjectId
+    // 選択を変える。今の画面の続き(同じ一覧)を、そのプロジェクトのページで開く(旧 UI の chooseProjectContext と同じ)。
+    val chooseProject: (String?) -> Unit = { id ->
+        selectedProjectId = id
+        val target = route.inProjectContext(id)
+        if (target != route) navigate(target)
+    }
     var dropdownExpanded by remember { mutableStateOf(false) }
     var searchOpen by remember { mutableStateOf(false) }
 
@@ -209,7 +222,7 @@ private fun KivraAppContent(
     MaterialTheme {
         if (searchOpen) {
             SearchDialog(
-                projectId = selectedProjectId,
+                projectId = projectId,
                 onDismiss = { searchOpen = false },
                 onNavigate = navigate
             )
@@ -243,7 +256,8 @@ private fun KivraAppContent(
                             items.forEach { dest ->
                                 NavigationDrawerItem(
                                     selected = route.nav == dest,
-                                    onClick = { navigate(Route.Page(dest)) },
+                                    // 選択中のプロジェクトがあれば、そのプロジェクトのページへ(旧 UI のヘッダのタブと同じ)。
+                                    onClick = { navigate(dest.routeFor(projectId)) },
                                     label = { Text(dest.label) },
                                     // 承認の件数のバッジ(旧 UI の nav-approvals-badge)。件数が読めている時だけ。
                                     badge = approvalsBadge.takeIf { dest == NavDestination.Approvals }?.let { text ->
@@ -273,6 +287,11 @@ private fun KivraAppContent(
                                 style = MaterialTheme.typography.headlineSmall,
                                 modifier = Modifier.padding(16.dp)
                             )
+                            is Route.ProjectPage -> Text(
+                                text = r.dest.label,
+                                style = MaterialTheme.typography.headlineSmall,
+                                modifier = Modifier.padding(16.dp)
+                            )
                             is Route.Invalid -> Text(
                                 text = "リンクが正しくありません",
                                 style = MaterialTheme.typography.headlineSmall,
@@ -287,9 +306,9 @@ private fun KivraAppContent(
 
                         // Project selector dropdown
                         ProjectSelectorDropdown(
-                            selectedProjectId = selectedProjectId,
+                            selectedProjectId = projectId,
                             projects = projects,
-                            onProjectSelected = { selectedProjectId = it },
+                            onProjectSelected = chooseProject,
                             dropdownExpanded = dropdownExpanded,
                             onDropdownExpandedChange = { dropdownExpanded = it }
                         )
@@ -303,7 +322,7 @@ private fun KivraAppContent(
                         )
                         // 承認待ちの件数(1 件以上のとき。押すと承認の画面へ)。
                         headerApprovalsText(pendingApprovals)?.let { text ->
-                            TextButton(onClick = { navigate(Route.Page(NavDestination.Approvals)) }) { Text(text) }
+                            TextButton(onClick = { navigate(NavDestination.Approvals.routeFor(projectId)) }) { Text(text) }
                         }
                         // 役割と、判定の状態の補足(読めた時だけ)。
                         roleHeader?.let { role ->
@@ -323,10 +342,11 @@ private fun KivraAppContent(
                     HorizontalDivider()
 
                     // Main content
-                    val projectId = selectedProjectId
+                    // 一覧の画面(プロジェクト配下の一覧も同じ画面。プロジェクトは projectId で渡す)。
+                    val pageDest = (route as? Route.Page)?.dest ?: (route as? Route.ProjectPage)?.dest
                     when (val r = route) {
-                        is Route.Page -> when (r.dest) {
-                            NavDestination.Home -> HomeScreen(projectId) { navigate(Route.Page(it)) }
+                        is Route.Page, is Route.ProjectPage -> when (pageDest) {
+                            NavDestination.Home -> HomeScreen(projectId) { navigate(it.routeFor(projectId)) }
                             NavDestination.Tasks -> TasksScreen(projectId, navigate)
                             NavDestination.Goals -> GoalsScreen(projectId, navigate)
                             NavDestination.Orders -> OrdersScreen(projectId, navigate)
@@ -339,6 +359,7 @@ private fun KivraAppContent(
                             )
                             NavDestination.Assignees -> AssigneesScreen(projectId)
                             NavDestination.Autopilot -> AutopilotScreen()
+                            null -> Unit
                         }
                         is Route.ProjectDashboard -> ProjectDashboardScreen(r.projectId, navigate)
                         is Route.RunDetail -> RunDetailScreen(r.runId, navigate)
@@ -355,6 +376,17 @@ private fun KivraAppContent(
             }
         }
     }
+}
+
+/**
+ * 今のハッシュを読んでルートにする。旧い形(`#/projects/<id>/budget`)は、ブラウザの URL もダッシュボードのハッシュへ置き換える
+ * (旧 UI の route と同じ。履歴には残さない)。
+ */
+private fun settleLocationHash(): Route {
+    val raw = currentLocationHash()
+    val canonical = canonicalHash(raw)
+    if (canonical != raw) replaceLocationHash(canonical)
+    return parseRoute(canonical)
 }
 
 /** セッション切れの案内(旧 UI の session-banner と同じ趣旨)。再読み込みでサインインし直す。 */

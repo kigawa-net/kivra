@@ -33,11 +33,10 @@ fun SearchDialog(projectId: String?, onDismiss: () -> Unit, onNavigate: (Route) 
                 .forEach { hits += SearchHit(Route.RunDetail(it.runId), "Run", it.title, it.runId, it.state) }
         } catch (e: Exception) { errors += "Run" }
         try {
-            ApiClient.getGoals().forEach { hits += SearchHit(Route.GoalDetail(it.taskId), "Goal", it.title, it.taskId, it.state) }
+            ApiClient.getGoals(projectId).forEach { hits += SearchHit(Route.GoalDetail(it.taskId), "Goal", it.title, it.taskId, it.state) }
         } catch (e: Exception) { errors += "Goal" }
         try {
-            ApiClient.getOrders().filter { projectId == null || it.projectId == projectId }
-                .forEach { hits += SearchHit(Route.OrderDetail(it.orderId), "order", it.orderId, it.orderId, it.state) }
+            ApiClient.getOrders(projectId).forEach { hits += SearchHit(Route.OrderDetail(it.orderId), "order", it.orderId, it.orderId, it.state) }
         } catch (e: Exception) { errors += "order" }
         all = hits
         failed = errors

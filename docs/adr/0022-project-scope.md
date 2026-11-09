@@ -69,7 +69,7 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - システムが起票する Task(`kivra-incident`)は、作成時に `target_repo` の対応からプロジェクトを継承する。対応がなければ NULL。冪等の再送では、継承した値を比較しない。
 - 監査は構造化ログ(`net.kigawa.kivra.project.admin`)に、固定の code と件数、実行者のハッシュだけを残す。repo 名は残さない。
 - 画面(プロジェクトのダッシュボード)に、運用者だけの「リポジトリの対応」と「既存データの振り分け」(dry-run、確認ダイアログ付きの実行)を足した。運用の手順は `docs/runbook-selfdev.md` 4.16。
-- 残り(後続): PR-D(権限を `project_members` で判定)、PR-E(予算)、PR-F(NULL の行を消す)。プロジェクトの削除は、登録済みの repo や行があると FK RESTRICT で失敗する(今は 500 になる。扱いは後続で決める)。
+- 残り(後続): PR-D(権限を `project_members` で判定)、PR-E(予算)、PR-F(NULL の行を消す)。
 
 ## 進捗(PR-D1: 読み取りの絞り込みと、プロジェクト単位の認可の影、ブランチ `feat/project-scope-read`)
 

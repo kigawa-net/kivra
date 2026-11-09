@@ -14,6 +14,7 @@ import net.kigawa.kivra.selfdev.memory.SelfDevMemoryValidator
 import net.kigawa.kivra.selfdev.memory.ShadowFacts
 import net.kigawa.kivra.selfdev.memory.SuppressShadowRules
 import org.jetbrains.exposed.sql.Database
+import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
 
 /*
@@ -61,6 +62,13 @@ data class MemoryFilter(
 
 /** Counts for the operator's view (ADR 0016 P2). [tombstones] are the DELETED notes; [deletionAudit] sums the DELETED audit rows. */
 data class MemoryAuditSummary(val tombstones: Int, val deletionAudit: Int)
+
+/**
+ * The memory records that refer to [projectId] (ADR 0022: the project delete counts them). Read only. Lives here because this file is the
+ * only one that names the memory tables (SelfDevMemoryArchitectureTest).
+ */
+internal fun Transaction.countMemoryRecordsOfProject(projectId: String): Long =
+    execQuery("SELECT COUNT(*) FROM selfdev_memory_records WHERE project_id = ?", projectId) { it.getLong(1) }.first()
 
 /**
  * The rows of `selfdev_memory_records` with no project (ADR 0022 PR-F, the check before V52). Counts only. This file is the only one that

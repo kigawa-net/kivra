@@ -15,11 +15,13 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
+import java.math.BigDecimal
 import java.time.Clock
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
@@ -28,6 +30,7 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import net.kigawa.kivra.auth.AssigneeAccess
 import net.kigawa.kivra.auth.AssigneeLookup
 import net.kigawa.kivra.auth.PermissionMode
@@ -36,10 +39,20 @@ import net.kigawa.kivra.auth.Role
 import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.db.Assignee
+import net.kigawa.kivra.db.AssigneeResult
+import net.kigawa.kivra.db.AssigneeRole
+import net.kigawa.kivra.db.CreateRootResult
+import net.kigawa.kivra.db.MemberPutResult
+import net.kigawa.kivra.db.MemorySaveResult
 import net.kigawa.kivra.db.ProjectBackfillRepository
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectRepository
+import net.kigawa.kivra.db.RepoAddResult
+import net.kigawa.kivra.db.SelfDevAssigneeRepository
+import net.kigawa.kivra.db.SelfDevMemoryRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
+import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevSubmitResult
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.db.TestDb
@@ -47,6 +60,8 @@ import net.kigawa.kivra.db.migrateBeforeContract
 import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.newDbStore
 import net.kigawa.kivra.db.execUpdate
+import net.kigawa.kivra.selfdev.memory.MemoryCandidate
+import net.kigawa.kivra.selfdev.memory.MemoryChannel
 import org.jetbrains.exposed.sql.transactions.transaction
 
 class ProjectRoutesTest {
@@ -434,6 +449,151 @@ class ProjectRoutesTest {
                 setBody("{}")
             }
             assertEquals(HttpStatusCode.UnsupportedMediaType, response.status)
+        }
+    }
+
+    // ---- DELETE /api/projects/{id} (ADR 0022): only an empty project is deleted. A row that refers to it is a 409 with the counts, and
+    // nothing is removed or unassigned. No force delete exists.
+
+    private fun TestDb.newAssignee(name: String): String =
+        assertIs<AssigneeResult.Moved<Assignee>>(SelfDevAssigneeRepository(database).create(name, AssigneeRole.OPERATOR, "root")).value.assigneeId
+
+    /** Seeds one row of [kind] that refers to [projectId] through the real repositories. */
+    private fun TestDb.seedChild(kind: String, projectId: String) {
+        val clock = Clock.systemUTC()
+        when (kind) {
+            "repos" -> assertEquals(RepoAddResult.ADDED, ProjectRepository(database, clock).addRepo(projectId, "kigawa-net/kivra"))
+            "members" -> assertEquals(MemberPutResult.CREATED, ProjectMemberRepository(database, clock).put(projectId, newAssignee("member-$projectId"), "OPERATOR"))
+            "budget" -> assertNotNull(newDbStore(this, clock).setProjectBudget(projectId, BigDecimal("1000"), BigDecimal("0.8")))
+            "tasks" -> assertIs<SelfDevSubmitResult.Created>(
+                SelfDevOperatorRepository(database).submitTask("1:i:oper", "del-task-$projectId", "Task", null, "kigawa-net/kivra", projectId),
+            )
+            "orders" -> assertIs<CreateRootResult.Created>(
+                SelfDevOrderRepository(database).createRoot("1:i:oper", "Order $projectId", "policy", "kigawa-net/kivra", 1, projectId),
+            )
+            "memory" -> {
+                val goal = assertIs<SelfDevSubmitResult.Created>(
+                    SelfDevOperatorRepository(database).submitTask("1:i:oper", "del-goal-$projectId", "Goal", null, "kigawa-net/kivra", projectId),
+                ).task
+                assertIs<MemorySaveResult.Written>(
+                    SelfDevMemoryRepository(database, enabled = true).save(
+                        MemoryCandidate(
+                            kind = "GOAL_TITLE", channel = MemoryChannel.HTTP_OPERATOR, operatorAuthenticated = true, operatorId = "1:i:oper",
+                            goalId = goal.taskId, body = "CI を速くする",
+                        ),
+                    ),
+                )
+            }
+            "runs" -> assertIs<TaskSubmitResult.Created>(runs.submitTask("operator", "del-run-$projectId", "Run", projectId = projectId))
+            "assignees" -> exec("UPDATE selfdev_assignees SET project_id = ? WHERE assignee_id = ?", projectId, newAssignee("owner-$projectId"))
+            else -> error("unknown kind")
+        }
+    }
+
+    private fun TestDb.exec(sql: String, vararg params: Any?) = transaction(database) { execUpdate(sql, *params) }
+
+    /** The table and the rows that refer to a project, per kind of [seedChild]. */
+    private val childTables = mapOf(
+        "repos" to "project_repos", "members" to "project_members", "budget" to "project_budgets", "tasks" to "selfdev_tasks",
+        "orders" to "selfdev_orders", "memory" to "selfdev_memory_records", "runs" to "development_runs", "assignees" to "selfdev_assignees",
+    )
+
+    @Test
+    fun `an empty project is deleted with 204 and is gone`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val id = projects.create("Empty", null).projectId
+        testApplication {
+            setUp(db)
+            assertEquals(HttpStatusCode.NoContent, call(HttpMethod.Delete, "/api/projects/$id", "operator").status)
+            assertNull(projects.get(id))
+            assertEquals(HttpStatusCode.NotFound, call(HttpMethod.Delete, "/api/projects/$id", "operator").status)
+        }
+    }
+
+    @Test
+    fun `a project that still has a row of any kind is a conflict with the count of each kind, and nothing is removed`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        testApplication {
+            setUp(db)
+            for (kind in childTables.keys) {
+                val id = projects.create("Busy $kind", null).projectId
+                db.seedChild(kind, id)
+                val before = db.count(childTables.getValue(kind), "project_id = '$id'")
+                assertTrue(before > 0, "$kind is seeded")
+
+                val response = call(HttpMethod.Delete, "/api/projects/$id", "operator")
+                assertEquals(HttpStatusCode.Conflict, response.status, kind)
+                val body = response.bodyAsText()
+                val json = Json.parseToJsonElement(body).jsonObject
+                assertEquals("PROJECT_NOT_EMPTY", json["error"]!!.jsonPrimitive.content)
+                val counts = json["counts"]!!.jsonObject
+                assertEquals(setOf("repos", "members", "budget", "tasks", "orders", "memory", "runs", "assignees"), counts.keys)
+                assertTrue(counts[kind]!!.jsonPrimitive.long > 0, "$kind is counted: $body")
+                // The body has counts only: no project id, no repository name.
+                assertFalse(body.contains(id), kind)
+                assertFalse(body.contains("kigawa-net"), kind)
+
+                assertNotNull(projects.get(id), "$kind: the project stays")
+                assertEquals(before, db.count(childTables.getValue(kind), "project_id = '$id'"), "$kind: the rows stay")
+            }
+        }
+    }
+
+    @Test
+    fun `a project with several kinds of rows counts each of them, and the runs are not unassigned`() = TestDb().use { db ->
+        val projectId = ProjectRepository(db.database, Clock.systemUTC()).create("Several", null).projectId
+        db.seedChild("repos", projectId)
+        db.seedChild("members", projectId)
+        db.seedChild("runs", projectId)
+        testApplication {
+            setUp(db)
+            val response = call(HttpMethod.Delete, "/api/projects/$projectId", "operator")
+            assertEquals(HttpStatusCode.Conflict, response.status)
+            val counts = Json.parseToJsonElement(response.bodyAsText()).jsonObject["counts"]!!.jsonObject
+            assertEquals(1L, counts["repos"]!!.jsonPrimitive.long)
+            assertEquals(1L, counts["members"]!!.jsonPrimitive.long)
+            assertEquals(1L, counts["runs"]!!.jsonPrimitive.long)
+            assertEquals(0L, counts["budget"]!!.jsonPrimitive.long)
+            // A run is refused, not set to NULL (the foreign key would unassign it silently).
+            assertEquals(1, db.count("development_runs", "project_id = '$projectId'"))
+        }
+    }
+
+    @Test
+    fun `a project is deleted once the rows that refer to it are removed`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val id = projects.create("Cleared", null).projectId
+        testApplication {
+            setUp(db)
+            db.seedChild("repos", id)
+            assertEquals(HttpStatusCode.Conflict, call(HttpMethod.Delete, "/api/projects/$id", "operator").status)
+            assertEquals(HttpStatusCode.NoContent, call(HttpMethod.Delete, "/api/projects/$id/repos?repoKey=kigawa-net%2Fkivra", "operator", "{}").status)
+            assertEquals(HttpStatusCode.NoContent, call(HttpMethod.Delete, "/api/projects/$id", "operator").status)
+            assertNull(projects.get(id))
+        }
+    }
+
+    @Test
+    fun `deleting an unknown project is not found`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            assertEquals(HttpStatusCode.NotFound, call(HttpMethod.Delete, "/api/projects/01AAAAAAAAAAAAAAAAAAAAAAAA", "operator").status)
+        }
+    }
+
+    @Test
+    fun `a viewer or an unauthenticated caller cannot delete a project, empty or not`() = TestDb().use { db ->
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val empty = projects.create("Empty", null).projectId
+        val busy = projects.create("Busy", null).projectId
+        db.seedChild("repos", busy)
+        testApplication {
+            setUp(db, guard(mapOf("viewer" to Role.VIEWER)))
+            assertEquals(HttpStatusCode.Forbidden, call(HttpMethod.Delete, "/api/projects/$empty", "viewer").status)
+            assertEquals(HttpStatusCode.Forbidden, call(HttpMethod.Delete, "/api/projects/$busy", "viewer").status)
+            assertEquals(HttpStatusCode.Unauthorized, call(HttpMethod.Delete, "/api/projects/$empty", null).status)
+            assertNotNull(projects.get(empty))
+            assertNotNull(projects.get(busy))
         }
     }
 }

@@ -42,7 +42,7 @@ fun fxNoticeOf(fx: ApiFxExpiry?): FxNotice {
     }
 }
 
-private val YEN_DECIMAL = Regex("-?[0-9]+(\\.[0-9]+)?")
+internal val YEN_DECIMAL = Regex("-?[0-9]+(\\.[0-9]+)?")
 
 /**
  * 円の金額(サーバーの 10 進数の文字列)を `1,300 円` の形にする。数でない値は `（不明）`。

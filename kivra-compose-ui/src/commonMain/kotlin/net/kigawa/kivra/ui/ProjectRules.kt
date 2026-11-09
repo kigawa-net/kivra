@@ -172,7 +172,7 @@ fun projectScopeText(scope: String): String = if (scope == "ALL") {
 fun projectTotalText(total: Long): String = if (total == 0L) "Run はまだありません。" else "全部で $total 件です。"
 
 /** 費用の注記(旧 UI の project-dash-spend-note)。 */
-const val PROJECT_SPEND_NOTE = "プロジェクトごとの上限はありません（月ごとの上限は、運用者向けの予算画面で確認します）。計画（Planner）の費用は含みません。"
+const val PROJECT_SPEND_NOTE = "この Run に紐づく費用です。計画（Planner）の費用は含みません。プロジェクトの月の上限は、運用者には下の「今月の予算」に出ます。"
 
 /** 運用者だけに出す repo の操作を、ダッシュボードの scope が ALL のときだけ出すか(旧 UI の renderProjectOps)。 */
 fun showsProjectOperator(scope: String): Boolean = scope == "ALL"

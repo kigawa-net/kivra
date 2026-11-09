@@ -209,6 +209,21 @@ object ApiClient {
         )
 
     /**
+     * 運用者: 今月の予算の上限と警告の基準を設定する。`PUT /api/projects/{id}/budget`、本文 `{"monthlyLimitJpy": n, "softRatio": r}`。
+     * 400 は値の形(上限は 0 以上の整数、警告の基準は 0 より大きく 1 以下)、404 は無いプロジェクト、403 は運用者でない。
+     */
+    suspend fun putProjectBudget(projectId: String, monthlyLimitJpy: Long, softRatio: Double) =
+        writeWith(
+            HttpMethod.Put,
+            "/api/projects/${percentEncode(projectId)}/budget",
+            ProjectBudgetBody(monthlyLimitJpy, softRatio),
+        )
+
+    /** 運用者: 今月の上限を解除する。`DELETE /api/projects/{id}/budget`、本文は空の JSON オブジェクト `{}`。 */
+    suspend fun deleteProjectBudget(projectId: String) =
+        writeWith(HttpMethod.Delete, "/api/projects/${percentEncode(projectId)}/budget", EmptyJsonBody())
+
+    /**
      * 運用者: プロジェクトのメンバーの一覧。`GET /api/projects/{id}/members`(ORDER_MANAGE。403 は運用者でない、404 は無いプロジェクト)。
      */
     suspend fun getProjectMembers(projectId: String): List<ApiProjectMember> =
@@ -675,6 +690,9 @@ object ApiClient {
 
 /** メンバーの追加・role の変更・取り込みの本文(server `ProjectMemberRequest` / `ProjectMemberImportRequest`)。 */
 @Serializable private class ProjectMemberBody(val role: String)
+
+/** 今月の予算の設定の本文(server `ProjectBudgetInput`)。上限は円の整数、警告の基準は 0 より大きく 1 以下。 */
+@Serializable private class ProjectBudgetBody(val monthlyLimitJpy: Long, val softRatio: Double)
 
 /** order の作成の本文(server `CreateOrderRequest`)。冪等キーは持たない(サーバーは知らないフィールドを拒否する)。 */
 @Serializable private class CreateOrderBody(val title: String, val policy: String, val maxCycles: Int, val projectId: String)

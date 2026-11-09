@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
+import net.kigawa.kivra.ui.isUnassigned
 import net.kigawa.kivra.ui.AutopilotAvailability
 import net.kigawa.kivra.ui.GOAL_BAD_MESSAGE
 import net.kigawa.kivra.ui.GoalSignature
@@ -60,7 +61,10 @@ fun GoalsScreen(projectId: String, onNavigate: (Route) -> Unit) {
         Text("開発目標", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (showsGoalForm(read.availability, perms)) {
+        if (isUnassigned(projectId)) {
+            UnassignedCreateNote()
+            Spacer(modifier = Modifier.height(16.dp))
+        } else if (showsGoalForm(read.availability, perms)) {
             GoalFormCard(
                 projectId = projectId,
                 targetRepo = read.targetRepo,

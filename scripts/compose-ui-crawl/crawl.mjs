@@ -43,6 +43,8 @@ const pid = projects[0]?.projectId;
 const goals = await getJson('/api/selfdev/goals');
 const orders = await getJson('/api/selfdev/orders');
 const runs = await getJson('/api/runs');
+// 未分類(project_id が NULL)の Run。seed-unassigned-local.sh で作る。
+const unassignedRuns = await getJson('/api/runs?projectId=unassigned');
 
 // 改訂 2(docs/design/16-site-structure.md)の構成。プロジェクトが入口で、ページと詳細はプロジェクトの中に置く。
 // 旧 URL(legacy-*)は、プロジェクトが 1 つに決まればその配下へ置き換わり、決まらなければプロジェクト一覧へ行く。
@@ -58,6 +60,15 @@ const screens = [
   ['legacy-tasks', '#/tasks'],
   ['legacy-goals', '#/goals'],
   ['legacy-approvals', '#/approvals'],
+  // 未分類(疑似プロジェクト。データの一覧だけ。作成フォームは出さない)
+  ['unassigned-tasks', '#/projects/unassigned/tasks'],
+  ['unassigned-goals', '#/projects/unassigned/goals'],
+  ['unassigned-orders', '#/projects/unassigned/orders'],
+  ['unassigned-approvals', '#/projects/unassigned/approvals'],
+  ['unassigned-memory', '#/projects/unassigned/memory'],
+  ['unassigned-run-detail', unassignedRuns[0]?.runId && `#/projects/unassigned/runs/${unassignedRuns[0].runId}`],
+  // 未分類にはダッシュボードが無い(解釈できないリンク)
+  ['unassigned-dashboard', '#/projects/unassigned/dashboard'],
   // プロジェクト配下
   ['proj-dashboard', pid && `#/projects/${pid}/dashboard`],
   ['proj-tasks', pid && `#/projects/${pid}/tasks`],

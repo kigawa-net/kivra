@@ -23,6 +23,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -35,6 +36,9 @@ import net.kigawa.kivra.ui.PROJECT_NAME_MAX
 import net.kigawa.kivra.ui.PROJECT_CREATED_MESSAGE
 import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.SESSION_EXPIRED_MESSAGE
+import net.kigawa.kivra.ui.UNASSIGNED_LABEL
+import net.kigawa.kivra.ui.UNASSIGNED_PROJECT_ID
+import net.kigawa.kivra.ui.landingPageOf
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiSession
@@ -74,12 +78,16 @@ fun ProjectsScreen(notice: String?, onNavigate: (Route) -> Unit, onProjectsChang
             Spacer(modifier = Modifier.height(16.dp))
         }
 
+        // 未分類(プロジェクトに属さない既存のデータ)。プロジェクトが無くても出す。
+        UnassignedCard(onNavigate)
+        Spacer(modifier = Modifier.height(16.dp))
+
         Column(modifier = Modifier.weight(1f)) {
             LoadedList(loaded, emptyText = "プロジェクトがありません。") { projects ->
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
                     items(projects, key = { it.projectId }) { project ->
                         Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable {
-                            onNavigate(Route.ProjectPage(project.projectId, NavDestination.Dashboard))
+                            onNavigate(Route.ProjectPage(project.projectId, landingPageOf(project.projectId)))
                         }) {
                             Column(modifier = Modifier.padding(16.dp)) {
                                 Text(project.name, style = MaterialTheme.typography.titleMedium)
@@ -101,6 +109,35 @@ fun ProjectsScreen(notice: String?, onNavigate: (Route) -> Unit, onProjectsChang
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * 未分類の行(プロジェクトの一覧の上)。開くと未分類のタスク(Run の一覧)へ行く。データが 0 件なら薄く出す。
+ * 作成はできない(未分類にデータを増やさない)ので、その旨を一文で示す。
+ */
+@Composable
+private fun UnassignedCard(onNavigate: (Route) -> Unit) {
+    val loaded = rememberLoad(Unit) { loadProjectSummary(UNASSIGNED_PROJECT_ID) }
+    val s = loaded.value
+    val faint = s?.unassignedRows == 0
+    Card(modifier = Modifier.fillMaxWidth().alpha(if (faint) 0.6f else 1f).clickable {
+        onNavigate(Route.ProjectPage(UNASSIGNED_PROJECT_ID, NavDestination.Tasks))
+    }) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(UNASSIGNED_LABEL, style = MaterialTheme.typography.titleMedium)
+            Text(
+                "プロジェクトに属さない既存のデータ(Run・開発目標・order・記憶)。作成はできません。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                if (s?.unassignedRows == 0) "未分類のデータはありません" else summaryLine(s),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

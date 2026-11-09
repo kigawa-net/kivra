@@ -221,7 +221,8 @@ private fun KivraAppContent(
     }
 
     // 最後に選んだプロジェクト(この端末の記憶)。プロジェクトの中の画面を開くたびに覚える。旧い URL の行き先に使う。
-    var lastProjectId by remember { mutableStateOf(loadLastProjectId()) }
+    // 端末の記憶は検証してから使う(壊れた値は無視。未分類は有効な値)。
+    var lastProjectId by remember { mutableStateOf(validLastProjectId(loadLastProjectId())) }
     LaunchedEffect(route) {
         route.projectIdOrNull?.let { id ->
             lastProjectId = id
@@ -241,6 +242,7 @@ private fun KivraAppContent(
 
     val projectId = route.projectIdOrNull
     val nameOf: (String) -> String? = { id -> projects.find { it.projectId == id }?.name }
+    val labelOf: (String) -> String = { id -> projectLabel(id, nameOf(id)) }
     var dropdownExpanded by remember { mutableStateOf(false) }
     var searchOpen by remember { mutableStateOf(false) }
 
@@ -298,33 +300,33 @@ private fun KivraAppContent(
                     Column(modifier = Modifier.weight(1f)) {
                         // セッションが切れた時の案内。入力中の内容は残る(再読み込みするまで送信しない)。
                         if (ApiSession.expired) SessionBanner()
-                        // ヘッダー: パンくず(プロジェクト › ページ › 詳細)、今いるプロジェクトの切替、検索、承認待ち、役割、更新。
+                        // ヘッダーの 1 段目: パンくず(プロジェクト › ページ › 詳細)。全幅にして、長い id は折り返す(右の操作と並べると切れていた)。
+                        when (val r = route) {
+                            is Route.Invalid -> Text(
+                                text = "リンクが正しくありません",
+                                style = MaterialTheme.typography.headlineSmall,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                            is Route.Legacy -> Text(
+                                text = "読み込み中…",
+                                style = MaterialTheme.typography.headlineSmall,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                            else -> Breadcrumb(
+                                crumbs = r.breadcrumbs(labelOf),
+                                onNavigate = navigate,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        // ヘッダーの 2 段目: 今いるプロジェクトの切替、検索、承認待ち、役割、更新。
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.End,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            when (val r = route) {
-                                is Route.Invalid -> Text(
-                                    text = "リンクが正しくありません",
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    modifier = Modifier.padding(16.dp)
-                                )
-                                is Route.Legacy -> Text(
-                                    text = "読み込み中…",
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    modifier = Modifier.padding(16.dp)
-                                )
-                                else -> Breadcrumb(
-                                    crumbs = r.breadcrumbs(nameOf),
-                                    onNavigate = navigate,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-
                             // 今いるプロジェクトの切替(絞り込みではない)。全体の画面では「プロジェクトを選ぶ」。
                             ProjectSelectorDropdown(
-                                currentName = projectId?.let { nameOf(it) ?: it },
+                                currentName = projectId?.let { labelOf(it) },
                                 projects = projects,
                                 onProjectSelected = { id -> navigate(route.inProjectContext(id)) },
                                 onOverview = { navigate(Route.Page(NavDestination.Projects)) },
@@ -477,6 +479,14 @@ fun ProjectSelectorDropdown(
                     }
                 )
             }
+            // 未分類(プロジェクトに属さない既存のデータ)。プロジェクトが無くても選べる。
+            DropdownMenuItem(
+                text = { Text(UNASSIGNED_LABEL) },
+                onClick = {
+                    onProjectSelected(UNASSIGNED_PROJECT_ID)
+                    onDropdownExpandedChange(false)
+                }
+            )
         }
     }
 }

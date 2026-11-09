@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
+import net.kigawa.kivra.ui.isUnassigned
 import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.AutopilotAvailability
 import net.kigawa.kivra.ui.GatedOperation
@@ -58,7 +59,10 @@ fun OrdersScreen(projectId: String, onNavigate: (Route) -> Unit) {
         Text("order", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (showsOrderCreateForm(availability, perms)) {
+        if (isUnassigned(projectId)) {
+            UnassignedCreateNote()
+            Spacer(modifier = Modifier.height(16.dp))
+        } else if (showsOrderCreateForm(availability, perms)) {
             OrderCreateCard(projectId = projectId, onChanged = { listReload += 1 })
             Spacer(modifier = Modifier.height(16.dp))
         }

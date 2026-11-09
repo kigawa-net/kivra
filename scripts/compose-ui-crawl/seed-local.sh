@@ -26,6 +26,9 @@ post "/api/projects/$PB/tasks" "{\"title\":\"監視を追加\",\"body\":\"\",\"i
 echo "--- order(maxCycles は KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP=5 以下にする)"
 post "/api/projects/$PA/orders" "{\"title\":\"週次の改善 order\",\"policy\":\"小さく進める\",\"maxCycles\":3,\"projectId\":\"$PA\"}" >/dev/null
 
-echo "--- Run(シミュレーション)"
+echo "--- 未分類になる order(B の order。seed-unassigned-local.sh が project_id を NULL にする)"
+post "/api/projects/$PB/orders" "{\"title\":\"未分類に回る order(検証用)\",\"policy\":\"未分類の確認\",\"maxCycles\":2,\"projectId\":\"$PB\"}" >/dev/null
+
+echo "--- Run(シミュレーション。プロジェクトを持たないので、最初から未分類)"
 post /api/tasks '{"title":"サンプルのタスク実行","idempotencyKey":"seed-run-1"}' >/dev/null
 echo "done"

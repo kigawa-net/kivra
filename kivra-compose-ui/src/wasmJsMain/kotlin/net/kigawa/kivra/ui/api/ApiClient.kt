@@ -661,7 +661,7 @@ object ApiClient {
      * `GET /api/projects/{id}/memory?...`(project は path で渡す)。
      */
     suspend fun getMemoryPage(filter: MemoryListFilter, offset: Int, projectId: String?): ApiMemoryPage =
-        getJson(ProjectApi.memory(projectId) + "?" + memoryListQuery(filter, offset, null))
+        getJson(ProjectApi.withQuery(ProjectApi.memory(projectId), memoryListQuery(filter, offset, null)))
 
     /** 個別の削除。`POST /api/selfdev/memory/{id}/delete`、本文 `{reason}`(理由は trim 済み)。404 は既に無い。 */
     suspend fun deleteMemory(recordId: String, reason: String) =

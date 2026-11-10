@@ -35,6 +35,7 @@ import net.kigawa.kivra.db.AssigneeRole
 import net.kigawa.kivra.db.AssigneeResult
 import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.ProjectBackfillRepository
+import net.kigawa.kivra.db.ProjectDrainRepository
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectMemberStore
 import net.kigawa.kivra.db.ProjectRepository
@@ -186,6 +187,7 @@ class ProjectReadScopeTest {
                     backfill = ProjectBackfillRepository(db.database),
                     members = ProjectMemberRepository(db.database, clock),
                     budgets = newDbStore(db, clock),
+                    drain = ProjectDrainRepository(db.database, newDbStore(db, clock)),
                 )
                 configureRunViewRoutes(db.runs, identity, SelfDevSettings.disabled(), guard, fx.projects)
                 configureTaskApiRoutes(db.runs, identity, guard = guard, projectRepo = fx.projects)

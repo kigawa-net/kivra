@@ -26,6 +26,7 @@ import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.DbCodingResultStore
 import net.kigawa.kivra.db.ProjectBackfillRepository
+import net.kigawa.kivra.db.ProjectDrainRepository
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.config.BudgetConfig
 import net.kigawa.kivra.config.FushaTaskConfigLoader
@@ -616,6 +617,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                 backfill = ProjectBackfillRepository(database),
                 members = ProjectMemberRepository(database, java.time.Clock.systemUTC()),
                 budgets = budgetStore,
+                drain = ProjectDrainRepository(database, budgetStore),
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

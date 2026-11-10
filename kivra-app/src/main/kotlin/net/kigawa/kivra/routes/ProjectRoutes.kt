@@ -29,6 +29,8 @@ import net.kigawa.kivra.db.MemberPutResult
 import net.kigawa.kivra.db.MemberRemoveResult
 import net.kigawa.kivra.db.PROJECT_MEMBER_ROLES
 import net.kigawa.kivra.db.ProjectBackfillRepository
+import net.kigawa.kivra.db.ProjectDrainRepository
+import net.kigawa.kivra.db.ProjectDrainResult
 import net.kigawa.kivra.db.ProjectDeleteResult
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectMemberRow
@@ -45,6 +47,10 @@ private data class ProjectError(val error: String)
 /** The 409 of a project that still has rows: a fixed code and the count of each kind. No ids and no names. */
 @Serializable
 private data class ProjectNotEmptyError(val error: String, val counts: Map<String, Long>)
+
+/** The 409 of a drain refused because the project is busy: a fixed code and the counts of what blocks it. No ids and no names. */
+@Serializable
+private data class ProjectBusyError(val error: String, val counts: Map<String, Long>)
 
 /**
  * Project routes (V38): CRUD for projects and Run assignment.
@@ -79,6 +85,8 @@ internal fun Route.configureProjectRoutes(
     members: ProjectMemberRepository,
     /** The monthly budget of a project (ADR 0022, PR-E): `/api/projects/{id}/budget` and the dashboard's budget. */
     budgets: DbBudgetStore,
+    /** The drain of a project into another (ADR 0022): `POST /api/projects/{id}/drain`. */
+    drain: ProjectDrainRepository,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -408,6 +416,61 @@ internal fun Route.configureProjectRoutes(
                 }
             }
         }
+        // Empties this project into the target (ADR 0022, the drain): every row moves to the target, the members and the budget row of this
+        // project are removed (the last ADMIN included, the one place where that is allowed), and nothing is deleted. Operators only. A dry run
+        // (the default) only counts. Refused with 409 PROJECT_BUSY while this project has a Run that is not terminal, or a reservation in progress.
+        post("drain") {
+            val principal = call.principalOr401() ?: return@post
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_drain")) return@post
+            if (!call.requireJsonSameOrigin()) return@post
+            val dryRun = when (call.request.queryParameters["dryRun"]) {
+                null, "true" -> true
+                "false" -> false
+                else -> return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_dry_run"))
+            }
+            val projectId = call.pathParam("projectId")
+                ?: return@post call.respond(HttpStatusCode.NotFound)
+            val input = runCatching { call.receive<ProjectDrainRequest>() }.getOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_body"))
+            if (projectRepo.get(projectId) == null || !mayReadProject(principal, projectId, "project_drain")) {
+                return@post call.respond(HttpStatusCode.NotFound)
+            }
+            // The target is checked with the same rules as a new entity's project (ProjectScope.kt): required, well formed, existing.
+            val targetId = input.targetProjectId
+            when (val target = projectRepo.scopeOf(targetId)) {
+                is ProjectScope.Refused -> return@post call.respond(target.status, ProjectError(target.error))
+                is ProjectScope.Assigned -> Unit
+            }
+            if (targetId == projectId) return@post call.respond(HttpStatusCode.BadRequest, ProjectError("same_project"))
+            if (!mayReadProject(principal, targetId, "project_drain")) return@post call.respond(HttpStatusCode.NotFound)
+            when (val result = drain.drain(projectId, targetId, dryRun)) {
+                ProjectDrainResult.NotFound -> {
+                    projectAdminLog.info("project admin action: action=PROJECT_DRAIN mode={} result=NOT_FOUND actor={}", drainMode(dryRun), operatorTag(principal))
+                    call.respond(HttpStatusCode.NotFound)
+                }
+                is ProjectDrainResult.Busy -> {
+                    projectAdminLog.info(
+                        "project admin action: action=PROJECT_DRAIN mode={} result=PROJECT_BUSY actor={} counts={}",
+                        drainMode(dryRun),
+                        operatorTag(principal),
+                        "activeRuns=${result.busy.activeRuns},reservedBudget=${result.busy.reservedBudget}",
+                    )
+                    call.respond(
+                        HttpStatusCode.Conflict,
+                        ProjectBusyError(error = "PROJECT_BUSY", counts = mapOf("activeRuns" to result.busy.activeRuns, "reservedBudget" to result.busy.reservedBudget)),
+                    )
+                }
+                is ProjectDrainResult.Done -> {
+                    projectAdminLog.info(
+                        "project admin action: action=PROJECT_DRAIN mode={} result=OK actor={} counts={}",
+                        drainMode(dryRun),
+                        operatorTag(principal),
+                        result.counts.toMap().entries.joinToString(",") { (kind, n) -> "$kind=$n" },
+                    )
+                    call.respond(ProjectDrainResponse(dryRun = dryRun, targetProjectId = targetId, counts = result.counts.toMap()))
+                }
+            }
+        }
     }
 
     route("/api/runs/{runId}/project") {
@@ -478,6 +541,14 @@ data class ProjectMemberRequest(val role: String)
 
 @Serializable
 data class ProjectMemberImportRequest(val role: String)
+
+/** The body of `POST /api/projects/{id}/drain`: the project that receives every row of this one. */
+@Serializable
+data class ProjectDrainRequest(val targetProjectId: String)
+
+/** The drain's answer: whether it was a dry run, the target, and the rows of each kind that were (or, for a dry run, would be) moved. */
+@Serializable
+data class ProjectDrainResponse(val dryRun: Boolean, val targetProjectId: String, val counts: Map<String, Long>)
 
 /** A member: the assignee's id and display name, its role in the project and its state (ACTIVE or DISABLED). */
 @Serializable
@@ -577,6 +648,9 @@ private const val DASHBOARD_RECENT_RUNS = 10
 
 /** Audit lines of the project administration: fixed codes and ids only. A repository name is never logged. */
 private val projectAdminLog = LoggerFactory.getLogger("net.kigawa.kivra.project.admin")
+
+/** The audit mode of a drain: a dry run counts, a real drain writes. */
+private fun drainMode(dryRun: Boolean): String = if (dryRun) "DRY_RUN" else "EXECUTE"
 
 /** owner/name as [RepoRef] accepts it (the rule of the self-development target), or null. The value is returned as given. */
 internal fun parseRepoKey(value: String): String? {

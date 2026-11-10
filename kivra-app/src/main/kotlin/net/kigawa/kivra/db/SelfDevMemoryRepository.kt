@@ -71,6 +71,13 @@ internal fun Transaction.countMemoryRecordsOfProject(projectId: String): Long =
     execQuery("SELECT COUNT(*) FROM selfdev_memory_records WHERE project_id = ?", projectId) { it.getLong(1) }.first()
 
 /**
+ * Moves the memory records of [from] to [to], in batches (ADR 0022, the project drain). It lives here for the reason of
+ * [countMemoryRecordsOfProject]: the memory tables are written in this file only (SelfDevMemoryArchitectureTest).
+ */
+internal fun Transaction.moveMemoryRecordsOfProject(from: String, to: String, batchSize: Int): Long =
+    moveProjectRows("selfdev_memory_records", "record_id", from, to, batchSize)
+
+/**
  * The rows of `selfdev_memory_records` with no project (ADR 0022 PR-F, the check before V52). Counts only. This file is the only one that
  * names the memory tables (SelfDevMemoryArchitectureTest).
  */

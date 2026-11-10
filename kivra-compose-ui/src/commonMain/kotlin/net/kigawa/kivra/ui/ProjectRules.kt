@@ -3,7 +3,9 @@ package net.kigawa.kivra.ui
 import net.kigawa.kivra.ui.api.ApiAssignee
 import net.kigawa.kivra.ui.api.ApiBackfillReport
 import net.kigawa.kivra.ui.api.ApiBackfillTable
+import net.kigawa.kivra.ui.api.ApiDrainReport
 import net.kigawa.kivra.ui.api.ApiMemberImportReport
+import net.kigawa.kivra.ui.api.ApiProject
 import net.kigawa.kivra.ui.api.ApiProjectActivity
 import net.kigawa.kivra.ui.api.ApiProjectMember
 
@@ -310,3 +312,75 @@ fun memberImportExplain(report: ApiMemberImportReport): String =
 fun memberRemoveExplain(displayName: String): String =
     "この担当（$displayName）を、このプロジェクトのメンバーから外します。担当そのものは消えません。" +
         "プロジェクトの最後の管理者（ADMIN）は外せません。"
+
+/* ---- 空にして削除(ADR 0022 PR-H。運用者だけ。サーバーの drain と DELETE /api/projects/{id}) ---- */
+
+/** 移す行の種類の表示(サーバーの drain の counts の鍵。知らない鍵は「その他」)。 */
+private val DRAIN_KIND_LABELS = mapOf(
+    "repos" to "repo の登録",
+    "members" to "メンバー（外す）",
+    "budget" to "予算の上限（解除）",
+    "tasks" to "Task",
+    "orders" to "Order",
+    "memory" to "記憶",
+    "runs" to "Run",
+    "assignees" to "担当",
+)
+
+const val DRAIN_DRY_DONE_MESSAGE = "確認の結果です（dry-run。何も書き込んでいません）。"
+const val DRAIN_DONE_MESSAGE = "移しました。このプロジェクトは空になりました。削除できます。"
+const val DRAIN_NO_TARGET_MESSAGE = "移し先のプロジェクトがありません。先に、移し先になるプロジェクトを作ってください。"
+
+/** 移し先の候補: 移し元以外のプロジェクト(受け取った順を保つ)。 */
+fun drainTargetChoices(projects: List<ApiProject>, source: String): List<ApiProject> = projects.filter { it.projectId != source }
+
+/** 移す行の合計(counts の和)。0 なら移すものは無い。 */
+fun drainTotal(counts: Map<String, Long>): Long = counts.values.sum()
+
+/** 件数の表示の一行ずつ(0 件の種類は出さない)。 */
+fun drainCountLines(counts: Map<String, Long>): List<String> =
+    counts.filter { it.value > 0L }.map { (kind, n) -> "${DRAIN_KIND_LABELS[kind] ?: "その他"}：$n 件" }
+
+/**
+ * 空にする(実行)ができるか: 確認(dry-run)の結果があり、その移し先が選ばれたままで、移すものが 1 件以上あり、送信中でない。
+ * 確認の結果が移し先を違えたら使えない(実行の対象が変わるため)。
+ */
+fun canRunDrain(dryRun: ApiDrainReport?, target: String?, busy: Boolean): Boolean =
+    !busy && dryRun != null && target != null && dryRun.targetProjectId == target && drainTotal(dryRun.counts) > 0L
+
+/**
+ * 削除ができるか: 空になっている(確認の結果で移すものが 0 件、または、移しが完了した)こと、送信中でないこと。
+ * サーバーが最後の判定をする(行が残れば 409)。
+ */
+fun canDeleteEmptied(emptied: Boolean, busy: Boolean): Boolean = !busy && emptied
+
+/** 空にする(実行)の確認ダイアログの説明。移す先の名前と、外すものを明記する。 */
+fun drainExplain(report: ApiDrainReport, targetName: String): String {
+    val parts = drainCountLines(report.counts)
+    return "確認の結果、次の行を「$targetName」へ移します：" + parts.joinToString("、") +
+        "。移すのは行の所属だけで、行は消しません。このプロジェクトのメンバーは全員外します（最後の管理者を含みます）。" +
+        "このプロジェクトの予算の上限は解除します（消化額は残ります）。移し先のメンバーと上限は変わりません。この操作を取り消す機能はありません。"
+}
+
+/** 削除の確認ダイアログの説明。 */
+fun deleteExplain(projectName: String): String =
+    "プロジェクト「$projectName」を削除します。このプロジェクトに残っている行はありません。削除は取り消せません。"
+
+/** 空にする(実行)の失敗の文言(HTTP のステータスだけで決める。サーバーの本文は出さない)。 */
+fun drainFailureText(status: Int?): String = when (status) {
+    401 -> SESSION_EXPIRED_MESSAGE
+    403 -> "この操作は運用者だけができます。"
+    400 -> "移し先の指定が正しくありません。移し先を選び直してください。"
+    404 -> "プロジェクトか移し先が見つかりません。画面を読み直してから、もう一度お試しください。"
+    409 -> "進行中の Run か、実行中の予約があるため、今は空にできません。終わるまで待ってから、もう一度「確認（dry-run）」をしてください。"
+    else -> "操作に失敗しました。時間をおいてもう一度お試しください。"
+}
+
+/** 削除の失敗の文言。409 は行が残っている(空にしてから削除する)。 */
+fun deleteProjectFailureText(status: Int?): String = when (status) {
+    401 -> SESSION_EXPIRED_MESSAGE
+    403 -> "この操作は運用者だけができます。"
+    404 -> "このプロジェクトは見つかりません。画面を読み直してください。"
+    409 -> "このプロジェクトには、まだ行が残っています。先に「空にして移す」を実行してください。"
+    else -> "削除に失敗しました。時間をおいてもう一度お試しください。"
+}

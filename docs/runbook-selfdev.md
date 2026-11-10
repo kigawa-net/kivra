@@ -826,19 +826,43 @@ API と MCP の投入は、従来どおり `projectId`(MCP は `project_id`)が�
 | `members` | `DELETE /api/projects/{id}/members/{assigneeId}`(本文 `{}`) | ADMIN は最後の 1 人を外せない(409 `last_admin`)。下の制限を見る |
 | `budget` | `DELETE /api/projects/{id}/budget`(本文 `{}`) | 上限の解除(4.18)。消化額は残る |
 | `runs` | `DELETE /api/runs/{runId}/project` | Run を未分類に戻す。Run 自体は残る(Run の一覧は `GET /api/projects/{id}/dashboard`) |
-| `tasks` / `orders` / `assignees` | **この API には外す操作がない。** 別のプロジェクトへ移す API も、消す API もない | このプロジェクトは削除できない |
-| `memory` | 個別削除 `POST /api/selfdev/memory/{id}/delete`(4.17 の画面)。ただし覚え書き(note)は墨消しの行(`DELETED`)が `project_id` を持ったまま残るので、件数は減らない | このプロジェクトは削除できない |
+| `tasks` / `orders` / `assignees` / `memory` | 別のプロジェクトへ移す(drain、4.23)。個別に消す API はない。覚え書き(note)の墨消しの行(`DELETED`)も行なので、移る | 4.23 の drain で移す |
 
-手順: (1) 409 の `counts` を見て、0 でない種類を上の表で外す。(2) 再度 `DELETE /api/projects/{id}`。204 なら完了。
-
-**削除できない既知の制限(要判断、コードは変えていない)。**
-
-- **ADMIN のメンバーがいるプロジェクトは、API では空にできない。** 最後の ADMIN は外せず、役割も変えられない(`MemberRemoveResult.LAST_ADMIN`、ADR 0022 PR-D2 の「ADMIN を少なくとも 1 人残す」)。このため ADMIN を含むプロジェクトは、メンバーが 1 人でも 409 のままになる。空にするには、ADMIN の扱いを決め直す必要がある。
-- **tasks・orders・assignees・memory の行は、この API では移せない。** これらが 1 件でもあるプロジェクトは、削除できない状態が続く。それで正しい(行は消さない方針)が、削除したいプロジェクトに行があるなら、DB の直接操作ではなく運用の判断として扱う。
+手順: (1) 409 の `counts` を見て、0 でない種類を上の表で外す。(2) 再度 `DELETE /api/projects/{id}`。204 なら完了。行を別のプロジェクトへ移すなら、4.23 の drain を使う(drain のあとは、この 409 は出ない)。
 
 **監査。** 削除と拒否は `net.kigawa.kivra.project.admin` の構造化ログに、固定の code(`PROJECT_DELETED`、`PROJECT_DELETE_BLOCKED`)、実行者、プロジェクト ID、`PROJECT_DELETE_BLOCKED` のときだけ種類ごとの件数(`counts=repos=1,members=0,...`)を残す。repo 名は残さない。
 
 **確認。** `curl -si -X DELETE -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/json' -d '{}' '<BASE>/api/projects/<ID>'` が、行のあるプロジェクトで `409` と上の本文を返し、`GET /api/projects/<ID>/repos` などの件数が変わらないこと。空のプロジェクトで `204` を返すこと。
+
+### 4.23 プロジェクトを空にして削除する(ADR 0022 PR-H、運用者のみ)
+
+行を別のプロジェクトへ移して空にし、そのあと 4.22 の削除をする。データは消さない。移す先は既存のプロジェクトで、移し元と同じであってはならない。画面は、プロジェクトの画面の「空にして削除（運用者のみ）」の欄で行う(移し先の選択、dry-run の件数、確認ダイアログ、実行、削除)。API は次のとおり。
+
+```
+POST /api/projects/{id}/drain?dryRun=true        (既定。何も書かない)
+POST /api/projects/{id}/drain?dryRun=false       (実行)
+本文: {"targetProjectId":"<移し先の ULID>"}
+```
+
+| 移すもの | 扱い |
+|---|---|
+| tasks、orders、記憶(墨消しの行を含む)、Run、担当 | 移し先へ付け替える(行は消さない) |
+| repo の登録 | 同じ repo を移し先へ付け替える |
+| 予算(上限) | 移し元の上限を消す。移し先の上限は変えない。消化額は残る |
+| メンバー | 移し元の全員を外す(ADMIN の最後の 1 人を含む)。移し先のメンバーは変えない |
+
+**手順。**
+1. 移し先を決める。`GET /api/projects` で ID を確かめる。
+2. dry-run をする。`POST /api/projects/{id}/drain`(本文は上のとおり)。応答の `counts` が、移る件数。画面では「確認（dry-run）」。
+3. 409 `PROJECT_BUSY` が出たら、止まる理由を外す。`counts.activeRuns` は、移し元の終端でない Run の数(Run を終える、またはキャンセルする)。`counts.reservedBudget` は、移し元の進行中の予約の数(予約が解放されるか、確定するまで待つ)。どちらも 0 になるまで drain は通らない。移し先の進行中の Run は止めない。
+4. `POST /api/projects/{id}/drain?dryRun=false`。200 なら完了。`counts` が移った件数。もう一度呼ぶと、全て 0 で 200(冪等)。
+5. `DELETE /api/projects/{id}`(4.22)。204 なら削除済み。
+
+**やらないこと。** 同じ移し元へ新しい行を入れない(入れると、次の drain で移る)。移し先を移し元と同じにはできない(400 `same_project`)。存在しない移し先は 404、形式違いは 400。
+
+**権限と監査。** ORDER_MANAGE(運用者)だけ。viewer は 403、トークンなしは 401。JSON の CSRF ガードは通常どおり(`Content-Type: application/json` が必要)。監査は `net.kigawa.kivra.project.admin` に `action=PROJECT_DRAIN mode=DRY_RUN|EXECUTE result=OK|PROJECT_BUSY|NOT_FOUND` と実行者、件数(`counts=repos=1,members=3,...`)だけを出す。ID と repo 名は出さない。
+
+**確認。** 移す前に `GET /api/projects/<移し元>/repos` などの件数を控える。実行のあと、移し先で同じ件数が見えること。移し元で `GET /api/projects/<移し元>/dashboard` の Run が 0 件であること。
 
 ## 5. 動作確認
 

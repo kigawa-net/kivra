@@ -248,3 +248,44 @@ PR-D3 の「残り」のうち、MCP の読み取り、集計、旧ルートの�
 **変更。** `ProjectScope.kt` に `retiredBy`(`Deprecation`、`Link`、ログ)と `ROUTE_RETIRED` を足した。`SelfDevGoalRoutes.kt` と `SelfDevOrderRoutes.kt` の旧 POST は、認証と権限の判定のあとに 410 を返す。`SelfDevGoalRoutesTest` と `SelfDevOrderRoutesTest` の投入は別名で行い、「存在しない・形式が違う project は 404、body の projectId が違うと 400」を別名の規則として確かめる。`ProjectScopedRoutesTest` に、旧 POST が 410 を返し、何も作らず、AI と無トークンは従来どおり 403・401 になるテストを足した。
 
 **残り(後続)。** `/api/selfdev/runs` と `POST /api/selfdev/tasks` の別名(と Deprecation)。全体の呼び出しから `Deprecation` を外すか。旧 POST の登録の削除(runbook 4.21 の条件を満たした後)。
+
+## 進捗(PR-H: プロジェクトを空にする、ブランチ `feat/project-drain`)
+
+`DELETE /api/projects/{id}` は空のプロジェクトだけを消す(PR-D2 以降の 409 `PROJECT_NOT_EMPTY`)。行を移す手段がなかったので、使われたプロジェクトは消せなかった。この PR は、行を別のプロジェクトへ移して空にする操作(drain)を足す。マイグレーションは追加しない。データは消さない。
+
+**API。** `POST /api/projects/{id}/drain?dryRun=true|false`(既定は dry-run)、本文 `{"targetProjectId":"<ULID>"}`。ORDER_MANAGE、JSON の CSRF ガード、`pathParam()` で path を読む。移し先は `ProjectScope.kt` の既存の検査(`scopeOf`)で見る。形式違いと空は 400、存在しないのは 404、移し先が自分自身は 400(`same_project`)。移し先を読めない(`mayReadProject`)ときは 404。応答は `{"dryRun", "targetProjectId", "counts"}`(件数だけ)。
+
+**何を移すか(判断 1)。**
+
+| 行 | 扱い | 理由 |
+|---|---|---|
+| tasks、orders、memory records、runs、assignees | `project_id` を移し先へ更新(`UPDATE ... WHERE project_id = :from` のバッチ) | 行は消さない。移し先で見えるようにする |
+| repos(`project_repos`) | 同じ `repo_key` を移し先へ付け替える | `repo_key` は UNIQUE で、移し先に同じ key は元々ない。以後の振り分けは移し先へ向く |
+| budget(`project_budgets`) | 移し元の行を消す。移し先の行は変えない | 移し元に上限が残ると、空にしたあとも予算の判定が残る。消化額(`budget_periods`)は履歴として残す |
+| members(`project_members`) | 移し元のメンバーを全て外す(ADMIN を含む)。移し先のメンバーは変えない | 下の判断 2 |
+
+**判断 2: 最後の ADMIN を外せるのは drain の中だけ。** 通常の `DELETE`/`PUT` のメンバーは従来どおり `LAST_ADMIN` で 409 のまま(`ProjectMemberRepository` は変えていない)。drain は「プロジェクトを空にする」操作の一部で、空にしたあとは誰もそのプロジェクトのメンバーを必要としないので、最後の ADMIN を外す理由になる。テスト `every member of the source is removed, the last ADMIN too, and the normal removal still refuses it` で両方を確かめる。
+
+**判断 3: 進行中の Run と予約があれば 409 `PROJECT_BUSY`(何も書かない)。** 次の 2 つのどちらかがあれば拒否する。
+- 移し元の、終端状態でない Run(`COMPLETED`、`FAILED`、`CANCELLED` 以外)。
+- 移し元のスコープ `project:<from>` の RESERVED の予約。
+
+理由。予約は発行時点のスコープ(`budget_reservation_scopes`)で固定されるので、台帳の整合は崩れない。しかし進行中の Run は、付け替えのあとの支出を移し先のスコープへ計上し、以後の承認を別の上限で判定してしまう。終端の Run は支出がもう増えないので、移しても判定は変わらない。移し先の進行中の Run は拒否しない。移し先の Run は自分の project を保つので、付け替えで判定が変わらない。409 の本文は `{"error":"PROJECT_BUSY","counts":{"activeRuns":n,"reservedBudget":m}}`(件数だけ)。dry-run も同じ判定をして 409 を返すので、画面は実行前に止まる理由を出せる。dry-run は何もロックせず、期限切れの RESERVED を LAPSED に変えないので、dry-run の 409 は古い可能性がある。実行が判定の正本である。
+
+**判断 4: ロックの順序と一つのトランザクション。**
+1. 移し元と移し先の `projects` 行を `FOR UPDATE`、id の昇順(デッドロック回避)。
+2. 移し元の進行中の Run を `FOR UPDATE` で読む(ロック読みは最新のコミット済みの行を見る)。
+3. 各表の行を、1 バッチ 500 件(`ProjectBackfillRepository.DEFAULT_BATCH_SIZE`)で `SELECT ... FOR UPDATE` してから `UPDATE`。UPDATE の件数が選んだ件数と違えば例外で全体を戻す。
+4. テナントの予算行をロックし、期限切れの予約を LAPSED にしてから、RESERVED を数える(`DbBudgetStore.lockTenantForDrain`)。
+5. 移し元の `project_budgets` 行を消す。
+
+ロックの順は ADR 0015 の順(オーダー行を先、テナントの予算行を後)に合わせた。先にテナントの予算行を取ると、オーダー行を待つサイクルの原価との間で循環待ちになりうるため。予算の判定は、テナントの予算行のロックで直列化される(予約の追加と drain の付け替えが同時に起きない)。
+
+**件数の上限(判断 5)。** 上限は設けない。全体は 1 つのトランザクションで、移す行は行ロックを保つ。想定の規模(個人と小さなチームの運用で、表の行は数百まで)では、ロックは短い。件数が数万になるなら、表ごとに分けて実行する方式を検討する(この PR では行わない)。大きい drain は dry-run の件数で先に見てから実行する(runbook 4.23)。
+
+**監査。** `net.kigawa.kivra.project.admin` に、固定の code(`action=PROJECT_DRAIN`、`mode=DRY_RUN|EXECUTE`、`result=OK|PROJECT_BUSY|NOT_FOUND`)、実行者、件数だけを出す。プロジェクト ID、repo 名、行の ID は出さない(テスト `the audit line ...` で確かめる)。
+
+**残ること(判断しない)。**
+- `selfdev_memory_events`(監査の行)には `project_id` がない。移すべき行がないので、drain は触らない。削除の監査をプロジェクトに帰属させることは、PR-D3 の判断のとおり後続。
+- drain の直後に、移し元へ新しい行が入ると、その行は次の drain で移る(件数は実行時点の正本)。
+- 判断 3 の判定と、Run の作成の間にある競合(作成が同時に移し元を選んだ場合)は、スコープの固定により台帳を壊さないが、その予算の帰属は移し先になりうる。

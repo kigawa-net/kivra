@@ -33,6 +33,7 @@ import net.kigawa.kivra.auth.Role
 import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.ProjectBackfillRepository
+import net.kigawa.kivra.db.ProjectDrainRepository
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.TestDb
@@ -68,6 +69,7 @@ class ProjectBudgetRoutesTest {
                     backfill = ProjectBackfillRepository(db.database),
                     members = ProjectMemberRepository(db.database, Clock.systemUTC()),
                     budgets = budgets,
+                    drain = ProjectDrainRepository(db.database, budgets),
                 )
             }
         }

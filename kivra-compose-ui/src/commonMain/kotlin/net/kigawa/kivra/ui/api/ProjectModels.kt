@@ -98,3 +98,23 @@ data class ApiMemberImportReport(
     val alreadyMember: Long,
     val disabled: Long,
 )
+
+/** `POST /api/projects/{id}/chat` の応答の1件(server `ChatMessageResponse`)。 */
+@Serializable
+data class ApiChatMessage(
+    val id: Long,
+    val sessionId: String,
+    val role: String,
+    val content: String,
+    val createdAt: String,
+)
+
+/** `GET /api/projects/{id}/chat` の応答(server `ChatSessionResponse`)。 */
+@Serializable
+data class ApiChatSession(
+    val sessionId: String,
+    val title: String,
+    val updatedAt: String,
+    val messages: List<ApiChatMessage>,
+    val messageCount: Long,
+)

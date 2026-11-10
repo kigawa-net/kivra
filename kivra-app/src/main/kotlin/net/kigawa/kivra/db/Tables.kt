@@ -225,6 +225,24 @@ object ProjectReposTable : Table("project_repos") {
     override val primaryKey = PrimaryKey(projectId, repoKey)
 }
 
+/** The chat session of a project (V53). One per project: the project_id is the primary key (and the session id). */
+object ProjectChatSessionsTable : Table("project_chat_sessions") {
+    val projectId = char("project_id", 26)
+    val title = varchar("title", 256)
+    val updatedAt = datetime("updated_at")
+    override val primaryKey = PrimaryKey(projectId)
+}
+
+/** The messages of a project's chat session (V53). role is 'user' or 'assistant'. */
+object ProjectChatMessagesTable : Table("project_chat_messages") {
+    val id = long("id").autoIncrement()
+    val sessionId = char("session_id", 26)
+    val role = varchar("role", 16)
+    val content = text("content")
+    val createdAt = datetime("created_at")
+    override val primaryKey = PrimaryKey(id)
+}
+
 /** Orchestrator leader lease (V41). Single-row table for leader election. */
 object LeaderLeasesTable : Table("orchestrator_leader_lease") {
     val id = integer("id").default(0)

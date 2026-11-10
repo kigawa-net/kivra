@@ -619,7 +619,11 @@ internal fun Application.appModule(env: Map<String, String>) {
                 backfill = ProjectBackfillRepository(database),
                 members = ProjectMemberRepository(database, java.time.Clock.systemUTC()),
                 budgets = budgetStore,
+<<<<<<< HEAD
                 drain = ProjectDrainRepository(database, budgetStore),
+=======
+                chatRepo = net.kigawa.kivra.db.ProjectChatRepository(database),
+>>>>>>> f09208e (feat(project): プロジェクトチャット機能の追加 (V53))
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

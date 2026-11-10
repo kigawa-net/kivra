@@ -48,6 +48,8 @@ import net.kigawa.kivra.ui.api.ApiProjectBudget
 import net.kigawa.kivra.ui.api.ApiProjectDashboard
 import net.kigawa.kivra.ui.api.ApiRun
 import net.kigawa.kivra.ui.api.ApiSession
+import net.kigawa.kivra.ui.api.ApiChatMessage
+import net.kigawa.kivra.ui.api.ApiChatSession
 import net.kigawa.kivra.ui.backfillExplain
 import net.kigawa.kivra.ui.backfillFailureText
 import net.kigawa.kivra.ui.backfillTableLine
@@ -152,6 +154,10 @@ private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNa
             Text(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
         }
     }
+
+    // プロジェクトごとのチャット（V53）。kivra Agentへの指示投入用。
+    Spacer(Modifier.height(16.dp))
+    ProjectChatSection(projectId)
 
     if (operator) {
         Spacer(Modifier.height(16.dp))
@@ -674,5 +680,126 @@ private fun ProjectOperatorSection(projectId: String) {
                 }
             },
         )
+    }
+}
+
+/**
+ * プロジェクトチャットセクション（V53）。メッセージの表示と送信を行う。
+ * チャットメッセージはDBに保存されるだけ。Taskとして投入するには、この画面ではなく
+ * 自己開発のタスク投入UI（TasksScreen）を使うか、チャット内容をコピーして投入する。
+ */
+@Composable
+private fun ProjectChatSection(projectId: String) {
+    val scope = rememberCoroutineScope()
+    val chat = rememberLoad(projectId) { loadChatSession(projectId) }
+    var inputText by remember { mutableStateOf("") }
+    var sendBusy by remember { mutableStateOf(false) }
+    var sendNotice by remember { mutableStateOf<ActionNotice?>(null) }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("チャット（kivra Agentへの指示）", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+
+            // メッセージ一覧
+            if (chat.messages.isEmpty()) {
+                Text("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                chat.messages.forEach { msg: ApiChatMessage ->
+                    ChatMessageRow(msg)
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // 入力エリア
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = inputText,
+                    onValueChange = { inputText = it },
+                    label = { Text("指示を入力") },
+                    placeholder = { Text("例: プロジェクトの設定を確認して") },
+                    singleLine = true,
+                    enabled = !sendBusy && !ApiSession.expired,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    enabled = inputText.isNotBlank() && !sendBusy && !ApiSession.expired,
+                    onClick = {
+                        if (submitBlocked(sendBusy, ApiSession.expired)) return@Button
+                        sendBusy = true
+                        sendNotice = null
+                        scope.launch {
+                            var done = false
+                            try {
+                                ApiClient.sendChatMessage(projectId, inputText.trim())
+                                done = true
+                                inputText = ""
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                sendNotice = ActionNotice("送信に失敗しました", ok = false)
+                            } finally {
+                                sendBusy = false
+                            }
+                            if (done) {
+                                sendNotice = ActionNotice("送信しました", ok = true)
+                            }
+                        }
+                    },
+                ) {
+                    Text("送信")
+                }
+            }
+            sendNotice?.let { n ->
+                Text(
+                    n.text,
+                    color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 1件のチャットメッセージの表示。roleによってスタイルを変える。 */
+@Composable
+private fun ChatMessageRow(msg: ApiChatMessage) {
+    val isUser = msg.role == "user"
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                if (isUser) "あなた" else "kivra",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(msg.content, style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(2.dp))
+            Text(msg.createdAt, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** チャットセッションの読み込み。セッションがなければnull（UIは「メッセージはありません」を表示）。 */
+internal suspend fun loadChatSession(projectId: String): ApiChatSession {
+    return try {
+        ApiClient.getChatSession(projectId)
+    } catch (e: ApiException) {
+        // 404: セッション未作成。空のセッションを返す
+        if (e.status == 404) {
+            ApiChatSession(
+                sessionId = projectId,
+                title = "Chat",
+                updatedAt = "",
+                messages = emptyList(),
+                messageCount = 0,
+            )
+        } else {
+            throw e
+        }
     }
 }

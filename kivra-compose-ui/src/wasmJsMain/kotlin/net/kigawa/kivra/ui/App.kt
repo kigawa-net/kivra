@@ -262,6 +262,29 @@ private fun KivraAppContent(
                     PermanentDrawerSheet(modifier = Modifier.width(200.dp)) {
                         Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
                             Text("Kivra", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(8.dp))
+                            // プロジェクトの切替。ヘッダーと同じく、今の画面の種類を引き継ぐ。
+                            HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+                            Text(
+                                text = "プロジェクト",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp)
+                            )
+                            projects.forEach { project ->
+                                NavigationDrawerItem(
+                                    selected = route.projectIdOrNull == project.projectId && route !is Route.Page,
+                                    onClick = { navigate(route.inProjectContext(project.projectId)) },
+                                    label = { Text(project.name) },
+                                )
+                            }
+                            // 未分類は、プロジェクトがあるときだけ出す(ホームと同じ)。
+                            if (projects.isNotEmpty()) {
+                                NavigationDrawerItem(
+                                    selected = isUnassigned(route.projectIdOrNull),
+                                    onClick = { navigate(route.inProjectContext(UNASSIGNED_PROJECT_ID)) },
+                                    label = { Text(UNASSIGNED_LABEL) },
+                                )
+                            }
                             val approvalsBadge = approvalsBadgeText(pendingApprovals)
                             sidebarSections(projectId, projectId?.let { nameOf(it) }).forEach { section ->
                                 // 権限と自律運転・API の結果で隠す項目を外し、残りが無い節は見出しごと出さない。

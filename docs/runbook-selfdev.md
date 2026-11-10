@@ -2262,6 +2262,7 @@ curl -s -X POST -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/j
 
 - **監査**: `SELECT kind, reason_code, actor_kind, payload_json, occurred_at FROM selfdev_order_events WHERE order_id = '...' AND kind = 'EXTENDED';`。`payload_json` に延長の前後の `max_cycles` と `expires_at` が入る(V53 の列)。
 - **注意**: 延長は周を始めない。周の開始は従来どおりで、自動の開始が有効なら次の tick から条件に従って始まる。
+- **UI からの操作**: `/ui/compose` の order の詳細で、ルートの order が `ACTIVE` か `PAUSED` のときだけ「延長…」を出す(運用者の `ORDER_MANAGE`)。ダイアログで追加する周数と延長する日数を入れる(どちらか一方か両方。両方空は不可、日数は 1〜14)。送る `version` は読んだ値。成功すると詳細を読み直す。400 `MAX_CYCLES_INVALID` と `EXPIRES_AT_INVALID`、409 `NOT_ROOT`・`STOP_ALREADY_PENDING`・`TERMINAL`・`EXTENSION_DOES_NOT_LIFT`・版の競合は、固定の日本語の文言で出す。再開は UI でも別に行う(延長は自動で再開しない)。
 
 #### 7.6.5 監査とログ
 

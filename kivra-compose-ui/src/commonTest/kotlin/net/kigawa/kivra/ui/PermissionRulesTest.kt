@@ -103,6 +103,7 @@ class PermissionRulesTest {
         assertTrue(p.can(GatedOperation.SUBMIT_TASK))
         assertTrue(p.can(GatedOperation.CREATE_PROJECT))
         assertTrue(p.can(GatedOperation.READ_MEMORY))
+        assertTrue(p.can(GatedOperation.EXTEND_ORDER))
         // STOP_DECIDE は ADMIN と APPROVER だけ。OPERATOR は停止要求を承認できない。
         assertFalse(p.can(GatedOperation.DECIDE_STOP_REQUEST))
         assertFalse(p.showsApprovals())
@@ -135,6 +136,7 @@ class PermissionRulesTest {
         assertEquals(SelfDevPermission.BUDGET_OVERRIDE, GatedOperation.ACKNOWLEDGE_BUDGET.permission)
         assertEquals(SelfDevPermission.SPEND_START, GatedOperation.SUBMIT_TASK.permission)
         assertEquals(SelfDevPermission.ORDER_MANAGE, GatedOperation.CREATE_PROJECT.permission)
+        assertEquals(SelfDevPermission.ORDER_MANAGE, GatedOperation.EXTEND_ORDER.permission)
         assertEquals(SelfDevPermission.READ_TEXT, GatedOperation.READ_MEMORY.permission)
     }
 }

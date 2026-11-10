@@ -14,6 +14,7 @@ import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.GOAL_STOP_REASON_MAX
 import net.kigawa.kivra.ui.GatedOperation
 import net.kigawa.kivra.ui.LocalCallerPermissions
+import net.kigawa.kivra.ui.ORDER_EXTENDED_DONE
 import net.kigawa.kivra.ui.ORDER_PAUSED_DONE
 import net.kigawa.kivra.ui.ORDER_RESUMED_DONE
 import net.kigawa.kivra.ui.ORDER_STOP_CANCELLED_DONE
@@ -23,6 +24,7 @@ import net.kigawa.kivra.ui.RUN_RELEASE_REASON_MAX
 import net.kigawa.kivra.ui.ReleaseKind
 import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.canCancelOrderStop
+import net.kigawa.kivra.ui.canExtendOrder
 import net.kigawa.kivra.ui.canPauseOrder
 import net.kigawa.kivra.ui.canRequestOrderStop
 import net.kigawa.kivra.ui.canResumeOrder
@@ -365,6 +367,8 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
     var notice by remember { mutableStateOf<ActionNotice?>(null) }
     var stopOpen by remember { mutableStateOf(false) }
     var stopError by remember { mutableStateOf<String?>(null) }
+    var extendOpen by remember { mutableStateOf(false) }
+    var extendError by remember { mutableStateOf<String?>(null) }
     val perms = LocalCallerPermissions.current
     val gate = rememberOperatorWriteGate()
     val state = rememberLoad(orderId, reloadKey) { ApiClient.getOrder(orderId) }
@@ -442,11 +446,13 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
             val showResume = perms.can(GatedOperation.MANAGE_ORDER) && canResumeOrder(order.state, order.stateReason)
             val showRequest = perms.can(GatedOperation.REQUEST_ORDER_STOP) && canRequestOrderStop(order.state, pending != null)
             val showCancel = perms.can(GatedOperation.REQUEST_ORDER_STOP) && canCancelOrderStop(pending)
+            // 延長はルートの order で、ACTIVE か PAUSED のときだけ(子・STOP_REQUESTED・STOPPED では出さない)。
+            val showExtend = perms.can(GatedOperation.EXTEND_ORDER) && canExtendOrder(order.state, order.parentOrderId)
             notice?.let { n ->
                 Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                 Spacer(Modifier.height(8.dp))
             }
-            if (showPause || showResume || showRequest || showCancel) {
+            if (showPause || showResume || showExtend || showRequest || showCancel) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (showPause) {
                         Button(enabled = !gate.busy, onClick = {
@@ -457,6 +463,9 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                         Button(enabled = !gate.busy, onClick = {
                             send(OperatorAction.RESUME_ORDER, ORDER_RESUMED_DONE) { ApiClient.resumeOrder(order.orderId, order.version) }
                         }) { Text("再開") }
+                    }
+                    if (showExtend) {
+                        OutlinedButton(enabled = !gate.busy, onClick = { extendError = null; extendOpen = true }) { Text("延長…") }
                     }
                     if (showRequest) {
                         OutlinedButton(enabled = !gate.busy, onClick = { stopError = null; stopOpen = true }) { Text("停止を要求…") }
@@ -470,6 +479,32 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(12.dp))
+            }
+            if (extendOpen && showExtend) {
+                OrderExtendDialog(
+                    order = order,
+                    busy = gate.busy,
+                    errorText = extendError,
+                    onSubmit = { addCycles, extendDays ->
+                        extendError = null
+                        gate.send(
+                            action = OperatorAction.EXTEND_ORDER,
+                            call = { ApiClient.extendOrder(order.orderId, order.version, addCycles, extendDays) },
+                            onSuccess = {
+                                extendOpen = false
+                                notice = ActionNotice(ORDER_EXTENDED_DONE, ok = true)
+                                reloadKey++
+                            },
+                            onFailure = { extendError = it },
+                        )
+                    },
+                    onDismiss = {
+                        if (!gate.busy) {
+                            extendOpen = false
+                            extendError = null
+                        }
+                    },
+                )
             }
             if (stopOpen && showRequest) {
                 OrderStopRequestDialog(

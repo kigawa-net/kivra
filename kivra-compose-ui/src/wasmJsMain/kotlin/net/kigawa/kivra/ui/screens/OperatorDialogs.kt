@@ -29,15 +29,25 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.BUDGET_ACTUAL_HINT
 import net.kigawa.kivra.ui.BUDGET_TEXT_MAX
+import net.kigawa.kivra.ui.ORDER_EXTEND_CONFIRM
+import net.kigawa.kivra.ui.ORDER_EXTEND_HINT
 import net.kigawa.kivra.ui.ORDER_STOP_CONFIRM
 import net.kigawa.kivra.ui.OperatorAction
 import net.kigawa.kivra.ui.REQUESTABLE_STOP_REASONS
 import net.kigawa.kivra.ui.ReasonCheck
+import net.kigawa.kivra.ui.EXTEND_DAYS_MAX
 import net.kigawa.kivra.ui.budgetPathLabel
 import net.kigawa.kivra.ui.checkReason
+import net.kigawa.kivra.ui.displayTime
 import net.kigawa.kivra.ui.api.ApiException
+import net.kigawa.kivra.ui.api.ApiOrder
 import net.kigawa.kivra.ui.api.ApiUnpricedReservation
+import net.kigawa.kivra.ui.isExtendFormOk
+import net.kigawa.kivra.ui.isValidAddCycles
 import net.kigawa.kivra.ui.isValidBudgetActual
+import net.kigawa.kivra.ui.isValidExtendDays
+import net.kigawa.kivra.ui.addCyclesOrNull
+import net.kigawa.kivra.ui.extendDaysOrNull
 import net.kigawa.kivra.ui.operatorWriteFailureText
 import net.kigawa.kivra.ui.reasonLength
 import net.kigawa.kivra.ui.reservationLabel
@@ -198,6 +208,79 @@ private fun confirmText(actual: String, amountJpy: String): String =
     } else {
         "実額として $actual 円を記録します（0 は「請求されていないことを確認済み」の意味です）。"
     }
+
+/**
+ * order の延長ダイアログ。追加する周数と延長する日数(どちらか一方か両方。両方空は不可)。現在の開始済みの周・上限・期限を示す。
+ * 形式の検査は [isExtendFormOk]、上限と 30 日の天井はサーバーが判定する。送信中は [busy] の間、すべての操作を止める。
+ * 失敗時は [errorText] をダイアログ内に出し、ダイアログは閉じない。成功時は呼び出し側が閉じる。
+ */
+@Composable
+internal fun OrderExtendDialog(
+    order: ApiOrder,
+    busy: Boolean,
+    errorText: String?,
+    onSubmit: (addCycles: Int?, extendDays: Int?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    // 開いている間は定期更新を止める(入力中の内容を読み直しで消さないため)。
+    HoldAutoRefreshWhileShown()
+    var addInput by remember { mutableStateOf("") }
+    var daysInput by remember { mutableStateOf("") }
+    val addOk = isValidAddCycles(addInput)
+    val daysOk = isValidExtendDays(daysInput)
+    val formOk = isExtendFormOk(addInput, daysInput)
+
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("order の延長") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(ORDER_EXTEND_CONFIRM)
+                Spacer(Modifier.height(4.dp))
+                Text(ORDER_EXTEND_HINT)
+                Spacer(Modifier.height(8.dp))
+                DetailRow("開始した周", "${order.cyclesStarted} 周")
+                DetailRow("現在の上限", "${order.maxCycles} 周")
+                DetailRow("現在の期限", displayTime(order.expiresAt))
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = addInput,
+                    onValueChange = { addInput = it },
+                    label = { Text("追加する周数") },
+                    enabled = !busy,
+                    isError = !addOk,
+                    supportingText = { Text(if (addOk) "空欄は追加しません（1 以上の整数）" else "1 以上の整数で入力してください") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = daysInput,
+                    onValueChange = { daysInput = it },
+                    label = { Text("延長する日数") },
+                    enabled = !busy,
+                    isError = !daysOk,
+                    supportingText = {
+                        Text(if (daysOk) "空欄は延長しません（1〜$EXTEND_DAYS_MAX 日）" else "1〜$EXTEND_DAYS_MAX の整数で入力してください")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (errorText != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(errorText, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !busy && formOk,
+                onClick = { onSubmit(addCyclesOrNull(addInput), extendDaysOrNull(daysInput)) },
+            ) { Text("延長する") }
+        },
+        dismissButton = {
+            TextButton(enabled = !busy, onClick = onDismiss) { Text("キャンセル") }
+        },
+    )
+}
 
 /**
  * order の停止要求ダイアログ。理由は要求できる 4 種から一つ選ぶ(自由入力はない)。選んで「停止を要求する」を押すまで送らない。

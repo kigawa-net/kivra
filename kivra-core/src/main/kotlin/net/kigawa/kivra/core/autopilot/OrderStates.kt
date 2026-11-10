@@ -97,7 +97,7 @@ private val NOT_RESUMABLE = setOf(OrderReason.LIMIT_REACHED, OrderReason.EXPIRED
  * fixed code, and [actor] who asks. Every pair not listed is refused.
  *
  * - ACTIVE -> PAUSED: an operator's pause, or a system guard's pause (see [SYSTEM_PAUSE_REASONS]).
- * - PAUSED -> ACTIVE: an operator's resume only, and not after a limit or an expiry.
+ * - PAUSED -> ACTIVE: an operator's resume only, and not after a limit or an expiry unless [limitsLifted] (the extension lifted it).
  * - ACTIVE or PAUSED -> STOP_REQUESTED: a stop request, by an operator or by the AI principal.
  * - STOP_REQUESTED -> STOPPED: the approval, by an operator only (the approver's identity is checked by the caller). The reason is
  *   OPERATOR_STOPPED for the root and PARENT_STOPPED for a child.
@@ -112,6 +112,12 @@ fun checkOrderTransition(
     reason: OrderReason,
     actor: OrderActor,
     fromReason: OrderReason?,
+    /**
+     * True when the order's cycle limit is not reached and its lifetime is not over, and an operator's extension (ADR 0015 section 2.6, addendum
+     * 2026-11-10) has made that so after a LIMIT_REACHED or EXPIRED pause. Only then may the operator resume such an order. The caller checks it
+     * under the order's lock. False (the default) keeps the rule that a limit or an expiry is never resumed.
+     */
+    limitsLifted: Boolean = false,
 ): OrderTransitionDecision {
     if (from == OrderState.STOPPED) return OrderTransitionDecision.Refused(OrderRefusal.TERMINAL)
     return when {
@@ -125,7 +131,7 @@ fun checkOrderTransition(
         from == OrderState.PAUSED && to == OrderState.ACTIVE -> when {
             reason != OrderReason.OPERATOR_RESUMED -> refused(OrderRefusal.REASON_NOT_ALLOWED)
             actor != OrderActor.HUMAN -> refused(OrderRefusal.ACTOR_NOT_ALLOWED)
-            fromReason in NOT_RESUMABLE -> refused(OrderRefusal.RESUME_NOT_ALLOWED)
+            fromReason in NOT_RESUMABLE && !limitsLifted -> refused(OrderRefusal.RESUME_NOT_ALLOWED)
             else -> allowed()
         }
         (from == OrderState.ACTIVE || from == OrderState.PAUSED) && to == OrderState.STOP_REQUESTED -> when {

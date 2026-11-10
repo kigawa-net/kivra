@@ -2213,7 +2213,7 @@ order の tick(60 秒ごと)が、条件がそろった order の次の周を始
 | 状態 | 意味 | 解除 |
 |---|---|---|
 | `ACTIVE` | 周を続けてよい | — |
-| `PAUSED` | 周を始めない。理由コードを持つ | 運用者の再開(`POST .../resume`)。ただし `LIMIT_REACHED` と `EXPIRED` は再開できない(新しい order が要る) |
+| `PAUSED` | 周を始めない。理由コードを持つ | 運用者の再開(`POST .../resume`)。ただし `LIMIT_REACHED` と `EXPIRED` は、延長(§7.6.4a)で上限と期限が両方解消したあとにだけ再開できる(延長がなければ新しい order が要る) |
 | `STOP_REQUESTED` | 停止を要求中。周を始めない。承認を待つ | 承認(`STOPPED`)、却下、取り消し、期限切れ(24 時間。`PAUSED` に戻る) |
 | `STOPPED` | 終端。承認でだけ入る | なし |
 
@@ -2231,6 +2231,37 @@ order の tick(60 秒ごと)が、条件がそろった order の次の周を始
   5. 期限切れ: 要求から 24 時間で `EXPIRED`、order は `PAUSED`(`STOP_NOT_APPROVED`)。承認は期限切れの後は受け付けない。
 
 AI の主体ができるのは、読み取りと停止の要求だけである。作成、周の開始、一時停止、再開、承認、却下、取り消しは、AI の主体には 403 を返す。
+
+#### 7.6.4a 延長(上限と期限の変更、2026-11-10 追補)
+
+上限(`max_cycles`)か期限(`expires_at`)を使い切った order を、作り直さずに延長する。ADR 0015 の 2026-11-10 追補(§2.6 の改め)が根拠である。
+
+- **対象**: ルートの order だけ。`ACTIVE` か `PAUSED` のとき。`STOP_REQUESTED` と `STOPPED` は 409、子の order は 409 `NOT_ROOT`。
+- **API**: `POST /api/selfdev/orders/{id}/extend` `{"version": n, "addCycles": 1..CAP, "extendDays": 1..14}`。どちらか一方だけでもよいが、少なくとも一方は要る。運用者だけ(AI の主体は 403)。`version` が違えば 409 `STALE`。
+- **上限**: 延長後の `max_cycles` は `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` 以下(超えれば 400 `MAX_CYCLES_INVALID`)。CAP を上げるのは設定の変更で、この操作ではできない。
+- **期限**: 現在時刻と現在の `expires_at` の遅い方から `extendDays` 日後。作成から 30 日以内(超えれば 400 `EXPIRES_AT_INVALID`)。
+- **変わらないもの**: 予算(`order_budget_jpy`、`cycle_budget_jpy`。予算の増額はこの操作の対象外)、連続失敗、サーキットブレーカー、停止の承認、子の上限。
+- **止まっている order**: 理由が `LIMIT_REACHED` / `EXPIRED` なら、延長で上限と期限が両方解消するときに限り延長できる。解消しなければ 409 `EXTENSION_DOES_NOT_LIFT`。その他の理由(`OPERATOR_PAUSED` など)の order は、延長しても理由のまま止まる。延長は状態を `ACTIVE` にしない。
+- **再開**: 延長で解消した `LIMIT_REACHED` / `EXPIRED` の order は、`POST .../resume` で再開できる(自動では再開しない)。延長をしていない `LIMIT_REACHED` の order は、従来どおり再開できない。
+- **手順**(`<JWT>` は運用者のトークン、`<BASE>` は kivra の URL。秘密は書かない):
+
+```sh
+# 1. 現在の version と state を確かめる
+curl -s -H 'Authorization: Bearer <JWT>' '<BASE>/api/selfdev/orders/<ORDER_ID>'
+
+# 2. 1 周と 14 日延長する(version は 1 で見た値)
+curl -s -X POST -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/json' \
+  -d '{"version": <VERSION>, "addCycles": 1, "extendDays": 14}' \
+  '<BASE>/api/selfdev/orders/<ORDER_ID>/extend'
+
+# 3. 止まっていたなら再開する(version は 2 の応答の version)
+curl -s -X POST -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/json' \
+  -d '{"version": <VERSION_AFTER_EXTEND>}' \
+  '<BASE>/api/selfdev/orders/<ORDER_ID>/resume'
+```
+
+- **監査**: `SELECT kind, reason_code, actor_kind, payload_json, occurred_at FROM selfdev_order_events WHERE order_id = '...' AND kind = 'EXTENDED';`。`payload_json` に延長の前後の `max_cycles` と `expires_at` が入る(V53 の列)。
+- **注意**: 延長は周を始めない。周の開始は従来どおりで、自動の開始が有効なら次の tick から条件に従って始まる。
 
 #### 7.6.5 監査とログ
 

@@ -880,3 +880,18 @@ U-14(有効化された後の起動で、全 `ACTIVE` を `PAUSED(STARTUP_HOLD)`
 - **残る窓**: 保留は、ワーカーを起動した後に行われる(従来と同じ順序)。`true` のとき、再起動の直後から `ACTIVE` の order が周を始め得る。これは運用者がこの変数を選んだ結果である。
 - **ロールバック**: 変数を `false`(または消す)にして再起動する。次の起動から保留が戻り、その起動で `ACTIVE` の order は `STARTUP_HOLD` で止まる。ロールバックの操作そのものは order の状態を変えない。
 - **確認したこと**: 設定の読み込み(既定、true / false、不正値、オーダー無効時に読まないこと)と、起動時の保留の分岐(既定で保留、`true` で保留しない、リポジトリが無いとき何もしない)を単体テストで確かめた。dev での有効化の判断は運用者が行う(未確認)。
+
+## 追補(2026-11-10): order の延長(§2.6 の改め)
+
+§2.6 は「order の方針、範囲、上限、親は、作成後に変えない」とし、上限を上げたいときは新しい order を作るとした。実運用では、`max_cycles` か `expires_at` を使い切った order を作り直すしかなく、ルートは 1 件だけなので、先に承認つきで停止する必要があった。そこで、§2.6 の「作成後に変えない」を、次の範囲に限って運用者の明示操作で変えられるように改める。本文の §2.6 は編集しない(この追補の日付の版が正である)。
+
+- **変えられるもの**: `max_cycles`(`addCycles`。延長後も `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` 以下)と、`expires_at`(`extendDays`、1〜14 日。現在時刻と現 `expires_at` の遅い方から加え、作成から 30 日以内)。
+- **変えられないもの**: 方針、題名、範囲、親、予算(`order_budget_jpy` と `cycle_budget_jpy`。予算の増額はこの追補に含めない)、連続失敗、サーキットブレーカー、停止の承認の規則、子の上限。安全装置は、延長でも変わらない。
+- **対象**: ルートの order だけ(子は 409 `NOT_ROOT`)。`ACTIVE` か `PAUSED` のとき。`STOP_REQUESTED` と `STOPPED` は 409。
+- **PAUSED の扱い**: 理由が `LIMIT_REACHED` / `EXPIRED` の order は、延長で上限と期限の両方が解消するときに限り延長できる。解消しなければ 409 `EXTENSION_DOES_NOT_LIFT`。ほかの理由の order は、延長しても理由のまま止まる。延長は状態も理由も変えず、自動では `ACTIVE` に戻さない。再開は運用者が従来の `resume` で行う。
+- **resume の拒否条件の改め**: `LIMIT_REACHED` / `EXPIRED` の order は、延長のあとで、かつ `cycles_started < max_cycles` かつ `expires_at > now` のときに限り再開できる。「延長のあと」は、`EXTENDED` の事象が最後の `PAUSED` の事象より後にあることで見る。この条件は、延長していない `LIMIT_REACHED` の order を従来どおり拒否させるために要る。自動の開始が `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` で止めた order は、`cycles_started` が `max_cycles` より小さいため、条件の 2 つだけでは延長なしで再開できてしまう。
+- **理由**: 上限と期限は、止まっている理由のうち運用者が明示的に解く対象である。承認の対象が途中で変わる問題(TOCTOU、§2.6 の元の理由)は、停止の要求の中では延長を拒否し(`STOP_ALREADY_PENDING`)、`version` の一致を要求することで避ける。停止の digest は order の version を含むので、延長は承認の対象を変えうる。そのため、要求の中の延長は拒否する。新しい order を作る経路(U-10)と承認つきの更新(U-11)は、従来どおり残す。
+- **監査**: `selfdev_order_events` の `kind = 'EXTENDED'`、`actor_kind = 'HUMAN'`、`reason_code = 'OPERATOR_EXTENDED'`。延長の前後の `max_cycles` と `expires_at` は、新しい列 `payload_json`(V53。数値と時刻だけの固定の形の JSON、255 文字まで)に入れる。既存の列では表せないため、マイグレーションを 1 つ(V53、nullable の列 1 つ)だけ足した。ログは ID と結果の状態コードだけ(題名、方針、数値は出さない)。
+- **拒否の答え**: 400 `MAX_CYCLES_INVALID`(CAP を超える)、400 `EXPIRES_AT_INVALID`(作成から 30 日を超える)、409 `STALE`(version が違う)、409 `NOT_ROOT`、409 `TERMINAL`、409 `STOP_ALREADY_PENDING`、409 `EXTENSION_DOES_NOT_LIFT`。AI の主体は、入力を読む前に 403(既存の `resume` と同じ `ORDER_MANAGE`)。
+- **確認したこと**: リポジトリ層(TestDb の実 DB)で、ACTIVE の延長、PAUSED(`OPERATOR_PAUSED`、`LIMIT_REACHED`、`EXPIRED`)の延長と理由の保持、解消しない延長の拒否、CAP と 30 日の超過、子、要求中と停止済みの拒否、version の不一致、延長後の resume、延長なしの cap 停止の resume の拒否を単体テストで確かめた。ルートの 400 / 403 / 409 の答えは、ルートのテストで確かめた。核の遷移規則 `checkOrderTransition` は、`limitsLifted` の 2 つの場合を単体テストで確かめた。
+- **未確認**: 本番の運用の手順(dev で延長を試す判断は運用者が行う)。UI(`kivra-compose-ui`)と MCP には出していない(この追補は API だけ)。

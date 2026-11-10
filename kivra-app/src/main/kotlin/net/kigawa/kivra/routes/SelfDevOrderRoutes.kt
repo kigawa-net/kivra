@@ -23,6 +23,9 @@ import net.kigawa.kivra.db.ChildLimits
 import net.kigawa.kivra.db.DEFAULT_CYCLE_BUDGET_JPY
 import net.kigawa.kivra.db.ChildRefusal
 import net.kigawa.kivra.db.CreateRootResult
+import net.kigawa.kivra.db.EXTEND_DAYS_LIMIT
+import net.kigawa.kivra.db.ExtendInvalid
+import net.kigawa.kivra.db.ExtendResult
 import net.kigawa.kivra.db.OrderConflict
 import net.kigawa.kivra.db.OrderCycle
 import net.kigawa.kivra.db.OrderResult
@@ -82,6 +85,13 @@ data class CreateOrderRequest(
 
 @Serializable
 data class OrderVersionRequest(val version: Long)
+
+/**
+ * An operator's extension of the root order (ADR 0015 addendum 2026-11-10, section 2.6). At least one of [addCycles] (1 to the cap) and
+ * [extendDays] (1 to 14) is given.
+ */
+@Serializable
+data class ExtendOrderRequest(val version: Long, val addCycles: Int? = null, val extendDays: Int? = null)
 
 /** A child order (ADR 0015 section 2.7). The same title and policy rules as the root; the budget is whole yen. */
 @Serializable
@@ -254,6 +264,8 @@ private const val CHILDREN_DISABLED = "child orders are disabled"
 private const val CHILD_FIELDS_INVALID = "title and policy as for an order, and idempotencyKey 1-128 characters without control characters"
 private const val MAX_CYCLES_INVALID = "maxCycles must be a whole number from 1 to the configured cap"
 private const val MAX_CYCLES_INVALID_CODE = "MAX_CYCLES_INVALID"
+private const val EXPIRES_AT_INVALID = "the extended expiry is more than 30 days after the order was created"
+private const val EXPIRES_AT_INVALID_CODE = "EXPIRES_AT_INVALID"
 private const val BUDGET_INVALID = "orderBudgetJpy must be a whole number of yen from 1 to 999999999999"
 private const val BUDGET_BELOW_CYCLE = "orderBudgetJpy must be at least the cycle budget of 1000 yen"
 private const val PARENT_NOT_ACTIVE = "the parent order is not active; a child needs an active parent"
@@ -396,6 +408,39 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
                 call.respond(r.value.summary())
             }
             else -> call.respondOutcome(r)
+        }
+    }
+
+    post("/api/selfdev/orders/{id}/extend") {
+        val caller = deps.caller(call) ?: return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        // The operator only, as for the resume: the AI principal is refused before the body is read (ADR 0015 section 4.6).
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.extend")) return@post
+        val orderId = orderIdOf(call) ?: return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+        val request = decodeOr<ExtendOrderRequest>(call) ?: return@post
+        val cap = deps.orderSettings.maxCyclesCap
+        if (request.version < 0 || (request.addCycles == null && request.extendDays == null)) {
+            return@post call.respond(HttpStatusCode.BadRequest, OrderError(INVALID_BODY))
+        }
+        if (request.addCycles != null && request.addCycles !in 1..cap) {
+            return@post call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
+        }
+        if (request.extendDays != null && request.extendDays !in 1..EXTEND_DAYS_LIMIT) {
+            return@post call.respond(HttpStatusCode.BadRequest, OrderError(INVALID_BODY))
+        }
+        when (val r = deps.orders.extendByOperator(orderId, request.version, caller.principal, request.addCycles, request.extendDays, cap)) {
+            is ExtendResult.Moved -> {
+                // The log holds the IDs and the fixed codes only: no title, no policy, and not the numbers of the extension.
+                operatorLog.info("order operator action: action=EXTENDED actor={} orderId={} result={}", operatorTag(caller.principal), orderId, r.order.state.name)
+                call.respond(r.order.summary())
+            }
+            ExtendResult.NotFound -> call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+            ExtendResult.StaleVersion -> call.respond(HttpStatusCode.Conflict, OrderError(STALE))
+            is ExtendResult.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedText(r.reason), r.reason.name))
+            is ExtendResult.Invalid -> when (r.reason) {
+                ExtendInvalid.MAX_CYCLES_OVER_CAP -> call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
+                ExtendInvalid.EXPIRY_OVER_CEILING -> call.respond(HttpStatusCode.BadRequest, OrderError(EXPIRES_AT_INVALID, EXPIRES_AT_INVALID_CODE))
+            }
         }
     }
 
@@ -629,6 +674,8 @@ internal fun refusedText(reason: OrderConflict): String = when (reason) {
     OrderConflict.NO_PROJECT -> "the order has no project; it must be assigned to a project before a cycle can start"
     OrderConflict.NOT_ACTIVE -> "the order is not active"
     OrderConflict.RESUME_NOT_ALLOWED -> "this order cannot be resumed; a new order is needed"
+    OrderConflict.NOT_ROOT -> "only a root order can be extended"
+    OrderConflict.EXTENSION_DOES_NOT_LIFT -> "the extension would not lift the cycle limit and the expiry that paused the order"
     OrderConflict.ACTOR_NOT_ALLOWED -> "this caller may not make this change"
     OrderConflict.REASON_NOT_ALLOWED, OrderConflict.NO_EDGE, OrderConflict.TERMINAL -> "the state does not allow this operation"
     OrderConflict.SAME_PRINCIPAL -> FORBIDDEN

@@ -32,6 +32,12 @@ class ProjectApiPathTest {
     }
 
     @Test
+    fun aRunIsSubmittedOnTheAliasOfItsProjectAndOnTheOldRouteOnlyForUnassigned() {
+        assertEquals("/api/projects/p1/runs", ProjectApi.runSubmit("p1"))
+        assertEquals("/api/selfdev/tasks", ProjectApi.runSubmit("unassigned"))
+    }
+
+    @Test
     fun unassignedListsUseTheOldRoutesWithTheProjectIdQuery() {
         assertEquals("/api/selfdev/goals?projectId=unassigned", ProjectApi.goals("unassigned"))
         assertEquals("/api/selfdev/orders?projectId=unassigned", ProjectApi.orders("unassigned"))

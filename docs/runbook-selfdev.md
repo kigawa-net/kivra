@@ -724,11 +724,12 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 | `GET /api/projects/{id}/approvals?state=PENDING` | `GET /api/selfdev/stop-requests?state=PENDING` | 承認待ちの停止要求。`state` は必須(従来どおり) |
 | `GET /api/projects/{id}/memory` | `GET /api/selfdev/memory` | 検索の条件は旧ルートと同じ |
 | `GET /api/projects/{id}/assignees` | `GET /api/selfdev/assignees` | そのプロジェクトのメンバー(担当) |
+| `GET` / `POST /api/projects/{id}/runs` | `GET /api/selfdev/runs?projectId=`、`POST /api/selfdev/tasks` | 自己開発の Run(PR のみ)の一覧・投入(4.19 の下の注)。投入の body の `projectId` は省略可。あれば path と一致が必要(不一致は 400) |
 
 - **path のプロジェクトが正。** 存在しない(または形式が違う)プロジェクトは 404。一覧の `?projectId=` は path と同じか省略のみ(違えば 400)。
 - **認可は path のプロジェクトで判定する。** 運用者の認証(トークン)は従来どおり必須(無ければ 401)。`KIVRA_SELFDEV_PROJECT_MODE` の shadow・enforce は path のプロジェクトに対して働く(4.17)。
-- **旧ルートの `Link` の宛先。** `projectId` の指定がある旧ルートは、その ID を入れた宛先を返す。指定がない場合(旧 POST の body 指定を含む)は `/api/projects/%7BprojectId%7D/tasks` のようなテンプレートになる。`%7BprojectId%7D` は `{projectId}` の置き換えであり、そのまま使わない。
-- **`/api/selfdev/runs` と `POST /api/selfdev/tasks`(PR-only の Run)は移していない。** projectId は受け付けるが、移行先のルートがまだないので `Deprecation` は付けない。画面の「タスク」は、従来どおり `GET /api/runs?projectId=`(Task API)を読む。
+- **旧ルートの `Deprecation` と `Link`(PR-I で変更)。** `projectId` のクエリに ULID を指定したときだけ付く。`Link` の宛先は、その ID を入れたもの。projectId の指定がない一覧(全体)と `?projectId=unassigned` には、移行先がないので付かない。`projectId=<ULID 以外>` は従来どおり 400 で、ヘッダも付かない。廃止した旧 POST(4.21)は、body の指定によらず `/api/projects/%7BprojectId%7D/tasks` のようなテンプレートを返す。`%7BprojectId%7D` は `{projectId}` の置き換えであり、そのまま使わない。
+- **Run(PR のみ)の別名(PR-I)。** `GET /api/projects/{id}/runs` と `POST /api/projects/{id}/runs` は、`GET /api/selfdev/runs?projectId=` と `POST /api/selfdev/tasks` と同じ応答。`/api/projects/{id}/tasks` は開発目標(Task)の別名なので、Run の投入は `runs` を使う。画面の「タスク」は、従来どおり `GET /api/runs?projectId=`(Task API)を読む。自己開発の投入は、選んだプロジェクトの `POST /api/projects/{id}/runs` を使う(未分類には別名がないので、旧ルートのまま)。
 
 **画面(`/ui`)**
 
@@ -745,6 +746,7 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 2. 同じプロジェクトで `GET /api/projects/<ID>/tasks` と `GET /api/selfdev/goals?projectId=<ID>` の一覧が同じ。
 3. `GET /api/projects/<存在しないID>/tasks` が 404。`POST /api/projects/<ID>/tasks` の body の `projectId` を別の ID にすると 400 で、何も作られない。
 4. 画面で左のプロジェクトを選び、タブが `#/projects/<ID>/...` になること、旧ハッシュ `#/goals` で同じプロジェクトの行が出ることを見る。
+5. `GET /api/selfdev/runs`(全体)と `GET /api/selfdev/runs?projectId=unassigned` の応答に `Deprecation` が付かないこと。`GET /api/projects/<ID>/runs` と `GET /api/selfdev/runs?projectId=<ID>` の一覧が同じ。
 
 **MCP**
 
@@ -793,7 +795,7 @@ API と MCP の投入は、従来どおり `projectId`(MCP は `project_id`)が�
 `POST /api/selfdev/goals` と `POST /api/selfdev/orders` は廃止した。応答は `410 Gone`(本文は固定の `{"error":"this route is retired; use the alias named in the Link header"}`)で、`Deprecation: true` と `Link: <…/api/projects/%7BprojectId%7D/tasks>`(または `/orders`)を付ける。何も作られない。移行先は `POST /api/projects/{id}/tasks`・`POST /api/projects/{id}/orders`(4.19)。認証と権限は従来どおり先に判定するので、トークンのない呼び出しは 401、AI や権限のない運用者は 403 のまま。
 
 - 廃止の対象は、移行先の別名があり、リポジトリの中に呼び出し元が残っていない旧ルートだけ。Compose UI は作成を別名で行っている(`ProjectApi.goalSubmit`、`orderCreate`)。
-- **残した旧 GET。** `GET /api/selfdev/goals`、`GET /api/selfdev/orders`、`GET /api/selfdev/stop-requests?state=PENDING`、`GET /api/selfdev/memory`、`GET /api/selfdev/assignees` は廃止しない。Compose UI が「全体」(プロジェクトを選ばない)と「未分類」(`?projectId=unassigned`)の一覧でこれらを読む。別名は ULID の project を path で要求するので、この 2 つの表示に移せない。`scripts/compose-ui-crawl/crawl.mjs` と `scripts/selfdev-check.sh` も `GET /api/selfdev/orders`(と goals)を読む。`Deprecation` と `Link` は従来どおり(全体の呼び出しには移行先がないことに注意)。
+- **残した旧 GET。** `GET /api/selfdev/goals`、`GET /api/selfdev/orders`、`GET /api/selfdev/stop-requests?state=PENDING`、`GET /api/selfdev/memory`、`GET /api/selfdev/assignees` は廃止しない。Compose UI が「全体」(プロジェクトを選ばない)と「未分類」(`?projectId=unassigned`)の一覧でこれらを読む。別名は ULID の project を path で要求するので、この 2 つの表示に移せない。`scripts/compose-ui-crawl/crawl.mjs` と `scripts/selfdev-check.sh` も `GET /api/selfdev/orders`(と goals)を読む。`Deprecation` と `Link` は、projectId に ULID を指定したときだけ付く(PR-I)。全体と未分類の呼び出しには付かない。
 - **外部の呼び出し元は確認できない。** MCP(`kivra_*`)はサーバー内のリポジトリを直接呼ぶので HTTP の旧ルートを使わない。自律ループ、Planner、エージェント API も HTTP を使わない。他のシステムや手元のスクリプトが `POST /api/selfdev/goals` や `POST /api/selfdev/orders` を使っていれば、その呼び出しは 410 になる。
 
 **廃止の確認**

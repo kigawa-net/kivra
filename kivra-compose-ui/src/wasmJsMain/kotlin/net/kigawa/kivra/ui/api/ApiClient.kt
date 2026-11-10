@@ -131,7 +131,8 @@ object ApiClient {
 
     /**
      * Task を投入する。種別 [SubmitKind.SIMULATED] は `POST /api/tasks`(本文とプロジェクトは送らない。旧 UI と同じ)。
-     * [SubmitKind.SELF_DEV] は `POST /api/selfdev/tasks`(本文は空なら送らない。プロジェクトは必須で、欠けていれば送らずに 400 扱い)。
+     * [SubmitKind.SELF_DEV] は `POST /api/projects/{id}/runs`(別名。未分類は旧ルート `POST /api/selfdev/tasks`。本文は空なら送らない。
+     * プロジェクトは必須で、欠けていれば送らずに 400 扱い)。
      * 同じ内容の再送には同じ [idempotencyKey] を渡す(キーの管理は呼び出し側の [net.kigawa.kivra.ui.IdempotencyKeys])。
      */
     suspend fun submitTask(
@@ -144,7 +145,7 @@ object ApiClient {
         if (kind == SubmitKind.SELF_DEV) {
             if (projectId == null) return SubmitResult.Failed(SubmitFailure.BAD_REQUEST)
             return submitRequest(
-                "/api/selfdev/tasks",
+                ProjectApi.runSubmit(projectId),
                 SubmitSelfDevRequest(title, body?.takeIf { it.isNotBlank() }, idempotencyKey, projectId),
             )
         }

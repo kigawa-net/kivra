@@ -96,6 +96,9 @@ class RolesCoverageArchitectureTest {
         "GET /api/projects/{projectId}/approvals" to Permission.STOP_DECIDE,
         "GET /api/projects/{projectId}/memory" to Permission.READ_TEXT,
         "GET /api/projects/{projectId}/assignees" to Permission.ASSIGNEE_MANAGE,
+        // The Run aliases (ADR 0022 PR-I): the same handlers as the old Run routes above (the list and the submission).
+        "GET /api/projects/{projectId}/runs" to Permission.READ,
+        "POST /api/projects/{projectId}/runs" to Permission.SPEND_START,
         "POST /api/selfdev/stop-requests/{id}/approve" to Permission.STOP_DECIDE,
         "POST /api/selfdev/stop-requests/{id}/reject" to Permission.STOP_DECIDE,
         "POST /api/selfdev/stop-requests/{id}/cancel" to Permission.STOP_REQUEST,

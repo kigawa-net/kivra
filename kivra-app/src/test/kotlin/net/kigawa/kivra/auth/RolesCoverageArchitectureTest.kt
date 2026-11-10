@@ -263,13 +263,15 @@ class RolesCoverageArchitectureTest {
      * Each file and how many direct calls of an authentication entrance it makes today. These are the entrances PR 3e replaces with
      * `authenticateMember`; it updates this table. A new file, or a new call, fails the test until it is added here on purpose. Nothing
      * outside routes/ and mcp/ may make such a call (the implementations are the entrances themselves).
-     *  - SelfDevOrderRoutes, SelfDevGoalRoutes, SelfDevMemoryRoutes: `operators.authenticate(` (the roles' routes, then `guard.resolve`).
-     *  - the Task API routes (TaskApi, OperationApi, RunView, SelfDev, SelfDevAdmin, BudgetAdmin): `identity.principal(`.
-     *  - RunExecutionRoutes: the gate of the execution routes (`identity.principal(`).
-     *  - AgentApiRoutes: the agent's own identity (`identity.authenticate(`), not a member.
-     *  - McpRoutes: `verifier.authenticate(`, the MCP token (then the dispatcher's guard), and `tokenAuth?.authenticate(`, the API token of an
-     *    assignee (ADR 0020 addendum, PR T2: a `kvt_` Bearer, only while the roles are shadow or enforce). Two entrances, so the count is 2.
-     *  - MetricsRoutes makes none: it has no member authentication.
+     *
+     * Authentication call types:
+     *  - `operators.authenticate(` — Roles-based authentication (SelfDevOrderRoutes, SelfDevGoalRoutes, SelfDevMemoryRoutes, SelfDevAssigneeRoutes)
+     *  - `identity.principal(` — Task API identity resolution (TaskApiRoutes, OperationApiRoutes, RunViewRoutes, SelfDevRoutes, SelfDevAdminRoutes,
+     *    BudgetAdminRoutes, ProjectRoutes, RunExecutionRoutes)
+     *  - `identity.authenticate(` — Agent API's own identity (AgentApiRoutes, not a member)
+     *  - `verifier.authenticate(` + `tokenAuth?.authenticate(` — MCP token and assignee API token (McpRoutes, count = 2 for both entrances)
+     *
+     * MetricsRoutes makes none: it has no member authentication.
      */
     private val AUTH_CALLS: Map<String, Int> = mapOf(
         "routes/SelfDevOrderRoutes.kt" to 1,

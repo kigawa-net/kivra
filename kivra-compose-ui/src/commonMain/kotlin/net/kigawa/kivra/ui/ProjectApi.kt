@@ -7,8 +7,10 @@ package net.kigawa.kivra.ui
  * 未分類([UNASSIGNED_PROJECT_ID])は別名ルートが ULID 専用なので、一覧だけ旧ルートに `?projectId=unassigned` を付ける
  * (サーバーは project_id IS NULL の行だけを返す)。未分類への作成は無い([goalSubmit] と [orderCreate] は未分類で呼べない)。
  *
- * 旧ルートのまま残すもの(移行先がない、または全体の意味を持つ): `/api/runs`・`/api/selfdev/runs`・`POST /api/selfdev/tasks`、
- * 記憶の削除(`/api/selfdev/memory/...`)、担当・トークンの操作。
+ * Run の投入(`POST`)は、プロジェクトが選ばれていれば別名 `POST /api/projects/{id}/runs`(ADR 0022 PR-I)。未分類は別名が ULID 専用なので旧ルート。
+ *
+ * 旧ルートのまま残すもの(移行先がない、または全体の意味を持つ): `/api/runs`・`/api/selfdev/runs`(全体)、記憶の削除(`/api/selfdev/memory/...`)、
+ * 担当・トークンの操作。
  */
 object ProjectApi {
     /** 開発目標の一覧。 */
@@ -32,6 +34,13 @@ object ProjectApi {
     /** 承認待ちの停止要求(`state=PENDING`)。 */
     fun approvals(projectId: String?): String =
         under(projectId, "/api/selfdev/stop-requests?state=PENDING", "approvals?state=PENDING")
+
+    /**
+     * Run の投入(`POST`)。ULID の project は別名 `/api/projects/{id}/runs`(本文の projectId は path と同じ)。未分類は別名が使えないので、
+     * 旧ルート(サーバーは projectId を 400 で返す。未分類への作成は呼び出し側で止める)。
+     */
+    fun runSubmit(projectId: String): String =
+        if (isUnassigned(projectId)) "/api/selfdev/tasks" else "/api/projects/${percentEncode(projectId)}/runs"
 
     /** 担当の一覧。 */
     fun assignees(projectId: String?): String = under(projectId, "/api/selfdev/assignees", "assignees")

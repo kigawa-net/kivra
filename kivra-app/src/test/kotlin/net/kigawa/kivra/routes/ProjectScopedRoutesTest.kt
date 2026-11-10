@@ -201,10 +201,14 @@ class ProjectScopedRoutesTest {
         assertEquals("true", oldWithProject.headers["Deprecation"])
         assertEquals("</api/projects/$projectId/tasks>; rel=\"successor-version\"", oldWithProject.headers["Link"])
 
-        // Without a project the link names the alias as a template: the placeholder stays encoded, and no id is invented.
+        // Without a project (the whole list) there is no alias to move to: no Deprecation and no Link (ADR 0022 PR-I).
         val oldWithout = send(HttpMethod.Get, "/api/selfdev/goals")
-        assertEquals("true", oldWithout.headers["Deprecation"])
-        assertEquals("</api/projects/%7BprojectId%7D/tasks>; rel=\"successor-version\"", oldWithout.headers["Link"])
+        assertEquals(HttpStatusCode.OK, oldWithout.status)
+        assertNull(oldWithout.headers["Deprecation"])
+        assertNull(oldWithout.headers["Link"])
+        val oldUnassigned = send(HttpMethod.Get, "/api/selfdev/goals?projectId=unassigned")
+        assertNull(oldUnassigned.headers["Deprecation"])
+        assertNull(oldUnassigned.headers["Link"])
 
         val oldOrders = send(HttpMethod.Get, "/api/selfdev/orders?projectId=$projectId")
         assertEquals("</api/projects/$projectId/orders>; rel=\"successor-version\"", oldOrders.headers["Link"])
@@ -214,10 +218,10 @@ class ProjectScopedRoutesTest {
         assertEquals("</api/projects/$projectId/memory>; rel=\"successor-version\"", oldMemory.headers["Link"])
         val oldAssignees = send(HttpMethod.Get, "/api/selfdev/assignees?projectId=$projectId")
         assertEquals("</api/projects/$projectId/assignees>; rel=\"successor-version\"", oldAssignees.headers["Link"])
-        // The old route with a value that is not a project id: the same 400 as before, with the header.
+        // The old route with a value that is not a project id: the same 400 as before, and no alias to announce.
         val bad = send(HttpMethod.Get, "/api/selfdev/goals?projectId=nope")
         assertEquals(HttpStatusCode.BadRequest, bad.status)
-        assertEquals("true", bad.headers["Deprecation"])
+        assertNull(bad.headers["Deprecation"])
     }
 
     @Test

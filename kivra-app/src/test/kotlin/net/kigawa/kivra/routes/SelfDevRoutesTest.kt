@@ -18,10 +18,12 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.auth.TaskApiIdentity
@@ -182,6 +184,110 @@ class SelfDevRoutesTest {
             assertEquals(HttpStatusCode.OK, list.status)
             assertEquals(1, Json.parseToJsonElement(list.bodyAsText()).let { (it as kotlinx.serialization.json.JsonArray).size })
             assertFalse("SECRET-TITLE-MARKER" in list.bodyAsText())
+        }
+    }
+
+    // ---- the Run aliases under a project (ADR 0022 PR-I) ----
+
+    /** A project id of the right shape that names no project. */
+    private val unknownProject = "01" + "Z".repeat(24)
+
+    private fun newProject(db: TestDb, name: String): String =
+        net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()).create(name, null).projectId
+
+    @Test
+    fun `the alias submits a run under the path's project, with or without a body projectId, and the old route replays it`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            val created = client.post("/api/projects/$projectId/runs") {
+                header("X-Test-Principal", "alice")
+                contentType(ContentType.Application.Json)
+                setBody("""{"title":"$title","idempotencyKey":"a1"}""")
+            }
+            assertEquals(HttpStatusCode.Accepted, created.status)
+            assertEquals(projectId, created.json()["projectId"]!!.jsonPrimitive.content, "the path's project is the run's project")
+            assertNull(created.headers["Deprecation"], "the alias announces nothing")
+            // The same request on the old route is the same run (a replay), since the body projectId is the same.
+            val replay = submit("alice", "a1")
+            assertEquals(HttpStatusCode.OK, replay.status)
+            assertEquals(created.json()["runId"], replay.json()["runId"])
+        }
+    }
+
+    @Test
+    fun `the alias refuses a body projectId that differs from the path (400) and an unknown project in the path (404), and writes nothing`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            val other = newProject(db, "Other")
+            val mismatch = client.post("/api/projects/$projectId/runs") {
+                header("X-Test-Principal", "alice")
+                contentType(ContentType.Application.Json)
+                setBody("""{"title":"$title","idempotencyKey":"m1","projectId":"$other"}""")
+            }
+            assertEquals(HttpStatusCode.BadRequest, mismatch.status)
+            val unknown = client.post("/api/projects/$unknownProject/runs") {
+                header("X-Test-Principal", "alice")
+                contentType(ContentType.Application.Json)
+                setBody("""{"title":"$title","idempotencyKey":"u1"}""")
+            }
+            assertEquals(HttpStatusCode.NotFound, unknown.status)
+            assertTrue(db.runs.listTasks("alice", selfDev = true).isEmpty())
+        }
+    }
+
+    @Test
+    fun `the list alias narrows to the path's project, and the old list announces it only when it names a project`() = TestDb().use { db ->
+        testApplication {
+            setUp(db, maxActive = 5)
+            val other = newProject(db, "Other")
+            submit("alice", "l1")
+            client.post("/api/projects/$other/runs") {
+                header("X-Test-Principal", "alice")
+                contentType(ContentType.Application.Json)
+                setBody("""{"title":"$title","idempotencyKey":"l2"}""")
+            }
+            val viaAlias = client.get("/api/projects/$projectId/runs") { header("X-Test-Principal", "alice") }
+            assertEquals(HttpStatusCode.OK, viaAlias.status)
+            assertNull(viaAlias.headers["Deprecation"], "the alias announces nothing")
+            val rows = Json.parseToJsonElement(viaAlias.bodyAsText()).jsonArray
+            assertEquals(1, rows.size, "only the path's project's run")
+            assertEquals(projectId, rows.single().jsonObject["projectId"]!!.jsonPrimitive.content)
+
+            val viaOld = client.get("/api/selfdev/runs?projectId=$projectId") { header("X-Test-Principal", "alice") }
+            assertEquals(viaAlias.bodyAsText(), viaOld.bodyAsText(), "the alias gives the old route's answer for the project")
+            assertEquals("true", viaOld.headers["Deprecation"])
+            assertEquals("</api/projects/$projectId/runs>; rel=\"successor-version\"", viaOld.headers["Link"])
+
+            // No project (the whole list) and unassigned have no alias to move to: no Deprecation and no Link.
+            val whole = client.get("/api/selfdev/runs") { header("X-Test-Principal", "alice") }
+            assertEquals(HttpStatusCode.OK, whole.status)
+            assertNull(whole.headers["Deprecation"])
+            assertNull(whole.headers["Link"])
+            val unassigned = client.get("/api/selfdev/runs?projectId=unassigned") { header("X-Test-Principal", "alice") }
+            assertEquals(HttpStatusCode.OK, unassigned.status)
+            assertNull(unassigned.headers["Deprecation"])
+            assertNull(unassigned.headers["Link"])
+            // A value that is not a project id is the same 400 as before, with no header either.
+            val bad = client.get("/api/selfdev/runs?projectId=nope") { header("X-Test-Principal", "alice") }
+            assertEquals(HttpStatusCode.BadRequest, bad.status)
+            assertNull(bad.headers["Deprecation"])
+
+            assertEquals(HttpStatusCode.NotFound, client.get("/api/projects/$unknownProject/runs") { header("X-Test-Principal", "alice") }.status)
+        }
+    }
+
+    @Test
+    fun `the run aliases need authentication, as the old routes do`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            assertEquals(HttpStatusCode.Unauthorized, client.get("/api/projects/$projectId/runs").status)
+            assertEquals(
+                HttpStatusCode.Unauthorized,
+                client.post("/api/projects/$projectId/runs") {
+                    contentType(ContentType.Application.Json)
+                    setBody("""{"title":"$title","idempotencyKey":"n1"}""")
+                }.status,
+            )
         }
     }
 

@@ -1,6 +1,7 @@
 package net.kigawa.kivra.routes
 
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
@@ -26,7 +27,8 @@ import net.kigawa.kivra.github.RunBranch
  * Self-development routes (ADR 0008 part 7, Issue #56). They are registered only when `KIVRA_SELFDEV_ENABLED=true` (see
  * `SelfDevSettings`). Authentication is the Task API's: the same [TaskApiIdentity], so a caller sees only its own runs.
  *
- * The only write is `POST /api/selfdev/tasks`. It creates a PR_ONLY run. kivra never merges or closes a pull request.
+ * The only write is `POST /api/selfdev/tasks` (and its alias `POST /api/projects/{projectId}/runs`). It creates a PR_ONLY run. kivra never merges
+ * or closes a pull request.
  */
 internal class SelfDevRouteDeps(
     val runs: DevelopmentRunRepository,
@@ -91,63 +93,9 @@ private val strictJson = Json { ignoreUnknownKeys = false }
 private val RUN_ID_SHAPE = Regex("[0-9A-Z]{26}")
 
 internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
-    post("/api/selfdev/tasks") {
-        val principal = deps.identity.principal(call.request.headers)
-        if (principal == null) {
-            call.respond(HttpStatusCode.Unauthorized, SelfDevError("unauthorized"))
-            return@post
-        }
-        val access = deps.guard.resolve(principal, legacyAdmin = true)
-        if (deps.guard.check(access, Permission.SPEND_START, "selfdev_submit") is GuardResult.Deny) {
-            call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
-            return@post
-        }
-        if (!call.requireJsonSameOrigin()) return@post
-        val request = try {
-            strictJson.decodeFromString(SubmitSelfDevTaskRequest.serializer(), call.receiveText())
-        } catch (_: Exception) {
-            call.respond(HttpStatusCode.BadRequest, SelfDevError("invalid request body"))
-            return@post
-        }
-        val title = validatedText(request.title, MAX_TASK_TITLE_CODE_POINTS)
-        val key = validatedText(request.idempotencyKey, MAX_IDEMPOTENCY_KEY_CODE_POINTS)
-        if (title == null || key == null) {
-            call.respond(HttpStatusCode.BadRequest, SelfDevError("title must be 1-200 characters and idempotencyKey 1-128 characters, without control characters"))
-            return@post
-        }
-        // A blank body is the same as none. A non-blank body that fails the rules is a 400, and nothing is stored.
-        val rawBody = request.body
-        val body = validatedBody(rawBody)
-        if (rawBody != null && body == null && rawBody.isNotBlank()) {
-            call.respond(HttpStatusCode.BadRequest, SelfDevError("body must be at most 8000 characters, and may contain line breaks but no other control characters"))
-            return@post
-        }
-        val projectId = when (val scope = deps.projects.scopeOf(request.projectId)) {
-            is ProjectScope.Refused -> {
-                call.respond(scope.status, SelfDevError(scope.error))
-                return@post
-            }
-            is ProjectScope.Assigned -> scope.projectId
-        }
-        // The project check (ADR 0022 PR-D): under the project mode off or shadow this is the same answer as before.
-        if (deps.guard.checkInProject(access, projectId, Permission.SPEND_START, "selfdev_submit") is GuardResult.Deny) {
-            call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
-            return@post
-        }
-        try {
-            val submitted = deps.runs.submitTask(
-                principal, key, title, selfDev = true, maxActiveSelfDev = deps.maxActiveRuns, body = body, projectId = projectId,
-            )
-            when (submitted) {
-                is TaskSubmitResult.Created -> call.respond(HttpStatusCode.Accepted, submitted.run.toSelfDevResponse(note = SELF_DEV_NOTE))
-                is TaskSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, submitted.run.toSelfDevResponse(note = SELF_DEV_NOTE))
-                is TaskSubmitResult.ConflictingTitle ->
-                    call.respond(HttpStatusCode.Conflict, SelfDevError("idempotency key was already used with a different request"))
-            }
-        } catch (_: ActiveSelfDevLimitException) {
-            call.respond(HttpStatusCode.TooManyRequests, SelfDevError("too many active self-development runs"))
-        }
-    }
+    // The Run submission: the old route (the body's projectId) and its alias (the path's project; a body projectId must match it). The same handler.
+    post("/api/selfdev/tasks") { submitSelfDevRun(deps, call) }
+    post("/api/projects/{projectId}/runs") { submitSelfDevRun(deps, call) }
 
     get("/api/selfdev/runs/{id}") {
         val principal = deps.identity.principal(call.request.headers)
@@ -178,23 +126,108 @@ internal fun Route.configureSelfDevRoutes(deps: SelfDevRouteDeps) {
         )
     }
 
+    // The old list announces the alias only when it names a project (ADR 0022). Without a project (the whole list) there is no alias to move to.
     get("/api/selfdev/runs") {
-        val principal = deps.identity.principal(call.request.headers)
-        if (principal == null) {
-            call.respond(HttpStatusCode.Unauthorized, SelfDevError("unauthorized"))
-            return@get
+        call.deprecatedBy("/api/projects/{projectId}/runs", call.request.queryParameters["projectId"])
+        listSelfDevRuns(deps, call)
+    }
+    // The alias of the list under a project: the same handler; the path's project is the project.
+    get("/api/projects/{projectId}/runs") { listSelfDevRuns(deps, call) }
+}
+
+/**
+ * GET the caller's Runs: the whole list (no project named), the old route's `projectId` query, or the alias with the path's project. The alias
+ * answers 404 for a project that does not exist, and for one the caller may not read (as the other aliases do).
+ */
+private suspend fun listSelfDevRuns(deps: SelfDevRouteDeps, call: ApplicationCall) {
+    val principal = deps.identity.principal(call.request.headers)
+    if (principal == null) {
+        call.respond(HttpStatusCode.Unauthorized, SelfDevError("unauthorized"))
+        return
+    }
+    if (!deps.guard.permits(principal, Permission.READ, "selfdev_run_list")) {
+        call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
+        return
+    }
+    val pinned = call.pathParam("projectId")
+    if (pinned != null && !deps.projects.projectExistsForPath(pinned)) {
+        call.respond(HttpStatusCode.NotFound, SelfDevError(PROJECT_NOT_FOUND))
+        return
+    }
+    // The rows the caller may read (ADR 0022 PR-D3): narrowed in SQL, before the limit.
+    val access = deps.guard.resolve(principal, legacyAdmin = true)
+    val scope = deps.guard.readScope(access)
+    if (pinned != null && !scope.sees(pinned)) {
+        call.respond(HttpStatusCode.NotFound, SelfDevError(PROJECT_NOT_FOUND))
+        return
+    }
+    val project = when (val s = listScopeOf(pinned, call.request.queryParameters["projectId"])) {
+        is ListScope.Refused -> return call.respond(HttpStatusCode.BadRequest, SelfDevError(s.error))
+        is ListScope.Filtered -> scope.narrow(s.filter)
+    }
+    val rows = deps.runs.listTasks(principal, limit = LIST_LIMIT, selfDev = true, project = project)
+    deps.guard.recordReadShadow(access, rows.map { it.projectId }, "selfdev_run_list")
+    call.respond(rows.map { it.toSelfDevResponse() })
+}
+
+/** POST a Run: the old route (the body's projectId, required) or the alias (the path's project; a body projectId must equal it). */
+private suspend fun submitSelfDevRun(deps: SelfDevRouteDeps, call: ApplicationCall) {
+    val pinned = call.pathParam("projectId")
+    val principal = deps.identity.principal(call.request.headers)
+    if (principal == null) {
+        call.respond(HttpStatusCode.Unauthorized, SelfDevError("unauthorized"))
+        return
+    }
+    val access = deps.guard.resolve(principal, legacyAdmin = true)
+    if (deps.guard.check(access, Permission.SPEND_START, "selfdev_submit") is GuardResult.Deny) {
+        call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
+        return
+    }
+    if (!call.requireJsonSameOrigin()) return
+    val request = try {
+        strictJson.decodeFromString(SubmitSelfDevTaskRequest.serializer(), call.receiveText())
+    } catch (_: Exception) {
+        call.respond(HttpStatusCode.BadRequest, SelfDevError("invalid request body"))
+        return
+    }
+    val title = validatedText(request.title, MAX_TASK_TITLE_CODE_POINTS)
+    val key = validatedText(request.idempotencyKey, MAX_IDEMPOTENCY_KEY_CODE_POINTS)
+    if (title == null || key == null) {
+        call.respond(HttpStatusCode.BadRequest, SelfDevError("title must be 1-200 characters and idempotencyKey 1-128 characters, without control characters"))
+        return
+    }
+    // A blank body is the same as none. A non-blank body that fails the rules is a 400, and nothing is stored.
+    val rawBody = request.body
+    val body = validatedBody(rawBody)
+    if (rawBody != null && body == null && rawBody.isNotBlank()) {
+        call.respond(HttpStatusCode.BadRequest, SelfDevError("body must be at most 8000 characters, and may contain line breaks but no other control characters"))
+        return
+    }
+    // The alias takes the path's project (an unknown one is 404); the body's projectId, when given, must be the same.
+    val projectId = when (val scope = pinned?.let { deps.projects.scopeOfPath(it, request.projectId) } ?: deps.projects.scopeOf(request.projectId)) {
+        is ProjectScope.Refused -> {
+            call.respond(scope.status, SelfDevError(scope.error))
+            return
         }
-        if (!deps.guard.permits(principal, Permission.READ, "selfdev_run_list")) {
-            call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
-            return@get
+        is ProjectScope.Assigned -> scope.projectId
+    }
+    // The project check (ADR 0022 PR-D): under the project mode off or shadow this is the same answer as before.
+    if (deps.guard.checkInProject(access, projectId, Permission.SPEND_START, "selfdev_submit") is GuardResult.Deny) {
+        call.respond(HttpStatusCode.Forbidden, SelfDevError("forbidden"))
+        return
+    }
+    try {
+        val submitted = deps.runs.submitTask(
+            principal, key, title, selfDev = true, maxActiveSelfDev = deps.maxActiveRuns, body = body, projectId = projectId,
+        )
+        when (submitted) {
+            is TaskSubmitResult.Created -> call.respond(HttpStatusCode.Accepted, submitted.run.toSelfDevResponse(note = SELF_DEV_NOTE))
+            is TaskSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, submitted.run.toSelfDevResponse(note = SELF_DEV_NOTE))
+            is TaskSubmitResult.ConflictingTitle ->
+                call.respond(HttpStatusCode.Conflict, SelfDevError("idempotency key was already used with a different request"))
         }
-        val project = projectFilterOf(call.request.queryParameters["projectId"])
-            ?: return@get call.respond(HttpStatusCode.BadRequest, SelfDevError(PROJECT_FILTER_INVALID))
-        // The rows the caller may read (ADR 0022 PR-D3): narrowed in SQL, before the limit.
-        val access = deps.guard.resolve(principal, legacyAdmin = true)
-        val rows = deps.runs.listTasks(principal, limit = LIST_LIMIT, selfDev = true, project = deps.guard.readScope(access).narrow(project))
-        deps.guard.recordReadShadow(access, rows.map { it.projectId }, "selfdev_run_list")
-        call.respond(rows.map { it.toSelfDevResponse() })
+    } catch (_: ActiveSelfDevLimitException) {
+        call.respond(HttpStatusCode.TooManyRequests, SelfDevError("too many active self-development runs"))
     }
 }
 

@@ -115,7 +115,7 @@ PR-F まで NULL を残すのは、PR-B で対応が不明な行を推測で割�
 - **MCP。** 出力に `project_id` を足した(`kivra_selfdev_start`、`kivra_run_get` と `kivra_run_list` の Run、`kivra_order_get` と `kivra_order_list` の order)。入力は変えない(`kivra_selfdev_start` は `project_id` 必須のまま)。停止要求の出力は、order の `project_id` で足りるので変えていない。
 - **既存の注意(挙動は変えていない)。** `ProjectRoutes.kt` の `/api/projects/{projectId}/...`(repos、members、budget、dashboard)と、`/api/selfdev/.../{id}` の一部も `call.parameters` を読むため、同名のクエリで path が隠れる(例: `GET /api/projects/A/members?projectId=B` は B のメンバーを返す。運用者の権限は必要)。修正済み(ブランチ `fix/path-param-shadowing`): `routes/` の path パラメータはすべて `pathParam()`(`RoutingRequest.pathVariables`、path の捕捉だけ)で読む。`call.parameters` を `routes/` で使うことは `PathParamArchitectureTest` で禁じる。
 - **Compose UI(`kivra-compose-ui`)は変えていない。** 旧ルートの応答が変わらないので、そのまま動く。
-- **残り(後続)。** PR-F(NULL の行を消す)、`/api/selfdev/runs` と `POST /api/selfdev/tasks` の別名(Run の一覧・投入)と、その Deprecation。
+- **残り(後続)。** PR-F(NULL の行を消す)。Run の別名は PR-I で追加した。
 
 ## 進捗(PR-D3: 読み取りの認可、ブランチ `feat/project-scope-read-authz`)
 
@@ -215,7 +215,7 @@ PR-D3 の「残り」のうち、MCP の読み取り、集計、旧ルートの�
   - UPDATE で `project_id` を NULL に戻す経路はない(`ProjectBackfill` は NULL の行だけを更新する)。FK は `ON DELETE RESTRICT`。
 - **NULL 可の列(判断)。** `selfdev_orders`、`development_runs`、`selfdev_assignees` の `project_id` は NULL 可のまま残す。段階表は PR-F を「NULL の行を消す」としたが、これらの列の NULL は「未分類」を表す(`ProjectFilter.Unassigned`、画面の「未分類」)。V38、V42 の `ON DELETE SET NULL` も変えない。NOT NULL にするなら未分類の表し方を別に決める必要があり、この PR の範囲を超える。
 - **テスト。** `MigrationChainTest` は V52 を含む完全な連鎖を確かめる。V50 と V51 の test は V51 までの版を作って、V51 の時点の挙動(NULL が残る)を確かめる。新しい test `V52 waits while a task or memory row has no project, then applies once none is left` は、保留中に起動が失敗せず、行が残り、振り分け後に V52 が適用され、NULL が拒否されることを確かめる。
-- **残り(後続)。** Task API(`/api/tasks`)が作る Run に project を付けるか(Run の列は NULL 可のまま)。`/api/selfdev/runs` と `POST /api/selfdev/tasks`(PR-only の Run)の別名と Deprecation。旧版の Pod を止める順序は運用で行う(runbook 4.20)。
+- **残り(後続)。** Task API(`/api/tasks`)が作る Run に project を付けるか(Run の列は NULL 可のまま)。旧版の Pod を止める順序は運用で行う(runbook 4.20)。
 - 運用の手順は `docs/runbook-selfdev.md` 4.20。
 
 ## 進捗(PR-G: 旧ルートの廃止、ブランチ `feat/retire-legacy-selfdev-paths`)
@@ -242,12 +242,12 @@ PR-D3 の「残り」のうち、MCP の読み取り、集計、旧ルートの�
    - 代替案(採用しない): (a) そのまま残す(Deprecation だけ)。外部の利用が分からず、いつ終えるかの根拠がないので却下。(b) 404 にする。移行先の案内(`Link`)が出せず、呼び出し元が原因を調べにくいので却下。(c) 認証の前に 410 を返す。401・403 の応答が変わり、権限の表(`RolesCoverageArchitectureTest`)の前提が崩れるので却下。
    - 認証と権限は従来どおり先に判定する(`requireOperator` と `permit`、order は `caller` と `permit`)。よって 401 と 403 は変わらず、表の行(`GOAL_WRITE`、`ORDER_MANAGE`)もそのまま。
 2. **旧 GET は残す。** 別名がなく、Compose UI の「全体」と「未分類」が読む。410 にすると画面の一覧が消える。別名を作るには「全体」の意味を別のルートに置く必要があり、この PR の範囲を超える。
-   - 残る問題: 「全体」の呼び出しにも `Deprecation` と `Link`(テンプレート)が付く。移行先がないのに廃止を示すので、紛らわしい。全体の呼び出しでは `Deprecation` を付けない、という変更は後続で決める(応答の変更なので、この PR では行わない)。
+   - 残る問題: 「全体」の呼び出しにも `Deprecation` と `Link`(テンプレート)が付く。移行先がないのに廃止を示すので、紛らわしい。全体の呼び出しでは `Deprecation` を付けない、という変更は後続で決める(応答の変更なので、この PR では行わない)。→ PR-I で解消(全体と未分類には `Deprecation` も `Link` も付けない)。
 3. **削除の時期。** 410 の旧 POST の登録は、ログ `net.kigawa.kivra.routes.retired` に廃止から 30 日の間 1 件も出ず、外部の利用がないことを運用者が確かめてから削除する(runbook 4.21)。削除すると応答は 404 になり、表の行・README・テストも消す。
 
 **変更。** `ProjectScope.kt` に `retiredBy`(`Deprecation`、`Link`、ログ)と `ROUTE_RETIRED` を足した。`SelfDevGoalRoutes.kt` と `SelfDevOrderRoutes.kt` の旧 POST は、認証と権限の判定のあとに 410 を返す。`SelfDevGoalRoutesTest` と `SelfDevOrderRoutesTest` の投入は別名で行い、「存在しない・形式が違う project は 404、body の projectId が違うと 400」を別名の規則として確かめる。`ProjectScopedRoutesTest` に、旧 POST が 410 を返し、何も作らず、AI と無トークンは従来どおり 403・401 になるテストを足した。
 
-**残り(後続)。** `/api/selfdev/runs` と `POST /api/selfdev/tasks` の別名(と Deprecation)。全体の呼び出しから `Deprecation` を外すか。旧 POST の登録の削除(runbook 4.21 の条件を満たした後)。
+**残り(後続)。** 旧 POST の登録の削除(runbook 4.21 の条件を満たした後)。
 
 ## 進捗(PR-H: プロジェクトを空にする、ブランチ `feat/project-drain`)
 
@@ -289,3 +289,13 @@ PR-D3 の「残り」のうち、MCP の読み取り、集計、旧ルートの�
 - `selfdev_memory_events`(監査の行)には `project_id` がない。移すべき行がないので、drain は触らない。削除の監査をプロジェクトに帰属させることは、PR-D3 の判断のとおり後続。
 - drain の直後に、移し元へ新しい行が入ると、その行は次の drain で移る(件数は実行時点の正本)。
 - 判断 3 の判定と、Run の作成の間にある競合(作成が同時に移し元を選んだ場合)は、スコープの固定により台帳を壊さないが、その予算の帰属は移し先になりうる。
+
+## 進捗(PR-I: Run の別名と Deprecation の整理、ブランチ `feat/project-alias-runs-tasks`)
+
+- マイグレーションは追加しない。ルートの登録と応答のヘッダだけを変える。旧 POST(`/api/selfdev/goals`、`/api/selfdev/orders`)は 410 のまま。
+- **Run の別名(新)。** `GET /api/projects/{id}/runs`(一覧)と `POST /api/projects/{id}/runs`(投入)。`/api/projects/{id}/tasks` は開発目標(Task)の別名で既に使われているので、Run の投入は `runs` とした(衝突しない名前)。旧 `GET /api/selfdev/runs` と `POST /api/selfdev/tasks` と同じ関数を使い、重複の実装はない。path の projectId は `pathParam("projectId")` で読む(`PathParams.kt`)。投入の body の projectId は省略可、あれば path と一致が必要(不一致は 400)。存在しない・形式の違う project は 404。認証・Origin・権限の判定は旧ルートと同じ順序で、プロジェクトの判定は path のプロジェクトで `checkInProject` を通す。権限の表 `ROUTE_PERMISSIONS` に 2 行を足した(`GET` は READ、`POST` は SPEND_START)。
+- **旧ルートの応答は変えない。** 旧 `GET /api/selfdev/runs` は、projectId に ULID を指定したときだけ `Deprecation` と `Link` を付ける。旧 `POST /api/selfdev/tasks` は projectId を body で受けるので、PR-E の旧 POST(goals、orders)と同じく `Deprecation` は付けない。
+- **Deprecation の付け方(判断)。** `deprecatedBy` は、projectId クエリが ULID のときだけヘッダを付ける。全体(クエリなし)、`unassigned`、ULID でない値には付けない。移行先がない、または移せない呼び出しに廃止を示さないため。テンプレートの `Link`(`%7BprojectId%7D`)は、廃止した旧 POST(410、`retiredBy`)にだけ残る。410 の応答は変えない。
+- **UI。** 自己開発の投入(`ProjectApi.runSubmit`)は、ULID のプロジェクトでは別名 `POST /api/projects/{id}/runs` を使う。未分類は別名が ULID 専用なので旧ルート(サーバーは 400)のまま。画面の「タスク」は従来どおり `GET /api/runs?projectId=`(Task API)を読むので変更はない。
+- **テスト。** `SelfDevRoutesTest`: 別名の投入(body なしで作られ、旧ルートの同じキーで replay される)、body の projectId 不一致は 400・存在しない project は 404 で何も作られない、一覧の絞り込みと旧ルートの `Deprecation` の有無(全体・unassigned・不正値には付かない)、401。`ProjectScopedRoutesTest`: 全体・unassigned・不正値の旧 GET に `Deprecation` が付かないこと(旧テンプレートの期待を更新)。`RolesCoverageArchitectureTest` の表に 2 行。`ProjectApiPathTest` に `runSubmit` のテスト。
+- **構造テストの注意。** `RolesCoverageArchitectureTest` は、登録の本文を次の登録の手前までとして読む。最後の登録は EOF までを読むので、最後に置いた登録の権限の判定が後ろの関数の `Permission` を拾う。`listSelfDevRuns` は `submitSelfDevRun` より前に置いている(この順序を変えると GET の表と一致しなくなる)。

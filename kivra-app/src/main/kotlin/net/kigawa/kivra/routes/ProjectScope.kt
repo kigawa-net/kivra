@@ -114,12 +114,15 @@ internal fun ReadScope.narrow(filter: ProjectFilter): ProjectFilter = when (this
 }
 
 /**
- * The header of an old route that takes a `projectId` (ADR 0022 PR-E): `Deprecation: true` and a `successor-version` link to the alias. The
- * answer itself is unchanged. [successor] is the alias's path with `{projectId}` as its placeholder; the placeholder is filled with the query's
- * project id when it is a project id, and otherwise stays encoded as a template.
+ * The header of an old route that takes a `projectId` query (ADR 0022 PR-E): `Deprecation: true` and a `successor-version` link to the alias.
+ * The answer itself is unchanged. [successor] is the alias's path with `{projectId}` as its placeholder, filled with the query's project id.
+ *
+ * Only a call that names a project (a ULID in [query]) gets the header, since only that call can move to the alias. A call with no project
+ * (the whole list), with `unassigned`, or with a value that is not a project id gets nothing: there is no alias for it to move to (ADR 0022
+ * PR-I). A retired route ([retiredBy]) is different: it always announces its template.
  */
 internal fun ApplicationCall.deprecatedBy(successor: String, query: String?) {
-    val id = query?.takeIf { PROJECT_ID_SHAPE.matches(it) } ?: "%7BprojectId%7D"
+    val id = query?.takeIf { PROJECT_ID_SHAPE.matches(it) } ?: return
     response.headers.append("Deprecation", "true")
     response.headers.append("Link", "<" + successor.replace("{projectId}", id) + ">; rel=\"successor-version\"")
 }

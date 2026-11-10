@@ -1471,14 +1471,20 @@ class SelfDevOrderRepository(
         /** A small fixed-field JSON of numbers and timestamps (V53), or null. Never free text. */
         payloadJson: String? = null,
     ) {
+        // payload_json (V53) is named only when there is a payload, so an event without one is written the same way as before V53.
+        val payloadColumn = if (payloadJson != null) ", payload_json" else ""
+        val payloadMark = if (payloadJson != null) ", ?" else ""
+        val args: List<Any?> = listOf(
+            Ulid.generate(clock), orderId, cycleNo, kind, from?.name, to?.name, reason, actor.name, actorKey?.let(::actorRef), requestId, now,
+            parentOrderId, depth, amountJpy,
+        ) + listOfNotNull(payloadJson)
         execUpdate(
             """
             INSERT INTO selfdev_order_events (event_id, order_id, cycle_no, kind, from_state, to_state, reason_code, actor_kind, actor_ref,
-                request_id, occurred_at, parent_order_id, depth, amount_jpy, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                request_id, occurred_at, parent_order_id, depth, amount_jpy$payloadColumn)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?$payloadMark)
             """.trimIndent(),
-            Ulid.generate(clock), orderId, cycleNo, kind, from?.name, to?.name, reason, actor.name, actorKey?.let(::actorRef), requestId, now,
-            parentOrderId, depth, amountJpy, payloadJson,
+            *args.toTypedArray(),
         )
     }
 

@@ -122,6 +122,21 @@ class OrderStatesTest {
     }
 
     @Test
+    fun `an operator's extension that lifted a limit or an expiry lets the operator resume it`() {
+        for (fromReason in listOf(OrderReason.LIMIT_REACHED, OrderReason.EXPIRED)) {
+            assertEquals(
+                OrderTransitionDecision.Allowed,
+                checkOrderTransition(OrderState.PAUSED, OrderState.ACTIVE, OrderReason.OPERATOR_RESUMED, OrderActor.HUMAN, fromReason, limitsLifted = true),
+            )
+        }
+        // The flag does not open the other edges: the actor and the reason are still checked.
+        assertEquals(
+            OrderTransitionDecision.Refused(OrderRefusal.ACTOR_NOT_ALLOWED),
+            checkOrderTransition(OrderState.PAUSED, OrderState.ACTIVE, OrderReason.OPERATOR_RESUMED, OrderActor.AI, OrderReason.LIMIT_REACHED, limitsLifted = true),
+        )
+    }
+
+    @Test
     fun `nothing resumes an order by itself`() {
         for (reason in OrderReason.entries) {
             assertEquals(

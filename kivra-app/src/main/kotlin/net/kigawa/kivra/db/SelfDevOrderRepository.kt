@@ -117,6 +117,13 @@ enum class OrderConflict {
      * Nothing is written. The order must be assigned to a project first (the backfill, or an order created with one).
      */
     NO_PROJECT,
+    /** An extension of a child: only a root order is extended by an operator (ADR 0015 addendum 2026-11-10). Nothing is written. */
+    NOT_ROOT,
+    /**
+     * An extension of an order paused by LIMIT_REACHED or EXPIRED that would not lift both the cycle limit and the lifetime, so the order could
+     * not be resumed after it. Nothing is written.
+     */
+    EXTENSION_DOES_NOT_LIFT,
 }
 
 sealed interface OrderResult<out T> {
@@ -153,6 +160,32 @@ sealed interface AutoCycleResult {
 
 /** The outcome of a successful cycle start: the order, the cycle's root Task ([goalId]) and the cycle number. */
 data class CycleStarted(val order: SelfDevOrder, val goalId: String, val cycleNo: Int)
+
+/** The most days one extension adds (ADR 0015 addendum 2026-11-10, section 2.6). The route checks it, and so does the repository's tests. */
+const val EXTEND_DAYS_LIMIT = 14
+
+/** An extended expiry may be at most this many days after the order was created (ADR 0015 addendum 2026-11-10, section 2.6). */
+const val LIFETIME_CEILING_DAYS = 30L
+
+/** The fixed reason of the audit event of an extension (kind EXTENDED, actor HUMAN). The values before and after are in its payload. */
+const val OPERATOR_EXTENDED = "OPERATOR_EXTENDED"
+
+/** Why an extension is refused with 400. Each name is a fixed code. */
+enum class ExtendInvalid {
+    /** The new max_cycles is above `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`. */
+    MAX_CYCLES_OVER_CAP,
+    /** The new expiry is more than [LIFETIME_CEILING_DAYS] days after the order's creation. */
+    EXPIRY_OVER_CEILING,
+}
+
+/** The outcome of an operator's extension. [Refused] is a conflict (409), [Invalid] a bad request (400). */
+sealed interface ExtendResult {
+    data class Moved(val order: SelfDevOrder) : ExtendResult
+    data object NotFound : ExtendResult
+    data object StaleVersion : ExtendResult
+    data class Refused(val reason: OrderConflict) : ExtendResult
+    data class Invalid(val reason: ExtendInvalid) : ExtendResult
+}
 
 /** The fixed refusal codes of a child creation (ADR 0015 section 2.7). When one holds, nothing is written. */
 enum class ChildRefusal { PARENT_NOT_ACTIVE, DEPTH_LIMIT, CHILD_LIMIT, TREE_LIMIT, BUDGET_EXCEEDS_PARENT }
@@ -456,9 +489,67 @@ class SelfDevOrderRepository(
     fun pauseByOperator(orderId: String, expectedVersion: Long, operatorKey: String): OrderResult<SelfDevOrder> =
         move(orderId, expectedVersion, OrderState.PAUSED, OrderReason.OPERATOR_PAUSED, OrderActor.HUMAN, operatorKey, null)
 
-    /** PAUSED -> ACTIVE by an operator. Refused for a limit or an expiry (a new order is needed). */
+    /**
+     * PAUSED -> ACTIVE by an operator. Refused for a limit or an expiry, unless an operator's extension has lifted it ([liftedByExtension]: the
+     * cycle limit and the lifetime are both clear again after the extension, ADR 0015 addendum 2026-11-10).
+     */
     fun resumeByOperator(orderId: String, expectedVersion: Long, operatorKey: String): OrderResult<SelfDevOrder> =
         move(orderId, expectedVersion, OrderState.ACTIVE, OrderReason.OPERATOR_RESUMED, OrderActor.HUMAN, operatorKey, null)
+
+    /**
+     * Extends the root order by an operator (ADR 0015 addendum 2026-11-10, section 2.6): [addCycles] adds to `max_cycles`, and [extendDays] moves
+     * `expires_at` to the later of now and the current expiry, plus those days. Either or both is given. The state is not changed: an ACTIVE order
+     * stays ACTIVE, and a PAUSED one keeps its reason. A PAUSED order held by LIMIT_REACHED or EXPIRED is extended only when the extension lifts
+     * both (the new limit is above `cycles_started` and the new expiry is after now), so a resume can follow. The safety guards (budget, failures,
+     * breaker, stop approval) are not touched.
+     *
+     * The checks run under the order's row lock, before any write, so a refusal leaves nothing behind. [expectedVersion] must be the current
+     * version ([ExtendResult.StaleVersion] otherwise). Only a root order may be extended ([OrderConflict.NOT_ROOT]), and only an ACTIVE or PAUSED one
+     * ([OrderConflict.TERMINAL] for STOPPED, [OrderConflict.STOP_ALREADY_PENDING] for STOP_REQUESTED).
+     *
+     * [maxCyclesCap] is `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`. The audit event is kind EXTENDED, actor HUMAN, with the values before and after in
+     * its payload (V53).
+     */
+    fun extendByOperator(
+        orderId: String,
+        expectedVersion: Long,
+        operatorKey: String,
+        addCycles: Int?,
+        extendDays: Int?,
+        maxCyclesCap: Int,
+    ): ExtendResult = transaction(database) {
+        val current = lockOrder(orderId) ?: return@transaction ExtendResult.NotFound
+        if (current.version != expectedVersion) return@transaction ExtendResult.StaleVersion
+        if (current.parentOrderId != null) return@transaction ExtendResult.Refused(OrderConflict.NOT_ROOT)
+        when (current.state) {
+            OrderState.ACTIVE, OrderState.PAUSED -> Unit
+            OrderState.STOP_REQUESTED -> return@transaction ExtendResult.Refused(OrderConflict.STOP_ALREADY_PENDING)
+            OrderState.STOPPED -> return@transaction ExtendResult.Refused(OrderConflict.TERMINAL)
+        }
+        val now = utcNow(clock)
+        val newMaxCycles = current.maxCycles + (addCycles ?: 0)
+        if (newMaxCycles > maxCyclesCap) return@transaction ExtendResult.Invalid(ExtendInvalid.MAX_CYCLES_OVER_CAP)
+        val newExpiresAt = if (extendDays == null) {
+            current.expiresAt
+        } else {
+            (if (current.expiresAt.isAfter(now)) current.expiresAt else now).plusDays(extendDays.toLong())
+        }
+        if (newExpiresAt.isAfter(current.createdAt.plusDays(LIFETIME_CEILING_DAYS))) {
+            return@transaction ExtendResult.Invalid(ExtendInvalid.EXPIRY_OVER_CEILING)
+        }
+        val lifetimePaused = current.state == OrderState.PAUSED && current.stateReason in LIFETIME_PAUSES
+        if (lifetimePaused && !(newMaxCycles > current.cyclesStarted && newExpiresAt.isAfter(now))) {
+            return@transaction ExtendResult.Refused(OrderConflict.EXTENSION_DOES_NOT_LIFT)
+        }
+        if (!updateExtension(orderId, expectedVersion, newMaxCycles, newExpiresAt, now)) return@transaction ExtendResult.StaleVersion
+        appendEvent(
+            orderId, current.cyclesStarted.takeIf { it > 0 }, "EXTENDED", current.state, current.state, OPERATOR_EXTENDED,
+            OrderActor.HUMAN, operatorKey, null, now,
+            payloadJson = """{"maxCycles":{"from":${current.maxCycles},"to":$newMaxCycles},""" +
+                """"expiresAt":{"from":"${current.expiresAt}","to":"$newExpiresAt"}}""",
+        )
+        ExtendResult.Moved(getIn(orderId) ?: error("order vanished after extension"))
+    }
 
     /**
      * ACTIVE -> PAUSED by a safety guard (ADR 0015 section 5.2). The order is checked under its row lock, so a guard that is slower than
@@ -1297,14 +1388,15 @@ class SelfDevOrderRepository(
                 ?: return@transaction OrderResult.NotFound
             val current = path.first()
             if (current.version != expectedVersion) return@transaction OrderResult.StaleVersion
-            val decision = checkOrderTransition(current.state, to, reason, actor, current.stateReason)
+            val now = utcNow(clock)
+            val limitsLifted = to == OrderState.ACTIVE && liftedByExtension(current, now)
+            val decision = checkOrderTransition(current.state, to, reason, actor, current.stateReason, limitsLifted)
             if (decision is OrderTransitionDecision.Refused) {
                 throw Rollback(OrderResult.Refused(OrderConflict.valueOf(decision.reason.name)))
             }
             if (to == OrderState.ACTIVE) {
                 firstStoppingAncestor(path.drop(1))?.let { throw Rollback(OrderResult.Refused(OrderConflict.ANCESTOR_NOT_ACTIVE, it.orderId)) }
             }
-            val now = utcNow(clock)
             if (!updateState(orderId, expectedVersion, to, reason, now)) throw Rollback(OrderResult.StaleVersion)
             val kind = if (to == OrderState.ACTIVE) "RESUMED" else "PAUSED"
             appendEvent(orderId, current.cyclesStarted.takeIf { it > 0 }, kind, current.state, to, reason.name, actor, actorKey, requestId, now)
@@ -1333,6 +1425,35 @@ class SelfDevOrderRepository(
             failures, now, orderId, expectedVersion,
         ) == 1
 
+    /** Sets the new max_cycles and expires_at (the extension), and bumps the version. Returns false unless exactly one row changed. */
+    private fun Transaction.updateExtension(orderId: String, expectedVersion: Long, maxCycles: Int, expiresAt: LocalDateTime, now: LocalDateTime): Boolean =
+        execUpdate(
+            """
+            UPDATE selfdev_orders SET max_cycles = ?, expires_at = ?, version = version + 1, updated_at = ?
+             WHERE order_id = ? AND version = ?
+            """.trimIndent(),
+            maxCycles, expiresAt, now, orderId, expectedVersion,
+        ) == 1
+
+    /**
+     * True when a PAUSED order held by LIMIT_REACHED or EXPIRED is free of both, and an operator's extension made it so (ADR 0015 addendum
+     * 2026-11-10): the cycle limit is above `cycles_started`, the expiry is after now, and an EXTENDED event came after the latest PAUSED event. The
+     * last condition keeps an order paused at the automatic start's cap (not a limit that an extension lifts) refused as before.
+     */
+    private fun Transaction.liftedByExtension(current: SelfDevOrder, now: LocalDateTime): Boolean =
+        current.state == OrderState.PAUSED && current.stateReason in LIFETIME_PAUSES &&
+            current.cyclesStarted < current.maxCycles && current.expiresAt.isAfter(now) && extendedSinceLastPause(current.orderId)
+
+    private fun Transaction.extendedSinceLastPause(orderId: String): Boolean =
+        execQuery(
+            """
+            SELECT COUNT(*) FROM selfdev_order_events
+             WHERE order_id = ? AND kind = 'EXTENDED'
+               AND occurred_at >= (SELECT MAX(occurred_at) FROM selfdev_order_events WHERE order_id = ? AND kind = 'PAUSED')
+            """.trimIndent(),
+            orderId, orderId,
+        ) { it.getInt(1) }.single() > 0
+
     private fun Transaction.appendEvent(
         orderId: String,
         cycleNo: Int?,
@@ -1347,15 +1468,17 @@ class SelfDevOrderRepository(
         parentOrderId: String? = null,
         depth: Int? = null,
         amountJpy: Long? = null,
+        /** A small fixed-field JSON of numbers and timestamps (V53), or null. Never free text. */
+        payloadJson: String? = null,
     ) {
         execUpdate(
             """
             INSERT INTO selfdev_order_events (event_id, order_id, cycle_no, kind, from_state, to_state, reason_code, actor_kind, actor_ref,
-                request_id, occurred_at, parent_order_id, depth, amount_jpy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                request_id, occurred_at, parent_order_id, depth, amount_jpy, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             Ulid.generate(clock), orderId, cycleNo, kind, from?.name, to?.name, reason, actor.name, actorKey?.let(::actorRef), requestId, now,
-            parentOrderId, depth, amountJpy,
+            parentOrderId, depth, amountJpy, payloadJson,
         )
     }
 
@@ -1472,6 +1595,9 @@ class SelfDevOrderRepository(
          */
         val CYCLE_SUCCESS_STATES: Set<String> = setOf("DONE", "COMPLETED")
         val CYCLE_FAILURE_STATES: Set<String> = setOf("FAILED", "STOPPED", "CANCELLED", "SKIPPED")
+
+        /** The pauses an operator's extension can lift (ADR 0015 addendum 2026-11-10): the cycle limit and the lifetime. */
+        val LIFETIME_PAUSES: Set<OrderReason> = setOf(OrderReason.LIMIT_REACHED, OrderReason.EXPIRED)
 
         /** The audit kind of a cost count (stage 3g). Its `amount_jpy` is the change of the counted yen. */
         const val SPEND_COUNTED = "SPEND_COUNTED"

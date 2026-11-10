@@ -78,6 +78,7 @@ enum class OperatorAction {
     RESUME_ORDER,
     REQUEST_STOP,
     CANCEL_STOP,
+    EXTEND_ORDER,
 }
 
 /**
@@ -85,52 +86,59 @@ enum class OperatorAction {
  * (予算解除の TOO_LARGE / NOT_COMPARABLE)。サーバーの error 本文は表示しない(既存の規則と同じ)。
  * 通信・セッション・権限・未検出・不明は [writeFailureText] の共通文言を使う。
  */
-fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code: String? = null): String = when (failure) {
-    WriteFailure.STALE -> when (action) {
-        OperatorAction.RELEASE_RUN -> "この Run は解放できる状態ではありません（状態が既に変わっています）。詳細を読み直してください。"
-        OperatorAction.ACKNOWLEDGE_BUDGET -> "この予約は未確定ではありません（既に解除されたか、状態が変わりました）。一覧を更新してください。"
-        OperatorAction.RESUME_ORDER -> "この order は再開できる状態ではありません（状態が既に変わっています）。詳細を読み直してください。"
-        OperatorAction.STOP_GOAL,
-        OperatorAction.PAUSE_AUTOPILOT,
-        OperatorAction.RESUME_AUTOPILOT,
-        OperatorAction.RESET_BREAKER,
-        OperatorAction.PAUSE_ORDER,
-        OperatorAction.REQUEST_STOP,
-        OperatorAction.CANCEL_STOP,
-        -> writeFailureText(failure)
-    }
-    WriteFailure.BAD_REQUEST -> when (action) {
-        OperatorAction.RELEASE_RUN -> "理由を確認してください（1〜500 文字、空白だけは使えません）。"
-        OperatorAction.STOP_GOAL -> "理由を確認してください（1〜500 文字、制御文字は使えません）。"
-        OperatorAction.ACKNOWLEDGE_BUDGET -> when (code) {
-            "TOO_LARGE" -> "実額が計上額の 100 倍を超えています。実額を確かめてください（上限は計上額の 100 倍まで）。"
-            "NOT_COMPARABLE" -> "実額の単位が予約と合いません。円の数字で入力してください。"
-            else -> "入力を確認してください（実額は円の数字、根拠と理由は 1〜500 文字、制御文字は使えません）。"
+fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code: String? = null): String {
+    // 延長は 400 / 409 の機械的なコード(MAX_CYCLES_INVALID など)を表示に対応づける。規則は OrderExtendRules.kt。
+    if (action == OperatorAction.EXTEND_ORDER) return extendFailureText(failure, code)
+    return when (failure) {
+        WriteFailure.STALE -> when (action) {
+            OperatorAction.RELEASE_RUN -> "この Run は解放できる状態ではありません（状態が既に変わっています）。詳細を読み直してください。"
+            OperatorAction.ACKNOWLEDGE_BUDGET -> "この予約は未確定ではありません（既に解除されたか、状態が変わりました）。一覧を更新してください。"
+            OperatorAction.RESUME_ORDER -> "この order は再開できる状態ではありません（状態が既に変わっています）。詳細を読み直してください。"
+            OperatorAction.STOP_GOAL,
+            OperatorAction.PAUSE_AUTOPILOT,
+            OperatorAction.RESUME_AUTOPILOT,
+            OperatorAction.RESET_BREAKER,
+            OperatorAction.PAUSE_ORDER,
+            OperatorAction.REQUEST_STOP,
+            OperatorAction.CANCEL_STOP,
+            OperatorAction.EXTEND_ORDER,
+            -> writeFailureText(failure)
         }
-        OperatorAction.PAUSE_AUTOPILOT,
-        OperatorAction.RESUME_AUTOPILOT,
-        OperatorAction.RESET_BREAKER,
-        OperatorAction.PAUSE_ORDER,
-        OperatorAction.RESUME_ORDER,
-        OperatorAction.REQUEST_STOP,
-        OperatorAction.CANCEL_STOP,
-        -> writeFailureText(failure)
+        WriteFailure.BAD_REQUEST -> when (action) {
+            OperatorAction.RELEASE_RUN -> "理由を確認してください（1〜500 文字、空白だけは使えません）。"
+            OperatorAction.STOP_GOAL -> "理由を確認してください（1〜500 文字、制御文字は使えません）。"
+            OperatorAction.ACKNOWLEDGE_BUDGET -> when (code) {
+                "TOO_LARGE" -> "実額が計上額の 100 倍を超えています。実額を確かめてください（上限は計上額の 100 倍まで）。"
+                "NOT_COMPARABLE" -> "実額の単位が予約と合いません。円の数字で入力してください。"
+                else -> "入力を確認してください（実額は円の数字、根拠と理由は 1〜500 文字、制御文字は使えません）。"
+            }
+            OperatorAction.PAUSE_AUTOPILOT,
+            OperatorAction.RESUME_AUTOPILOT,
+            OperatorAction.RESET_BREAKER,
+            OperatorAction.PAUSE_ORDER,
+            OperatorAction.RESUME_ORDER,
+            OperatorAction.REQUEST_STOP,
+            OperatorAction.CANCEL_STOP,
+            OperatorAction.EXTEND_ORDER,
+            -> writeFailureText(failure)
+        }
+        WriteFailure.DISABLED -> when (action) {
+            OperatorAction.STOP_GOAL,
+            OperatorAction.PAUSE_AUTOPILOT,
+            OperatorAction.RESUME_AUTOPILOT,
+            OperatorAction.RESET_BREAKER,
+            -> "自律運転が今は無効です。時間をおいて、もう一度お試しください。"
+            OperatorAction.ACKNOWLEDGE_BUDGET -> "予算の台帳に書けませんでした。予約は変わっていません。時間をおいて、もう一度お試しください。"
+            OperatorAction.RELEASE_RUN -> writeFailureText(WriteFailure.UNKNOWN)
+            OperatorAction.PAUSE_ORDER,
+            OperatorAction.RESUME_ORDER,
+            OperatorAction.REQUEST_STOP,
+            OperatorAction.CANCEL_STOP,
+            OperatorAction.EXTEND_ORDER,
+            -> writeFailureText(failure)
+        }
+        else -> writeFailureText(failure)
     }
-    WriteFailure.DISABLED -> when (action) {
-        OperatorAction.STOP_GOAL,
-        OperatorAction.PAUSE_AUTOPILOT,
-        OperatorAction.RESUME_AUTOPILOT,
-        OperatorAction.RESET_BREAKER,
-        -> "自律運転が今は無効です。時間をおいて、もう一度お試しください。"
-        OperatorAction.ACKNOWLEDGE_BUDGET -> "予算の台帳に書けませんでした。予約は変わっていません。時間をおいて、もう一度お試しください。"
-        OperatorAction.RELEASE_RUN -> writeFailureText(WriteFailure.UNKNOWN)
-        OperatorAction.PAUSE_ORDER,
-        OperatorAction.RESUME_ORDER,
-        OperatorAction.REQUEST_STOP,
-        OperatorAction.CANCEL_STOP,
-        -> writeFailureText(failure)
-    }
-    else -> writeFailureText(failure)
 }
 
 private val CODING_KEY_SHAPE = Regex("coding:([^:]+):([0-9]+)")

@@ -438,6 +438,18 @@ class DbBudgetStore(
         projectBudgetStatusIn(projectId, now)
     }
 
+    /**
+     * Locks the tenant rows and expires the due reservations, in the caller's transaction (ADR 0022, the project drain). It is the first
+     * step of every budget operation, so a drain that calls it after its own rows is ordered with every admission and every spend. The
+     * drain takes it after the rows of orders (ADR 0015: order rows, then the tenant budget rows), never before them.
+     */
+    internal fun lockTenantForDrain(tx: Transaction) {
+        with(tx) {
+            lockTenant()
+            expireDue(clock.instant())
+        }
+    }
+
     private fun Transaction.projectBudgetStatusIn(projectId: String, now: Instant): ProjectBudgetStatus {
         val scope = projectScope(projectId)
         val period = periodFor(scope, now)

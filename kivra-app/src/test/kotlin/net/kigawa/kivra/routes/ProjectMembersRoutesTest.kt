@@ -34,6 +34,7 @@ import net.kigawa.kivra.db.Assignee
 import net.kigawa.kivra.db.AssigneeRole
 import net.kigawa.kivra.db.AssigneeResult
 import net.kigawa.kivra.db.ProjectBackfillRepository
+import net.kigawa.kivra.db.ProjectDrainRepository
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAssigneeRepository
@@ -70,6 +71,7 @@ class ProjectMembersRoutesTest {
                     backfill = ProjectBackfillRepository(db.database),
                     members = ProjectMemberRepository(db.database, Clock.systemUTC()),
                     budgets = newDbStore(db, Clock.systemUTC()),
+                    drain = ProjectDrainRepository(db.database, newDbStore(db, Clock.systemUTC())),
                 )
             }
         }

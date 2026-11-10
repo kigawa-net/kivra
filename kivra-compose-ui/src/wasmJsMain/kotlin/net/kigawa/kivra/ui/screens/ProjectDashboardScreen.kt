@@ -14,6 +14,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,6 +41,7 @@ import net.kigawa.kivra.ui.REPO_KEY_INPUT_MAX
 import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.api.ApiBackfillReport
 import net.kigawa.kivra.ui.api.ApiClient
+import net.kigawa.kivra.ui.api.ApiDrainReport
 import net.kigawa.kivra.ui.api.ApiException
 import net.kigawa.kivra.ui.api.ApiProjectActivity
 import net.kigawa.kivra.ui.api.ApiProjectBudget
@@ -49,7 +51,19 @@ import net.kigawa.kivra.ui.api.ApiSession
 import net.kigawa.kivra.ui.backfillExplain
 import net.kigawa.kivra.ui.backfillFailureText
 import net.kigawa.kivra.ui.backfillTableLine
+import net.kigawa.kivra.ui.DRAIN_DONE_MESSAGE
+import net.kigawa.kivra.ui.DRAIN_DRY_DONE_MESSAGE
+import net.kigawa.kivra.ui.DRAIN_NO_TARGET_MESSAGE
+import net.kigawa.kivra.ui.canDeleteEmptied
 import net.kigawa.kivra.ui.canRunBackfill
+import net.kigawa.kivra.ui.canRunDrain
+import net.kigawa.kivra.ui.deleteExplain
+import net.kigawa.kivra.ui.deleteProjectFailureText
+import net.kigawa.kivra.ui.drainCountLines
+import net.kigawa.kivra.ui.drainExplain
+import net.kigawa.kivra.ui.drainFailureText
+import net.kigawa.kivra.ui.drainTargetChoices
+import net.kigawa.kivra.ui.drainTotal
 import net.kigawa.kivra.ui.isProjectBudgetBody
 import net.kigawa.kivra.ui.isRepoKeyShape
 import net.kigawa.kivra.ui.projectActivityText
@@ -146,6 +160,237 @@ private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNa
             Text("今月の予算を見る（運用者のみ）")
         }
         ProjectOperatorSection(projectId)
+        Spacer(Modifier.height(16.dp))
+        ProjectDrainSection(projectId, d.project.name, onNavigate)
+    }
+}
+
+/**
+ * 運用者だけの「空にして削除」(ADR 0022 PR-H)。移し先を選び、確認（dry-run）の件数を見て、確認ダイアログから空にする(実行)。空になったら
+ * 削除できる。判定は運用者の権限と行の状態をサーバーが決める。移し先を変えたら、それまでの確認の結果は捨てる(実行の対象が変わるため)。
+ */
+@Composable
+private fun ProjectDrainSection(projectId: String, projectName: String, onNavigate: (Route) -> Unit) {
+    val scope = rememberCoroutineScope()
+    val projects = rememberLoad(projectId) { ApiClient.getProjects() }
+    var targetId by remember { mutableStateOf<String?>(null) }
+    var targetName by remember { mutableStateOf("") }
+    // 確認（dry-run）の結果。実行の対象になる。実行の結果は [shown] に出す。
+    var dry by remember { mutableStateOf<ApiDrainReport?>(null) }
+    var shown by remember { mutableStateOf<ApiDrainReport?>(null) }
+    // 空になったか(確認で移すものが 0 件、または移しが済んだ)。削除できるかの材料。
+    var emptied by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<ActionNotice?>(null) }
+    var drainConfirm by remember { mutableStateOf(false) }
+    var drainError by remember { mutableStateOf<String?>(null) }
+    var deleteConfirm by remember { mutableStateOf(false) }
+    var deleteError by remember { mutableStateOf<String?>(null) }
+
+    fun chooseTarget(id: String, name: String) {
+        targetId = id
+        targetName = name
+        dry = null
+        shown = null
+        emptied = false
+        notice = null
+    }
+
+    fun dryRun() {
+        val target = targetId ?: return
+        if (submitBlocked(busy, ApiSession.expired)) return
+        busy = true
+        notice = null
+        scope.launch {
+            try {
+                val report = ApiClient.drainProject(projectId, target, dryRun = true)
+                if (!report.dryRun) error("the dry run answered as a real run")
+                dry = report
+                emptied = drainTotal(report.counts) == 0L
+                notice = ActionNotice(DRAIN_DRY_DONE_MESSAGE, ok = true)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                dry = null
+                emptied = false
+                notice = ActionNotice(drainFailureText((e as? ApiException)?.status), ok = false)
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun runDrain() {
+        val target = targetId ?: return
+        if (submitBlocked(busy, ApiSession.expired)) return
+        busy = true
+        drainError = null
+        scope.launch {
+            var done: ApiDrainReport? = null
+            try {
+                val report = ApiClient.drainProject(projectId, target, dryRun = false)
+                if (report.dryRun) error("the real run answered as a dry run")
+                done = report
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                drainError = drainFailureText((e as? ApiException)?.status)
+            } finally {
+                busy = false
+            }
+            done?.let { report ->
+                shown = report
+                dry = null
+                emptied = true
+                drainConfirm = false
+                drainError = null
+                notice = ActionNotice(DRAIN_DONE_MESSAGE, ok = true)
+            }
+        }
+    }
+
+    fun runDelete() {
+        if (submitBlocked(busy, ApiSession.expired)) return
+        busy = true
+        deleteError = null
+        scope.launch {
+            var deleted = false
+            try {
+                ApiClient.deleteProject(projectId)
+                deleted = true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                deleteError = deleteProjectFailureText((e as? ApiException)?.status)
+            } finally {
+                busy = false
+            }
+            if (deleted) {
+                deleteConfirm = false
+                // The project is gone: go back to the list, which no longer shows it.
+                onNavigate(Route.Page(NavDestination.Projects))
+            }
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("空にして削除（運用者のみ）", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "このプロジェクトの行（Task、Order、記憶、Run、担当、repo）を別のプロジェクトへ移して空にし、削除できるようにします。" +
+                    "データは消しません。メンバーと予算の上限は、このプロジェクトから外れます。まず確認（dry-run）をしてください。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            LoadedView(projects) { list ->
+                val choices = drainTargetChoices(list, projectId)
+                if (choices.isEmpty()) {
+                    Text(DRAIN_NO_TARGET_MESSAGE, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    Text("移し先", style = MaterialTheme.typography.labelLarge)
+                    choices.forEach { p ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable(enabled = !busy && !ApiSession.expired) { chooseTarget(p.projectId, p.name) },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = targetId == p.projectId,
+                                onClick = { chooseTarget(p.projectId, p.name) },
+                                enabled = !busy && !ApiSession.expired,
+                            )
+                            Text(p.name)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(enabled = targetId != null && !busy && !ApiSession.expired, onClick = { dryRun() }) {
+                            Text("確認（dry-run）")
+                        }
+                        Button(
+                            enabled = canRunDrain(dry, targetId, busy) && !ApiSession.expired,
+                            onClick = {
+                                drainError = null
+                                drainConfirm = true
+                            },
+                        ) {
+                            Text("空にして移す…")
+                        }
+                    }
+                }
+            }
+            dry?.let { report ->
+                Spacer(Modifier.height(4.dp))
+                Text("移す件数（確認の結果）", style = MaterialTheme.typography.labelLarge)
+                val lines = drainCountLines(report.counts)
+                if (lines.isEmpty()) {
+                    Text("移す行はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    lines.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                }
+            }
+            shown?.let { report ->
+                Spacer(Modifier.height(4.dp))
+                Text("移した件数", style = MaterialTheme.typography.labelLarge)
+                drainCountLines(report.counts).forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+            }
+            notice?.let { n ->
+                Text(
+                    n.text,
+                    color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Button(
+                enabled = canDeleteEmptied(emptied, busy) && !ApiSession.expired,
+                onClick = {
+                    deleteError = null
+                    deleteConfirm = true
+                },
+            ) {
+                Text("削除…")
+            }
+        }
+    }
+
+    // 空にする(実行)の確認。確認の結果が無いときは開かない。失敗時は開いたままにする。
+    val report = dry
+    if (drainConfirm && report != null && targetId != null) {
+        ReasonDialog(
+            title = "空にして移す",
+            message = drainExplain(report, targetName),
+            submitLabel = "移す",
+            reasonLabel = null,
+            busy = busy,
+            errorText = drainError,
+            onSubmit = { runDrain() },
+            onDismiss = {
+                if (!busy) {
+                    drainConfirm = false
+                    drainError = null
+                }
+            },
+        )
+    }
+
+    // 削除の確認。失敗時は開いたままにする(409 は行が残っている)。
+    if (deleteConfirm) {
+        ReasonDialog(
+            title = "プロジェクトの削除",
+            message = deleteExplain(projectName),
+            submitLabel = "削除する",
+            reasonLabel = null,
+            busy = busy,
+            errorText = deleteError,
+            onSubmit = { runDelete() },
+            onDismiss = {
+                if (!busy) {
+                    deleteConfirm = false
+                    deleteError = null
+                }
+            },
+        )
     }
 }
 

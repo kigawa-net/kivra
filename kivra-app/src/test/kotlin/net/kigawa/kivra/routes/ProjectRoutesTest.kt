@@ -46,6 +46,7 @@ import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.MemberPutResult
 import net.kigawa.kivra.db.MemorySaveResult
 import net.kigawa.kivra.db.ProjectBackfillRepository
+import net.kigawa.kivra.db.ProjectDrainRepository
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.RepoAddResult
@@ -85,6 +86,7 @@ class ProjectRoutesTest {
                     backfill = ProjectBackfillRepository(db.database),
                     members = ProjectMemberRepository(db.database, Clock.systemUTC()),
                     budgets = newDbStore(db, Clock.systemUTC()),
+                    drain = ProjectDrainRepository(db.database, newDbStore(db, Clock.systemUTC())),
                 )
             }
         }

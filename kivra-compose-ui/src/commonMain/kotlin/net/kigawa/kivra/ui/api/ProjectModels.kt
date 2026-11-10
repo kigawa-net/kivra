@@ -69,6 +69,13 @@ data class ApiProjectActivity(
 @Serializable
 data class ApiProjectRepo(val repoKey: String)
 
+/**
+ * `POST /api/projects/{id}/drain`(server `ProjectDrainResponse`)。件数だけ: 種類ごとの行の数(repos、members、budget、tasks、orders、
+ * memory、runs、assignees)。dryRun が true なら何も書いていない。
+ */
+@Serializable
+data class ApiDrainReport(val dryRun: Boolean, val targetProjectId: String, val counts: Map<String, Long>)
+
 /** `POST /api/projects/backfill`(server `BackfillResponse`)。 */
 @Serializable
 data class ApiBackfillReport(val dryRun: Boolean, val tables: List<ApiBackfillTable>)

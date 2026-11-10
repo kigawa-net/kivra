@@ -296,6 +296,29 @@ object ApiClient {
     }
 
     /**
+     * 運用者: プロジェクトを移し先へ空にする(drain)。`POST /api/projects/{id}/drain?dryRun=true|false`、本文 `{"targetProjectId": "..."}`。
+     * dryRun は数えるだけ(既定もそう)。409 は進行中の Run か実行中の予約があり、今は空にできない。400・404 は移し先の指定。
+     * 応答の形が違えば [ApiException]。
+     */
+    suspend fun drainProject(projectId: String, targetProjectId: String, dryRun: Boolean): ApiDrainReport {
+        val text = postWriteText(
+            "/api/projects/${percentEncode(projectId)}/drain?dryRun=${if (dryRun) "true" else "false"}",
+            DrainBody(targetProjectId),
+        )
+        return try {
+            replyJson.decodeFromString<ApiDrainReport>(text)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw ApiException(null, "response is not the expected format")
+        }
+    }
+
+    /** 運用者: 空のプロジェクトを削除する。`DELETE /api/projects/{id}`、本文は空の JSON オブジェクト `{}`。409 は行が残っている。 */
+    suspend fun deleteProject(projectId: String) =
+        writeWith(HttpMethod.Delete, "/api/projects/${percentEncode(projectId)}", EmptyJsonBody())
+
+    /**
      * Goal の再計画。`POST /api/selfdev/goals/{id}/replan`、本文 `{"version": n}`(読んだ version)。BLOCKED で計画の失敗のときだけ。
      * 409 は状態・version の競合、403 は権限(GOAL_WRITE)、503 は自律運転が無効。
      */
@@ -711,6 +734,8 @@ object ApiClient {
 
 /** 今月の予算の設定の本文(server `ProjectBudgetInput`)。上限は円の整数、警告の基準は 0 より大きく 1 以下。 */
 @Serializable private class ProjectBudgetBody(val monthlyLimitJpy: Long, val softRatio: Double)
+
+@Serializable private class DrainBody(val targetProjectId: String)
 
 /** order の作成の本文(server `CreateOrderRequest`)。冪等キーは持たない(サーバーは知らないフィールドを拒否する)。 */
 @Serializable private class CreateOrderBody(val title: String, val policy: String, val maxCycles: Int, val projectId: String)

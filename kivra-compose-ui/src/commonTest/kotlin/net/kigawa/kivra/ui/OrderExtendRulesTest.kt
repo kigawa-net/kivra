@@ -34,8 +34,10 @@ class OrderExtendRulesTest {
         assertTrue(isValidExtendDays(""))
         assertTrue(isValidExtendDays("1"))
         assertTrue(isValidExtendDays("14"))
+        assertTrue(isValidExtendDays("15"))
+        assertTrue(isValidExtendDays("3650"))
         assertFalse(isValidExtendDays("0"))
-        assertFalse(isValidExtendDays("15"))
+        assertFalse(isValidExtendDays("3651"))
         assertFalse(isValidExtendDays("3.0"))
     }
 
@@ -48,7 +50,7 @@ class OrderExtendRulesTest {
         assertTrue(isExtendFormOk("1", "14"))
         // 入れた方が形式に合わなければ送れない。
         assertFalse(isExtendFormOk("0", ""))
-        assertFalse(isExtendFormOk("1", "15"))
+        assertFalse(isExtendFormOk("1", "3651"))
     }
 
     @Test
@@ -61,9 +63,10 @@ class OrderExtendRulesTest {
     }
 
     @Test
-    fun maxCyclesAndExpiryCodesHaveTheirOwnTexts() {
+    fun maxCyclesCodeHasItsOwnText() {
         assertTrue(extendFailureText(WriteFailure.BAD_REQUEST, "MAX_CYCLES_INVALID").contains("周の上限"))
-        assertTrue(extendFailureText(WriteFailure.BAD_REQUEST, "EXPIRES_AT_INVALID").contains("30 日"))
+        // The expiry has no ceiling any more (ADR 0015 addendum 2026-11-11): its old code is not a text of its own.
+        assertFalse(extendFailureText(WriteFailure.BAD_REQUEST, "EXPIRES_AT_INVALID").contains("30 日"))
         // 400 で code が無い(入力の形の誤り)は入力の確認。
         assertTrue(extendFailureText(WriteFailure.BAD_REQUEST, null).contains("入力を確認"))
     }

@@ -3,18 +3,18 @@ package net.kigawa.kivra.ui
 /*
  * order の延長の純粋ロジック(画面に依存しない)。ADR 0015 の 2026-11-10 追補(§2.6 の改め)と、サーバーの
  * POST /api/selfdev/orders/{id}/extend(kivra-app の routes/SelfDevOrderRoutes.kt)の規則に合わせる。
- * 上限(設定の周の上限)と期限の 30 日の天井はサーバーが判定する。画面は形式と、固定コードの表示だけを持つ。
+ * 上限(設定の周の上限)はサーバーが判定する。期限には天井が無い(延長日数の 3650 は入力の検査)。画面は形式と、固定コードの表示だけを持つ。
  */
 
-/** 延長する日数の上限。サーバーの EXTEND_DAYS_LIMIT と同じ(1 から 14)。 */
-const val EXTEND_DAYS_MAX = 14
+/** 延長する日数の上限。サーバーの EXTEND_DAYS_LIMIT と同じ(1 から 3650)。期限の天井ではなく、入力の検査(ADR 0015 追補 2026-11-11)。 */
+const val EXTEND_DAYS_MAX = 3650
 
 /** 延長の入力の補足。 */
 const val ORDER_EXTEND_HINT = "追加する周数と延長する日数は、どちらか一方か両方を入れます（両方空は不可）。"
 
 /** 延長の確認文。周は始めず、予算は変えないことを先に言う。 */
 const val ORDER_EXTEND_CONFIRM = "延長しても周は始まりません。予算は変わりません。" +
-    "期限は、今と現在の期限の遅い方から延長日数だけ後になります（作成から 30 日以内）。"
+    "期限は、今と現在の期限の遅い方から延長日数だけ後になります。"
 
 /** 延長の成功の文言。 */
 const val ORDER_EXTENDED_DONE = "order を延長しました。周は始まりません。止まっている order は、別に再開してください（自動では再開しません）。"
@@ -52,14 +52,13 @@ fun addCyclesOrNull(raw: String): Int? = raw.trim().takeIf { it.isNotEmpty() && 
 fun extendDaysOrNull(raw: String): Int? = raw.trim().takeIf { it.isNotEmpty() && isValidExtendDays(it) }?.toInt()
 
 /**
- * 延長の失敗の日本語の文言。[code] は応答の機械的なコード(サーバーの固定値)。400 の MAX_CYCLES_INVALID と EXPIRES_AT_INVALID、
+ * 延長の失敗の日本語の文言。[code] は応答の機械的なコード(サーバーの固定値)。400 の MAX_CYCLES_INVALID、
  * 409 の NOT_ROOT・STOP_ALREADY_PENDING・TERMINAL・EXTENSION_DOES_NOT_LIFT を文言に対応づける。code の無い 409 は版の競合、
  * code の無い 400 は入力の確認。それ以外は [writeFailureText] の共通文言。サーバーの error 本文は表示しない。
  */
 fun extendFailureText(failure: WriteFailure, code: String?): String = when (failure) {
     WriteFailure.BAD_REQUEST -> when (code) {
         "MAX_CYCLES_INVALID" -> "延長後の周の上限が、設定された上限を超えています。周の数を減らしてください。"
-        "EXPIRES_AT_INVALID" -> "延長後の期限が、作成から 30 日を超えます。延長する日数を減らしてください。"
         else -> "入力を確認してください（追加する周数は 1 以上の整数、延長する日数は 1〜$EXTEND_DAYS_MAX 日です）。"
     }
     WriteFailure.STALE -> when (code) {

@@ -161,11 +161,12 @@ sealed interface AutoCycleResult {
 /** The outcome of a successful cycle start: the order, the cycle's root Task ([goalId]) and the cycle number. */
 data class CycleStarted(val order: SelfDevOrder, val goalId: String, val cycleNo: Int)
 
-/** The most days one extension adds (ADR 0015 addendum 2026-11-10, section 2.6). The route checks it, and so does the repository's tests. */
-const val EXTEND_DAYS_LIMIT = 14
-
-/** An extended expiry may be at most this many days after the order was created (ADR 0015 addendum 2026-11-10, section 2.6). */
-const val LIFETIME_CEILING_DAYS = 30L
+/**
+ * The most days one extension adds. This is an input check, not a limit on the order's lifetime (ADR 0015 addendum 2026-11-11, section 2.6):
+ * it only refuses a value that is not a sensible number of days (an overflow or a typing mistake). An extension may take an order's expiry
+ * past any date the operator chooses; the expiry itself is still required, and an order still stops when it is reached (EXPIRED).
+ */
+const val EXTEND_DAYS_LIMIT = 3650
 
 /** The fixed reason of the audit event of an extension (kind EXTENDED, actor HUMAN). The values before and after are in its payload. */
 const val OPERATOR_EXTENDED = "OPERATOR_EXTENDED"
@@ -174,8 +175,6 @@ const val OPERATOR_EXTENDED = "OPERATOR_EXTENDED"
 enum class ExtendInvalid {
     /** The new max_cycles is above `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`. */
     MAX_CYCLES_OVER_CAP,
-    /** The new expiry is more than [LIFETIME_CEILING_DAYS] days after the order's creation. */
-    EXPIRY_OVER_CEILING,
 }
 
 /** The outcome of an operator's extension. [Refused] is a conflict (409), [Invalid] a bad request (400). */
@@ -533,9 +532,6 @@ class SelfDevOrderRepository(
             current.expiresAt
         } else {
             (if (current.expiresAt.isAfter(now)) current.expiresAt else now).plusDays(extendDays.toLong())
-        }
-        if (newExpiresAt.isAfter(current.createdAt.plusDays(LIFETIME_CEILING_DAYS))) {
-            return@transaction ExtendResult.Invalid(ExtendInvalid.EXPIRY_OVER_CEILING)
         }
         val lifetimePaused = current.state == OrderState.PAUSED && current.stateReason in LIFETIME_PAUSES
         if (lifetimePaused && !(newMaxCycles > current.cyclesStarted && newExpiresAt.isAfter(now))) {

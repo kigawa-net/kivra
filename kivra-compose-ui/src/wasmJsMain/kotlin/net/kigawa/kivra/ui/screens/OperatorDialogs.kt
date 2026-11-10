@@ -211,7 +211,7 @@ private fun confirmText(actual: String, amountJpy: String): String =
 
 /**
  * order の延長ダイアログ。追加する周数と延長する日数(どちらか一方か両方。両方空は不可)。現在の開始済みの周・上限・期限を示す。
- * 形式の検査は [isExtendFormOk]、上限と 30 日の天井はサーバーが判定する。送信中は [busy] の間、すべての操作を止める。
+ * 形式の検査は [isExtendFormOk]、上限はサーバーが判定する。送信中は [busy] の間、すべての操作を止める。
  * 失敗時は [errorText] をダイアログ内に出し、ダイアログは閉じない。成功時は呼び出し側が閉じる。
  */
 @Composable

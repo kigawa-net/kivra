@@ -1,5 +1,7 @@
 package net.kigawa.kivra.selfdev
 
+import net.kigawa.kivra.db.SelfDevOrderRepository
+
 /**
  * The self-development orders' environment settings (ADR 0015 stage 1, Issue #273). Fail-closed, like [AutopilotSettings]:
  *
@@ -44,6 +46,12 @@ class OrderSettings private constructor(
      * [enabled]. Its rollback is `false`.
      */
     val autoCycleEnabled: Boolean = false,
+    /**
+     * Whether the startup does **not** hold the ACTIVE orders (ADR 0015 U-14, addendum 2026-11-10). Off by default, which is the hold: every
+     * ACTIVE order is paused with `STARTUP_HOLD` at startup. `true` is the operator's explicit opt-in: the ACTIVE orders stay ACTIVE.
+     * Present only when [enabled]. The safety guards are not changed by it.
+     */
+    val autoResumeOnStartup: Boolean = false,
 ) {
     override fun toString(): String = "OrderSettings(enabled=$enabled)"
 
@@ -58,6 +66,7 @@ class OrderSettings private constructor(
         const val ENV_SPEND = "KIVRA_SELFDEV_ORDER_SPEND_ENABLED"
         const val ENV_MAX_CYCLES_CAP = "KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP"
         const val ENV_AUTO_CYCLE = "KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED"
+        const val ENV_AUTO_RESUME_ON_STARTUP = "KIVRA_SELFDEV_ORDER_AUTO_RESUME_ON_STARTUP"
         const val DEFAULT_MAX_CYCLES_CAP = 1
         const val MAX_CYCLES_CAP_LIMIT = 10
         const val DEFAULT_MAX_CHILDREN = 5
@@ -94,10 +103,18 @@ class OrderSettings private constructor(
                 spendEnabled = boolFlag(env, ENV_SPEND, default = false),
                 maxCyclesCap = boundedInt(env, ENV_MAX_CYCLES_CAP, default = DEFAULT_MAX_CYCLES_CAP, range = 1..MAX_CYCLES_CAP_LIMIT),
                 autoCycleEnabled = boolFlag(env, ENV_AUTO_CYCLE, default = false),
+                autoResumeOnStartup = boolFlag(env, ENV_AUTO_RESUME_ON_STARTUP, default = false),
             )
         }
     }
 }
+
+/**
+ * The startup step of ADR 0015 U-14: holds every ACTIVE order with `STARTUP_HOLD`, unless [OrderSettings.autoResumeOnStartup] is on (then nothing
+ * is written and the ACTIVE orders stay ACTIVE). [orders] is null when the orders are off. Returns the number held.
+ */
+fun OrderSettings.startupHold(orders: SelfDevOrderRepository?): Int =
+    if (orders == null || autoResumeOnStartup) 0 else orders.holdActiveOnStartup()
 
 /** An integer setting with a range. Unset or blank is [default]. A value out of range or not an integer is a startup failure. */
 internal fun boundedInt(env: Map<String, String>, name: String, default: Int, range: IntRange): Int {

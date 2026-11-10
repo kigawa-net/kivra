@@ -2024,6 +2024,8 @@ order は、Task を 1 周ずつ回す長く生きる指示である(V40 以降�
 
 有効化の順序: dev で有効化し、E2E を確かめる。有効化の後の起動では、既存の `ACTIVE` の order はすべて `PAUSED`(理由 `STARTUP_HOLD`)になる(U-14)。運用者が再開するまで、周は始まらない。
 
+起動時の保留は、運用者の明示的なオプトインで外せる(既定は従来どおりの保留。ADR 0015 の 2026-11-10 の追補)。`KIVRA_SELFDEV_ORDER_AUTO_RESUME_ON_STARTUP`(既定 `false`)を `true` にすると、起動時に `ACTIVE` の order は `ACTIVE` のまま残り、周は次の tick から再開する。`true` / `false` 以外は起動に失敗する(変数名だけが出て、値は出ない)。オーダーが無効のときは読まれない。予算、`max_cycles`、期限、サーキットブレーカーなどの安全装置は、この変数で変わらない。自律運用のための設定なので、使うのは運用者の判断で、dev の承認の後にする。
+
 #### 7.6.2 ルートの作成と周の開始(運用者)
 
 - 作成: `POST /api/selfdev/orders` `{"title": "...", "policy": "...", "maxCycles": n}`。`maxCycles` は任意で、未指定は 1。1 以上、`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`(既定 1、最大 10)以下でなければ 400(`code` は `MAX_CYCLES_INVALID`)。作成後は変えられない(ADR 0015 §2.6)。ルートは 1 件だけ(2 件目は 409)。`policy` は方針の文で、作成後は変えられない。AI の主体は作成できない(403)。
@@ -2188,7 +2190,7 @@ order の tick(60 秒ごと)が、条件がそろった order の次の周を始
 有効化の手順(dev。別の PR で manifest を変える。ユーザーの承認が要る):
 
 1. `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` を決める(dev の既定の運用は、まず 3 など小さい値)。`KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED=true` を足して再起動する。
-2. 再起動では `STARTUP_HOLD` で全 `ACTIVE` の order が `PAUSED` になる。order の画面か `POST /api/selfdev/orders/{id}/resume` で再開する。再開から次の tick(最大 60 秒)で、最初の周が始まる。
+2. 再起動では `STARTUP_HOLD` で全 `ACTIVE` の order が `PAUSED` になる。order の画面か `POST /api/selfdev/orders/{id}/resume` で再開する。再開から次の tick(最大 60 秒)で、最初の周が始まる。自律運用で再起動の後に人の再開を待ちたくないときは、`KIVRA_SELFDEV_ORDER_AUTO_RESUME_ON_STARTUP=true` を足す(既定は `false`。§7.6.1 の有効化の順序)。
 3. `maxCycles` は作成時にしか決められない。既存の order(`max_cycles` = 1)は 1 周で `PAUSED(LIMIT_REACHED)` になる。複数周が要るときは、新しい order を作る(ルートは 1 件なので、先にルートを承認つきで停止する。§7.6.4)。
 
 止め方:
@@ -2196,6 +2198,7 @@ order の tick(60 秒ごと)が、条件がそろった order の次の周を始
 - 一時停止: order を一時停止する(`OPERATOR_PAUSED`)か、停止要求を出す。次の tick から周は始まらない。進行中の周は止まらない(Goal の停止は §7.6.4)。
 - 全体の一時停止(`POST /api/selfdev/autopilot/pause`)とブレーカーも、自動の開始を止める。
 - ロールバック: `KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED=false`(または変数を消す)にして再起動する。order の状態は変わらず、運用者が周を始める経路はそのまま使える。
+- 起動時の保留の外し方(`KIVRA_SELFDEV_ORDER_AUTO_RESUME_ON_STARTUP=true`)のロールバックは、変数を `false`(または消す)にして再起動する。次の起動から保留が戻り、その起動で `ACTIVE` の order は `STARTUP_HOLD` で止まる。
 
 監査の見方:
 

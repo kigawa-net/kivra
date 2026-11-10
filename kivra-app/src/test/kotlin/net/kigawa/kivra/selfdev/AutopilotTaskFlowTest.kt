@@ -10,6 +10,8 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.core.patch.PatchSet
+import net.kigawa.kivra.core.patch.Write
 import net.kigawa.kivra.core.autopilot.AutopilotReason
 import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.core.autopilot.TransitionRefusal
@@ -337,6 +339,26 @@ class AutopilotTaskFlowTest {
         val after = h.ops.task(child.taskId)!!
         assertEquals(TaskState.PENDING_APPROVAL, after.state)
         assertEquals(AutopilotReason.AUTO_SCOPE_EXCEEDED, after.stateReason)
+    }
+
+    @Test
+    fun theGuardJudgesAnAutoQueuedTaskUnderItsOwnApprovalMode() = TestDb().use { db ->
+        // A stage 3 task outside the stage 2 scope: queued under full, dispatched, and re-checked against the real Run's task.
+        val h = Harness(db, listOf(plan(task("Code", paths = "\"kivra-app/src/main/kotlin/x.kt\"", size = "L"))))
+        val root = h.submitRoot()
+        runBlocking { h.planner(AutopilotApproval.FULL).planTask(root.taskId) }
+        assertEquals(TaskState.QUEUED, h.planned(root.taskId).single().state)
+        h.dispatcher().tick()
+        val child = h.planned(root.taskId).single()
+        assertEquals(TaskState.SUBMITTED, child.state)
+        val runId = RunId(child.runId!!)
+        val inside = PatchSet(listOf(Write("kivra-app/src/main/kotlin/x.kt", "x\n")), "summary")
+        val denied = PatchSet(listOf(Write("kivra-app/src/main/kotlin/net/kigawa/kivra/auth/Login.kt", "x\n")), "summary")
+
+        assertEquals(AutoScopeVerdict.InScope, PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, inside) { null })
+        assertEquals(AutoScopeVerdict.OutOfScope(1, 1), PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, denied) { null })
+        // The same Run under the stage 2 rule is out of scope: the path is not docs, test sources or README.
+        assertEquals(AutoScopeVerdict.OutOfScope(1, 1), PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.AUTO).check(runId, inside) { null })
     }
 
     @Test

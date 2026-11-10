@@ -111,6 +111,12 @@ object PlanValidator {
     internal fun isAutoScopePath(path: String): Boolean = autoPolicy.allowsPath(path)
 
     /**
+     * True when [path] is in the stage-3 scope (ADR 0011 section 6.1): the PatchPolicy allowlist and not denylisted, with the stage 2
+     * narrowing (docs, test sources, README only) lifted. The re-check of the actual change set under `full` uses this rule.
+     */
+    internal fun isFullScopePath(path: String): Boolean = policy.allowsPath(path)
+
+    /**
      * True when the Planner may name [path] in a task: the same rule as [validate] (the allowlist, and not denylisted). Used to choose the
      * repository files the Planner is shown, so a listed path is always one the validator accepts. It never accepts a path by itself.
      */
@@ -159,12 +165,17 @@ object PlanValidator {
                 }
             }
             // Stage 2 (ADR 0011 section 6.1): AUTO only, S, at most 3 paths, all in the narrow allowlist, none denylisted.
-            // The model's own size estimate is trusted only for this choice; the real diff is re-checked later (section 6.2).
-            val autoEligible = config.approval == AutopilotApproval.AUTO &&
-                !denylisted &&
-                raw.sizeEstimate == "S" &&
-                raw.targetPaths.size <= AUTO_MAX_PATHS &&
-                raw.targetPaths.all { autoPolicy.allowsPath(it) }
+            // Stage 3 (section 6.1): FULL only, none denylisted, at most 3 paths. The size estimate and the narrow allowlist are not
+            // required; the 3-path cap stays as a guard (section 5.2). The model's own estimate is trusted only for this choice;
+            // the real diff is re-checked later (section 6.2).
+            val autoEligible = when (config.approval) {
+                AutopilotApproval.REQUIRED -> false
+                AutopilotApproval.AUTO -> !denylisted &&
+                    raw.sizeEstimate == "S" &&
+                    raw.targetPaths.size <= AUTO_MAX_PATHS &&
+                    raw.targetPaths.all { autoPolicy.allowsPath(it) }
+                AutopilotApproval.FULL -> !denylisted && raw.targetPaths.size <= AUTO_MAX_PATHS
+            }
             val requiresApproval = config.requiresApproval(denylisted) || !autoEligible
             tasks += NewTask(
                 title = title,

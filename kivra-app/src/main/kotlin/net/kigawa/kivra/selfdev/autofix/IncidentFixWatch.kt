@@ -15,7 +15,7 @@ import org.slf4j.LoggerFactory
 
 /**
  * Submits one autopilot task per opened incident issue (issue #226, the second stage of self-healing). The task is the same kind of task
- * an operator submits: it enters at TASK_SUBMITTED, the Planner plans it, and the approval setting (required or auto), the AutoScopeGuard,
+ * an operator submits: it enters at TASK_SUBMITTED, the Planner plans it, and the approval setting (required, auto or full), the AutoScopeGuard,
  * the budget, the breaker and the run limits decide the rest. This watch skips none of them.
  *
  * Rules, all fixed in code:

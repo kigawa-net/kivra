@@ -90,6 +90,22 @@ class AutopilotSettingsTest {
     }
 
     @Test
+    fun `full is the stage 3 value, and an unknown value is refused naming only the variable`() {
+        assertEquals(
+            AutopilotApproval.FULL,
+            AutopilotSettings.fromEnv(autopilotEnv(AutopilotSettings.ENV_APPROVAL to "full"), cliSelfDev).config!!.approval,
+        )
+        // The values are lower case, as required and auto are. A different case is refused, not folded.
+        for (bad in listOf("FULL", "Full", "always-on")) {
+            val refused = assertFailsWith<IllegalStateException> {
+                AutopilotSettings.fromEnv(autopilotEnv(AutopilotSettings.ENV_APPROVAL to bad), cliSelfDev)
+            }
+            assertTrue(refused.message!!.contains(AutopilotSettings.ENV_APPROVAL), refused.message)
+            assertFalse(refused.message!!.contains(bad), "the message must not echo the value")
+        }
+    }
+
+    @Test
     fun `the approval values are required and auto, and anything else is refused by name`() {
         assertEquals(
             AutopilotApproval.AUTO,

@@ -127,7 +127,7 @@ order の方針、範囲、上限、親は、作成後に変えない。承認�
 #### 2.7 order の木(親子構造)
 
 - **構造**: 各 order は親を 1 つ持つ(ルートを除く)。親は作成時に決まり、変えられない(付け替えは禁止。U-21)。循環は、親が作成時にだけ決まり、新しい行は自分の祖先にはなれないため、構造上起きない。
-- **ルートの印**: `parent_order_id IS NULL` の order がルート。ルートは木に 1 つだけ作られる。ルートの承認者は人(§4.1)。
+- **ルートの印**: `parent_order_id IS NULL` の order がルート。ルートは複数作れる(各ルートが 1 本の木の根。追補 2026-11-11)。ルートの承認者は人(§4.1)。
 - **規則(提案の既定。U-20)**:
   - 深さの上限: 2(ルート 0、子 1、孫 2)。作成時に、親の深さ + 1 が上限以下であることを確かめる。
   - 子の数の上限: 1 つの親につき 5 件。木 1 本の全体は 15 件まで。
@@ -213,7 +213,7 @@ order の方針、範囲、上限、親は、作成後に変えない。承認�
   - ルートには親が無いので、決定は人(ルートの承認者)だけが行える。自動のループは、ルートの停止を決定も承認もできない。
   - 要求者と承認者は、主体として別でなければならない。kigawa が要求して kigawa が承認することはできない。二人目の要求者は AI の主体とする(ユーザーの決定。§4.6)。
 - **(c) 手順**
-  1. 要求(任意。人、または AI の主体(§4.6)。AI の主体は、ルートの停止の要求者として使う): `POST /api/selfdev/orders/{id}/stop-requests`。木に未決の要求は 1 件まで(`active_key` の UNIQUE)。対象は `STOP_REQUESTED` になる。要求の行は、要求時の部分木の版(各 order の `id` と `version` の組、ソート済み)、理由コード、要求者の主体を持つ。
+  1. 要求(任意。人、または AI の主体(§4.6)。AI の主体は、ルートの停止の要求者として使う): `POST /api/selfdev/orders/{id}/stop-requests`。木に未決の要求は 1 件まで(`tree_root_id` と `active_key` の UNIQUE、V54。追補 2026-11-11)。対象は `STOP_REQUESTED` になる。要求の行は、要求時の部分木の版(各 order の `id` と `version` の組、ソート済み)、理由コード、要求者の主体を持つ。
   2. 決定(人): `POST /api/selfdev/stop-requests/{id}/approve`。1 つの transaction で次を検査する。
      - `requireJsonSameOrigin`(CSRF)。同一オリジンのブラウザの経路だけ。
      - 決定者が決定権を持つ(子は直接の親の名での決定、ルートは要求者と別の主体)。
@@ -895,3 +895,43 @@ U-14(有効化された後の起動で、全 `ACTIVE` を `PAUSED(STARTUP_HOLD)`
 - **拒否の答え**: 400 `MAX_CYCLES_INVALID`(CAP を超える)、400 `EXPIRES_AT_INVALID`(作成から 30 日を超える)、409 `STALE`(version が違う)、409 `NOT_ROOT`、409 `TERMINAL`、409 `STOP_ALREADY_PENDING`、409 `EXTENSION_DOES_NOT_LIFT`。AI の主体は、入力を読む前に 403(既存の `resume` と同じ `ORDER_MANAGE`)。
 - **確認したこと**: リポジトリ層(TestDb の実 DB)で、ACTIVE の延長、PAUSED(`OPERATOR_PAUSED`、`LIMIT_REACHED`、`EXPIRED`)の延長と理由の保持、解消しない延長の拒否、CAP と 30 日の超過、子、要求中と停止済みの拒否、version の不一致、延長後の resume、延長なしの cap 停止の resume の拒否を単体テストで確かめた。ルートの 400 / 403 / 409 の答えは、ルートのテストで確かめた。核の遷移規則 `checkOrderTransition` は、`limitsLifted` の 2 つの場合を単体テストで確かめた。
 - **未確認**: 本番の運用の手順(dev で延長を試す判断は運用者が行う)。UI(`kivra-compose-ui`)と MCP には出していない(この追補は API だけ)。
+
+## 追補(2026-11-11): 期限の天井と、ルートの複数化
+
+運用者の明示的な判断により、次の 2 つの制限を外す。2026-11-10 の追補で作った「作成から 30 日の天井」と、「ルートは木に 1 つだけ」の制約である。
+
+**前提の訂正**: 「ルートは 1 件だけ(2 件目は 409 `ROOT_EXISTS`)」は、この時点の `main` では既に成り立っていなかった。V43(`selfdev_orders` の `root_slot` の UNIQUE を削除)で DB の制約は外れており、作成の API は 2 件目を拒否しなかった。残っていたのは、古い文書と UI の文言(409 の説明)、使われない `CreateRootResult.RootExists`、および次に挙げる 2 つの実装の穴である。
+
+### 1. 期限の天井(§2.6 の追補 2026-11-10 の改め)
+
+- **変えたもの**: 延長の天井(作成から 30 日、400 `EXPIRES_AT_INVALID`)を削除した。`EXTEND_DAYS_LIMIT` は 14 から 3650 にした。これは「制限」ではなく入力の検査である(数値の溢れと誤入力を防ぐ技術的な上限)。延長の日数は 1 から 3650 の正の整数だけを受ける。
+- **変えないもの**: `expires_at` は必須のままである。期限が来た order は従来どおり `EXPIRED` で止まる(`expireDueOrders`)。作成時の既定の期限(`orderTtl`、14 日)は変えない。作成には天井の検査がもともと無い。
+- **対象**: ルートの order だけ、`ACTIVE` か `PAUSED` のとき(従来どおり)。
+
+### 2. ルートの複数化
+
+- **DB**: V43 で済んでいる(UNIQUE `root_slot` の削除)。V54 は、もう一つの全体制約を木ごとに直す(下記)。
+- **停止の要求が木ごとに 1 件**: V23 の `uk_selfdev_order_stop_active`(`active_key` の UNIQUE)は、テーブル全体で未決の要求を 1 件に絞っていた。ルートが 2 つあると、一方の木の未決の要求が他方の木の要求を拒否する。ADR 0015 §4.2 の「木に未決の要求は 1 件まで」に合わせ、V54 で次のとおり変えた。
+  - `tree_root_id`(要求の木のルート)を足し、`UNIQUE (tree_root_id, active_key)` を作った。
+  - `uk_selfdev_order_stop_active` を削除した(Contract。`MigrationExpandOnlyTest` の許可リストに理由つきで載せた)。
+  - 木の中の 1 件までの検査は、ルートの行のロック(`lockPath`)の下で、木の全 order に `STOP_REQUESTED` が無いことで行う。`tree_root_id` の無い、V54 より前の行もこの検査で止まる。
+- **子の作成の直列化**: 旧コードは `root_slot = 1 FOR UPDATE` でルートを 1 行ロックしていた。V43 の後は一致する行が無く、ロックは何もしていなかった。`TREE_LIMIT`(木の大きさ)は全木の合計を数えるため、木をまたいだ 2 つの作成が同時に上限を通りうる。すべてのルートを ID の順にロックするよう直した。木をまたぐ他のトランザクションは必ず 1 本の木のルートを先に取るので、この順序で循環待ちは起きない。
+- **ガードの打ち切りの穴(発見して直した)**: `OrderWatch` は ACTIVE の order を先頭 50 件(`BATCH`)だけ読んで、予算、FX、UNKNOWN Run の検査をしていた。ルートが複数あると、51 件目以降の order はどの検査も受けない。周の自動開始の候補(`autoCycleCandidates`)も同じ理由で後ろが飢える。両方を ID の順のキーセット・ページングで全件読むよう直した(`activeOrdersAfter`、`autoCycleCandidatesAfter`)。テストで 52 件の ACTIVE の order のうち、最後の 2 件も `BUDGET_HOLD` になることを確かめた。
+
+### 3. 変えなかった安全装置
+
+予算(月次の割当ての `BUDGET_HOLD`、order の `order_budget_jpy` と `cycle_budget_jpy`、`ORDER_BUDGET`)、サーキットブレーカー(`BREAKER_OPEN`)、連続失敗(`CYCLE_FAILURES`)、PR の上限(`maxPendingPrs`)、同時の self-development Run の上限(`maxActiveSelfDev`)、1 日の Run の上限(`maxRunsPerDay`)、停止の承認(人。ルートは要求者と別の主体、digest の一致、版の一致)、AI の主体の拒否、周数の CAP(`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`。k8s で 10 にする)、起動時の保留。これらは order の外で、または order ごとに、従来の規則で動く。
+
+共有の資源の扱い(テストで確かめたこと):
+
+- 同時の Run は、木をまたいで Dispatcher の `maxActiveSelfDev` で 1 件に止まる(テスト `theOneRunSlotIsSharedByEveryTree`)。木の中の「周は 1 件ずつ」(`TREE_BUSY`)は木ごとに残る。
+- 月次の予算の停止は、全 ACTIVE の order に効く(テスト `theMonthlyBudgetHoldsEveryActiveOrderNotOnlyTheFirstPage`)。
+- 木の大きさ(`TREE_LIMIT`)は、全木の合計で数える(テスト `theTreeSizeLimitCountsTheOrdersOfEveryTree`)。木ごとに数えると上限が木の数だけ増えるため、緩めない。
+
+### 4. 残るリスク
+
+- **周の日次の上限は order ごと**(`AUTO_CYCLE_DAILY_MAX` = 3)。木が増えれば、周の候補は木の数だけ増える。ただし、Run の実行は全体の `maxActiveSelfDev` と `maxRunsPerDay` で止まり、周の作成は Run を増やさない。
+- **ルートの予算は木ごと**(既定 5,000 円)。ルートの数だけ予算の合計は増える。月次の枠は `BUDGET_HOLD` で全体に効くが、枠の取り合いは先着になる。
+- **ルートの数に上限が無い**。作成は運用者(`ORDER_MANAGE`)だけで、AI の主体は作れない。
+- **一覧は作成の古い順に 50 件**(`list`、API と MCP)。order が 50 件を超えると、新しい order は一覧に出ない(詳細は ID で見られる)。直すには一覧の並びと件数の設計が要るため、この追補では変えない。
+- **未確認**: MariaDB での V54(`DROP CONSTRAINT` と、NULL を含む複合の UNIQUE)の実行。H2 のテストは通すが、`KIVRA_TEST_DB=mariadb` の確認は別に行う。本番と dev の挙動。

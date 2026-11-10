@@ -328,7 +328,7 @@ object ApiClient {
 
     /**
      * order の作成(ルートの order)。`POST /api/projects/{projectId}/orders`(別名)、本文 `{title, policy, maxCycles, projectId}`。
-     * 冪等キーは送らない(サーバーの本文は厳密で、知らないフィールドは 400 になる)。ルートは一つだけ(2 つ目は 409)。
+     * 冪等キーは送らない(サーバーの本文は厳密で、知らないフィールドは 400 になる)。ルートは複数作れる(2 つ目も受け付ける。ADR 0015 追補 2026-11-11)。
      */
     suspend fun createOrder(title: String, policy: String, maxCycles: Int, projectId: String) =
         postWrite(ProjectApi.orderCreate(projectId), CreateOrderBody(title, policy, maxCycles, projectId))

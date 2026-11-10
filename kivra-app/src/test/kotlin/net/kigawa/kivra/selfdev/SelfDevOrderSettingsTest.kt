@@ -293,6 +293,38 @@ class SelfDevOrderSettingsTest {
         assertEquals(1, off.maxCyclesCap)
     }
 
+    // ---- startup auto-resume (ADR 0015 U-14, addendum 2026-11-10) ------------------------------------------------------------
+
+    @Test
+    fun `the startup auto-resume is off by default and accepts only true or false`() {
+        assertFalse(OrderSettings.fromEnv(onEnv, enabledAutopilot, null).autoResumeOnStartup)
+        val off = OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_AUTO_RESUME_ON_STARTUP to "false"), enabledAutopilot, null)
+        assertFalse(off.autoResumeOnStartup)
+        assertTrue(OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_AUTO_RESUME_ON_STARTUP to "true"), enabledAutopilot, null).autoResumeOnStartup)
+        for (bad in listOf("yes", "1", "", "TRUE", "resume-secret-value")) {
+            val e = assertFailsWith<IllegalStateException> {
+                OrderSettings.fromEnv(onEnv + (OrderSettings.ENV_AUTO_RESUME_ON_STARTUP to bad), enabledAutopilot, null)
+            }
+            assertTrue(e.message!!.contains(OrderSettings.ENV_AUTO_RESUME_ON_STARTUP))
+            assertFalse(e.message!!.contains("resume-secret-value"))
+        }
+    }
+
+    @Test
+    fun `the startup auto-resume is not read while the orders are off`() {
+        val off = OrderSettings.fromEnv(
+            mapOf(OrderSettings.ENV_ENABLED to "false", OrderSettings.ENV_AUTO_RESUME_ON_STARTUP to "not-a-switch"),
+            enabledAutopilot,
+            null,
+        )
+        assertFalse(off.autoResumeOnStartup)
+        val trap = object : Map<String, String> by mapOf(OrderSettings.ENV_ENABLED to "false") {
+            override fun get(key: String): String? =
+                if (key == OrderSettings.ENV_ENABLED) "false" else throw AssertionError("read $key while the orders are off")
+        }
+        assertFalse(OrderSettings.fromEnv(trap, enabledAutopilot, null).autoResumeOnStartup)
+    }
+
     private fun selfDev(): SelfDevSettings = SelfDevSettings.fromEnv(
         mapOf(
             "KIVRA_SELFDEV_ENABLED" to "true",

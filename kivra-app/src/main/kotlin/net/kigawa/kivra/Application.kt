@@ -95,6 +95,7 @@ import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.CodingAttemptPatchSource
 import net.kigawa.kivra.selfdev.DeferredPrMergeAuthority
 import net.kigawa.kivra.selfdev.SelfDevSettings
+import net.kigawa.kivra.selfdev.startupHold
 import net.kigawa.kivra.selfdev.aiPrincipalFromEnv
 import net.kigawa.kivra.selfdev.autopilotBudgetAllows
 import net.kigawa.kivra.selfdev.buildSelfDev
@@ -312,8 +313,9 @@ internal fun Application.appModule(env: Map<String, String>) {
     selfDevParts?.incidentFix?.start(this)
     // The memory's retention step (ADR 0016 section 9). Started only with the memory switch on.
     memoryRepo?.let { repo -> SelfDevMemoryRetentionWorker({ repo.purgeRetention() }, SelfDevMemoryRetentionWorker.DEFAULT_INTERVAL).start(this) }
-    // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD). Nothing runs before this.
-    orderRepo?.holdActiveOnStartup()
+    // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD), unless the operator opted into
+    // KIVRA_SELFDEV_ORDER_AUTO_RESUME_ON_STARTUP=true (default false). Nothing runs before this.
+    orderSettings.startupHold(orderRepo)
     // ADR 0021 L4: the shadow judgement of the LLM stop approval. Built only with its flag on (null otherwise, and nothing is read or created).
     // It judges and records; it never approves (that is L5). It starts after the hold above, so a request cannot predate the order hold.
     // It needs the Anthropic credential of self-development and the orders. While either is off, its flag is not even read (the fail-closed

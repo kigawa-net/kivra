@@ -15,11 +15,22 @@ import org.slf4j.LoggerFactory
  */
 fun createDataSource(config: DatabaseConfig): DataSource = createPool(config.jdbcUrl, config.user, config.password)
 
-private fun createPool(jdbcUrl: String, user: String, password: String): DataSource {
+/**
+ * The migration user's pool is small: migrations run one after another, and the migration user has a low `max_user_connections`
+ * (5 in dev). The Hikari default (10 connections, all kept idle) tries to open more than the user may, and logs
+ * `1226 max_user_connections` errors at every start.
+ */
+internal const val MIGRATION_POOL_SIZE = 2
+
+private fun createPool(jdbcUrl: String, user: String, password: String, maxPoolSize: Int? = null): DataSource {
     val hikariConfig = HikariConfig().apply {
         this.jdbcUrl = jdbcUrl
         username = user
         this.password = password
+        if (maxPoolSize != null) {
+            maximumPoolSize = maxPoolSize
+            minimumIdle = maxPoolSize
+        }
         driverClassName = if (jdbcUrl.startsWith("jdbc:h2")) "org.h2.Driver" else "org.mariadb.jdbc.Driver"
     }
     return HikariDataSource(hikariConfig)
@@ -41,7 +52,7 @@ fun migrateDatabase(
         migrate(appDataSource)
         return
     }
-    val migrationDataSource = createPool(config.jdbcUrl, user, password)
+    val migrationDataSource = createPool(config.jdbcUrl, user, password, MIGRATION_POOL_SIZE)
     try {
         migrate(migrationDataSource)
     } finally {

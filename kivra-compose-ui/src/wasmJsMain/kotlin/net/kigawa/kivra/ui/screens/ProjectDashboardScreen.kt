@@ -17,6 +17,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -702,11 +703,13 @@ private fun ProjectChatSection(projectId: String) {
             Spacer(Modifier.height(8.dp))
 
             // メッセージ一覧
-            if (chat.messages.isEmpty()) {
-                Text("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                chat.messages.forEach { msg: ApiChatMessage ->
-                    ChatMessageRow(msg)
+            when {
+                chat.value == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                chat.value!!.messages.isEmpty() -> Text("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else -> {
+                    chat.value!!.messages.forEach { msg: ApiChatMessage ->
+                        ChatMessageRow(msg)
+                    }
                 }
             }
 

@@ -6,6 +6,9 @@ import java.io.InputStream
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
+import net.kigawa.kivra.agent.backend.RunOutcome
+import net.kigawa.kivra.agent.backend.RunResult
+import net.kigawa.kivra.agent.backend.StdoutLine
 import org.slf4j.LoggerFactory
 
 /** One running process of the docker CLI. The streams are read by the runner, and the process is always ended by it. */
@@ -49,36 +52,6 @@ object ProcessDockerLauncher : DockerLauncher {
     }
 }
 
-enum class DockerRunOutcome { EXITED, TIMEOUT, CANCELLED, OUTPUT_LIMIT }
-
-/**
- * One line of the container's standard output, as it is read while the container runs. [Text] holds the line's content (never logged;
- * [toString] shows no value). [Oversized] is a line over the per-line limit, whose content is not kept.
- */
-sealed interface StdoutLine {
-    class Text(val value: String) : StdoutLine {
-        override fun toString(): String = "StdoutLine.Text(***)"
-    }
-
-    data object Oversized : StdoutLine
-}
-
-/**
- * The result of one run. [stdout] and [stderr] are bounded and may contain anything the container wrote, including secrets or the
- * task. The caller must not log them. [toString] shows sizes only.
- */
-class DockerRunResult(
-    val outcome: DockerRunOutcome,
-    val exitCode: Int?,
-    val stdout: String,
-    val stderr: String,
-    val outputTruncated: Boolean,
-) {
-    override fun toString(): String =
-        "DockerRunResult(outcome=$outcome, exitCode=$exitCode, stdoutChars=${stdout.length}, stderrChars=${stderr.length}, " +
-            "outputTruncated=$outputTruncated)"
-}
-
 /**
  * Starts, watches and stops the Run containers (design #187 section 3.3, PR 6).
  *
@@ -109,13 +82,13 @@ class DockerRunner(
      *
      * [onStdoutLine], when given, receives each line of the standard output while the container runs. It runs on its own thread, behind
      * a bounded queue: a slow or failing listener never delays the reading, the limits or the kill. A line the queue cannot take is
-     * dropped. The returned [DockerRunResult.stdout] is the same as without the listener.
+     * dropped. The returned [RunResult.stdout] is the same as without the listener.
      */
     fun run(
         spec: DockerRunSpec,
         onStdoutLine: ((StdoutLine) -> Unit)? = null,
         cancelRequested: () -> Boolean = { false },
-    ): DockerRunResult {
+    ): RunResult {
         val args = builder.build(spec)
         guard.check(args)
         val process = launcher.start(dockerArgv(args), dockerEnv())
@@ -124,14 +97,14 @@ class DockerRunner(
         val deadline = nanoTime() + spec.timeout.toNanos()
 
         var exit: Int? = null
-        var stopReason: DockerRunOutcome? = null
+        var stopReason: RunOutcome? = null
         while (true) {
             exit = process.waitFor(pollMillis)
             if (exit != null) break
             val reason = when {
-                stdout.exceeded || stderr.exceeded -> DockerRunOutcome.OUTPUT_LIMIT
-                cancelRequested() -> DockerRunOutcome.CANCELLED
-                nanoTime() - deadline >= 0 -> DockerRunOutcome.TIMEOUT
+                stdout.exceeded || stderr.exceeded -> RunOutcome.OUTPUT_LIMIT
+                cancelRequested() -> RunOutcome.CANCELLED
+                nanoTime() - deadline >= 0 -> RunOutcome.TIMEOUT
                 else -> null
             }
             if (reason != null) {
@@ -143,7 +116,7 @@ class DockerRunner(
         }
         stdout.join()
         stderr.join()
-        val outcome = stopReason ?: if (stdout.exceeded || stderr.exceeded) DockerRunOutcome.OUTPUT_LIMIT else DockerRunOutcome.EXITED
+        val outcome = stopReason ?: if (stdout.exceeded || stderr.exceeded) RunOutcome.OUTPUT_LIMIT else RunOutcome.EXITED
         logger.info(
             "docker run finished: runId={} attemptId={} outcome={} exitCode={}",
             spec.runId,
@@ -151,7 +124,7 @@ class DockerRunner(
             outcome,
             exit,
         )
-        return DockerRunResult(
+        return RunResult(
             outcome = outcome,
             exitCode = exit,
             stdout = stdout.text(),

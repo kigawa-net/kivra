@@ -44,6 +44,8 @@ class AgentConfig private constructor(
     val executorMode: ExecutorMode,
     /** The settings of the real executor. Null unless [executorMode] is [ExecutorMode.REAL]. */
     val realExecutor: RealExecutorSettings?,
+    /** Where the containers of the real executor run. The default is docker. See [Backend]. */
+    val backend: Backend,
 ) {
     /** One attempt at a time. Fixed, not configurable. */
     val maxConcurrent: Int get() = MAX_CONCURRENT
@@ -52,6 +54,12 @@ class AgentConfig private constructor(
 
     /** The executor of an attempt. REAL is enabled only by `KIVRA_AGENT_EXECUTOR=real` (see the runbook, section 6.10). */
     enum class ExecutorMode { STUB, REAL }
+
+    /**
+     * Where the containers run (`KIVRA_AGENT_BACKEND`). DOCKER is the default. K8S is named here so that it is refused by name; it is not
+     * implemented yet (ADR 0010 追補 7, PR 4), so [fromEnv] rejects it and nothing falls back to docker.
+     */
+    enum class Backend { DOCKER, K8S }
 
     companion object {
         const val ENV_KIVRA_URL = "KIVRA_AGENT_KIVRA_URL"
@@ -63,6 +71,7 @@ class AgentConfig private constructor(
         const val ENV_HEARTBEAT_INTERVAL_MS = "KIVRA_AGENT_HEARTBEAT_INTERVAL_MS"
         const val ENV_STOP_FILE = "KIVRA_AGENT_STOP_FILE"
         const val ENV_EXECUTOR = "KIVRA_AGENT_EXECUTOR"
+        const val ENV_BACKEND = "KIVRA_AGENT_BACKEND"
         const val ENV_DOCKER_BIN = "KIVRA_AGENT_DOCKER_BIN"
         const val ENV_DOCKER_HOST = "KIVRA_AGENT_DOCKER_HOST"
         const val ENV_DOCKER_NETWORK = "KIVRA_AGENT_DOCKER_NETWORK"
@@ -116,7 +125,18 @@ class AgentConfig private constructor(
                 stopFile = stopFile,
                 executorMode = executorMode,
                 realExecutor = if (executorMode == ExecutorMode.REAL) realExecutorSettings(env) else null,
+                backend = backend(env),
             )
+        }
+
+        /**
+         * Read on every start, also with the stub. `docker` (the default) or unset is docker. `k8s` is refused by name, because it is not
+         * implemented yet, and no other value is accepted. The message does not show the value.
+         */
+        private fun backend(env: Map<String, String>): AgentConfig.Backend = when (optional(env, ENV_BACKEND)) {
+            null, "docker" -> AgentConfig.Backend.DOCKER
+            "k8s" -> throw ConfigException("$ENV_BACKEND names a backend that is not implemented yet; only docker runs")
+            else -> throw ConfigException("$ENV_BACKEND must be docker or k8s")
         }
 
         /** Read only for `KIVRA_AGENT_EXECUTOR=real`. The docker and git paths are absolute; the repository is `owner/repo`. */

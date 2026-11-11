@@ -17,13 +17,11 @@ import net.kigawa.kivra.agent.claude.MonitorEvent
 import net.kigawa.kivra.agent.claude.ReportedUsage
 import net.kigawa.kivra.agent.claude.StreamJsonParser
 import net.kigawa.kivra.agent.claude.StreamReport
+import net.kigawa.kivra.agent.backend.RunBackend
+import net.kigawa.kivra.agent.backend.RunResult
+import net.kigawa.kivra.agent.backend.RunSpec
 import net.kigawa.kivra.agent.docker.CliCommand
-import net.kigawa.kivra.agent.docker.DockerLauncher
-import net.kigawa.kivra.agent.docker.DockerRunResult
-import net.kigawa.kivra.agent.docker.DockerRunSpec
-import net.kigawa.kivra.agent.docker.DockerRunner
-import net.kigawa.kivra.agent.docker.DockerSettings
-import net.kigawa.kivra.agent.docker.ProcessDockerLauncher
+import net.kigawa.kivra.agent.docker.CliOutputLimits
 import net.kigawa.kivra.agent.docker.TaskFile
 import net.kigawa.kivra.agent.workdir.AgentResult
 import net.kigawa.kivra.agent.workdir.CollectOutcome
@@ -73,7 +71,7 @@ class RealExecutorSettings(
  * The real attempt executor (ADR 0010, runbook 6.5 and 6.10). For one claimed attempt it:
  *
  * 1. reads the public base commit into a host-side mirror and extracts it into a new work directory ([WorkDirPreparer]);
- * 2. runs the CLI in one container ([DockerRunner]). The container is stopped on the time limit, on a cancel request from kivra
+ * 2. runs the CLI in one container ([RunBackend]). The container is stopped on the time limit, on a cancel request from kivra
  *    (`cancelRequested`), on the STOP file, and when the coroutine is cancelled;
  * 3. after the container has stopped, classifies the stream ([StreamJsonParser], [CliOutcomeClassifier]) and collects the change set
  *    from the work directory ([DiffCollector]);
@@ -91,18 +89,10 @@ class RealAttemptExecutor(
     workRoot: Path,
     private val stopFile: Path,
     private val settings: RealExecutorSettings,
-    private val launcher: DockerLauncher = ProcessDockerLauncher,
-    private val pollMillis: Long = DockerRunner.DEFAULT_POLL_MILLIS,
+    /** Runs the containers and removes the orphans. Built by [createRunBackend] from the settings, so this class names no backend. */
+    private val backend: RunBackend,
 ) : AttemptExecutor {
     private val logger = LoggerFactory.getLogger(RealAttemptExecutor::class.java)
-    private val dockerSettings = DockerSettings(
-        dockerBinary = settings.dockerBinary,
-        dockerHost = settings.dockerHost,
-        workRoot = workRoot,
-        allowedNetworks = setOf(settings.network),
-        allowedImages = setOf(settings.image),
-        allowedModels = setOf(settings.model),
-    )
     private val mirror = PublicGitMirror(settings.gitBinary, workRoot.resolve(MIRROR_DIR_NAME))
     private val preparer = WorkDirPreparer(workRoot)
     private val changeRoot: Path = workRoot
@@ -181,7 +171,7 @@ class RealAttemptExecutor(
                 ),
             )
             state.prepared = work
-            val spec = DockerRunSpec(
+            val spec = RunSpec(
                 runId = attempt.runId,
                 attemptId = attempt.attemptId,
                 image = settings.image,
@@ -192,16 +182,13 @@ class RealAttemptExecutor(
                 maxTurns = attempt.limits.maxTurns,
                 model = settings.model,
                 budgetUsd = settings.budgetUsd,
+                outputLimitBytes = minOf(attempt.limits.maxOutputBytes, CliOutputLimits.MAX_TOTAL_BYTES).toInt(),
             )
-            val runner = DockerRunner(
-                dockerSettings,
-                launcher = launcher,
-                pollMillis = pollMillis,
-                outputLimitBytes = minOf(attempt.limits.maxOutputBytes, DockerRunner.DEFAULT_OUTPUT_LIMIT_BYTES.toLong()).toInt(),
-            )
-            runner.cleanupOrphans(attempt.runId)
+            // A refused spec throws here, before the orphans are removed or anything starts (as before the RunBackend split).
+            backend.validate(spec)
+            backend.cleanupOrphans(attempt.runId)
             monitor.record(MonitorEvent.AttemptStarted)
-            val result = runner.run(
+            val result = backend.run(
                 spec,
                 onStdoutLine = monitor.stdoutListener(),
                 cancelRequested = { !job.isActive || Files.exists(stopFile) },
@@ -286,7 +273,7 @@ class RealAttemptExecutor(
         }
     }
 
-    private class RunState(val result: DockerRunResult, val report: StreamReport, val outcome: AgentRunOutcome)
+    private class RunState(val result: RunResult, val report: StreamReport, val outcome: AgentRunOutcome)
 
     /** What one attempt has produced so far, for the debug output. Written by [attemptOnce], read by [execute]. */
     private class AttemptState {

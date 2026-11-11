@@ -1340,6 +1340,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 | 変数 | 必須 | 内容 |
 | --- | --- | --- |
 | `KIVRA_AGENT_EXECUTOR` | 任意 | `stub`(既定)か `real`。ほかの値は起動に失敗する |
+| `KIVRA_AGENT_BACKEND` | 任意 | コンテナの実行先。`docker`(既定)。`k8s` は未実装のため起動に失敗する(ADR 0010 追補 7 の PR 4 で実装)。ほかの値も起動に失敗する。stub でも検査する |
 | `KIVRA_AGENT_DOCKER_BIN` | real で必須 | docker CLI の絶対パス |
 | `KIVRA_AGENT_DOCKER_HOST` | 任意 | rootless の `unix:///...`。docker CLI のプロセスにだけ渡す |
 | `KIVRA_AGENT_DOCKER_NETWORK` | real で必須 | 内部ネットワーク名(`--internal`。確認は運用) |

@@ -226,3 +226,63 @@ ADR 0008 の自己開発は、LLM の 1 回の提案で `PatchSet`(ファイル�
 5. **未了(この追補の範囲外)**: 予約の計上の失敗は再試行しない(追補 4 の既知の制限のまま。定期ワーカーは ORPHANED / EXPIRED の遷移を一度しか行わないため、計上の欠損は runbook §6.13 の手順で確認する)。`coding_attempt_usage` の保持期間。claim の `allowedPathPatterns` の差分検査への受け渡し(エージェント側)。claim の `maxOutputBytes`(#231 の残りの項目)。
 6. **担保するテスト**: `CodingReconcileWorkerTest`(印付けと Run が動かないこと、二重の処理と複数の周期での一回だけの計上、失敗した掃除が印付けを止めないこと、期限、終端の Run の結果だけを消すこと、active の結果を消さないこと、受理されなかった行、件数の上限、ログの衛生)、`AgentApiWiringTest`(周期ワーカーは agent API が有効のときだけ起動)、`AgentApiSettingsTest`(間隔と保持の既定と範囲)、`AgentApiRoutesTest`(三つのコードの受理と保存されたコード名)、`SelfDevCodingEndToEndTest`(三つのコードの Run の状態と理由)、`UiRoutesTest`(対応表の三行)。
    - **変異テスト(2026-10-18)**: 削除の条件から「attempt が非活性」を外すと `CodingReconcileWorkerTest` の 1 件が落ちる。`fromWire` で `EMPTY_PATCH` を `CLI_NONZERO` に写すと `AgentApiRoutesTest` の 1 件が落ちる。
+
+## 追補 7(2026-11-11、提案: k8s で Run ごとの Job として実行する)
+
+状態: **提案(Proposed)**。実装はこの追補の承認の後に、別の PR で行う。この追補は、「代替案」の「k8s のワーカー Pod は採らない」を、次の条件つきで更新する。既定は `docker` のまま変えない。
+
+### 1. 何を変えるか
+
+- 運用者の判断(2026-11-11)で、エージェントを k8s で動かす。PC が落ちている間に Run が `QUEUED` で待つ、という代償を外すため。
+- 方式は、**Run(attempt)ごとに 1 つの k8s Job** を作る。常駐のワーカー Pod、StatefulSet、PVC は使わない。認証情報を PVC に保持しない、という元の不採用理由は、この方式では当たらない。
+- Docker-in-Docker(特権コンテナ)と、PC の docker を使い続ける方式は採らない。前者は特権が要り、後者は PC への依存が残るため。
+
+### 2. 元の不採用理由への答え
+
+| 元の理由 | この追補での扱い |
+|---|---|
+| 認証を PVC に保持するため、長期の認証情報をクラスタに置く | Job の Pod には Secret を渡さない(`automountServiceAccountToken: false`、env は許可リストの名前だけ)。認証は egress プロキシだけが持つ。**プロキシには、Keycloak の client secret(長期)を Secret として置く。** これは、PC に置いていたものと同じ種類の秘密で、Anthropic の長期のキーではない(Anthropic への認証は WIF の短命トークン)。クラスタに長期の秘密が増える点は、残るリスクとして受け入れる |
+| NetworkPolicy が現行の CNI(Flannel)では効かず、egress を強制できない | **egress の強制には、NetworkPolicy が効く状態が前提。** 2026-11-11 時点の `prod` の CNI は Flannel(NetworkPolicy のオブジェクトはあるが強制されない)。§3 の導入を、実装の前提条件にする。導入と検証の前に、Job の既定を `k8s` にしない |
+| PC が落ちている間は Run が `QUEUED` で待つ | 解消する(クラスタが動いていれば Run は進む) |
+
+### 3. 前提条件: NetworkPolicy を効かせる(運用者の作業)
+
+- 方式: Flannel を置き換えず、**Calico をポリシー専用(Flannel が経路、Calico がポリシーを担当)で追加する**。Pod の通信経路は変わらない。クラスター全体の CNI の全置換は、通信の停止を招きうるため採らない。
+- 導入の前に、既存の NetworkPolicy(例: `argocd` namespace)が、強制されたときに意図しない遮断を起こさないかを、全 namespace で確認する。
+- 導入の後に、検証用の namespace で、(1) default-deny の egress が実際に落ちること、(2) 許可した宛先(プロキシと DNS)だけに届くこと、を確かめる。確かめるまで、実装の PR の有効化はしない。
+- この作業は共有基盤の変更で、運用者が行う。この PR(提案)では、クラスターを変更しない。
+
+### 4. 不変条件の対応(docker → k8s)
+
+ADR 0010 の決定 3・5・6(docker 引数の不変条件)を、Job のマニフェストの検査で同じ強さに保つ。マニフェストは許可リスト方式で検査し、許可していない項目は拒否する(`DockerArgsGuard` の対応物)。
+
+| docker | k8s の Job |
+|---|---|
+| docker.sock を渡さない | hostPath と docker.sock なし。agent の RBAC は、Job の作成・取得・一覧・削除と、Pod のログ取得だけ |
+| `--privileged` なし、ホストの PID/NET/IPC なし | `privileged: false`、`hostPID/hostIPC/hostNetwork: false`、`allowPrivilegeEscalation: false`。namespace に PodSecurity `restricted` |
+| マウントは作業ディレクトリ 1 つ | volumes は emptyDir(`/work`、`/tmp`、`/home/agent`)だけ。hostPath 禁止 |
+| `--user=10001:10001`、`--read-only`、`--cap-drop=ALL`、no-new-privileges | `runAsUser/runAsGroup: 10001`、`runAsNonRoot`、`readOnlyRootFilesystem`、`capabilities.drop: [ALL]`、`seccompProfile: RuntimeDefault` |
+| 内部ネットワーク + プロキシだけ | NetworkPolicy。Job の Pod の egress は、プロキシ Service と DNS だけ。ingress は全拒否 |
+| メモリ 6g、CPU 4、`--pids-limit` | `resources.limits`。pids は Pod 単位で指定できず、kubelet の `podPidsLimit`(クラスタ設定)になるため、運用確認の項目にする |
+| `--rm`、label、`docker kill` | `ttlSecondsAfterFinished`、同じ label(`kivra-agent=1`、`kivra-run=<runId>`)、Job の delete と `activeDeadlineSeconds`。孤児の掃除は label セレクタ |
+| コンテナ名 `kivra-run-<runId>-<attemptId>` | Job 名は DNS-1123 に合わせて小文字にする(ULID の大文字は使えない) |
+
+### 5. 実装の分割(承認の後)
+
+1. 3 つのイメージ(エージェント本体、実行用、プロキシ)を CI でビルドし、Harbor に push する(現状はどれも CI にない)。
+2. 実行バックエンドの抽象化(挙動は変えない)。`KIVRA_AGENT_BACKEND=docker|k8s`(既定 `docker`)。
+3. Job のマニフェストの生成と検査。禁止項目ごとにテストを 1 つ置く。
+4. k8s のランナー(Job の作成、ログの読み取り、停止、掃除)と、作業ディレクトリと差分収集の Pod 内化。
+5. マニフェスト(プロキシ、NetworkPolicy、RBAC、Secret)、k8s 版の検証、runbook。
+
+### 6. 未決の点
+
+- **差分(PatchSet)の受け取り方。** 差分の収集(`DiffCollector`)は、ホストのファイルシステムを走査する。Pod の終了後は emptyDir を読めないため、Pod 内で収集して結果を出す必要がある。出し方(ログの終端 JSON、ConfigMap、ほか)は、PR 4 で決める。ログは kubelet のローテーションで失われうるため、ログだけに頼らない案を優先する。
+- **git の mirror。** Job ごとに取得するか、キャッシュを持つか。公開 GitHub の https だけで、資格情報は持たない(従来どおり)。
+- **`kivra-agent` と プロキシで、Keycloak の client を分けるか。** 分ければ、Job 側の侵害の影響を小さくできる。
+- **`STOP` ファイルの代替**(キルスイッチ)。ConfigMap か、kivra 側の停止の判定を使う。
+
+### 7. 見直しの条件
+
+- §3 の検証に失敗する、または NetworkPolicy が効くことを確かめられない場合、この追補は採らず、PC での運用を続ける。
+- Job の Pod から、プロキシ以外への到達が 1 件でも確認された場合、k8s の既定への切り替えを止める。

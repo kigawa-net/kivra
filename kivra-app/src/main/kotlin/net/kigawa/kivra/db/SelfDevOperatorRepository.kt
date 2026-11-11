@@ -93,6 +93,14 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
     }
     fun task(taskId: String): SelfDevTask? = transaction(database) { taskIn(taskId) }
 
+    /** The planned children of a plan root (parent_task_id = [rootId]), oldest first, up to [limit] (read only). */
+    fun childrenOf(rootId: String, limit: Int): List<SelfDevTask> = transaction(database) {
+        SelfDevTasksTable.selectAll()
+            .where { SelfDevTasksTable.parentTaskId eq rootId }
+            .orderBy(SelfDevTasksTable.createdAt to SortOrder.ASC, SelfDevTasksTable.taskId to SortOrder.ASC)
+            .limit(limit).map { taskOf(it) }
+    }
+
     /**
      * Accepts a task from the operator (V40 `selfdev_tasks`, state TASK_SUBMITTED). The pair (created_by, idempotency_key) is unique: the
      * same key with the same title, body, target and project is a replay, and with other content it is a conflict. Nothing is planned here.

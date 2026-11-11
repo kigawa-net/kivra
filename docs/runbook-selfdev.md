@@ -167,6 +167,46 @@ curl -X POST "https://<kivra-host>/api/admin/selfdev/runs/<runId>/release-unboun
 
 解放の前に、その PR が本当に束縛されていないことと、GitHub 上の状態を確認する。解放は PR に触れないため、解放後も PR は残る。
 
+### 4.1c 止まった DEVELOPING の Run を解放する
+
+**実装済み(ADR 0009 追補 2026-11-11)。** `POST /api/admin/selfdev/runs/{id}/release-stuck-developing`。`KIVRA_AUTH_MODE` が設定されているときに登録される(`Application.kt`)。§4.1(`UNKNOWN`)、§4.1b(束縛の無い `PULL_REQUEST`)とは別の経路である。
+
+自己開発の Run が `DEVELOPING` のまま止まり、同時 Run 上限(`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`)を占有して、Order の自動の周が始まらないときに使う。例: 作成の直後から更新が無く、coding attempt が 1 件も投入されておらず、エージェントの claim も無い Run。
+
+- UNKNOWN の解放(§4.1)との違い: 対象の状態が `DEVELOPING` であること。`UNKNOWN` は「結果が分からない Run」を証拠なしで閉じる経路で、条件はそれだけ。`DEVELOPING` は動いている最中かもしれないので、**止まっていることを kivra が確かめる条件**(下)がすべて要る。
+- 対象: 自己開発の Run(`taskId` が `selfdev:` で始まるもの)で、状態が `DEVELOPING` のもの。遷移は `DEVELOPING` → `CANCELLED` だけで、`state_reason` は `OPERATOR_RELEASED_STUCK`。
+- 安全条件(行ロックの下で、この順に確認する。1 つでも満たさなければ 409 で何も書かない。`code` で区別する):
+  1. `NOT_DEVELOPING`: 状態が `DEVELOPING` ではない(解放済みを含む)。
+  2. `PR_BOUND`: PR が結び付いている(この経路は PR に触れない)。
+  3. `ACTIVE_ATTEMPT`: coding attempt が `QUEUED` / `CLAIMED` / `RUNNING` のものがある。エージェントが動いているかもしれない。
+  4. `LEASE_HELD`: worker(SelfDevRunner)の lease が切れていない。DB の時計で判定する(他の fence と同じ)。
+  5. `TOO_RECENT`: 最終更新(`updated_at`)から 10 分(`STUCK_DEVELOPING_MIN_IDLE`、コードの定数。環境変数では変えない)たっていない。
+- 認証・CSRF・権限: §4.1 と同じ(`BUDGET_OVERRIDE`)。`Content-Type: application/json` が必須。
+- リクエスト: `{"reason":"<理由。1〜500 文字>"}`。ほかのフィールドは 400。
+- 応答: 200 `{"runId","state":"CANCELLED","reasonCode":"OPERATOR_RELEASED_STUCK"}`、400 不正な入力、401 未認証、403 権限なし、404 該当なし(自己開発でない Run を含む)、409 `{"error","code"}`(上の 5 つのどれか)。
+- 監査: 同じトランザクションで `RUN_RELEASED` を監査に(payload に `from`=`DEVELOPING`、`reasonCode`、理由)、`RunStateChanged` を outbox に書く。理由はログに出ない。
+- **GitHub には何もしない。** PR は閉じず、マージもしない。
+- 解放した Run は、同時 Run 上限を占有しない(`countActiveSelfDev` は終端状態を除外し、`CANCELLED` は終端)。
+- 予算の予約と Order の周は、§4.1 と同じ扱いにする。解放はそれらに書かない。予算の予約は既存の経路(期限切れ・§4.2)で扱い、Order の周は `CANCELLED` の Run を失敗として見る。
+- 解放は原因を直さない。同じ原因で次の Run も止まるなら、原因(worker・エージェントの起動・キュー)を調べる。
+
+**使う前に確認すること。**
+
+1. その Run の coding attempt の状態(詳細の「実行の経過」、または `coding_attempts`)。`QUEUED` で残っているなら、キューの期限が切れる(または取り消される)のを待つ。
+2. エージェントのログ。claim や heartbeat が出ていないか。出ていれば、止まっているのではなく遅いだけかもしれない。
+3. kivra の worker のログ。その Run の lease を持っている worker が生きていないか。
+
+画面(`/ui/compose`)では、状態が `DEVELOPING` の Run の詳細に「運用者の解放（止まった Run）…」が出る(§4.7)。説明文のとおり、attempt が無く一定時間更新が無い Run だけが解放できる。画面は状態しか見ないので、出るボタンが押せるとは限らない。断られた理由は、コードごとの文言で出る。
+
+curl で行う場合:
+
+```sh
+curl -X POST "https://<kivra-host>/api/admin/selfdev/runs/<runId>/release-stuck-developing" \
+  -H "Authorization: Bearer <JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"<理由>"}'
+```
+
 ### 4.2 UNKNOWN_COST の acknowledge(予算の予約)
 
 **実装済み。** `POST /api/admin/budget/acknowledge`。`KIVRA_AUTH_MODE` が設定されているときに登録される(`Application.kt`)。
@@ -242,7 +282,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - **投入(種別の選択)**: 投入フォームの「種別」で、シミュレーション(`POST /api/tasks`)か自己開発(`POST /api/selfdev/tasks`、GitHub に PR を作る)を選ぶ。自己開発は、`GET /api/selfdev/status` の `enabled` が `true` のときだけ選べる。無効のとき、または状態を取れないときは選べない。
   - 冪等キーは画面が作る。種別を切り替えたとき、またはタイトルを変えて送るときは、キーを作り直す。送信が成功するまでは、同じ内容の再送は同じキーになる(ネットワーク失敗のあとに押し直しても二重にはならない)。
   - 送信中はボタンを無効化する。結果: 202「受け付けました」(Run ID つき)、200「既に受け付け済み」、409「同じキーで別の内容」(キーを作り直す。内容を確かめてから投入し直す)、429「自己開発の Run が上限に達している」、400・401・415・その他は固定の文言。応答の本文は画面に出さない。
-- **解放(詳細の「運用者の解放…」「解放（束縛なし）…」)**: 対象は、自己開発の Run で状態が `UNKNOWN` のもの(§4.1)、または `PULL_REQUEST` で束縛が無いもの(§4.1b)。ボタンは理由(1〜500 文字、必須、空白だけは不可)を入力する確認の画面(ダイアログ)を開く。理由を入れて「解放する」を押すと、`/release` か `/release-unbound-pr` を呼ぶ。成功すると詳細を読み直す。PR は閉じず、マージもしない(GitHub には書き込まない)。
+- **解放(詳細の「運用者の解放…」「解放（束縛なし）…」「運用者の解放（止まった Run）…」)**: 対象は、自己開発の Run で状態が `UNKNOWN` のもの(§4.1)、`PULL_REQUEST` で束縛が無いもの(§4.1b)、または `DEVELOPING` で PR が無いもの(§4.1c。attempt が有る・worker が掴んでいる・最終更新が 10 分以内の Run はサーバーが 409 で断る)。ボタンは理由(1〜500 文字、必須、空白だけは不可)を入力する確認の画面(ダイアログ)を開く。理由を入れて「解放する」を押すと、`/release`、`/release-unbound-pr`、`/release-stuck-developing` のどれかを呼ぶ。成功すると詳細を読み直す。PR は閉じず、マージもしない(GitHub には書き込まない)。
   - 応答: 200「解放しました（CANCELLED）」、409「解放できる状態ではない（状態が既に変わっている）」、404「見つからない」、401 はセッション切れの案内、400・415・その他は固定の文言。
 - **予算(運用者向け、「予算（運用者向け）」の欄)**: `GET /api/admin/budget/status` が 200 を返すユーザーにだけ出る(運用者でない、または予算の API が無効なら出ない。401・403・404 では、セッション切れにもしない)。内容と見方は §6.13 の「運用者の確認手順(画面)」を参照する。
   - 月の使用額(確定 + 予約中)の棒と、上限、残り。上限を超えたときは文字でも出す。経路別の内訳(API 経路 / CLI 経路)。

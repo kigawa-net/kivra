@@ -86,6 +86,7 @@ private val RUN_REASONS = mapOf(
     "CODING_NOT_DEVELOPING" to "開発の段階ではなかったため、実行を始めなかった",
     "CODING_ENQUEUE_REFUSED" to "実行の投入が拒否された（Run が見つからない、開発中でない、または入力が不正）",
     "OPERATOR_RELEASED_UNBOUND_PR" to "運用者が解放した（PR と結び付いていない）",
+    "OPERATOR_RELEASED_STUCK" to "運用者が解放した（開発が止まっていた）",
 )
 
 private val RUN_ACTIONS = mapOf(

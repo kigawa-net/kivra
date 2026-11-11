@@ -37,6 +37,33 @@ class OperatorRulesTest {
     }
 
     @Test
+    fun developingSelfDevRunWithoutPullRequestGetsTheStuckRelease() {
+        assertEquals(ReleaseKind.STUCK_DEVELOPING, releaseKindOf(run(state = "DEVELOPING")))
+        assertNull(releaseKindOf(run(state = "DEVELOPING", pr = 42)))
+        assertNull(releaseKindOf(run(mode = "SIMULATED", state = "DEVELOPING")))
+        assertNull(releaseKindOf(run(state = "DEVELOPING", id = "not-a-run-id")))
+    }
+
+    @Test
+    fun stuckReleasePathAndTextsAndLabel() {
+        assertEquals("/api/admin/selfdev/runs/$runId/release-stuck-developing", releasePath(runId, ReleaseKind.STUCK_DEVELOPING))
+        assertTrue(releaseTextsOf(ReleaseKind.STUCK_DEVELOPING).explain.contains("attempt が無く"))
+        assertTrue(releaseButtonLabel(ReleaseKind.STUCK_DEVELOPING).contains("解放"))
+    }
+
+    @Test
+    fun stuckReleaseConflictCodesGetTheirOwnTexts() {
+        val codes = listOf("ACTIVE_ATTEMPT", "TOO_RECENT", "LEASE_HELD", "PR_BOUND", "NOT_DEVELOPING")
+        val texts = codes.map { operatorWriteFailureText(OperatorAction.RELEASE_RUN, WriteFailure.STALE, it) }
+        assertEquals(codes.size, texts.toSet().size)
+        assertTrue(texts[0].contains("attempt"))
+        assertTrue(texts[1].contains("10 分"))
+        // 知らない code や code 無しは、従来の「状態が変わった」文言。他の失敗の種類は code に影響されない。
+        assertTrue(operatorWriteFailureText(OperatorAction.RELEASE_RUN, WriteFailure.STALE, "OTHER").contains("解放できる状態"))
+        assertEquals(writeFailureText(WriteFailure.FORBIDDEN), operatorWriteFailureText(OperatorAction.RELEASE_RUN, WriteFailure.FORBIDDEN, "ACTIVE_ATTEMPT"))
+    }
+
+    @Test
     fun otherRunsAndModesGetNoRelease() {
         assertNull(releaseKindOf(run(state = "RUNNING")))
         assertNull(releaseKindOf(run(mode = "SIMULATED", state = "UNKNOWN")))

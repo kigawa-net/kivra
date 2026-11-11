@@ -73,6 +73,7 @@ class RequestGuardsTest {
         SELFDEV_TASKS("/api/selfdev/tasks", HttpStatusCode.Accepted),
         RELEASE("/api/admin/selfdev/runs/01ARZ3NDEKTSV4RRFFQ69G5FAV/release", HttpStatusCode.NotFound),
         RELEASE_UNBOUND_PR("/api/admin/selfdev/runs/01ARZ3NDEKTSV4RRFFQ69G5FAV/release-unbound-pr", HttpStatusCode.NotFound),
+        RELEASE_STUCK_DEVELOPING("/api/admin/selfdev/runs/01ARZ3NDEKTSV4RRFFQ69G5FAV/release-stuck-developing", HttpStatusCode.NotFound),
         BUDGET("/api/admin/budget/acknowledge", HttpStatusCode.NotFound),
     }
 
@@ -85,7 +86,7 @@ class RequestGuardsTest {
     private fun body(endpoint: Endpoint): String = when (endpoint) {
         Endpoint.TASKS -> """{"title":"README を直す","idempotencyKey":"csrf-key-${keySeq.incrementAndGet()}"}"""
         Endpoint.SELFDEV_TASKS -> """{"title":"README を直す","idempotencyKey":"csrf-key-${keySeq.incrementAndGet()}","projectId":"$projectId"}"""
-        Endpoint.RELEASE, Endpoint.RELEASE_UNBOUND_PR -> """{"reason":"csrf"}"""
+        Endpoint.RELEASE, Endpoint.RELEASE_UNBOUND_PR, Endpoint.RELEASE_STUCK_DEVELOPING -> """{"reason":"csrf"}"""
         Endpoint.BUDGET ->
             """{"scopeId":"tenant","period":"2026-10","reservationKey":"csrf-missing","actualAmountJpy":"0","evidence":"e","reason":"r"}"""
     }

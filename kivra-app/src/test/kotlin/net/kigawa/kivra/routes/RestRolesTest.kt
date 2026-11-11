@@ -83,6 +83,7 @@ class RestRolesTest {
     private val targets = listOf(
         Target("release", HttpMethod.Post, "/api/admin/selfdev/runs/$RUN_ID/release", Permission.BUDGET_OVERRIDE, """{"reason":"x"}"""),
         Target("release-unbound-pr", HttpMethod.Post, "/api/admin/selfdev/runs/$RUN_ID/release-unbound-pr", Permission.BUDGET_OVERRIDE, """{"reason":"x"}"""),
+        Target("release-stuck-developing", HttpMethod.Post, "/api/admin/selfdev/runs/$RUN_ID/release-stuck-developing", Permission.BUDGET_OVERRIDE, """{"reason":"x"}"""),
         Target("budget-status", HttpMethod.Get, "/api/admin/budget/status", Permission.READ),
         Target("budget-fx", HttpMethod.Get, "/api/admin/budget/fx", Permission.READ),
         Target("budget-ack", HttpMethod.Post, "/api/admin/budget/acknowledge", Permission.BUDGET_OVERRIDE, "{}"),
@@ -173,11 +174,11 @@ class RestRolesTest {
             for (t in targets) assertTrue(statusOf(t, AI) != HttpStatusCode.Forbidden, t.name)
         }
         val denies = log.lines.filter { it.startsWith("permission shadow: wouldDeny") }
-        assertEquals(3, denies.size, denies.toString())
+        assertEquals(4, denies.size, denies.toString())
         assertTrue(denies.all { it.contains("permission=BUDGET_OVERRIDE code=PERMISSION_DENIED source=ENV_AI role=AI route=") && it.contains("via=rest") })
         assertTrue(denies.none { it.contains(AI) })
         assertEquals(
-            setOf("selfdev_release", "selfdev_release_unbound_pr", "budget_acknowledge"),
+            setOf("selfdev_release", "selfdev_release_unbound_pr", "selfdev_release_stuck_developing", "budget_acknowledge"),
             denies.map { Regex("route=(\\S+)").find(it)!!.groupValues[1] }.toSet(),
         )
     }
@@ -225,7 +226,7 @@ class RestRolesTest {
     fun `the AI cannot release a budget or a run in enforce, and can submit`() = TestDb().use { db ->
         testApplication {
             setUp(db, guard(PermissionMode.ENFORCE))
-            for (name in listOf("release", "release-unbound-pr", "budget-ack")) {
+            for (name in listOf("release", "release-unbound-pr", "release-stuck-developing", "budget-ack")) {
                 assertEquals(HttpStatusCode.Forbidden, statusOf(targets.first { it.name == name }, AI), name)
             }
             assertTrue(statusOf(targets.first { it.name == "task-submit" }, AI) != HttpStatusCode.Forbidden)

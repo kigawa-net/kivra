@@ -112,6 +112,36 @@ const val OPERATOR_RELEASED_REASON = "OPERATOR_RELEASED"
  */
 const val OPERATOR_RELEASED_UNBOUND_PR_REASON = "OPERATOR_RELEASED_UNBOUND_PR"
 
+/** Fixed state reason of a DEVELOPING self-development run released by an operator because it stalled (ADR 0009 addendum 2026-11-11). */
+const val OPERATOR_RELEASED_STUCK_REASON = "OPERATOR_RELEASED_STUCK"
+
+/** How long a DEVELOPING run must have gone without any update before an operator may release it as stuck. */
+val STUCK_DEVELOPING_MIN_IDLE: java.time.Duration = java.time.Duration.ofMinutes(10)
+
+/** Result of [DevelopmentRunRepository.releaseStuckDevelopingSelfDev]. Every refusal writes nothing. */
+sealed interface StuckReleaseResult {
+    /** The run was a stalled DEVELOPING run and is now CANCELLED. */
+    data class Released(val run: DevelopmentRun) : StuckReleaseResult
+
+    /** No self-development run with that id. A run of another kind is reported the same way. */
+    data object NotFound : StuckReleaseResult
+
+    /** The run is not DEVELOPING (or changed under this call). */
+    data object NotDeveloping : StuckReleaseResult
+
+    /** A pull request is bound to the run. This path never touches a pull request, so it is refused. */
+    data object PullRequestBound : StuckReleaseResult
+
+    /** The run has a coding attempt in QUEUED, CLAIMED or RUNNING: an agent may be working on it. */
+    data object ActiveAttempt : StuckReleaseResult
+
+    /** A worker holds an unexpired lease on the run. */
+    data object LeaseHeld : StuckReleaseResult
+
+    /** The run was updated less than [STUCK_DEVELOPING_MIN_IDLE] ago. */
+    data object TooRecent : StuckReleaseResult
+}
+
 /** Result of [DevelopmentRunRepository.releaseUnboundPullRequestSelfDev]. */
 sealed interface UnboundPrReleaseResult {
     /** The run was an unbound PULL_REQUEST and is now CANCELLED. */
@@ -1055,6 +1085,75 @@ class DevelopmentRunRepository(
         // Read in this transaction: a nested transaction would not see the update above.
         val released = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.single().toDevelopmentRunOrNull()
         UnboundPrReleaseResult.Released(checkNotNull(released) { "released run $runId has an unknown state" })
+    }
+
+    /**
+     * Operator release of a stalled DEVELOPING self-development run (ADR 0009 addendum 2026-11-11): DEVELOPING -> CANCELLED with
+     * [OPERATOR_RELEASED_STUCK_REASON]. Refused (nothing written) unless all of these hold, checked under the row lock in this order:
+     * the run is DEVELOPING, no pull request is bound, no coding attempt is QUEUED / CLAIMED / RUNNING, no worker holds an unexpired
+     * lease (DB clock, like the fences), and the run was last updated at least [minIdle] ago.
+     *
+     * The update is guarded on state and version. The run row, its RUN_RELEASED audit event (the reason only in its payload) and its
+     * RunStateChanged outbox event are written in one transaction. Budget reservations and the Order's cycle are left alone, exactly as
+     * for [releaseUnknownSelfDev]: a CANCELLED run no longer counts against the active-run cap, and the cycle sees it as a failure.
+     */
+    fun releaseStuckDevelopingSelfDev(
+        runId: RunId,
+        operator: String,
+        reason: String,
+        minIdle: java.time.Duration = STUCK_DEVELOPING_MIN_IDLE,
+    ): StuckReleaseResult = transaction(database) {
+        val row = lockRun(runId)
+        if (row == null || !row[DevelopmentRunsTable.taskId].startsWith(SELF_DEV_TASK_PREFIX)) return@transaction StuckReleaseResult.NotFound
+        if (DevelopmentRunState.fromStorage(row[DevelopmentRunsTable.state]) != DevelopmentRunState.DEVELOPING) {
+            return@transaction StuckReleaseResult.NotDeveloping
+        }
+        if (row[DevelopmentRunsTable.prNumber] != null || row[DevelopmentRunsTable.prRepository] != null || row[DevelopmentRunsTable.prHeadSha] != null) {
+            return@transaction StuckReleaseResult.PullRequestBound
+        }
+        val activeAttempts = execQuery(
+            "SELECT COUNT(*) FROM coding_attempts WHERE run_id = ? AND state IN ('QUEUED', 'CLAIMED', 'RUNNING')", runId.value,
+        ) { it.getInt(1) }.single()
+        if (activeAttempts > 0) return@transaction StuckReleaseResult.ActiveAttempt
+        val leased = execQuery(
+            "SELECT COUNT(*) FROM development_runs WHERE run_id = ? AND lease_owner IS NOT NULL AND lease_expires_at > ${DbTime.NOW}", runId.value,
+        ) { it.getInt(1) }.single()
+        if (leased > 0) return@transaction StuckReleaseResult.LeaseHeld
+        if (java.time.Duration.between(row[DevelopmentRunsTable.updatedAt], utcNow(clock)) < minIdle) return@transaction StuckReleaseResult.TooRecent
+        val version = row[DevelopmentRunsTable.version]
+        val taskId = row[DevelopmentRunsTable.taskId]
+        val traceId = row[DevelopmentRunsTable.traceId]
+        val updated = execUpdate(
+            """
+            UPDATE development_runs
+               SET state = ?, state_reason = ?, version = version + 1, updated_at = ?
+             WHERE run_id = ? AND version = ? AND state = ?
+            """.trimIndent(),
+            DevelopmentRunState.CANCELLED.name, OPERATOR_RELEASED_STUCK_REASON, utcNow(clock), runId.value, version,
+            DevelopmentRunState.DEVELOPING.name,
+        )
+        if (updated != 1) throw VersionConflictException("run $runId changed concurrently")
+        audit.append(
+            this, runId,
+            AuditEntry(
+                actor = operator, action = "RUN_RELEASED", result = "OK", resource = "task:$taskId", traceId = traceId,
+                payload = buildJsonObject {
+                    put("taskId", taskId)
+                    put("from", DevelopmentRunState.DEVELOPING.name)
+                    put("to", DevelopmentRunState.CANCELLED.name)
+                    put("reasonCode", OPERATOR_RELEASED_STUCK_REASON)
+                    put("reason", reason)
+                }.toString(),
+            ),
+        )
+        outbox.append(
+            this, runId, version + 1, "RunStateChanged",
+            transitionPayload(taskId, DevelopmentRunState.DEVELOPING, DevelopmentRunState.CANCELLED, OPERATOR_RELEASED_STUCK_REASON),
+            traceId,
+        )
+        // Read in this transaction: a nested transaction would not see the update above.
+        val released = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.single().toDevelopmentRunOrNull()
+        StuckReleaseResult.Released(checkNotNull(released) { "released run $runId has an unknown state" })
     }
 
     private fun lockRun(runId: RunId): ResultRow? =

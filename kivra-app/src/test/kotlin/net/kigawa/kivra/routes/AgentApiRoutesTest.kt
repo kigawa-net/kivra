@@ -218,6 +218,7 @@ class AgentApiRoutesTest {
             assertEquals(HttpStatusCode.Unauthorized, get("/api/selfdev/runs", token = agent).status)
             assertEquals(HttpStatusCode.Unauthorized, post("/api/admin/selfdev/runs/$runId/release", """{"reason":"x"}""", token = agent).status)
             assertEquals(HttpStatusCode.Unauthorized, post("/api/admin/selfdev/runs/$runId/release-unbound-pr", """{"reason":"x"}""", token = agent).status)
+            assertEquals(HttpStatusCode.Unauthorized, post("/api/admin/selfdev/runs/$runId/release-stuck-developing", """{"reason":"x"}""", token = agent).status)
             assertEquals(HttpStatusCode.Unauthorized, post("/api/admin/budget/acknowledge", "{}", token = agent).status)
             assertEquals(HttpStatusCode.Unauthorized, get("/api/runs", token = agent).status)
             // The same routes accept the operator's own token, so the refusals above are the authorization and not a broken setup.

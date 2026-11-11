@@ -174,8 +174,8 @@ class ProjectScopedRouteTest {
     }
 
     @Test
-    fun sidebarWithoutAProjectHasHomeProjectsAndTheGlobalSection() {
-        val sections = sidebarSections(projectId = null, projectName = null)
+    fun sidebarHasHomeProjectsAndTheGlobalSectionOnly() {
+        val sections = sidebarSections()
         assertEquals(listOf(null, "全体"), sections.map { it.title })
         assertEquals(
             listOf(NavDestination.Home, NavDestination.Projects),
@@ -188,13 +188,9 @@ class ProjectScopedRouteTest {
     }
 
     @Test
-    fun sidebarWithAProjectAddsItsPagesBetweenTheTopAndTheGlobalSection() {
-        val sections = sidebarSections(projectId = "p1", projectName = "基幹")
-        assertEquals(listOf(null, "基幹", "全体"), sections.map { it.title })
-        val project = sections[1].items
-        assertEquals(NavDestination.projectPages, project.map { it.dest })
-        assertTrue(project.all { it.target == Route.ProjectPage("p1", it.dest) })
-        // 全体への出口は、プロジェクトを選んでいても残る。
-        assertTrue(sections[2].items.all { it.target is Route.Page })
+    fun projectLinksAreTheProjectPagesWithoutTheDashboard() {
+        val links = projectLinkTargets("p1")
+        assertEquals(NavDestination.projectPages - NavDestination.Dashboard, links.map { it.dest })
+        assertTrue(links.all { it.target == Route.ProjectPage("p1", it.dest) })
     }
 }

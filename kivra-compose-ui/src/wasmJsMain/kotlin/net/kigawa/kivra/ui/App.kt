@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -243,6 +246,14 @@ private fun KivraAppContent(
     val projectId = route.projectIdOrNull
     val nameOf: (String) -> String? = { id -> projects.find { it.projectId == id }?.name }
     val labelOf: (String) -> String = { id -> projectLabel(id, nameOf(id)) }
+    // プロジェクトの画面に並べるリンク。権限と自律運転・API の結果で隠す項目を外す(以前のサイドナビと同じ判定)。
+    val visibleLinks: (String) -> List<NavItem> = { id ->
+        projectLinkTargets(id).filter {
+            perms.navVisible(it.dest) &&
+                navVisibleForAutopilot(it.dest, autopilot) &&
+                navVisibleForSections(it.dest, autopilot, budgetVisible, pendingApprovals)
+        }
+    }
     var dropdownExpanded by remember { mutableStateOf(false) }
     var searchOpen by remember { mutableStateOf(false) }
 
@@ -258,7 +269,7 @@ private fun KivraAppContent(
             }
             Surface(modifier = Modifier.fillMaxSize()) {
                 Row(modifier = Modifier.fillMaxSize()) {
-                    // サイドナビ: 2 層(プロジェクト選択中はそのプロジェクトの節、最後に全体の節)。
+                    // サイドナビ: ホーム・プロジェクト一覧、プロジェクト名のリンク、全体の節。プロジェクト配下の項目はダッシュボードのリンクから開く。
                     PermanentDrawerSheet(modifier = Modifier.width(200.dp)) {
                         Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(12.dp)) {
                             Text("Kivra", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(8.dp))
@@ -285,8 +296,7 @@ private fun KivraAppContent(
                                     label = { Text(UNASSIGNED_LABEL) },
                                 )
                             }
-                            val approvalsBadge = approvalsBadgeText(pendingApprovals)
-                            sidebarSections(projectId, projectId?.let { nameOf(it) }).forEach { section ->
+                            sidebarSections().forEach { section ->
                                 // 権限と自律運転・API の結果で隠す項目を外し、残りが無い節は見出しごと出さない。
                                 val items = section.items.filter {
                                     perms.navVisible(it.dest) &&
@@ -307,10 +317,6 @@ private fun KivraAppContent(
                                         selected = route.nav == item.dest && route.projectIdOrNull == item.target.projectIdOrNull,
                                         onClick = { navigate(item.target) },
                                         label = { Text(item.dest.label) },
-                                        // 承認の件数のバッジ(旧 UI の nav-approvals-badge)。件数が読めている時だけ。
-                                        badge = approvalsBadge.takeIf { item.dest == NavDestination.Approvals }?.let { text ->
-                                            @Composable { Text(text) }
-                                        },
                                     )
                                 }
                             }
@@ -396,6 +402,11 @@ private fun KivraAppContent(
                         }
                         HorizontalDivider()
 
+                        // 未分類にはダッシュボードが無いので、一覧への入口はここに出す。
+                        if (isUnassigned(projectId)) {
+                            ProjectLinks(visibleLinks(UNASSIGNED_PROJECT_ID), approvalsBadgeText(pendingApprovals), route, navigate)
+                        }
+
                         // Main content
                         when (val r = route) {
                             is Route.Page -> when (r.dest) {
@@ -411,7 +422,7 @@ private fun KivraAppContent(
                                 else -> Unit
                             }
                             is Route.ProjectPage -> when (r.dest) {
-                                NavDestination.Dashboard -> ProjectDashboardScreen(r.projectId, navigate)
+                                NavDestination.Dashboard -> ProjectDashboardScreen(r.projectId, navigate, visibleLinks(r.projectId), approvalsBadgeText(pendingApprovals))
                                 NavDestination.Tasks -> TasksScreen(r.projectId, navigate)
                                 NavDestination.Goals -> GoalsScreen(r.projectId, navigate)
                                 NavDestination.Orders -> OrdersScreen(r.projectId, navigate)
@@ -509,6 +520,26 @@ fun ProjectSelectorDropdown(
                     onProjectSelected(UNASSIGNED_PROJECT_ID)
                     onDropdownExpandedChange(false)
                 }
+            )
+        }
+    }
+}
+
+/** プロジェクトの項目へのリンクの並び。[current] と同じ項目は選択中にする。承認には件数のバッジを添える。 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun ProjectLinks(items: List<NavItem>, approvalsBadge: String?, current: Route, onNavigate: (Route) -> Unit) {
+    if (items.isEmpty()) return
+    FlowRow(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items.forEach { item ->
+            val badge = approvalsBadge.takeIf { item.dest == NavDestination.Approvals }
+            FilterChip(
+                selected = current.nav == item.dest && current.projectIdOrNull == item.target.projectIdOrNull,
+                onClick = { onNavigate(item.target) },
+                label = { Text(if (badge != null) "${item.dest.label} $badge" else item.dest.label) },
             )
         }
     }

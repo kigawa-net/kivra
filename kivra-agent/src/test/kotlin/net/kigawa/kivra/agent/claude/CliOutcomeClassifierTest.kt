@@ -1,8 +1,8 @@
 package net.kigawa.kivra.agent.claude
 
 import net.kigawa.kivra.agent.AgentErrorCode
-import net.kigawa.kivra.agent.docker.DockerRunOutcome
-import net.kigawa.kivra.agent.docker.DockerRunResult
+import net.kigawa.kivra.agent.backend.RunOutcome
+import net.kigawa.kivra.agent.backend.RunResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -18,32 +18,32 @@ class CliOutcomeClassifierTest {
         false,
     )
 
-    private fun run(outcome: DockerRunOutcome, exit: Int?, truncated: Boolean = false) =
-        DockerRunResult(outcome, exit, "", "", truncated)
+    private fun run(outcome: RunOutcome, exit: Int?, truncated: Boolean = false) =
+        RunResult(outcome, exit, "", "", truncated)
 
     @Test
     fun runnerOutcomesComeFirst() {
-        assertEquals(AgentRunOutcome.TIMEOUT, CliOutcomeClassifier.classify(run(DockerRunOutcome.TIMEOUT, 137), success))
-        assertEquals(AgentRunOutcome.CANCELLED, CliOutcomeClassifier.classify(run(DockerRunOutcome.CANCELLED, 137), success))
-        assertEquals(AgentRunOutcome.OUTPUT_LIMIT, CliOutcomeClassifier.classify(run(DockerRunOutcome.OUTPUT_LIMIT, 137), success))
+        assertEquals(AgentRunOutcome.TIMEOUT, CliOutcomeClassifier.classify(run(RunOutcome.TIMEOUT, 137), success))
+        assertEquals(AgentRunOutcome.CANCELLED, CliOutcomeClassifier.classify(run(RunOutcome.CANCELLED, 137), success))
+        assertEquals(AgentRunOutcome.OUTPUT_LIMIT, CliOutcomeClassifier.classify(run(RunOutcome.OUTPUT_LIMIT, 137), success))
     }
 
     @Test
     fun cleanSuccessIsSucceeded() {
-        assertEquals(AgentRunOutcome.SUCCEEDED, CliOutcomeClassifier.classify(run(DockerRunOutcome.EXITED, 0), success))
+        assertEquals(AgentRunOutcome.SUCCEEDED, CliOutcomeClassifier.classify(run(RunOutcome.EXITED, 0), success))
     }
 
     @Test
     fun noResultWithZeroExitIsMalformedAndWithNonZeroExitIsCliFailed() {
-        assertEquals(AgentRunOutcome.MALFORMED_OUTPUT, CliOutcomeClassifier.classify(run(DockerRunOutcome.EXITED, 0), noReport))
-        assertEquals(AgentRunOutcome.CLI_FAILED, CliOutcomeClassifier.classify(run(DockerRunOutcome.EXITED, 1), noReport))
+        assertEquals(AgentRunOutcome.MALFORMED_OUTPUT, CliOutcomeClassifier.classify(run(RunOutcome.EXITED, 0), noReport))
+        assertEquals(AgentRunOutcome.CLI_FAILED, CliOutcomeClassifier.classify(run(RunOutcome.EXITED, 1), noReport))
     }
 
     @Test
     fun truncatedRunOutputIsOutputLimitBeforeAnythingElse() {
         assertEquals(
             AgentRunOutcome.OUTPUT_LIMIT,
-            CliOutcomeClassifier.classify(run(DockerRunOutcome.EXITED, 0, truncated = true), noReport),
+            CliOutcomeClassifier.classify(run(RunOutcome.EXITED, 0, truncated = true), noReport),
         )
     }
 
@@ -58,7 +58,7 @@ class CliOutcomeClassifierTest {
             0,
             false,
         )
-        assertEquals(AgentRunOutcome.BUDGET_EXCEEDED, CliOutcomeClassifier.classify(run(DockerRunOutcome.EXITED, 1), budgetStop))
+        assertEquals(AgentRunOutcome.BUDGET_EXCEEDED, CliOutcomeClassifier.classify(run(RunOutcome.EXITED, 1), budgetStop))
         assertEquals(AgentErrorCode.CLI_NONZERO, AgentRunOutcome.BUDGET_EXCEEDED.errorCode(newErrorCodes = false))
     }
 

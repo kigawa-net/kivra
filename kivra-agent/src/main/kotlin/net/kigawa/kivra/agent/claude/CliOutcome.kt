@@ -1,8 +1,8 @@
 package net.kigawa.kivra.agent.claude
 
 import net.kigawa.kivra.agent.AgentErrorCode
-import net.kigawa.kivra.agent.docker.DockerRunOutcome
-import net.kigawa.kivra.agent.docker.DockerRunResult
+import net.kigawa.kivra.agent.backend.RunOutcome
+import net.kigawa.kivra.agent.backend.RunResult
 
 /**
  * The classification of one attempt's CLI run. Each value maps to one kivra error code (or to none, for success), so that AgentLoop can
@@ -38,7 +38,7 @@ enum class AgentRunOutcome(private val legacyCode: AgentErrorCode?, private val 
 /**
  * Turns a container run and its parsed stream into one [AgentRunOutcome]. Fail-closed, in this order (the first rule that applies wins):
  *
- * 1. The runner ended the run: a timeout, a cancel request, or an output limit ([DockerRunOutcome]).
+ * 1. The runner ended the run: a timeout, a cancel request, or an output limit ([RunOutcome]).
  * 2. The output was cut at the limit, or a line was over the per-line limit: OUTPUT_LIMIT.
  * 3. No `result` event: an API error category decides (authentication, rate limit, overloaded). Otherwise a non-zero exit is
  *    CLI_FAILED, and a zero exit with an incomplete stream (the output was cut) is MALFORMED_OUTPUT.
@@ -52,12 +52,12 @@ enum class AgentRunOutcome(private val legacyCode: AgentErrorCode?, private val 
  * The result text is not inspected here, so a model's text cannot change the classification.
  */
 object CliOutcomeClassifier {
-    fun classify(run: DockerRunResult, report: StreamReport): AgentRunOutcome {
+    fun classify(run: RunResult, report: StreamReport): AgentRunOutcome {
         when (run.outcome) {
-            DockerRunOutcome.TIMEOUT -> return AgentRunOutcome.TIMEOUT
-            DockerRunOutcome.CANCELLED -> return AgentRunOutcome.CANCELLED
-            DockerRunOutcome.OUTPUT_LIMIT -> return AgentRunOutcome.OUTPUT_LIMIT
-            DockerRunOutcome.EXITED -> Unit
+            RunOutcome.TIMEOUT -> return AgentRunOutcome.TIMEOUT
+            RunOutcome.CANCELLED -> return AgentRunOutcome.CANCELLED
+            RunOutcome.OUTPUT_LIMIT -> return AgentRunOutcome.OUTPUT_LIMIT
+            RunOutcome.EXITED -> Unit
         }
         if (run.outputTruncated || report.outputLimitReached || report.oversizedLines > 0) return AgentRunOutcome.OUTPUT_LIMIT
 

@@ -7,7 +7,7 @@ import net.kigawa.kivra.agent.claude.ApiErrorKind
 import net.kigawa.kivra.agent.claude.MonitorEvent
 import net.kigawa.kivra.agent.claude.MonitorTool
 import net.kigawa.kivra.agent.claude.MonitorWarning
-import net.kigawa.kivra.agent.docker.DockerRunOutcome
+import net.kigawa.kivra.agent.backend.RunOutcome
 
 /**
  * The golden test of the wire form (ADR 0012 §2.1). The expected lists below are kivra's own: `MonitorEventSchema` in kivra-app
@@ -54,7 +54,7 @@ class MonitorWireGoldenTest {
         MonitorEvent.Cost(1_234_567) to """{"seq":7,"kind":"COST","costUsd":1.234567}""",
         MonitorEvent.Cost(0) to """{"seq":7,"kind":"COST","costUsd":0.000000}""",
         MonitorEvent.StopRequested to """{"seq":7,"kind":"STOP_REQUESTED"}""",
-        MonitorEvent.ProcessExitConfirmed(DockerRunOutcome.OUTPUT_LIMIT) to
+        MonitorEvent.ProcessExitConfirmed(RunOutcome.OUTPUT_LIMIT) to
             """{"seq":7,"kind":"PROCESS_EXIT_CONFIRMED","code":"OUTPUT_LIMIT"}""",
         MonitorEvent.Warning(MonitorWarning.OVERSIZED_LINE) to """{"seq":7,"kind":"WARNING","count":1}""",
         MonitorEvent.Dropped(5) to """{"seq":7,"kind":"DROPPED","count":5}""",
@@ -88,7 +88,7 @@ class MonitorWireGoldenTest {
         assertEquals(kivraPhases, ProgressPhase.entries.map { it.name }.toSet(), "ProgressPhase")
         assertEquals(kivraToolNames, MonitorTool.entries.map { it.wire }.toSet(), "MonitorTool")
         assertEquals(kivraApiErrorKinds, ApiErrorKind.entries.map { it.name }.toSet(), "ApiErrorKind")
-        assertEquals(kivraDockerRunOutcomes, DockerRunOutcome.entries.map { it.name }.toSet(), "DockerRunOutcome")
+        assertEquals(kivraDockerRunOutcomes, RunOutcome.entries.map { it.name }.toSet(), "RunOutcome")
     }
 
     @Test

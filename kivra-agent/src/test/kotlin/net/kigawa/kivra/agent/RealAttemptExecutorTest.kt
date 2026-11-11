@@ -137,11 +137,8 @@ private class World(
     )
     val stopFile: Path = root.resolve(AgentConfig.DEFAULT_STOP_FILE_NAME)
 
-    fun executor(debugKeep: Boolean = false, newErrorCodes: Boolean = false, monitorEvents: Boolean = false): RealAttemptExecutor = RealAttemptExecutor(
-        client = client,
-        workRoot = root,
-        stopFile = stopFile,
-        settings = RealExecutorSettings(
+    fun executor(debugKeep: Boolean = false, newErrorCodes: Boolean = false, monitorEvents: Boolean = false): RealAttemptExecutor {
+        val settings = RealExecutorSettings(
             dockerBinary = Path.of("/usr/bin/docker"),
             dockerHost = null,
             network = NETWORK,
@@ -152,10 +149,15 @@ private class World(
             debugKeep = debugKeep,
             newErrorCodes = newErrorCodes,
             monitorEvents = monitorEvents,
-        ),
-        launcher = docker,
-        pollMillis = 20,
-    )
+        )
+        return RealAttemptExecutor(
+            client = client,
+            workRoot = root,
+            stopFile = stopFile,
+            settings = settings,
+            backend = createRunBackend(AgentConfig.Backend.DOCKER, settings, root, launcher = docker, pollMillis = 20),
+        )
+    }
 
     fun attempt(
         baseSha: String = repo.sha,
@@ -602,21 +604,17 @@ class RealAttemptExecutorTest {
     @Test
     fun invalidExecutorSettingsFailBeforeAnyWork() {
         val root = Files.createTempDirectory("kivra-real-exec-bad").toRealPath()
+        val settings = RealExecutorSettings(
+            dockerBinary = Path.of("docker"),
+            dockerHost = null,
+            network = NETWORK,
+            image = IMAGE,
+            proxyUrl = PROXY,
+            gitBinary = GIT_BIN,
+            repo = LocalPath(root),
+        )
         assertFailsWith<net.kigawa.kivra.agent.docker.DockerSpecException> {
-            RealAttemptExecutor(
-                client = KivraAgentClient(fakeKivraHttp(synchronizedList()) { World.defaultReply(it) }, KIVRA_BASE, FixedTokens()),
-                workRoot = root,
-                stopFile = root.resolve("STOP"),
-                settings = RealExecutorSettings(
-                    dockerBinary = Path.of("docker"),
-                    dockerHost = null,
-                    network = NETWORK,
-                    image = IMAGE,
-                    proxyUrl = PROXY,
-                    gitBinary = GIT_BIN,
-                    repo = LocalPath(root),
-                ),
-            )
+            createRunBackend(AgentConfig.Backend.DOCKER, settings, root)
         }
     }
 

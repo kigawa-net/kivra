@@ -5,6 +5,8 @@ import java.util.Collections
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import net.kigawa.kivra.agent.backend.RunOutcome
+import net.kigawa.kivra.agent.backend.StdoutLine
 
 /** The line reading of [DockerRunner.run] (`onStdoutLine`): the lines arrive while the run goes on, and nothing about the run changes. */
 class DockerRunLinesTest {
@@ -75,7 +77,7 @@ class DockerRunLinesTest {
         }
         val result = runner(fake).run(fixture.spec(), onStdoutLine = { throw IllegalStateException("listener broke") })
 
-        assertEquals(DockerRunOutcome.EXITED, result.outcome)
+        assertEquals(RunOutcome.EXITED, result.outcome)
         assertEquals(0, result.exitCode)
         assertEquals("a\nb\nc\n", result.stdout)
     }
@@ -87,7 +89,7 @@ class DockerRunLinesTest {
         val result = runner(fake).run(fixture.spec(), onStdoutLine = { Thread.sleep(60_000) })
         val elapsedMillis = (System.nanoTime() - started) / 1_000_000
 
-        assertEquals(DockerRunOutcome.EXITED, result.outcome)
+        assertEquals(RunOutcome.EXITED, result.outcome)
         assertEquals("a\nb\n", result.stdout)
         assertTrue(elapsedMillis < 10_000, "the run took $elapsedMillis ms")
     }
@@ -100,7 +102,7 @@ class DockerRunLinesTest {
         }
         val result = runner(fake).run(fixture.spec(timeout = Duration.ofSeconds(5)), onStdoutLine = { Thread.sleep(60_000) })
 
-        assertEquals(DockerRunOutcome.TIMEOUT, result.outcome)
+        assertEquals(RunOutcome.TIMEOUT, result.outcome)
         assertEquals(listOf("kivra-run-$TEST_RUN_ID-$TEST_ATTEMPT_ID"), fake.killedNames)
     }
 

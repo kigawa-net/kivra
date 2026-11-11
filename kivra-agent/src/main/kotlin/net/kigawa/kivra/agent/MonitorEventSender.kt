@@ -20,7 +20,7 @@ import kotlinx.serialization.json.putJsonArray
 import net.kigawa.kivra.agent.claude.MonitorEvent
 import net.kigawa.kivra.agent.claude.MonitorEventExtractor
 import net.kigawa.kivra.agent.claude.MonitorWarning
-import net.kigawa.kivra.agent.docker.StdoutLine
+import net.kigawa.kivra.agent.backend.StdoutLine
 import org.slf4j.LoggerFactory
 
 /**

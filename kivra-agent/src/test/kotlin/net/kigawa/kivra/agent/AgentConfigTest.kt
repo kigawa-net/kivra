@@ -37,6 +37,50 @@ class AgentConfigTest {
     }
 
     @Test
+    fun backendDefaultsToDocker() {
+        assertEquals(AgentConfig.Backend.DOCKER, AgentConfig.fromEnv(env()).backend)
+        assertEquals(AgentConfig.Backend.DOCKER, AgentConfig.fromEnv(env(AgentConfig.ENV_BACKEND to null)).backend)
+        assertEquals(AgentConfig.Backend.DOCKER, AgentConfig.fromEnv(env(AgentConfig.ENV_BACKEND to "")).backend)
+    }
+
+    @Test
+    fun backendDockerIsAcceptedWithEitherExecutor() {
+        assertEquals(AgentConfig.Backend.DOCKER, AgentConfig.fromEnv(env(AgentConfig.ENV_BACKEND to "docker")).backend)
+        val real = AgentConfig.fromEnv(
+            env(
+                AgentConfig.ENV_BACKEND to "docker",
+                AgentConfig.ENV_EXECUTOR to "real",
+                AgentConfig.ENV_DOCKER_BIN to "/usr/bin/docker",
+                AgentConfig.ENV_DOCKER_NETWORK to "kivra-agent-internal",
+                AgentConfig.ENV_DOCKER_IMAGE to "kivra-agent-runtime:local",
+                AgentConfig.ENV_DOCKER_PROXY_URL to "http://kivra-agent-proxy:8080",
+                AgentConfig.ENV_GIT_BIN to "/usr/bin/git",
+                AgentConfig.ENV_REPO to "kigawa-net/kivra",
+            ),
+        )
+        assertEquals(AgentConfig.Backend.DOCKER, real.backend)
+        assertEquals(AgentConfig.ExecutorMode.REAL, real.executorMode)
+    }
+
+    @Test
+    fun backendK8sIsRefusedByNameWithoutTheValueAndForAnyExecutor() {
+        for (executor in listOf(null, "stub")) {
+            val e = rejected(AgentConfig.ENV_BACKEND to "k8s", AgentConfig.ENV_EXECUTOR to executor)
+            assertEquals(AgentConfig.ENV_BACKEND, e.message!!.substringBefore(" "))
+            assertTrue(e.message!!.contains("not implemented"))
+            assertFalse(e.message!!.contains("k8s"), "the error must not echo the value")
+        }
+    }
+
+    @Test
+    fun backendAnyOtherValueIsRefusedWithoutTheValue() {
+        for (bad in listOf("Docker", "podman", "kubernetes", "docker,k8s", "k8s-docker")) {
+            val e = rejected(AgentConfig.ENV_BACKEND to bad)
+            assertEquals("${AgentConfig.ENV_BACKEND} must be docker or k8s", e.message)
+        }
+    }
+
+    @Test
     fun missingVariableIsRejectedByNameOnly() {
         val e = rejected(AgentConfig.ENV_TOKEN_URL to null)
         assertEquals("${AgentConfig.ENV_TOKEN_URL} is required", e.message)

@@ -7,8 +7,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import net.kigawa.kivra.agent.docker.DockerRunOutcome
-import net.kigawa.kivra.agent.docker.DockerRunResult
+import net.kigawa.kivra.agent.backend.RunOutcome
+import net.kigawa.kivra.agent.backend.RunResult
 
 class StreamJsonParserTest {
     private val parser = StreamJsonParser()
@@ -21,8 +21,8 @@ class StreamJsonParserTest {
 
     private fun stream(vararg lines: String) = lines.joinToString("\n", postfix = "\n")
 
-    private fun run(exit: Int?, stdout: String, outputTruncated: Boolean = false, outcome: DockerRunOutcome = DockerRunOutcome.EXITED) =
-        DockerRunResult(outcome, exit, stdout, "", outputTruncated)
+    private fun run(exit: Int?, stdout: String, outputTruncated: Boolean = false, outcome: RunOutcome = RunOutcome.EXITED) =
+        RunResult(outcome, exit, stdout, "", outputTruncated)
 
     private fun classify(stdout: String, exit: Int? = 0, parser: StreamJsonParser = this.parser): AgentRunOutcome =
         CliOutcomeClassifier.classify(run(exit, stdout), parser.parse(stdout))

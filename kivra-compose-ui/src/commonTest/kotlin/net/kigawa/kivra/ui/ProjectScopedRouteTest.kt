@@ -174,16 +174,12 @@ class ProjectScopedRouteTest {
     }
 
     @Test
-    fun sidebarHasHomeProjectsAndTheGlobalSectionOnly() {
+    fun sidebarHasTheGlobalSectionOnly() {
         val sections = sidebarSections()
-        assertEquals(listOf(null, "全体"), sections.map { it.title })
-        assertEquals(
-            listOf(NavDestination.Home, NavDestination.Projects),
-            sections[0].items.map { it.dest },
-        )
+        assertEquals(listOf("全体"), sections.map { it.title })
         assertEquals(
             listOf(NavDestination.Budget, NavDestination.Autopilot, NavDestination.Assignees),
-            sections[1].items.map { it.dest },
+            sections[0].items.map { it.dest },
         )
     }
 

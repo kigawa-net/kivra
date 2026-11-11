@@ -4,3 +4,6 @@
 services.gradle.org
 plugins.gradle.org
 repo.maven.apache.org
+# k8s Pod fetches the public base commit over https (ADR 0010 追補 7). Smart HTTP talks to github.com only (the pack comes from the same
+# host), so no codeload/objects host is needed. Keep this list exact: the test TestShippedAllowlistIsExactlyTheNeededHosts pins it.
+github.com

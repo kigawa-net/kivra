@@ -1079,11 +1079,25 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 
 - `K8sRunBackend`(`RunBackend` の k8s 実装): Job のマニフェストを `K8sJobBuilder` で作り、**送信の直前に必ず `K8sJobGuard` で検査する**(拒否された manifest は送られない)。Pod が Running になったら、入力を exec の stdin で送り、コンテナのログを追う。ログは docker 側と同じ上限(`outputLimitBytes`、1 行 1 MiB)で読む。時間切れ(`timeout`、Job の `activeDeadlineSeconds`)、停止要求、出力の上限で止め、**どの終わり方でも Job を delete する**。`cleanupOrphans` は label `kivra-agent=1` の Job のうち、実行中の Run のもの以外を delete する。
 - 結果の受け取り(exec readout): Pod の entrypoint が CLI を実行し、差分を収集して `/work/.kivra/result.json` を書き、生きたまま待つ。agent は `cat` の exec で読む(上限 8 MiB、厳密に解釈)。`RunResult.podReadout` に入り、呼び出し側が `PodReadout.Collected.finish(summary, sessionId, limits, pathRules)` で再検査してから使う。
-- Job の command は、`/usr/local/bin/kivra-pod-entrypoint` と、その後ろに従来の CLI の argv(ガードが 1 トークンずつ照合)。**実行用イメージに、この launcher(`net.kigawa.kivra.agent.k8s.pod.PodEntrypointKt` を起動する。JDK 21 と git は既にある)と agent の jar を入れる作業が必要で、この PR には含まれない**(PR 5 の前)。
-- Pod 内の取得: base commit を公開 GitHub から Job ごとに取得する(キャッシュなし、資格情報なし、プロキシ経由)。**プロキシの許可リストに `github.com` を足す必要がある**(PR 5)。
+- Job の command は、`/usr/local/bin/kivra-pod-entrypoint` と、その後ろに従来の CLI の argv(ガードが 1 トークンずつ照合)。launcher と agent の jar は実行用イメージに入れた(PR 5a、下の追記)。
+- Pod 内の取得: base commit を公開 GitHub から Job ごとに取得する(キャッシュなし、資格情報なし、プロキシ経由)。プロキシの許可リストに `github.com` を足した(PR 5a)。
 - agent の ServiceAccount の RBAC(Job の namespace 内。manifest は PR 5): `batch/jobs` の create・get・list・delete、`pods` の get・list、`pods/log` の get、`pods/exec` の create(と get)。`secrets`、`configmaps`、`deletecollection`、cluster 全体の権限は与えない。
 - API への接続: in-cluster の ServiceAccount の token と CA(`HttpKubeApi.inCluster`)。標準の `java.net.http`(exec は WebSocket、`v4.channel.k8s.io`)だけを使い、依存は増やしていない。
 - 既知の制約: ログと標準エラーは Pod のログに混ざる(`RunResult.stderr` は空)。ログの読み取りが途中で切れても再接続しない(その場合、読めた分だけが stdout になる)。exec readout は、実クラスタでは未検証(WebSocket の経路は単体試験で結線していない。PR 5 の検証で確かめる)。
+
+#### 6.6c 追記: PR 5a(リポジトリ側の前提。2026-11-11)
+
+**まだ k8s は有効にしない**(`KIVRA_AGENT_BACKEND=k8s` は設定エラーで拒否されたまま。`RunBackendFactory` も拒否する)。
+
+済み:
+- 実行用イメージ(`agent-runtime/image/Dockerfile`): `/usr/local/bin/kivra-pod-entrypoint`(`PodEntrypointKt` を `/opt/kivra-agent/lib/*` で起動する)と agent の jar を追加した。JDK 21 は元からあるので JRE は足していない(増えるのは jar だけ)。非 root(10001)、特権なしのまま。jar は名前付きビルドコンテキスト `agent-dist` で渡す(`cd.yml` の build-agent が `:kivra-agent:installDist` を先に実行して渡す)。渡さない従来の docker build(`install.sh`、`verify/run-all.sh`)は、jar の無いイメージになるだけで、docker バックエンドの挙動は変わらない。
+- プロキシの許可リストに `github.com` だけを追加した(base commit の `fetch --depth=1` の smart HTTP は github.com だけに接続する)。注意: プロキシは docker バックエンドと共有なので、docker の Run からも github.com に届くようになる。許可リストの内容は `TestShippedAllowlistIsExactlyTheNeededHosts` で固定した。
+- executor の配線: `RunResult.podReadout` があれば、host での差分収集の代わりに `PodReadout.Collected.finish(...)` で再検査して使う(`Error` は `BAD_OUTPUT`)。`PodInputSource` は `AttemptPodInputs`(executor が Run の前後で登録・解除)が供給する。readout が無い(docker)場合の経路は変えていない。
+
+残り(PR 5b 以降):
+- kigawa-net-k8s リポジトリの manifest: プロキシの Deployment と Service、NetworkPolicy(Job の Pod はプロキシと DNS だけ)、agent の RBAC(§6.6c)、Secret、namespace の PodSecurity `restricted`。
+- 実クラスタでの検証(exec readout、Pod 内 entrypoint、公開リポジトリの取得、NetworkPolicy の強制、`podPidsLimit`)。
+- `RunBackendFactory` と `AgentConfig` の k8s の有効化(`HttpKubeApi.inCluster`、`K8sSettings`、`AttemptPodInputs` の配線)。k8s では Pod が自分で取得するので、host での作業ディレクトリの準備(現状は executor が先に行う)を省く整理も 5b で行う。
 
 ### 6.7 CLI の起動、task ファイル、stream-json の解析と分類(PR 7)
 

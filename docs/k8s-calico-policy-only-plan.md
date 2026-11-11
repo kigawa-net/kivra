@@ -26,6 +26,19 @@
 4. **nextcloud / ArgoCD**: 規則が実際の通信(DB、redis、Git、Dex)を過不足なく許可しているかを確認する。
 5. ArgoCD、cert-manager、ingress controller、kube-dns など、policy の無い namespace は影響を受けない(policy が無い Pod は、全許可のまま)。
 
+## 2.1 確認結果(2026-11-11、読み取りのみ)
+
+| 対象 | 結果 | 対応 |
+|---|---|---|
+| `kivra-netpol` | **要対応。** `/api/agent/`、`/mcp`、`/.well-known/oauth-protected-resource` は、haproxy ingress(`system` namespace、Pod ネットワーク)から `kivra-svc:8080` に直接届く。oauth2-proxy を経由しないため、強制後に遮断される | kigawa-net-k8s に `kivra-netpol-haproxy`(haproxy の 8080 を許可)を足す(kigawa-net-k8s#575)。NetworkPolicy は許可の和なので、`kivra-netpol` は変更しない |
+| `argocd`(7 件) | 問題なし。上流の標準ポリシー(ingress のみ、egress の制限なし) | なし |
+| `nextcloud`、`kigawa-net-nextcloud`(4 件) | 問題なし。ingress はポート指定だけで、egress は全許可 | なし |
+| `kigawa-system-rook-ceph`(CSI ctrlplugin 2 件) | 低リスク。ingress は全拒否、egress は全許可。Pod はホストネットワークではない。影響が出るのは外部からの接続(メトリクスの収集など)だけと見込む | 導入後に検証用の PVC で作成・拡張を確認する |
+| `onemc-build`(`mc-server-build-netpol`) | 要確認。ingress は `kigawa-net` namespace からの 25565 だけ。Service は ClusterIP で外部の公開経路はない | 接続元が `kigawa-net` 内だけであることを担当が確認する |
+| `platform-exkes-*-sandbox`(3 件) | 要確認。`default-deny` が効くようになる。`main-sandbox` には許可の規則がなく、`stg-sandbox` には gateway からの 8080 の許可が 1 件ある | exkes の担当が、必要な通信が許可されているか確認する |
+
+kigawa-net-k8s#575 のマージは、導入より前に行う。現状(強制されない)では、動作は変わらない。
+
 ## 3. 手順(運用者)
 
 1. 影響の確認(読み取り): §2 の各項目を確認する。特に `kivra-netpol` と rook-ceph。

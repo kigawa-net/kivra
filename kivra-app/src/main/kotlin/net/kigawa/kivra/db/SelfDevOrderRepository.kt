@@ -94,6 +94,28 @@ data class SelfDevOrderStopRequest(
  */
 data class OrderCycle(val cycleNo: Int, val goalId: String, val goalState: String, val stateReason: String?, val createdAt: LocalDateTime)
 
+/**
+ * The state of the cycle in progress (`current_goal_id`), read from the Task it points to. [taskState] and [taskReason] are null when no Task
+ * row has that ID ([taskMissing]): an order of before V40, whose goal was dropped (ADR 0015 addendum 2026-11-11, section 3).
+ */
+data class CurrentCycle(val taskId: String, val taskState: String?, val taskReason: String?) {
+    val taskMissing: Boolean get() = taskState == null
+}
+
+/** The fixed reason of the event that closes a cycle whose Task row is gone (kind CYCLE_EVALUATED, actor SYSTEM). */
+const val LOST_GOAL = "LOST_GOAL"
+
+/** The fixed reason of the audit event of an operator's cycle abandonment (kind CYCLE_ABANDONED, actor HUMAN). The operator's text is in its payload. */
+const val OPERATOR_ABANDONED = "OPERATOR_ABANDONED"
+
+/** The outcome of an operator's cycle abandonment. [Refused] is a conflict (409). */
+sealed interface AbandonResult {
+    data class Moved(val order: SelfDevOrder) : AbandonResult
+    data object NotFound : AbandonResult
+    data object StaleVersion : AbandonResult
+    data class Refused(val reason: OrderConflict) : AbandonResult
+}
+
 /** The fixed reason a write was refused. Each name is a [OrderRefusal] or a code of this repository. */
 enum class OrderConflict {
     TERMINAL, NO_EDGE, ACTOR_NOT_ALLOWED, REASON_NOT_ALLOWED, RESUME_NOT_ALLOWED,
@@ -124,6 +146,10 @@ enum class OrderConflict {
      * not be resumed after it. Nothing is written.
      */
     EXTENSION_DOES_NOT_LIFT,
+    /** An abandonment of a cycle: the order has no cycle in progress (`current_goal_id` is NULL). Nothing is written. */
+    NO_CYCLE_IN_PROGRESS,
+    /** An abandonment of a cycle whose Task has already ended: the automatic evaluation closes it with its real outcome. Nothing is written. */
+    CYCLE_ALREADY_ENDED,
 }
 
 sealed interface OrderResult<out T> {
@@ -350,6 +376,17 @@ class SelfDevOrderRepository(
         ) { rs ->
             OrderCycle(rs.getInt(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getObject(5, LocalDateTime::class.java))
         }
+    }
+
+    /** True when a cycle's root Task is in a state that ends the cycle (a success or a failure state); a Task in any other state still runs. */
+    fun isCycleTaskEnded(state: String): Boolean = state in CYCLE_SUCCESS_STATES || state in CYCLE_FAILURE_STATES
+
+    /** The cycle in progress of [order] read from its Task, or null when `current_goal_id` is NULL. Read only. */
+    fun currentCycleOf(order: SelfDevOrder): CurrentCycle? = transaction(database) {
+        val taskId = order.currentGoalId ?: return@transaction null
+        execQuery("SELECT state, state_reason FROM selfdev_tasks WHERE task_id = ?", taskId) { rs ->
+            CurrentCycle(taskId, rs.getString(1), rs.getString(2))
+        }.singleOrNull() ?: CurrentCycle(taskId, null, null)
     }
 
     /**
@@ -799,40 +836,129 @@ class SelfDevOrderRepository(
         return ids.count { evaluateOne(it) }
     }
 
-    /** Evaluates one order's cycle. False when the cycle has not ended, or nothing was written. */
+    /**
+     * Evaluates one order's cycle. False when the cycle has not ended, or nothing was written. A `current_goal_id` that points to no Task row
+     * (the goal of an order of before V40, which the migration dropped; ADR 0015 addendum 2026-11-11) is closed as a failed cycle with the
+     * fixed reason [LOST_GOAL]. That cannot be a cycle in progress: the start writes the Task row and `current_goal_id` in one transaction
+     * ([startCycleIn]), nothing deletes a Task row, and this runs after the order's row lock, so a start that is still committing is waited for.
+     */
     private fun evaluateOne(orderId: String): Boolean = try {
         transaction(database) {
             val current = lockOrder(orderId) ?: return@transaction false
             val taskId = current.currentGoalId ?: return@transaction false
             if (current.state == OrderState.STOP_REQUESTED) return@transaction false
-            val (taskState, taskReason) = execQuery("SELECT state, state_reason FROM selfdev_tasks WHERE task_id = ?", taskId) { rs ->
+            val task = execQuery("SELECT state, state_reason FROM selfdev_tasks WHERE task_id = ?", taskId) { rs ->
                 rs.getString(1) to rs.getString(2)
-            }.singleOrNull() ?: return@transaction false
+            }.singleOrNull()
+            val now = utcNow(clock)
+            if (task == null) {
+                closeCycle(current, success = false, eventKind = "CYCLE_EVALUATED", reason = LOST_GOAL, actor = OrderActor.SYSTEM, actorKey = null,
+                    payloadJson = null, now = now, pauseOnLimits = true)
+                return@transaction true
+            }
+            val (taskState, taskReason) = task
             val success = when (taskState) {
                 in CYCLE_SUCCESS_STATES -> true
                 in CYCLE_FAILURE_STATES -> false
                 else -> return@transaction false
             }
-            val now = utcNow(clock)
-            val failures = if (success) 0 else current.consecutiveFailedCycles + 1
-            if (!updateCycleOutcome(orderId, current.version, failures, now)) return@transaction false
-            appendEvent(orderId, current.cyclesStarted, "CYCLE_EVALUATED", current.state, current.state, taskReason ?: taskState, OrderActor.SYSTEM, null, null, now)
-
-            if (current.state == OrderState.ACTIVE) {
-                val pauseReason = when {
-                    current.cyclesStarted >= current.maxCycles -> OrderReason.LIMIT_REACHED
-                    failures >= CYCLE_FAILURE_LIMIT -> OrderReason.CYCLE_FAILURES
-                    else -> null
-                }
-                if (pauseReason != null) {
-                    if (!updateState(orderId, current.version + 1, OrderState.PAUSED, pauseReason, now)) throw Rollback(OrderResult.StaleVersion)
-                    appendEvent(orderId, current.cyclesStarted, "PAUSED", OrderState.ACTIVE, OrderState.PAUSED, pauseReason.name, OrderActor.SYSTEM, null, null, now)
-                }
-            }
+            closeCycle(current, success, "CYCLE_EVALUATED", taskReason ?: taskState, OrderActor.SYSTEM, null, null, now, pauseOnLimits = true)
             true
         }
     } catch (_: Rollback) {
         false
+    }
+
+    /**
+     * Closes the cycle in progress of [current] (the locked order): clears `current_goal_id`, sets the failure count (0 after a success, one more
+     * after a failure), writes the audit event, and, when [pauseOnLimits] and the order is ACTIVE, pauses it at the cycle limit (LIMIT_REACHED)
+     * or at [CYCLE_FAILURE_LIMIT] failures (CYCLE_FAILURES). Throws [Rollback] when the version moved, so nothing stays written.
+     */
+    private fun Transaction.closeCycle(
+        current: SelfDevOrder,
+        success: Boolean,
+        eventKind: String,
+        reason: String,
+        actor: OrderActor,
+        actorKey: String?,
+        payloadJson: String?,
+        now: LocalDateTime,
+        pauseOnLimits: Boolean,
+    ) {
+        val failures = if (success) 0 else current.consecutiveFailedCycles + 1
+        if (!updateCycleOutcome(current.orderId, current.version, failures, now)) throw Rollback(OrderResult.StaleVersion)
+        appendEvent(current.orderId, current.cyclesStarted, eventKind, current.state, current.state, reason, actor, actorKey, null, now, payloadJson = payloadJson)
+        if (pauseOnLimits && current.state == OrderState.ACTIVE) {
+            val pauseReason = when {
+                current.cyclesStarted >= current.maxCycles -> OrderReason.LIMIT_REACHED
+                failures >= CYCLE_FAILURE_LIMIT -> OrderReason.CYCLE_FAILURES
+                else -> null
+            }
+            if (pauseReason != null) {
+                if (!updateState(current.orderId, current.version + 1, OrderState.PAUSED, pauseReason, now)) throw Rollback(OrderResult.StaleVersion)
+                appendEvent(current.orderId, current.cyclesStarted, "PAUSED", OrderState.ACTIVE, OrderState.PAUSED, pauseReason.name, OrderActor.SYSTEM, null, null, now)
+            }
+        }
+    }
+
+    /**
+     * An operator's abandonment of the cycle in progress (ADR 0015 addendum 2026-11-11, section 3). The order is locked and [expectedVersion] must
+     * be its version ([AbandonResult.StaleVersion] otherwise). The order must be ACTIVE or PAUSED ([OrderConflict.TERMINAL] for STOPPED,
+     * [OrderConflict.STOP_ALREADY_PENDING] for STOP_REQUESTED) and must have a cycle ([OrderConflict.NO_CYCLE_IN_PROGRESS]). The cycle is closed as a
+     * failure: `current_goal_id` becomes NULL and the failure count rises by one. The state is not changed (no pause at the limits: the operator
+     * decides what comes next). A Task that still runs is refused ([OrderConflict.CYCLE_IN_PROGRESS]): the caller stops it first. A Task that ended
+     * by itself with a success is refused too ([OrderConflict.CYCLE_ALREADY_ENDED]), since the evaluation closes it with its real outcome. A missing
+     * Task row, or a Task that failed or was stopped, is closed as it is. The audit event is kind CYCLE_ABANDONED, actor HUMAN, reason
+     * [OPERATOR_ABANDONED], and [reasonText] only in its payload (see [abandonPayload]).
+     */
+    fun abandonCycle(orderId: String, expectedVersion: Long, operatorKey: String, reasonText: String): AbandonResult = try {
+        transaction(database) {
+            val current = lockOrder(orderId) ?: return@transaction AbandonResult.NotFound
+            if (current.version != expectedVersion) return@transaction AbandonResult.StaleVersion
+            when (current.state) {
+                OrderState.ACTIVE, OrderState.PAUSED -> Unit
+                OrderState.STOP_REQUESTED -> return@transaction AbandonResult.Refused(OrderConflict.STOP_ALREADY_PENDING)
+                OrderState.STOPPED -> return@transaction AbandonResult.Refused(OrderConflict.TERMINAL)
+            }
+            val taskId = current.currentGoalId ?: return@transaction AbandonResult.Refused(OrderConflict.NO_CYCLE_IN_PROGRESS)
+            val taskState = execQuery("SELECT state FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }.singleOrNull()
+            if (taskState != null) {
+                if (taskState in CYCLE_SUCCESS_STATES) return@transaction AbandonResult.Refused(OrderConflict.CYCLE_ALREADY_ENDED)
+                if (taskState !in CYCLE_FAILURE_STATES) return@transaction AbandonResult.Refused(OrderConflict.CYCLE_IN_PROGRESS)
+            }
+            val now = utcNow(clock)
+            closeCycle(current, success = false, eventKind = "CYCLE_ABANDONED", reason = OPERATOR_ABANDONED, actor = OrderActor.HUMAN, actorKey = operatorKey,
+                payloadJson = abandonPayload(reasonText, taskState == null), now = now, pauseOnLimits = false)
+            AbandonResult.Moved(getIn(orderId) ?: error("order vanished after abandonment"))
+        }
+    } catch (_: Rollback) {
+        AbandonResult.StaleVersion
+    }
+
+    /**
+     * The payload of the abandonment event: `{"taskMissing":b,"reasonChars":n,"reason":"..."}`. The column is VARCHAR(255) (V53), so the reason
+     * is cut to the longest prefix (in code points) that keeps the whole JSON within [PAYLOAD_LIMIT] characters; `reasonChars` is the full length.
+     */
+    private fun abandonPayload(reasonText: String, taskMissing: Boolean): String {
+        val total = reasonText.codePointCount(0, reasonText.length)
+        var keep = minOf(total, ABANDON_REASON_KEEP)
+        while (true) {
+            val prefix = reasonText.substring(0, reasonText.offsetByCodePoints(0, keep))
+            val json = """{"taskMissing":$taskMissing,"reasonChars":$total,"reason":${jsonString(prefix)}}"""
+            if (json.length <= PAYLOAD_LIMIT || keep == 0) return json
+            keep--
+        }
+    }
+
+    private fun jsonString(text: String): String = buildString {
+        append('"')
+        for (c in text) when {
+            c == '"' -> append("\\\"")
+            c == '\\' -> append("\\\\")
+            c < ' ' -> append("\\u%04x".format(c.code))
+            else -> append(c)
+        }
+        append('"')
     }
 
     // ---- cycle spend (ADR 0015 addendum 2026-10-23, stage 3g) --------------------------------------------------------------------
@@ -1615,6 +1741,9 @@ class SelfDevOrderRepository(
     private class ChildRollback(val outcome: ChildCreateResult) : RuntimeException(null, null, false, false)
 
     private companion object {
+        /** The width of `selfdev_order_events.payload_json` (V53), and how many code points of an operator reason the abandonment event keeps at most. */
+        const val PAYLOAD_LIMIT = 255
+        const val ABANDON_REASON_KEEP = 120
         const val ORDER_COLUMNS = "order_id, parent_order_id, depth, title, policy, target_repo, max_cycles, cycles_started, " +
             "current_goal_id, consecutive_failed_cycles, state, state_reason, expires_at, created_by, version, created_at, updated_at, " +
             "order_budget_jpy, allocated_jpy, child_count, spent_jpy, cycle_budget_jpy, project_id"

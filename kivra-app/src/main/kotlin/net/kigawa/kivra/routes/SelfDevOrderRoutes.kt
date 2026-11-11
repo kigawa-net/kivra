@@ -17,7 +17,9 @@ import net.kigawa.kivra.auth.PermissionMode
 import net.kigawa.kivra.auth.PermissionService
 import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.core.autopilot.OrderActor
+import net.kigawa.kivra.core.autopilot.OrderState
 import net.kigawa.kivra.core.autopilot.StopRequestReason
+import net.kigawa.kivra.db.AbandonResult
 import net.kigawa.kivra.db.ChildCreateResult
 import net.kigawa.kivra.db.ChildLimits
 import net.kigawa.kivra.db.DEFAULT_CYCLE_BUDGET_JPY
@@ -27,6 +29,7 @@ import net.kigawa.kivra.db.EXTEND_DAYS_LIMIT
 import net.kigawa.kivra.db.ExtendInvalid
 import net.kigawa.kivra.db.ExtendResult
 import net.kigawa.kivra.db.OrderConflict
+import net.kigawa.kivra.db.CurrentCycle
 import net.kigawa.kivra.db.OrderCycle
 import net.kigawa.kivra.db.OrderResult
 // SelfDevGoalRepository removed in V40
@@ -36,6 +39,7 @@ import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOrderStopRequest
 import net.kigawa.kivra.db.StopEnd
+import net.kigawa.kivra.db.TaskTransition
 import net.kigawa.kivra.selfdev.AutopilotSettings
 import net.kigawa.kivra.selfdev.OrderSettings
 import net.kigawa.kivra.selfdev.stopCycleGoalOf
@@ -93,6 +97,13 @@ data class OrderVersionRequest(val version: Long)
 @Serializable
 data class ExtendOrderRequest(val version: Long, val addCycles: Int? = null, val extendDays: Int? = null)
 
+/**
+ * An operator's abandonment of the cycle in progress (ADR 0015 addendum 2026-11-11, section 3). [reason] is 1 to 500 characters; it goes to the
+ * audit payload only (cut to fit the column), and is never logged or echoed.
+ */
+@Serializable
+data class AbandonCycleRequest(val expectedVersion: Long, val reason: String)
+
 /** A child order (ADR 0015 section 2.7). The same title and policy rules as the root; the budget is whole yen. */
 @Serializable
 data class CreateChildRequest(val title: String, val policy: String, val orderBudgetJpy: Long, val idempotencyKey: String)
@@ -135,7 +146,13 @@ data class OrderDetailResponse(
     val title: String,
     val policy: String,
     val pendingStopRequest: StopRequestResponse?,
+    /** The cycle in progress read from its Task (added 2026-11-11), or null when the order has none (`currentGoalId` is null). */
+    val currentCycle: CurrentCycleResponse? = null,
 )
+
+/** The state of the cycle in progress. [taskMissing] is true when no Task has the ID in `currentGoalId` (an old goal); then both state fields are null. */
+@Serializable
+data class CurrentCycleResponse(val taskId: String, val taskState: String?, val taskReason: String?, val taskMissing: Boolean)
 
 @Serializable
 data class StopRequestResponse(
@@ -249,6 +266,7 @@ private suspend fun listApprovals(deps: SelfDevOrderRouteDeps, call: Application
     call.respond(rows.map { it.response(true) })
 }
 
+private const val MAX_ABANDON_REASON_CODE_POINTS = 500
 private const val ORDERS_DISABLED = "self-development orders are disabled"
 private const val INVALID_BODY = "invalid request body"
 private const val TITLE_INVALID = "title must be 1-200 characters without control characters"
@@ -307,6 +325,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
                 title = order.title,
                 policy = order.policy,
                 pendingStopRequest = pending?.response(deps.guard.can(caller.access, Permission.STOP_DECIDE))?.copy(projectId = order.projectId),
+                currentCycle = deps.orders.currentCycleOf(order)?.response(),
             ),
         )
     }
@@ -439,6 +458,49 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
             is ExtendResult.Invalid -> when (r.reason) {
                 ExtendInvalid.MAX_CYCLES_OVER_CAP -> call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
             }
+        }
+    }
+
+    post("/api/selfdev/orders/{id}/cycles/abandon") {
+        val caller = deps.caller(call) ?: return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        // The operator only, as for the extension: the AI principal is refused before the body is read (ADR 0015 section 4.6).
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.cycle.abandon")) return@post
+        val orderId = orderIdOf(call) ?: return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+        val request = decodeOr<AbandonCycleRequest>(call) ?: return@post
+        val reason = request.reason.trim()
+        if (request.expectedVersion < 0 || reason.isEmpty() || reason.codePointCount(0, reason.length) > MAX_ABANDON_REASON_CODE_POINTS ||
+            reason.any { it.isISOControl() }
+        ) {
+            return@post call.respond(HttpStatusCode.BadRequest, OrderError(INVALID_BODY))
+        }
+        val order = deps.orders.get(orderId) ?: return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+        // The checks that decide before anything is written: the version, the state and the cycle. The repository checks them again under the lock.
+        if (order.version != request.expectedVersion) return@post call.respond(HttpStatusCode.Conflict, OrderError(STALE))
+        when (order.state) {
+            OrderState.ACTIVE, OrderState.PAUSED -> Unit
+            OrderState.STOP_REQUESTED -> return@post call.respond(HttpStatusCode.Conflict, OrderError(refusedText(OrderConflict.STOP_ALREADY_PENDING), OrderConflict.STOP_ALREADY_PENDING.name))
+            OrderState.STOPPED -> return@post call.respond(HttpStatusCode.Conflict, OrderError(refusedText(OrderConflict.TERMINAL), OrderConflict.TERMINAL.name))
+        }
+        val taskId = order.currentGoalId
+            ?: return@post call.respond(HttpStatusCode.Conflict, OrderError(refusedText(OrderConflict.NO_CYCLE_IN_PROGRESS), OrderConflict.NO_CYCLE_IN_PROGRESS.name))
+        // A Task that still runs is stopped first (the operator's stop, as POST /api/selfdev/goals/{id}/stop does); a missing or ended one is left.
+        val task = deps.operations.task(taskId)
+        if (task != null && !deps.orders.isCycleTaskEnded(task.state.name)) {
+            when (val stopped = deps.operations.stopTask(taskId, task.version)) {
+                is TaskTransition.Moved -> operatorLog.info("order operator action: action=CYCLE_TASK_STOPPED actor={} orderId={} result=STOPPED", operatorTag(caller.principal), orderId)
+                TaskTransition.NotFound, TaskTransition.StaleVersion -> return@post call.respond(HttpStatusCode.Conflict, OrderError(STALE))
+                is TaskTransition.Refused -> return@post call.respond(HttpStatusCode.Conflict, OrderError(refusedText(OrderConflict.CYCLE_IN_PROGRESS), stopped.reason.name))
+            }
+        }
+        when (val r = deps.orders.abandonCycle(orderId, request.expectedVersion, caller.principal, reason)) {
+            is AbandonResult.Moved -> {
+                operatorLog.info("order operator action: action=CYCLE_ABANDONED actor={} orderId={} result={}", operatorTag(caller.principal), orderId, r.order.state.name)
+                call.respond(r.order.summary())
+            }
+            AbandonResult.NotFound -> call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+            AbandonResult.StaleVersion -> call.respond(HttpStatusCode.Conflict, OrderError(STALE))
+            is AbandonResult.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedText(r.reason), r.reason.name))
         }
     }
 
@@ -673,6 +735,8 @@ internal fun refusedText(reason: OrderConflict): String = when (reason) {
     OrderConflict.NOT_ACTIVE -> "the order is not active"
     OrderConflict.RESUME_NOT_ALLOWED -> "this order cannot be resumed; a new order is needed"
     OrderConflict.NOT_ROOT -> "only a root order can be extended"
+    OrderConflict.NO_CYCLE_IN_PROGRESS -> "the order has no cycle in progress"
+    OrderConflict.CYCLE_ALREADY_ENDED -> "the cycle's task has already ended; the evaluation closes it with its real outcome"
     OrderConflict.EXTENSION_DOES_NOT_LIFT -> "the extension would not lift the cycle limit and the expiry that paused the order"
     OrderConflict.ACTOR_NOT_ALLOWED -> "this caller may not make this change"
     OrderConflict.REASON_NOT_ALLOWED, OrderConflict.NO_EDGE, OrderConflict.TERMINAL -> "the state does not allow this operation"
@@ -725,6 +789,8 @@ private fun SelfDevOrderStopRequest.response(approverView: Boolean) = StopReques
     targetIsRoot = targetIsRoot,
     projectId = projectId,
 )
+
+private fun CurrentCycle.response() = CurrentCycleResponse(taskId = taskId, taskState = taskState, taskReason = taskReason, taskMissing = taskMissing)
 
 private fun OrderCycle.response() = CycleResponse(
     cycleNo = cycleNo,

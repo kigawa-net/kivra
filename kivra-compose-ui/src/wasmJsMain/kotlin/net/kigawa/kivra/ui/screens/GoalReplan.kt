@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -63,11 +64,11 @@ internal fun ReplanGoalAction(goal: ApiGoal, onChanged: () -> Unit) {
                 }
             },
         ) {
-            Text("再計画する")
+            SelectableText("再計画する")
         }
     }
     notice?.let { n ->
-        Text(
+        SelectableText(
             n.text,
             color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
         )

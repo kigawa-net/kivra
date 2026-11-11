@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -54,28 +55,28 @@ fun SearchDialog(projectId: String?, onDismiss: () -> Unit, onNavigate: (Route) 
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        confirmButton = { TextButton(onClick = onDismiss) { Text("閉じる") } },
-        title = { Text("検索") },
+        confirmButton = { TextButton(onClick = onDismiss) { SelectableText("閉じる") } },
+        title = { SelectableText("検索") },
         text = {
             Column(Modifier.width(480.dp)) {
                 OutlinedTextField(
                     value = query, onValueChange = { query = it }, singleLine = true,
-                    label = { Text("Run・Goal・order(id / タイトル / 状態)") },
+                    label = { SelectableText("Run・Goal・order(id / タイトル / 状態)") },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(8.dp))
                 if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (failed.isNotEmpty()) {
-                    Text("取得できなかった種別: ${failed.joinToString()}", color = MaterialTheme.colorScheme.error)
+                    SelectableText("取得できなかった種別: ${failed.joinToString()}", color = MaterialTheme.colorScheme.error)
                 }
-                if (q.isNotEmpty() && !loading && results.isEmpty()) Text("該当なし")
+                if (q.isNotEmpty() && !loading && results.isEmpty()) SelectableText("該当なし")
                 LazyColumn(Modifier.heightIn(max = 320.dp)) {
                     items(results) { h ->
                         Column(
                             Modifier.fillMaxWidth().clickable { onNavigate(h.route); onDismiss() }.padding(vertical = 8.dp)
                         ) {
-                            Text("[${h.kind}] ${h.label}", style = MaterialTheme.typography.bodyMedium)
-                            Text("${h.id} · ${h.state}", style = MaterialTheme.typography.bodySmall,
+                            SelectableText("[${h.kind}] ${h.label}", style = MaterialTheme.typography.bodyMedium)
+                            SelectableText("${h.id} · ${h.state}", style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         HorizontalDivider()

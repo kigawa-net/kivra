@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -35,11 +36,11 @@ fun HomeScreen(projects: List<ApiProject>, projectsError: String?, onNavigate: (
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         // 自己開発の有無(読めなかった時は「取得失敗」)。
-        Text(selfDev.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectableText(selfDev.label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(8.dp))
-        projectsError?.let { Text("プロジェクト一覧: $it", color = MaterialTheme.colorScheme.error) }
+        projectsError?.let { SelectableText("プロジェクト一覧: $it", color = MaterialTheme.colorScheme.error) }
         if (projects.isEmpty() && projectsError == null) {
-            Text("プロジェクトがありません。「プロジェクト」から作成してください。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SelectableText("プロジェクトがありません。「プロジェクト」から作成してください。", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         LoadedView(summaries) { byId ->
             val all = targets.map { it to byId[it.id] }
@@ -48,7 +49,7 @@ fun HomeScreen(projects: List<ApiProject>, projectsError: String?, onNavigate: (
             val running = all.sumOf { (_, s) -> s?.running ?: 0L }
             val overBudget = all.count { (_, s) -> s?.budget?.softExceeded == true }
             val needed = approvals + attention
-            Text(
+            SelectableText(
                 if (needed == 0L) "対応が必要なものはありません" else "対応が必要: $needed 件",
                 style = MaterialTheme.typography.titleMedium,
             )
@@ -58,7 +59,7 @@ fun HomeScreen(projects: List<ApiProject>, projectsError: String?, onNavigate: (
             SummaryCard("実行中の Run", "$running 件", false)
             SummaryCard("今月の予算の超過(警告)", "$overBudget 件", overBudget > 0)
             Spacer(Modifier.height(16.dp))
-            Text("プロジェクト別", style = MaterialTheme.typography.titleSmall)
+            SelectableText("プロジェクト別", style = MaterialTheme.typography.titleSmall)
             // 要対応の多いプロジェクトを先に出す(同数は一覧の順。未分類は最後)。
             all.sortedByDescending { (_, s) -> (s?.approvals ?: 0) + (s?.attention ?: 0L) }.forEach { (target, s) ->
                 ProjectHomeRow(target, s, onNavigate)
@@ -75,38 +76,38 @@ private fun ProjectHomeRow(target: HomeTarget, s: ProjectSummary?, onNavigate: (
     val faint = unassigned && s?.unassignedRows == 0
     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).alpha(if (faint) 0.6f else 1f)) {
         Column(Modifier.padding(12.dp)) {
-            Text(target.name, style = MaterialTheme.typography.titleSmall)
+            SelectableText(target.name, style = MaterialTheme.typography.titleSmall)
             if (unassigned) {
-                Text(
+                SelectableText(
                     "プロジェクトに属さない既存のデータ(作成はできません)",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (s == null) {
-                Text("読み込み中…", style = MaterialTheme.typography.bodySmall)
+                SelectableText("読み込み中…", style = MaterialTheme.typography.bodySmall)
                 return@Column
             }
             if (faint) {
-                Text("未分類のデータはありません", style = MaterialTheme.typography.bodySmall)
+                SelectableText("未分類のデータはありません", style = MaterialTheme.typography.bodySmall)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = { onNavigate(Route.ProjectPage(target.id, NavDestination.Approvals)) }) {
-                    Text("承認 ${s.approvals?.toString() ?: "取得できません"}")
+                    SelectableText("承認 ${s.approvals?.toString() ?: "取得できません"}")
                 }
                 TextButton(onClick = { onNavigate(Route.ProjectPage(target.id, NavDestination.Tasks)) }) {
-                    Text("失敗・解放待ち ${s.attention?.toString() ?: "取得できません"}")
+                    SelectableText("失敗・解放待ち ${s.attention?.toString() ?: "取得できません"}")
                 }
                 TextButton(onClick = { onNavigate(Route.ProjectPage(target.id, NavDestination.Tasks)) }) {
-                    Text("実行中 ${s.running?.toString() ?: "取得できません"}")
+                    SelectableText("実行中 ${s.running?.toString() ?: "取得できません"}")
                 }
                 s.budget?.let { b ->
                     TextButton(onClick = { onNavigate(Route.ProjectPage(target.id, NavDestination.ProjectBudget)) }) {
-                        Text(if (b.softExceeded) "予算: 超過の警告" else "予算")
+                        SelectableText(if (b.softExceeded) "予算: 超過の警告" else "予算")
                     }
                 }
                 TextButton(onClick = { onNavigate(Route.ProjectPage(target.id, landingPageOf(target.id))) }) {
-                    Text("開く")
+                    SelectableText("開く")
                 }
             }
         }
@@ -121,8 +122,8 @@ private fun SummaryCard(title: String, value: String, highlight: Boolean) {
         else CardDefaults.cardColors(),
     ) {
         Row(Modifier.padding(16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            Text(value, style = MaterialTheme.typography.titleMedium)
+            SelectableText(title, style = MaterialTheme.typography.titleSmall)
+            SelectableText(value, style = MaterialTheme.typography.titleMedium)
         }
     }
 }

@@ -11,6 +11,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -228,8 +229,8 @@ internal fun ProjectMembersSection(projectId: String) {
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        Text("メンバー（運用者のみ）", style = MaterialTheme.typography.titleMedium)
-        Text(
+        SelectableText("メンバー（運用者のみ）", style = MaterialTheme.typography.titleMedium)
+        SelectableText(
             "担当をこのプロジェクトのメンバーにし、役割（role）を決めます。プロジェクトの最後の管理者（ADMIN）は外せず、role も変えられません。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -242,7 +243,7 @@ internal fun ProjectMembersSection(projectId: String) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(memberLabel(m), modifier = Modifier.weight(1f))
+                    SelectableText(memberLabel(m), modifier = Modifier.weight(1f))
                     OptionPicker(
                         label = "役割",
                         options = MEMBER_ROLES.map { it to it },
@@ -256,16 +257,16 @@ internal fun ProjectMembersSection(projectId: String) {
                             removeError = null
                             removeTarget = m
                         },
-                    ) { Text("外す…") }
+                    ) { SelectableText("外す…") }
                 }
             }
         }
 
         Spacer(Modifier.height(8.dp))
-        Text("追加", style = MaterialTheme.typography.titleSmall)
-        picker.value?.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        SelectableText("追加", style = MaterialTheme.typography.titleSmall)
+        picker.value?.error?.let { SelectableText(it, color = MaterialTheme.colorScheme.error) }
         if (candidates.isEmpty()) {
-            Text(MEMBER_NO_CANDIDATE_MESSAGE, style = MaterialTheme.typography.bodySmall)
+            SelectableText(MEMBER_NO_CANDIDATE_MESSAGE, style = MaterialTheme.typography.bodySmall)
         } else {
             Row(
                 verticalAlignment = Alignment.Bottom,
@@ -285,11 +286,11 @@ internal fun ProjectMembersSection(projectId: String) {
                     onSelect = { addRole = it ?: addRole },
                     enabled = !busy && !expired,
                 )
-                Button(enabled = !busy && !expired, onClick = { addMember() }) { Text("追加") }
+                Button(enabled = !busy && !expired, onClick = { addMember() }) { SelectableText("追加") }
             }
         }
         memberNotice?.let { n ->
-            Text(
+            SelectableText(
                 n.text,
                 color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(top = 4.dp),
@@ -297,8 +298,8 @@ internal fun ProjectMembersSection(projectId: String) {
         }
 
         Spacer(Modifier.height(12.dp))
-        Text("全担当の取り込み", style = MaterialTheme.typography.titleSmall)
-        Text(
+        SelectableText("全担当の取り込み", style = MaterialTheme.typography.titleSmall)
+        SelectableText(
             "有効で、まだメンバーでない担当を、指定の role でこのプロジェクトに追加します。すでにメンバーの人の role は変えません。" +
                 "まず確認（dry-run）をしてください。",
             style = MaterialTheme.typography.bodySmall,
@@ -314,22 +315,22 @@ internal fun ProjectMembersSection(projectId: String) {
                 enabled = !busy && !expired,
             )
             OutlinedButton(enabled = !busy && !expired, onClick = { runImport(dryRun = true, role = importRole) }) {
-                Text("全担当を取り込む（dry-run）")
+                SelectableText("全担当を取り込む（dry-run）")
             }
             Button(
                 enabled = canRunMemberImport(importDry, busy) && !expired,
                 onClick = { importConfirmOpen = true },
-            ) { Text("全担当を取り込む…") }
+            ) { SelectableText("全担当を取り込む…") }
         }
         importNotice?.let { n ->
-            Text(
+            SelectableText(
                 n.text,
                 color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(top = 4.dp),
             )
         }
         importShown?.let { report ->
-            Text(memberImportSummary(report), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+            SelectableText(memberImportSummary(report), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
         }
     }
 

@@ -16,6 +16,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
@@ -126,12 +127,12 @@ private fun ProjectDashboardBody(
     approvalsBadge: String?,
 ) {
     val operator = showsProjectOperator(d.scope)
-    Text(d.project.name, style = MaterialTheme.typography.headlineSmall)
+    SelectableText(d.project.name, style = MaterialTheme.typography.headlineSmall)
     d.project.description?.takeIf { it.isNotBlank() }?.let { description ->
-        Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectableText(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     Spacer(Modifier.height(4.dp))
-    Text(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    SelectableText(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     Spacer(Modifier.height(8.dp))
     // このプロジェクトの項目への入口(サイドナビからはここへ移した)。
     ProjectLinks(links, approvalsBadge, Route.ProjectPage(projectId, NavDestination.Dashboard), onNavigate)
@@ -142,20 +143,20 @@ private fun ProjectDashboardBody(
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             SectionTitle("Run の状態別件数")
-            Text(projectTotalText(d.tasks.total))
+            SelectableText(projectTotalText(d.tasks.total))
             val rows = projectStateRows(d.tasks.byState)
             if (rows.isEmpty()) {
-                Text("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 rows.forEach { (code, count) ->
-                    Text("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
+                    SelectableText("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
                 }
             }
             Spacer(Modifier.height(12.dp))
 
             SectionTitle("最近の Run")
             if (d.recentRuns.isEmpty()) {
-                Text("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 d.recentRuns.forEach { run ->
                     ProjectRunRow(run, showCreator = operator, onClick = { onNavigate(Route.RunDetail(run.runId)) })
@@ -169,7 +170,7 @@ private fun ProjectDashboardBody(
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             SectionTitle("費用（この Run に紐づく分）")
-            Text(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SelectableText(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             DetailRow("確定", yenText(d.spend.committedJpy))
             DetailRow("予約中", yenText(d.spend.reservedJpy))
             DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
@@ -184,10 +185,10 @@ private fun ProjectDashboardBody(
         Column(modifier = Modifier.padding(16.dp)) {
             SectionTitle("最近の活動")
             if (d.activity.isEmpty()) {
-                Text("最近の活動はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectableText("最近の活動はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 d.activity.forEach { event: ApiProjectActivity ->
-                    Text(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                    SelectableText(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
                 }
             }
         }
@@ -200,7 +201,7 @@ private fun ProjectDashboardBody(
     if (operator) {
         // 今月の予算は、プロジェクトの「予算」のページにある(設定と解除もそこで行う)。
         TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectBudget)) }) {
-            Text("今月の予算を見る（運用者のみ）")
+            SelectableText("今月の予算を見る（運用者のみ）")
         }
         ProjectOperatorSection(projectId)
         ProjectDrainSection(projectId, d.project.name, onNavigate)
@@ -316,8 +317,8 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("空にして削除（運用者のみ）", style = MaterialTheme.typography.titleMedium)
-            Text(
+            SelectableText("空にして削除（運用者のみ）", style = MaterialTheme.typography.titleMedium)
+            SelectableText(
                 "このプロジェクトの行（Task、Order、記憶、Run、担当、repo）を別のプロジェクトへ移して空にし、削除できるようにします。" +
                     "データは消しません。メンバーと予算の上限は、このプロジェクトから外れます。まず確認（dry-run）をしてください。",
                 style = MaterialTheme.typography.bodySmall,
@@ -327,9 +328,9 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
             LoadedView(projects) { list ->
                 val choices = drainTargetChoices(list, projectId)
                 if (choices.isEmpty()) {
-                    Text(DRAIN_NO_TARGET_MESSAGE, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    SelectableText(DRAIN_NO_TARGET_MESSAGE, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
-                    Text("移し先", style = MaterialTheme.typography.labelLarge)
+                    SelectableText("移し先", style = MaterialTheme.typography.labelLarge)
                     choices.forEach { p ->
                         Row(
                             modifier = Modifier.fillMaxWidth().clickable(enabled = !busy && !ApiSession.expired) { chooseTarget(p.projectId, p.name) },
@@ -340,13 +341,13 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
                                 onClick = { chooseTarget(p.projectId, p.name) },
                                 enabled = !busy && !ApiSession.expired,
                             )
-                            Text(p.name)
+                            SelectableText(p.name)
                         }
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(enabled = targetId != null && !busy && !ApiSession.expired, onClick = { dryRun() }) {
-                            Text("確認（dry-run）")
+                            SelectableText("確認（dry-run）")
                         }
                         Button(
                             enabled = canRunDrain(dry, targetId, busy) && !ApiSession.expired,
@@ -355,28 +356,28 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
                                 drainConfirm = true
                             },
                         ) {
-                            Text("空にして移す…")
+                            SelectableText("空にして移す…")
                         }
                     }
                 }
             }
             dry?.let { report ->
                 Spacer(Modifier.height(4.dp))
-                Text("移す件数（確認の結果）", style = MaterialTheme.typography.labelLarge)
+                SelectableText("移す件数（確認の結果）", style = MaterialTheme.typography.labelLarge)
                 val lines = drainCountLines(report.counts)
                 if (lines.isEmpty()) {
-                    Text("移す行はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    SelectableText("移す行はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
-                    lines.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    lines.forEach { SelectableText(it, style = MaterialTheme.typography.bodySmall) }
                 }
             }
             shown?.let { report ->
                 Spacer(Modifier.height(4.dp))
-                Text("移した件数", style = MaterialTheme.typography.labelLarge)
-                drainCountLines(report.counts).forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                SelectableText("移した件数", style = MaterialTheme.typography.labelLarge)
+                drainCountLines(report.counts).forEach { SelectableText(it, style = MaterialTheme.typography.bodySmall) }
             }
             notice?.let { n ->
-                Text(
+                SelectableText(
                     n.text,
                     color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp),
@@ -390,7 +391,7 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
                     deleteConfirm = true
                 },
             ) {
-                Text("削除…")
+                SelectableText("削除…")
             }
         }
     }
@@ -437,7 +438,7 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
 
 @Composable
 private fun SectionTitle(text: String) {
-    Text(text, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 4.dp, bottom = 4.dp))
+    SelectableText(text, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 4.dp, bottom = 4.dp))
 }
 
 /** 一件の Run の行。作成者は運用者だけに出す(旧 UI の runRow と同じ)。 */
@@ -445,8 +446,8 @@ private fun SectionTitle(text: String) {
 private fun ProjectRunRow(run: ApiRun, showCreator: Boolean, onClick: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable(onClick = onClick)) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(run.title, style = MaterialTheme.typography.titleSmall)
-            Text(
+            SelectableText(run.title, style = MaterialTheme.typography.titleSmall)
+            SelectableText(
                 "状態: ${run.state} | 作成: ${run.createdAt}" +
                     (if (showCreator) run.createdBy?.let { " | 作成者: $it" } ?: "" else ""),
                 style = MaterialTheme.typography.bodySmall,
@@ -594,7 +595,7 @@ private fun ProjectOperatorSection(projectId: String) {
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("リポジトリの対応（運用者のみ）", style = MaterialTheme.typography.titleMedium)
+            SelectableText("リポジトリの対応（運用者のみ）", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
             LoadedList(repos, emptyText = REPO_EMPTY_MESSAGE) { list ->
                 list.forEach { repo ->
@@ -603,7 +604,7 @@ private fun ProjectOperatorSection(projectId: String) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text(repo.repoKey, modifier = Modifier.weight(1f))
+                        SelectableText(repo.repoKey, modifier = Modifier.weight(1f))
                         OutlinedButton(
                             enabled = !repoBusy && !ApiSession.expired,
                             onClick = {
@@ -611,7 +612,7 @@ private fun ProjectOperatorSection(projectId: String) {
                                 repoRemoveTarget = repo.repoKey
                             },
                         ) {
-                            Text("登録を外す…")
+                            SelectableText("登録を外す…")
                         }
                     }
                 }
@@ -621,18 +622,18 @@ private fun ProjectOperatorSection(projectId: String) {
                 OutlinedTextField(
                     value = repoInput,
                     onValueChange = { repoInput = it },
-                    label = { Text("repo（owner/name）") },
-                    placeholder = { Text("owner/name") },
+                    label = { SelectableText("repo（owner/name）") },
+                    placeholder = { SelectableText("owner/name") },
                     singleLine = true,
                     enabled = !repoBusy && !ApiSession.expired,
                     isError = repoInput.length > REPO_KEY_INPUT_MAX,
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(8.dp))
-                Button(enabled = !repoBusy && !ApiSession.expired, onClick = { addRepo() }) { Text("追加") }
+                Button(enabled = !repoBusy && !ApiSession.expired, onClick = { addRepo() }) { SelectableText("追加") }
             }
             repoNotice?.let { n ->
-                Text(
+                SelectableText(
                     n.text,
                     color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp),
@@ -642,8 +643,8 @@ private fun ProjectOperatorSection(projectId: String) {
             Spacer(Modifier.height(16.dp))
             ProjectMembersSection(projectId)
             Spacer(Modifier.height(16.dp))
-            Text("既存データの振り分け", style = MaterialTheme.typography.titleMedium)
-            Text(
+            SelectableText("既存データの振り分け", style = MaterialTheme.typography.titleMedium)
+            SelectableText(
                 "プロジェクトが未設定の既存データだけを、repo の対応で振り分けます（全プロジェクトに効きます）。" +
                     "すでにプロジェクトを持つ行は変わりません。対応がない行は未設定のままです。まず確認（dry-run）をしてください。",
                 style = MaterialTheme.typography.bodySmall,
@@ -652,7 +653,7 @@ private fun ProjectOperatorSection(projectId: String) {
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(enabled = !backfillBusy && !ApiSession.expired, onClick = { dryRun() }) {
-                    Text("確認（dry-run）")
+                    SelectableText("確認（dry-run）")
                 }
                 Button(
                     enabled = canRunBackfill(backfillDry, backfillBusy) && !ApiSession.expired,
@@ -661,18 +662,18 @@ private fun ProjectOperatorSection(projectId: String) {
                         confirmOpen = true
                     },
                 ) {
-                    Text("振り分けを実行…")
+                    SelectableText("振り分けを実行…")
                 }
             }
             backfillNotice?.let { n ->
-                Text(
+                SelectableText(
                     n.text,
                     color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
             backfillShown?.tables?.forEach { table ->
-                Text(backfillTableLine(table), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                SelectableText(backfillTableLine(table), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
             }
         }
     }
@@ -737,7 +738,7 @@ private fun ProjectChatSection(projectId: String) {
             // メッセージ一覧
             when {
                 chat.value == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-                chat.value!!.messages.isEmpty() -> Text("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                chat.value!!.messages.isEmpty() -> SelectableText("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else -> {
                     chat.value!!.messages.forEach { msg: ApiChatMessage ->
                         ChatMessageRow(msg)
@@ -750,8 +751,8 @@ private fun ProjectChatSection(projectId: String) {
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
-                    label = { Text("指示を入力") },
-                    placeholder = { Text("指示を入力...") },
+                    label = { SelectableText("指示を入力") },
+                    placeholder = { SelectableText("指示を入力...") },
                     singleLine = true,
                     enabled = !sendBusy && !ApiSession.expired,
                     modifier = Modifier.weight(1f),
@@ -797,11 +798,11 @@ private fun ProjectChatSection(projectId: String) {
                         }
                     },
                 ) {
-                    Text("送信")
+                    SelectableText("送信")
                 }
             }
             sendNotice?.let { n ->
-                Text(
+                SelectableText(
                     n.text,
                     color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp),
@@ -820,14 +821,14 @@ private fun ChatMessageRow(msg: ApiChatMessage) {
         verticalAlignment = Alignment.Top,
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(
+            SelectableText(
                 if (isUser) "あなた" else "kivra",
                 style = MaterialTheme.typography.labelSmall,
                 color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
             )
-            Text(msg.content, style = MaterialTheme.typography.bodyMedium)
+            SelectableText(msg.content, style = MaterialTheme.typography.bodyMedium)
         }
-        Text(msg.createdAt, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectableText(msg.createdAt, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

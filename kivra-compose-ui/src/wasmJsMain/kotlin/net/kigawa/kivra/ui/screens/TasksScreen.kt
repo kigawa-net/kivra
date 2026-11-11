@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,18 +67,18 @@ fun TasksScreen(projectId: String, onNavigate: (Route) -> Unit) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Run の一覧", style = MaterialTheme.typography.headlineSmall)
+            SelectableText("Run の一覧", style = MaterialTheme.typography.headlineSmall)
             Row {
                 FilterChip(
                     selected = scope == "mine",
                     onClick = { scope = "mine" },
-                    label = { Text("自分の Run") }
+                    label = { SelectableText("自分の Run") }
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 FilterChip(
                     selected = scope == "all",
                     onClick = { scope = "all" },
-                    label = { Text("全員の Run") }
+                    label = { SelectableText("全員の Run") }
                 )
             }
         }
@@ -170,23 +171,23 @@ private fun SubmitTaskCard(projectId: String, onAccepted: () -> Unit) {
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("Task を投入", style = MaterialTheme.typography.titleMedium)
+            SelectableText("Task を投入", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
                     selected = kind == SubmitKind.SIMULATED,
                     onClick = { requestedKind = SubmitKind.SIMULATED },
-                    label = { Text("シミュレーション") },
+                    label = { SelectableText("シミュレーション") },
                     enabled = !blocked,
                 )
                 FilterChip(
                     selected = kind == SubmitKind.SELF_DEV,
                     onClick = { requestedKind = SubmitKind.SELF_DEV },
-                    label = { Text("自己開発（GitHub に PR を作成）") },
+                    label = { SelectableText("自己開発（GitHub に PR を作成）") },
                     enabled = !blocked && selfDevSelectable(availability),
                 )
             }
-            Text(
+            SelectableText(
                 selfDevNoteText(availability),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -195,7 +196,7 @@ private fun SubmitTaskCard(projectId: String, onAccepted: () -> Unit) {
             OutlinedTextField(
                 value = title,
                 onValueChange = { title = it },
-                label = { Text("タイトル（1〜200 文字）") },
+                label = { SelectableText("タイトル（1〜200 文字）") },
                 enabled = !blocked,
                 isError = codePointCount(title) > TASK_TITLE_MAX,
                 supportingText = { CounterText(codePointCount(title), TASK_TITLE_MAX) },
@@ -206,7 +207,7 @@ private fun SubmitTaskCard(projectId: String, onAccepted: () -> Unit) {
                 OutlinedTextField(
                     value = body,
                     onValueChange = { body = it },
-                    label = { Text("本文（任意、0〜8000 文字。自己開発のみ。タイトルが Issue の URL、#番号、owner/repo#番号のときは Issue の本文を kivra が読んで添えます）") },
+                    label = { SelectableText("本文（任意、0〜8000 文字。自己開発のみ。タイトルが Issue の URL、#番号、owner/repo#番号のときは Issue の本文を kivra が読んで添えます）") },
                     enabled = !blocked,
                     isError = codePointCount(body) > TASK_BODY_MAX,
                     supportingText = { CounterText(codePointCount(body), TASK_BODY_MAX) },
@@ -224,13 +225,13 @@ private fun SubmitTaskCard(projectId: String, onAccepted: () -> Unit) {
                 enabled = !blocked,
                 modifier = Modifier.align(Alignment.End)
             ) {
-                Text("投入")
+                SelectableText("投入")
             }
             if (ApiSession.expired) {
-                Text(SESSION_EXPIRED_MESSAGE, color = MaterialTheme.colorScheme.error)
+                SelectableText(SESSION_EXPIRED_MESSAGE, color = MaterialTheme.colorScheme.error)
             }
             result?.let { (text, ok) ->
-                Text(
+                SelectableText(
                     text,
                     color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 )
@@ -254,28 +255,28 @@ private fun RunCard(run: ApiRun, showCreator: Boolean, onClick: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(runTitleText(run.mode, run.title), style = MaterialTheme.typography.titleMedium)
+                SelectableText(runTitleText(run.mode, run.title), style = MaterialTheme.typography.titleMedium)
                 AssistChip(
                     onClick = { },
-                    label = { Text("状態: ${state.label}") }
+                    label = { SelectableText("状態: ${state.label}") }
                 )
             }
             Spacer(modifier = Modifier.height(4.dp))
             val creator = if (showCreator) " | 作成者: ${run.createdBy ?: ""}" else ""
-            Text("${kind.label} | 作成日時: ${displayTime(run.createdAt)}$creator",
+            SelectableText("${kind.label} | 作成日時: ${displayTime(run.createdAt)}$creator",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (run.projectName != null) {
-                Text("プロジェクト: ${run.projectName}",
+                SelectableText("プロジェクト: ${run.projectName}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (reason.isNotEmpty()) {
-                Text("理由: $reason",
+                SelectableText("理由: $reason",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text("PR: ${pullRequestText(run.pullRequestRepository, run.pullRequestNumber)}",
+            SelectableText("PR: ${pullRequestText(run.pullRequestRepository, run.pullRequestNumber)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

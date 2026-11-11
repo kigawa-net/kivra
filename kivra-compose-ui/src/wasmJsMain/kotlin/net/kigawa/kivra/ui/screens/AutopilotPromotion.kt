@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -32,20 +33,20 @@ internal fun PromotionSection() {
         readout
     }
     Column {
-        Text("段階 1 → 2 の昇格条件（ADR 0011 §6.3）", style = MaterialTheme.typography.titleMedium)
+        SelectableText("段階 1 → 2 の昇格条件（ADR 0011 §6.3）", style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(8.dp))
         val readout = loaded.value
         when {
-            loaded.error != null -> Text(PROMOTION_FAILED_TEXT, color = MaterialTheme.colorScheme.error)
-            readout == null -> Text(PROMOTION_NOT_FETCHED_TEXT)
+            loaded.error != null -> SelectableText(PROMOTION_FAILED_TEXT, color = MaterialTheme.colorScheme.error)
+            readout == null -> SelectableText(PROMOTION_NOT_FETCHED_TEXT)
             else -> {
-                Text(promotionSummary(readout.conditions))
+                SelectableText(promotionSummary(readout.conditions))
                 readout.conditions.forEach { c ->
                     Spacer(Modifier.height(4.dp))
-                    Text("・" + promotionLine(c))
+                    SelectableText("・" + promotionLine(c))
                 }
                 Spacer(Modifier.height(8.dp))
-                Text(PROMOTION_NOTE_TEXT, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectableText(PROMOTION_NOTE_TEXT, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

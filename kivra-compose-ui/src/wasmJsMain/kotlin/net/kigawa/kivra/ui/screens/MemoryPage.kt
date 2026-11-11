@@ -16,6 +16,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -171,14 +172,14 @@ fun MemoryScreen(projectId: String) {
     }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        Text("記憶", style = MaterialTheme.typography.headlineSmall)
+        SelectableText("記憶", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(8.dp))
 
         if (!canRead) {
-            Text("この画面を見る権限がありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SelectableText("この画面を見る権限がありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
             notice?.let { n ->
-                Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                SelectableText(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
@@ -204,20 +205,20 @@ fun MemoryScreen(projectId: String) {
                     enabled = !busy,
                 )
                 Spacer(modifier = Modifier.width(12.dp))
-                OutlinedButton(onClick = onApply, enabled = !busy) { Text("絞り込む") }
+                OutlinedButton(onClick = onApply, enabled = !busy) { SelectableText("絞り込む") }
             }
             Spacer(modifier = Modifier.height(12.dp))
 
             LoadedView(loaded) { page ->
-                Text(memoryTotalText(page.total), style = MaterialTheme.typography.bodySmall)
-                Text(
+                SelectableText(memoryTotalText(page.total), style = MaterialTheme.typography.bodySmall)
+                SelectableText(
                     memoryCountsText(page.tombstones, page.deletionAudit),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 if (page.items.isEmpty()) {
-                    Text("該当する記録はありません。")
+                    SelectableText("該当する記録はありません。")
                 } else {
                     page.items.forEach { mem ->
                         MemoryRow(
@@ -231,7 +232,7 @@ fun MemoryScreen(projectId: String) {
                         )
                     }
                 }
-                Text(
+                SelectableText(
                     memoryPageText(offset, page.items.size),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -240,35 +241,35 @@ fun MemoryScreen(projectId: String) {
                     OutlinedButton(
                         onClick = { offset = (offset - MEMORY_PAGE_SIZE).coerceAtLeast(0) },
                         enabled = !busy && memoryHasPrev(offset),
-                    ) { Text("前の $MEMORY_PAGE_SIZE 件") }
+                    ) { SelectableText("前の $MEMORY_PAGE_SIZE 件") }
                     OutlinedButton(
                         onClick = { offset += MEMORY_PAGE_SIZE },
                         enabled = !busy && memoryHasNext(offset, page.items.size, page.total),
-                    ) { Text("次の $MEMORY_PAGE_SIZE 件") }
+                    ) { SelectableText("次の $MEMORY_PAGE_SIZE 件") }
                 }
             }
 
             if (canDelete) {
                 Spacer(modifier = Modifier.height(24.dp))
-                Text("条件での削除", style = MaterialTheme.typography.titleMedium)
-                Text(
+                SelectableText("条件での削除", style = MaterialTheme.typography.titleMedium)
+                SelectableText(
                     "種類か信頼を選んで「絞り込む」を押し、件数を確認してから削除します。削除は、確認した条件と同じ条件のときだけできます（1 回の上限は $MEMORY_CONDITION_LIMIT 件）。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onDryRun, enabled = !busy) { Text("該当の件数を確認") }
+                    OutlinedButton(onClick = onDryRun, enabled = !busy) { SelectableText("該当の件数を確認") }
                     Button(
                         onClick = {
                             dialogError = null
                             target = MemoryDeleteTarget(recordId = null, filter = applied, matched = dryRun?.matched ?: 0)
                         },
                         enabled = !busy && memoryConditionDeleteEnabled(dryRun, applied),
-                    ) { Text("この条件で削除") }
+                    ) { SelectableText("この条件で削除") }
                 }
                 if (dryText.isNotEmpty()) {
-                    Text(dryText, style = MaterialTheme.typography.bodySmall)
+                    SelectableText(dryText, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -301,9 +302,9 @@ private fun MemoryRow(mem: ApiMemory, canDelete: Boolean, enabled: Boolean, onDe
     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(memoryKindLabel(mem.kind), style = MaterialTheme.typography.titleMedium)
+                SelectableText(memoryKindLabel(mem.kind), style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(
+                SelectableText(
                     "[${memoryTierLabel(mem.tier)}]",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -315,18 +316,18 @@ private fun MemoryRow(mem: ApiMemory, canDelete: Boolean, enabled: Boolean, onDe
                 mem.code?.let { add("理由コード: ${memoryCodeText(it)}") }
                 add("出所: ${mem.source}")
             }
-            Text(
+            SelectableText(
                 meta.joinToString(" | "),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             memoryBodyText(mem.body, mem.bodyWithheld)?.let { text ->
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(text, style = MaterialTheme.typography.bodyMedium)
+                SelectableText(text, style = MaterialTheme.typography.bodyMedium)
             }
             if (canDelete) {
                 Spacer(modifier = Modifier.height(4.dp))
-                OutlinedButton(onClick = onDelete, enabled = enabled) { Text("この記録を削除") }
+                OutlinedButton(onClick = onDelete, enabled = enabled) { SelectableText("この記録を削除") }
             }
         }
     }

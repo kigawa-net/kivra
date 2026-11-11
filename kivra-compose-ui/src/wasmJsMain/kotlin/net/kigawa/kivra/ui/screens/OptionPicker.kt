@@ -7,6 +7,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,13 +28,13 @@ internal fun OptionPicker(
     var expanded by remember { mutableStateOf(false) }
     val shown = options.firstOrNull { it.first == selected }?.second ?: options.first().second
     Column {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectableText(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Box {
-            OutlinedButton(onClick = { expanded = true }, enabled = enabled) { Text(shown) }
+            OutlinedButton(onClick = { expanded = true }, enabled = enabled) { SelectableText(shown) }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                 options.forEach { (value, text) ->
                     DropdownMenuItem(
-                        text = { Text(text) },
+                        text = { SelectableText(text) },
                         onClick = {
                             expanded = false
                             onSelect(value)

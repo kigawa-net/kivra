@@ -2,6 +2,7 @@ package net.kigawa.kivra.ui.screens
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -21,7 +22,7 @@ fun ProjectBudgetScreen(projectId: String) {
         LoadedView(loaded) { d ->
             val budget = d.budget
             if (budget == null) {
-                Text("予算は運用者だけが見られます。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectableText("予算は運用者だけが見られます。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 ProjectBudgetSection(budget, onChanged = { reload += 1 })
             }

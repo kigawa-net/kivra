@@ -473,14 +473,6 @@ object ApiClient {
         postWrite("/api/selfdev/orders/${percentEncode(orderId)}/extend", ExtendOrderBody(version, addCycles, extendDays))
 
     /**
-     * 進行中の周の放棄(運用者のみ)。`POST /api/selfdev/orders/{id}/cycles/abandon`、本文 `{"expectedVersion": n, "reason": "1〜500 字"}`。
-     * 読んだ version を送る。動いている Task はサーバーが止めてから、周を失敗として閉じる。409 は版の競合や、放棄できない状態
-     * (NO_CYCLE_IN_PROGRESS など)。判定の詳細は OrderCycleRules.kt。
-     */
-    suspend fun abandonOrderCycle(orderId: String, version: Long, reason: String) =
-        postWrite("/api/selfdev/orders/${percentEncode(orderId)}/cycles/abandon", AbandonCycleBody(version, reason))
-
-    /**
      * order の停止要求。`POST /api/selfdev/orders/{id}/stop-requests`、本文 `{"version": n, "reasonCode": "..."}`。
      * reasonCode は要求できる 4 種のいずれか(一覧から選ぶ)。承認されるまで order は止まらない。403 は権限(STOP_REQUEST)。
      */
@@ -779,9 +771,6 @@ object ApiClient {
 
 /** order の延長の本文(server `ExtendOrderRequest`)。フィールドは厳密に検査されるので、この三つだけ送る。 */
 @Serializable private class ExtendOrderBody(val version: Long, val addCycles: Int? = null, val extendDays: Int? = null)
-
-/** 周の放棄の本文(server `AbandonCycleRequest`)。フィールドは厳密に検査されるので、この二つだけ送る。 */
-@Serializable private class AbandonCycleBody(val expectedVersion: Long, val reason: String)
 
 /** 本文が空の JSON オブジェクト `{}`(フィールドなし)。 */
 @Serializable private class EmptyJsonBody

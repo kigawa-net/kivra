@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -27,8 +28,8 @@ internal fun BudgetFxNotice() {
     Spacer(Modifier.height(8.dp))
     val value = loaded.value
     when {
-        loaded.error != null -> Text(FX_FAILED_TEXT)
-        value == null -> Text("読み込み中…")
+        loaded.error != null -> SelectableText(FX_FAILED_TEXT)
+        value == null -> SelectableText("読み込み中…")
         else -> {
             val notice = fxNoticeOf(value.fx)
             val color = when (notice.level) {
@@ -36,7 +37,7 @@ internal fun BudgetFxNotice() {
                 FxLevel.WARN -> FX_WARN_COLOR
                 FxLevel.ERROR -> MaterialTheme.colorScheme.error
             }
-            Text(notice.text, color = color)
+            SelectableText(notice.text, color = color)
         }
     }
 }
@@ -44,5 +45,5 @@ internal fun BudgetFxNotice() {
 /** 月の残りが負のとき、超過を文字で出す(バーが 100% で止まっても、数字と文字で分かるように)。負でなければ何も出さない。 */
 @Composable
 internal fun BudgetOverspendLine(remainingJpy: String) {
-    budgetOverspendText(remainingJpy)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    budgetOverspendText(remainingJpy)?.let { SelectableText(it, color = MaterialTheme.colorScheme.error) }
 }

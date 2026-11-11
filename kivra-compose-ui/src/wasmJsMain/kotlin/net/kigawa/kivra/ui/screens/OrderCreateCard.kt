@@ -11,6 +11,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -102,8 +103,8 @@ internal fun OrderCreateCard(projectId: String, onChanged: () -> Unit) {
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("order を作る", style = MaterialTheme.typography.titleMedium)
-            Text(
+            SelectableText("order を作る", style = MaterialTheme.typography.titleMedium)
+            SelectableText(
                 "order の作成は、ルートの order を 1 件作る操作です。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -112,7 +113,7 @@ internal fun OrderCreateCard(projectId: String, onChanged: () -> Unit) {
             OutlinedTextField(
                 value = title,
                 onValueChange = { title = it },
-                label = { Text("題名（1〜200 文字）") },
+                label = { SelectableText("題名（1〜200 文字）") },
                 enabled = !blocked,
                 singleLine = true,
                 isError = codePointCount(title) > ORDER_TITLE_MAX,
@@ -123,7 +124,7 @@ internal fun OrderCreateCard(projectId: String, onChanged: () -> Unit) {
             OutlinedTextField(
                 value = policy,
                 onValueChange = { policy = it },
-                label = { Text("方針（1〜2000 文字）") },
+                label = { SelectableText("方針（1〜2000 文字）") },
                 enabled = !blocked,
                 isError = codePointCount(policy) > ORDER_POLICY_MAX,
                 supportingText = { CounterText(codePointCount(policy), ORDER_POLICY_MAX) },
@@ -134,7 +135,7 @@ internal fun OrderCreateCard(projectId: String, onChanged: () -> Unit) {
             OutlinedTextField(
                 value = maxCycles,
                 onValueChange = { maxCycles = it },
-                label = { Text("最大の周の数（1〜10。作成後は変えられません。サーバーの上限を超えると拒否されます）") },
+                label = { SelectableText("最大の周の数（1〜10。作成後は変えられません。サーバーの上限を超えると拒否されます）") },
                 enabled = !blocked,
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -148,13 +149,13 @@ internal fun OrderCreateCard(projectId: String, onChanged: () -> Unit) {
                 enabled = !blocked,
                 modifier = Modifier.align(Alignment.End),
             ) {
-                Text("order を作る")
+                SelectableText("order を作る")
             }
             if (ApiSession.expired) {
-                Text(SESSION_EXPIRED_MESSAGE, color = MaterialTheme.colorScheme.error)
+                SelectableText(SESSION_EXPIRED_MESSAGE, color = MaterialTheme.colorScheme.error)
             }
             notice?.let { n ->
-                Text(
+                SelectableText(
                     n.text,
                     color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 )

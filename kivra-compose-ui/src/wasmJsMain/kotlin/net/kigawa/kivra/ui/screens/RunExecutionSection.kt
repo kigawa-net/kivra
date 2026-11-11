@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -148,55 +149,55 @@ private fun failed(watch: ExecutionWatch): Boolean {
 @Composable
 private fun ExecutionBody(watch: ExecutionWatch) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("実行の経過", style = MaterialTheme.typography.titleMedium)
-        Text(EXECUTION_READ_ONLY_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectableText("実行の経過", style = MaterialTheme.typography.titleMedium)
+        SelectableText(EXECUTION_READ_ONLY_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (watch.failing) {
             val at = if (watch.acceptedAtMs > 0L) "（最後に取得できた時点: ${formatClock(watch.acceptedAtMs.toDouble())}）" else ""
-            Text(EXECUTION_LOAD_FAILED_TEXT + at, color = MaterialTheme.colorScheme.error)
+            SelectableText(EXECUTION_LOAD_FAILED_TEXT + at, color = MaterialTheme.colorScheme.error)
         }
         val snap = watch.snap
         if (snap == null) {
-            if (!watch.failing) Text("読み込み中…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!watch.failing) SelectableText("読み込み中…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             return@Column
         }
         StatusLine(snap, watch)
-        Text("取得方法: 定期取得（${ExecutionPolling.POLL_LABEL}）", style = MaterialTheme.typography.bodySmall)
+        SelectableText("取得方法: 定期取得（${ExecutionPolling.POLL_LABEL}）", style = MaterialTheme.typography.bodySmall)
 
         val warnings = execWarningLines(snap.warnings, snap.dropped, snap.truncated, snap.apiRetries)
         if (warnings.isNotEmpty()) {
-            Text("注意", style = MaterialTheme.typography.titleSmall)
-            warnings.forEach { Text("・$it") }
+            SelectableText("注意", style = MaterialTheme.typography.titleSmall)
+            warnings.forEach { SelectableText("・$it") }
         }
 
-        Text("試行", style = MaterialTheme.typography.titleSmall)
+        SelectableText("試行", style = MaterialTheme.typography.titleSmall)
         snap.attempts.forEach { a ->
             val last = parseInstantMillis(a.lastReceivedAt)?.let { "、最終の受信 ${executionLocalTime(it.toDouble())}" } ?: ""
-            Text("試行 #${a.attemptNo}：${execLookup(EXECUTION_ATTEMPT_STATES, a.state)}（世代 ${a.leaseGeneration}）$last")
+            SelectableText("試行 #${a.attemptNo}：${execLookup(EXECUTION_ATTEMPT_STATES, a.state)}（世代 ${a.leaseGeneration}）$last")
         }
         if (snap.attempts.any { it.state in EXECUTION_ACTIVE_ATTEMPT_STATES }) {
             // 総量の上限は分からないので、割合の棒は出さず、不確定の棒だけ出す。
-            Text(EXECUTION_PROGRESS_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SelectableText(EXECUTION_PROGRESS_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
-        Text("進み（メッセージ数・ツール呼び出し）", style = MaterialTheme.typography.titleSmall)
+        SelectableText("進み（メッセージ数・ツール呼び出し）", style = MaterialTheme.typography.titleSmall)
         DetailRow("メッセージ数", "${snap.turns} 件")
         DetailRow("ツール呼び出し（合計）", "${snap.tools.total} 回")
         DetailRow("ツール結果の失敗", "${snap.tools.errors} 件")
         DetailRow("権限の拒否", "${snap.permissionDenied} 件")
         DetailRow("最後の段階（エージェントの報告）", snap.lastPhase?.let { execLookup(EXECUTION_PHASES, it) } ?: "なし")
         DetailRow("テストの段階", if (snap.testingReported) "報告あり" else "報告なし")
-        Text(EXECUTION_TURNS_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text("ツールの種類別の件数", style = MaterialTheme.typography.titleSmall)
+        SelectableText(EXECUTION_TURNS_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectableText("ツールの種類別の件数", style = MaterialTheme.typography.titleSmall)
         EXECUTION_TOOLS.forEach { (name, label) ->
             DetailRow(label, "${execToolCount(snap.tools, name)} 回")
         }
 
-        Text("費用", style = MaterialTheme.typography.titleSmall)
+        SelectableText("費用", style = MaterialTheme.typography.titleSmall)
         DetailRow("確定（CLI の報告。終了後に確定します）", usdText(snap.cost.confirmedUsd))
         DetailRow("推定（予約からの見積り。確定ではありません）", execEstimateText(snap.cost, snap.attempts))
 
-        Text("停止", style = MaterialTheme.typography.titleSmall)
+        SelectableText("停止", style = MaterialTheme.typography.titleSmall)
         DetailRow("段階", execLookup(EXECUTION_STOP_STAGES, snap.stop.stage))
         DetailRow("停止要求", if (snap.stop.runCancelRequested) "あり" else "なし")
         DetailRow("エージェントの確認（エージェントの報告）", if (snap.stop.agentAcknowledged) "停止要求を受けたと報告" else "報告なし")
@@ -211,7 +212,7 @@ private fun ExecutionBody(watch: ExecutionWatch) {
 private fun StatusLine(snap: ApiRunExecution, watch: ExecutionWatch) {
     if (isExecutionTerminal(snap.runState)) {
         val ended = parseInstantMillis(snap.lastReceivedAt)
-        Text(EXECUTION_TERMINAL_TEXT + "最終の受信: " + (ended?.let { executionLocalTime(it.toDouble()) } ?: "不明"))
+        SelectableText(EXECUTION_TERMINAL_TEXT + "最終の受信: " + (ended?.let { executionLocalTime(it.toDouble()) } ?: "不明"))
         return
     }
     if (snap.freshness == "STALE") {
@@ -222,9 +223,9 @@ private fun StatusLine(snap: ApiRunExecution, watch: ExecutionWatch) {
             minutes < 1L -> "最終の受信から 1 分未満"
             else -> "最終の受信から $minutes 分経過。$EXECUTION_STALE_TEXT"
         }
-        Text(text, color = MaterialTheme.colorScheme.error)
+        SelectableText(text, color = MaterialTheme.colorScheme.error)
         return
     }
     val last = parseInstantMillis(snap.lastReceivedAt)
-    Text("鮮度: ${snap.freshness}。最終の受信: " + (last?.let { executionLocalTime(it.toDouble()) } ?: "不明"))
+    SelectableText("鮮度: ${snap.freshness}。最終の受信: " + (last?.let { executionLocalTime(it.toDouble()) } ?: "不明"))
 }

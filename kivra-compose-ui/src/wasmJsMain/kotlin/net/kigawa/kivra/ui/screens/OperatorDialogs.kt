@@ -13,6 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -126,10 +127,10 @@ internal fun BudgetAcknowledgeDialog(
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("未確定の予約を解除") },
+        title = { SelectableText("未確定の予約を解除") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                Text(
+                SelectableText(
                     "${reservationLabel(row.reservationKey)}（${budgetPathLabel(row.path)}、期間 ${row.period}、" +
                         "計上額 ${row.amountJpy} 円）を解除します。実額が分かれば入力してください。" +
                         "実額が分からなければ空欄のままにします（計上額が残ります）。",
@@ -139,44 +140,44 @@ internal fun BudgetAcknowledgeDialog(
                     OutlinedTextField(
                         value = actualInput,
                         onValueChange = { actualInput = it },
-                        label = { Text("実額（円・任意）") },
+                        label = { SelectableText("実額（円・任意）") },
                         enabled = !busy,
                         isError = !actualOk,
-                        supportingText = { Text(if (actualOk) BUDGET_ACTUAL_HINT else BUDGET_ACTUAL_BAD) },
+                        supportingText = { SelectableText(if (actualOk) BUDGET_ACTUAL_HINT else BUDGET_ACTUAL_BAD) },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = evidenceInput,
                         onValueChange = { evidenceInput = it },
-                        label = { Text("根拠") },
+                        label = { SelectableText("根拠") },
                         enabled = !busy,
                         isError = evidenceCheck !is ReasonCheck.Valid && evidenceInput.isNotEmpty(),
-                        supportingText = { Text(textSupport(evidenceCheck, evidenceInput)) },
+                        supportingText = { SelectableText(textSupport(evidenceCheck, evidenceInput)) },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = reasonInput,
                         onValueChange = { reasonInput = it },
-                        label = { Text("理由") },
+                        label = { SelectableText("理由") },
                         enabled = !busy,
                         isError = reasonCheck !is ReasonCheck.Valid && reasonInput.isNotEmpty(),
-                        supportingText = { Text(textSupport(reasonCheck, reasonInput)) },
+                        supportingText = { SelectableText(textSupport(reasonCheck, reasonInput)) },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 } else {
-                    Text(confirmText(actualInput.trim(), row.amountJpy))
+                    SelectableText(confirmText(actualInput.trim(), row.amountJpy))
                 }
                 if (errorText != null) {
                     Spacer(Modifier.height(8.dp))
-                    Text(errorText, color = MaterialTheme.colorScheme.error)
+                    SelectableText(errorText, color = MaterialTheme.colorScheme.error)
                 }
             }
         },
         confirmButton = {
             if (!confirming) {
-                TextButton(enabled = !busy && formOk, onClick = { confirming = true }) { Text("次へ") }
+                TextButton(enabled = !busy && formOk, onClick = { confirming = true }) { SelectableText("次へ") }
             } else {
                 TextButton(
                     enabled = !busy,
@@ -186,14 +187,14 @@ internal fun BudgetAcknowledgeDialog(
                         val actual = actualInput.trim().takeIf { it.isNotEmpty() }
                         onSubmit(actual, evidence, reason)
                     },
-                ) { Text("解除する") }
+                ) { SelectableText("解除する") }
             }
         },
         dismissButton = {
             if (!confirming) {
-                TextButton(enabled = !busy, onClick = onDismiss) { Text("キャンセル") }
+                TextButton(enabled = !busy, onClick = onDismiss) { SelectableText("キャンセル") }
             } else {
-                TextButton(enabled = !busy, onClick = { confirming = false }) { Text("戻る") }
+                TextButton(enabled = !busy, onClick = { confirming = false }) { SelectableText("戻る") }
             }
         },
     )
@@ -232,12 +233,12 @@ internal fun OrderExtendDialog(
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("order の延長") },
+        title = { SelectableText("order の延長") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                Text(ORDER_EXTEND_CONFIRM)
+                SelectableText(ORDER_EXTEND_CONFIRM)
                 Spacer(Modifier.height(4.dp))
-                Text(ORDER_EXTEND_HINT)
+                SelectableText(ORDER_EXTEND_HINT)
                 Spacer(Modifier.height(8.dp))
                 DetailRow("開始した周", "${order.cyclesStarted} 周")
                 DetailRow("現在の上限", "${order.maxCycles} 周")
@@ -246,27 +247,27 @@ internal fun OrderExtendDialog(
                 OutlinedTextField(
                     value = addInput,
                     onValueChange = { addInput = it },
-                    label = { Text("追加する周数") },
+                    label = { SelectableText("追加する周数") },
                     enabled = !busy,
                     isError = !addOk,
-                    supportingText = { Text(if (addOk) "空欄は追加しません（1 以上の整数）" else "1 以上の整数で入力してください") },
+                    supportingText = { SelectableText(if (addOk) "空欄は追加しません（1 以上の整数）" else "1 以上の整数で入力してください") },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = daysInput,
                     onValueChange = { daysInput = it },
-                    label = { Text("延長する日数") },
+                    label = { SelectableText("延長する日数") },
                     enabled = !busy,
                     isError = !daysOk,
                     supportingText = {
-                        Text(if (daysOk) "空欄は延長しません（1〜$EXTEND_DAYS_MAX 日）" else "1〜$EXTEND_DAYS_MAX の整数で入力してください")
+                        SelectableText(if (daysOk) "空欄は延長しません（1〜$EXTEND_DAYS_MAX 日）" else "1〜$EXTEND_DAYS_MAX の整数で入力してください")
                     },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (errorText != null) {
                     Spacer(Modifier.height(8.dp))
-                    Text(errorText, color = MaterialTheme.colorScheme.error)
+                    SelectableText(errorText, color = MaterialTheme.colorScheme.error)
                 }
             }
         },
@@ -274,10 +275,10 @@ internal fun OrderExtendDialog(
             TextButton(
                 enabled = !busy && formOk,
                 onClick = { onSubmit(addCyclesOrNull(addInput), extendDaysOrNull(daysInput)) },
-            ) { Text("延長する") }
+            ) { SelectableText("延長する") }
         },
         dismissButton = {
-            TextButton(enabled = !busy, onClick = onDismiss) { Text("キャンセル") }
+            TextButton(enabled = !busy, onClick = onDismiss) { SelectableText("キャンセル") }
         },
     )
 }
@@ -301,12 +302,12 @@ internal fun OrderStopRequestDialog(
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("停止の要求") },
+        title = { SelectableText("停止の要求") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                Text(ORDER_STOP_CONFIRM)
+                SelectableText(ORDER_STOP_CONFIRM)
                 Spacer(Modifier.height(4.dp))
-                Text("対象の order: $orderId")
+                SelectableText("対象の order: $orderId")
                 Spacer(Modifier.height(8.dp))
                 REQUESTABLE_STOP_REASONS.forEach { (code, label) ->
                     Row(
@@ -323,12 +324,12 @@ internal fun OrderStopRequestDialog(
                     ) {
                         RadioButton(selected = chosen == code, onClick = null, enabled = !busy)
                         Spacer(Modifier.width(8.dp))
-                        Text(label)
+                        SelectableText(label)
                     }
                 }
                 if (errorText != null) {
                     Spacer(Modifier.height(8.dp))
-                    Text(errorText, color = MaterialTheme.colorScheme.error)
+                    SelectableText(errorText, color = MaterialTheme.colorScheme.error)
                 }
             }
         },
@@ -336,10 +337,10 @@ internal fun OrderStopRequestDialog(
             TextButton(
                 enabled = !busy && chosen != null,
                 onClick = { chosen?.let(onSubmit) },
-            ) { Text("停止を要求する") }
+            ) { SelectableText("停止を要求する") }
         },
         dismissButton = {
-            TextButton(enabled = !busy, onClick = onDismiss) { Text("キャンセル") }
+            TextButton(enabled = !busy, onClick = onDismiss) { SelectableText("キャンセル") }
         },
     )
 }

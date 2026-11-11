@@ -8,6 +8,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -51,20 +52,20 @@ fun ReasonDialog(
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text(title) },
+        title = { SelectableText(title) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                Text(message)
+                SelectableText(message)
                 if (reasonLabel != null) {
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
                         value = reasonInput,
                         onValueChange = { reasonInput = it },
-                        label = { Text(reasonLabel) },
+                        label = { SelectableText(reasonLabel) },
                         enabled = !busy,
                         isError = reasonErrorText(check, maxCodePoints) != null,
                         supportingText = {
-                            Text(
+                            SelectableText(
                                 reasonErrorText(check, maxCodePoints)
                                     ?: "${reasonLength(reasonInput)} / $maxCodePoints 文字",
                             )
@@ -74,7 +75,7 @@ fun ReasonDialog(
                 }
                 if (errorText != null) {
                     Spacer(Modifier.height(8.dp))
-                    Text(errorText, color = MaterialTheme.colorScheme.error)
+                    SelectableText(errorText, color = MaterialTheme.colorScheme.error)
                 }
             }
         },
@@ -85,10 +86,10 @@ fun ReasonDialog(
                     if (!submitEnabled) return@TextButton
                     onSubmit((check as? ReasonCheck.Valid)?.reason)
                 },
-            ) { Text(submitLabel) }
+            ) { SelectableText(submitLabel) }
         },
         dismissButton = {
-            TextButton(enabled = !busy, onClick = onDismiss) { Text("キャンセル") }
+            TextButton(enabled = !busy, onClick = onDismiss) { SelectableText("キャンセル") }
         },
     )
 }

@@ -13,6 +13,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -144,16 +145,16 @@ internal fun ProjectBudgetSection(budget: ApiProjectBudget, onChanged: () -> Uni
 
     val warning = budgetWarningOf(budget.monthlyLimitJpy, budget.softExceeded)
     Column(modifier = Modifier.fillMaxWidth()) {
-        Text("今月の予算（運用者のみ）", style = MaterialTheme.typography.titleMedium)
-        Text(BUDGET_SECTION_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(budgetPeriodText(budget.period), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectableText("今月の予算（運用者のみ）", style = MaterialTheme.typography.titleMedium)
+        SelectableText(BUDGET_SECTION_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectableText(budgetPeriodText(budget.period), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(4.dp))
         BudgetFigure("上限", budgetYenText(budget.monthlyLimitJpy))
         BudgetFigure("警告の基準", budgetYenText(budget.softLimitJpy))
         BudgetFigure("確定", budgetYenText(budget.committedJpy))
         BudgetFigure("予約中", budgetYenText(budget.reservedJpy))
         BudgetFigure("残額", budgetYenText(budget.remainingJpy))
-        Text(
+        SelectableText(
             warning.text,
             style = MaterialTheme.typography.bodySmall,
             color = if (warning.error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -164,8 +165,8 @@ internal fun ProjectBudgetSection(budget: ApiProjectBudget, onChanged: () -> Uni
             OutlinedTextField(
                 value = limitInput,
                 onValueChange = { if (it.length <= BUDGET_LIMIT_INPUT_MAX) limitInput = it },
-                label = { Text("月の上限（円、整数）") },
-                placeholder = { Text("例 10000") },
+                label = { SelectableText("月の上限（円、整数）") },
+                placeholder = { SelectableText("例 10000") },
                 singleLine = true,
                 enabled = !busy && !expired,
                 modifier = Modifier.weight(1f),
@@ -173,7 +174,7 @@ internal fun ProjectBudgetSection(budget: ApiProjectBudget, onChanged: () -> Uni
             OutlinedTextField(
                 value = ratioInput,
                 onValueChange = { if (it.length <= BUDGET_RATIO_INPUT_MAX) ratioInput = it },
-                label = { Text("警告の基準（0 より大きく 1 以下）") },
+                label = { SelectableText("警告の基準（0 より大きく 1 以下）") },
                 singleLine = true,
                 enabled = !busy && !expired,
                 modifier = Modifier.weight(1f),
@@ -181,11 +182,11 @@ internal fun ProjectBudgetSection(budget: ApiProjectBudget, onChanged: () -> Uni
         }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(enabled = !busy && !expired, onClick = { openSet() }) { Text("上限を設定…") }
-            OutlinedButton(enabled = !busy && !expired, onClick = { openClear() }) { Text("上限を解除…") }
+            Button(enabled = !busy && !expired, onClick = { openSet() }) { SelectableText("上限を設定…") }
+            OutlinedButton(enabled = !busy && !expired, onClick = { openClear() }) { SelectableText("上限を解除…") }
         }
         notice?.let { n ->
-            Text(
+            SelectableText(
                 n.text,
                 color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(top = 4.dp),
@@ -219,7 +220,7 @@ internal fun ProjectBudgetSection(budget: ApiProjectBudget, onChanged: () -> Uni
 @Composable
 private fun BudgetFigure(label: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(120.dp))
-        Text(value, style = MaterialTheme.typography.bodySmall)
+        SelectableText(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(120.dp))
+        SelectableText(value, style = MaterialTheme.typography.bodySmall)
     }
 }

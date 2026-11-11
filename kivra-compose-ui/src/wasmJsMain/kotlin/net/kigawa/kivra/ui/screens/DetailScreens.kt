@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
@@ -23,12 +24,7 @@ import net.kigawa.kivra.ui.OperatorAction
 import net.kigawa.kivra.ui.RUN_RELEASE_REASON_MAX
 import net.kigawa.kivra.ui.ReleaseKind
 import net.kigawa.kivra.ui.Route
-import net.kigawa.kivra.ui.ORDER_ABANDONED_DONE
-import net.kigawa.kivra.ui.ORDER_ABANDON_CONFIRM
-import net.kigawa.kivra.ui.canAbandonCycle
 import net.kigawa.kivra.ui.canCancelOrderStop
-import net.kigawa.kivra.ui.currentCycleText
-import net.kigawa.kivra.ui.emptyCyclesText
 import net.kigawa.kivra.ui.canExtendOrder
 import net.kigawa.kivra.ui.canPauseOrder
 import net.kigawa.kivra.ui.canRequestOrderStop
@@ -84,11 +80,11 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
     val state = rememberLoad(runId, reloadKey) { ApiClient.getRun(runId) }
     DetailPage {
         notice?.let { n ->
-            Text(n, color = MaterialTheme.colorScheme.primary)
+            SelectableText(n, color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(8.dp))
         }
         LoadedView(state) { run ->
-            Text(runTitleText(run.mode, run.title), style = MaterialTheme.typography.headlineSmall)
+            SelectableText(runTitleText(run.mode, run.title), style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
@@ -123,12 +119,12 @@ fun RunDetailScreen(runId: String, onNavigate: (Route) -> Unit) {
                 RunExecutionSection(run.runId)
             }
             Spacer(Modifier.height(16.dp))
-            Text("状態の経過", style = MaterialTheme.typography.titleMedium)
+            SelectableText("状態の経過", style = MaterialTheme.typography.titleMedium)
             val events = run.events
             if (events == null) {
-                Text("イベントは含まれていません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectableText("イベントは含まれていません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else if (events.isEmpty()) {
-                Text("記録がありません")
+                SelectableText("記録がありません")
             } else {
                 events.forEach { EventLine(it) }
             }
@@ -147,7 +143,7 @@ private fun RunReleaseSection(runId: String, kind: ReleaseKind, onReleased: (Str
     var open by remember { mutableStateOf(false) }
     var dialogError by remember { mutableStateOf<String?>(null) }
 
-    OutlinedButton(onClick = { dialogError = null; open = true }) { Text(releaseButtonLabel(kind)) }
+    OutlinedButton(onClick = { dialogError = null; open = true }) { SelectableText(releaseButtonLabel(kind)) }
     if (open) {
         ReasonDialog(
             title = texts.title,
@@ -190,19 +186,19 @@ private fun PullRequestSection(run: ApiRun) {
     val uriHandler = LocalUriHandler.current
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
-            Text("PR", style = MaterialTheme.typography.titleMedium)
+            SelectableText("PR", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
             val repo = run.pullRequestRepository
             val number = run.pullRequestNumber
             val url = safePullRequestUrl(run.pullRequestUrl)
             if (repo == null && number == null && run.pullRequestUrl == null) {
-                Text("PR はありません", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectableText("PR はありません", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 DetailRow("リポジトリ", repo ?: "—")
                 DetailRow("番号", number?.let { "#$it" } ?: "—")
                 if (url != null) {
                     Spacer(Modifier.height(4.dp))
-                    OutlinedButton(onClick = { uriHandler.openUri(url) }) { Text("PR を開く") }
+                    OutlinedButton(onClick = { uriHandler.openUri(url) }) { SelectableText("PR を開く") }
                 }
             }
         }
@@ -213,7 +209,7 @@ private fun PullRequestSection(run: ApiRun) {
 private fun EventLine(event: ApiRunEvent) {
     val transition = event.toState?.let { " → $it" } ?: ""
     val reason = runReasonText(event.reasonCode).takeIf { it.isNotEmpty() }?.let { "（$it）" } ?: ""
-    Text(
+    SelectableText(
         text = "${displayTime(event.occurredAt)}  ${runActionText(event.action)}$transition$reason  [${event.result}]",
         style = MaterialTheme.typography.bodySmall,
         modifier = Modifier.padding(vertical = 2.dp),
@@ -257,7 +253,7 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
     DetailPage {
         LoadedView(state) { detail ->
             val goal: ApiGoal = detail.task
-            Text(goal.title, style = MaterialTheme.typography.headlineSmall)
+            SelectableText(goal.title, style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
@@ -273,7 +269,7 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
                     DetailRow("更新日時", displayTime(goal.updatedAt))
                     if (goal.revision > 0) {
                         Spacer(Modifier.height(4.dp))
-                        Text("計画の親タスクです。承認・見送りは子タスクごとに行います。",
+                        SelectableText("計画の親タスクです。承認・見送りは子タスクごとに行います。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -283,7 +279,7 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
             // 承認待ちで、計画の親でない Task だけ承認・見送りを出す(旧 UI と同じ条件)。GOAL_WRITE の人だけ出す。
             if (goal.state == "PENDING_APPROVAL" && goal.revision == 0 && perms.can(GatedOperation.APPROVE_GOAL)) {
                 notice?.let { n ->
-                    Text(
+                    SelectableText(
                         n.text,
                         color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     )
@@ -293,23 +289,23 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
                     Button(
                         enabled = !busy,
                         onClick = { act("タスクを承認しました（投入を待っています）。") { ApiClient.approveGoal(goal.taskId, goal.version) } },
-                    ) { Text("このタスクを承認") }
+                    ) { SelectableText("このタスクを承認") }
                     Spacer(Modifier.width(8.dp))
                     OutlinedButton(
                         enabled = !busy,
                         onClick = { act("タスクを見送りました。") { ApiClient.rejectGoal(goal.taskId, goal.version) } },
-                    ) { Text("見送る") }
+                    ) { SelectableText("見送る") }
                 }
                 Spacer(Modifier.height(12.dp))
             } else {
                 notice?.let { n ->
-                    Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                    SelectableText(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                     Spacer(Modifier.height(12.dp))
                 }
             }
             // 中止は終端でない Goal だけ(旧 UI と同じ条件)。GOAL_STOP の人だけ。理由は必須で、送るだけで保存しない。
             if (canStopGoal(goal.state) && perms.can(GatedOperation.STOP_GOAL)) {
-                OutlinedButton(onClick = { stopError = null; stopOpen = true }) { Text("中止…") }
+                OutlinedButton(onClick = { stopError = null; stopOpen = true }) { SelectableText("中止…") }
                 Spacer(Modifier.height(12.dp))
                 if (stopOpen) {
                     ReasonDialog(
@@ -348,11 +344,11 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
             // 計画の失敗で止まった Goal の再計画(旧 UI の「再計画する」)。GOAL_WRITE の人だけ。
             ReplanGoalAction(goal = goal, onChanged = { reloadKey++ })
             goal.runId?.let { runId ->
-                OutlinedButton(onClick = { onNavigate(Route.RunDetail(runId)) }) { Text("関連する Run を開く") }
+                OutlinedButton(onClick = { onNavigate(Route.RunDetail(runId)) }) { SelectableText("関連する Run を開く") }
                 Spacer(Modifier.height(12.dp))
             }
-            Text("本文", style = MaterialTheme.typography.titleMedium)
-            Text(
+            SelectableText("本文", style = MaterialTheme.typography.titleMedium)
+            SelectableText(
                 text = detail.body?.takeIf { it.isNotBlank() } ?: "（本文はありません）",
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(top = 4.dp),
@@ -375,8 +371,6 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
     var stopError by remember { mutableStateOf<String?>(null) }
     var extendOpen by remember { mutableStateOf(false) }
     var extendError by remember { mutableStateOf<String?>(null) }
-    var abandonOpen by remember { mutableStateOf(false) }
-    var abandonError by remember { mutableStateOf<String?>(null) }
     val perms = LocalCallerPermissions.current
     val gate = rememberOperatorWriteGate()
     val state = rememberLoad(orderId, reloadKey) { ApiClient.getOrder(orderId) }
@@ -401,7 +395,7 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
         LoadedView(state) { detail ->
             val order: ApiOrder = detail.order
             val pending = detail.pendingStopRequest
-            Text("order ${order.orderId}", style = MaterialTheme.typography.headlineSmall)
+            SelectableText("order ${order.orderId}", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
@@ -413,7 +407,6 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                     DetailRow("連続して失敗した周", order.consecutiveFailedCycles.toString())
                     DetailRow("子 order 数", order.childCount.toString())
                     DetailRow("現在の開発目標", order.currentGoalId ?: "なし")
-                    currentCycleText(order.currentGoalId, detail.currentCycle)?.let { DetailRow("進行中の周の状態", it) }
                     DetailRow("プロジェクト", order.projectId ?: "未割り当て")
                     DetailRow("有効期限", displayTime(order.expiresAt))
                     DetailRow("作成日時", displayTime(order.createdAt))
@@ -423,7 +416,7 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
-                    Text("予算(円)", style = MaterialTheme.typography.titleMedium)
+                    SelectableText("予算(円)", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(4.dp))
                     DetailRow("order 予算", yenText(order.orderBudgetJpy))
                     DetailRow("割り当て済み", yenText(order.allocatedJpy))
@@ -435,11 +428,11 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
-                    Text("停止の要求", style = MaterialTheme.typography.titleMedium)
+                    SelectableText("停止の要求", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(4.dp))
                     val pending = detail.pendingStopRequest
                     if (pending == null) {
-                        Text("なし")
+                        SelectableText("なし")
                     } else {
                         DetailRow("理由", orderCodeText(STOP_REASONS, pending.reasonCode))
                         DetailRow("要求した主体", requesterKindText(pending.requesterKind))
@@ -457,39 +450,34 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
             val showCancel = perms.can(GatedOperation.REQUEST_ORDER_STOP) && canCancelOrderStop(pending)
             // 延長はルートの order で、ACTIVE か PAUSED のときだけ(子・STOP_REQUESTED・STOPPED では出さない)。
             val showExtend = perms.can(GatedOperation.EXTEND_ORDER) && canExtendOrder(order.state, order.parentOrderId)
-            // 周の放棄は ACTIVE で進行中の周があるときだけ(サーバーが最終判定する)。
-            val showAbandon = perms.can(GatedOperation.ABANDON_CYCLE) && canAbandonCycle(order.state, order.currentGoalId)
             notice?.let { n ->
-                Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                SelectableText(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                 Spacer(Modifier.height(8.dp))
             }
-            if (showPause || showResume || showExtend || showAbandon || showRequest || showCancel) {
+            if (showPause || showResume || showExtend || showRequest || showCancel) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (showPause) {
                         Button(enabled = !gate.busy, onClick = {
                             send(OperatorAction.PAUSE_ORDER, ORDER_PAUSED_DONE) { ApiClient.pauseOrder(order.orderId, order.version) }
-                        }) { Text("一時停止") }
+                        }) { SelectableText("一時停止") }
                     }
                     if (showResume) {
                         Button(enabled = !gate.busy, onClick = {
                             send(OperatorAction.RESUME_ORDER, ORDER_RESUMED_DONE) { ApiClient.resumeOrder(order.orderId, order.version) }
-                        }) { Text("再開") }
+                        }) { SelectableText("再開") }
                     }
                     if (showExtend) {
-                        OutlinedButton(enabled = !gate.busy, onClick = { extendError = null; extendOpen = true }) { Text("延長…") }
-                    }
-                    if (showAbandon) {
-                        OutlinedButton(enabled = !gate.busy, onClick = { abandonError = null; abandonOpen = true }) { Text("周を放棄…") }
+                        OutlinedButton(enabled = !gate.busy, onClick = { extendError = null; extendOpen = true }) { SelectableText("延長…") }
                     }
                     if (showRequest) {
-                        OutlinedButton(enabled = !gate.busy, onClick = { stopError = null; stopOpen = true }) { Text("停止を要求…") }
+                        OutlinedButton(enabled = !gate.busy, onClick = { stopError = null; stopOpen = true }) { SelectableText("停止を要求…") }
                     }
                     if (showCancel && pending != null) {
                         OutlinedButton(enabled = !gate.busy, onClick = {
                             send(OperatorAction.CANCEL_STOP, ORDER_STOP_CANCELLED_DONE) {
                                 ApiClient.cancelOrderStopRequest(pending.requestId)
                             }
-                        }) { Text("要求を取り消す") }
+                        }) { SelectableText("要求を取り消す") }
                     }
                 }
                 Spacer(Modifier.height(12.dp))
@@ -516,37 +504,6 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                         if (!gate.busy) {
                             extendOpen = false
                             extendError = null
-                        }
-                    },
-                )
-            }
-            if (abandonOpen && showAbandon) {
-                ReasonDialog(
-                    title = "周の放棄",
-                    message = ORDER_ABANDON_CONFIRM,
-                    submitLabel = "放棄する",
-                    reasonLabel = "理由",
-                    busy = gate.busy,
-                    errorText = abandonError,
-                    onSubmit = { reason ->
-                        if (reason != null) {
-                            abandonError = null
-                            gate.send(
-                                action = OperatorAction.ABANDON_CYCLE,
-                                call = { ApiClient.abandonOrderCycle(order.orderId, order.version, reason) },
-                                onSuccess = {
-                                    abandonOpen = false
-                                    notice = ActionNotice(ORDER_ABANDONED_DONE, ok = true)
-                                    reloadKey++
-                                },
-                                onFailure = { abandonError = it },
-                            )
-                        }
-                    },
-                    onDismiss = {
-                        if (!gate.busy) {
-                            abandonOpen = false
-                            abandonError = null
                         }
                     },
                 )
@@ -579,13 +536,13 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
             }
             Row {
                 order.parentOrderId?.let { parent ->
-                    OutlinedButton(onClick = { onNavigate(Route.OrderDetail(parent)) }) { Text("親の order") }
+                    OutlinedButton(onClick = { onNavigate(Route.OrderDetail(parent)) }) { SelectableText("親の order") }
                     Spacer(Modifier.width(8.dp))
                 }
-                OutlinedButton(onClick = { onNavigate(Route.OrderCycles(order.orderId)) }) { Text("周の一覧") }
+                OutlinedButton(onClick = { onNavigate(Route.OrderCycles(order.orderId)) }) { SelectableText("周の一覧") }
                 order.currentGoalId?.let { goalId ->
                     Spacer(Modifier.width(8.dp))
-                    OutlinedButton(onClick = { onNavigate(Route.GoalDetail(goalId)) }) { Text("現在の開発目標") }
+                    OutlinedButton(onClick = { onNavigate(Route.GoalDetail(goalId)) }) { SelectableText("現在の開発目標") }
                 }
             }
         }
@@ -596,34 +553,24 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
 @Composable
 fun OrderCyclesScreen(orderId: String, onNavigate: (Route) -> Unit) {
     val state = rememberLoad(orderId) { ApiClient.getOrderCycles(orderId) }
-    // 進行中の周の状態は order の詳細から読む(周の一覧の応答は配列で、Task の無い current_goal_id を持てない)。
-    val orderState = rememberLoad(orderId) { ApiClient.getOrder(orderId) }
     DetailPage {
-        Text("order $orderId の周", style = MaterialTheme.typography.headlineSmall)
+        SelectableText("order $orderId の周", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
-        orderState.value?.let { detail ->
-            currentCycleText(detail.order.currentGoalId, detail.currentCycle)?.let { text ->
-                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    Column(Modifier.padding(16.dp)) { DetailRow("進行中の周の状態", text) }
-                }
-            }
-        }
         LoadedView(state) { cycles ->
             if (cycles.isEmpty()) {
-                val detail = orderState.value
-                Text(emptyCyclesText(detail?.order?.currentGoalId, detail?.currentCycle))
+                SelectableText("周はまだ開始されていません")
             } else {
                 cycles.forEach { cycle ->
                     Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                         Column(Modifier.padding(16.dp)) {
-                            Text("周 ${cycle.cycleNo}", style = MaterialTheme.typography.titleMedium)
+                            SelectableText("周 ${cycle.cycleNo}", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
                             val goalState = goalStateText(cycle.goalState)
                             DetailRow("開発目標の状態", goalState.label)
                             cycle.stateReason?.takeIf { it.isNotEmpty() }?.let { DetailRow("理由", goalReasonText(it)) }
                             DetailRow("開始日時", displayTime(cycle.createdAt))
                             OutlinedButton(onClick = { onNavigate(Route.GoalDetail(cycle.goalId)) }) {
-                                Text("この周の開発目標を開く")
+                                SelectableText("この周の開発目標を開く")
                             }
                         }
                     }

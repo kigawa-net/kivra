@@ -29,7 +29,16 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import net.kigawa.kivra.agent.backend.RunBackend
+import net.kigawa.kivra.agent.backend.RunOutcome
+import net.kigawa.kivra.agent.backend.RunResult
+import net.kigawa.kivra.agent.backend.RunSpec
+import net.kigawa.kivra.agent.backend.StdoutLine
 import net.kigawa.kivra.agent.docker.DockerLauncher
+import net.kigawa.kivra.agent.k8s.pod.PodReadout
+import net.kigawa.kivra.agent.workdir.AgentChange
+import net.kigawa.kivra.agent.workdir.AgentChangeKind
+import net.kigawa.kivra.agent.workdir.RepoSource
 import net.kigawa.kivra.agent.docker.DockerProcess
 import net.kigawa.kivra.agent.workdir.DiffRejectReason
 import net.kigawa.kivra.agent.workdir.GIT_BIN
@@ -137,7 +146,13 @@ private class World(
     )
     val stopFile: Path = root.resolve(AgentConfig.DEFAULT_STOP_FILE_NAME)
 
-    fun executor(debugKeep: Boolean = false, newErrorCodes: Boolean = false, monitorEvents: Boolean = false): RealAttemptExecutor {
+    fun executor(
+        debugKeep: Boolean = false,
+        newErrorCodes: Boolean = false,
+        monitorEvents: Boolean = false,
+        backend: RunBackend? = null,
+        podInputs: AttemptPodInputs = AttemptPodInputs(),
+    ): RealAttemptExecutor {
         val settings = RealExecutorSettings(
             dockerBinary = Path.of("/usr/bin/docker"),
             dockerHost = null,
@@ -155,7 +170,8 @@ private class World(
             workRoot = root,
             stopFile = stopFile,
             settings = settings,
-            backend = createRunBackend(AgentConfig.Backend.DOCKER, settings, root, launcher = docker, pollMillis = 20),
+            backend = backend ?: createRunBackend(AgentConfig.Backend.DOCKER, settings, root, launcher = docker, pollMillis = 20),
+            podInputs = podInputs,
         )
     }
 
@@ -854,4 +870,135 @@ private const val MIB = 1024 * 1024
 private fun paddingEvents(totalBytes: Int): String = buildString {
     val line = 512 * 1024
     repeat(totalBytes / line) { append("{\"type\":\"user\",\"pad\":\"").append("a".repeat(line - 25)).append("\"}\n") }
+}
+
+/** A backend that gives a scripted [RunResult] (stdout of a successful CLI, the given readout) after [onRun] saw the host work directory. */
+private class FakeBackend(
+    private val readout: PodReadout?,
+    private val onRun: (RunSpec) -> Unit = {},
+    private val exitCode: Int = 0,
+) : RunBackend {
+    var seen: RunSpec? = null
+    override fun validate(spec: RunSpec) {}
+    override fun run(spec: RunSpec, onStdoutLine: ((StdoutLine) -> Unit)?, cancelRequested: () -> Boolean): RunResult {
+        seen = spec
+        onRun(spec)
+        return RunResult(RunOutcome.EXITED, exitCode, lines(resultLine("Changed a.")), "", false, podReadout = readout)
+    }
+    override fun cleanupOrphans(activeRunId: String?): Int? = null
+}
+
+private fun podChange(path: String = "kivra-agent/src/Main.kt", content: String = "fun a() = 9\n") =
+    AgentChange(path, AgentChangeKind.WRITE, content)
+
+/** ADR 0010 追補 7 PR 5a: a Pod readout replaces the host collection, and is checked again; without one the host collection is unchanged. */
+class RealAttemptExecutorPodReadoutTest {
+    @Test
+    fun aPodReadoutIsUsedAndTheHostWorkDirectoryIsNotCollected() = runBlocking {
+        val world = World(docker = ScriptedDocker())
+        // The host work directory is changed differently: it must be ignored when the Pod gave a readout.
+        val backend = FakeBackend(
+            PodReadout.Collected(0, listOf(podChange()), emptyList()),
+            onRun = { spec -> Files.writeString(spec.workDir.resolve("kivra-agent/src/Hygiene.kt"), "fun host() = 1\n") },
+        )
+        assertEquals(AttemptOutcome.ResultSubmitted, world.executor(backend = backend).execute(world.attempt()))
+        val result = world.recorded.single { it.path.endsWith("/result") }
+        assertTrue(result.body.startsWith("""{"generation":3,"result":{"summary":"Changed a.","exitStatus":0,"sessionId":"sess-42""""), result.body)
+        assertTrue(result.body.contains(""""path":"kivra-agent/src/Main.kt","kind":"WRITE","fileKind":"REGULAR","content":"fun a() = 9\n""""))
+        assertFalse(result.body.contains("Hygiene.kt"), "the host work directory must not be collected")
+        world.assertNoRunLeft()
+    }
+
+    @Test
+    fun aPodClaimIsCheckedAgainWithThePathRulesOfTheAttempt() = runBlocking {
+        for (path in listOf(".github/workflows/x.yml", "outside/x.txt", "kivra-agent/../x", "/abs.kt")) {
+            val world = World(docker = ScriptedDocker())
+            val backend = FakeBackend(PodReadout.Collected(0, listOf(podChange(path)), emptyList()))
+            assertEquals(AttemptOutcome.Failed(AgentErrorCode.BAD_OUTPUT), world.executor(backend = backend).execute(world.attempt()), path)
+            assertEquals(0, world.paths("/result"), path)
+            world.assertNoRunLeft()
+        }
+    }
+
+    @Test
+    fun aPodClaimIsCheckedAgainWithTheLimitsOfTheAttemptAndTheSecretRule() = runBlocking {
+        val tooMany = World(docker = ScriptedDocker())
+        val many = (1..21).map { podChange("kivra-agent/src/F$it.kt") }
+        assertEquals(
+            AttemptOutcome.Failed(AgentErrorCode.BAD_OUTPUT),
+            tooMany.executor(backend = FakeBackend(PodReadout.Collected(0, many, emptyList()))).execute(tooMany.attempt()),
+        )
+        assertEquals(0, tooMany.paths("/result"))
+
+        val secret = World(docker = ScriptedDocker())
+        val leaked = listOf(podChange(content = "token = sk-ant-api03-" + "A".repeat(40) + "\n"))
+        assertEquals(
+            AttemptOutcome.Failed(AgentErrorCode.BAD_OUTPUT),
+            secret.executor(backend = FakeBackend(PodReadout.Collected(0, leaked, emptyList()))).execute(secret.attempt()),
+        )
+        assertEquals(0, secret.paths("/result"))
+    }
+
+    @Test
+    fun aPodErrorAndARefusedPodCollectionAreFailures() = runBlocking {
+        val readouts = listOf(
+            PodReadout.Error("RESULT_MALFORMED"),
+            PodReadout.Collected(0, null, listOf(DiffRejectReason.SYMLINK)),
+            PodReadout.Collected(1, listOf(podChange()), emptyList()),
+        )
+        for (readout in readouts) {
+            val world = World(docker = ScriptedDocker())
+            assertEquals(AttemptOutcome.Failed(AgentErrorCode.BAD_OUTPUT), world.executor(backend = FakeBackend(readout)).execute(world.attempt()), readout.toString())
+            assertEquals(0, world.paths("/result"))
+            world.assertNoRunLeft()
+        }
+    }
+
+    @Test
+    fun withoutAReadoutTheHostCollectsTheWorkDirectoryAsBefore() = runBlocking {
+        val world = World(docker = ScriptedDocker())
+        val backend = FakeBackend(null, onRun = { spec -> Files.writeString(spec.workDir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") })
+        assertEquals(AttemptOutcome.ResultSubmitted, world.executor(backend = backend).execute(world.attempt()))
+        val result = world.recorded.single { it.path.endsWith("/result") }
+        assertTrue(result.body.contains(""""path":"kivra-agent/src/Main.kt","kind":"WRITE","fileKind":"REGULAR","content":"fun a() = 2\n""""))
+
+        // and an untouched work directory is still an empty patch, never a success
+        val empty = World(docker = ScriptedDocker())
+        assertEquals(AttemptOutcome.Failed(AgentErrorCode.CLI_NONZERO), empty.executor(backend = FakeBackend(null)).execute(empty.attempt()))
+    }
+
+    @Test
+    fun theInputOfTheRunIsRegisteredOnlyWhileItRuns() = runBlocking {
+        val world = World(docker = ScriptedDocker())
+        val inputs = AttemptPodInputs()
+        var during: Boolean? = null
+        val backend = FakeBackend(null, onRun = { spec -> during = inputs.isRegistered(spec) })
+        world.executor(backend = backend, podInputs = inputs).execute(world.attempt())
+        assertEquals(true, during)
+        assertFalse(inputs.isRegistered(checkNotNull(backend.seen)))
+    }
+
+    @Test
+    fun theSuppliedInputHasTheRepositoryTheBaseCommitAndTheTask() {
+        val inputs = AttemptPodInputs()
+        val world = World(docker = ScriptedDocker())
+        val attempt = world.attempt(body = "body text", bodyTruncated = true)
+        inputs.register(attempt, RepoSource.PublicGithub("kigawa-net", "kivra"))
+        val spec = RunSpec(
+            runId = RUN, attemptId = ATTEMPT, image = IMAGE, workDir = world.root, network = NETWORK, proxyUrl = PROXY,
+            timeout = Duration.ofSeconds(60), maxTurns = 3, model = "m", budgetUsd = "1.00", outputLimitBytes = 1000,
+        )
+        val input = inputs.inputFor(spec)
+        assertEquals("kigawa-net", input.owner)
+        assertEquals("kivra", input.repo)
+        assertEquals(attempt.baseSha, input.commit)
+        assertEquals(TITLE, input.title)
+        assertEquals("body text", input.body)
+        assertTrue(input.truncated)
+        // a local repository (tests) or an unknown run is refused, never guessed
+        inputs.register(attempt, LocalPath(world.repo.repo))
+        assertFailsWith<IllegalStateException> { inputs.inputFor(spec) }
+        inputs.unregister(attempt)
+        assertFailsWith<IllegalStateException> { inputs.inputFor(spec) }
+    }
 }

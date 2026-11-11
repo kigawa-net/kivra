@@ -23,6 +23,9 @@ import net.kigawa.kivra.agent.backend.RunSpec
 import net.kigawa.kivra.agent.docker.CliCommand
 import net.kigawa.kivra.agent.docker.CliOutputLimits
 import net.kigawa.kivra.agent.docker.TaskFile
+import net.kigawa.kivra.agent.k8s.PodInputSource
+import net.kigawa.kivra.agent.k8s.pod.PodInput
+import net.kigawa.kivra.agent.k8s.pod.PodReadout
 import net.kigawa.kivra.agent.workdir.AgentResult
 import net.kigawa.kivra.agent.workdir.CollectOutcome
 import net.kigawa.kivra.agent.workdir.DiffCollector
@@ -91,6 +94,11 @@ class RealAttemptExecutor(
     private val settings: RealExecutorSettings,
     /** Runs the containers and removes the orphans. Built by [createRunBackend] from the settings, so this class names no backend. */
     private val backend: RunBackend,
+    /**
+     * Where a k8s backend reads the input of the run it is running (the repository, the base commit and the task). The executor registers
+     * each attempt here before the run and removes it after. The docker backend does not read it.
+     */
+    private val podInputs: AttemptPodInputs = AttemptPodInputs(),
 ) : AttemptExecutor {
     private val logger = LoggerFactory.getLogger(RealAttemptExecutor::class.java)
     private val mirror = PublicGitMirror(settings.gitBinary, workRoot.resolve(MIRROR_DIR_NAME))
@@ -188,11 +196,16 @@ class RealAttemptExecutor(
             backend.validate(spec)
             backend.cleanupOrphans(attempt.runId)
             monitor.record(MonitorEvent.AttemptStarted)
-            val result = backend.run(
-                spec,
-                onStdoutLine = monitor.stdoutListener(),
-                cancelRequested = { !job.isActive || Files.exists(stopFile) },
-            )
+            val result = try {
+                podInputs.register(attempt, settings.repo)
+                backend.run(
+                    spec,
+                    onStdoutLine = monitor.stdoutListener(),
+                    cancelRequested = { !job.isActive || Files.exists(stopFile) },
+                )
+            } finally {
+                podInputs.unregister(attempt)
+            }
             monitor.record(MonitorEvent.ProcessExitConfirmed(result.outcome))
             val report = StreamJsonParser().parse(result.stdout)
             RunState(result, report, CliOutcomeClassifier.classify(result, report))
@@ -214,14 +227,7 @@ class RealAttemptExecutor(
 
         val work = checkNotNull(state.prepared) { "the work directory is missing after a run" }
         val collected = withContext(Dispatchers.IO + NonCancellable) {
-            DiffCollector(changeRoot, attempt.limits.toDiffLimits()).collect(
-                runDir = work.runDir,
-                manifestPath = work.manifest,
-                summary = run.report.result?.resultText.orEmpty(),
-                exitStatus = checkNotNull(run.result.exitCode),
-                sessionId = run.report.result?.sessionId,
-                pathRules = pathRules,
-            )
+            collect(attempt, run, work, pathRules)
         }
         return when (collected) {
             is CollectOutcome.Rejected -> {
@@ -239,6 +245,29 @@ class RealAttemptExecutor(
                 AttemptOutcome.Failed(code, usage)
             }
             is CollectOutcome.Accepted -> submit(attempt, collected.result, usage, monitor)
+        }
+    }
+
+    /**
+     * Collects the change set. A run that gives a Pod readout (k8s) is not collected on the host: the Pod's claim is checked again with
+     * the real limits and path rules of the attempt, and the summary and the session id come from the CLI's output here
+     * ([PodReadout.Collected.finish]). Without a readout (docker) the host collects from the work directory, as it always did.
+     */
+    private fun collect(attempt: ClaimedAttempt, run: RunState, work: PreparedWorkDir, pathRules: PathRules): CollectOutcome {
+        val limits = attempt.limits.toDiffLimits()
+        val summary = run.report.result?.resultText.orEmpty()
+        val sessionId = run.report.result?.sessionId
+        return when (val readout = run.result.podReadout) {
+            null -> DiffCollector(changeRoot, limits).collect(
+                runDir = work.runDir,
+                manifestPath = work.manifest,
+                summary = summary,
+                exitStatus = checkNotNull(run.result.exitCode),
+                sessionId = sessionId,
+                pathRules = pathRules,
+            )
+            is PodReadout.Error -> CollectOutcome.Rejected(listOf(DiffRejectReason.RESULT_FIELD_INVALID))
+            is PodReadout.Collected -> readout.finish(summary, sessionId, limits, pathRules)
         }
     }
 
@@ -297,4 +326,39 @@ class RealAttemptExecutor(
                 else -> AgentErrorCode.BAD_OUTPUT
             }
     }
+}
+
+/**
+ * The input of the runs in flight, for the k8s backend ([PodInputSource]). [RealAttemptExecutor] registers an attempt before its run and
+ * removes it after. The repository must be a public GitHub one: the Pod fetches the base commit itself, with no credential.
+ */
+class AttemptPodInputs : PodInputSource {
+    private val attempts = java.util.concurrent.ConcurrentHashMap<String, Pair<ClaimedAttempt, RepoSource>>()
+
+    internal fun register(attempt: ClaimedAttempt, repo: RepoSource) {
+        attempts[key(attempt.runId, attempt.attemptId)] = attempt to repo
+    }
+
+    internal fun unregister(attempt: ClaimedAttempt) {
+        attempts.remove(key(attempt.runId, attempt.attemptId))
+    }
+
+    internal fun isRegistered(spec: RunSpec): Boolean = attempts.containsKey(key(spec.runId, spec.attemptId))
+
+    override fun inputFor(spec: RunSpec): PodInput {
+        val (attempt, repo) = attempts[key(spec.runId, spec.attemptId)] ?: error("no input is registered for the run")
+        val github = repo as? RepoSource.PublicGithub ?: error("the repository is not a public GitHub one")
+        return PodInput(
+            runId = attempt.runId,
+            attemptId = attempt.attemptId,
+            owner = github.owner,
+            repo = github.repo,
+            commit = attempt.baseSha,
+            title = attempt.task.value,
+            body = attempt.task.body,
+            truncated = attempt.task.truncated || attempt.task.bodyTruncated,
+        )
+    }
+
+    private fun key(runId: String, attemptId: String) = "$runId/$attemptId"
 }

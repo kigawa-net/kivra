@@ -935,3 +935,35 @@ U-14(有効化された後の起動で、全 `ACTIVE` を `PAUSED(STARTUP_HOLD)`
 - **ルートの数に上限が無い**。作成は運用者(`ORDER_MANAGE`)だけで、AI の主体は作れない。
 - **一覧は作成の古い順に 50 件**(`list`、API と MCP)。order が 50 件を超えると、新しい order は一覧に出ない(詳細は ID で見られる)。直すには一覧の並びと件数の設計が要るため、この追補では変えない。
 - **未確認**: MariaDB での V54(`DROP CONSTRAINT` と、NULL を含む複合の UNIQUE)の実行。H2 のテストは通すが、`KIVRA_TEST_DB=mariadb` の確認は別に行う。本番と dev の挙動。
+
+## 追補(2026-11-11): V40 で消えた Goal を指す `current_goal_id` の扱いと、周の放棄(段階 0)
+
+### 1. 事実
+
+- V40(`V40__flatten_tasks.sql`)は旧 Goal の表を DROP した。V49 以後、周は `selfdev_tasks` の根の Task で、`selfdev_orders.current_goal_id` はその Task の ID を持つ(FK は無い)。V40 より前に始まった周の `current_goal_id` は、存在しない Goal を指したまま残りうる。
+- 実例: order `01M60DX8CFFPYGD5XYCCZPDGW1` は `current_goal_id = 01M60G8C7GXDKN8KNM51CQ2F1H`、`cycles_started = 1`、周の一覧は空だった。
+- 旧コードでは、`evaluateOne` は `current_goal_id` の Task 行が無いと何もせず、自動の周の開始(`autoCycleCandidatesAfter`)は `current_goal_id IS NULL` の order だけを候補にする。order は次の周へ進めず、運用者が直す API も無かった(止めれば order ごと止まる)。
+
+### 2. 決定(段階 0。スキーマ変更なし。単独でマージ・ロールバックできる)
+
+- **自動の修復**: `evaluateOne` は、`current_goal_id` の指す Task 行が無いとき、その周を「失敗」として閉じる。`current_goal_id` を NULL にし、`consecutive_failed_cycles` を失敗した周と同じ規則で 1 増やす。連続失敗が上限(2)か周の上限に達した ACTIVE の order は、同じ規則で `PAUSED` になる。`selfdev_order_events` には `kind = CYCLE_EVALUATED`、`reason_code = LOST_GOAL`、`actor_kind = SYSTEM` を書く(列は既存のまま、`kind` の CHECK は無い)。版の CAS と行ロックは、これまでの周の評価と同じ(`lockOrder` の後に `updateCycleOutcome` を `version` つきで行う)。`STOP_REQUESTED` の order は、その版が承認の束縛なので、従来どおり触らない。
+- **周の放棄**: `POST /api/selfdev/orders/{id}/cycles/abandon`、本文 `{"expectedVersion", "reason"}`(厳密、理由は 1〜500 字)。権限は `ORDER_MANAGE`(AI は不可)。`current_goal_id` が NULL なら 409。指す Task が存在して終わっていなければ、運用者の Task 停止で止めてから、周を失敗として閉じる。Task が無ければ閉じるだけ。成功で終わった Task の周は 409 `CYCLE_ALREADY_ENDED`(自動の評価が正しい結果で閉じる)。order の状態は変えない(上限に達しても `PAUSED` にしない。次をどうするかは運用者が決める)。監査は `kind = CYCLE_ABANDONED`、`reason_code = OPERATOR_ABANDONED`、`actor_kind = HUMAN`。理由の本文は `payload_json` だけに入れる。
+  - `payload_json` は VARCHAR(255)(V53)で、理由は最大 500 字なので、理由は先頭の部分(最大 120 字。JSON 全体が 255 字に収まるまで短くする)と全体の字数(`reasonChars`)を入れる。全文を残すには列の拡張(マイグレーション)が要る。段階 0 では足さない。
+- **見えるもの**: `GET /api/selfdev/orders/{id}` の応答に `currentCycle`(`taskId`、`taskState`、`taskReason`、`taskMissing`)を足した(追加のみ)。`GET .../cycles` の応答は配列で、進行中の周の状態を足す場所が無い。形を変えると既存のクライアントを壊すので変えず、状態は詳細の応答に置いた。画面は、詳細と周の一覧の両方で「進行中の周の状態」を出し、`current_goal_id` があるときは「周はまだ開始されていません」を出さない。MCP の `kivra_order_get` は変えていない。
+
+### 3. 正常な周を誤って閉じないことの根拠
+
+- 周の開始(`startCycleIn`)は、根の Task の INSERT と `selfdev_orders.current_goal_id` の更新を同じ transaction で行う。外から、片方だけが見える状態は無い。
+- `evaluateOne` は order の行を `FOR UPDATE` で取ってから Task を読む。開始の transaction が書き込み中なら、その commit を待つので、Task の行が見えない `current_goal_id` を読むことは無い。
+- `selfdev_tasks` の行を削除するコードは無い(`DELETE FROM selfdev_tasks` はコードに無い)。Task 行が無い `current_goal_id` は、V40 より前の Goal の名残りだけである。
+- テスト: 非終端の Task を持つ周は閉じない(`SelfDevOrderLostGoalRecoveryTest`)。
+
+### 4. 将来との関係
+
+「周を葉の order にする」設計(別の ADR で書く)の前提として、まず order が周の途中で動けなくならないようにする。この段階は、その設計の採否に依らず必要な修復である。
+
+### 5. 残るリスク
+
+- 理由は `payload_json` に先頭の部分しか残らない(上の 2.)。
+- 放棄は、Task の停止(1 つの transaction)と周の閉じ(別の transaction)の 2 段で行う。間に自動の評価が先に周を閉じると、放棄は 409(版の競合)になる。結果は同じ(Task は停止、周は失敗で閉じる)で、二重には数えない。
+- 放棄は連続失敗を 1 増やす。連続失敗が上限の order は自動の開始の対象にならない。

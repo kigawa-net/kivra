@@ -71,6 +71,9 @@ enum class GatedOperation(val permission: SelfDevPermission) {
     /** order の延長(app.js には無い新しい操作 / サーバー: order.extend は ORDER_MANAGE。運用者のみ。ADR 0015 追補 2026-11-10 §2.6)。 */
     EXTEND_ORDER(SelfDevPermission.ORDER_MANAGE),
 
+    /** 進行中の周の放棄(サーバー: order.cycle.abandon は ORDER_MANAGE。運用者のみ。ADR 0015 追補 2026-11-11)。 */
+    ABANDON_CYCLE(SelfDevPermission.ORDER_MANAGE),
+
     /** order の停止要求と、要求の取り消し(app.js: can('STOP_REQUEST') / サーバー: order.stop.request・order.stop.cancel)。 */
     REQUEST_ORDER_STOP(SelfDevPermission.STOP_REQUEST),
 

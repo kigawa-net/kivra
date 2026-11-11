@@ -136,6 +136,7 @@ class EmergencyStopRulesTest {
         assertFalse(v.can(GatedOperation.MANAGE_ORDER))
         assertFalse(v.can(GatedOperation.REQUEST_ORDER_STOP))
         assertFalse(v.can(GatedOperation.EXTEND_ORDER))
+        assertFalse(v.can(GatedOperation.ABANDON_CYCLE))
 
         // 承認者は停止の要求と取り消しはできるが、一時停止・再開・延長(ORDER_MANAGE)はできない。
         val a = enforced(approver)
@@ -143,6 +144,7 @@ class EmergencyStopRulesTest {
         assertFalse(a.can(GatedOperation.MANAGE_AUTOPILOT))
         assertFalse(a.can(GatedOperation.MANAGE_ORDER))
         assertFalse(a.can(GatedOperation.EXTEND_ORDER))
+        assertFalse(a.can(GatedOperation.ABANDON_CYCLE))
 
         // 運用者は一時停止・再開・延長と、停止の要求ができる。
         val o = enforced(operator)
@@ -150,6 +152,7 @@ class EmergencyStopRulesTest {
         assertTrue(o.can(GatedOperation.MANAGE_ORDER))
         assertTrue(o.can(GatedOperation.REQUEST_ORDER_STOP))
         assertTrue(o.can(GatedOperation.EXTEND_ORDER))
+        assertTrue(o.can(GatedOperation.ABANDON_CYCLE))
     }
 
     @Test

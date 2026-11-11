@@ -2304,6 +2304,34 @@ curl -s -X POST -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/j
 - **注意**: 延長は周を始めない。周の開始は従来どおりで、自動の開始が有効なら次の tick から条件に従って始まる。
 - **UI からの操作**: `/ui/compose` の order の詳細で、ルートの order が `ACTIVE` か `PAUSED` のときだけ「延長…」を出す(運用者の `ORDER_MANAGE`)。ダイアログで追加する周数と延長する日数を入れる(どちらか一方か両方。両方空は不可、日数は 1〜3650)。送る `version` は読んだ値。成功すると詳細を読み直す。400 `MAX_CYCLES_INVALID`、409 `NOT_ROOT`・`STOP_ALREADY_PENDING`・`TERMINAL`・`EXTENSION_DOES_NOT_LIFT`・版の競合は、固定の日本語の文言で出す。再開は UI でも別に行う(延長は自動で再開しない)。
 
+#### 7.6.4b 止まった周を閉じる・周の放棄(2026-11-11 追補、段階 0)
+
+V40 が旧 Goal の表を DROP したため、古い order の `current_goal_id` が、もう存在しない Goal を指したまま残ることがある。Task 行が無いので、周は終わらず、次の周も始まらず、order は進まない(止めれば order ごと止まる)。ADR 0015 の 2026-11-11 追補(「V40 で消えた Goal を指す `current_goal_id`」)が根拠である。
+
+- **自動の修復**: 周期の評価(`evaluateEndedCycles`)が、`current_goal_id` の指す Task 行が無い order を見つけると、その周を「失敗」として閉じる。`current_goal_id` を NULL にし、`consecutive_failed_cycles` を 1 増やす。連続失敗が上限(`CYCLE_FAILURE_LIMIT` = 2)に達するか、周の上限に達すると、これまでの失敗した周と同じく `PAUSED`(`CYCLE_FAILURES` / `LIMIT_REACHED`)になる。`STOP_REQUESTED` の order は、これまでどおり触らない。
+  - 監査: `selfdev_order_events` に `kind = 'CYCLE_EVALUATED'`、`reason_code = 'LOST_GOAL'`、`actor_kind = 'SYSTEM'`。
+  - 確認: `SELECT kind, reason_code, actor_kind, occurred_at FROM selfdev_order_events WHERE order_id = '...' AND kind IN ('CYCLE_EVALUATED', 'PAUSED') ORDER BY occurred_at;`
+- **周の放棄(運用者)**: 自動の修復を待たずに、あるいは動いている周をやめたいときに、運用者が進行中の周を失敗として閉じる。
+  - **API**: `POST /api/selfdev/orders/{id}/cycles/abandon` `{"expectedVersion": n, "reason": "1〜500 字"}`。権限は `ORDER_MANAGE`(AI の主体は 403、未認証は 401)。本文は厳密に検査する(余分なフィールドは 400)。`expectedVersion` が違えば 409(`STALE` 相当、`code` なし)。
+  - **動作**: `current_goal_id` が NULL なら 409 `NO_CYCLE_IN_PROGRESS`。指す Task が存在して終わっていなければ、運用者の Task 停止(`POST /api/selfdev/goals/{id}/stop` と同じ処理)で止めてから、周を失敗として閉じる。Task が存在しなければ(旧 Goal)、閉じるだけ。Task が既に成功(`DONE` / `COMPLETED`)で終わっている周は 409 `CYCLE_ALREADY_ENDED`(自動の評価が正しい結果で閉じる)。`STOP_REQUESTED` は 409 `STOP_ALREADY_PENDING`、`STOPPED` は 409 `TERMINAL`。
+  - **結果**: `current_goal_id` が NULL になり、連続失敗が 1 増える。order の状態は変えない(`ACTIVE` のまま。連続失敗が上限に達した order は自動の開始の対象にならないので、続けるには連続失敗を成功の周で戻すか、新しい order を作る)。作成済みの PR は閉じない。
+  - **監査**: `SELECT kind, reason_code, actor_kind, payload_json, occurred_at FROM selfdev_order_events WHERE order_id = '...' AND kind = 'CYCLE_ABANDONED';`。`reason_code` は `OPERATOR_ABANDONED`、`actor_kind` は `HUMAN`。理由は `payload_json`(`{"taskMissing":b,"reasonChars":n,"reason":"..."}`)だけに入る。列は 255 文字なので、理由は先頭の部分(最大 120 文字)に切る。全文の文字数は `reasonChars`。ログには出さない。
+- **見えるもの**: `GET /api/selfdev/orders/{id}` の応答に `currentCycle`(`taskId`、`taskState`、`taskReason`、`taskMissing`)を足した。進行中の周が無ければ null。Task 行が無ければ `taskMissing: true` で、状態は null。`GET .../cycles` は配列のままで形を変えない(Task 行が無い周は載らない)。
+- **手順**(`<JWT>` は運用者のトークン、`<BASE>` は kivra の URL。秘密は書かない):
+
+```sh
+# 1. 現在の version と進行中の周を確かめる(currentCycle.taskMissing が true なら旧 Goal)
+curl -s -H 'Authorization: Bearer <JWT>' '<BASE>/api/selfdev/orders/<ORDER_ID>'
+
+# 2. 周を放棄する(expectedVersion は 1 で見た version)
+curl -s -X POST -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/json' \
+  -d '{"expectedVersion": <VERSION>, "reason": "旧 Goal を指していたため"}' \
+  '<BASE>/api/selfdev/orders/<ORDER_ID>/cycles/abandon'
+```
+
+- **UI からの操作**: `/ui/compose` の order の詳細に「進行中の周の状態」(「Task が見つからない（旧 Goal）」または状態名)を出す。「周を放棄…」は、運用者(`ORDER_MANAGE`)で、order が `ACTIVE` かつ進行中の周があるときだけ出す。理由(1〜500 文字)を入れて確認する。周の一覧では、周の行が空でも進行中の周があれば、「まだ開始されていません」ではなく、その状態を出す。
+- **MCP**: `kivra_order_get` の JSON は変えていない。進行中の周の状態は REST か画面で見る。
+
 #### 7.6.5 監査とログ
 
 - 監査: `selfdev_order_events`(追記専用)。ID、種類、理由コード、状態、主体の種類(`HUMAN` / `AI` / `SYSTEM`)、owner key の SHA-256 の先頭 12 文字(`actor_ref`)だけを持つ。題名、方針、理由の本文は入らない。

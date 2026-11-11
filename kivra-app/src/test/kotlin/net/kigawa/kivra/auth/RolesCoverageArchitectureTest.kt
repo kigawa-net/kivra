@@ -88,6 +88,7 @@ class RolesCoverageArchitectureTest {
         "POST /api/selfdev/orders/{id}/pause" to Permission.ORDER_MANAGE,
         "POST /api/selfdev/orders/{id}/resume" to Permission.ORDER_MANAGE,
         "POST /api/selfdev/orders/{id}/extend" to Permission.ORDER_MANAGE,
+        "POST /api/selfdev/orders/{id}/cycles/abandon" to Permission.ORDER_MANAGE,
         "POST /api/selfdev/orders/{id}/stop-requests" to Permission.STOP_REQUEST,
         "GET /api/selfdev/stop-requests" to Permission.STOP_DECIDE,
         // The project-scoped aliases (ADR 0022 PR-E2) run the same handlers as the old routes above, so they need the same permission.

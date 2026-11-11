@@ -85,6 +85,7 @@ enum class OperatorAction {
     REQUEST_STOP,
     CANCEL_STOP,
     EXTEND_ORDER,
+    ABANDON_CYCLE,
 }
 
 /**
@@ -95,6 +96,7 @@ enum class OperatorAction {
 fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code: String? = null): String {
     // 延長は 400 / 409 の機械的なコード(MAX_CYCLES_INVALID など)を表示に対応づける。規則は OrderExtendRules.kt。
     if (action == OperatorAction.EXTEND_ORDER) return extendFailureText(failure, code)
+    if (action == OperatorAction.ABANDON_CYCLE) return abandonFailureText(failure, code)
     if (action == OperatorAction.RELEASE_RUN && failure == WriteFailure.STALE) releaseConflictText(code)?.let { return it }
     return when (failure) {
         WriteFailure.STALE -> when (action) {
@@ -109,6 +111,7 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             OperatorAction.REQUEST_STOP,
             OperatorAction.CANCEL_STOP,
             OperatorAction.EXTEND_ORDER,
+            OperatorAction.ABANDON_CYCLE,
             -> writeFailureText(failure)
         }
         WriteFailure.BAD_REQUEST -> when (action) {
@@ -127,6 +130,7 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             OperatorAction.REQUEST_STOP,
             OperatorAction.CANCEL_STOP,
             OperatorAction.EXTEND_ORDER,
+            OperatorAction.ABANDON_CYCLE,
             -> writeFailureText(failure)
         }
         WriteFailure.DISABLED -> when (action) {
@@ -142,6 +146,7 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             OperatorAction.REQUEST_STOP,
             OperatorAction.CANCEL_STOP,
             OperatorAction.EXTEND_ORDER,
+            OperatorAction.ABANDON_CYCLE,
             -> writeFailureText(failure)
         }
         else -> writeFailureText(failure)

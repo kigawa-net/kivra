@@ -126,6 +126,20 @@ data class ApiGoalDetail(
 data class ApiOrderDetail(
     val order: ApiOrder,
     val pendingStopRequest: ApiStopRequest? = null,
+    /** 進行中の周の状態(2026-11-11 に追加)。周が無い(`currentGoalId` が null)ときと、古いサーバーでは null。 */
+    val currentCycle: ApiCurrentCycle? = null,
+)
+
+/**
+ * server `CurrentCycleResponse`。`currentGoalId` が指す Task の状態。[taskMissing] が true なら、その ID の Task が無い
+ * (V40 で消えた旧 Goal)ので、[taskState] と [taskReason] は null。
+ */
+@Serializable
+data class ApiCurrentCycle(
+    val taskId: String,
+    val taskState: String? = null,
+    val taskReason: String? = null,
+    val taskMissing: Boolean = false,
 )
 
 /** `GET /api/selfdev/orders/{id}/cycles` element = server `CycleResponse`. [goalId] is the goal the cycle started. */

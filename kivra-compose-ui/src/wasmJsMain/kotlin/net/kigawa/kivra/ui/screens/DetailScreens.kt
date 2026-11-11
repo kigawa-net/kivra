@@ -23,7 +23,12 @@ import net.kigawa.kivra.ui.OperatorAction
 import net.kigawa.kivra.ui.RUN_RELEASE_REASON_MAX
 import net.kigawa.kivra.ui.ReleaseKind
 import net.kigawa.kivra.ui.Route
+import net.kigawa.kivra.ui.ORDER_ABANDONED_DONE
+import net.kigawa.kivra.ui.ORDER_ABANDON_CONFIRM
+import net.kigawa.kivra.ui.canAbandonCycle
 import net.kigawa.kivra.ui.canCancelOrderStop
+import net.kigawa.kivra.ui.currentCycleText
+import net.kigawa.kivra.ui.emptyCyclesText
 import net.kigawa.kivra.ui.canExtendOrder
 import net.kigawa.kivra.ui.canPauseOrder
 import net.kigawa.kivra.ui.canRequestOrderStop
@@ -370,6 +375,8 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
     var stopError by remember { mutableStateOf<String?>(null) }
     var extendOpen by remember { mutableStateOf(false) }
     var extendError by remember { mutableStateOf<String?>(null) }
+    var abandonOpen by remember { mutableStateOf(false) }
+    var abandonError by remember { mutableStateOf<String?>(null) }
     val perms = LocalCallerPermissions.current
     val gate = rememberOperatorWriteGate()
     val state = rememberLoad(orderId, reloadKey) { ApiClient.getOrder(orderId) }
@@ -406,6 +413,7 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                     DetailRow("連続して失敗した周", order.consecutiveFailedCycles.toString())
                     DetailRow("子 order 数", order.childCount.toString())
                     DetailRow("現在の開発目標", order.currentGoalId ?: "なし")
+                    currentCycleText(order.currentGoalId, detail.currentCycle)?.let { DetailRow("進行中の周の状態", it) }
                     DetailRow("プロジェクト", order.projectId ?: "未割り当て")
                     DetailRow("有効期限", displayTime(order.expiresAt))
                     DetailRow("作成日時", displayTime(order.createdAt))
@@ -449,11 +457,13 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
             val showCancel = perms.can(GatedOperation.REQUEST_ORDER_STOP) && canCancelOrderStop(pending)
             // 延長はルートの order で、ACTIVE か PAUSED のときだけ(子・STOP_REQUESTED・STOPPED では出さない)。
             val showExtend = perms.can(GatedOperation.EXTEND_ORDER) && canExtendOrder(order.state, order.parentOrderId)
+            // 周の放棄は ACTIVE で進行中の周があるときだけ(サーバーが最終判定する)。
+            val showAbandon = perms.can(GatedOperation.ABANDON_CYCLE) && canAbandonCycle(order.state, order.currentGoalId)
             notice?.let { n ->
                 Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                 Spacer(Modifier.height(8.dp))
             }
-            if (showPause || showResume || showExtend || showRequest || showCancel) {
+            if (showPause || showResume || showExtend || showAbandon || showRequest || showCancel) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (showPause) {
                         Button(enabled = !gate.busy, onClick = {
@@ -467,6 +477,9 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                     }
                     if (showExtend) {
                         OutlinedButton(enabled = !gate.busy, onClick = { extendError = null; extendOpen = true }) { Text("延長…") }
+                    }
+                    if (showAbandon) {
+                        OutlinedButton(enabled = !gate.busy, onClick = { abandonError = null; abandonOpen = true }) { Text("周を放棄…") }
                     }
                     if (showRequest) {
                         OutlinedButton(enabled = !gate.busy, onClick = { stopError = null; stopOpen = true }) { Text("停止を要求…") }
@@ -503,6 +516,37 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                         if (!gate.busy) {
                             extendOpen = false
                             extendError = null
+                        }
+                    },
+                )
+            }
+            if (abandonOpen && showAbandon) {
+                ReasonDialog(
+                    title = "周の放棄",
+                    message = ORDER_ABANDON_CONFIRM,
+                    submitLabel = "放棄する",
+                    reasonLabel = "理由",
+                    busy = gate.busy,
+                    errorText = abandonError,
+                    onSubmit = { reason ->
+                        if (reason != null) {
+                            abandonError = null
+                            gate.send(
+                                action = OperatorAction.ABANDON_CYCLE,
+                                call = { ApiClient.abandonOrderCycle(order.orderId, order.version, reason) },
+                                onSuccess = {
+                                    abandonOpen = false
+                                    notice = ActionNotice(ORDER_ABANDONED_DONE, ok = true)
+                                    reloadKey++
+                                },
+                                onFailure = { abandonError = it },
+                            )
+                        }
+                    },
+                    onDismiss = {
+                        if (!gate.busy) {
+                            abandonOpen = false
+                            abandonError = null
                         }
                     },
                 )
@@ -552,12 +596,22 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
 @Composable
 fun OrderCyclesScreen(orderId: String, onNavigate: (Route) -> Unit) {
     val state = rememberLoad(orderId) { ApiClient.getOrderCycles(orderId) }
+    // 進行中の周の状態は order の詳細から読む(周の一覧の応答は配列で、Task の無い current_goal_id を持てない)。
+    val orderState = rememberLoad(orderId) { ApiClient.getOrder(orderId) }
     DetailPage {
         Text("order $orderId の周", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
+        orderState.value?.let { detail ->
+            currentCycleText(detail.order.currentGoalId, detail.currentCycle)?.let { text ->
+                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Column(Modifier.padding(16.dp)) { DetailRow("進行中の周の状態", text) }
+                }
+            }
+        }
         LoadedView(state) { cycles ->
             if (cycles.isEmpty()) {
-                Text("周はまだ開始されていません")
+                val detail = orderState.value
+                Text(emptyCyclesText(detail?.order?.currentGoalId, detail?.currentCycle))
             } else {
                 cycles.forEach { cycle ->
                     Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {

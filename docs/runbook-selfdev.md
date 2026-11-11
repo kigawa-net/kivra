@@ -1063,6 +1063,16 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 - `DockerRunner.cleanupOrphans` は、起動時に `kivra-agent=1` のラベルが付いたコンテナだけを対象に `docker rm -f` する。他のラベルのコンテナには触れない。
 - 出力(stdout・stderr)は上限つきで読み、超えたらコンテナを止める。ログには出さない。
 
+### 6.6b k8s の Job マニフェストの生成と検査(ADR 0010 追補 7、PR 3)
+
+コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/k8s/`(`K8sJobSpec`、`K8sJobBuilder`、`K8sJobGuard`、`K8sConstants`)。Kubernetes API には接続しない。**この PR の範囲はマニフェストの生成と検査だけで、まだ k8s では動かない**(`KIVRA_AGENT_BACKEND=k8s` は引き続き設定エラーで拒否される)。
+
+- `K8sJobBuilder` が Run ごとの Job(`batch/v1`、`backoffLimit: 0`、Pod 1 つ、コンテナ 1 つ、emptyDir 3 つ)を JSON の木で作る。argv と env は docker 側(`CliCommand`、`DockerConstants`)と同じ値を使う。
+- `K8sJobGuard` が許可リスト方式で検査する。未知のキー、欠けたキー、禁止項目(hostPath などの emptyDir 以外の volume、privileged、capabilities.add、host の名前空間、service account、init container、許可外の env・mount・image)は、それぞれ固有の理由で拒否する。例外の文言は理由だけで、値を含まない。
+- 試験: `K8sJobGuardTest` は禁止項目を 1 行 1 ケースで固定し、`K8sDockerCorrespondenceTest` は docker 側と値が一致することを確かめる。docker 側の定数は変えていない。
+- 未決の点(PR 4): init container を作らない(作業ディレクトリの準備と差分収集の Pod 内化)。差分の受け取り方。Job の作成・ログの読み取り・停止・掃除。
+- クラスタ側の前提(§3 の NetworkPolicy、namespace の PodSecurity `restricted`、kubelet の `podPidsLimit`)は、この PR では確かめていない。
+
 ### 6.7 CLI の起動、task ファイル、stream-json の解析と分類(PR 7)
 
 コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/docker/`(`CliCommand.kt`、`TaskFile.kt`、`DockerArgsGuard.kt`)、`kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/claude/`(`StreamJsonParser.kt`、`CliOutcome.kt`)。試験は fake の docker と固定の出力で行い、実際の docker と `claude` は使わない。AgentLoop への接続は PR 9。

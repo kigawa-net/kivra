@@ -620,6 +620,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                 members = ProjectMemberRepository(database, java.time.Clock.systemUTC()),
                 budgets = budgetStore,
                 drain = ProjectDrainRepository(database, budgetStore),
+                chatRepo = net.kigawa.kivra.db.ProjectChatRepository(database),
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

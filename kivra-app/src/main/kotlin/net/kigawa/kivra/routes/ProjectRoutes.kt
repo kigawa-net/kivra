@@ -32,6 +32,9 @@ import net.kigawa.kivra.db.ProjectBackfillRepository
 import net.kigawa.kivra.db.ProjectDrainRepository
 import net.kigawa.kivra.db.ProjectDrainResult
 import net.kigawa.kivra.db.ProjectDeleteResult
+import net.kigawa.kivra.db.ProjectChatMessageRow
+import net.kigawa.kivra.db.ProjectChatRepository
+import net.kigawa.kivra.db.ProjectChatSessionRow
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectMemberRow
 import net.kigawa.kivra.db.ProjectRepository
@@ -87,6 +90,8 @@ internal fun Route.configureProjectRoutes(
     budgets: DbBudgetStore,
     /** The drain of a project into another (ADR 0022): `POST /api/projects/{id}/drain`. */
     drain: ProjectDrainRepository,
+    /** The project chat (V55): `/api/projects/{id}/chat`. Null: the chat routes are not registered. */
+    chatRepo: ProjectChatRepository? = null,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -365,6 +370,39 @@ internal fun Route.configureProjectRoutes(
                 ),
             )
         }
+        // The project chat (V55). Registered only when a chat repository is given. Reads need READ and the project's read scope; sending
+        // a message needs ORDER_MANAGE. The message is only stored here: no Task is submitted.
+        if (chatRepo != null) {
+            get("chat") {
+                val principal = call.principalOr401() ?: return@get
+                if (!call.permitOr403(principal, Permission.READ, "project_chat_get")) return@get
+                val projectId = call.pathParam("projectId")
+                    ?: return@get call.respond(HttpStatusCode.NotFound)
+                if (projectRepo.get(projectId) == null || !mayReadProject(principal, projectId, "project_chat_get")) {
+                    return@get call.respond(HttpStatusCode.NotFound)
+                }
+                val session = chatRepo.getSession(projectId)
+                    ?: return@get call.respond(HttpStatusCode.NotFound)
+                call.respond(chatSessionResponse(chatRepo, session))
+            }
+            post("chat") {
+                val principal = call.principalOr401() ?: return@post
+                if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_chat_send")) return@post
+                if (!call.requireJsonSameOrigin()) return@post
+                val projectId = call.pathParam("projectId")
+                    ?: return@post call.respond(HttpStatusCode.NotFound)
+                if (projectRepo.get(projectId) == null || !mayReadProject(principal, projectId, "project_chat_send")) {
+                    return@post call.respond(HttpStatusCode.NotFound)
+                }
+                val input = call.receive<ChatSendMessageRequest>()
+                if (input.content.isBlank()) return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_content"))
+                if (input.title.length > CHAT_TITLE_MAX) return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_title"))
+                val session = chatRepo.getSession(projectId)
+                    ?: chatRepo.createSession(projectId, input.title.ifBlank { DEFAULT_CHAT_TITLE })
+                val message = chatRepo.appendMessage(session.projectId, "user", input.content)
+                call.respond(HttpStatusCode.Created, message.toResponse())
+            }
+        }
         get {
             val principal = call.principalOr401() ?: return@get
             if (!call.permitOr403(principal, Permission.READ, "project_get")) return@get
@@ -642,6 +680,43 @@ data class ProjectActivityResponse(
     val result: String,
     val toState: String? = null,
     val reasonCode: String? = null,
+)
+
+/** The body of `POST /api/projects/{id}/chat`. [title] names the session when this message creates it; otherwise it is ignored. */
+@Serializable
+data class ChatSendMessageRequest(val content: String, val title: String = "")
+
+@Serializable
+data class ChatMessageResponse(val id: Long, val sessionId: String, val role: String, val content: String, val createdAt: String)
+
+/** A chat session with its latest messages (oldest first). [sessionId] is the project id. */
+@Serializable
+data class ChatSessionResponse(
+    val sessionId: String,
+    val title: String,
+    val updatedAt: String,
+    val messages: List<ChatMessageResponse>,
+    val messageCount: Long,
+)
+
+private const val CHAT_RECENT_MESSAGES = 50
+private const val CHAT_TITLE_MAX = 256
+private const val DEFAULT_CHAT_TITLE = "Chat"
+
+private fun chatSessionResponse(repo: ProjectChatRepository, session: ProjectChatSessionRow): ChatSessionResponse {
+    val count = repo.countMessages(session.projectId)
+    val offset = (count - CHAT_RECENT_MESSAGES).coerceAtLeast(0)
+    return ChatSessionResponse(
+        sessionId = session.projectId,
+        title = session.title,
+        updatedAt = session.updatedAt.toString(),
+        messages = repo.getMessages(session.projectId, CHAT_RECENT_MESSAGES, offset).map { it.toResponse() },
+        messageCount = count,
+    )
+}
+
+private fun ProjectChatMessageRow.toResponse() = ChatMessageResponse(
+    id = id, sessionId = sessionId, role = role, content = content, createdAt = createdAt.toString(),
 )
 
 private const val DASHBOARD_RECENT_RUNS = 10

@@ -17,6 +17,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,6 +49,8 @@ import net.kigawa.kivra.ui.api.ApiProjectBudget
 import net.kigawa.kivra.ui.api.ApiProjectDashboard
 import net.kigawa.kivra.ui.api.ApiRun
 import net.kigawa.kivra.ui.api.ApiSession
+import net.kigawa.kivra.ui.api.ApiChatMessage
+import net.kigawa.kivra.ui.api.ApiChatSession
 import net.kigawa.kivra.ui.backfillExplain
 import net.kigawa.kivra.ui.backfillFailureText
 import net.kigawa.kivra.ui.backfillTableLine
@@ -76,6 +79,11 @@ import net.kigawa.kivra.ui.projectRunStateText
 import net.kigawa.kivra.ui.showsProjectOperator
 import net.kigawa.kivra.ui.submitBlocked
 import net.kigawa.kivra.ui.yenText
+import net.kigawa.kivra.ui.IdempotencyKeys
+import net.kigawa.kivra.ui.SubmitKind
+import net.kigawa.kivra.ui.SubmitResult
+import net.kigawa.kivra.ui.taskSuccessText
+import net.kigawa.kivra.ui.validatedTaskTitle
 
 /**
  * プロジェクトのダッシュボード(`#/projects/<id>/dashboard`、旧 UI の project-dash): 状態別の件数、最近の Run、費用、最近の活動。
@@ -152,6 +160,10 @@ private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNa
             Text(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
         }
     }
+
+    // プロジェクトごとのチャット（V53）。kivra Agentへの指示投入用。
+    Spacer(Modifier.height(16.dp))
+    ProjectChatSection(projectId)
 
     if (operator) {
         Spacer(Modifier.height(16.dp))
@@ -674,5 +686,150 @@ private fun ProjectOperatorSection(projectId: String) {
                 }
             },
         )
+    }
+}
+
+/**
+ * プロジェクトチャットセクション（V53）。メッセージの表示と送信を行う。
+ * チャットメッセージはDBに保存され、同時にTaskとしてkivra Agentへ指示が投入される。
+ */
+@Composable
+private fun ProjectChatSection(projectId: String) {
+    val scope = rememberCoroutineScope()
+    val chat = rememberLoad(projectId) { loadChatSession(projectId) }
+    var inputText by remember { mutableStateOf("") }
+    var sendBusy by remember { mutableStateOf(false) }
+    var sendNotice by remember { mutableStateOf<ActionNotice?>(null) }
+    val keys = remember { IdempotencyKeys() }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("チャット（kivra Agentへの指示）", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+
+            // メッセージ一覧
+            when {
+                chat.value == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                chat.value!!.messages.isEmpty() -> Text("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else -> {
+                    chat.value!!.messages.forEach { msg: ApiChatMessage ->
+                        ChatMessageRow(msg)
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            // 入力エリア
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = inputText,
+                    onValueChange = { inputText = it },
+                    label = { Text("指示を入力") },
+                    placeholder = { Text("例: プロジェクトの設定を確認して") },
+                    singleLine = true,
+                    enabled = !sendBusy && !ApiSession.expired,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    enabled = inputText.isNotBlank() && !sendBusy && !ApiSession.expired,
+                    onClick = {
+                        if (submitBlocked(sendBusy, ApiSession.expired)) return@Button
+                        sendBusy = true
+                        sendNotice = null
+                        val trimmed = inputText.trim()
+                        inputText = ""
+                        scope.launch {
+                            var chatOk = false
+                            var taskOk = false
+                            try {
+                                // チャットメッセージをDBに保存
+                                ApiClient.sendChatMessage(projectId, trimmed)
+                                chatOk = true
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                // チャットの保存に失敗してもTask投入は試みる
+                                sendNotice = ActionNotice("チャットの保存に失敗しました", ok = false)
+                            }
+                            // Taskとしてkivra Agentへ指示を投入
+                            try {
+                                val title = validatedTaskTitle(trimmed) ?: trimmed
+                                val key = keys.keyFor(title)
+                                val result = ApiClient.submitTask(title, null, SubmitKind.SELF_DEV, projectId, key)
+                                taskOk = true
+                                keys.rotate()
+                                // チャット送信のみの成功時は「送信しました」、Task追加時は「Taskとして投入しました」
+                                sendNotice = if (chatOk) {
+                                    ActionNotice(taskSuccessText(result, SubmitKind.SELF_DEV), ok = result !is SubmitResult.Failed)
+                                } else {
+                                    ActionNotice("Taskとして投入しました（チャットの保存は失敗しました）", ok = true)
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                if (!chatOk) {
+                                    sendNotice = ActionNotice("送信に失敗しました", ok = false)
+                                }
+                                // chatOk の場合はすでに sendNotice が設定されている
+                            } finally {
+                                sendBusy = false
+                            }
+                        }
+                    },
+                ) {
+                    Text("送信")
+                }
+            }
+            sendNotice?.let { n ->
+                Text(
+                    n.text,
+                    color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 1件のチャットメッセージの表示。roleによってスタイルを変える。 */
+@Composable
+private fun ChatMessageRow(msg: ApiChatMessage) {
+    val isUser = msg.role == "user"
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                if (isUser) "あなた" else "kivra",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(msg.content, style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(2.dp))
+            Text(msg.createdAt, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** チャットセッションの読み込み。セッションがなければnull（UIは「メッセージはありません」を表示）。 */
+internal suspend fun loadChatSession(projectId: String): ApiChatSession {
+    return try {
+        ApiClient.getChatSession(projectId)
+    } catch (e: ApiException) {
+        // 404: セッション未作成。空のセッションを返す
+        if (e.status == 404) {
+            ApiChatSession(
+                sessionId = projectId,
+                title = "Chat",
+                updatedAt = "",
+                messages = emptyList(),
+                messageCount = 0,
+            )
+        } else {
+            throw e
+        }
     }
 }

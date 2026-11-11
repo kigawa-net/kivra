@@ -718,6 +718,23 @@ object ApiClient {
         }
     }
 
+    /**
+     * チャットのセッション取得。`GET /api/projects/{id}/chat`。404 はセッション未作成。
+     */
+    suspend fun getChatSession(projectId: String): ApiChatSession =
+        getJson("/api/projects/${percentEncode(projectId)}/chat")
+
+    /**
+     * チャットメッセージ送信。`POST /api/projects/{id}/chat`、本文 `{content, title}`。
+     * 既存のセッションがあればそこに追加、無ければ title で新規作成。201。
+     */
+    suspend fun sendChatMessage(projectId: String, content: String, title: String = "") =
+        postWrite(
+            "/api/projects/${percentEncode(projectId)}/chat",
+            ChatSendMessageRequest(content, title),
+        )
+
+
     private val replyJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val ERROR_FIELD = Regex("\"error\"\\s*:\\s*\"([^\"]{0,200})\"")
@@ -776,3 +793,8 @@ object ApiClient {
 /** Server `MemoryListResponse`: the page of notes plus the counts. Only the items are used by the UI. */
 @Serializable
 private data class ApiMemoryList(val items: List<ApiMemory>)
+
+/** `POST /api/projects/{id}/chat` の本文(server `ChatSendMessageRequest`)。 */
+@Serializable
+private class ChatSendMessageRequest(val content: String, val title: String)
+

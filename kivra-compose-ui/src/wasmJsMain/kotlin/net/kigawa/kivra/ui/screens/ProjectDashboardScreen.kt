@@ -7,8 +7,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -132,10 +135,10 @@ private fun ProjectDashboardBody(
     }
     Spacer(Modifier.height(4.dp))
     Text(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Spacer(Modifier.height(8.dp))
+    Spacer(Modifier.height(4.dp))
     // このプロジェクトの項目への入口(サイドナビからはここへ移した)。
     ProjectLinks(links, approvalsBadge, Route.ProjectPage(projectId, NavDestination.Dashboard), onNavigate)
-    Spacer(Modifier.height(12.dp))
+    Spacer(Modifier.height(8.dp))
 
 
     // --- Run 関連：状態別件数 + 最近の Run ---
@@ -151,7 +154,7 @@ private fun ProjectDashboardBody(
                     Text("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
 
             SectionTitle("最近の Run")
             if (d.recentRuns.isEmpty()) {
@@ -163,21 +166,33 @@ private fun ProjectDashboardBody(
             }
         }
     }
-    Spacer(Modifier.height(12.dp))
+    Spacer(Modifier.height(8.dp))
 
     // --- 費用 ---
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             SectionTitle("費用（この Run に紐づく分）")
             Text(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            DetailRow("確定", yenText(d.spend.committedJpy))
-            DetailRow("予約中", yenText(d.spend.reservedJpy))
-            DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
-            DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(modifier = Modifier.weight(1f)) {
+                    DetailRow("確定", yenText(d.spend.committedJpy))
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    DetailRow("予約中", yenText(d.spend.reservedJpy))
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(modifier = Modifier.weight(1f)) {
+                    DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
+                }
+            }
             DetailRow("合計", yenText(d.spend.totalJpy))
         }
     }
-    Spacer(Modifier.height(12.dp))
+    Spacer(Modifier.height(8.dp))
 
     // --- 最近の活動 ---
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -192,7 +207,7 @@ private fun ProjectDashboardBody(
             }
         }
     }
-    Spacer(Modifier.height(12.dp))
+    Spacer(Modifier.height(8.dp))
 
     // プロジェクトごとのチャット（V53）。kivra Agentへの指示投入用。
     ProjectChatSection(projectId)
@@ -323,7 +338,7 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             LoadedView(projects) { list ->
                 val choices = drainTargetChoices(list, projectId)
                 if (choices.isEmpty()) {
@@ -343,7 +358,7 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
                             Text(p.name)
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(4.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(enabled = targetId != null && !busy && !ApiSession.expired, onClick = { dryRun() }) {
                             Text("確認（dry-run）")
@@ -382,7 +397,7 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             Button(
                 enabled = canDeleteEmptied(emptied, busy) && !ApiSession.expired,
                 onClick = {
@@ -595,7 +610,7 @@ private fun ProjectOperatorSection(projectId: String) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("リポジトリの対応（運用者のみ）", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             LoadedList(repos, emptyText = REPO_EMPTY_MESSAGE) { list ->
                 list.forEach { repo ->
                     Row(
@@ -616,7 +631,7 @@ private fun ProjectOperatorSection(projectId: String) {
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = repoInput,
@@ -639,9 +654,9 @@ private fun ProjectOperatorSection(projectId: String) {
                 )
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
             ProjectMembersSection(projectId)
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
             Text("既存データの振り分け", style = MaterialTheme.typography.titleMedium)
             Text(
                 "プロジェクトが未設定の既存データだけを、repo の対応で振り分けます（全プロジェクトに効きます）。" +
@@ -649,7 +664,7 @@ private fun ProjectOperatorSection(projectId: String) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(enabled = !backfillBusy && !ApiSession.expired, onClick = { dryRun() }) {
                     Text("確認（dry-run）")
@@ -739,12 +754,14 @@ private fun ProjectChatSection(projectId: String) {
                 chat.value == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
                 chat.value!!.messages.isEmpty() -> Text("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else -> {
-                    chat.value!!.messages.forEach { msg: ApiChatMessage ->
-                        ChatMessageRow(msg)
+                    Column(modifier = Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
+                        chat.value!!.messages.forEach { msg: ApiChatMessage ->
+                            ChatMessageRow(msg)
+                        }
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
             // 入力エリア
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(

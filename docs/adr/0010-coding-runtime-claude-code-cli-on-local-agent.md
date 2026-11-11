@@ -277,8 +277,8 @@ ADR 0010 の決定 3・5・6(docker 引数の不変条件)を、Job のマニフ
 
 ### 6. 未決の点
 
-- **差分(PatchSet)の受け取り方。** 差分の収集(`DiffCollector`)は、ホストのファイルシステムを走査する。Pod の終了後は emptyDir を読めないため、Pod 内で収集して結果を出す必要がある。出し方(ログの終端 JSON、ConfigMap、ほか)は、PR 4 で決める。ログは kubelet のローテーションで失われうるため、ログだけに頼らない案を優先する。
-- **git の mirror。** Job ごとに取得するか、キャッシュを持つか。公開 GitHub の https だけで、資格情報は持たない(従来どおり)。
+- **差分(PatchSet)の受け取り方。(PR 4 で決定、2026-11-11)** 「exec readout」方式にする。Pod の中の entrypoint(`k8s/pod/PodEntrypoint`)が、CLI の終了後に差分を収集し(`DiffCollector` を再利用)、`/work/.kivra/result.json` を atomic に書き、その後は生きたまま待つ。agent は `pods/exec` でこのファイルを読み、その後に Job を delete する。PatchSet はログに載せず、ログのローテーションに依存しない。Pod には認証情報を渡さず、agent への外向きの経路も作らない。agent が必要とする RBAC は、Job の namespace の中で `batch/jobs` の create・get・list・delete、`pods` の get・list、`pods/log` の get、`pods/exec` の create(と get)だけ(manifest は PR 5)。結果ファイルは、モデルが動かしたコードの出力なので信頼しない。agent は 8 MiB 以内で厳密に読み、claim の limits と path rules で全項目を再検査する(`PodReadout.Collected.finish`)。summary と sessionId は CLI の出力(ログ)にしかないため、Pod の収集ではプレースホルダを使い、agent が差し替える。入力(リポジトリ、base commit、依頼文)は、逆向きに exec の stdin で `/work/.kivra/input.json` に送る(依頼文はコマンドラインにも環境変数にも入れない)。
+- **git の mirror。(PR 4 で決定、2026-11-11)** Job ごとに Pod の中で取得する。キャッシュは持たない。公開 GitHub の https だけで、資格情報は持たない(`PublicGitMirror.syncCommit`、base commit 1 つを depth 1 で取得)。Pod の egress はプロキシだけなので、取得はプロキシ経由(`HTTPS_PROXY`)になる。**プロキシの許可リスト(`agent-runtime/proxy/allowlist.txt`)に `github.com` を足す作業は PR 5 の前提**(現状の許可リストは Gradle の 3 ホストだけ)。
 - **`kivra-agent` と プロキシで、Keycloak の client を分けるか。** 分ければ、Job 側の侵害の影響を小さくできる。
 - **`STOP` ファイルの代替**(キルスイッチ)。ConfigMap か、kivra 側の停止の判定を使う。
 

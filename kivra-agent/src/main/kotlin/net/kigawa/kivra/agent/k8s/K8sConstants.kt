@@ -22,10 +22,16 @@ internal object K8sConstants {
      */
     const val IMAGE_PULL_POLICY = "IfNotPresent"
 
+    /**
+     * The in-Pod entrypoint (ADR 0010 追補 7, PR 4). It is the first token of the container command; the CLI argv follows. It is a launcher
+     * of `net.kigawa.kivra.agent.k8s.pod.PodEntrypointKt` that the runtime image must provide (the image change is not part of PR 4).
+     */
+    const val POD_ENTRYPOINT = "/usr/local/bin/kivra-pod-entrypoint"
+
     /** The working directory of the container (the emptyDir `work`), as [DockerConstants.WORKDIR]. */
     const val WORKDIR = DockerConstants.WORKDIR
 
-    /** Kept after the Job finished, so the logs can be read (PR 4). An operator choice, not a docker value. */
+    /** Kept after the Job finished (the agent deletes the Job itself after it has read the logs and the result file; this is the backstop). An operator choice, not a docker value. */
     const val TTL_SECONDS_AFTER_FINISHED = 3600
 
     /** The most `activeDeadlineSeconds` a Job may have: 24 hours, as the docker side's time limit. */

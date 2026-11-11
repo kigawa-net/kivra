@@ -66,6 +66,10 @@ internal object PlannerPrompt {
             appendLine("A new file is allowed only when its parent directory is inside an allowed path that the list shows.")
             appendLine("If the list is a summary by directory, the files inside a listed directory are not all shown: name such a file")
             appendLine("only when the goal itself names it.")
+            appendLine("A path that the list shows already exists. Never write a task that creates or rewrites such a file from scratch:")
+            appendLine("it would overwrite working code, and the coding step then ends with no change. Write the task as a concrete")
+            appendLine("change to the existing file instead (what to add, fix or extend), or leave the task out if you cannot name one.")
+            appendLine("You cannot see the file content. Do not claim that a feature is missing from a file you have not been shown.")
         }
         appendLine()
         appendLine("TASK SIZE")

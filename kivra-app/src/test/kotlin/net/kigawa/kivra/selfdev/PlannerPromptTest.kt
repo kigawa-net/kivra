@@ -20,4 +20,12 @@ class PlannerPromptTest {
         assertTrue(system.contains("Use only these keys. Unknown keys are rejected. Do not add any other key."))
         assertTrue(system.contains("Do not plan changes to CI workflows, build files, dependency declarations, database migrations, ADRs, or credentials."))
     }
+
+    @Test
+    fun theRepoFilePromptForbidsRecreatingListedFiles() {
+        val with = PlannerPrompt.system(repoFiles = true)
+        assertTrue(with.contains("Never write a task that creates or rewrites such a file from scratch"))
+        assertTrue(with.contains("You cannot see the file content."))
+        assertTrue(!PlannerPrompt.system().contains("from scratch"))
+    }
 }

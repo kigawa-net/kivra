@@ -718,11 +718,9 @@ private fun ProjectChatSection(projectId: String) {
     var sendNotice by remember { mutableStateOf<ActionNotice?>(null) }
     val keys = remember { IdempotencyKeys() }
 
+    SectionTitle("チャット（kivra Agentへの指示）")
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text("チャット（kivra Agentへの指示）", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(8.dp))
-
+        Column(modifier = Modifier.padding(12.dp)) {
             // メッセージ一覧
             when {
                 chat.value == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
@@ -733,16 +731,14 @@ private fun ProjectChatSection(projectId: String) {
                     }
                 }
             }
-
-            Spacer(Modifier.height(12.dp))
-
+            Spacer(Modifier.height(8.dp))
             // 入力エリア
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
                     label = { Text("指示を入力") },
-                    placeholder = { Text("例: プロジェクトの設定を確認して") },
+                    placeholder = { Text("指示を入力...") },
                     singleLine = true,
                     enabled = !sendBusy && !ApiSession.expired,
                     modifier = Modifier.weight(1f),
@@ -758,25 +754,19 @@ private fun ProjectChatSection(projectId: String) {
                         inputText = ""
                         scope.launch {
                             var chatOk = false
-                            var taskOk = false
                             try {
-                                // チャットメッセージをDBに保存
                                 ApiClient.sendChatMessage(projectId, trimmed)
                                 chatOk = true
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
-                                // チャットの保存に失敗してもTask投入は試みる
                                 sendNotice = ActionNotice("チャットの保存に失敗しました", ok = false)
                             }
-                            // Taskとしてkivra Agentへ指示を投入
                             try {
                                 val title = validatedTaskTitle(trimmed) ?: trimmed
                                 val key = keys.keyFor(title)
                                 val result = ApiClient.submitTask(title, null, SubmitKind.SELF_DEV, projectId, key)
-                                taskOk = true
                                 keys.rotate()
-                                // チャット送信のみの成功時は「送信しました」、Task追加時は「Taskとして投入しました」
                                 sendNotice = if (chatOk) {
                                     ActionNotice(taskSuccessText(result, SubmitKind.SELF_DEV), ok = result !is SubmitResult.Failed)
                                 } else {
@@ -788,7 +778,6 @@ private fun ProjectChatSection(projectId: String) {
                                 if (!chatOk) {
                                     sendNotice = ActionNotice("送信に失敗しました", ok = false)
                                 }
-                                // chatOk の場合はすでに sendNotice が設定されている
                             } finally {
                                 sendBusy = false
                             }
@@ -813,20 +802,19 @@ private fun ProjectChatSection(projectId: String) {
 @Composable
 private fun ChatMessageRow(msg: ApiChatMessage) {
     val isUser = msg.role == "user"
-    Card(
+    Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.Top,
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 if (isUser) "あなた" else "kivra",
                 style = MaterialTheme.typography.labelSmall,
                 color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
             )
-            Spacer(Modifier.height(2.dp))
             Text(msg.content, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(2.dp))
-            Text(msg.createdAt, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        Text(msg.createdAt, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

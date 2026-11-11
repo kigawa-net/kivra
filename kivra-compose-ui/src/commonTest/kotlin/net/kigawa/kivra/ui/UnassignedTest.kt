@@ -120,9 +120,9 @@ class UnassignedTest {
     }
 
     @Test
-    fun sidebarOfUnassignedShowsOnlyTheListPages() {
-        val section = sidebarSections("unassigned", null).first { it.title == "未分類" }
-        assertEquals(NavDestination.unassignedPages, section.items.map { it.dest })
-        assertEquals(Route.ProjectPage("unassigned", NavDestination.Tasks), section.items[0].target)
+    fun linksOfUnassignedShowOnlyTheListPages() {
+        val links = projectLinkTargets("unassigned")
+        assertEquals(NavDestination.unassignedPages, links.map { it.dest })
+        assertEquals(Route.ProjectPage("unassigned", NavDestination.Tasks), links[0].target)
     }
 }

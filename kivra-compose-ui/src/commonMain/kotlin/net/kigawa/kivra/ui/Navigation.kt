@@ -55,27 +55,28 @@ data class NavItem(val dest: NavDestination, val target: Route)
 data class NavSection(val title: String?, val items: List<NavItem>)
 
 /**
- * サイドナビの 2 層(docs/design/16-site-structure.md §3)。
+ * サイドナビ(docs/design/16-site-structure.md §3)。
  * - 常に: ホーム、プロジェクト一覧。
- * - プロジェクトを選んでいるとき: そのプロジェクト名の節(プロジェクト配下の項目)。
- * - 常に最後: 「全体」の節(全体の予算・FX、自動化、担当)。プロジェクトを選んでいても、ここから全体へ出られる。
+ * - 常に最後: 「全体」の節(全体の予算・FX、自動化、担当)。
+ * プロジェクト配下の項目は、サイドナビには出さない。プロジェクトの一覧から選び、ダッシュボードのリンク([projectLinkTargets])で開く。
  * 権限や API の結果による出し分けは呼び出し側が行う([CallerPermissions.navVisible] など)。
  */
-fun sidebarSections(projectId: String?, projectName: String?): List<NavSection> {
+fun sidebarSections(): List<NavSection> {
     val top = NavSection(
         title = null,
         items = listOf(NavDestination.Home, NavDestination.Projects).map { NavItem(it, Route.Page(it)) },
     )
-    val project = projectId?.let { id ->
-        NavSection(
-            title = projectLabel(id, projectName),
-            items = pagesOf(id).map { NavItem(it, Route.ProjectPage(id, it)) },
-        )
-    }
     val global = NavSection(
         title = "全体",
         items = listOf(NavDestination.Budget, NavDestination.Autopilot, NavDestination.Assignees)
             .map { NavItem(it, Route.Page(it)) },
     )
-    return listOfNotNull(top, project, global)
+    return listOf(top, global)
 }
+
+/**
+ * プロジェクトの画面に並べるリンク(ダッシュボード自身を除く[pagesOf])。ダッシュボードの上、または未分類の画面の上に出す。
+ * 権限や API の結果による出し分けは呼び出し側が行う。
+ */
+fun projectLinkTargets(projectId: String): List<NavItem> =
+    pagesOf(projectId).filter { it != NavDestination.Dashboard }.map { NavItem(it, Route.ProjectPage(projectId, it)) }

@@ -33,6 +33,8 @@ import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.BACKFILL_DRY_DONE_MESSAGE
 import net.kigawa.kivra.ui.BACKFILL_RUN_DONE_MESSAGE
 import net.kigawa.kivra.ui.NavDestination
+import net.kigawa.kivra.ui.NavItem
+import net.kigawa.kivra.ui.ProjectLinks
 import net.kigawa.kivra.ui.PROJECT_SPEND_NOTE
 import net.kigawa.kivra.ui.REPO_ADDED_MESSAGE
 import net.kigawa.kivra.ui.REPO_EMPTY_MESSAGE
@@ -91,11 +93,16 @@ import net.kigawa.kivra.ui.validatedTaskTitle
  * 読み込みの失敗は固定の文言(サーバーの本文は出さない)。
  */
 @Composable
-fun ProjectDashboardScreen(projectId: String, onNavigate: (Route) -> Unit) {
+fun ProjectDashboardScreen(
+    projectId: String,
+    onNavigate: (Route) -> Unit,
+    links: List<NavItem> = emptyList(),
+    approvalsBadge: String? = null,
+) {
     val loaded = rememberLoad(projectId) { loadProjectDashboard(projectId) }
     DetailPage {
         LoadedView(loaded) { d ->
-            ProjectDashboardBody(projectId, d, onNavigate)
+            ProjectDashboardBody(projectId, d, onNavigate, links, approvalsBadge)
         }
     }
 }
@@ -111,7 +118,13 @@ internal suspend fun loadProjectDashboard(projectId: String): ApiProjectDashboar
 }
 
 @Composable
-private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNavigate: (Route) -> Unit) {
+private fun ProjectDashboardBody(
+    projectId: String,
+    d: ApiProjectDashboard,
+    onNavigate: (Route) -> Unit,
+    links: List<NavItem>,
+    approvalsBadge: String?,
+) {
     val operator = showsProjectOperator(d.scope)
     Text(d.project.name, style = MaterialTheme.typography.headlineSmall)
     d.project.description?.takeIf { it.isNotBlank() }?.let { description ->
@@ -119,6 +132,9 @@ private fun ProjectDashboardBody(projectId: String, d: ApiProjectDashboard, onNa
     }
     Spacer(Modifier.height(4.dp))
     Text(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Spacer(Modifier.height(8.dp))
+    // このプロジェクトの項目への入口(サイドナビからはここへ移した)。
+    ProjectLinks(links, approvalsBadge, Route.ProjectPage(projectId, NavDestination.Dashboard), onNavigate)
     Spacer(Modifier.height(12.dp))
 
     SectionTitle("Run の状態別件数")

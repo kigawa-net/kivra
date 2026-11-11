@@ -39,6 +39,8 @@ class PublicGitMirror(
     private val gitBinary: Path,
     private val mirrorDir: Path,
     private val timeout: Duration = Duration.ofMinutes(10),
+    /** Added to git's cleared environment. The in-Pod entrypoint passes the proxy variables here; the host side passes nothing. */
+    private val extraEnv: Map<String, String> = emptyMap(),
 ) {
     init {
         require(gitBinary.isAbsolute) { "gitBinary must be an absolute path" }
@@ -55,6 +57,22 @@ class PublicGitMirror(
             is LocalPath -> source.path.toString()
         }
         runGit(source, listOf("--git-dir=$mirrorDir", "fetch", "--prune", "--quiet", "--no-tags", url, "+refs/*:refs/*"))
+    }
+
+    /**
+     * Fetches the one commit [commit] (depth 1, no tags, no other refs) into the bare mirror. This is the per-Job fetch of the k8s Pod
+     * (ADR 0010 追補 7 PR 4): there is no cache and no credential. GitHub allows a fetch by full object name.
+     */
+    fun syncCommit(source: RepoSource, commit: String) {
+        if (!COMMIT.matches(commit)) throw WorkDirException(WorkDirReason.GIT_FAILED)
+        if (!Files.isDirectory(mirrorDir)) {
+            runGit(source, listOf("init", "--bare", "--quiet", mirrorDir.toString()))
+        }
+        val url = when (source) {
+            is RepoSource.PublicGithub -> source.url()
+            is LocalPath -> source.path.toString()
+        }
+        runGit(source, listOf("--git-dir=$mirrorDir", "fetch", "--depth=1", "--quiet", "--no-tags", url, commit))
     }
 
     /** Streams the tar of [commit]. Closing the stream waits for git and fails if git failed. */
@@ -89,6 +107,7 @@ class PublicGitMirror(
         val env = builder.environment()
         env.clear()
         env.putAll(environment())
+        env.putAll(extraEnv)
     }
 
     private fun command(args: List<String>): List<String> = listOf(gitBinary.toString(), "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null") + args

@@ -186,7 +186,10 @@ class K8sJobGuard(private val settings: K8sSettings) {
      * only the fixed prompt. Every other token is compared with the fixed one, so no shell syntax can pass either.
      */
     private fun checkCommand(command: List<JsonElement>) {
-        val tokens = command.map { it.stringOrFail(K8sGuardRule.COMMAND_NOT_ALLOWED) }
+        val all = command.map { it.stringOrFail(K8sGuardRule.COMMAND_NOT_ALLOWED) }
+        // The first token is the in-Pod entrypoint (PR 4), which runs the rest; the rest is the CLI argv and is checked as before.
+        if (all.firstOrNull() != K8sConstants.POD_ENTRYPOINT) fail(K8sGuardRule.COMMAND_NOT_ALLOWED)
+        val tokens = all.drop(1)
         val template = CliCommand.argv(CliCommand.DEFAULT_MAX_TURNS)
         if (tokens.size != template.size) fail(K8sGuardRule.COMMAND_NOT_ALLOWED)
         for ((i, token) in tokens.withIndex()) {

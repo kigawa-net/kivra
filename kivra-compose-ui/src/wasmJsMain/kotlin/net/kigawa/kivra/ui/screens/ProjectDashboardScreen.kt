@@ -137,62 +137,75 @@ private fun ProjectDashboardBody(
     ProjectLinks(links, approvalsBadge, Route.ProjectPage(projectId, NavDestination.Dashboard), onNavigate)
     Spacer(Modifier.height(12.dp))
 
-    SectionTitle("Run の状態別件数")
-    Text(projectTotalText(d.tasks.total))
-    val rows = projectStateRows(d.tasks.byState)
-    if (rows.isEmpty()) {
-        Text("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-    } else {
-        rows.forEach { (code, count) ->
-            Text("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
+
+    // --- Run 関連：状態別件数 + 最近の Run ---
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            SectionTitle("Run の状態別件数")
+            Text(projectTotalText(d.tasks.total))
+            val rows = projectStateRows(d.tasks.byState)
+            if (rows.isEmpty()) {
+                Text("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                rows.forEach { (code, count) ->
+                    Text("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+
+            SectionTitle("最近の Run")
+            if (d.recentRuns.isEmpty()) {
+                Text("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                d.recentRuns.forEach { run ->
+                    ProjectRunRow(run, showCreator = operator, onClick = { onNavigate(Route.RunDetail(run.runId)) })
+                }
+            }
         }
     }
     Spacer(Modifier.height(12.dp))
 
-    SectionTitle("最近の Run")
-    if (d.recentRuns.isEmpty()) {
-        Text("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-    } else {
-        d.recentRuns.forEach { run ->
-            ProjectRunRow(run, showCreator = operator, onClick = { onNavigate(Route.RunDetail(run.runId)) })
+    // --- 費用 ---
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            SectionTitle("費用（この Run に紐づく分）")
+            Text(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            DetailRow("確定", yenText(d.spend.committedJpy))
+            DetailRow("予約中", yenText(d.spend.reservedJpy))
+            DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
+            DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
+            DetailRow("合計", yenText(d.spend.totalJpy))
         }
     }
     Spacer(Modifier.height(12.dp))
 
-    SectionTitle("費用（この Run に紐づく分）")
-    Text(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    DetailRow("確定", yenText(d.spend.committedJpy))
-    DetailRow("予約中", yenText(d.spend.reservedJpy))
-    DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
-    DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
-    DetailRow("合計", yenText(d.spend.totalJpy))
-    Spacer(Modifier.height(12.dp))
-
-    SectionTitle("最近の活動")
-    if (d.activity.isEmpty()) {
-        Text("最近の活動はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-    } else {
-        d.activity.forEach { event: ApiProjectActivity ->
-            Text(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+    // --- 最近の活動 ---
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            SectionTitle("最近の活動")
+            if (d.activity.isEmpty()) {
+                Text("最近の活動はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                d.activity.forEach { event: ApiProjectActivity ->
+                    Text(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                }
+            }
         }
     }
+    Spacer(Modifier.height(12.dp))
 
     // プロジェクトごとのチャット（V53）。kivra Agentへの指示投入用。
-    Spacer(Modifier.height(16.dp))
     ProjectChatSection(projectId)
 
     if (operator) {
-        Spacer(Modifier.height(16.dp))
         // 今月の予算は、プロジェクトの「予算」のページにある(設定と解除もそこで行う)。
         TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectBudget)) }) {
             Text("今月の予算を見る（運用者のみ）")
         }
         ProjectOperatorSection(projectId)
-        Spacer(Modifier.height(16.dp))
         ProjectDrainSection(projectId, d.project.name, onNavigate)
     }
 }
-
 /**
  * 運用者だけの「空にして削除」(ADR 0022 PR-H)。移し先を選び、確認（dry-run）の件数を見て、確認ダイアログから空にする(実行)。空になったら
  * 削除できる。判定は運用者の権限と行の状態をサーバーが決める。移し先を変えたら、それまでの確認の結果は捨てる(実行の対象が変わるため)。

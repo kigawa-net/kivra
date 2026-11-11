@@ -59,7 +59,10 @@ class K8sDockerCorrespondenceTest {
     @Test
     fun commandIsTheSameArgv() {
         val dockerCommand = docker.subList(docker.indexOf(TEST_IMAGE) + 1, docker.size)
-        val k8sCommand = container["command"]!!.jsonArray.map { it.jsonPrimitive.content }
+        val k8sFull = container["command"]!!.jsonArray.map { it.jsonPrimitive.content }
+        // The k8s command is the in-Pod entrypoint and then the docker argv.
+        assertEquals(K8sConstants.POD_ENTRYPOINT, k8sFull.first())
+        val k8sCommand = k8sFull.drop(1)
         assertEquals(dockerCommand, k8sCommand)
         assertEquals(CliCommand.argv(CliCommand.DEFAULT_MAX_TURNS), k8sCommand)
     }

@@ -1070,8 +1070,20 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 - `K8sJobBuilder` が Run ごとの Job(`batch/v1`、`backoffLimit: 0`、Pod 1 つ、コンテナ 1 つ、emptyDir 3 つ)を JSON の木で作る。argv と env は docker 側(`CliCommand`、`DockerConstants`)と同じ値を使う。
 - `K8sJobGuard` が許可リスト方式で検査する。未知のキー、欠けたキー、禁止項目(hostPath などの emptyDir 以外の volume、privileged、capabilities.add、host の名前空間、service account、init container、許可外の env・mount・image)は、それぞれ固有の理由で拒否する。例外の文言は理由だけで、値を含まない。
 - 試験: `K8sJobGuardTest` は禁止項目を 1 行 1 ケースで固定し、`K8sDockerCorrespondenceTest` は docker 側と値が一致することを確かめる。docker 側の定数は変えていない。
-- 未決の点(PR 4): init container を作らない(作業ディレクトリの準備と差分収集の Pod 内化)。差分の受け取り方。Job の作成・ログの読み取り・停止・掃除。
+- 未決の点だった、差分の受け取り方、作業ディレクトリの準備、Job の作成・ログ・停止・掃除は PR 4(§6.6c)で決めた。command は PR 4 で、entrypoint + CLI の argv になった。
 - クラスタ側の前提(§3 の NetworkPolicy、namespace の PodSecurity `restricted`、kubelet の `podPidsLimit`)は、この PR では確かめていない。
+
+### 6.6c k8s のランナー(ADR 0010 追補 7、PR 4)
+
+コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/k8s/`(`K8sRunBackend`、`KubeApi`、`HttpKubeApi`)と `k8s/pod/`(`PodEntrypoint`、`PodProtocol`)。**この PR の範囲はランナーと Pod 内の entrypoint までで、まだ有効にしない**(`KIVRA_AGENT_BACKEND=k8s` は引き続き設定エラーで拒否される。有効化と配線は PR 5)。試験は fake の `KubeApi` とローカルの HTTP サーバーだけで行い、クラスタには接続しない。
+
+- `K8sRunBackend`(`RunBackend` の k8s 実装): Job のマニフェストを `K8sJobBuilder` で作り、**送信の直前に必ず `K8sJobGuard` で検査する**(拒否された manifest は送られない)。Pod が Running になったら、入力を exec の stdin で送り、コンテナのログを追う。ログは docker 側と同じ上限(`outputLimitBytes`、1 行 1 MiB)で読む。時間切れ(`timeout`、Job の `activeDeadlineSeconds`)、停止要求、出力の上限で止め、**どの終わり方でも Job を delete する**。`cleanupOrphans` は label `kivra-agent=1` の Job のうち、実行中の Run のもの以外を delete する。
+- 結果の受け取り(exec readout): Pod の entrypoint が CLI を実行し、差分を収集して `/work/.kivra/result.json` を書き、生きたまま待つ。agent は `cat` の exec で読む(上限 8 MiB、厳密に解釈)。`RunResult.podReadout` に入り、呼び出し側が `PodReadout.Collected.finish(summary, sessionId, limits, pathRules)` で再検査してから使う。
+- Job の command は、`/usr/local/bin/kivra-pod-entrypoint` と、その後ろに従来の CLI の argv(ガードが 1 トークンずつ照合)。**実行用イメージに、この launcher(`net.kigawa.kivra.agent.k8s.pod.PodEntrypointKt` を起動する。JDK 21 と git は既にある)と agent の jar を入れる作業が必要で、この PR には含まれない**(PR 5 の前)。
+- Pod 内の取得: base commit を公開 GitHub から Job ごとに取得する(キャッシュなし、資格情報なし、プロキシ経由)。**プロキシの許可リストに `github.com` を足す必要がある**(PR 5)。
+- agent の ServiceAccount の RBAC(Job の namespace 内。manifest は PR 5): `batch/jobs` の create・get・list・delete、`pods` の get・list、`pods/log` の get、`pods/exec` の create(と get)。`secrets`、`configmaps`、`deletecollection`、cluster 全体の権限は与えない。
+- API への接続: in-cluster の ServiceAccount の token と CA(`HttpKubeApi.inCluster`)。標準の `java.net.http`(exec は WebSocket、`v4.channel.k8s.io`)だけを使い、依存は増やしていない。
+- 既知の制約: ログと標準エラーは Pod のログに混ざる(`RunResult.stderr` は空)。ログの読み取りが途中で切れても再接続しない(その場合、読めた分だけが stdout になる)。exec readout は、実クラスタでは未検証(WebSocket の経路は単体試験で結線していない。PR 5 の検証で確かめる)。
 
 ### 6.7 CLI の起動、task ファイル、stream-json の解析と分類(PR 7)
 

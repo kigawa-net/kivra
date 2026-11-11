@@ -72,7 +72,7 @@ class OrderWatch(
      */
     private fun startCyclesAutomatically(cap: Int): Int {
         var started = 0
-        for (orderId in orders.autoCycleCandidates(BATCH)) {
+        for (orderId in allPages({ after -> orders.autoCycleCandidatesAfter(after, BATCH) }, { it })) {
             try {
                 when (val r = orders.startCycleAutomatically(orderId, cap)) {
                     is AutoCycleResult.Started -> {
@@ -133,9 +133,13 @@ class OrderWatch(
         }
     }
 
+    /**
+     * The ACTIVE orders, all of them, one page of [BATCH] at a time. With one root the first page held every order; with several (V43) an
+     * order behind the first [BATCH] would never be guarded (the budget hold, the FX rate, an UNKNOWN Run), so the pass reads every page.
+     */
     private fun guardActiveOrders(): Int {
         var paused = 0
-        for (order in orders.activeOrders(BATCH)) {
+        for (order in allPages({ after -> orders.activeOrdersAfter(after, BATCH) }, { it.orderId })) {
             val reason = when {
                 !budgetAllows() -> OrderReason.BUDGET_HOLD
                 fxExpired() -> OrderReason.FX_EXPIRED
@@ -149,6 +153,18 @@ class OrderWatch(
             }
         }
         return paused
+    }
+
+    /** Every row of a keyset-paged read: [page] takes the key of the row before it (null for the first page), [keyOf] is the row's key. */
+    private fun <T> allPages(page: (String?) -> List<T>, keyOf: (T) -> String): List<T> {
+        val all = mutableListOf<T>()
+        var after: String? = null
+        while (true) {
+            val rows = page(after)
+            all += rows
+            if (rows.size < BATCH) return all
+            after = keyOf(rows.last())
+        }
     }
 
     private fun step(name: String, block: () -> Int) {

@@ -104,7 +104,7 @@ class ProjectScopeReadTest {
     }
 
     @Test
-    fun `the stop requests of pending orders are narrowed by the order's project, with the project id on each`() = TestDb(::migrateBeforeContract).use { db ->
+    fun `the stop requests of pending orders are narrowed by the order's project, with the project id on each`() = TestDb().use { db ->
         val alpha = db.projectA()
         val orderAlpha = db.order("alpha order", alpha)
         db.order("none order", null)

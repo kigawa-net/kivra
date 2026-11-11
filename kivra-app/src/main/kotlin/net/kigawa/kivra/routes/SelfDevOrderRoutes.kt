@@ -264,8 +264,6 @@ private const val CHILDREN_DISABLED = "child orders are disabled"
 private const val CHILD_FIELDS_INVALID = "title and policy as for an order, and idempotencyKey 1-128 characters without control characters"
 private const val MAX_CYCLES_INVALID = "maxCycles must be a whole number from 1 to the configured cap"
 private const val MAX_CYCLES_INVALID_CODE = "MAX_CYCLES_INVALID"
-private const val EXPIRES_AT_INVALID = "the extended expiry is more than 30 days after the order was created"
-private const val EXPIRES_AT_INVALID_CODE = "EXPIRES_AT_INVALID"
 private const val BUDGET_INVALID = "orderBudgetJpy must be a whole number of yen from 1 to 999999999999"
 private const val BUDGET_BELOW_CYCLE = "orderBudgetJpy must be at least the cycle budget of 1000 yen"
 private const val PARENT_NOT_ACTIVE = "the parent order is not active; a child needs an active parent"
@@ -425,6 +423,7 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         if (request.addCycles != null && request.addCycles !in 1..cap) {
             return@post call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
         }
+        // The days are an input check (EXTEND_DAYS_LIMIT), not a limit on the lifetime: any expiry the operator sets is allowed.
         if (request.extendDays != null && request.extendDays !in 1..EXTEND_DAYS_LIMIT) {
             return@post call.respond(HttpStatusCode.BadRequest, OrderError(INVALID_BODY))
         }
@@ -439,7 +438,6 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
             is ExtendResult.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedText(r.reason), r.reason.name))
             is ExtendResult.Invalid -> when (r.reason) {
                 ExtendInvalid.MAX_CYCLES_OVER_CAP -> call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
-                ExtendInvalid.EXPIRY_OVER_CEILING -> call.respond(HttpStatusCode.BadRequest, OrderError(EXPIRES_AT_INVALID, EXPIRES_AT_INVALID_CODE))
             }
         }
     }

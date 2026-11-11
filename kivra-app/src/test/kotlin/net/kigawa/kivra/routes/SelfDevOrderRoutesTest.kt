@@ -182,10 +182,12 @@ class SelfDevOrderRoutesTest {
         val order = createdOrder(db, orders)
         val path = "/api/selfdev/orders/${order.orderId}/extend"
 
-        // Neither addCycles nor extendDays, a negative version, a day count out of 1..14: 400 with the fixed text only.
+        // Neither addCycles nor extendDays, a negative version, a day count out of 1..3650 (an input check, not a lifetime limit): 400 with
+        // the fixed text only.
         assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, path, """{"version":0}""").status)
         assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, path, """{"version":-1,"addCycles":1}""").status)
-        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, path, """{"version":0,"extendDays":15}""").status)
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, path, """{"version":0,"extendDays":3651}""").status)
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, path, """{"version":0,"extendDays":0}""").status)
         // Above the cap (3): 400 MAX_CYCLES_INVALID, and nothing is written.
         val overCap = send(HttpMethod.Post, path, """{"version":0,"addCycles":3}""")
         assertEquals(HttpStatusCode.BadRequest, overCap.status)

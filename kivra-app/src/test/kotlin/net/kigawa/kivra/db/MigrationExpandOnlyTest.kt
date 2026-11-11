@@ -169,6 +169,11 @@ class MigrationExpandOnlyTest {
                 "refuse a NULL project (ProjectRequiredException), so the old Writers are the only risk and are drained before V52.",
             "V52:MODIFY (ALTER TABLE SELFDEV_MEMORY_RECORDS MODIFY COLUMN PROJECT_ID CHAR(26) NOT NULL)" to
                 "V52 makes selfdev_memory_records.project_id NOT NULL. The same gate and drain as the tasks column.",
+            // V54: one PENDING stop request per tree. The global UNIQUE on active_key is replaced by UNIQUE (tree_root_id, active_key), added
+            // in the same migration. Old Writers keep working: their INSERT does not name tree_root_id (NULL, and NULLs do not clash).
+            "V54:DROP (ALTER TABLE SELFDEV_ORDER_STOP_REQUESTS DROP CONSTRAINT UK_SELFDEV_ORDER_STOP_ACTIVE)" to
+                "V54 drops the database-wide single PENDING stop request (ADR 0015 addendum 2026-11-11). The per-tree UNIQUE is added in " +
+                "the same migration, and the application checks the tree under the root lock for the rows with no tree_root_id.",
         )
     }
 }

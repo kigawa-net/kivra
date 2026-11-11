@@ -135,10 +135,12 @@ sealed interface OrderResult<out T> {
     data class Refused(val reason: OrderConflict, val orderId: String? = null) : OrderResult<Nothing>
 }
 
+/**
+ * The result of a root creation. There is one case: several roots may exist (V43). The type is kept so the callers' `as CreateRootResult.Created`
+ * reads stay as they were.
+ */
 sealed interface CreateRootResult {
     data class Created(val order: SelfDevOrder) : CreateRootResult
-    /** The tree already has its root. Nothing changed. */
-    data object RootExists : CreateRootResult
 }
 
 /**
@@ -161,11 +163,12 @@ sealed interface AutoCycleResult {
 /** The outcome of a successful cycle start: the order, the cycle's root Task ([goalId]) and the cycle number. */
 data class CycleStarted(val order: SelfDevOrder, val goalId: String, val cycleNo: Int)
 
-/** The most days one extension adds (ADR 0015 addendum 2026-11-10, section 2.6). The route checks it, and so does the repository's tests. */
-const val EXTEND_DAYS_LIMIT = 14
-
-/** An extended expiry may be at most this many days after the order was created (ADR 0015 addendum 2026-11-10, section 2.6). */
-const val LIFETIME_CEILING_DAYS = 30L
+/**
+ * The most days one extension adds. This is an input check, not a limit on the order's lifetime (ADR 0015 addendum 2026-11-11, section 2.6):
+ * it only refuses a value that is not a sensible number of days (an overflow or a typing mistake). An extension may take an order's expiry
+ * past any date the operator chooses; the expiry itself is still required, and an order still stops when it is reached (EXPIRED).
+ */
+const val EXTEND_DAYS_LIMIT = 3650
 
 /** The fixed reason of the audit event of an extension (kind EXTENDED, actor HUMAN). The values before and after are in its payload. */
 const val OPERATOR_EXTENDED = "OPERATOR_EXTENDED"
@@ -174,8 +177,6 @@ const val OPERATOR_EXTENDED = "OPERATOR_EXTENDED"
 enum class ExtendInvalid {
     /** The new max_cycles is above `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`. */
     MAX_CYCLES_OVER_CAP,
-    /** The new expiry is more than [LIFETIME_CEILING_DAYS] days after the order's creation. */
-    EXPIRY_OVER_CEILING,
 }
 
 /** The outcome of an operator's extension. [Refused] is a conflict (409), [Invalid] a bad request (400). */
@@ -300,6 +301,17 @@ class SelfDevOrderRepository(
         execQuery("SELECT $ORDER_COLUMNS FROM selfdev_orders WHERE state = 'ACTIVE' ORDER BY created_at, order_id LIMIT ?", limit) { it.toOrder() }
     }
 
+    /**
+     * The next page of ACTIVE orders after [afterOrderId] (null for the first), in ID order. The guards page through all of them: a guard that
+     * read only the first page would never see the orders behind it, once there are several roots (V43).
+     */
+    fun activeOrdersAfter(afterOrderId: String?, limit: Int): List<SelfDevOrder> = transaction(database) {
+        execQuery(
+            "SELECT $ORDER_COLUMNS FROM selfdev_orders WHERE state = 'ACTIVE' AND order_id > ? ORDER BY order_id LIMIT ?",
+            afterOrderId.orEmpty(), limit,
+        ) { it.toOrder() }
+    }
+
     fun stopRequest(requestId: String): SelfDevOrderStopRequest? = transaction(database) { getRequestIn(requestId) }
 
     /** The PENDING stop request of the order, if any. */
@@ -373,8 +385,8 @@ class SelfDevOrderRepository(
     // ---- creation ----------------------------------------------------------------------------------------------------------------
 
     /**
-     * Creates the root order, ACTIVE, with no cycle yet. The tree has one root: the UNIQUE `root_slot` refuses a second one, and that
-     * refusal is returned as [CreateRootResult.RootExists].
+     * Creates a root order, ACTIVE, with no cycle yet. Any number of roots may exist, each the top of its own tree (ADR 0015 addendum
+     * 2026-11-11; V43 removed the single-root UNIQUE), so nothing here refuses one because another exists.
      */
     fun createRoot(
         createdBy: String,
@@ -384,9 +396,9 @@ class SelfDevOrderRepository(
         maxCycles: Int = 1,
         /** The project the order belongs to (V42, ADR 0022). The API requires it; the repository itself does not. */
         projectId: String? = null,
-    ): CreateRootResult = try {
+    ): CreateRootResult {
         require(maxCycles in 1..MAX_CYCLES_LIMIT) { "maxCycles must be 1 to $MAX_CYCLES_LIMIT" }
-        transaction(database) {
+        return transaction(database) {
             val now = utcNow(clock)
             val orderId = Ulid.generate(clock)
             execUpdate(
@@ -400,9 +412,6 @@ class SelfDevOrderRepository(
             appendEvent(orderId, null, "ORDER_CREATED", null, OrderState.ACTIVE, null, OrderActor.HUMAN, createdBy, null, now)
             CreateRootResult.Created(getIn(orderId) ?: error("order vanished after insert"))
         }
-    } catch (e: Exception) {
-        if (!e.hasUniqueViolation()) throw e
-        CreateRootResult.RootExists
     }
 
     /**
@@ -425,7 +434,9 @@ class SelfDevOrderRepository(
     ): ChildCreateResult = try {
         transaction(database) {
             val now = utcNow(clock)
-            execQuery("SELECT order_id FROM selfdev_orders WHERE root_slot = 1 FOR UPDATE") { it.getString(1) }
+            // Every root, in ID order, before the path. TREE_LIMIT counts the orders of all trees, so two creations in different trees must not both
+            // pass that count. Every other transaction takes one tree's root first, so this order cannot deadlock with them.
+            execQuery("SELECT order_id FROM selfdev_orders WHERE parent_order_id IS NULL ORDER BY order_id FOR UPDATE") { it.getString(1) }
             val path = lockPath(parentId) ?: throw ChildRollback(ChildCreateResult.Refused(ChildRefusal.PARENT_NOT_ACTIVE))
             val parent = path.first()
             findChildByKey(parentId, idempotencyKey)?.let { existing ->
@@ -533,9 +544,6 @@ class SelfDevOrderRepository(
             current.expiresAt
         } else {
             (if (current.expiresAt.isAfter(now)) current.expiresAt else now).plusDays(extendDays.toLong())
-        }
-        if (newExpiresAt.isAfter(current.createdAt.plusDays(LIFETIME_CEILING_DAYS))) {
-            return@transaction ExtendResult.Invalid(ExtendInvalid.EXPIRY_OVER_CEILING)
         }
         val lifetimePaused = current.state == OrderState.PAUSED && current.stateReason in LIFETIME_PAUSES
         if (lifetimePaused && !(newMaxCycles > current.cyclesStarted && newExpiresAt.isAfter(now))) {
@@ -668,6 +676,19 @@ class SelfDevOrderRepository(
              ORDER BY created_at, order_id LIMIT ?
             """.trimIndent(),
             CYCLE_FAILURE_LIMIT, limit,
+        ) { it.getString(1) }
+    }
+
+    /** The next page of [autoCycleCandidates] after [afterOrderId] (null for the first), in ID order, so a pass reaches every order (see [activeOrdersAfter]). */
+    fun autoCycleCandidatesAfter(afterOrderId: String?, limit: Int): List<String> = transaction(database) {
+        execQuery(
+            """
+            SELECT order_id FROM selfdev_orders
+             WHERE state = 'ACTIVE' AND current_goal_id IS NULL AND consecutive_failed_cycles < ? AND cycles_started < max_cycles
+               AND order_id > ?
+             ORDER BY order_id LIMIT ?
+            """.trimIndent(),
+            CYCLE_FAILURE_LIMIT, afterOrderId.orEmpty(), limit,
         ) { it.getString(1) }
     }
 
@@ -914,8 +935,8 @@ class SelfDevOrderRepository(
 
     /**
      * Asks to stop the order. The order moves to STOP_REQUESTED at once, so no new cycle starts while the request waits. The request binds to
-     * the order's new version and to a digest of the request. At most one request is PENDING per tree: the UNIQUE `active_key` refuses a
-     * second one, returned as [OrderConflict.STOP_ALREADY_PENDING].
+     * the order's new version and to a digest of the request. At most one request is PENDING per tree: the check under the root lock, and the
+     * UNIQUE (`tree_root_id`, `active_key`, V54) refuse a second one, returned as [OrderConflict.STOP_ALREADY_PENDING].
      */
     fun requestStop(
         orderId: String,
@@ -950,8 +971,12 @@ class SelfDevOrderRepository(
             val path = lockPath(orderId) ?: return@transaction OrderResult.NotFound
             val current = path.first()
             if (current.version != expectedVersion) return@transaction OrderResult.StaleVersion
-            // A request is already waiting on this tree: that is the answer, not a generic transition refusal.
-            if (current.state == OrderState.STOP_REQUESTED) throw Rollback(OrderResult.Refused(OrderConflict.STOP_ALREADY_PENDING))
+            // At most one PENDING request per tree (ADR 0015 section 4.2). A PENDING request holds its target in STOP_REQUESTED. The root lock
+            // (taken by lockPath) makes this read exact, and it also covers the rows written before V54 (no tree_root_id).
+            val treeRootId = path.last().orderId
+            if (subtreeIn(treeRootId).any { it.state == OrderState.STOP_REQUESTED }) {
+                throw Rollback(OrderResult.Refused(OrderConflict.STOP_ALREADY_PENDING))
+            }
             val decision = checkOrderTransition(current.state, OrderState.STOP_REQUESTED, OrderReason.STOP_REQUESTED, requesterKind, current.stateReason)
             if (decision is OrderTransitionDecision.Refused) {
                 throw Rollback(OrderResult.Refused(OrderConflict.valueOf(decision.reason.name)))
@@ -968,11 +993,12 @@ class SelfDevOrderRepository(
             execUpdate(
                 """
                 INSERT INTO selfdev_order_stop_requests (request_id, order_id, requested_by, requester_kind, reason_code, order_version,
-                    digest, state, active_key, decided_by, decider_kind, decided_at, expires_at, created_at, target_is_root)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, NULL, NULL, NULL, ?, ?, ?)
+                    digest, state, active_key, decided_by, decider_kind, decided_at, expires_at, created_at, target_is_root, tree_root_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 1, NULL, NULL, NULL, ?, ?, ?, ?)
                 """.trimIndent(),
                 requestId, orderId, requestedBy, requesterKind.name, reason.name, newVersion,
                 orderStopDigest(requestId, orderId, subtree, reason), now.plus(stopTtl), now, if (current.parentOrderId == null) 1 else 0,
+                treeRootId,
             )
             appendTreeEvent(current, "STOP_REQUESTED", current.state, OrderState.STOP_REQUESTED, OrderReason.STOP_REQUESTED.name, requesterKind, requestedBy, requestId, now)
             OrderResult.Moved(getRequestIn(requestId) ?: error("stop request vanished after insert"))

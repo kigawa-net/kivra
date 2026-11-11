@@ -2030,7 +2030,7 @@ order は、Task を 1 周ずつ回す長く生きる指示である(V40 以降�
 
 #### 7.6.2 ルートの作成と周の開始(運用者)
 
-- 作成: `POST /api/selfdev/orders` `{"title": "...", "policy": "...", "maxCycles": n}`。`maxCycles` は任意で、未指定は 1。1 以上、`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`(既定 1、最大 10)以下でなければ 400(`code` は `MAX_CYCLES_INVALID`)。作成後は変えられない(ADR 0015 §2.6)。ルートは 1 件だけ(2 件目は 409)。`policy` は方針の文で、作成後は変えられない。AI の主体は作成できない(403)。
+- 作成: `POST /api/selfdev/orders` `{"title": "...", "policy": "...", "maxCycles": n}`。`maxCycles` は任意で、未指定は 1。1 以上、`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`(既定 1、最大 10)以下でなければ 400(`code` は `MAX_CYCLES_INVALID`)。作成後は変えられない(ADR 0015 §2.6)。ルートは複数作れる(各ルートが 1 本の木の根。2 件目を拒否する検査は無い。ADR 0015 追補 2026-11-11)。`policy` は方針の文で、作成後は変えられない。AI の主体は作成できない(403)。
 - 周の開始: `POST /api/selfdev/orders/{id}/cycles` `{"version": n}`。周の根の Task が 1 件作られ(`selfdev_tasks` の `order_id` と `cycle_no` = 1、状態 `TASK_SUBMITTED`)、既存の Planner と Plan の承認に進む。進行中の周があるとき、上限に達したとき、期限切れのとき、全体の一時停止中のときは 409。
 - 状況: `GET /api/selfdev/orders/{id}`(状態、理由、周の数、保留中の停止の要求。方針と題名は運用者だけに返る)、`GET /api/selfdev/orders/{id}/cycles`。一覧 `GET /api/selfdev/orders` には題名と方針を含めない。
 
@@ -2193,7 +2193,7 @@ order の tick(60 秒ごと)が、条件がそろった order の次の周を始
 
 1. `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` を決める(dev の既定の運用は、まず 3 など小さい値)。`KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED=true` を足して再起動する。
 2. 再起動では `STARTUP_HOLD` で全 `ACTIVE` の order が `PAUSED` になる。order の画面か `POST /api/selfdev/orders/{id}/resume` で再開する。再開から次の tick(最大 60 秒)で、最初の周が始まる。自律運用で再起動の後に人の再開を待ちたくないときは、`KIVRA_SELFDEV_ORDER_AUTO_RESUME_ON_STARTUP=true` を足す(既定は `false`。§7.6.1 の有効化の順序)。
-3. `maxCycles` は作成時にしか決められない。既存の order(`max_cycles` = 1)は 1 周で `PAUSED(LIMIT_REACHED)` になる。複数周が要るときは、新しい order を作る(ルートは 1 件なので、先にルートを承認つきで停止する。§7.6.4)。
+3. `maxCycles` は作成時にしか決められない。既存の order(`max_cycles` = 1)は 1 周で `PAUSED(LIMIT_REACHED)` になる。複数周が要るときは、延長する(§7.6.4a)か、新しい order(ルート)を作る。ルートは複数作れるので、既存のルートを承認つきで止める必要は無い。
 
 止め方:
 
@@ -2237,9 +2237,9 @@ AI の主体ができるのは、読み取りと停止の要求だけである�
 上限(`max_cycles`)か期限(`expires_at`)を使い切った order を、作り直さずに延長する。ADR 0015 の 2026-11-10 追補(§2.6 の改め)が根拠である。
 
 - **対象**: ルートの order だけ。`ACTIVE` か `PAUSED` のとき。`STOP_REQUESTED` と `STOPPED` は 409、子の order は 409 `NOT_ROOT`。
-- **API**: `POST /api/selfdev/orders/{id}/extend` `{"version": n, "addCycles": 1..CAP, "extendDays": 1..14}`。どちらか一方だけでもよいが、少なくとも一方は要る。運用者だけ(AI の主体は 403)。`version` が違えば 409 `STALE`。
+- **API**: `POST /api/selfdev/orders/{id}/extend` `{"version": n, "addCycles": 1..CAP, "extendDays": 1..3650}`。どちらか一方だけでもよいが、少なくとも一方は要る。運用者だけ(AI の主体は 403)。`version` が違えば 409 `STALE`。
 - **上限**: 延長後の `max_cycles` は `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` 以下(超えれば 400 `MAX_CYCLES_INVALID`)。CAP を上げるのは設定の変更で、この操作ではできない。
-- **期限**: 現在時刻と現在の `expires_at` の遅い方から `extendDays` 日後。作成から 30 日以内(超えれば 400 `EXPIRES_AT_INVALID`)。
+- **期限**: 現在時刻と現在の `expires_at` の遅い方から `extendDays` 日後。作成からの天井は無い(ADR 0015 追補 2026-11-11)。`extendDays` は 1〜3650 の整数の入力検査で、外れば 400。`expires_at` は必須のままで、期限が来た order は `EXPIRED` で止まる。
 - **変わらないもの**: 予算(`order_budget_jpy`、`cycle_budget_jpy`。予算の増額はこの操作の対象外)、連続失敗、サーキットブレーカー、停止の承認、子の上限。
 - **止まっている order**: 理由が `LIMIT_REACHED` / `EXPIRED` なら、延長で上限と期限が両方解消するときに限り延長できる。解消しなければ 409 `EXTENSION_DOES_NOT_LIFT`。その他の理由(`OPERATOR_PAUSED` など)の order は、延長しても理由のまま止まる。延長は状態を `ACTIVE` にしない。
 - **再開**: 延長で解消した `LIMIT_REACHED` / `EXPIRED` の order は、`POST .../resume` で再開できる(自動では再開しない)。延長をしていない `LIMIT_REACHED` の order は、従来どおり再開できない。
@@ -2262,7 +2262,7 @@ curl -s -X POST -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/j
 
 - **監査**: `SELECT kind, reason_code, actor_kind, payload_json, occurred_at FROM selfdev_order_events WHERE order_id = '...' AND kind = 'EXTENDED';`。`payload_json` に延長の前後の `max_cycles` と `expires_at` が入る(V53 の列)。
 - **注意**: 延長は周を始めない。周の開始は従来どおりで、自動の開始が有効なら次の tick から条件に従って始まる。
-- **UI からの操作**: `/ui/compose` の order の詳細で、ルートの order が `ACTIVE` か `PAUSED` のときだけ「延長…」を出す(運用者の `ORDER_MANAGE`)。ダイアログで追加する周数と延長する日数を入れる(どちらか一方か両方。両方空は不可、日数は 1〜14)。送る `version` は読んだ値。成功すると詳細を読み直す。400 `MAX_CYCLES_INVALID` と `EXPIRES_AT_INVALID`、409 `NOT_ROOT`・`STOP_ALREADY_PENDING`・`TERMINAL`・`EXTENSION_DOES_NOT_LIFT`・版の競合は、固定の日本語の文言で出す。再開は UI でも別に行う(延長は自動で再開しない)。
+- **UI からの操作**: `/ui/compose` の order の詳細で、ルートの order が `ACTIVE` か `PAUSED` のときだけ「延長…」を出す(運用者の `ORDER_MANAGE`)。ダイアログで追加する周数と延長する日数を入れる(どちらか一方か両方。両方空は不可、日数は 1〜3650)。送る `version` は読んだ値。成功すると詳細を読み直す。400 `MAX_CYCLES_INVALID`、409 `NOT_ROOT`・`STOP_ALREADY_PENDING`・`TERMINAL`・`EXTENSION_DOES_NOT_LIFT`・版の競合は、固定の日本語の文言で出す。再開は UI でも別に行う(延長は自動で再開しない)。
 
 #### 7.6.5 監査とログ
 
@@ -2278,7 +2278,7 @@ curl -s -X POST -H 'Authorization: Bearer <JWT>' -H 'Content-Type: application/j
 
 - **一覧**: オートパイロットが有効で `GET /api/selfdev/orders` が 200 のときだけ、「order の一覧（ADR 0015）」を出す。状態、周の数、連続して失敗した周、期限を見られる。題名と方針は表示しない。「詳細」で、停止の要求の有無を見られる。
   - 子の order は親の下に字下げして表示し、各行に子の数と「使用 / 予算」(円)を出す。読み取りだけで、操作のボタンは増えない。子の自動の停止の理由(`CHILD_CYCLE_FAILURES`、`CHILD_BUDGET_EXHAUSTED`)は、詳細の停止の要求に固定の文で出る。
-- **作成**: 「order を作る」（一覧の下の折りたたみ）から、題名と方針を入力してルートの order を作れる。一覧と同じく、オートパイロットが有効のときだけ出る。題名と方針は結果欄・ログ・エラーに出さず、409 `ROOT_EXISTS` は「ルートの order は既にあります」と出す。
+- **作成**: 「order を作る」（一覧の下の折りたたみ）から、題名と方針を入力してルートの order を作れる。一覧と同じく、オートパイロットが有効のときだけ出る。題名と方針は結果欄・ログ・エラーに出さない。作成は 2 件目のルートも受け付ける(409 `ROOT_EXISTS` は無い。ADR 0015 追補 2026-11-11)。
 - **一時停止と再開**: 詳細の「一時停止」は `ACTIVE` のときだけ、「再開」は `PAUSED` で理由が `LIMIT_REACHED` と `EXPIRED` 以外のときだけ出す。
 - **停止の要求と取り消し**: 詳細の「停止を要求」は `ACTIVE` か `PAUSED` で保留中の要求が無いときだけ出し、理由コード(`REQUESTABLE` の 4 種)を選んで確認すると `POST .../stop-requests` を `version` と一緒に送る。保留中の要求があるときは「要求を取り消す」を出す(要求者は応答に無いため、誰の要求でも出し、権限がなければ 403 の固定文を出す)。
 - **停止の承認**: `GET /api/selfdev/stop-requests?state=PENDING` が 200 の主体(承認者)だけに、「停止の承認（承認者だけ）」を出す。要求の対象、理由、要求した主体(AI の主体か人)、要求の時刻、期限を表示する。

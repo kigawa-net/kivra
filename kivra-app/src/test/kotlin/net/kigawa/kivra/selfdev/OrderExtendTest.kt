@@ -20,6 +20,7 @@ import net.kigawa.kivra.db.AutoCycleResult
 import net.kigawa.kivra.db.ChildCreateResult
 import net.kigawa.kivra.db.ChildLimits
 import net.kigawa.kivra.db.CreateRootResult
+import net.kigawa.kivra.db.EXTEND_DAYS_LIMIT
 import net.kigawa.kivra.db.ExtendInvalid
 import net.kigawa.kivra.db.ExtendResult
 import net.kigawa.kivra.db.OrderConflict
@@ -200,15 +201,16 @@ class OrderExtendTest {
     }
 
     @Test
-    fun `an expiry more than 30 days after the creation is refused`() = TestDb().use { db ->
+    fun `there is no lifetime ceiling, so an expiry may pass thirty days after the creation`() = TestDb().use { db ->
         val h = Harness(db)
         val order = h.newOrder()
-        // Day 14 + 14 = day 28 is inside the ceiling of day 30.
+        // Day 14 + 14 = day 28 (ADR 0015 addendum 2026-11-11: the old ceiling of day 30 is gone).
         val first = assertIs<ExtendResult.Moved>(h.extend(order.orderId, extendDays = 14))
         assertEquals(at(28), first.order.expiresAt)
-        // The next fourteen days would reach day 42.
-        assertEquals(ExtendResult.Invalid(ExtendInvalid.EXPIRY_OVER_CEILING), h.extend(order.orderId, extendDays = 14))
-        assertEquals(first.order.version, h.version(order.orderId))
+        // The largest input the route accepts is still added in full.
+        val second = assertIs<ExtendResult.Moved>(h.extend(order.orderId, extendDays = EXTEND_DAYS_LIMIT))
+        assertEquals(at(28L + EXTEND_DAYS_LIMIT), second.order.expiresAt)
+        assertEquals(second.order.version, h.version(order.orderId))
     }
 
     @Test

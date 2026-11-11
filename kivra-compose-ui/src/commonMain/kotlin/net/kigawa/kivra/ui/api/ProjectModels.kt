@@ -117,4 +117,20 @@ data class ApiChatSession(
     val updatedAt: String,
     val messages: List<ApiChatMessage>,
     val messageCount: Long,
+    /** The open proposals (ADR 0023). Absent or empty for an operator who may not confirm, and for an older server. */
+    val actions: List<ApiChatAction> = emptyList(),
 )
+
+/** One open proposal of the chat (server `ChatActionResponse`): the label is the server's fixed text. */
+@Serializable
+data class ApiChatAction(
+    val actionId: String,
+    val code: String,
+    val label: String,
+    val targetId: String? = null,
+    val proposedAt: String = "",
+)
+
+/** The answer of a confirm or dismiss (server `ChatActionResolvedResponse`): the new state and a fixed result code. */
+@Serializable
+data class ApiChatActionResult(val actionId: String, val state: String, val resultCode: String)

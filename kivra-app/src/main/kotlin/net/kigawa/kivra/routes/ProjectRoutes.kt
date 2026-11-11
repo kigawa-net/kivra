@@ -19,7 +19,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.core.chat.ChatActionCode
 import net.kigawa.kivra.db.BackfillReport
+import net.kigawa.kivra.db.ProjectChatActionRepository
 import net.kigawa.kivra.db.DbBudgetStore
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.ProjectBudgetStatus
@@ -92,6 +94,8 @@ internal fun Route.configureProjectRoutes(
     drain: ProjectDrainRepository,
     /** The project chat (V55): `/api/projects/{id}/chat`. Null: the chat routes are not registered. */
     chatRepo: ProjectChatRepository? = null,
+    /** The project chat's action proposals (ADR 0023): proposed on the chat read, for an operator who may act. Null: no actions. */
+    chatActions: ProjectChatActionRepository? = null,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -99,6 +103,10 @@ internal fun Route.configureProjectRoutes(
         if (principal == null) respond(HttpStatusCode.Unauthorized, ProjectError("unauthorized"))
         return principal
     }
+
+    /** True when [principal] may confirm a chat action: the operator's ORDER_MANAGE, and never the AI principal. */
+    fun mayActOnChat(principal: String): Boolean =
+        guard.resolve(principal, legacyAdmin = true).let { !it.isAi } && guard.permits(principal, Permission.ORDER_MANAGE, "project_chat_get")
 
     /** True when [principal] holds [permission]; responds 403 otherwise. */
     suspend fun ApplicationCall.permitOr403(principal: String, permission: Permission, route: String): Boolean {
@@ -383,7 +391,13 @@ internal fun Route.configureProjectRoutes(
                 }
                 val session = chatRepo.getSession(projectId)
                     ?: return@get call.respond(HttpStatusCode.NotFound)
-                call.respond(chatSessionResponse(chatRepo, session))
+                // Only an operator who may confirm sees the proposals (the AI never does). The proposer runs here, on the read.
+                val actions = if (chatActions != null && mayActOnChat(principal)) {
+                    proposeChatActions(chatActions, projectId)
+                } else {
+                    emptyList()
+                }
+                call.respond(chatSessionResponse(chatRepo, session, actions))
             }
             post("chat") {
                 val principal = call.principalOr401() ?: return@post
@@ -689,7 +703,7 @@ data class ChatSendMessageRequest(val content: String, val title: String = "")
 @Serializable
 data class ChatMessageResponse(val id: Long, val sessionId: String, val role: String, val content: String, val createdAt: String)
 
-/** A chat session with its latest messages (oldest first). [sessionId] is the project id. */
+/** A chat session with its latest messages (oldest first). [sessionId] is the project id. [actions] are the open proposals (ADR 0023). */
 @Serializable
 data class ChatSessionResponse(
     val sessionId: String,
@@ -697,13 +711,19 @@ data class ChatSessionResponse(
     val updatedAt: String,
     val messages: List<ChatMessageResponse>,
     val messageCount: Long,
+    /** The open proposals (PROPOSED) for an operator who may confirm them; empty for everyone else. Added with ADR 0023. */
+    val actions: List<ChatActionResponse> = emptyList(),
 )
+
+/** One open proposal: its ID, the allow-list code, the server's fixed label, the order it is for and when it was proposed. */
+@Serializable
+data class ChatActionResponse(val actionId: String, val code: String, val label: String, val targetId: String?, val proposedAt: String)
 
 private const val CHAT_RECENT_MESSAGES = 50
 private const val CHAT_TITLE_MAX = 256
 private const val DEFAULT_CHAT_TITLE = "Chat"
 
-private fun chatSessionResponse(repo: ProjectChatRepository, session: ProjectChatSessionRow): ChatSessionResponse {
+private fun chatSessionResponse(repo: ProjectChatRepository, session: ProjectChatSessionRow, actions: List<ChatActionResponse>): ChatSessionResponse {
     val count = repo.countMessages(session.projectId)
     val offset = (count - CHAT_RECENT_MESSAGES).coerceAtLeast(0)
     return ChatSessionResponse(
@@ -712,7 +732,30 @@ private fun chatSessionResponse(repo: ProjectChatRepository, session: ProjectCha
         updatedAt = session.updatedAt.toString(),
         messages = repo.getMessages(session.projectId, CHAT_RECENT_MESSAGES, offset).map { it.toResponse() },
         messageCount = count,
+        actions = actions,
     )
+}
+
+/**
+ * Runs the rule-based proposer (ADR 0023) and returns the open proposals. A failure of the proposer never fails the chat read: it is logged
+ * with its exception class only (no ids, no text), and the chat answers without proposals.
+ */
+private fun proposeChatActions(repo: ProjectChatActionRepository, projectId: String): List<ChatActionResponse> {
+    try {
+        repo.refresh(projectId)
+    } catch (e: Exception) {
+        projectAdminLog.warn("project chat proposer failed: error={}", e::class.simpleName)
+    }
+    return repo.proposed(projectId).mapNotNull { row ->
+        val code = ChatActionCode.entries.firstOrNull { it.name == row.code } ?: return@mapNotNull null
+        ChatActionResponse(
+            actionId = row.actionId,
+            code = code.name,
+            label = code.label,
+            targetId = row.targetId,
+            proposedAt = row.proposedAt.toString(),
+        )
+    }
 }
 
 private fun ProjectChatMessageRow.toResponse() = ChatMessageResponse(

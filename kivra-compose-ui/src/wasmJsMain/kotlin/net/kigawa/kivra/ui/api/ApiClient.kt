@@ -743,6 +743,21 @@ object ApiClient {
         )
 
 
+    /**
+     * チャットの提案を確定する。`POST /api/projects/{id}/chat/actions/{actionId}/confirm`、本文 `{}`。サーバーが提案の操作
+     * (周の開始・放棄)を実行し、結果の固定コードを返す。409 は既に処理済み。403 は権限(運用者のみ、AI 不可)。
+     */
+    suspend fun confirmChatAction(projectId: String, actionId: String): ApiChatActionResult {
+        val text = postWriteText("/api/projects/${percentEncode(projectId)}/chat/actions/${percentEncode(actionId)}/confirm", EmptyJsonBody())
+        return replyJson.decodeFromString(ApiChatActionResult.serializer(), text)
+    }
+
+    /** 提案を却下する。`POST .../chat/actions/{actionId}/dismiss`、本文 `{}`。何も実行しない。 */
+    suspend fun dismissChatAction(projectId: String, actionId: String): ApiChatActionResult {
+        val text = postWriteText("/api/projects/${percentEncode(projectId)}/chat/actions/${percentEncode(actionId)}/dismiss", EmptyJsonBody())
+        return replyJson.decodeFromString(ApiChatActionResult.serializer(), text)
+    }
+
     private val replyJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val ERROR_FIELD = Regex("\"error\"\\s*:\\s*\"([^\"]{0,200})\"")

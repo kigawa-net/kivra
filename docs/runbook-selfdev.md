@@ -3011,3 +3011,49 @@ SELECT counter_name, bucket_key, amount FROM selfdev_llm_stop_limits ORDER BY co
 3. **キルスイッチの確認**: `AI_APPROVER` を無効化し、次の判断が `SKIPPED`(`NO_ACTIVE_AI_APPROVER`)になることを確認する。有効化して、戻ることを確認する。
 4. **上限の確認**: `MAX_CALLS_PER_HOUR=1` や `MAX_PER_HOUR=0` など小さくして再起動し、`LIMIT_*` の `ABSTAINED` になり、LLM が呼ばれない(`tokens_in` が 0)ことを確認する。
 5. **API 障害の確認**: Anthropic の認証を誤らせる(または到達できなくする)と、`ERROR`(`AUTH`、`TIMEOUT`、`TRANSPORT` など)が記録され、停止要求が `PENDING` のまま残り、人が決められることを確認する。要求を作る API の応答は遅れない。
+
+## 12. プロジェクトチャットの提案(ADR 0023、段階 1: 規則に基づく。LLM なし)
+
+チャットの節に、サーバーが規則で出した提案がカードで出る。提案は運用者(ORDER_MANAGE)にだけ見え、AI には出ない。
+
+### 12.1 提案の種類
+
+| コード | ラベル(サーバーの固定文言) | 出る条件 |
+|---|---|---|
+| `ORDER_START_CYCLE` | 周を開始する | ルート order が ACTIVE、期限内、進行中の周なし、`cycles_started < max_cycles`。連続失敗があっても出る(手動の開始は許される) |
+| `ORDER_ABANDON_CYCLE` | 進行中の周を放棄する | ルート order が ACTIVE で、進行中の周が「止まっている」(子 Task が全部 QUEUED で、FAILED か STOPPED の依存を持つ) |
+
+### 12.2 確定と却下
+
+- 確定(確定ボタン → 確認ダイアログ → 確定): サーバーは提案の行の対象と版で、REST と同じ操作を 1 回だけ実行する。結果は `EXECUTED`(`OK`)、版が違えば `EXPIRED`(`STALE_VERSION`)、拒否は `FAILED` と拒否理由。
+- 却下: 何も実行しない。`DISMISSED`(`OPERATOR_DISMISSED`)。
+- 解決済みの提案への確定・却下は 409(`ACTION_RESOLVED`)。一覧を読み直す。
+
+### 12.3 提案の寿命
+
+- order の版が動くと、その版の提案は次にチャットを読んだときに `EXPIRED`(`VERSION_MOVED`)になり、規則が今も成り立つなら、新しい版で出し直す。
+- 規則から外れた提案(周が始まった、停止要求が来た、など)は `NO_LONGER_ELIGIBLE` で閉じる。
+- 同じ版の提案は、確定・却下・失敗の後に出し直さない。
+
+### 12.4 確認の手順
+
+1. 提案の対象 order を、詳細の画面で確かめる(状態、版、進行中の周)。
+2. 放棄の提案は、`selfdev_tasks` で周の Task の状態を見る: 子 Task の状態が QUEUED で、依存先が FAILED か STOPPED であること。動いている Task(RUNNING など)が一つでもあれば、規則は出さないはず。出ていて動いていれば、確定せず、ADR 0023 の規則の見直しを記録する。
+3. 確定の後、監査行を確かめる: `order operator action: action=CYCLE_STARTED`(または `CYCLE_ABANDONED`)と `project chat action: action=... actor=... actionId=... result=...`。`actor` は運用者の値の短いハッシュで、AI の主体の値は現れない。
+
+### 12.5 拒否された確定の読み方
+
+| `resultCode` | 意味 | 対処 |
+|---|---|---|
+| `VERSION_MOVED` / `STALE_VERSION` | order が変わった | チャットを読み直す。新しい提案を確定する |
+| `CYCLE_IN_PROGRESS` | 進行中の周がある | 周の状態を確認する。放棄の提案が出ていなければ待つ |
+| `CYCLE_LIMIT_REACHED` | 周の上限 | 延長(order の extend)か、新しい order |
+| `ORDER_BUDGET`、`ORDER_UNPRICED` | 予算、または未確定の費用 | 予算の画面と、UNPRICED の確認(ADR 0003)を見る。チャットからは解除しない |
+| `AUTOPILOT_PAUSED` | 自律実行が一時停止 | 自律実行を再開してから、提案を出し直す |
+| `ORDER_NOT_FOUND` | 対象が無い、またはプロジェクトが違う | 提案は無効。操作しない |
+| `TASK_STOP_REFUSED` | 放棄で周の Task を止められなかった | Task の状態を確認する。REST の放棄で手動で処理する |
+
+### 12.6 ロールバック
+
+- 機能は、チャットの読み取りに提案を足しただけ。提案が出ないようにするには、`KIVRA_SELFDEV_ORDER_*` を止めるか、運用者の権限を外す。既存の行を消す必要は無い(`project_chat_actions` は追加のみ。V56)。
+- 提案の行は `EXPIRED` のまま残る(履歴)。古い行を消す手順は、この段階では無い。

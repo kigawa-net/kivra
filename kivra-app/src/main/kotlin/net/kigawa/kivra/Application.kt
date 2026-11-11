@@ -274,6 +274,8 @@ internal fun Application.appModule(env: Map<String, String>) {
         SelfDevMemoryRouteDeps(operators = verifier, memory = memoryRepo, aiPrincipal = aiPrincipal, projects = projectRepo, guard = permissionGuard)
     }
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
+    // The project chat's action proposals (ADR 0023): shared by the chat read (the proposer) and the order routes (confirm and dismiss).
+    val projectChatActions = net.kigawa.kivra.db.ProjectChatActionRepository(database)
     val orderRoutes = if (orderRepo != null && operatorVerifier != null) {
         SelfDevOrderRouteDeps(
             operators = operatorVerifier,
@@ -286,6 +288,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             operations = SelfDevOperatorRepository(database),
             projects = projectRepo,
             guard = permissionGuard,
+            chatActions = projectChatActions,
         )
     } else {
         null
@@ -623,6 +626,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                 budgets = budgetStore,
                 drain = ProjectDrainRepository(database, budgetStore),
                 chatRepo = net.kigawa.kivra.db.ProjectChatRepository(database),
+                chatActions = projectChatActions,
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

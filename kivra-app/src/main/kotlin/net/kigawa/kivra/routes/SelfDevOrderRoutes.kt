@@ -18,12 +18,16 @@ import net.kigawa.kivra.auth.PermissionService
 import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.OrderState
+import net.kigawa.kivra.core.chat.ChatActionCode
+import net.kigawa.kivra.core.chat.ChatActionState
+import net.kigawa.kivra.core.chat.ChatResultCode
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.AbandonResult
 import net.kigawa.kivra.db.ChildCreateResult
 import net.kigawa.kivra.db.ChildLimits
 import net.kigawa.kivra.db.DEFAULT_CYCLE_BUDGET_JPY
 import net.kigawa.kivra.db.ChildRefusal
+import net.kigawa.kivra.db.CycleStarted
 import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.EXTEND_DAYS_LIMIT
 import net.kigawa.kivra.db.ExtendInvalid
@@ -33,6 +37,8 @@ import net.kigawa.kivra.db.CurrentCycle
 import net.kigawa.kivra.db.OrderCycle
 import net.kigawa.kivra.db.OrderResult
 // SelfDevGoalRepository removed in V40
+import net.kigawa.kivra.db.ProjectChatActionRepository
+import net.kigawa.kivra.db.ProjectChatActionRow
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
@@ -75,6 +81,8 @@ class SelfDevOrderRouteDeps(
     val guard: PermissionGuard = PermissionGuard(
         PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, aiPrincipal, orderSettings.rootApprover, null),
     ),
+    /** The project chat's action proposals (ADR 0023): `/api/projects/{id}/chat/actions/...`. Null: those routes answer 503. */
+    val chatActions: ProjectChatActionRepository? = null,
 )
 
 @Serializable
@@ -350,9 +358,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         val orderId = orderIdOf(call)
         val version = call.readVersion() ?: return@post
         if (orderId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
-        when (val r = deps.orders.startCycle(orderId, version, caller.principal)) {
+        when (val r = deps.startCycleAsOperator(orderId, version, caller.principal)) {
             is OrderResult.Moved -> {
-                operatorLog.info("order operator action: action=CYCLE_STARTED actor={} orderId={} cycleNo={}", operatorTag(caller.principal), orderId, r.value.cycleNo)
                 call.respond(
                     HttpStatusCode.Created,
                     CycleStartedResponse(orderId, r.value.goalId, r.value.cycleNo, r.value.order.version),
@@ -474,33 +481,12 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         ) {
             return@post call.respond(HttpStatusCode.BadRequest, OrderError(INVALID_BODY))
         }
-        val order = deps.orders.get(orderId) ?: return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
-        // The checks that decide before anything is written: the version, the state and the cycle. The repository checks them again under the lock.
-        if (order.version != request.expectedVersion) return@post call.respond(HttpStatusCode.Conflict, OrderError(STALE))
-        when (order.state) {
-            OrderState.ACTIVE, OrderState.PAUSED -> Unit
-            OrderState.STOP_REQUESTED -> return@post call.respond(HttpStatusCode.Conflict, OrderError(refusedText(OrderConflict.STOP_ALREADY_PENDING), OrderConflict.STOP_ALREADY_PENDING.name))
-            OrderState.STOPPED -> return@post call.respond(HttpStatusCode.Conflict, OrderError(refusedText(OrderConflict.TERMINAL), OrderConflict.TERMINAL.name))
-        }
-        val taskId = order.currentGoalId
-            ?: return@post call.respond(HttpStatusCode.Conflict, OrderError(refusedText(OrderConflict.NO_CYCLE_IN_PROGRESS), OrderConflict.NO_CYCLE_IN_PROGRESS.name))
-        // A Task that still runs is stopped first (the operator's stop, as POST /api/selfdev/goals/{id}/stop does); a missing or ended one is left.
-        val task = deps.operations.task(taskId)
-        if (task != null && !deps.orders.isCycleTaskEnded(task.state.name)) {
-            when (val stopped = deps.operations.stopTask(taskId, task.version)) {
-                is TaskTransition.Moved -> operatorLog.info("order operator action: action=CYCLE_TASK_STOPPED actor={} orderId={} result=STOPPED", operatorTag(caller.principal), orderId)
-                TaskTransition.NotFound, TaskTransition.StaleVersion -> return@post call.respond(HttpStatusCode.Conflict, OrderError(STALE))
-                is TaskTransition.Refused -> return@post call.respond(HttpStatusCode.Conflict, OrderError(refusedText(OrderConflict.CYCLE_IN_PROGRESS), stopped.reason.name))
-            }
-        }
-        when (val r = deps.orders.abandonCycle(orderId, request.expectedVersion, caller.principal, reason)) {
-            is AbandonResult.Moved -> {
-                operatorLog.info("order operator action: action=CYCLE_ABANDONED actor={} orderId={} result={}", operatorTag(caller.principal), orderId, r.order.state.name)
-                call.respond(r.order.summary())
-            }
-            AbandonResult.NotFound -> call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
-            AbandonResult.StaleVersion -> call.respond(HttpStatusCode.Conflict, OrderError(STALE))
-            is AbandonResult.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedText(r.reason), r.reason.name))
+        when (val r = deps.abandonCycleAsOperator(orderId, request.expectedVersion, caller.principal, reason)) {
+            is CycleAbandonOutcome.Moved -> call.respond(r.order.summary())
+            CycleAbandonOutcome.NotFound -> call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+            CycleAbandonOutcome.Stale -> call.respond(HttpStatusCode.Conflict, OrderError(STALE))
+            is CycleAbandonOutcome.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedText(r.reason), r.reason.name))
+            is CycleAbandonOutcome.TaskStopRefused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedText(OrderConflict.CYCLE_IN_PROGRESS), r.code))
         }
     }
 
@@ -532,6 +518,11 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         listApprovals(deps, call)
     }
     get("/api/projects/{projectId}/approvals") { listApprovals(deps, call) }
+
+    // The project chat's action proposals (ADR 0023). Confirm runs the same operation as the REST route; dismiss only records the operator's
+    // refusal. Each wrapper checks the same things as the REST route it stands for, in the same order, before anything is read.
+    post("/api/projects/{projectId}/chat/actions/{actionId}/confirm") { confirmChatAction(deps, call) }
+    post("/api/projects/{projectId}/chat/actions/{actionId}/dismiss") { dismissChatAction(deps, call) }
 
     post("/api/selfdev/stop-requests/{id}/approve") {
         val caller = deps.caller(call) ?: return@post
@@ -658,6 +649,152 @@ private fun SelfDevOrderRouteDeps.stopCurrentGoal(order: SelfDevOrder) {
         null -> Unit
     }
 }
+
+/** The outcome of an operator's cycle abandonment, shared by the REST route and a project chat action (ADR 0023). */
+internal sealed interface CycleAbandonOutcome {
+    data class Moved(val order: SelfDevOrder) : CycleAbandonOutcome
+    data object NotFound : CycleAbandonOutcome
+    data object Stale : CycleAbandonOutcome
+    data class Refused(val reason: OrderConflict) : CycleAbandonOutcome
+
+    /** The cycle's Task could not be stopped; [code] is the Task transition's fixed reason name. */
+    data class TaskStopRefused(val code: String) : CycleAbandonOutcome
+}
+
+/**
+ * An operator's cycle start (ADR 0015 section 4.1). The REST route and a project chat confirmation both run it, so the checks and the audit line
+ * are the same. The caller authenticated and passed the permission check.
+ */
+internal fun SelfDevOrderRouteDeps.startCycleAsOperator(orderId: String, expectedVersion: Long, principal: String): OrderResult<CycleStarted> {
+    val result = orders.startCycle(orderId, expectedVersion, principal)
+    if (result is OrderResult.Moved) {
+        operatorLog.info("order operator action: action=CYCLE_STARTED actor={} orderId={} cycleNo={}", operatorTag(principal), orderId, result.value.cycleNo)
+    }
+    return result
+}
+
+/**
+ * An operator's abandonment of the cycle in progress (ADR 0015 addendum 2026-11-11, section 3). The checks that decide before anything is written
+ * (the order, the version, the state, the cycle) come first; the repository checks them again under the lock. A Task that still runs is stopped
+ * first. Shared by the REST route and a project chat confirmation.
+ */
+internal fun SelfDevOrderRouteDeps.abandonCycleAsOperator(orderId: String, expectedVersion: Long, principal: String, reason: String): CycleAbandonOutcome {
+    val order = orders.get(orderId) ?: return CycleAbandonOutcome.NotFound
+    if (order.version != expectedVersion) return CycleAbandonOutcome.Stale
+    when (order.state) {
+        OrderState.ACTIVE, OrderState.PAUSED -> Unit
+        OrderState.STOP_REQUESTED -> return CycleAbandonOutcome.Refused(OrderConflict.STOP_ALREADY_PENDING)
+        OrderState.STOPPED -> return CycleAbandonOutcome.Refused(OrderConflict.TERMINAL)
+    }
+    val taskId = order.currentGoalId ?: return CycleAbandonOutcome.Refused(OrderConflict.NO_CYCLE_IN_PROGRESS)
+    // A Task that still runs is stopped first (the operator's stop, as POST /api/selfdev/goals/{id}/stop does); a missing or ended one is left.
+    val task = operations.task(taskId)
+    if (task != null && !orders.isCycleTaskEnded(task.state.name)) {
+        when (val stopped = operations.stopTask(taskId, task.version)) {
+            is TaskTransition.Moved -> operatorLog.info("order operator action: action=CYCLE_TASK_STOPPED actor={} orderId={} result=STOPPED", operatorTag(principal), orderId)
+            TaskTransition.NotFound, TaskTransition.StaleVersion -> return CycleAbandonOutcome.Stale
+            is TaskTransition.Refused -> return CycleAbandonOutcome.TaskStopRefused(stopped.reason.name)
+        }
+    }
+    return when (val r = orders.abandonCycle(orderId, expectedVersion, principal, reason)) {
+        is AbandonResult.Moved -> {
+            operatorLog.info("order operator action: action=CYCLE_ABANDONED actor={} orderId={} result={}", operatorTag(principal), orderId, r.order.state.name)
+            CycleAbandonOutcome.Moved(r.order)
+        }
+        AbandonResult.NotFound -> CycleAbandonOutcome.NotFound
+        AbandonResult.StaleVersion -> CycleAbandonOutcome.Stale
+        is AbandonResult.Refused -> CycleAbandonOutcome.Refused(r.reason)
+    }
+}
+
+private const val CHAT_ACTION_NOT_FOUND = "action not found"
+private const val CHAT_ACTION_RESOLVED = "the action is already resolved; reload the chat"
+
+/** The reason the chat's confirmation gives the abandonment. Fixed server text: the operator's chat text never reaches the audit. */
+private const val CHAT_ABANDON_REASON = "confirmed from the project chat"
+
+/** The answer of a resolved chat action: its state and its fixed result code. */
+@Serializable
+data class ChatActionResolvedResponse(val actionId: String, val state: String, val resultCode: String)
+
+/** `POST .../chat/actions/{actionId}/confirm`: the operator's confirmation. Runs the REST operation of the action's code, once. */
+private suspend fun confirmChatAction(deps: SelfDevOrderRouteDeps, call: ApplicationCall) {
+    val caller = deps.caller(call) ?: return
+    if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return
+    if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "chat.action.confirm", projectId = call.pathParam("projectId"))) return
+    deps.resolveChatAction(call, caller, confirm = true)
+}
+
+/** `POST .../chat/actions/{actionId}/dismiss`: the operator's refusal. Nothing runs. */
+private suspend fun dismissChatAction(deps: SelfDevOrderRouteDeps, call: ApplicationCall) {
+    val caller = deps.caller(call) ?: return
+    if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return
+    if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "chat.action.dismiss", projectId = call.pathParam("projectId"))) return
+    deps.resolveChatAction(call, caller, confirm = false)
+}
+
+/**
+ * The shared part of a chat confirm and dismiss. The client sends nothing the server trusts but the action ID: the code, the target and the
+ * expected version are the proposal's, read from the row. The project must be one the caller may read (a 404 otherwise, as the chat routes).
+ * A PROPOSED row is resolved once, with a fixed result code; a second answer is 409.
+ */
+private suspend fun SelfDevOrderRouteDeps.resolveChatAction(call: ApplicationCall, caller: OrderCaller, confirm: Boolean) {
+    if (!call.readEmptyBody()) return
+    val repo = chatActions ?: return call.respond(HttpStatusCode.ServiceUnavailable, OrderError(ORDERS_DISABLED))
+    val projectId = call.pathParam("projectId")?.takeIf { ORDER_ID_SHAPE.matches(it) }
+    val actionId = call.pathParam("actionId")?.takeIf { ORDER_ID_SHAPE.matches(it) }
+    if (projectId == null || actionId == null || !guard.readScope(caller.access).sees(projectId)) {
+        return call.respond(HttpStatusCode.NotFound, OrderError(CHAT_ACTION_NOT_FOUND))
+    }
+    val action = repo.find(projectId, actionId) ?: return call.respond(HttpStatusCode.NotFound, OrderError(CHAT_ACTION_NOT_FOUND))
+    if (action.state != ChatActionState.PROPOSED.name) {
+        return call.respond(HttpStatusCode.Conflict, OrderError(CHAT_ACTION_RESOLVED, "ACTION_RESOLVED"))
+    }
+    val code = ChatActionCode.entries.firstOrNull { it.name == action.code }
+    val (state, resultCode) = when {
+        !confirm -> ChatActionState.DISMISSED to ChatResultCode.OPERATOR_DISMISSED
+        code == null -> ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
+        else -> runChatAction(code, action, projectId, caller.principal)
+    }
+    if (!repo.resolve(actionId, state, resultCode, caller.principal)) {
+        return call.respond(HttpStatusCode.Conflict, OrderError(CHAT_ACTION_RESOLVED, "ACTION_RESOLVED"))
+    }
+    chatLog.info(
+        "project chat action: action={} actor={} actionId={} result={}",
+        code?.name ?: "UNKNOWN", operatorTag(caller.principal), actionId, resultCode,
+    )
+    call.respond(ChatActionResolvedResponse(actionId, state.name, resultCode))
+}
+
+/** Runs the REST operation of [code] for the proposal. The mapping of its outcome to a state and a fixed code is the only logic here. */
+private fun SelfDevOrderRouteDeps.runChatAction(
+    code: ChatActionCode,
+    action: ProjectChatActionRow,
+    projectId: String,
+    principal: String,
+): Pair<ChatActionState, String> {
+    val targetId = action.targetId ?: return ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
+    val expected = action.expectedVersion ?: return ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
+    // The target must belong to this project; an order of another project is not found, whatever the proposal says.
+    if (orders.get(targetId)?.projectId != projectId) return ChatActionState.FAILED to ChatResultCode.ORDER_NOT_FOUND
+    return when (code) {
+        ChatActionCode.ORDER_START_CYCLE -> when (val r = startCycleAsOperator(targetId, expected, principal)) {
+            is OrderResult.Moved -> ChatActionState.EXECUTED to ChatResultCode.OK
+            OrderResult.NotFound -> ChatActionState.FAILED to ChatResultCode.ORDER_NOT_FOUND
+            OrderResult.StaleVersion -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
+            is OrderResult.Refused -> ChatActionState.FAILED to r.reason.name
+        }
+        ChatActionCode.ORDER_ABANDON_CYCLE -> when (val r = abandonCycleAsOperator(targetId, expected, principal, CHAT_ABANDON_REASON)) {
+            is CycleAbandonOutcome.Moved -> ChatActionState.EXECUTED to ChatResultCode.OK
+            CycleAbandonOutcome.NotFound -> ChatActionState.FAILED to ChatResultCode.ORDER_NOT_FOUND
+            CycleAbandonOutcome.Stale -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
+            is CycleAbandonOutcome.Refused -> ChatActionState.FAILED to r.reason.name
+            is CycleAbandonOutcome.TaskStopRefused -> ChatActionState.FAILED to ChatResultCode.TASK_STOP_REFUSED
+        }
+    }
+}
+
+private val chatLog = LoggerFactory.getLogger("net.kigawa.kivra.project.chat")
 
 private fun orderIdOf(call: ApplicationCall): String? = call.pathParam("id")?.takeIf { ORDER_ID_SHAPE.matches(it) }
 

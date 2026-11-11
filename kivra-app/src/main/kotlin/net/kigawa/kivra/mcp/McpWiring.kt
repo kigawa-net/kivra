@@ -5,6 +5,7 @@ import net.kigawa.kivra.auth.OidcJwtConfig
 import net.kigawa.kivra.auth.RefreshingJwkProvider
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.ProjectRepository
+import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.github.RepoRef
 import net.kigawa.kivra.routes.PermissionGuard
 import net.kigawa.kivra.routes.legacyPermissionGuard
@@ -29,7 +30,8 @@ fun buildMcpRouteDeps(
     selfDevEnabled: Boolean = false,
     maxActiveSelfDev: Int = 1,
     orders: McpOrderDeps? = null,
-    // goals: McpGoalDeps temporarily removed pending Task model migration (V40)
+    /** The tasks of the cycle tree ([McpTaskTools], ADR 0019). Set only while the autopilot is on; registered with the Goal read flag. */
+    tasks: SelfDevOperatorRepository? = null,
     guard: PermissionGuard? = null,
     tokenAuth: McpTokenAuth? = null,
     /** The projects a write tool may assign a run to (ADR 0022). Required while the MCP write switch is on. */
@@ -45,7 +47,8 @@ fun buildMcpRouteDeps(
         } else {
             emptyList()
         }) +
-        (orders?.let { McpOrderTools(it).tools(settings.writeEnabled) } ?: emptyList())
+        (orders?.let { McpOrderTools(it).tools(settings.writeEnabled) } ?: emptyList()) +
+        (if (settings.goalReadEnabled) tasks?.let { McpTaskTools(it, settings.goalTextEnabled).tools() } ?: emptyList() else emptyList())
     return McpRouteDeps(
         settings = settings,
         verifier = McpJwtVerifier(oidc, jwkProvider ?: RefreshingJwkProvider(oidc.jwksUrl), settings.agentRole),

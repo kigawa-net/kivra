@@ -2736,6 +2736,17 @@ Goal の読み取りは、`KIVRA_MCP_GOAL_READ_ENABLED=true` かつ `KIVRA_MCP_E
 - **ログ**: `net.kigawa.kivra.selfdev.autopilot.operator` に、`via=mcp`、固定の理由コード、Goal の ID の先頭 12 文字だけが出る。題名、本文、主体の生の値は出ない。
 - 有効化: dev で先に確かめる。共有基盤の変更のため、dev での有効化は運用者の承認を経る(ADR 0019 決定 4)。戻すには該当の変数を `false` にして再起動する。
 
+### 8.9a 周の木の読み取り(`kivra_task_list`、ADR 0019 追補 2026-11-12)
+
+`KIVRA_MCP_GOAL_READ_ENABLED=true` かつ `KIVRA_MCP_ENABLED=true` かつ オートパイロットが有効のときだけ登録する(読み取り専用)。
+
+| ツール | 必要なスコープ | 入力 | 出力(`structuredContent`) |
+|---|---|---|---|
+| `kivra_task_list` | `kivra.runs.read` | `task_id`(26 文字。周の根の ID) | `task`(`task_id`、`state`、`state_reason`、`version`、`project_id`)、`children`(最大 50 件、古い順。各件は `task_id`、`state`、`state_reason`、`requires_approval`、`depends_on`、`version`、`created_at`)、`children_truncated`。無いタスク、または読めないプロジェクトのタスクは `NOT_FOUND`(`isError`)。 |
+
+- 題名は `KIVRA_MCP_GOAL_TEXT_ENABLED=true` のときだけ、運用者本人に返す(AI の主体には返さない)。`untrusted: true` と固定の `note` が付く。
+- 本文、方針、対象パス、見積りは返さない。対象パスと見積りは計画の出力にだけあり、タスクの行には無い。
+
 ### 8.9b 題名の読み取り(ADR 0019 追補、2026-10-21、既定は無効)
 
 `KIVRA_MCP_GOAL_TEXT_ENABLED=true` のとき、`kivra_goal_get_titles` を登録する。`KIVRA_MCP_ENABLED=true`、`KIVRA_MCP_GOAL_READ_ENABLED=true`、オートパイロットが要る。どれかが欠けると起動を止める。既定は `false`。off のときは tools/list に出ず、呼んでも未登録のツールとして扱われる。

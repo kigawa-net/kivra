@@ -229,6 +229,7 @@ class RolesCoverageArchitectureTest {
         "kivra_run_get" to Permission.READ,
         "kivra_order_list" to Permission.READ,
         "kivra_order_get" to Permission.READ,
+        "kivra_task_list" to Permission.READ,
         // Goal MCP tools removed in V40
         // "kivra_goal_list" to Permission.READ,
         // "kivra_goal_get" to Permission.READ,

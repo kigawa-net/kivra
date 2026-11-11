@@ -88,13 +88,10 @@ internal fun Route.configureProjectRoutes(
     members: ProjectMemberRepository,
     /** The monthly budget of a project (ADR 0022, PR-E): `/api/projects/{id}/budget` and the dashboard's budget. */
     budgets: DbBudgetStore,
-<<<<<<< HEAD
     /** The drain of a project into another (ADR 0022): `POST /api/projects/{id}/drain`. */
     drain: ProjectDrainRepository,
-=======
-    /** The project chat (V53): `/api/projects/{id}/chat`. Null: the chat routes are not registered. */
+    /** The project chat (V55): `/api/projects/{id}/chat`. Null: the chat routes are not registered. */
     chatRepo: ProjectChatRepository? = null,
->>>>>>> f09208e (feat(project): プロジェクトチャット機能の追加 (V53))
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -373,7 +370,7 @@ internal fun Route.configureProjectRoutes(
                 ),
             )
         }
-        // The project chat (V53). Registered only when a chat repository is given. Reads need READ and the project's read scope; sending
+        // The project chat (V55). Registered only when a chat repository is given. Reads need READ and the project's read scope; sending
         // a message needs ORDER_MANAGE. The message is only stored here: no Task is submitted.
         if (chatRepo != null) {
             get("chat") {

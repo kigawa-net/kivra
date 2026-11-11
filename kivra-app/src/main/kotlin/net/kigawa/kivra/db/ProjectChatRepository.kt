@@ -12,7 +12,7 @@ import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
 
-/** A project's chat session (V53). One per project, so the session id is the [projectId]. */
+/** A project's chat session (V55). One per project, so the session id is the [projectId]. */
 data class ProjectChatSessionRow(
     val projectId: String,
     val title: String,
@@ -28,7 +28,7 @@ data class ProjectChatMessageRow(
     val createdAt: Instant,
 )
 
-/** Persistence of the project chat (V53): the session of a project and its messages. */
+/** Persistence of the project chat (V55): the session of a project and its messages. */
 class ProjectChatRepository(
     private val database: Database,
     private val clock: Clock = Clock.systemUTC(),

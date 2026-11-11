@@ -1,4 +1,4 @@
--- V53: project chat sessions and messages.
+-- V55: project chat sessions and messages.
 -- Each project has a single chat session (one-to-one).
 -- Messages are appended in chronological order (id auto-increment).
 

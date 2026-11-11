@@ -79,6 +79,11 @@ import net.kigawa.kivra.ui.projectRunStateText
 import net.kigawa.kivra.ui.showsProjectOperator
 import net.kigawa.kivra.ui.submitBlocked
 import net.kigawa.kivra.ui.yenText
+import net.kigawa.kivra.ui.IdempotencyKeys
+import net.kigawa.kivra.ui.SubmitKind
+import net.kigawa.kivra.ui.SubmitResult
+import net.kigawa.kivra.ui.taskSuccessText
+import net.kigawa.kivra.ui.validatedTaskTitle
 
 /**
  * プロジェクトのダッシュボード(`#/projects/<id>/dashboard`、旧 UI の project-dash): 状態別の件数、最近の Run、費用、最近の活動。
@@ -686,8 +691,7 @@ private fun ProjectOperatorSection(projectId: String) {
 
 /**
  * プロジェクトチャットセクション（V53）。メッセージの表示と送信を行う。
- * チャットメッセージはDBに保存されるだけ。Taskとして投入するには、この画面ではなく
- * 自己開発のタスク投入UI（TasksScreen）を使うか、チャット内容をコピーして投入する。
+ * チャットメッセージはDBに保存され、同時にTaskとしてkivra Agentへ指示が投入される。
  */
 @Composable
 private fun ProjectChatSection(projectId: String) {
@@ -696,6 +700,7 @@ private fun ProjectChatSection(projectId: String) {
     var inputText by remember { mutableStateOf("") }
     var sendBusy by remember { mutableStateOf(false) }
     var sendNotice by remember { mutableStateOf<ActionNotice?>(null) }
+    val keys = remember { IdempotencyKeys() }
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -733,21 +738,43 @@ private fun ProjectChatSection(projectId: String) {
                         if (submitBlocked(sendBusy, ApiSession.expired)) return@Button
                         sendBusy = true
                         sendNotice = null
+                        val trimmed = inputText.trim()
+                        inputText = ""
                         scope.launch {
-                            var done = false
+                            var chatOk = false
+                            var taskOk = false
                             try {
-                                ApiClient.sendChatMessage(projectId, inputText.trim())
-                                done = true
-                                inputText = ""
+                                // チャットメッセージをDBに保存
+                                ApiClient.sendChatMessage(projectId, trimmed)
+                                chatOk = true
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
-                                sendNotice = ActionNotice("送信に失敗しました", ok = false)
+                                // チャットの保存に失敗してもTask投入は試みる
+                                sendNotice = ActionNotice("チャットの保存に失敗しました", ok = false)
+                            }
+                            // Taskとしてkivra Agentへ指示を投入
+                            try {
+                                val title = validatedTaskTitle(trimmed) ?: trimmed
+                                val key = keys.keyFor(title)
+                                val result = ApiClient.submitTask(title, null, SubmitKind.SELF_DEV, projectId, key)
+                                taskOk = true
+                                keys.rotate()
+                                // チャット送信のみの成功時は「送信しました」、Task追加時は「Taskとして投入しました」
+                                sendNotice = if (chatOk) {
+                                    ActionNotice(taskSuccessText(result, SubmitKind.SELF_DEV), ok = result !is SubmitResult.Failed)
+                                } else {
+                                    ActionNotice("Taskとして投入しました（チャットの保存は失敗しました）", ok = true)
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                if (!chatOk) {
+                                    sendNotice = ActionNotice("送信に失敗しました", ok = false)
+                                }
+                                // chatOk の場合はすでに sendNotice が設定されている
                             } finally {
                                 sendBusy = false
-                            }
-                            if (done) {
-                                sendNotice = ActionNotice("送信しました", ok = true)
                             }
                         }
                     },

@@ -13,8 +13,10 @@ import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.OPERATOR_RELEASED_REASON
+import net.kigawa.kivra.db.OPERATOR_RELEASED_STUCK_REASON
 import net.kigawa.kivra.db.OPERATOR_RELEASED_UNBOUND_PR_REASON
 import net.kigawa.kivra.db.ReleaseResult
+import net.kigawa.kivra.db.StuckReleaseResult
 import net.kigawa.kivra.db.UnboundPrReleaseResult
 
 /** Body of `POST /api/admin/selfdev/runs/{id}/release` and `.../release-unbound-pr`. Strict: any other field is refused. */
@@ -26,6 +28,10 @@ data class ReleaseSelfDevRunResponse(val runId: String, val state: String, val r
 
 @Serializable
 private data class SelfDevAdminError(val error: String)
+
+/** A refusal of the stuck-DEVELOPING release with a fixed machine code the screen can explain. */
+@Serializable
+private data class SelfDevAdminCodedError(val error: String, val code: String)
 
 private const val MAX_RELEASE_REASON_CHARS = 500
 private val releaseJson = Json { ignoreUnknownKeys = false }
@@ -41,6 +47,10 @@ private const val INVALID_RELEASE_REQUEST = "invalid release request"
  *   404 no such self-development run, 409 the run is not UNKNOWN.
  * - `POST .../release-unbound-pr`: PULL_REQUEST without a binding -> CANCELLED (ADR 0009 addendum). 200 released, 400 and 401
  *   as above, 404 no such self-development run, 409 the run is not a PULL_REQUEST without a binding (a bound one completes on merge).
+ *
+ * - `POST .../release-stuck-developing`: a stalled DEVELOPING run -> CANCELLED (ADR 0009 addendum 2026-11-11). 200 released, 400 and
+ *   401 as above, 404 no such self-development run, 409 refused with a `code`: `NOT_DEVELOPING`, `PR_BOUND`, `ACTIVE_ATTEMPT`
+ *   (an agent may be working), `LEASE_HELD` (a worker holds the run), `TOO_RECENT` (updated within the last 10 minutes).
  *
  * The reason is written to the audit payload only. It is never logged or echoed. Neither route writes to GitHub.
  */
@@ -103,6 +113,36 @@ internal fun Route.configureSelfDevAdminRoutes(
                 HttpStatusCode.Conflict,
                 SelfDevAdminError("run is not a PULL_REQUEST without a binding"),
             )
+        }
+    }
+    post("/api/admin/selfdev/runs/{id}/release-stuck-developing") {
+        val operator = identity.principal(call.request.headers)
+        if (operator == null) {
+            call.respond(HttpStatusCode.Unauthorized, SelfDevAdminError("unauthorized"))
+            return@post
+        }
+        if (!guard.permits(operator, Permission.BUDGET_OVERRIDE, "selfdev_release_stuck_developing")) {
+            call.respond(HttpStatusCode.Forbidden, SelfDevAdminError("forbidden"))
+            return@post
+        }
+        if (!call.requireJsonSameOrigin()) return@post
+        val reason = call.readReleaseReason() ?: return@post
+        val id = call.pathParam("id")?.takeIf { ADMIN_RUN_ID_SHAPE.matches(it) }
+        if (id == null) {
+            call.respond(HttpStatusCode.NotFound, SelfDevAdminError("run not found"))
+            return@post
+        }
+        when (runs.releaseStuckDevelopingSelfDev(RunId(id), operator, reason)) {
+            is StuckReleaseResult.Released -> call.respond(
+                HttpStatusCode.OK,
+                ReleaseSelfDevRunResponse(runId = id, state = "CANCELLED", reasonCode = OPERATOR_RELEASED_STUCK_REASON),
+            )
+            StuckReleaseResult.NotFound -> call.respond(HttpStatusCode.NotFound, SelfDevAdminError("run not found"))
+            StuckReleaseResult.NotDeveloping -> call.respond(HttpStatusCode.Conflict, SelfDevAdminCodedError("run is not DEVELOPING", "NOT_DEVELOPING"))
+            StuckReleaseResult.PullRequestBound -> call.respond(HttpStatusCode.Conflict, SelfDevAdminCodedError("run has a pull request bound", "PR_BOUND"))
+            StuckReleaseResult.ActiveAttempt -> call.respond(HttpStatusCode.Conflict, SelfDevAdminCodedError("run has an active coding attempt", "ACTIVE_ATTEMPT"))
+            StuckReleaseResult.LeaseHeld -> call.respond(HttpStatusCode.Conflict, SelfDevAdminCodedError("a worker holds the run", "LEASE_HELD"))
+            StuckReleaseResult.TooRecent -> call.respond(HttpStatusCode.Conflict, SelfDevAdminCodedError("run was updated recently", "TOO_RECENT"))
         }
     }
 }

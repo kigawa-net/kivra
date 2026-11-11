@@ -84,3 +84,46 @@ ADR 0008 の自己開発 Run は、外部結果が不明なとき `UNKNOWN` に�
   監査と outbox を同じトランザクションで書く。
 - 汎用の遷移ルールは変わらない。`PULL_REQUEST -> CANCELLED` は、`next` に従来からあるが、この経路は `transition()` を通らない。
   運用者の経路で、束縛の有無を行ロックの下で確認する点が、汎用の遷移と異なる。
+
+## 追補(2026-11-11): 止まった DEVELOPING の Run の解放
+
+### 背景
+
+自己開発の Run が `DEVELOPING` のまま止まることがある。実例: 作成から 3 秒後を最後に更新が無く、coding attempt が 1 件も投入されず、
+エージェントの claim も無い Run。この Run が同時 Run 上限(`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`)の枠を占有し、Order の自動の周が始まらなかった。
+これまでの解放は `UNKNOWN`(本文)と、束縛の無い `PULL_REQUEST`(2026-10-17 の追補)だけで、`DEVELOPING` を取り消す手段が無かった。
+
+### 決定(追補)
+
+1. **経路を足す。** `POST /api/admin/selfdev/runs/{id}/release-stuck-developing`。認証・CSRF・権限(`BUDGET_OVERRIDE`)・本文の検査は、
+   既存の 2 つの解放と同じ。理由は 1〜500 文字で、監査の payload にだけ入る。汎用の `transition()` と遷移表は変えない。
+2. **遷移は `DEVELOPING` → `CANCELLED` だけ。** `state_reason` は固定コード `OPERATOR_RELEASED_STUCK`(`varchar(64)` に収まる)。
+3. **動いているかもしれない Run は解放しない。** 行をロック(`FOR UPDATE`)した下で、次の順に確認し、満たさなければ何も書かず 409 を返す。
+   応答は `{"error","code"}` で、`code` は `NOT_DEVELOPING`、`PR_BOUND`、`ACTIVE_ATTEMPT`、`LEASE_HELD`、`TOO_RECENT`。
+   - 状態が `DEVELOPING`(`NOT_DEVELOPING`)。
+   - PR が結び付いていない(`PR_BOUND`)。この経路は PR に触れない。
+   - `QUEUED` / `CLAIMED` / `RUNNING` の coding attempt が無い(`ACTIVE_ATTEMPT`)。エージェントが動いているかもしれない。
+     終端(`RESULT_RECEIVED`、`FAILED`、`ORPHANED`、`EXPIRED`、`CANCELLED`)だけなら妨げない。
+   - worker の lease が切れているか、誰も持っていない(`LEASE_HELD`)。DB の時計で判定する(他の fence と同じ)。
+   - 最終更新から 10 分以上たっている(`TOO_RECENT`)。定数 `STUCK_DEVELOPING_MIN_IDLE`。生きている Run を誤って止めないための余裕で、
+     環境変数にはしない(運用で変える理由が見つかったら別に決める)。
+   更新は `state` と `version` を条件にし、`RUN_RELEASED` の監査(`from` = `DEVELOPING`)と `RunStateChanged` の outbox を同じトランザクションで書く。
+4. **GitHub には何もしない。** PR は閉じず、マージもしない。`DEVELOPING` の Run に PR は無いはずだが、結び付いていれば拒否する。
+5. **解放後は上限の計数に入らない。** `countActiveSelfDev` は終端状態を除外し、`CANCELLED` は終端。テストで、解放の前は新しい投入が上限で断られ、
+   後は受け付けられることを確認する。
+6. **予算の予約と Order の周は、`UNKNOWN` の解放と同じ扱い。** 解放はどちらにも書かない。予算の予約は既存の経路(期限・acknowledge)で扱う。
+   Order の周は、`CANCELLED` の Run を失敗として見る(`UNKNOWN` が周の安全装置になる点は、`CANCELLED` では外れる)。
+7. **画面。** 状態が `DEVELOPING` で PR の無い Run の詳細に「運用者の解放（止まった Run）…」を出す。表示条件は純関数(`releaseKindOf`)。
+   画面は attempt・lease・最終更新を見ないので、状態だけで出し、解放できるかはサーバーが決める。断られた理由は `code` ごとの文言で出す。
+8. **マイグレーションは足さない。**
+
+### 未対応(この追補で扱わないこと)
+
+- **自動の解放は含まない。** 止まった Run を kivra 自身が見つけて閉じる処理(止まる原因の調査と再発防止を含む)は、別に決める。
+- **`QUEUED` のまま期限が切れた attempt の掃除は含まない。** 期限切れは既存の reconcile が `EXPIRED` にする。それまでは `ACTIVE_ATTEMPT` で拒否する。
+- **worker の lease を強制的に解く処理は行わない。** lease が切れていることを条件にする。
+
+### 結果(追補)
+
+- 解放の経路は 3 つになる。`UNKNOWN`、束縛の無い `PULL_REQUEST`、止まった `DEVELOPING`。いずれも運用者が認証された主体として行い、監査と outbox を同じトランザクションで書く。
+- `DEVELOPING` の解放は条件が最も厳しい(動いている最中の Run を止めうるため)。運用手順は runbook §4.1c。

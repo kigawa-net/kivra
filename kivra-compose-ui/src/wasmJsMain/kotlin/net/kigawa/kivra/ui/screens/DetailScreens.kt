@@ -29,6 +29,7 @@ import net.kigawa.kivra.ui.canPauseOrder
 import net.kigawa.kivra.ui.canRequestOrderStop
 import net.kigawa.kivra.ui.canResumeOrder
 import net.kigawa.kivra.ui.canStopGoal
+import net.kigawa.kivra.ui.releaseButtonLabel
 import net.kigawa.kivra.ui.releaseKindOf
 import net.kigawa.kivra.ui.releaseTextsOf
 import net.kigawa.kivra.ui.safePullRequestUrl
@@ -141,7 +142,7 @@ private fun RunReleaseSection(runId: String, kind: ReleaseKind, onReleased: (Str
     var open by remember { mutableStateOf(false) }
     var dialogError by remember { mutableStateOf<String?>(null) }
 
-    OutlinedButton(onClick = { dialogError = null; open = true }) { Text(if (kind == ReleaseKind.UNKNOWN) "運用者の解放…" else "解放（束縛なし）…") }
+    OutlinedButton(onClick = { dialogError = null; open = true }) { Text(releaseButtonLabel(kind)) }
     if (open) {
         ReasonDialog(
             title = texts.title,

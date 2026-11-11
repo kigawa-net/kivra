@@ -21,7 +21,10 @@ import net.kigawa.kivra.agent.docker.ProxyEnv
  * fixed argv and env names of the docker side. The output is checked by [K8sJobGuard] before it is used. The task text is not an input:
  * [K8sJobSpec] has no field for it, and the container gets only [CliCommand.argv] as its command.
  *
- * The init container is not built (PR 4 decides how the work directory is filled), and no `args`, `envFrom`, `hostPath` or service account
+ * The command is the in-Pod entrypoint ([K8sConstants.POD_ENTRYPOINT]) followed by [CliCommand.argv]. The entrypoint fills the work
+ * directory, runs the argv, collects the diff and writes the result file (PR 4, `k8s.pod.PodEntrypoint`).
+ *
+ * The init container is not built (the entrypoint does its work), and no `args`, `envFrom`, `hostPath` or service account
  * is written. [K8sJobGuard] refuses each of them.
  */
 class K8sJobBuilder(private val settings: K8sSettings) {
@@ -73,7 +76,10 @@ class K8sJobBuilder(private val settings: K8sSettings) {
                                 put("image", spec.image)
                                 put("imagePullPolicy", K8sConstants.IMAGE_PULL_POLICY)
                                 put("workingDir", K8sConstants.WORKDIR)
-                                putJsonArray("command") { command.forEach { add(JsonPrimitive(it)) } }
+                                putJsonArray("command") {
+                                    add(JsonPrimitive(K8sConstants.POD_ENTRYPOINT))
+                                    command.forEach { add(JsonPrimitive(it)) }
+                                }
                                 putJsonArray("env") {
                                     env.forEach { (name, value) ->
                                         addJsonObject {

@@ -83,6 +83,12 @@ class RunResult(
     val stdout: String,
     val stderr: String,
     val outputTruncated: Boolean,
+    /**
+     * The result file that the k8s Pod wrote (PR 4), read through exec. Null for docker, where the host collects the diff, and for a k8s
+     * run that ended before the file was written. It is untrusted until [net.kigawa.kivra.agent.k8s.pod.PodReadout.Collected.finish]
+     * has checked it.
+     */
+    val podReadout: net.kigawa.kivra.agent.k8s.pod.PodReadout? = null,
 ) {
     override fun toString(): String =
         "RunResult(outcome=$outcome, exitCode=$exitCode, stdoutChars=${stdout.length}, stderrChars=${stderr.length}, " +

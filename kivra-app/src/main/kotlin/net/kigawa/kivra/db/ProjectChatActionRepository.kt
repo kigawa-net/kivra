@@ -6,10 +6,13 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.core.chat.ENDED_TASK_STATES
+import net.kigawa.kivra.core.chat.ChatActionCode
 import net.kigawa.kivra.core.chat.ChatActionProposal
 import net.kigawa.kivra.core.chat.ChatActionState
+import net.kigawa.kivra.core.chat.ChatCycleTaskFact
 import net.kigawa.kivra.core.chat.ChatOrderFacts
 import net.kigawa.kivra.core.chat.ChatResultCode
+import net.kigawa.kivra.core.chat.ChatTargetKind
 import net.kigawa.kivra.core.chat.ChatTaskFact
 import net.kigawa.kivra.core.chat.isCycleStuck
 import net.kigawa.kivra.core.chat.proposeChatActions
@@ -91,13 +94,15 @@ class ProjectChatActionRepository(
                 maxCycles = root.maxCycles,
                 expired = !root.expiresAt.isAfter(now),
                 cycleStuck = root.currentGoalId?.let { cycleStuck(it) } ?: false,
+                cycleTask = root.currentGoalId?.let { cycleTaskOf(it) },
             )
         }
         val proposals = proposeChatActions(facts)
         val wanted = proposals.map { Triple(it.code.name, it.targetId, it.expectedVersion) }.toSet()
-        val versionOf = facts.associate { it.orderId to it.version }
+        val orderVersionOf = facts.associate { it.orderId to it.version }
+        val taskVersionOf = facts.mapNotNull { f -> f.cycleTask?.let { it.taskId to it.version } }.toMap()
 
-        // Expire the open proposals the rules no longer make (the version moved, or the order is no longer eligible).
+        // Expire the open proposals the rules no longer make (the version moved, or the order or Task is no longer eligible).
         val open = openRows(projectId)
         val openKeys = mutableSetOf<Triple<String, String?, Long?>>()
         for (row in open) {
@@ -106,7 +111,13 @@ class ProjectChatActionRepository(
                 openKeys += key
                 continue
             }
-            val moved = row.targetId != null && versionOf[row.targetId] != null && versionOf[row.targetId] != row.expectedVersion
+            val current = row.targetId?.let { id ->
+                when (kindOf(row.code)) {
+                    ChatTargetKind.ORDER -> orderVersionOf[id]
+                    ChatTargetKind.TASK -> taskVersionOf[id] ?: taskVersionRow(id)
+                }
+            }
+            val moved = current != null && current != row.expectedVersion
             execUpdate(
                 "UPDATE project_chat_actions SET state = ?, active_key = NULL, result_code = ?, resolved_at = ? WHERE action_id = ? AND state = ?",
                 ChatActionState.EXPIRED.name,
@@ -195,6 +206,20 @@ class ProjectChatActionRepository(
         }
         return isCycleStuck(rootEnded = rootState in ENDED_TASK_STATES, children = children) { states[it] }
     }
+
+    /** The cycle's root Task (the order's current goal) as the replan rule reads it, or null when the row is missing. */
+    private fun Transaction.cycleTaskOf(rootTaskId: String): ChatCycleTaskFact? =
+        execQuery("SELECT task_id, version, state, state_reason FROM selfdev_tasks WHERE task_id = ?", rootTaskId) { rs ->
+            ChatCycleTaskFact(rs.getString(1), rs.getLong(2), rs.getString(3), rs.getString(4))
+        }.firstOrNull()
+
+    /** The current version of a Task that is not a cycle root of this read (an open TASK_REPLAN whose Task moved on), or null when gone. */
+    private fun Transaction.taskVersionRow(taskId: String): Long? =
+        execQuery("SELECT version FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getLong(1) }.firstOrNull()
+
+    /** The target kind of a stored code. A code this build does not know is an order (it is never proposed here). */
+    private fun kindOf(code: String): ChatTargetKind =
+        ChatActionCode.entries.firstOrNull { it.name == code }?.targetKind ?: ChatTargetKind.ORDER
 
     private fun dependenciesOf(raw: String?): List<String> {
         if (raw.isNullOrBlank()) return emptyList()

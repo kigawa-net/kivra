@@ -77,3 +77,15 @@
 ## 運用
 
 手順は `docs/runbook-selfdev.md` の「12. プロジェクトチャットの提案(ADR 0023)」を参照。
+
+## 追補 2026-11-12: TASK_REPLAN(段階 1 の第 3 のコード)
+
+目標ページの再計画ボタンを、チャットからも押せるようにする。周の根 Task が、計画の失敗(`PLAN_INVALID`・`PLAN_BUDGET_HOLD`・`PLAN_CALL_FAILED`)で BLOCKED のとき、ACTIVE なルート order の提案として `TASK_REPLAN` を出す。段階 1 の範囲のまま(LLM は呼ばない。ラベルは固定文言)。
+
+- **対象の種類**: `ChatActionCode.targetKind`(`ORDER` か `TASK`)で決める。`TASK_REPLAN` の `target_id` は根 Task の ID、`expected_version` は Task の版。既存の 2 つは order の ID と order の版のまま。V56 の表は変えない(移行は無い。`action_code` は自由な VARCHAR(64) で、CHECK は無い)。版の動きによる失効は、対象の種類で版を読む先を選ぶ(order の版か、Task の版)。
+- **規則(純粋関数)**: `isReplannable(task)` = 状態が BLOCKED かつ理由が `PLAN_BLOCK_REASONS` の要素。目標ページの `canReplanGoal` と同じ集合。REST のルート自体は BLOCKED なら何でも受けるが、チャットは計画の失敗だけを提案する。
+- **権限は、コードごと**(§4 の修正): 確定・却下の検査は、行のコードの権限で行う。`ORDER_START_CYCLE`・`ORDER_ABANDON_CYCLE` は ORDER_MANAGE、`TASK_REPLAN` は GOAL_WRITE(REST の再計画ルートと同じ)。どちらも、プロジェクトの範囲(`checkInProject`)で検査する。未知のコードは従来どおり ORDER_MANAGE。AI の主体は、どのコードでも 403。
+- **表示も、コードごと**: チャットの読み取りは、そのコードの権限を持つ運用者にだけ、そのコードの提案を返す。提案の作成(規則の読み直し)は、いずれかのコードの権限を持つ運用者の読み取りで行う。
+- **確定の操作**: `SelfDevGoalRoutes.kt` の `SelfDevOperatorRepository.replanAsOperator(taskId, version, principal)` を、REST の再計画ルートとチャットの確定が共有する(遷移と監査行 `autopilot operator action: action=REPLAN` は同じ)。チャットは、対象の Task が提案のプロジェクトに属さなければ `TASK_NOT_FOUND`(実行しない)。版が違えば `EXPIRED`(`STALE_VERSION`)。遷移の拒否は、まとめて `FAILED`(`TASK_NOT_REPLANNABLE`)。再試行はしない。
+- **確認ダイアログ**: 再計画は Planner の呼び出しを起こすので、その旨(少額の予算を使う)を確定前に書く。
+- **既知の限界**: 権限の表(ADR 0020)には、ORDER_MANAGE を持ち GOAL_WRITE を持たない役割が無い。したがって、現在の役割の組み合わせでは、コードごとの差は表示と確定の検査の関数(`ChatActionCode.permission()`)の単体テストでだけ確かめている。役割の表を変えれば、同じ検査がそのまま効く。

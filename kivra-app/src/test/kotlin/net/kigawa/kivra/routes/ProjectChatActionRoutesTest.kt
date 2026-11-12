@@ -19,6 +19,7 @@ import java.time.Clock
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -27,9 +28,18 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import net.kigawa.kivra.auth.AssigneeAccess
+import net.kigawa.kivra.auth.AssigneeLookup
 import net.kigawa.kivra.auth.OperatorAuth
 import net.kigawa.kivra.auth.OperatorAuthenticator
+import net.kigawa.kivra.auth.Permission
+import net.kigawa.kivra.auth.PermissionMode
+import net.kigawa.kivra.auth.PermissionService
+import net.kigawa.kivra.auth.Role
+import net.kigawa.kivra.auth.RolesDefault
+import net.kigawa.kivra.core.chat.ChatActionCode
 import net.kigawa.kivra.db.CreateRootResult
+import net.kigawa.kivra.db.SelfDevTask
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.ProjectChatActionRepository
 import net.kigawa.kivra.db.ProjectRepository
@@ -97,7 +107,7 @@ class ProjectChatActionRoutesTest {
     )
 
     /** The order routes with the chat actions wired in, as Application does. Returns the order repository. */
-    private fun ApplicationTestBuilder.setUp(db: TestDb, aiPrincipal: String? = null): SelfDevOrderRepository {
+    private fun ApplicationTestBuilder.setUp(db: TestDb, aiPrincipal: String? = null, guard: PermissionGuard? = null): SelfDevOrderRepository {
         val autopilot = enabledAutopilot()
         val orders = SelfDevOrderRepository(db.database)
         val deps = SelfDevOrderRouteDeps(
@@ -118,6 +128,8 @@ class ProjectChatActionRoutesTest {
             operations = SelfDevOperatorRepository(db.database),
             projects = ProjectRepository(db.database, Clock.systemUTC()),
             chatActions = ProjectChatActionRepository(db.database),
+            // The default is the roles off (today's rules), as Application builds it.
+            guard = guard ?: PermissionGuard(PermissionService(PermissionMode.OFF, RolesDefault.OPERATOR, aiPrincipal, ROOT_APPROVER, null)),
         )
         application {
             install(ContentNegotiation) { json() }
@@ -331,6 +343,228 @@ class ProjectChatActionRoutesTest {
         transaction(db.database) { execUpdate("UPDATE selfdev_tasks SET state = ? WHERE task_id = ?", "SUBMITTED", child) }
         assertEquals(0, repo.refresh(project))
         assertTrue(repo.proposed(project).isEmpty())
+    }
+
+    /** A project with one order whose cycle is in progress; its root Task is set to [state], [reason] and [version] (ADR 0023, TASK_REPLAN). */
+    private data class Cycle(val project: String, val orderId: String, val taskId: String)
+
+    private fun ApplicationTestBuilder.blockedCycle(
+        db: TestDb,
+        orders: SelfDevOrderRepository,
+        name: String,
+        state: String = "BLOCKED",
+        reason: String? = "PLAN_INVALID",
+        version: Long = 7,
+    ): Cycle {
+        val project = newProject(db, name)
+        val order = newRoot(orders, project)
+        assertIs<OrderResult.Moved<*>>(orders.startCycle(order.orderId, order.version, OPERATOR))
+        val task = assertNotNull(orders.get(order.orderId)!!.currentGoalId)
+        setTask(db, task, project, state, reason, version)
+        return Cycle(project, order.orderId, task)
+    }
+
+    private fun setTask(db: TestDb, taskId: String, project: String, state: String, reason: String?, version: Long) {
+        transaction(db.database) {
+            execUpdate(
+                "UPDATE selfdev_tasks SET state = ?, state_reason = ?, version = ?, project_id = ? WHERE task_id = ?",
+                state, reason, version, project, taskId,
+            )
+        }
+    }
+
+    private fun taskOf(db: TestDb, taskId: String): SelfDevTask = assertNotNull(SelfDevOperatorRepository(db.database).task(taskId))
+
+    @Test
+    fun `a cycle whose root Task is blocked by a plan failure is proposed as a replan at the Task's version`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val cycle = blockedCycle(db, orders, "Replan proposal", version = 7)
+
+        assertEquals(1, repo.refresh(cycle.project))
+        val open = repo.proposed(cycle.project)
+        assertEquals(listOf("TASK_REPLAN"), open.map { it.code })
+        // The target is the Task, at the Task's version (7), not the order's.
+        assertEquals(cycle.taskId, open.single().targetId)
+        assertEquals(7L, open.single().expectedVersion)
+    }
+
+    @Test
+    fun `a blocked Task for another reason, or another state, gets no replan proposal`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val cases = listOf(
+            "pr-limit" to Triple("BLOCKED", "PENDING_PR_LIMIT", 7L),
+            "planning" to Triple("PLANNING", null, 7L),
+            "submitted" to Triple("TASK_SUBMITTED", "REPLAN_REQUESTED", 7L),
+        )
+        for ((name, c) in cases) {
+            val cycle = blockedCycle(db, orders, name, state = c.first, reason = c.second, version = c.third)
+            assertEquals(0, repo.refresh(cycle.project), name)
+            assertTrue(repo.proposed(cycle.project).isEmpty(), name)
+        }
+    }
+
+    @Test
+    fun `a replan proposal expires when the Task is no longer blocked, and a moved version expires it too`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val cycle = blockedCycle(db, orders, "Expire replan", version = 7)
+        repo.refresh(cycle.project)
+        val first = repo.proposed(cycle.project).single()
+
+        // The Task moves on without a new read: the version is 8, so the row expires as moved.
+        setTask(db, cycle.taskId, cycle.project, "BLOCKED", "PLAN_INVALID", 8)
+        assertEquals(1, repo.refresh(cycle.project))
+        assertEquals("VERSION_MOVED", assertNotNull(repo.find(cycle.project, first.actionId)).resultCode)
+        val second = repo.proposed(cycle.project).single()
+        assertEquals(8L, second.expectedVersion)
+
+        // The Task is no longer blocked, at the same version (a state change alone): the open row expires as no longer eligible.
+        setTask(db, cycle.taskId, cycle.project, "TASK_SUBMITTED", "REPLAN_REQUESTED", 8)
+        assertEquals(0, repo.refresh(cycle.project))
+        assertTrue(repo.proposed(cycle.project).isEmpty())
+        assertEquals("NO_LONGER_ELIGIBLE", assertNotNull(repo.find(cycle.project, second.actionId)).resultCode)
+    }
+
+    @Test
+    fun `confirm runs the replan as the goal route does once, and a second answer is 409`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val cycle = blockedCycle(db, orders, "Replan confirm", version = 7)
+        repo.refresh(cycle.project)
+        val action = repo.proposed(cycle.project).single()
+
+        val answer = send(HttpMethod.Post, confirmPath(cycle.project, action.actionId), "{}")
+        assertEquals(HttpStatusCode.OK, answer.status)
+        assertEquals("EXECUTED", answer.obj()["state"]!!.jsonPrimitive.content)
+        assertEquals("OK", answer.obj()["resultCode"]!!.jsonPrimitive.content)
+        val replanned = taskOf(db, cycle.taskId)
+        assertEquals("TASK_SUBMITTED", replanned.state.name)
+        assertEquals("REPLAN_REQUESTED", replanned.stateReason?.name)
+        assertEquals(8L, replanned.version)
+
+        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, confirmPath(cycle.project, action.actionId), "{}").status)
+        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, dismissPath(cycle.project, action.actionId), "{}").status)
+        assertEquals(8L, taskOf(db, cycle.taskId).version)
+    }
+
+    @Test
+    fun `a replan confirmed at a stale Task version expires with a fixed code and runs nothing`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val cycle = blockedCycle(db, orders, "Replan stale", version = 7)
+        repo.refresh(cycle.project)
+        val action = repo.proposed(cycle.project).single()
+        // The Task moved after the proposal, and the chat was not read again.
+        setTask(db, cycle.taskId, cycle.project, "BLOCKED", "PLAN_INVALID", 8)
+
+        val answer = send(HttpMethod.Post, confirmPath(cycle.project, action.actionId), "{}")
+        assertEquals(HttpStatusCode.OK, answer.status)
+        assertEquals("EXPIRED", answer.obj()["state"]!!.jsonPrimitive.content)
+        assertEquals("STALE_VERSION", answer.obj()["resultCode"]!!.jsonPrimitive.content)
+        assertEquals("BLOCKED", taskOf(db, cycle.taskId).state.name)
+    }
+
+    @Test
+    fun `a replan of a Task of another project is not found, whatever the proposal says`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val other = blockedCycle(db, orders, "Other project", version = 7)
+        val projectA = newProject(db, "Chat A")
+        val actionId = Ulid.generate()
+        transaction(db.database) {
+            execUpdate(
+                "INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, expected_version, state, active_key, proposed_at) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                actionId, projectA, "TASK_REPLAN", other.taskId, 7L, "PROPOSED", utcNow(Clock.systemUTC()),
+            )
+        }
+
+        val answer = send(HttpMethod.Post, confirmPath(projectA, actionId), "{}")
+        assertEquals(HttpStatusCode.OK, answer.status)
+        assertEquals("FAILED", answer.obj()["state"]!!.jsonPrimitive.content)
+        assertEquals("TASK_NOT_FOUND", answer.obj()["resultCode"]!!.jsonPrimitive.content)
+        assertEquals("BLOCKED", taskOf(db, other.taskId).state.name)
+        assertEquals("FAILED", repo.find(projectA, actionId)!!.state)
+    }
+
+    @Test
+    fun `the AI principal is refused a replan, and the proposal stays open`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db, aiPrincipal = AI_PRINCIPAL)
+        val repo = ProjectChatActionRepository(db.database)
+        val cycle = blockedCycle(db, orders, "AI replan", version = 7)
+        repo.refresh(cycle.project)
+        val action = repo.proposed(cycle.project).single()
+
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, confirmPath(cycle.project, action.actionId), "{}", principal = AI_PRINCIPAL).status)
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, dismissPath(cycle.project, action.actionId), "{}", principal = AI_PRINCIPAL).status)
+        assertEquals("PROPOSED", repo.find(cycle.project, action.actionId)!!.state)
+        assertEquals("BLOCKED", taskOf(db, cycle.taskId).state.name)
+    }
+
+    /** The roles on: an operator whose role holds no GOAL_WRITE (a VIEWER has READ only). The chat's replan is then refused. */
+    private fun viewerGuard(): PermissionGuard = PermissionGuard(
+        PermissionService(
+            PermissionMode.ENFORCE,
+            RolesDefault.NONE,
+            AI_PRINCIPAL,
+            ROOT_APPROVER,
+            object : AssigneeLookup {
+                override fun accessOf(ownerKey: String): AssigneeAccess? =
+                    if (ownerKey == OPERATOR) AssigneeAccess(Role.VIEWER, true, "assignee-viewer") else null
+            },
+        ),
+    )
+
+    @Test
+    fun `without GOAL_WRITE a replan is refused with 403, nothing runs, and it is not shown to that operator`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db, guard = viewerGuard())
+        val repo = ProjectChatActionRepository(db.database)
+        val cycle = blockedCycle(db, orders, "No GOAL_WRITE", version = 7)
+        repo.refresh(cycle.project)
+        val action = repo.proposed(cycle.project).single()
+
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, confirmPath(cycle.project, action.actionId), "{}").status)
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, dismissPath(cycle.project, action.actionId), "{}").status)
+        assertEquals("PROPOSED", repo.find(cycle.project, action.actionId)!!.state)
+        assertEquals("BLOCKED", taskOf(db, cycle.taskId).state.name)
+
+        // The chat's visibility is per code: the viewer sees neither code of this project; a global ADMIN sees both.
+        val viewer = viewerGuard()
+        assertFalse(chatActionVisibleTo(viewer, OPERATOR, cycle.project, ChatActionCode.TASK_REPLAN))
+        assertFalse(chatActionVisibleTo(viewer, OPERATOR, cycle.project, ChatActionCode.ORDER_START_CYCLE))
+        assertFalse(chatActionVisibleTo(viewer, AI_PRINCIPAL, cycle.project, ChatActionCode.TASK_REPLAN))
+        val admin = PermissionGuard(
+            PermissionService(
+                PermissionMode.ENFORCE,
+                RolesDefault.NONE,
+                AI_PRINCIPAL,
+                ROOT_APPROVER,
+                object : AssigneeLookup {
+                    override fun accessOf(ownerKey: String): AssigneeAccess? =
+                        if (ownerKey == OPERATOR) AssigneeAccess(Role.ADMIN, true, "assignee-admin") else null
+                },
+            ),
+        )
+        assertTrue(chatActionVisibleTo(admin, OPERATOR, cycle.project, ChatActionCode.TASK_REPLAN))
+        assertTrue(chatActionVisibleTo(admin, OPERATOR, cycle.project, ChatActionCode.ORDER_START_CYCLE))
+    }
+
+    @Test
+    fun `each chat action code names its own permission, the replan's being GOAL_WRITE`() {
+        assertEquals(Permission.GOAL_WRITE, ChatActionCode.TASK_REPLAN.permission())
+        assertEquals(Permission.ORDER_MANAGE, ChatActionCode.ORDER_START_CYCLE.permission())
+        assertEquals(Permission.ORDER_MANAGE, ChatActionCode.ORDER_ABANDON_CYCLE.permission())
+        assertEquals(Permission.ORDER_MANAGE, permissionOfChatAction("NOT_A_CODE"))
     }
 
     private fun insertTask(db: TestDb, id: String, project: String, state: String, parent: String?, deps: String, key: String) {

@@ -3014,19 +3014,23 @@ SELECT counter_name, bucket_key, amount FROM selfdev_llm_stop_limits ORDER BY co
 
 ## 12. プロジェクトチャットの提案(ADR 0023、段階 1: 規則に基づく。LLM なし)
 
-チャットの節に、サーバーが規則で出した提案がカードで出る。提案は運用者(ORDER_MANAGE)にだけ見え、AI には出ない。
+チャットの節に、サーバーが規則で出した提案がカードで出る。提案は、そのコードの権限を持つ運用者にだけ見え、AI には出ない。権限はコードごとに違う(下の表と 12.2)。
 
 ### 12.1 提案の種類
 
-| コード | ラベル(サーバーの固定文言) | 出る条件 |
-|---|---|---|
-| `ORDER_START_CYCLE` | 周を開始する | ルート order が ACTIVE、期限内、進行中の周なし、`cycles_started < max_cycles`。連続失敗があっても出る(手動の開始は許される) |
-| `ORDER_ABANDON_CYCLE` | 進行中の周を放棄する | ルート order が ACTIVE で、進行中の周が「止まっている」(子 Task が全部 QUEUED で、FAILED か STOPPED の依存を持つ) |
+| コード | ラベル(サーバーの固定文言) | 出る条件 | 必要な権限 |
+|---|---|---|---|
+| `ORDER_START_CYCLE` | 周を開始する | ルート order が ACTIVE、期限内、進行中の周なし、`cycles_started < max_cycles`。連続失敗があっても出る(手動の開始は許される) | ORDER_MANAGE |
+| `ORDER_ABANDON_CYCLE` | 進行中の周を放棄する | ルート order が ACTIVE で、進行中の周が「止まっている」(子 Task が全部 QUEUED で、FAILED か STOPPED の依存を持つ) | ORDER_MANAGE |
+| `TASK_REPLAN` | 計画に失敗した周を再計画する | ルート order が ACTIVE で、進行中の周の根 Task が BLOCKED かつ理由が `PLAN_INVALID`・`PLAN_BUDGET_HOLD`・`PLAN_CALL_FAILED`(目標ページの再計画ボタンと同じ条件)。対象は根 Task(版も Task の版) | GOAL_WRITE(プロジェクトの範囲で) |
+
+`TASK_REPLAN` の確定は、目標ページの再計画ボタン(`POST /api/selfdev/goals/{id}/replan`)と同じ操作を 1 回だけ実行する。Task は `TASK_SUBMITTED`(理由 `REPLAN_REQUESTED`)へ戻り、Planner が新しい計画を作る。Planner の呼び出しには少額の予算を使う。AI の主体は確定も却下もできず、提案も見えない。
 
 ### 12.2 確定と却下
 
 - 確定(確定ボタン → 確認ダイアログ → 確定): サーバーは提案の行の対象と版で、REST と同じ操作を 1 回だけ実行する。結果は `EXECUTED`(`OK`)、版が違えば `EXPIRED`(`STALE_VERSION`)、拒否は `FAILED` と拒否理由。
 - 却下: 何も実行しない。`DISMISSED`(`OPERATOR_DISMISSED`)。
+- 権限: 確定も却下も、そのコードの権限(12.1 の表)を、プロジェクトの範囲で検査する。権限が無ければ 403(提案は残る)。AI の主体は、どのコードでも 403。
 - 解決済みの提案への確定・却下は 409(`ACTION_RESOLVED`)。一覧を読み直す。
 
 ### 12.3 提案の寿命
@@ -3052,6 +3056,8 @@ SELECT counter_name, bucket_key, amount FROM selfdev_llm_stop_limits ORDER BY co
 | `AUTOPILOT_PAUSED` | 自律実行が一時停止 | 自律実行を再開してから、提案を出し直す |
 | `ORDER_NOT_FOUND` | 対象が無い、またはプロジェクトが違う | 提案は無効。操作しない |
 | `TASK_STOP_REFUSED` | 放棄で周の Task を止められなかった | Task の状態を確認する。REST の放棄で手動で処理する |
+| `TASK_NOT_FOUND` | 再計画の対象の Task が無い、またはプロジェクトが違う | 提案は無効。操作しない |
+| `TASK_NOT_REPLANNABLE` | 再計画の対象が BLOCKED でなくなった(遷移が拒否された) | 周の状態を確認する。目標ページで状態を見てから、必要なら手動で処理する |
 
 ### 12.6 ロールバック
 

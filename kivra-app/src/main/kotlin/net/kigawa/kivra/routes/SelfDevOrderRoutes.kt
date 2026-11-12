@@ -21,6 +21,7 @@ import net.kigawa.kivra.core.autopilot.OrderState
 import net.kigawa.kivra.core.chat.ChatActionCode
 import net.kigawa.kivra.core.chat.ChatActionState
 import net.kigawa.kivra.core.chat.ChatResultCode
+import net.kigawa.kivra.core.chat.ChatTargetKind
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.AbandonResult
 import net.kigawa.kivra.db.ChildCreateResult
@@ -717,11 +718,24 @@ private const val CHAT_ABANDON_REASON = "confirmed from the project chat"
 @Serializable
 data class ChatActionResolvedResponse(val actionId: String, val state: String, val resultCode: String)
 
+/**
+ * The permission an operator needs for an action of [this] code (ADR 0023 section 4). Each code names one REST operation, and that route's
+ * permission is the one it needs: the order's cycle is ORDER_MANAGE, the Task's replan is GOAL_WRITE (as `POST /api/selfdev/goals/{id}/replan`).
+ * Exhaustive on purpose: a new code does not compile until it names its permission.
+ */
+internal fun ChatActionCode.permission(): Permission = when (this) {
+    ChatActionCode.ORDER_START_CYCLE, ChatActionCode.ORDER_ABANDON_CYCLE -> Permission.ORDER_MANAGE
+    ChatActionCode.TASK_REPLAN -> Permission.GOAL_WRITE
+}
+
+/** The permission a stored action needs: its code's, or ORDER_MANAGE for a code this build does not know (the chat's former check). */
+internal fun permissionOfChatAction(code: String): Permission =
+    ChatActionCode.entries.firstOrNull { it.name == code }?.permission() ?: Permission.ORDER_MANAGE
+
 /** `POST .../chat/actions/{actionId}/confirm`: the operator's confirmation. Runs the REST operation of the action's code, once. */
 private suspend fun confirmChatAction(deps: SelfDevOrderRouteDeps, call: ApplicationCall) {
     val caller = deps.caller(call) ?: return
     if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return
-    if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "chat.action.confirm", projectId = call.pathParam("projectId"))) return
     deps.resolveChatAction(call, caller, confirm = true)
 }
 
@@ -729,14 +743,14 @@ private suspend fun confirmChatAction(deps: SelfDevOrderRouteDeps, call: Applica
 private suspend fun dismissChatAction(deps: SelfDevOrderRouteDeps, call: ApplicationCall) {
     val caller = deps.caller(call) ?: return
     if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return
-    if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "chat.action.dismiss", projectId = call.pathParam("projectId"))) return
     deps.resolveChatAction(call, caller, confirm = false)
 }
 
 /**
  * The shared part of a chat confirm and dismiss. The client sends nothing the server trusts but the action ID: the code, the target and the
  * expected version are the proposal's, read from the row. The project must be one the caller may read (a 404 otherwise, as the chat routes).
- * A PROPOSED row is resolved once, with a fixed result code; a second answer is 409.
+ * The permission is the action code's (see [permissionOfChatAction]), checked in the project's scope once the row is known. A PROPOSED row is
+ * resolved once, with a fixed result code; a second answer is 409.
  */
 private suspend fun SelfDevOrderRouteDeps.resolveChatAction(call: ApplicationCall, caller: OrderCaller, confirm: Boolean) {
     if (!call.readEmptyBody()) return
@@ -747,6 +761,8 @@ private suspend fun SelfDevOrderRouteDeps.resolveChatAction(call: ApplicationCal
         return call.respond(HttpStatusCode.NotFound, OrderError(CHAT_ACTION_NOT_FOUND))
     }
     val action = repo.find(projectId, actionId) ?: return call.respond(HttpStatusCode.NotFound, OrderError(CHAT_ACTION_NOT_FOUND))
+    val route = if (confirm) "chat.action.confirm" else "chat.action.dismiss"
+    if (!permit(call, caller, permissionOfChatAction(action.code), route, projectId = projectId)) return
     if (action.state != ChatActionState.PROPOSED.name) {
         return call.respond(HttpStatusCode.Conflict, OrderError(CHAT_ACTION_RESOLVED, "ACTION_RESOLVED"))
     }
@@ -766,7 +782,10 @@ private suspend fun SelfDevOrderRouteDeps.resolveChatAction(call: ApplicationCal
     call.respond(ChatActionResolvedResponse(actionId, state.name, resultCode))
 }
 
-/** Runs the REST operation of [code] for the proposal. The mapping of its outcome to a state and a fixed code is the only logic here. */
+/**
+ * Runs the REST operation of [code] for the proposal. The mapping of its outcome to a state and a fixed code is the only logic here. The target
+ * must belong to this project (an order or a Task, by the code's [ChatTargetKind]); another project's row is not found, whatever the proposal says.
+ */
 private fun SelfDevOrderRouteDeps.runChatAction(
     code: ChatActionCode,
     action: ProjectChatActionRow,
@@ -775,8 +794,14 @@ private fun SelfDevOrderRouteDeps.runChatAction(
 ): Pair<ChatActionState, String> {
     val targetId = action.targetId ?: return ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
     val expected = action.expectedVersion ?: return ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
-    // The target must belong to this project; an order of another project is not found, whatever the proposal says.
-    if (orders.get(targetId)?.projectId != projectId) return ChatActionState.FAILED to ChatResultCode.ORDER_NOT_FOUND
+    when (code.targetKind) {
+        ChatTargetKind.ORDER -> if (orders.get(targetId)?.projectId != projectId) {
+            return ChatActionState.FAILED to ChatResultCode.ORDER_NOT_FOUND
+        }
+        ChatTargetKind.TASK -> if (operations.task(targetId)?.projectId != projectId) {
+            return ChatActionState.FAILED to ChatResultCode.TASK_NOT_FOUND
+        }
+    }
     return when (code) {
         ChatActionCode.ORDER_START_CYCLE -> when (val r = startCycleAsOperator(targetId, expected, principal)) {
             is OrderResult.Moved -> ChatActionState.EXECUTED to ChatResultCode.OK
@@ -790,6 +815,14 @@ private fun SelfDevOrderRouteDeps.runChatAction(
             CycleAbandonOutcome.Stale -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
             is CycleAbandonOutcome.Refused -> ChatActionState.FAILED to r.reason.name
             is CycleAbandonOutcome.TaskStopRefused -> ChatActionState.FAILED to ChatResultCode.TASK_STOP_REFUSED
+        }
+        // The goal page's replan, on the Task the proposal names. Any refusal of the Task's transition is one fixed code: the operator
+        // sees the Task is not in a replannable state, and nothing is retried.
+        ChatActionCode.TASK_REPLAN -> when (val r = operations.replanAsOperator(targetId, expected, principal)) {
+            is TaskTransition.Moved -> ChatActionState.EXECUTED to ChatResultCode.OK
+            TaskTransition.NotFound -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_FOUND
+            TaskTransition.StaleVersion -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
+            is TaskTransition.Refused -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_REPLANNABLE
         }
     }
 }

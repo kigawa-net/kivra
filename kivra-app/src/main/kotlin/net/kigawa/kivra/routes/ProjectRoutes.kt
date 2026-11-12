@@ -104,9 +104,15 @@ internal fun Route.configureProjectRoutes(
         return principal
     }
 
-    /** True when [principal] may confirm a chat action: the operator's ORDER_MANAGE, and never the AI principal. */
-    fun mayActOnChat(principal: String): Boolean =
-        guard.resolve(principal, legacyAdmin = true).let { !it.isAi } && guard.permits(principal, Permission.ORDER_MANAGE, "project_chat_get")
+    /**
+     * True when [principal] may act on the chat action [code] in [projectId] (ADR 0023): the code's permission ([permission]), in the project's
+     * scope, and never the AI principal. Only such an operator sees the proposal of that code.
+     */
+    fun mayActOnChatCode(principal: String, projectId: String, code: ChatActionCode): Boolean =
+        chatActionVisibleTo(guard, principal, projectId, code)
+
+    /** True when [principal] may act on at least one chat action code of [projectId]; the proposer runs for such an operator only. */
+    fun mayActOnChat(principal: String, projectId: String): Boolean = ChatActionCode.entries.any { mayActOnChatCode(principal, projectId, it) }
 
     /** True when [principal] holds [permission]; responds 403 otherwise. */
     suspend fun ApplicationCall.permitOr403(principal: String, permission: Permission, route: String): Boolean {
@@ -391,9 +397,9 @@ internal fun Route.configureProjectRoutes(
                 }
                 val session = chatRepo.getSession(projectId)
                     ?: return@get call.respond(HttpStatusCode.NotFound)
-                // Only an operator who may confirm sees the proposals (the AI never does). The proposer runs here, on the read.
-                val actions = if (chatActions != null && mayActOnChat(principal)) {
-                    proposeChatActions(chatActions, projectId)
+                // Only an operator who may confirm a code sees its proposals (the AI never does). The proposer runs here, on the read.
+                val actions = if (chatActions != null && mayActOnChat(principal, projectId)) {
+                    proposeChatActions(chatActions, projectId) { mayActOnChatCode(principal, projectId, it) }
                 } else {
                     emptyList()
                 }
@@ -737,17 +743,30 @@ private fun chatSessionResponse(repo: ProjectChatRepository, session: ProjectCha
 }
 
 /**
- * Runs the rule-based proposer (ADR 0023) and returns the open proposals. A failure of the proposer never fails the chat read: it is logged
- * with its exception class only (no ids, no text), and the chat answers without proposals.
+ * True when [principal] may act on the chat action [code] in [projectId] (ADR 0023): the code's permission ([ChatActionCode.permission]) in the
+ * project's scope, and never the AI principal. Only such an operator is shown the proposal of that code, and only it may confirm or dismiss it.
  */
-private fun proposeChatActions(repo: ProjectChatActionRepository, projectId: String): List<ChatActionResponse> {
+internal fun chatActionVisibleTo(guard: PermissionGuard, principal: String, projectId: String, code: ChatActionCode): Boolean {
+    val access = guard.resolve(principal, legacyAdmin = true)
+    return !access.isAi && guard.checkInProject(access, projectId, code.permission(), "project_chat_get") is GuardResult.Allow
+}
+
+/**
+ * Runs the rule-based proposer (ADR 0023) and returns the open proposals that [visibleTo] allows (the caller's permission for each code). A failure
+ * of the proposer never fails the chat read: it is logged with its exception class only (no ids, no text), and the chat answers without proposals.
+ */
+private fun proposeChatActions(
+    repo: ProjectChatActionRepository,
+    projectId: String,
+    visibleTo: (ChatActionCode) -> Boolean,
+): List<ChatActionResponse> {
     try {
         repo.refresh(projectId)
     } catch (e: Exception) {
         projectAdminLog.warn("project chat proposer failed: error={}", e::class.simpleName)
     }
     return repo.proposed(projectId).mapNotNull { row ->
-        val code = ChatActionCode.entries.firstOrNull { it.name == row.code } ?: return@mapNotNull null
+        val code = ChatActionCode.entries.firstOrNull { it.name == row.code }?.takeIf(visibleTo) ?: return@mapNotNull null
         ChatActionResponse(
             actionId = row.actionId,
             code = code.name,

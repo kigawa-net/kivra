@@ -143,6 +143,19 @@ private const val LIST_LIMIT = 50
 
 private val operatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.autopilot.operator")
 
+/**
+ * An operator's replan of a BLOCKED Task (the goal page's button, `POST /api/selfdev/goals/{id}/replan`). The goal route and a project chat
+ * confirmation (ADR 0023, TASK_REPLAN) both run it, so the transition and the audit line are the same. The caller authenticated and passed the
+ * GOAL_WRITE check.
+ */
+internal fun SelfDevOperatorRepository.replanAsOperator(taskId: String, expectedVersion: Long, principal: String): TaskTransition {
+    val result = replanBlocked(taskId, expectedVersion)
+    if (result is TaskTransition.Moved) {
+        operatorLog.info("autopilot operator action: action=REPLAN actor={} taskId={} reason={}", operatorTag(principal), taskId, AutopilotReason.REPLAN_REQUESTED)
+    }
+    return result
+}
+
 internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     get("/api/selfdev/autopilot") {
         val caller = deps.requireOperator(call) ?: return@get
@@ -300,9 +313,8 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
             call.respond(HttpStatusCode.NotFound, GoalError(TASK_NOT_FOUND))
             return@post
         }
-        when (val r = deps.operations.replanBlocked(taskId, version)) {
+        when (val r = deps.operations.replanAsOperator(taskId, version, principal)) {
             is TaskTransition.Moved -> {
-                operatorLog.info("autopilot operator action: action=REPLAN actor={} taskId={} reason={}", operatorTag(principal), taskId, AutopilotReason.REPLAN_REQUESTED)
                 call.respond(HttpStatusCode.OK, r.row.summary())
             }
             else -> call.respondTransition(r)

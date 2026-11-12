@@ -156,6 +156,30 @@ internal fun SelfDevOperatorRepository.replanAsOperator(taskId: String, expected
     return result
 }
 
+/**
+ * An operator's approval of a Task that waits for approval (`POST /api/selfdev/tasks/{id}/approve`). The REST route and a project chat
+ * confirmation (ADR 0023, TASK_APPROVE) both run it, so the transition and the audit line are the same. The caller passed GOAL_WRITE.
+ */
+internal fun SelfDevOperatorRepository.approveAsOperator(taskId: String, expectedVersion: Long, principal: String): TaskTransition {
+    val result = approveTask(taskId, expectedVersion, principal)
+    if (result is TaskTransition.Moved) {
+        operatorLog.info("autopilot operator action: action=TASK_APPROVED actor={} taskId={} result=QUEUED", operatorTag(principal), taskId)
+    }
+    return result
+}
+
+/**
+ * An operator's rejection of a Task that waits for approval: the Task is skipped (`POST /api/selfdev/tasks/{id}/reject`). The REST route and a
+ * project chat confirmation (ADR 0023, TASK_REJECT) both run it. The caller passed GOAL_WRITE.
+ */
+internal fun SelfDevOperatorRepository.rejectAsOperator(taskId: String, expectedVersion: Long, principal: String): TaskTransition {
+    val result = skipTask(taskId, expectedVersion)
+    if (result is TaskTransition.Moved) {
+        operatorLog.info("autopilot operator action: action=TASK_REJECTED actor={} taskId={} result=SKIPPED", operatorTag(principal), taskId)
+    }
+    return result
+}
+
 internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     get("/api/selfdev/autopilot") {
         val caller = deps.requireOperator(call) ?: return@get
@@ -364,9 +388,8 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
             call.respond(HttpStatusCode.NotFound, GoalError(TASK_NOT_FOUND))
             return@post
         }
-        when (val r = deps.operations.approveTask(taskId, version, principal)) {
+        when (val r = deps.operations.approveAsOperator(taskId, version, principal)) {
             is TaskTransition.Moved -> {
-                operatorLog.info("autopilot operator action: action=TASK_APPROVED actor={} taskId={} result=QUEUED", operatorTag(principal), taskId)
                 call.respond(HttpStatusCode.OK, r.row.summary())
             }
             else -> call.respondTransition(r)
@@ -384,9 +407,8 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
             call.respond(HttpStatusCode.NotFound, GoalError(TASK_NOT_FOUND))
             return@post
         }
-        when (val r = deps.operations.skipTask(taskId, version)) {
+        when (val r = deps.operations.rejectAsOperator(taskId, version, principal)) {
             is TaskTransition.Moved -> {
-                operatorLog.info("autopilot operator action: action=TASK_REJECTED actor={} taskId={} result=SKIPPED", operatorTag(principal), taskId)
                 call.respond(HttpStatusCode.OK, r.row.summary())
             }
             else -> call.respondTransition(r)

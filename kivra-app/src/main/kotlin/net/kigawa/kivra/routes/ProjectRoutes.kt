@@ -20,6 +20,8 @@ import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.chat.ChatActionCode
+import net.kigawa.kivra.core.chat.approvalReasonText
+import net.kigawa.kivra.mcp.safeTaskTitle
 import net.kigawa.kivra.db.BackfillReport
 import net.kigawa.kivra.db.ProjectChatActionRepository
 import net.kigawa.kivra.db.DbBudgetStore
@@ -721,9 +723,27 @@ data class ChatSessionResponse(
     val actions: List<ChatActionResponse> = emptyList(),
 )
 
-/** One open proposal: its ID, the allow-list code, the server's fixed label, the order it is for and when it was proposed. */
+/**
+ * One open proposal: its ID, the allow-list code, the server's fixed label, the order or Task it is for and when it was proposed. [detail] is set
+ * for an approval (TASK_APPROVE, TASK_REJECT) only: what is being approved, read when the chat is read (ADR 0023 stage 2).
+ */
 @Serializable
-data class ChatActionResponse(val actionId: String, val code: String, val label: String, val targetId: String?, val proposedAt: String)
+data class ChatActionResponse(
+    val actionId: String,
+    val code: String,
+    val label: String,
+    val targetId: String?,
+    val proposedAt: String,
+    val detail: ChatActionDetail? = null,
+)
+
+/**
+ * What an approval proposal is about. [taskTitle] is AI-written text (the planner's): it is shown as plain text, marked as such, and never
+ * interpreted. It is [safeTaskTitle]'s output (200 code points at most; a control or bidi character gives a fixed marker). [reasonText] is the
+ * server's fixed Japanese text for [stateReason]. The Task's body and its paths are never returned here.
+ */
+@Serializable
+data class ChatActionDetail(val taskTitle: String, val stateReason: String?, val reasonText: String)
 
 private const val CHAT_RECENT_MESSAGES = 50
 private const val CHAT_TITLE_MAX = 256
@@ -773,8 +793,20 @@ private fun proposeChatActions(
             label = code.label,
             targetId = row.targetId,
             proposedAt = row.proposedAt.toString(),
+            detail = if (code == ChatActionCode.TASK_APPROVE || code == ChatActionCode.TASK_REJECT) approvalDetailOf(repo, row.targetId) else null,
         )
     }
+}
+
+/** The detail of an approval proposal's Task, read now (never stored with the proposal). Null when the Task is missing. */
+private fun approvalDetailOf(repo: ProjectChatActionRepository, taskId: String?): ChatActionDetail? {
+    if (taskId == null) return null
+    val task = repo.approvalTaskOf(taskId) ?: return null
+    return ChatActionDetail(
+        taskTitle = safeTaskTitle(task.title),
+        stateReason = task.stateReason,
+        reasonText = approvalReasonText(task.stateReason),
+    )
 }
 
 private fun ProjectChatMessageRow.toResponse() = ChatMessageResponse(

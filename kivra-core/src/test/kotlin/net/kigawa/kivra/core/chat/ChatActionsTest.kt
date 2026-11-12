@@ -21,7 +21,7 @@ class ChatActionsTest {
     fun aRegistryCodeHasAFixedJapaneseLabel() {
         assertEquals("周を開始する", ChatActionCode.ORDER_START_CYCLE.label)
         assertEquals("進行中の周を放棄する", ChatActionCode.ORDER_ABANDON_CYCLE.label)
-        assertEquals(3, ChatActionCode.entries.size)
+        assertEquals(5, ChatActionCode.entries.size)
     }
 
     @Test
@@ -94,7 +94,7 @@ class ChatActionsTest {
         assertEquals(ChatTargetKind.TASK, ChatActionCode.TASK_REPLAN.targetKind)
         assertEquals(ChatTargetKind.ORDER, ChatActionCode.ORDER_START_CYCLE.targetKind)
         assertEquals(ChatTargetKind.ORDER, ChatActionCode.ORDER_ABANDON_CYCLE.targetKind)
-        assertEquals(3, ChatActionCode.entries.size)
+        assertEquals(5, ChatActionCode.entries.size)
     }
 
     @Test
@@ -133,5 +133,59 @@ class ChatActionsTest {
     @Test
     fun theReplanRuleAcceptsTheSamePlanningReasonsAsTheGoalPage() {
         assertEquals(setOf("PLAN_INVALID", "PLAN_BUDGET_HOLD", "PLAN_CALL_FAILED"), REPLANNABLE_BLOCK_REASONS)
+    }
+
+    private fun approval(id: String, state: String = "PENDING_APPROVAL", version: Long = 2, planRoot: Boolean = false) =
+        ChatApprovalFact(id, version, state, planRoot)
+
+    @Test
+    fun aWaitingChildGetsBothApproveAndRejectAtItsVersion() {
+        val p = proposeChatActions(listOf(order(goal = "T1", stuck = false).copy(approvals = listOf(approval("C1", version = 5)))))
+        assertEquals(
+            listOf(
+                ChatActionProposal(ChatActionCode.TASK_APPROVE, "C1", 5),
+                ChatActionProposal(ChatActionCode.TASK_REJECT, "C1", 5),
+            ),
+            p,
+        )
+    }
+
+    @Test
+    fun aPlanRootOrAnotherStateOfAChildGetsNoApprovalProposal() {
+        val children = listOf(
+            approval("PLAN", planRoot = true),
+            approval("QUEUED", state = "QUEUED"),
+            approval("RUNNING", state = "RUNNING"),
+            approval("SKIPPED", state = "SKIPPED"),
+            approval("FAILED", state = "FAILED"),
+        )
+        val p = proposeChatActions(listOf(order(goal = "T1").copy(approvals = children)))
+        assertTrue(p.none { it.code == ChatActionCode.TASK_APPROVE || it.code == ChatActionCode.TASK_REJECT }, p.toString())
+    }
+
+    @Test
+    fun noApprovalProposalWithoutACycleOrForANotActiveOrder() {
+        val waiting = listOf(approval("C1"))
+        // No cycle in progress: the children are not read, and a start is what the order gets.
+        val noCycle = proposeChatActions(listOf(order().copy(approvals = waiting)))
+        assertTrue(noCycle.none { it.code == ChatActionCode.TASK_APPROVE || it.code == ChatActionCode.TASK_REJECT })
+        for (state in listOf("PAUSED", "STOPPED", "STOP_REQUESTED")) {
+            val p = proposeChatActions(listOf(order(state = state, goal = "T1").copy(approvals = waiting)))
+            assertTrue(p.none { it.code == ChatActionCode.TASK_APPROVE || it.code == ChatActionCode.TASK_REJECT }, state)
+        }
+    }
+
+    @Test
+    fun theApprovalRuleIsPendingApprovalAndNotAPlanRoot() {
+        assertTrue(isApprovable(approval("C1")))
+        assertFalse(isApprovable(approval("C1", planRoot = true)))
+        assertFalse(isApprovable(approval("C1", state = "QUEUED")))
+    }
+
+    @Test
+    fun theApprovalReasonTextIsFixedPerKnownReason() {
+        assertEquals("自動実行の範囲を超える変更があったため、承認が必要です。", approvalReasonText("AUTO_SCOPE_EXCEEDED"))
+        assertEquals("この Task は実行前に承認が必要です。", approvalReasonText(null))
+        assertEquals("承認待ちの Task です。", approvalReasonText("SOMETHING_NEW"))
     }
 }

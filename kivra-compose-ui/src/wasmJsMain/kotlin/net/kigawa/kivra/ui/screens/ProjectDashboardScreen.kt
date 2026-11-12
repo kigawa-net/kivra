@@ -58,6 +58,9 @@ import net.kigawa.kivra.ui.api.ApiChatAction
 import net.kigawa.kivra.ui.api.ApiChatMessage
 import net.kigawa.kivra.ui.CHAT_ACTION_CONFIRM_TITLE
 import net.kigawa.kivra.ui.WriteFailure
+import net.kigawa.kivra.ui.CHAT_ACTION_DISMISS_BUTTON_TEXT
+import net.kigawa.kivra.ui.CHAT_ACTION_TASK_TITLE_CAPTION
+import net.kigawa.kivra.ui.chatActionConfirmButtonText
 import net.kigawa.kivra.ui.chatActionConfirmMessage
 import net.kigawa.kivra.ui.chatActionFailureText
 import net.kigawa.kivra.ui.chatActionResultText
@@ -888,7 +891,7 @@ private fun ProjectChatSection(projectId: String) {
         ReasonDialog(
             title = CHAT_ACTION_CONFIRM_TITLE,
             message = chatActionConfirmMessage(action.label, action.code),
-            submitLabel = "確定",
+            submitLabel = chatActionConfirmButtonText(action.code),
             reasonLabel = null,
             busy = actionBusy,
             errorText = null,
@@ -898,17 +901,30 @@ private fun ProjectChatSection(projectId: String) {
     }
 }
 
-/** 1件の提案のカード。ラベルはサーバーの固定文言。確定は確認の後(呼び出し側)、却下は即時。 */
+/**
+ * 1件の提案のカード。ラベルはサーバーの固定文言。確定は確認の後(呼び出し側)、「提案を閉じる」は提案を隠すだけで Task は変えない(ADR 0023)。
+ * 承認の提案は、対象の Task 名を AI が書いた文章として、プレーンテキストで出す(指示としては扱わない)。
+ */
 @Composable
 private fun ChatActionCard(action: ApiChatAction, enabled: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Column(modifier = Modifier.padding(10.dp)) {
             Text("提案: ${action.label}", style = MaterialTheme.typography.bodyMedium)
+            action.detail?.let { detail ->
+                Spacer(Modifier.height(4.dp))
+                Text(detail.reasonText, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    CHAT_ACTION_TASK_TITLE_CAPTION,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(detail.taskTitle, style = MaterialTheme.typography.bodyMedium)
+            }
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(enabled = enabled, onClick = onConfirm) { Text("確定") }
+                Button(enabled = enabled, onClick = onConfirm) { Text(chatActionConfirmButtonText(action.code)) }
                 Spacer(Modifier.width(8.dp))
-                OutlinedButton(enabled = enabled, onClick = onDismiss) { Text("却下") }
+                OutlinedButton(enabled = enabled, onClick = onDismiss) { Text(CHAT_ACTION_DISMISS_BUTTON_TEXT) }
             }
         }
     }

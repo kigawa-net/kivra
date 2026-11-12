@@ -89,3 +89,24 @@
 - **確定の操作**: `SelfDevGoalRoutes.kt` の `SelfDevOperatorRepository.replanAsOperator(taskId, version, principal)` を、REST の再計画ルートとチャットの確定が共有する(遷移と監査行 `autopilot operator action: action=REPLAN` は同じ)。チャットは、対象の Task が提案のプロジェクトに属さなければ `TASK_NOT_FOUND`(実行しない)。版が違えば `EXPIRED`(`STALE_VERSION`)。遷移の拒否は、まとめて `FAILED`(`TASK_NOT_REPLANNABLE`)。再試行はしない。
 - **確認ダイアログ**: 再計画は Planner の呼び出しを起こすので、その旨(少額の予算を使う)を確定前に書く。
 - **既知の限界**: 権限の表(ADR 0020)には、ORDER_MANAGE を持ち GOAL_WRITE を持たない役割が無い。したがって、現在の役割の組み合わせでは、コードごとの差は表示と確定の検査の関数(`ChatActionCode.permission()`)の単体テストでだけ確かめている。役割の表を変えれば、同じ検査がそのまま効く。
+
+## 追補 2026-11-12(段階 2): Task の承認・見送り
+
+承認待ちの Task(`PENDING_APPROVAL`)を、目標ページの承認・見送りボタンと同じ操作で、チャットからも確定できるようにする。段階 2 の範囲のまま(LLM は呼ばない。ラベルは固定文言)。
+
+- **対象と規則**: 進行中の周の根 Task(ACTIVE なルート order の `current_goal_id`)の子 Task(`parent_task_id` が根)のうち、`PENDING_APPROVAL` で、計画の親でない(`revision = 0`。目標ページの「このタスクを承認」の条件と同じ。`isApprovable`)もの。子 1 件に、`TASK_APPROVE` と `TASK_REJECT` の 2 件の提案が出る。対象は子 Task の ID、版は子 Task の `version`。
+- **代わりの関係**: 同じ Task の 2 件は排他。片方が `EXECUTED`・`FAILED`・`EXPIRED` で解決されると、もう片方は `EXPIRED`(`SIBLING_RESOLVED`)になる。遷移が拒否された(`FAILED`)ときは版が動かないため、版の動きによる失効だけでは足りない。そのため解決の時に明示的に閉じる。「提案を閉じる」(`DISMISSED`)は、もう片方を閉じない。Task の版が動いた場合(目標ページでの承認など)は、次の読み取りで両方とも `VERSION_MOVED` になる。Task が承認待ちでなくなり版が同じ場合は `NO_LONGER_ELIGIBLE`。
+- **確定**: `approveAsOperator` / `rejectAsOperator`(`SelfDevGoalRoutes.kt`)を、REST の `POST /api/selfdev/tasks/{id}/approve` と `/reject` と、チャットの確定が共有する。遷移と監査行(`autopilot operator action: action=TASK_APPROVED|TASK_REJECTED`)は同じ。権限は `GOAL_WRITE`(REST と同じ)で、プロジェクトの範囲で検査する。AI の主体は 403。対象の Task が提案のプロジェクトに属さなければ `TASK_NOT_FOUND`(実行しない)。版が違えば `EXPIRED`(`STALE_VERSION`)。遷移の拒否は、承認が `FAILED`(`TASK_NOT_APPROVABLE`)、見送りが `FAILED`(`TASK_NOT_REJECTABLE`)。再試行は無い。
+- **何を承認するかが分かる表示**: 承認の提案には、チャットの読み取り時に `selfdev_tasks` から読んだ次の 2 つを `detail` として付ける(提案の行には保存しない)。
+  - `taskTitle`: Task の題名。planner が書いた文章なので、MCP の `safeTaskTitle`(200 コードポイントまで。制御文字と双方向制御文字を含めば固定の印 `[unsafe title omitted]`)を通す。クライアントは、AI が書いた文章としてプレーンテキストで出し、指示としては扱わない。
+  - `reasonText`: 状態理由の固定文言(`approvalReasonText`)。`AUTO_SCOPE_EXCEEDED` は「自動実行の範囲を超える変更があったため、承認が必要です」、理由が無いものは「この Task は実行前に承認が必要です」。
+  - Task の本文(body)と、対象のパスは返さない。ラベルには題名を入れない。
+- **確認ダイアログ**: 承認は「Run が始まり、完了すると PR が作られる。PR は人がレビューしてマージするまで反映されない」を、見送りは「Task は見送られ(スキップ)、実行されない。この Task に依存する Task も実行されない」を、確定の前に書く。確定ボタンの文言は「承認」「見送り」(他のコードは「確定」)。
+- **カードの却下**: ボタンの文言は「提案を閉じる」に変えた(全コード共通)。見送りとは別の操作であることを、文言で明確にする。
+- **マイグレーション**: 無し。`action_code` は既存の VARCHAR(64) で、新しいコードはそのまま入る。`project_chat_actions` への新しい SQL は、既存の列の UPDATE と SELECT だけ。
+- **段階 4 へ残すもの**: 予算の UNPRICED の確認(ADR 0003・ADR 0010 追補 4)は、この段階に含めない。全明細の確認と必須の理由が要るため、段階 4 で行う。AI は提案だけができる。
+
+### 既知の限界(段階 2)
+
+- 承認と見送りの提案は、周の根の子 Task だけを見る。周の外や、計画の親の子は対象外(目標ページで操作する)。
+- 「提案を閉じる」で閉じた提案は、同じ版で出し直さない(段階 1 と同じ)。Task の版が動けば、新しい版で出る。

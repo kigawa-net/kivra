@@ -725,7 +725,7 @@ data class ChatActionResolvedResponse(val actionId: String, val state: String, v
  */
 internal fun ChatActionCode.permission(): Permission = when (this) {
     ChatActionCode.ORDER_START_CYCLE, ChatActionCode.ORDER_ABANDON_CYCLE -> Permission.ORDER_MANAGE
-    ChatActionCode.TASK_REPLAN -> Permission.GOAL_WRITE
+    ChatActionCode.TASK_REPLAN, ChatActionCode.TASK_APPROVE, ChatActionCode.TASK_REJECT -> Permission.GOAL_WRITE
 }
 
 /** The permission a stored action needs: its code's, or ORDER_MANAGE for a code this build does not know (the chat's former check). */
@@ -823,6 +823,20 @@ private fun SelfDevOrderRouteDeps.runChatAction(
             TaskTransition.NotFound -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_FOUND
             TaskTransition.StaleVersion -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
             is TaskTransition.Refused -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_REPLANNABLE
+        }
+        // The goal page's approval and rejection of a waiting child Task (ADR 0023 stage 2). A refused transition is one fixed code per
+        // operation; nothing is retried, and the sibling proposal of the same Task is expired by the repository's resolve.
+        ChatActionCode.TASK_APPROVE -> when (val r = operations.approveAsOperator(targetId, expected, principal)) {
+            is TaskTransition.Moved -> ChatActionState.EXECUTED to ChatResultCode.OK
+            TaskTransition.NotFound -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_FOUND
+            TaskTransition.StaleVersion -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
+            is TaskTransition.Refused -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_APPROVABLE
+        }
+        ChatActionCode.TASK_REJECT -> when (val r = operations.rejectAsOperator(targetId, expected, principal)) {
+            is TaskTransition.Moved -> ChatActionState.EXECUTED to ChatResultCode.OK
+            TaskTransition.NotFound -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_FOUND
+            TaskTransition.StaleVersion -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
+            is TaskTransition.Refused -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_REJECTABLE
         }
     }
 }

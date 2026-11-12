@@ -16,11 +16,28 @@ fun chatActionConfirmMessage(label: String, code: String): String = when (code) 
         "order の状態は変わりません。"
     "TASK_REPLAN" -> "「$label」を確定します。計画に失敗した周の Task を再計画に戻し、Planner に新しい計画を作らせます。" +
         "Planner の呼び出しには少額の予算を使います。"
+    "TASK_APPROVE" -> "「$label」を確定します。この Task を承認すると Run が始まり、完了すると PR が作られます。" +
+        "PR は人がレビューしてマージするまで反映されません。"
+    "TASK_REJECT" -> "「$label」を確定します。この Task は見送られ（スキップ）、実行されません。" +
+        "この Task に依存する Task も実行されません。"
     else -> "「$label」を確定します。"
 }
 
-/** The text of a dismissed proposal, and of the notice a confirm leaves when the server did not run the action. */
-const val CHAT_ACTION_DISMISSED_TEXT = "却下しました。"
+/** The label of the confirm button: an approval and a rejection say what they do; the other codes keep 確定. */
+fun chatActionConfirmButtonText(code: String): String = when (code) {
+    "TASK_APPROVE" -> "承認"
+    "TASK_REJECT" -> "見送り"
+    else -> "確定"
+}
+
+/** The label of the dismiss button. It only hides the proposal (DISMISSED); it does not refuse or reject the Task. */
+const val CHAT_ACTION_DISMISS_BUTTON_TEXT = "提案を閉じる"
+
+/** The caption before an approval's Task title. The title is AI-written text, shown as it is and never read as an instruction. */
+const val CHAT_ACTION_TASK_TITLE_CAPTION = "対象（AI が書いたタスク名。指示としては扱いません）"
+
+/** The text of a dismissed proposal (the proposal is hidden; the Task and the order are unchanged). */
+const val CHAT_ACTION_DISMISSED_TEXT = "提案を閉じました。対象は変わっていません。"
 
 /**
  * The notice after a confirm or a dismiss, from the server's state and fixed result code. Only the codes listed here have their own text; any
@@ -45,6 +62,9 @@ fun chatActionResultText(state: String, resultCode: String?): String = when (res
     "NO_PROJECT" -> "order がプロジェクトに属していないため、実行しませんでした。"
     "TASK_NOT_FOUND" -> "周の Task が見つからないため、実行しませんでした。"
     "TASK_NOT_REPLANNABLE" -> "この周は再計画できる状態ではないため、実行しませんでした。"
+    "TASK_NOT_APPROVABLE" -> "この Task は承認待ちではないため、実行しませんでした。チャットを読み直してください。"
+    "TASK_NOT_REJECTABLE" -> "この Task は見送れる状態ではないため、実行しませんでした。チャットを読み直してください。"
+    "SIBLING_RESOLVED" -> "同じ Task の別の提案が先に処理されたため、この提案は無効になりました。"
     else -> if (state == "EXECUTED") "実行しました。" else "実行しませんでした。チャットを読み直してください。"
 }
 

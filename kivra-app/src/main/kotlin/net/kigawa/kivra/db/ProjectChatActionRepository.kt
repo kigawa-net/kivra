@@ -9,6 +9,7 @@ import net.kigawa.kivra.core.chat.ENDED_TASK_STATES
 import net.kigawa.kivra.core.chat.ChatActionCode
 import net.kigawa.kivra.core.chat.ChatActionProposal
 import net.kigawa.kivra.core.chat.ChatActionState
+import net.kigawa.kivra.core.chat.ChatApprovalFact
 import net.kigawa.kivra.core.chat.ChatCycleTaskFact
 import net.kigawa.kivra.core.chat.ChatOrderFacts
 import net.kigawa.kivra.core.chat.ChatResultCode
@@ -34,8 +35,11 @@ data class ProjectChatActionRow(
     val resolvedBy: String?,
 )
 
+/** The Task of an approval proposal as the chat card reads it at GET time: its raw title (planner-written, so the route sanitizes it) and state reason. */
+data class ChatApprovalTaskRow(val title: String, val stateReason: String?)
+
 /**
- * The proposals of the project chat (ADR 0023, stage 1). [refresh] is the rule-based proposer: it reads the root orders of a project and
+ * The proposals of the project chat (ADR 0023, stages 1 and 2). [refresh] is the rule-based proposer: it reads the root orders of a project and
  * their cycles in progress, expires the open proposals the rules no longer make, and writes the new ones. It runs when an operator reads the
  * chat, so a proposal always reflects the state at that read. Nothing here calls a model.
  *
@@ -95,12 +99,15 @@ class ProjectChatActionRepository(
                 expired = !root.expiresAt.isAfter(now),
                 cycleStuck = root.currentGoalId?.let { cycleStuck(it) } ?: false,
                 cycleTask = root.currentGoalId?.let { cycleTaskOf(it) },
+                approvals = root.currentGoalId?.let { approvalsOf(it) } ?: emptyList(),
             )
         }
         val proposals = proposeChatActions(facts)
         val wanted = proposals.map { Triple(it.code.name, it.targetId, it.expectedVersion) }.toSet()
         val orderVersionOf = facts.associate { it.orderId to it.version }
-        val taskVersionOf = facts.mapNotNull { f -> f.cycleTask?.let { it.taskId to it.version } }.toMap()
+        val taskVersionOf = facts.flatMap { f ->
+            listOfNotNull(f.cycleTask?.let { it.taskId to it.version }) + f.approvals.map { it.taskId to it.version }
+        }.toMap()
 
         // Expire the open proposals the rules no longer make (the version moved, or the order or Task is no longer eligible).
         val open = openRows(projectId)
@@ -160,11 +167,38 @@ class ProjectChatActionRepository(
      * resolved already (a second confirm or dismiss is refused, nothing runs twice).
      */
     fun resolve(actionId: String, state: ChatActionState, resultCode: String, resolvedBy: String?): Boolean = transaction(database) {
+        val now = utcNow(clock)
         val changed = execUpdate(
             "UPDATE project_chat_actions SET state = ?, active_key = NULL, result_code = ?, resolved_at = ?, resolved_by = ? WHERE action_id = ? AND state = ?",
-            state.name, resultCode, utcNow(clock), resolvedBy, actionId, ChatActionState.PROPOSED.name,
+            state.name, resultCode, now, resolvedBy, actionId, ChatActionState.PROPOSED.name,
         )
+        // A resolved approval (executed, failed or expired) takes its alternative with it: approve and reject of one Task are exclusive. A
+        // dismissal only hides the proposal, so it leaves the other one open. The version move would expire the other one too, but a failed
+        // transition does not move the version, so the sibling is expired here.
+        if (changed == 1 && state != ChatActionState.DISMISSED) expireSiblingsOf(actionId, now)
         changed == 1
+    }
+
+    /** The other open approval proposals of the same Task as [actionId] (APPROVE and REJECT of one Task) are expired as resolved. */
+    private fun Transaction.expireSiblingsOf(actionId: String, now: LocalDateTime) {
+        val row = execQuery("SELECT project_id, action_code, target_id FROM project_chat_actions WHERE action_id = ?", actionId) { rs ->
+            Triple(rs.getString(1), rs.getString(2), rs.getString(3))
+        }.firstOrNull() ?: return
+        val (projectId, code, targetId) = row
+        if (code !in APPROVAL_CODES || targetId == null) return
+        execUpdate(
+            "UPDATE project_chat_actions SET state = ?, active_key = NULL, result_code = ?, resolved_at = ? " +
+                "WHERE project_id = ? AND action_code IN (?, ?) AND target_id = ? AND action_id <> ? AND state = ?",
+            ChatActionState.EXPIRED.name, ChatResultCode.SIBLING_RESOLVED, now,
+            projectId, ChatActionCode.TASK_APPROVE.name, ChatActionCode.TASK_REJECT.name, targetId, actionId, ChatActionState.PROPOSED.name,
+        )
+    }
+
+    /** The Task of an approval proposal, read for the card at GET time (its title and state reason only; never the body), or null when missing. */
+    fun approvalTaskOf(taskId: String): ChatApprovalTaskRow? = transaction(database) {
+        execQuery("SELECT title, state_reason FROM selfdev_tasks WHERE task_id = ?", taskId) { rs ->
+            ChatApprovalTaskRow(rs.getString(1), rs.getString(2))
+        }.firstOrNull()
     }
 
     private fun Transaction.openRows(projectId: String): List<ProjectChatActionRow> =
@@ -207,6 +241,13 @@ class ProjectChatActionRepository(
         return isCycleStuck(rootEnded = rootState in ENDED_TASK_STATES, children = children) { states[it] }
     }
 
+    /** The child Tasks of the cycle's root that wait for approval (PENDING_APPROVAL), oldest ID first. The rule decides which are approvable. */
+    private fun Transaction.approvalsOf(rootTaskId: String): List<ChatApprovalFact> =
+        execQuery(
+            "SELECT task_id, version, state, revision FROM selfdev_tasks WHERE parent_task_id = ? AND state = ? ORDER BY task_id",
+            rootTaskId, "PENDING_APPROVAL",
+        ) { rs -> ChatApprovalFact(rs.getString(1), rs.getLong(2), rs.getString(3), rs.getInt(4) > 0) }
+
     /** The cycle's root Task (the order's current goal) as the replan rule reads it, or null when the row is missing. */
     private fun Transaction.cycleTaskOf(rootTaskId: String): ChatCycleTaskFact? =
         execQuery("SELECT task_id, version, state, state_reason FROM selfdev_tasks WHERE task_id = ?", rootTaskId) { rs ->
@@ -245,6 +286,7 @@ class ProjectChatActionRepository(
 
     private companion object {
         const val MAX_ROOTS = 200
+        val APPROVAL_CODES = setOf(ChatActionCode.TASK_APPROVE.name, ChatActionCode.TASK_REJECT.name)
         const val SELECT_COLUMNS = "SELECT action_id, project_id, action_code, target_id, expected_version, state, result_code, " +
             "proposed_at, resolved_at, resolved_by FROM project_chat_actions"
     }

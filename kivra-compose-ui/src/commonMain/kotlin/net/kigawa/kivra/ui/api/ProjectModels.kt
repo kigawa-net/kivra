@@ -121,7 +121,7 @@ data class ApiChatSession(
     val actions: List<ApiChatAction> = emptyList(),
 )
 
-/** One open proposal of the chat (server `ChatActionResponse`): the label is the server's fixed text. */
+/** One open proposal of the chat (server `ChatActionResponse`): the label is the server's fixed text. [detail] is set for an approval only. */
 @Serializable
 data class ApiChatAction(
     val actionId: String,
@@ -129,7 +129,15 @@ data class ApiChatAction(
     val label: String,
     val targetId: String? = null,
     val proposedAt: String = "",
+    val detail: ApiChatActionDetail? = null,
 )
+
+/**
+ * What an approval proposal is about (server `ChatActionDetail`). [taskTitle] is AI-written text: shown as plain text, never interpreted.
+ * [reasonText] is the server's fixed text.
+ */
+@Serializable
+data class ApiChatActionDetail(val taskTitle: String, val stateReason: String? = null, val reasonText: String = "")
 
 /** The answer of a confirm or dismiss (server `ChatActionResolvedResponse`): the new state and a fixed result code. */
 @Serializable

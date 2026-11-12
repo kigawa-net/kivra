@@ -54,6 +54,42 @@ class ChatActionRulesTest {
     }
 
     @Test
+    fun theApproveConfirmTextSaysThatARunStartsAndAPrNeedsReview() {
+        val text = chatActionConfirmMessage("承認待ちの Task を承認する", "TASK_APPROVE")
+        assertTrue(text.contains("「承認待ちの Task を承認する」"))
+        assertTrue(text.contains("Run が始まり"))
+        assertTrue(text.contains("PR が作られます"))
+        assertTrue(text.contains("人がレビューしてマージするまで反映されません"))
+        assertEquals("承認", chatActionConfirmButtonText("TASK_APPROVE"))
+    }
+
+    @Test
+    fun theRejectConfirmTextSaysTheTaskIsSkippedAndItsDependentsDoNotRun() {
+        val text = chatActionConfirmMessage("承認待ちの Task を見送る", "TASK_REJECT")
+        assertTrue(text.contains("見送られ（スキップ）"))
+        assertTrue(text.contains("この Task に依存する Task も実行されません"))
+        assertEquals("見送り", chatActionConfirmButtonText("TASK_REJECT"))
+        assertEquals("確定", chatActionConfirmButtonText("ORDER_START_CYCLE"))
+    }
+
+    @Test
+    fun theDismissButtonIsNotARejection() {
+        // Dismissing hides the proposal; the Task is unchanged. The label must not read as a refusal of the Task.
+        assertEquals("提案を閉じる", CHAT_ACTION_DISMISS_BUTTON_TEXT)
+        assertFalse(CHAT_ACTION_DISMISS_BUTTON_TEXT.contains("却下"))
+        assertFalse(CHAT_ACTION_DISMISS_BUTTON_TEXT.contains("見送"))
+        assertTrue(CHAT_ACTION_DISMISSED_TEXT.contains("対象は変わっていません"))
+    }
+
+    @Test
+    fun theApprovalResultCodesHaveTheirOwnText() {
+        assertTrue(chatActionResultText("FAILED", "TASK_NOT_APPROVABLE").contains("承認待ちではない"))
+        assertTrue(chatActionResultText("FAILED", "TASK_NOT_REJECTABLE").contains("見送れる状態ではない"))
+        assertTrue(chatActionResultText("FAILED", "SIBLING_RESOLVED").contains("別の提案が先に処理"))
+        assertTrue(chatActionResultText("EXECUTED", "OK").contains("実行しました"))
+    }
+
+    @Test
     fun aFailedRequestGetsItsWriteFailureText() {
         assertEquals("既に処理されています。チャットを読み直してください。", chatActionFailureText(WriteFailure.STALE))
         assertEquals(writeFailureText(WriteFailure.NETWORK), chatActionFailureText(WriteFailure.NETWORK))

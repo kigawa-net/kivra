@@ -26,6 +26,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.auth.AssigneeAccess
@@ -37,12 +38,21 @@ import net.kigawa.kivra.auth.PermissionMode
 import net.kigawa.kivra.auth.PermissionService
 import net.kigawa.kivra.auth.Role
 import net.kigawa.kivra.auth.RolesDefault
+import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.chat.ChatActionCode
+import net.kigawa.kivra.core.chat.ChatResultCode
 import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.SelfDevTask
 import net.kigawa.kivra.db.OrderResult
+import net.kigawa.kivra.db.ProjectBackfillRepository
 import net.kigawa.kivra.db.ProjectChatActionRepository
+import net.kigawa.kivra.db.ProjectChatActionRow
+import net.kigawa.kivra.db.ProjectChatRepository
+import net.kigawa.kivra.db.ProjectDrainRepository
+import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectRepository
+import net.kigawa.kivra.db.newDbStore
+import net.kigawa.kivra.mcp.safeTaskTitle
 import net.kigawa.kivra.core.chat.ChatActionState
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
@@ -565,6 +575,328 @@ class ProjectChatActionRoutesTest {
         assertEquals(Permission.ORDER_MANAGE, ChatActionCode.ORDER_START_CYCLE.permission())
         assertEquals(Permission.ORDER_MANAGE, ChatActionCode.ORDER_ABANDON_CYCLE.permission())
         assertEquals(Permission.ORDER_MANAGE, permissionOfChatAction("NOT_A_CODE"))
+    }
+
+    /** A cycle in progress whose child Task waits for approval (ADR 0023 stage 2). [title] and [body] are what the planner wrote. */
+    private data class Approval(val project: String, val orderId: String, val rootTaskId: String, val childId: String)
+
+    private fun waitingCycle(
+        db: TestDb,
+        orders: SelfDevOrderRepository,
+        name: String,
+        title: String = "Write the docs",
+        body: String? = "SECRET-BODY-TEXT",
+        version: Long = 2,
+        reason: String? = null,
+        revision: Int = 0,
+    ): Approval {
+        val project = newProject(db, name)
+        val order = newRoot(orders, project)
+        assertIs<OrderResult.Moved<*>>(orders.startCycle(order.orderId, order.version, OPERATOR))
+        val root = assertNotNull(orders.get(order.orderId)!!.currentGoalId)
+        val child = Ulid.generate()
+        insertWaiting(db, child, project, root, title, body, version, reason, revision)
+        return Approval(project, order.orderId, root, child)
+    }
+
+    private fun insertWaiting(
+        db: TestDb,
+        id: String,
+        project: String,
+        root: String,
+        title: String,
+        body: String?,
+        version: Long,
+        reason: String?,
+        revision: Int,
+    ) {
+        transaction(db.database) {
+            val now = utcNow(Clock.systemUTC())
+            execUpdate(
+                "INSERT INTO selfdev_tasks (task_id, created_by, idempotency_key, title, body, target_repo, state, state_reason, dependencies, " +
+                    "requires_approval, revision, attempts, version, created_at, updated_at, project_id, parent_task_id) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, 'PENDING_APPROVAL', ?, '[]', TRUE, ?, 0, ?, ?, ?, ?, ?)",
+                id, OPERATOR, "test:wait:$id", title, body, TARGET, reason, revision, version, now, now, project, root,
+            )
+        }
+    }
+
+    private fun ProjectChatActionRepository.proposedWithCode(project: String, code: ChatActionCode): ProjectChatActionRow =
+        proposed(project).single { it.code == code.name }
+
+    @Test
+    fun `a waiting child gets an approve and a reject at its version, and a plan root or another state gets neither`() {
+        val db = TestDb().also { openDbs += it }
+        val orders = SelfDevOrderRepository(db.database)
+        val repo = ProjectChatActionRepository(db.database)
+        val waiting = waitingCycle(db, orders, "Approve proposal", version = 5)
+
+        assertEquals(2, repo.refresh(waiting.project))
+        val open = repo.proposed(waiting.project).sortedBy { it.code }
+        assertEquals(listOf("TASK_APPROVE", "TASK_REJECT"), open.map { it.code })
+        assertTrue(open.all { it.targetId == waiting.childId && it.expectedVersion == 5L })
+
+        val planRoot = waitingCycle(db, orders, "Plan root child", revision = 1)
+        assertEquals(0, repo.refresh(planRoot.project))
+        val queued = waitingCycle(db, orders, "Queued child")
+        transaction(db.database) { execUpdate("UPDATE selfdev_tasks SET state = 'QUEUED', state_reason = NULL WHERE task_id = ?", queued.childId) }
+        assertEquals(0, repo.refresh(queued.project))
+        assertTrue(repo.proposed(planRoot.project).isEmpty())
+        assertTrue(repo.proposed(queued.project).isEmpty())
+    }
+
+    @Test
+    fun `approve runs the goal page's approval once, the Task leaves PENDING_APPROVAL, and the other proposal is expired`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val waiting = waitingCycle(db, orders, "Approve confirm")
+        repo.refresh(waiting.project)
+        val approve = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_APPROVE)
+        val reject = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_REJECT)
+
+        val answer = send(HttpMethod.Post, confirmPath(waiting.project, approve.actionId), "{}")
+        assertEquals(HttpStatusCode.OK, answer.status)
+        assertEquals("EXECUTED", answer.obj()["state"]!!.jsonPrimitive.content)
+        assertEquals("OK", answer.obj()["resultCode"]!!.jsonPrimitive.content)
+        val approved = taskOf(db, waiting.childId)
+        assertEquals("QUEUED", approved.state.name)
+        assertEquals("OPERATOR_APPROVED", approved.stateReason?.name)
+        assertEquals(3L, approved.version)
+
+        val sibling = assertNotNull(repo.find(waiting.project, reject.actionId))
+        assertEquals("EXPIRED", sibling.state)
+        assertEquals("SIBLING_RESOLVED", sibling.resultCode)
+        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, confirmPath(waiting.project, approve.actionId), "{}").status)
+        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, confirmPath(waiting.project, reject.actionId), "{}").status)
+        assertEquals(3L, taskOf(db, waiting.childId).version)
+        assertEquals(0, repo.refresh(waiting.project))
+        assertTrue(repo.proposed(waiting.project).isEmpty())
+    }
+
+    @Test
+    fun `reject skips the Task, its dependents do not run, and the approve proposal is expired`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val waiting = waitingCycle(db, orders, "Reject confirm")
+        repo.refresh(waiting.project)
+        val reject = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_REJECT)
+        val approve = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_APPROVE)
+
+        val answer = send(HttpMethod.Post, confirmPath(waiting.project, reject.actionId), "{}")
+        assertEquals(HttpStatusCode.OK, answer.status)
+        assertEquals("EXECUTED", answer.obj()["state"]!!.jsonPrimitive.content)
+        assertEquals("OK", answer.obj()["resultCode"]!!.jsonPrimitive.content)
+        val skipped = taskOf(db, waiting.childId)
+        assertEquals("SKIPPED", skipped.state.name)
+        assertEquals("OPERATOR_SKIPPED", skipped.stateReason?.name)
+        assertEquals("SIBLING_RESOLVED", assertNotNull(repo.find(waiting.project, approve.actionId)).resultCode)
+        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, confirmPath(waiting.project, approve.actionId), "{}").status)
+    }
+
+    @Test
+    fun `a failed approval expires its alternative, and the Task keeps waiting`() {
+        val db = TestDb().also { openDbs += it }
+        val orders = SelfDevOrderRepository(db.database)
+        val repo = ProjectChatActionRepository(db.database)
+        val waiting = waitingCycle(db, orders, "Failed approval")
+        repo.refresh(waiting.project)
+        val approve = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_APPROVE)
+        val reject = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_REJECT)
+
+        // A refused transition moves no version: the sibling must be expired by the resolution itself.
+        assertTrue(repo.resolve(approve.actionId, ChatActionState.FAILED, ChatResultCode.TASK_NOT_APPROVABLE, OPERATOR))
+        assertEquals("EXPIRED", assertNotNull(repo.find(waiting.project, reject.actionId)).state)
+        assertEquals("SIBLING_RESOLVED", assertNotNull(repo.find(waiting.project, reject.actionId)).resultCode)
+        assertEquals("PENDING_APPROVAL", taskOf(db, waiting.childId).state.name)
+        assertEquals(0, repo.refresh(waiting.project))
+    }
+
+    @Test
+    fun `a dismissed approval only hides itself, and its alternative stays open`() {
+        val db = TestDb().also { openDbs += it }
+        val orders = SelfDevOrderRepository(db.database)
+        val repo = ProjectChatActionRepository(db.database)
+        val waiting = waitingCycle(db, orders, "Dismiss approval")
+        repo.refresh(waiting.project)
+        val approve = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_APPROVE)
+
+        assertTrue(repo.resolve(approve.actionId, ChatActionState.DISMISSED, ChatResultCode.OPERATOR_DISMISSED, OPERATOR))
+        assertEquals(listOf("TASK_REJECT"), repo.proposed(waiting.project).map { it.code })
+        assertEquals(0, repo.refresh(waiting.project))
+        assertEquals("PENDING_APPROVAL", taskOf(db, waiting.childId).state.name)
+    }
+
+    @Test
+    fun `a goal page's own approval moves the version, and both proposals expire as moved on the next read`() {
+        val db = TestDb().also { openDbs += it }
+        val orders = SelfDevOrderRepository(db.database)
+        val repo = ProjectChatActionRepository(db.database)
+        val waiting = waitingCycle(db, orders, "Goal page approval")
+        repo.refresh(waiting.project)
+        val open = repo.proposed(waiting.project).associateBy { it.code }
+
+        // The Task leaves PENDING_APPROVAL on the goal page: its version moves.
+        transaction(db.database) {
+            execUpdate("UPDATE selfdev_tasks SET state = 'QUEUED', version = 3 WHERE task_id = ?", waiting.childId)
+        }
+        assertEquals(0, repo.refresh(waiting.project))
+        assertTrue(repo.proposed(waiting.project).isEmpty())
+        for (code in listOf("TASK_APPROVE", "TASK_REJECT")) {
+            assertEquals("VERSION_MOVED", assertNotNull(repo.find(waiting.project, open.getValue(code).actionId)).resultCode, code)
+        }
+    }
+
+    @Test
+    fun `a stale approval version expires with a fixed code and runs nothing`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val waiting = waitingCycle(db, orders, "Stale approval")
+        repo.refresh(waiting.project)
+        val approve = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_APPROVE)
+        // The Task was changed after the proposal (still waiting), and the chat was not read again.
+        transaction(db.database) { execUpdate("UPDATE selfdev_tasks SET version = 3 WHERE task_id = ?", waiting.childId) }
+
+        val answer = send(HttpMethod.Post, confirmPath(waiting.project, approve.actionId), "{}")
+        assertEquals(HttpStatusCode.OK, answer.status)
+        assertEquals("EXPIRED", answer.obj()["state"]!!.jsonPrimitive.content)
+        assertEquals("STALE_VERSION", answer.obj()["resultCode"]!!.jsonPrimitive.content)
+        assertEquals("PENDING_APPROVAL", taskOf(db, waiting.childId).state.name)
+    }
+
+    @Test
+    fun `the AI principal is refused an approval, and the proposal stays open`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db, aiPrincipal = AI_PRINCIPAL)
+        val repo = ProjectChatActionRepository(db.database)
+        val waiting = waitingCycle(db, orders, "AI approval")
+        repo.refresh(waiting.project)
+        val approve = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_APPROVE)
+
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, confirmPath(waiting.project, approve.actionId), "{}", principal = AI_PRINCIPAL).status)
+        assertEquals("PROPOSED", repo.find(waiting.project, approve.actionId)!!.state)
+        assertEquals("PENDING_APPROVAL", taskOf(db, waiting.childId).state.name)
+    }
+
+    @Test
+    fun `without GOAL_WRITE an approval is refused with 403, nothing runs, and it is not shown`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db, guard = viewerGuard())
+        val repo = ProjectChatActionRepository(db.database)
+        val waiting = waitingCycle(db, orders, "No GOAL_WRITE approval")
+        repo.refresh(waiting.project)
+        val approve = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_APPROVE)
+        val reject = repo.proposedWithCode(waiting.project, ChatActionCode.TASK_REJECT)
+
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, confirmPath(waiting.project, approve.actionId), "{}").status)
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, confirmPath(waiting.project, reject.actionId), "{}").status)
+        assertEquals("PROPOSED", repo.find(waiting.project, approve.actionId)!!.state)
+        assertEquals("PENDING_APPROVAL", taskOf(db, waiting.childId).state.name)
+        val viewer = viewerGuard()
+        assertFalse(chatActionVisibleTo(viewer, OPERATOR, waiting.project, ChatActionCode.TASK_APPROVE))
+        assertFalse(chatActionVisibleTo(viewer, OPERATOR, waiting.project, ChatActionCode.TASK_REJECT))
+    }
+
+    @Test
+    fun `an approval of another project's Task is not found, whatever the proposal says`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val repo = ProjectChatActionRepository(db.database)
+        val other = waitingCycle(db, orders, "Other approval")
+        val projectA = newProject(db, "Approval chat A")
+        val actionId = Ulid.generate()
+        transaction(db.database) {
+            execUpdate(
+                "INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, expected_version, state, active_key, proposed_at) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                actionId, projectA, "TASK_APPROVE", other.childId, 2L, "PROPOSED", utcNow(Clock.systemUTC()),
+            )
+        }
+
+        val answer = send(HttpMethod.Post, confirmPath(projectA, actionId), "{}")
+        assertEquals(HttpStatusCode.OK, answer.status)
+        assertEquals("FAILED", answer.obj()["state"]!!.jsonPrimitive.content)
+        assertEquals("TASK_NOT_FOUND", answer.obj()["resultCode"]!!.jsonPrimitive.content)
+        assertEquals("PENDING_APPROVAL", taskOf(db, other.childId).state.name)
+        assertEquals("FAILED", repo.find(projectA, actionId)!!.state)
+    }
+
+    @Test
+    fun `the approval permission is GOAL_WRITE for both codes`() {
+        assertEquals(Permission.GOAL_WRITE, ChatActionCode.TASK_APPROVE.permission())
+        assertEquals(Permission.GOAL_WRITE, ChatActionCode.TASK_REJECT.permission())
+    }
+
+    /** The project chat's GET with the proposals in it: the project routes with the chat wired in, as Application does. */
+    private fun ApplicationTestBuilder.setUpChat(db: TestDb, guard: PermissionGuard = offPermissionGuard()) {
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
+        val chatRepo = ProjectChatRepository(db.database, Clock.systemUTC())
+        val identity = TaskApiIdentity { headers -> headers[PRINCIPAL_HEADER]?.takeIf { it.isNotBlank() } }
+        application {
+            install(ContentNegotiation) { json() }
+            routing {
+                configureProjectRoutes(
+                    projects, db.runs, identity, guard,
+                    backfill = ProjectBackfillRepository(db.database),
+                    members = ProjectMemberRepository(db.database, Clock.systemUTC()),
+                    budgets = newDbStore(db, Clock.systemUTC()),
+                    drain = ProjectDrainRepository(db.database, newDbStore(db, Clock.systemUTC())),
+                    chatRepo = chatRepo,
+                    chatActions = ProjectChatActionRepository(db.database),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `the chat shows an approval with the planner's title as plain text and the fixed reason, and no body`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = SelfDevOrderRepository(db.database)
+        setUpChat(db)
+        val waiting = waitingCycle(db, orders, "Detail", title = "Write the docs", reason = "AUTO_SCOPE_EXCEEDED")
+        ProjectChatRepository(db.database, Clock.systemUTC()).createSession(waiting.project, "Chat")
+
+        val text = send(HttpMethod.Get, "/api/projects/${waiting.project}/chat", null).bodyAsText()
+        val actions = Json.parseToJsonElement(text).jsonObject["actions"]!!.jsonArray
+        val approve = actions.map { it.jsonObject }.single { it["code"]!!.jsonPrimitive.content == "TASK_APPROVE" }
+        val detail = approve["detail"]!!.jsonObject
+        assertEquals("Write the docs", detail["taskTitle"]!!.jsonPrimitive.content)
+        assertEquals("AUTO_SCOPE_EXCEEDED", detail["stateReason"]!!.jsonPrimitive.content)
+        assertEquals("自動実行の範囲を超える変更があったため、承認が必要です。", detail["reasonText"]!!.jsonPrimitive.content)
+        assertEquals("承認待ちの Task を承認する", approve["label"]!!.jsonPrimitive.content)
+        // The body is never returned, and the label stays the server's fixed text (no title in it).
+        assertFalse(text.contains("SECRET-BODY-TEXT"))
+        assertFalse(approve["label"]!!.jsonPrimitive.content.contains("Write the docs"))
+        assertEquals(2, actions.count { it.jsonObject["detail"] != null })
+    }
+
+    @Test
+    fun `the title sanitizer cuts to 200 code points and marks control or bidi characters`() {
+        assertEquals(200, safeTaskTitle("a".repeat(250)).codePointCount(0, safeTaskTitle("a".repeat(250)).length))
+        assertEquals("[unsafe title omitted]", safeTaskTitle("ok\u0007"))
+        assertEquals("[unsafe title omitted]", safeTaskTitle("x‮y"))
+        assertEquals("plain", safeTaskTitle("plain"))
+    }
+
+    @Test
+    fun `a control or bidi character in the planner's title gets the fixed marker, and a title of the column's 200 is shown whole`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = SelfDevOrderRepository(db.database)
+        setUpChat(db)
+        val bidi = waitingCycle(db, orders, "Bidi title", title = "Write‮evil the docs")
+        ProjectChatRepository(db.database, Clock.systemUTC()).createSession(bidi.project, "Chat")
+        val marked = Json.parseToJsonElement(send(HttpMethod.Get, "/api/projects/${bidi.project}/chat", null).bodyAsText())
+            .jsonObject["actions"]!!.jsonArray.first().jsonObject["detail"]!!.jsonObject
+        assertEquals("[unsafe title omitted]", marked["taskTitle"]!!.jsonPrimitive.content)
+
+        // The column is VARCHAR(200), so a stored title is at most 200 characters; it is shown whole.
+        val long = waitingCycle(db, orders, "Long title", title = "a".repeat(200))
+        ProjectChatRepository(db.database, Clock.systemUTC()).createSession(long.project, "Chat")
+        val whole = Json.parseToJsonElement(send(HttpMethod.Get, "/api/projects/${long.project}/chat", null).bodyAsText())
+            .jsonObject["actions"]!!.jsonArray.first().jsonObject["detail"]!!.jsonObject
+        assertEquals("a".repeat(200), whole["taskTitle"]!!.jsonPrimitive.content)
     }
 
     private fun insertTask(db: TestDb, id: String, project: String, state: String, parent: String?, deps: String, key: String) {

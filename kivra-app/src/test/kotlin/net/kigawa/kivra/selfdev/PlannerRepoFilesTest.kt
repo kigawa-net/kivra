@@ -89,6 +89,25 @@ class PlannerRepoFileListTest {
     }
 
     @Test
+    fun `CI and build files are left out even when they sit under an allowed src root`() {
+        val entries = listOf(
+            blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/Foo.kt"),
+            blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/tasks.gradle.kts"),
+            blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/Dockerfile.dev"),
+            blob(".github/workflows/ci.yml"),
+            blob("gradle/wrapper/gradle-wrapper.properties"),
+        )
+        val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
+
+        assertEquals(1, rendered.fileCount)
+        assertTrue(rendered.text.contains("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/Foo.kt"), rendered.text)
+        assertFalse(rendered.text.contains("tasks.gradle.kts"))
+        assertFalse(rendered.text.contains("Dockerfile"))
+        assertFalse(rendered.text.contains("ci.yml"))
+        assertFalse(rendered.text.contains("gradle-wrapper"))
+    }
+
+    @Test
     fun `a file of 20 KB or more carries its size in KB, and a smaller one carries none`() {
         val rendered = assertNotNull(
             PlannerRepoFileList.render(

@@ -1079,11 +1079,25 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 
 - `K8sRunBackend`(`RunBackend` の k8s 実装): Job のマニフェストを `K8sJobBuilder` で作り、**送信の直前に必ず `K8sJobGuard` で検査する**(拒否された manifest は送られない)。Pod が Running になったら、入力を exec の stdin で送り、コンテナのログを追う。ログは docker 側と同じ上限(`outputLimitBytes`、1 行 1 MiB)で読む。時間切れ(`timeout`、Job の `activeDeadlineSeconds`)、停止要求、出力の上限で止め、**どの終わり方でも Job を delete する**。`cleanupOrphans` は label `kivra-agent=1` の Job のうち、実行中の Run のもの以外を delete する。
 - 結果の受け取り(exec readout): Pod の entrypoint が CLI を実行し、差分を収集して `/work/.kivra/result.json` を書き、生きたまま待つ。agent は `cat` の exec で読む(上限 8 MiB、厳密に解釈)。`RunResult.podReadout` に入り、呼び出し側が `PodReadout.Collected.finish(summary, sessionId, limits, pathRules)` で再検査してから使う。
-- Job の command は、`/usr/local/bin/kivra-pod-entrypoint` と、その後ろに従来の CLI の argv(ガードが 1 トークンずつ照合)。**実行用イメージに、この launcher(`net.kigawa.kivra.agent.k8s.pod.PodEntrypointKt` を起動する。JDK 21 と git は既にある)と agent の jar を入れる作業が必要で、この PR には含まれない**(PR 5 の前)。
-- Pod 内の取得: base commit を公開 GitHub から Job ごとに取得する(キャッシュなし、資格情報なし、プロキシ経由)。**プロキシの許可リストに `github.com` を足す必要がある**(PR 5)。
+- Job の command は、`/usr/local/bin/kivra-pod-entrypoint` と、その後ろに従来の CLI の argv(ガードが 1 トークンずつ照合)。launcher と agent の jar は実行用イメージに入れた(PR 5a、下の追記)。
+- Pod 内の取得: base commit を公開 GitHub から Job ごとに取得する(キャッシュなし、資格情報なし、プロキシ経由)。プロキシの許可リストに `github.com` を足した(PR 5a)。
 - agent の ServiceAccount の RBAC(Job の namespace 内。manifest は PR 5): `batch/jobs` の create・get・list・delete、`pods` の get・list、`pods/log` の get、`pods/exec` の create(と get)。`secrets`、`configmaps`、`deletecollection`、cluster 全体の権限は与えない。
 - API への接続: in-cluster の ServiceAccount の token と CA(`HttpKubeApi.inCluster`)。標準の `java.net.http`(exec は WebSocket、`v4.channel.k8s.io`)だけを使い、依存は増やしていない。
 - 既知の制約: ログと標準エラーは Pod のログに混ざる(`RunResult.stderr` は空)。ログの読み取りが途中で切れても再接続しない(その場合、読めた分だけが stdout になる)。exec readout は、実クラスタでは未検証(WebSocket の経路は単体試験で結線していない。PR 5 の検証で確かめる)。
+
+#### 6.6c 追記: PR 5a(リポジトリ側の前提。2026-11-11)
+
+**まだ k8s は有効にしない**(`KIVRA_AGENT_BACKEND=k8s` は設定エラーで拒否されたまま。`RunBackendFactory` も拒否する)。
+
+済み:
+- 実行用イメージ(`agent-runtime/image/Dockerfile`): `/usr/local/bin/kivra-pod-entrypoint`(`PodEntrypointKt` を `/opt/kivra-agent/lib/*` で起動する)と agent の jar を追加した。JDK 21 は元からあるので JRE は足していない(増えるのは jar だけ)。非 root(10001)、特権なしのまま。jar は名前付きビルドコンテキスト `agent-dist` で渡す(`cd.yml` の build-agent が `:kivra-agent:installDist` を先に実行して渡す)。渡さない従来の docker build(`install.sh`、`verify/run-all.sh`)は、jar の無いイメージになるだけで、docker バックエンドの挙動は変わらない。
+- プロキシの許可リストに `github.com` だけを追加した(base commit の `fetch --depth=1` の smart HTTP は github.com だけに接続する)。注意: プロキシは docker バックエンドと共有なので、docker の Run からも github.com に届くようになる。許可リストの内容は `TestShippedAllowlistIsExactlyTheNeededHosts` で固定した。
+- executor の配線: `RunResult.podReadout` があれば、host での差分収集の代わりに `PodReadout.Collected.finish(...)` で再検査して使う(`Error` は `BAD_OUTPUT`)。`PodInputSource` は `AttemptPodInputs`(executor が Run の前後で登録・解除)が供給する。readout が無い(docker)場合の経路は変えていない。
+
+残り(PR 5b 以降):
+- kigawa-net-k8s リポジトリの manifest: プロキシの Deployment と Service、NetworkPolicy(Job の Pod はプロキシと DNS だけ)、agent の RBAC(§6.6c)、Secret、namespace の PodSecurity `restricted`。
+- 実クラスタでの検証(exec readout、Pod 内 entrypoint、公開リポジトリの取得、NetworkPolicy の強制、`podPidsLimit`)。
+- `RunBackendFactory` と `AgentConfig` の k8s の有効化(`HttpKubeApi.inCluster`、`K8sSettings`、`AttemptPodInputs` の配線)。k8s では Pod が自分で取得するので、host での作業ディレクトリの準備(現状は executor が先に行う)を省く整理も 5b で行う。
 
 ### 6.7 CLI の起動、task ファイル、stream-json の解析と分類(PR 7)
 
@@ -2722,6 +2736,17 @@ Goal の読み取りは、`KIVRA_MCP_GOAL_READ_ENABLED=true` かつ `KIVRA_MCP_E
 - **ログ**: `net.kigawa.kivra.selfdev.autopilot.operator` に、`via=mcp`、固定の理由コード、Goal の ID の先頭 12 文字だけが出る。題名、本文、主体の生の値は出ない。
 - 有効化: dev で先に確かめる。共有基盤の変更のため、dev での有効化は運用者の承認を経る(ADR 0019 決定 4)。戻すには該当の変数を `false` にして再起動する。
 
+### 8.9a 周の木の読み取り(`kivra_task_list`、ADR 0019 追補 2026-11-12)
+
+`KIVRA_MCP_GOAL_READ_ENABLED=true` かつ `KIVRA_MCP_ENABLED=true` かつ オートパイロットが有効のときだけ登録する(読み取り専用)。
+
+| ツール | 必要なスコープ | 入力 | 出力(`structuredContent`) |
+|---|---|---|---|
+| `kivra_task_list` | `kivra.runs.read` | `task_id`(26 文字。周の根の ID) | `task`(`task_id`、`state`、`state_reason`、`version`、`project_id`)、`children`(最大 50 件、古い順。各件は `task_id`、`state`、`state_reason`、`requires_approval`、`depends_on`、`version`、`created_at`)、`children_truncated`。無いタスク、または読めないプロジェクトのタスクは `NOT_FOUND`(`isError`)。 |
+
+- 題名は `KIVRA_MCP_GOAL_TEXT_ENABLED=true` のときだけ、運用者本人に返す(AI の主体には返さない)。`untrusted: true` と固定の `note` が付く。
+- 本文、方針、対象パス、見積りは返さない。対象パスと見積りは計画の出力にだけあり、タスクの行には無い。
+
 ### 8.9b 題名の読み取り(ADR 0019 追補、2026-10-21、既定は無効)
 
 `KIVRA_MCP_GOAL_TEXT_ENABLED=true` のとき、`kivra_goal_get_titles` を登録する。`KIVRA_MCP_ENABLED=true`、`KIVRA_MCP_GOAL_READ_ENABLED=true`、オートパイロットが要る。どれかが欠けると起動を止める。既定は `false`。off のときは tools/list に出ず、呼んでも未登録のツールとして扱われる。
@@ -2986,3 +3011,69 @@ SELECT counter_name, bucket_key, amount FROM selfdev_llm_stop_limits ORDER BY co
 3. **キルスイッチの確認**: `AI_APPROVER` を無効化し、次の判断が `SKIPPED`(`NO_ACTIVE_AI_APPROVER`)になることを確認する。有効化して、戻ることを確認する。
 4. **上限の確認**: `MAX_CALLS_PER_HOUR=1` や `MAX_PER_HOUR=0` など小さくして再起動し、`LIMIT_*` の `ABSTAINED` になり、LLM が呼ばれない(`tokens_in` が 0)ことを確認する。
 5. **API 障害の確認**: Anthropic の認証を誤らせる(または到達できなくする)と、`ERROR`(`AUTH`、`TIMEOUT`、`TRANSPORT` など)が記録され、停止要求が `PENDING` のまま残り、人が決められることを確認する。要求を作る API の応答は遅れない。
+
+## 12. プロジェクトチャットの提案(ADR 0023、段階 1・2: 規則に基づく。LLM なし)
+
+チャットの節に、サーバーが規則で出した提案がカードで出る。提案は、そのコードの権限を持つ運用者にだけ見え、AI には出ない。権限はコードごとに違う(下の表と 12.2)。
+
+### 12.1 提案の種類
+
+| コード | ラベル(サーバーの固定文言) | 出る条件 | 必要な権限 |
+|---|---|---|---|
+| `ORDER_START_CYCLE` | 周を開始する | ルート order が ACTIVE、期限内、進行中の周なし、`cycles_started < max_cycles`。連続失敗があっても出る(手動の開始は許される) | ORDER_MANAGE |
+| `ORDER_ABANDON_CYCLE` | 進行中の周を放棄する | ルート order が ACTIVE で、進行中の周が「止まっている」(子 Task が全部 QUEUED で、FAILED か STOPPED の依存を持つ) | ORDER_MANAGE |
+| `TASK_REPLAN` | 計画に失敗した周を再計画する | ルート order が ACTIVE で、進行中の周の根 Task が BLOCKED かつ理由が `PLAN_INVALID`・`PLAN_BUDGET_HOLD`・`PLAN_CALL_FAILED`(目標ページの再計画ボタンと同じ条件)。対象は根 Task(版も Task の版) | GOAL_WRITE(プロジェクトの範囲で) |
+
+| `TASK_APPROVE` | 承認待ちの Task を承認する | ルート order が ACTIVE で、進行中の周の子 Task(`parent_task_id` が周の根)が PENDING_APPROVAL で、計画の親でない(目標ページの「このタスクを承認」と同じ条件)。対象は子 Task(版も Task の版) | GOAL_WRITE(プロジェクトの範囲で) |
+| `TASK_REJECT` | 承認待ちの Task を見送る | `TASK_APPROVE` と同じ Task に対して出る。確定すると Task は SKIPPED(見送り) | GOAL_WRITE(プロジェクトの範囲で) |
+
+`TASK_REPLAN` の確定は、目標ページの再計画ボタン(`POST /api/selfdev/goals/{id}/replan`)と同じ操作を 1 回だけ実行する。Task は `TASK_SUBMITTED`(理由 `REPLAN_REQUESTED`)へ戻り、Planner が新しい計画を作る。Planner の呼び出しには少額の予算を使う。AI の主体は確定も却下もできず、提案も見えない。
+
+`TASK_APPROVE` と `TASK_REJECT` は同じ Task の代わりの関係: 片方を確定(実行・拒否・期限切れ)すると、もう片方は `EXPIRED`(`SIBLING_RESOLVED`)になる。「提案を閉じる」(却下ボタン)で閉じたときは、もう片方は残る。承認の提案には、対象の Task 名が「AI が書いたタスク名」として出る(プレーンテキスト。指示としては扱わない)。理由は、サーバーの固定文言(`AUTO_SCOPE_EXCEEDED` は「自動実行の範囲を超える変更があったため、承認が必要です」)。Task の本文と、対象のパスは出ない。提案の確定は、承認 = Run が始まり完了すると PR が作られる(PR は人がレビューしてマージするまで反映されない)。見送り = Task は実行されず、この Task に依存する Task も実行されない。
+
+段階 2 では、予算の未確定(UNPRICED)の確認は**含まない**(段階 4。全明細の確認と必須の理由が要る。ADR 0003)。
+
+### 12.2 確定と却下
+
+- 確定(確定ボタン → 確認ダイアログ → 確定): サーバーは提案の行の対象と版で、REST と同じ操作を 1 回だけ実行する。結果は `EXECUTED`(`OK`)、版が違えば `EXPIRED`(`STALE_VERSION`)、拒否は `FAILED` と拒否理由。
+- 却下(画面の表示は「提案を閉じる」): 何も実行しない。提案を閉じるだけで、Task や order は変わらない。`DISMISSED`(`OPERATOR_DISMISSED`)。見送り(`TASK_REJECT` の確定)とは別の操作。
+- 権限: 確定も却下も、そのコードの権限(12.1 の表)を、プロジェクトの範囲で検査する。権限が無ければ 403(提案は残る)。AI の主体は、どのコードでも 403。
+- 解決済みの提案への確定・却下は 409(`ACTION_RESOLVED`)。一覧を読み直す。
+
+### 12.3 提案の寿命
+
+- order の版が動くと、その版の提案は次にチャットを読んだときに `EXPIRED`(`VERSION_MOVED`)になり、規則が今も成り立つなら、新しい版で出し直す。
+- 規則から外れた提案(周が始まった、停止要求が来た、など)は `NO_LONGER_ELIGIBLE` で閉じる。
+- 同じ版の提案は、確定・却下・失敗の後に出し直さない。
+
+### 12.4 確認の手順
+
+1. 提案の対象 order を、詳細の画面で確かめる(状態、版、進行中の周)。
+2. 放棄の提案は、`selfdev_tasks` で周の Task の状態を見る: 子 Task の状態が QUEUED で、依存先が FAILED か STOPPED であること。動いている Task(RUNNING など)が一つでもあれば、規則は出さないはず。出ていて動いていれば、確定せず、ADR 0023 の規則の見直しを記録する。
+3. 確定の後、監査行を確かめる: `order operator action: action=CYCLE_STARTED`(または `CYCLE_ABANDONED`)と `project chat action: action=... actor=... actionId=... result=...`。`actor` は運用者の値の短いハッシュで、AI の主体の値は現れない。
+4. 承認・見送りの提案は、確定の前に次を確かめる。カードに出るのは対象の Task 名と理由だけで、本文は見えない。本文とパスは、目標ページの詳細で読む。
+   - Task 名が、計画の内容として妥当か(AI が書いた文章。カードの中の「AI が書いたタスク名」の表示で、指示ではない)。
+   - 理由が `AUTO_SCOPE_EXCEEDED` なら、変更範囲が計画を超えている。承認は、その変更を PR にして人がレビューするという意味になる。
+   - 確定の後の監査行: `autopilot operator action: action=TASK_APPROVED actor=... taskId=... result=QUEUED`(承認)、または `action=TASK_REJECTED ... result=SKIPPED`(見送り)、そして `project chat action: action=TASK_APPROVE|TASK_REJECT ...`。
+
+### 12.5 拒否された確定の読み方
+
+| `resultCode` | 意味 | 対処 |
+|---|---|---|
+| `VERSION_MOVED` / `STALE_VERSION` | order が変わった | チャットを読み直す。新しい提案を確定する |
+| `CYCLE_IN_PROGRESS` | 進行中の周がある | 周の状態を確認する。放棄の提案が出ていなければ待つ |
+| `CYCLE_LIMIT_REACHED` | 周の上限 | 延長(order の extend)か、新しい order |
+| `ORDER_BUDGET`、`ORDER_UNPRICED` | 予算、または未確定の費用 | 予算の画面と、UNPRICED の確認(ADR 0003)を見る。チャットからは解除しない |
+| `AUTOPILOT_PAUSED` | 自律実行が一時停止 | 自律実行を再開してから、提案を出し直す |
+| `ORDER_NOT_FOUND` | 対象が無い、またはプロジェクトが違う | 提案は無効。操作しない |
+| `TASK_STOP_REFUSED` | 放棄で周の Task を止められなかった | Task の状態を確認する。REST の放棄で手動で処理する |
+| `TASK_NOT_FOUND` | 再計画の対象の Task が無い、またはプロジェクトが違う | 提案は無効。操作しない |
+| `TASK_NOT_REPLANNABLE` | 再計画の対象が BLOCKED でなくなった(遷移が拒否された) | 周の状態を確認する。目標ページで状態を見てから、必要なら手動で処理する |
+| `TASK_NOT_APPROVABLE` | 承認の対象が承認待ちでなくなった(遷移が拒否された) | 目標ページで Task の状態を見る。承認は行われていない |
+| `TASK_NOT_REJECTABLE` | 見送りの対象が見送れる状態でなくなった(遷移が拒否された) | 目標ページで Task の状態を見る。見送りは行われていない |
+| `SIBLING_RESOLVED` | 同じ Task の、もう片方の提案が先に処理された(承認と見送りは排他) | 提案は無効。目標ページで Task の状態を見る |
+
+### 12.6 ロールバック
+
+- 機能は、チャットの読み取りに提案を足しただけ。提案が出ないようにするには、`KIVRA_SELFDEV_ORDER_*` を止めるか、運用者の権限を外す。既存の行を消す必要は無い(`project_chat_actions` は追加のみ。V56)。
+- 提案の行は `EXPIRED` のまま残る(履歴)。古い行を消す手順は、この段階では無い。

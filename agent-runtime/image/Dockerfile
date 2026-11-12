@@ -34,6 +34,13 @@ RUN set -eux; \
     install -m 0755 /tmp/claude /claude-bin; \
     rm -rf "$GNUPGHOME" /tmp/key.asc
 
+# ---- Stage 1b: the agent's classes for the in-Pod entrypoint (k8s only) ----
+# The jars (the `installDist` lib directory of :kivra-agent) are given as a named build context, which BuildKit uses in place of this
+# empty stage: `docker buildx build --build-context agent-dist=kivra-agent/build/install/kivra-agent/lib ...` (see cd.yml). Without it
+# (the plain docker build of the docker backend, whose context is only this directory) the stage stays empty, the image has no
+# agent classes, and `kivra-pod-entrypoint` fails at start; the docker backend never runs it.
+FROM scratch AS agent-dist
+
 # ---- Stage 2: runtime ----
 FROM ubuntu:24.04
 ARG CLAUDE_CODE_VERSION=2.1.301
@@ -47,6 +54,10 @@ RUN apt-get update \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /claude-bin /usr/local/bin/claude
+
+# The in-Pod launcher (k8s backend). Needs the Java runtime above; the jars are root-owned and read-only for uid 10001.
+COPY --from=agent-dist / /opt/kivra-agent/lib/
+COPY kivra-pod-entrypoint /usr/local/bin/kivra-pod-entrypoint
 
 # Fixed non-root identity. Ubuntu 24.04's default user is uid 1000, so 10001 is free.
 RUN groupadd --gid 10001 agent \

@@ -114,6 +114,13 @@ class PlanValidatorTest {
     }
 
     @Test
+    fun `a refused path is carried in the check, so the refusal can be traced to the path that caused it`() {
+        val check = assertIs<PlanCheck.Invalid>(PlanValidator.validate(plan(task(paths = """["src/x.kt"]""")), required))
+        assertEquals(PlanRejectReason.PATH_NOT_ALLOWED, check.reason)
+        assertEquals("src/x.kt", check.path)
+    }
+
+    @Test
     fun `the size estimate is S, M or L`() {
         assertEquals(PlanRejectReason.SIZE_ESTIMATE, invalid(plan(task(size = "\"XL\""))))
         assertEquals(PlanRejectReason.SIZE_ESTIMATE, invalid(plan(task(size = "\"s\""))))

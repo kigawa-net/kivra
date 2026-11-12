@@ -89,6 +89,25 @@ class PlannerRepoFileListTest {
     }
 
     @Test
+    fun `CI and build files are left out even when they sit under an allowed src root`() {
+        val entries = listOf(
+            blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/Foo.kt"),
+            blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/tasks.gradle.kts"),
+            blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/Dockerfile.dev"),
+            blob(".github/workflows/ci.yml"),
+            blob("gradle/wrapper/gradle-wrapper.properties"),
+        )
+        val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
+
+        assertEquals(1, rendered.fileCount)
+        assertTrue(rendered.text.contains("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/Foo.kt"), rendered.text)
+        assertFalse(rendered.text.contains("tasks.gradle.kts"))
+        assertFalse(rendered.text.contains("Dockerfile"))
+        assertFalse(rendered.text.contains("ci.yml"))
+        assertFalse(rendered.text.contains("gradle-wrapper"))
+    }
+
+    @Test
     fun `a file of 20 KB or more carries its size in KB, and a smaller one carries none`() {
         val rendered = assertNotNull(
             PlannerRepoFileList.render(
@@ -104,26 +123,44 @@ class PlannerRepoFileListTest {
 
     @Test
     fun `a list over the size limit becomes a directory summary that says so and fits the limit`() {
-        val entries = (1..2000).map { blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/gen/F$it.kt") }
+        val entries = (1..4000).map { blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/gen/F$it.kt") }
         val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
 
         assertTrue(rendered.summarized)
-        assertEquals(2000, rendered.fileCount)
+        assertEquals(4000, rendered.fileCount)
         assertTrue(rendered.text.contains("SUMMARIZED"), rendered.text)
-        assertTrue(rendered.text.contains("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/gen/ 2000 files"), rendered.text)
+        assertTrue(rendered.text.contains("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/gen/ 4000 files"), rendered.text)
         assertFalse(rendered.text.contains("F1.kt"))
         assertTrue(rendered.text.toByteArray(Charsets.UTF_8).size <= PlannerRepoFileList.MAX_BYTES)
     }
 
     @Test
+    fun `a list the size of the real main (about 1,000 files, 70 KB) stays complete and is not summarized`() {
+        val entries = (1..1000).map { blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/pkg${it % 40}/SomeFileName$it.kt") }
+        val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
+
+        assertFalse(rendered.summarized)
+        assertEquals(1000, rendered.fileCount)
+        assertTrue(rendered.text.contains("SomeFileName1.kt"), rendered.text)
+    }
+
+    @Test
+    fun `the summary header says that a directory line is not a path`() {
+        val entries = (1..4000).map { blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/gen/F$it.kt") }
+        val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
+
+        assertTrue(rendered.text.contains("is not a path: never write one in targetPaths"), rendered.text)
+    }
+
+    @Test
     fun `when the full directory summary is still too large, the depth is reduced until it fits`() {
-        val entries = (1..1500).map { blob("kivra-app/src/main/kotlin/pkg$it/sub/F.kt") }
+        val entries = (1..5000).map { blob("kivra-app/src/main/kotlin/pkg$it/sub/F.kt") }
         val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
 
         assertTrue(rendered.summarized)
         assertTrue(rendered.text.toByteArray(Charsets.UTF_8).size <= PlannerRepoFileList.MAX_BYTES)
-        // Depth 4 (kivra-app/src/main/kotlin) is the first that fits: one line for all 1500 packages.
-        assertTrue(rendered.text.contains("kivra-app/src/main/kotlin/ 1500 files"), rendered.text)
+        // Depth 4 (kivra-app/src/main/kotlin) is the first that fits: one line for all 5000 packages.
+        assertTrue(rendered.text.contains("kivra-app/src/main/kotlin/ 5000 files"), rendered.text)
         assertFalse(rendered.text.contains("pkg1/"))
     }
 

@@ -97,6 +97,10 @@ class RolesCoverageArchitectureTest {
         "GET /api/projects/{projectId}/orders" to Permission.READ,
         "POST /api/projects/{projectId}/orders" to Permission.ORDER_MANAGE,
         "GET /api/projects/{projectId}/approvals" to Permission.STOP_DECIDE,
+        // The project chat's action confirm and dismiss (ADR 0023): the permission is the action code's (ORDER_MANAGE for the order codes,
+        // GOAL_WRITE for TASK_REPLAN), so the row names the order codes' one and the handler resolves it per code (PER_CODE_PERMISSION_ROUTES).
+        "POST /api/projects/{projectId}/chat/actions/{actionId}/confirm" to Permission.ORDER_MANAGE,
+        "POST /api/projects/{projectId}/chat/actions/{actionId}/dismiss" to Permission.ORDER_MANAGE,
         "GET /api/projects/{projectId}/memory" to Permission.READ_TEXT,
         "GET /api/projects/{projectId}/assignees" to Permission.ASSIGNEE_MANAGE,
         // The Run aliases (ADR 0022 PR-I): the same handlers as the old Run routes above (the list and the submission).
@@ -202,6 +206,15 @@ class RolesCoverageArchitectureTest {
         assertEquals(emptySet(), (ROUTE_PERMISSIONS.keys + OPEN_ROUTES.keys) - registered, "a row without a route")
     }
 
+    /**
+     * Routes whose permission depends on a value of the request's row (the chat action's code, ADR 0023): the handler resolves it through
+     * `permissionOfChatAction(`, so the first-permission rule does not apply to them.
+     */
+    private val PER_CODE_PERMISSION_ROUTES = setOf(
+        "POST /api/projects/{projectId}/chat/actions/{actionId}/confirm",
+        "POST /api/projects/{projectId}/chat/actions/{actionId}/dismiss",
+    )
+
     @Test
     fun `a route's handler names the permission its row says`() {
         val permissionName = Regex("Permission\\.([A-Z_]+)")
@@ -209,6 +222,10 @@ class RolesCoverageArchitectureTest {
         val sharedGate = setOf("routes/RunExecutionRoutes.kt")
         for (r in registrations()) {
             val expected = ROUTE_PERMISSIONS[r.key] ?: continue
+            if (r.key in PER_CODE_PERMISSION_ROUTES) {
+                assertTrue(r.file.readText().contains("permissionOfChatAction("), "${r.key}: the permission must come from the action's code")
+                continue
+            }
             val named = permissionName.find(r.withHandlers())?.groupValues?.get(1)
             if (r.file.rel() in sharedGate) {
                 assertTrue(r.file.readText().contains("Permission.${expected.name}"), "${r.key}: ${r.file.rel()} must check ${expected.name}")
@@ -229,6 +246,7 @@ class RolesCoverageArchitectureTest {
         "kivra_run_get" to Permission.READ,
         "kivra_order_list" to Permission.READ,
         "kivra_order_get" to Permission.READ,
+        "kivra_task_list" to Permission.READ,
         // Goal MCP tools removed in V40
         // "kivra_goal_list" to Permission.READ,
         // "kivra_goal_get" to Permission.READ,

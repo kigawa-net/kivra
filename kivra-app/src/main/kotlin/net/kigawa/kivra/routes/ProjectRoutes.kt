@@ -19,7 +19,11 @@ import kotlinx.serialization.json.JsonPrimitive
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.core.RunId
+import net.kigawa.kivra.core.chat.ChatActionCode
+import net.kigawa.kivra.core.chat.approvalReasonText
+import net.kigawa.kivra.mcp.safeTaskTitle
 import net.kigawa.kivra.db.BackfillReport
+import net.kigawa.kivra.db.ProjectChatActionRepository
 import net.kigawa.kivra.db.DbBudgetStore
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.ProjectBudgetStatus
@@ -92,6 +96,8 @@ internal fun Route.configureProjectRoutes(
     drain: ProjectDrainRepository,
     /** The project chat (V55): `/api/projects/{id}/chat`. Null: the chat routes are not registered. */
     chatRepo: ProjectChatRepository? = null,
+    /** The project chat's action proposals (ADR 0023): proposed on the chat read, for an operator who may act. Null: no actions. */
+    chatActions: ProjectChatActionRepository? = null,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -99,6 +105,16 @@ internal fun Route.configureProjectRoutes(
         if (principal == null) respond(HttpStatusCode.Unauthorized, ProjectError("unauthorized"))
         return principal
     }
+
+    /**
+     * True when [principal] may act on the chat action [code] in [projectId] (ADR 0023): the code's permission ([permission]), in the project's
+     * scope, and never the AI principal. Only such an operator sees the proposal of that code.
+     */
+    fun mayActOnChatCode(principal: String, projectId: String, code: ChatActionCode): Boolean =
+        chatActionVisibleTo(guard, principal, projectId, code)
+
+    /** True when [principal] may act on at least one chat action code of [projectId]; the proposer runs for such an operator only. */
+    fun mayActOnChat(principal: String, projectId: String): Boolean = ChatActionCode.entries.any { mayActOnChatCode(principal, projectId, it) }
 
     /** True when [principal] holds [permission]; responds 403 otherwise. */
     suspend fun ApplicationCall.permitOr403(principal: String, permission: Permission, route: String): Boolean {
@@ -383,7 +399,13 @@ internal fun Route.configureProjectRoutes(
                 }
                 val session = chatRepo.getSession(projectId)
                     ?: return@get call.respond(HttpStatusCode.NotFound)
-                call.respond(chatSessionResponse(chatRepo, session))
+                // Only an operator who may confirm a code sees its proposals (the AI never does). The proposer runs here, on the read.
+                val actions = if (chatActions != null && mayActOnChat(principal, projectId)) {
+                    proposeChatActions(chatActions, projectId) { mayActOnChatCode(principal, projectId, it) }
+                } else {
+                    emptyList()
+                }
+                call.respond(chatSessionResponse(chatRepo, session, actions))
             }
             post("chat") {
                 val principal = call.principalOr401() ?: return@post
@@ -689,7 +711,7 @@ data class ChatSendMessageRequest(val content: String, val title: String = "")
 @Serializable
 data class ChatMessageResponse(val id: Long, val sessionId: String, val role: String, val content: String, val createdAt: String)
 
-/** A chat session with its latest messages (oldest first). [sessionId] is the project id. */
+/** A chat session with its latest messages (oldest first). [sessionId] is the project id. [actions] are the open proposals (ADR 0023). */
 @Serializable
 data class ChatSessionResponse(
     val sessionId: String,
@@ -697,13 +719,37 @@ data class ChatSessionResponse(
     val updatedAt: String,
     val messages: List<ChatMessageResponse>,
     val messageCount: Long,
+    /** The open proposals (PROPOSED) for an operator who may confirm them; empty for everyone else. Added with ADR 0023. */
+    val actions: List<ChatActionResponse> = emptyList(),
 )
+
+/**
+ * One open proposal: its ID, the allow-list code, the server's fixed label, the order or Task it is for and when it was proposed. [detail] is set
+ * for an approval (TASK_APPROVE, TASK_REJECT) only: what is being approved, read when the chat is read (ADR 0023 stage 2).
+ */
+@Serializable
+data class ChatActionResponse(
+    val actionId: String,
+    val code: String,
+    val label: String,
+    val targetId: String?,
+    val proposedAt: String,
+    val detail: ChatActionDetail? = null,
+)
+
+/**
+ * What an approval proposal is about. [taskTitle] is AI-written text (the planner's): it is shown as plain text, marked as such, and never
+ * interpreted. It is [safeTaskTitle]'s output (200 code points at most; a control or bidi character gives a fixed marker). [reasonText] is the
+ * server's fixed Japanese text for [stateReason]. The Task's body and its paths are never returned here.
+ */
+@Serializable
+data class ChatActionDetail(val taskTitle: String, val stateReason: String?, val reasonText: String)
 
 private const val CHAT_RECENT_MESSAGES = 50
 private const val CHAT_TITLE_MAX = 256
 private const val DEFAULT_CHAT_TITLE = "Chat"
 
-private fun chatSessionResponse(repo: ProjectChatRepository, session: ProjectChatSessionRow): ChatSessionResponse {
+private fun chatSessionResponse(repo: ProjectChatRepository, session: ProjectChatSessionRow, actions: List<ChatActionResponse>): ChatSessionResponse {
     val count = repo.countMessages(session.projectId)
     val offset = (count - CHAT_RECENT_MESSAGES).coerceAtLeast(0)
     return ChatSessionResponse(
@@ -712,6 +758,54 @@ private fun chatSessionResponse(repo: ProjectChatRepository, session: ProjectCha
         updatedAt = session.updatedAt.toString(),
         messages = repo.getMessages(session.projectId, CHAT_RECENT_MESSAGES, offset).map { it.toResponse() },
         messageCount = count,
+        actions = actions,
+    )
+}
+
+/**
+ * True when [principal] may act on the chat action [code] in [projectId] (ADR 0023): the code's permission ([ChatActionCode.permission]) in the
+ * project's scope, and never the AI principal. Only such an operator is shown the proposal of that code, and only it may confirm or dismiss it.
+ */
+internal fun chatActionVisibleTo(guard: PermissionGuard, principal: String, projectId: String, code: ChatActionCode): Boolean {
+    val access = guard.resolve(principal, legacyAdmin = true)
+    return !access.isAi && guard.checkInProject(access, projectId, code.permission(), "project_chat_get") is GuardResult.Allow
+}
+
+/**
+ * Runs the rule-based proposer (ADR 0023) and returns the open proposals that [visibleTo] allows (the caller's permission for each code). A failure
+ * of the proposer never fails the chat read: it is logged with its exception class only (no ids, no text), and the chat answers without proposals.
+ */
+private fun proposeChatActions(
+    repo: ProjectChatActionRepository,
+    projectId: String,
+    visibleTo: (ChatActionCode) -> Boolean,
+): List<ChatActionResponse> {
+    try {
+        repo.refresh(projectId)
+    } catch (e: Exception) {
+        projectAdminLog.warn("project chat proposer failed: error={}", e::class.simpleName)
+    }
+    return repo.proposed(projectId).mapNotNull { row ->
+        val code = ChatActionCode.entries.firstOrNull { it.name == row.code }?.takeIf(visibleTo) ?: return@mapNotNull null
+        ChatActionResponse(
+            actionId = row.actionId,
+            code = code.name,
+            label = code.label,
+            targetId = row.targetId,
+            proposedAt = row.proposedAt.toString(),
+            detail = if (code == ChatActionCode.TASK_APPROVE || code == ChatActionCode.TASK_REJECT) approvalDetailOf(repo, row.targetId) else null,
+        )
+    }
+}
+
+/** The detail of an approval proposal's Task, read now (never stored with the proposal). Null when the Task is missing. */
+private fun approvalDetailOf(repo: ProjectChatActionRepository, taskId: String?): ChatActionDetail? {
+    if (taskId == null) return null
+    val task = repo.approvalTaskOf(taskId) ?: return null
+    return ChatActionDetail(
+        taskTitle = safeTaskTitle(task.title),
+        stateReason = task.stateReason,
+        reasonText = approvalReasonText(task.stateReason),
     )
 }
 

@@ -148,6 +148,29 @@ func TestAllowlistParsing(t *testing.T) {
 	}
 }
 
+// The shipped allowlist file is exactly the hosts the runtime needs: Gradle's three, and github.com for the Pod's base commit fetch
+// (ADR 0010 追補 7 PR 5). A new host is a deliberate change of this test.
+func TestShippedAllowlistIsExactlyTheNeededHosts(t *testing.T) {
+	a, err := LoadAllowlist("allowlist.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"services.gradle.org", "plugins.gradle.org", "repo.maven.apache.org", "github.com"}
+	if len(a.hosts) != len(want) {
+		t.Fatalf("allowlist has %d hosts, want %d: %v", len(a.hosts), len(want), a.hosts)
+	}
+	for _, h := range want {
+		if !a.Allowed(h) {
+			t.Errorf("%s must be allowed", h)
+		}
+	}
+	for _, h := range []string{"codeload.github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "gist.github.com", "example.com"} {
+		if a.Allowed(h) {
+			t.Errorf("%s must not be allowed", h)
+		}
+	}
+}
+
 func TestConfigRequiresWIFIDs(t *testing.T) {
 	_, err := LoadConfig(func(string) string { return "" })
 	if err == nil || !strings.Contains(err.Error(), "KIVRA_PROXY_WIF_ORGANIZATION_ID") {

@@ -85,6 +85,8 @@ jobs:
           - name: kivra-agent-runtime
             context: agent-runtime/image
             file: agent-runtime/image/Dockerfile
+            # 実行イメージに Pod 内 entrypoint 用の agent のクラスを入れる。下の「Build agent classes」で作る。
+            build_contexts: agent-dist=kivra-agent/build/install/kivra-agent/lib
           - name: kivra-agent-proxy
             context: agent-runtime/proxy
             file: agent-runtime/proxy/Dockerfile
@@ -99,6 +101,17 @@ jobs:
           else
             echo "tag=${{ github.ref_name }}-${{ github.sha }}" >> "$GITHUB_OUTPUT"
           fi
+
+      # 実行イメージだけ: Pod 内 entrypoint 用に、agent のクラス(installDist の lib)を先にビルドして名前付きコンテキストで渡す。
+      - uses: actions/setup-java@v4
+        if: matrix.name == 'kivra-agent-runtime'
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build agent classes
+        if: matrix.name == 'kivra-agent-runtime'
+        run: ./gradlew :kivra-agent:installDist --no-daemon
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -127,6 +140,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
+          build-contexts: ${{ matrix.build_contexts }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ env.dockerRepository }}/${{ matrix.name }}:${{ steps.tag.outputs.tag }}
           # イメージごとに cache の scope を分け、3 つのビルドが互いの cache を上書きしないようにする。
@@ -195,6 +209,81 @@ jobs:
 
       # dev のイメージタグ更新だけを自動マージする。人間の承認を待たない (dev 限定)。
       # 差分が無く PR が作られなかった場合 (pull-request-number が空) は何もしない。
+      - name: Merge manifest pull request (dev)
+        if: steps.manifest-pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.k8s-token.outputs.token }}
+          PR_NUMBER: ${{ steps.manifest-pr.outputs.pull-request-number }}
+        run: |
+          gh pr merge "$PR_NUMBER" --repo "${{ env.manifestRepository }}" --squash
+
+  # kivra-agent 本体と egress プロキシのイメージタグを、manifest repo の kivra/dev-agent に反映する(dev 限定)。
+  # deploy-dev と同じ方式(manifest repo に PR を作って自動マージ)。別ジョブなので、agent 側の失敗が kivra 本体のデプロイを止めない。
+  # kivra/dev-agent は、ArgoCD の Application ができるまで cluster に反映されない(今はタグがファイルに入るだけ)。
+  # 実行用イメージ(kivra-agent-runtime)は manifest の image ではなく、agent の設定(K8s の Job が使う)に渡す値。配線は別の PR。
+  deploy-agent-dev:
+    name: deploy agent to dev
+    needs: build-agent
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-agent-dev
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      tag: ${{ github.ref_name }}-${{ github.sha }}
+    steps:
+      - name: Mint kigawa-net-k8s repo token
+        id: k8s-token
+        uses: kigawa-net/kinfra/.github/actions/kigawa-net-app-token@dev
+        with:
+          owner: kigawa-net
+          repositories: kigawa-net-k8s
+          permissions: '{"contents":"write","pull_requests":"write"}'
+
+      - name: checkout manifest repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.manifestRepository }}
+          ref: main
+          token: ${{ steps.k8s-token.outputs.token }}
+          path: manifests
+
+      - name: Update YAML Files
+        run: |
+          DIR=./manifests/kivra/dev-agent
+          for f in kivra-agent.yaml kivra-agent-proxy.yaml; do
+            if [ ! -f "$DIR/$f" ]; then
+              echo "::error::$DIR/$f が manifest repo にありません。"
+              exit 1
+            fi
+          done
+          yq -i '.spec.template.spec.containers[0].image = "${{ env.dockerRepository }}/kivra-agent:${{ env.tag }}"' "$DIR/kivra-agent.yaml"
+          yq -i '.spec.template.spec.containers[0].image = "${{ env.dockerRepository }}/kivra-agent-proxy:${{ env.tag }}"' "$DIR/kivra-agent-proxy.yaml"
+
+      - name: Create or update manifest pull request
+        id: manifest-pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.k8s-token.outputs.token }}
+          path: manifests
+          base: main
+          branch: deploy/kivra-agent/dev
+          add-paths: |
+            kivra/dev-agent/kivra-agent.yaml
+            kivra/dev-agent/kivra-agent-proxy.yaml
+          commit-message: "deploy kivra-agent ${{ env.tag }} to dev"
+          title: "deploy(kivra-agent): dev ${{ env.tag }}"
+          body: |
+            Automated manifest update for kivra-agent / kivra-agent-proxy dev.
+            Source commit: ${{ github.sha }}
+            Images: ${{ env.dockerRepository }}/kivra-agent:${{ env.tag }}, ${{ env.dockerRepository }}/kivra-agent-proxy:${{ env.tag }}
+
+            dev 向けのため、cd ワークフローが自動で squash マージする。kivra/dev-agent は ArgoCD の Application ができるまで cluster に反映されない。
+          delete-branch: true
+
       - name: Merge manifest pull request (dev)
         if: steps.manifest-pr.outputs.pull-request-number != ''
         env:

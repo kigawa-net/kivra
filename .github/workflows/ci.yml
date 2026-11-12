@@ -29,7 +29,7 @@ jobs:
 
       # H2 (MODE=MySQL): fast tests without external services.
       - name: Test (H2)
-        run: ./gradlew test --no-daemon
+        run: ./gradlew test --no-daemon --stacktrace
 
       # build は直前の test の結果を再利用する(H2 の設定のまま)。
       - name: Build
@@ -82,7 +82,7 @@ jobs:
           KIVRA_TEST_MARIADB_USER: root
           KIVRA_TEST_MARIADB_PASSWORD: test
           KIVRA_TEST_SHARD: ${{ matrix.shard }}
-        run: ./gradlew :kivra-app:test --rerun --no-daemon
+        run: ./gradlew :kivra-app:test --rerun --no-daemon --stacktrace
 
       - name: Upload test reports
         if: always()

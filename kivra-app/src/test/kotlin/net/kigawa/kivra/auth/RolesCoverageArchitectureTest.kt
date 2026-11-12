@@ -97,6 +97,9 @@ class RolesCoverageArchitectureTest {
         "GET /api/projects/{projectId}/orders" to Permission.READ,
         "POST /api/projects/{projectId}/orders" to Permission.ORDER_MANAGE,
         "GET /api/projects/{projectId}/approvals" to Permission.STOP_DECIDE,
+        // The project chat's action confirm and dismiss (ADR 0023): the operator's ORDER_MANAGE only, the AI is refused.
+        "POST /api/projects/{projectId}/chat/actions/{actionId}/confirm" to Permission.ORDER_MANAGE,
+        "POST /api/projects/{projectId}/chat/actions/{actionId}/dismiss" to Permission.ORDER_MANAGE,
         "GET /api/projects/{projectId}/memory" to Permission.READ_TEXT,
         "GET /api/projects/{projectId}/assignees" to Permission.ASSIGNEE_MANAGE,
         // The Run aliases (ADR 0022 PR-I): the same handlers as the old Run routes above (the list and the submission).

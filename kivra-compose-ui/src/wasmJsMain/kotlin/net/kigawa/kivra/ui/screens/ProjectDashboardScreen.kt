@@ -54,7 +54,14 @@ import net.kigawa.kivra.ui.api.ApiProjectBudget
 import net.kigawa.kivra.ui.api.ApiProjectDashboard
 import net.kigawa.kivra.ui.api.ApiRun
 import net.kigawa.kivra.ui.api.ApiSession
+import net.kigawa.kivra.ui.api.ApiChatAction
 import net.kigawa.kivra.ui.api.ApiChatMessage
+import net.kigawa.kivra.ui.CHAT_ACTION_CONFIRM_TITLE
+import net.kigawa.kivra.ui.WriteFailure
+import net.kigawa.kivra.ui.chatActionConfirmMessage
+import net.kigawa.kivra.ui.chatActionFailureText
+import net.kigawa.kivra.ui.chatActionResultText
+import net.kigawa.kivra.ui.writeFailureOf
 import net.kigawa.kivra.ui.api.ApiChatSession
 import net.kigawa.kivra.ui.backfillExplain
 import net.kigawa.kivra.ui.backfillFailureText
@@ -740,11 +747,46 @@ private fun ProjectOperatorSection(projectId: String) {
 @Composable
 private fun ProjectChatSection(projectId: String) {
     val scope = rememberCoroutineScope()
-    val chat = rememberLoad(projectId) { loadChatSession(projectId) }
+    // チャットの読み直し。提案の確定・却下の後に増やして、提案の一覧を読み直す(ADR 0023)。
+    var chatReload by remember { mutableStateOf(0) }
+    val chat = rememberLoad(projectId, reload = chatReload) { loadChatSession(projectId) }
     var inputText by remember { mutableStateOf("") }
     var sendBusy by remember { mutableStateOf(false) }
     var sendNotice by remember { mutableStateOf<ActionNotice?>(null) }
     val keys = remember { IdempotencyKeys() }
+    // 提案(ADR 0023)。確定は確認ダイアログの後、却下は即時。結果はサーバーの固定コードから文言にする。
+    var pendingAction by remember { mutableStateOf<ApiChatAction?>(null) }
+    var actionBusy by remember { mutableStateOf(false) }
+    var actionNotice by remember { mutableStateOf<ActionNotice?>(null) }
+
+    fun runChatAction(action: ApiChatAction, confirm: Boolean) {
+        actionBusy = true
+        actionNotice = null
+        scope.launch {
+            try {
+                val result = if (confirm) {
+                    ApiClient.confirmChatAction(projectId, action.actionId)
+                } else {
+                    ApiClient.dismissChatAction(projectId, action.actionId)
+                }
+                actionNotice = ActionNotice(
+                    chatActionResultText(result.state, result.resultCode),
+                    ok = result.state == "EXECUTED" || result.state == "DISMISSED",
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ApiException) {
+                actionNotice = ActionNotice(chatActionFailureText(writeFailureOf(e.status)), ok = false)
+            } catch (e: Exception) {
+                actionNotice = ActionNotice(chatActionFailureText(WriteFailure.NETWORK), ok = false)
+            } finally {
+                pendingAction = null
+                actionBusy = false
+                // Read the chat again: a proposal that was resolved, or expired by the server, leaves the list.
+                chatReload++
+            }
+        }
+    }
 
     SectionTitle("チャット（kivra Agentへの指示）")
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -760,6 +802,22 @@ private fun ProjectChatSection(projectId: String) {
                         }
                     }
                 }
+            }
+            // 提案のカード(サーバーが出したものだけ。AI や閲覧者には届かない)
+            chat.value?.actions?.forEach { action ->
+                ChatActionCard(
+                    action = action,
+                    enabled = !actionBusy && !ApiSession.expired,
+                    onConfirm = { pendingAction = action },
+                    onDismiss = { runChatAction(action, confirm = false) },
+                )
+            }
+            actionNotice?.let { n ->
+                Text(
+                    n.text,
+                    color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
             }
             Spacer(Modifier.height(4.dp))
             // 入力エリア
@@ -823,6 +881,34 @@ private fun ProjectChatSection(projectId: String) {
                     color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp),
                 )
+            }
+        }
+    }
+    pendingAction?.let { action ->
+        ReasonDialog(
+            title = CHAT_ACTION_CONFIRM_TITLE,
+            message = chatActionConfirmMessage(action.label, action.code),
+            submitLabel = "確定",
+            reasonLabel = null,
+            busy = actionBusy,
+            errorText = null,
+            onSubmit = { runChatAction(action, confirm = true) },
+            onDismiss = { if (!actionBusy) pendingAction = null },
+        )
+    }
+}
+
+/** 1件の提案のカード。ラベルはサーバーの固定文言。確定は確認の後(呼び出し側)、却下は即時。 */
+@Composable
+private fun ChatActionCard(action: ApiChatAction, enabled: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Text("提案: ${action.label}", style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(enabled = enabled, onClick = onConfirm) { Text("確定") }
+                Spacer(Modifier.width(8.dp))
+                OutlinedButton(enabled = enabled, onClick = onDismiss) { Text("却下") }
             }
         }
     }

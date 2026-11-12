@@ -17,6 +17,21 @@ class ChatActionRulesTest {
     }
 
     @Test
+    fun theReplanConfirmTextSaysWhatRunsAndThatItSpendsBudget() {
+        val text = chatActionConfirmMessage("計画に失敗した周を再計画する", "TASK_REPLAN")
+        assertTrue(text.contains("「計画に失敗した周を再計画する」"))
+        assertTrue(text.contains("Planner に新しい計画を作らせます"))
+        assertTrue(text.contains("予算"))
+    }
+
+    @Test
+    fun theReplanResultCodesHaveTheirOwnText() {
+        assertTrue(chatActionResultText("FAILED", "TASK_NOT_FOUND").contains("Task が見つからない"))
+        assertTrue(chatActionResultText("FAILED", "TASK_NOT_REPLANNABLE").contains("再計画できる状態ではない"))
+        assertTrue(chatActionResultText("EXPIRED", "STALE_VERSION").contains("対象（order または Task）が変わっていた"))
+    }
+
+    @Test
     fun anUnknownCodeGetsOnlyTheLabel() {
         assertEquals("「x」を確定します。", chatActionConfirmMessage("x", "SOMETHING_NEW"))
     }
@@ -25,7 +40,7 @@ class ChatActionRulesTest {
     fun theResultTextMapsTheFixedCodes() {
         assertEquals("実行しました。", chatActionResultText("EXECUTED", "OK"))
         assertEquals(CHAT_ACTION_DISMISSED_TEXT, chatActionResultText("DISMISSED", "OPERATOR_DISMISSED"))
-        assertTrue(chatActionResultText("EXPIRED", "STALE_VERSION").contains("order が変わっていた"))
+        assertTrue(chatActionResultText("EXPIRED", "STALE_VERSION").contains("対象（order または Task）が変わっていた"))
         assertTrue(chatActionResultText("FAILED", "CYCLE_IN_PROGRESS").contains("進行中の周"))
         assertTrue(chatActionResultText("FAILED", "ORDER_NOT_FOUND").contains("見つからない"))
     }

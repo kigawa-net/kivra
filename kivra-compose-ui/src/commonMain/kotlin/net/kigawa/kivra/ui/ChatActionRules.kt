@@ -14,6 +14,8 @@ fun chatActionConfirmMessage(label: String, code: String): String = when (code) 
     "ORDER_START_CYCLE" -> "「$label」を確定します。order の新しい周を 1 つ開始します。周を開始すると、Task が作られて実行が始まります。"
     "ORDER_ABANDON_CYCLE" -> "「$label」を確定します。進行中の周を失敗として閉じ、動いている Task を止めます（作成済みの PR は閉じず、マージもしません）。" +
         "order の状態は変わりません。"
+    "TASK_REPLAN" -> "「$label」を確定します。計画に失敗した周の Task を再計画に戻し、Planner に新しい計画を作らせます。" +
+        "Planner の呼び出しには少額の予算を使います。"
     else -> "「$label」を確定します。"
 }
 
@@ -27,9 +29,9 @@ const val CHAT_ACTION_DISMISSED_TEXT = "却下しました。"
 fun chatActionResultText(state: String, resultCode: String?): String = when (resultCode) {
     "OK" -> "実行しました。"
     "OPERATOR_DISMISSED" -> CHAT_ACTION_DISMISSED_TEXT
-    "VERSION_MOVED" -> "order が変わったため、この提案は無効になりました。チャットを読み直してください。"
+    "VERSION_MOVED" -> "対象が変わったため、この提案は無効になりました。チャットを読み直してください。"
     "NO_LONGER_ELIGIBLE" -> "今は実行できない状態のため、この提案は取り消されました。"
-    "STALE_VERSION" -> "order が変わっていたため、実行しませんでした。チャットを読み直してください。"
+    "STALE_VERSION" -> "対象（order または Task）が変わっていたため、実行しませんでした。チャットを読み直してください。"
     "ORDER_NOT_FOUND" -> "order が見つからないため、実行しませんでした。"
     "TASK_STOP_REFUSED" -> "周の Task を止められなかったため、実行しませんでした。"
     "UNKNOWN_ACTION" -> "この提案は実行できません。"
@@ -41,6 +43,8 @@ fun chatActionResultText(state: String, resultCode: String?): String = when (res
     "AUTOPILOT_PAUSED" -> "自律実行が一時停止中のため、実行しませんでした。"
     "ORDER_EXPIRED" -> "order の期限が切れているため、実行しませんでした。"
     "NO_PROJECT" -> "order がプロジェクトに属していないため、実行しませんでした。"
+    "TASK_NOT_FOUND" -> "周の Task が見つからないため、実行しませんでした。"
+    "TASK_NOT_REPLANNABLE" -> "この周は再計画できる状態ではないため、実行しませんでした。"
     else -> if (state == "EXECUTED") "実行しました。" else "実行しませんでした。チャットを読み直してください。"
 }
 

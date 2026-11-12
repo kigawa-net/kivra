@@ -21,7 +21,7 @@ class ChatActionsTest {
     fun aRegistryCodeHasAFixedJapaneseLabel() {
         assertEquals("周を開始する", ChatActionCode.ORDER_START_CYCLE.label)
         assertEquals("進行中の周を放棄する", ChatActionCode.ORDER_ABANDON_CYCLE.label)
-        assertEquals(2, ChatActionCode.entries.size)
+        assertEquals(3, ChatActionCode.entries.size)
     }
 
     @Test
@@ -83,5 +83,55 @@ class ChatActionsTest {
         assertFalse(isCycleStuck(false, emptyList(), stateOf))
         // An ended root is the evaluator's to close.
         assertFalse(isCycleStuck(true, listOf(ChatTaskFact("C1", "QUEUED", listOf("F"))), stateOf))
+    }
+
+    private fun task(state: String = "BLOCKED", reason: String? = "PLAN_INVALID", version: Long = 4) =
+        ChatCycleTaskFact("T1", version, state, reason)
+
+    @Test
+    fun aTaskRegistryCodeHasAFixedLabelAndTargetsTheTask() {
+        assertEquals("計画に失敗した周を再計画する", ChatActionCode.TASK_REPLAN.label)
+        assertEquals(ChatTargetKind.TASK, ChatActionCode.TASK_REPLAN.targetKind)
+        assertEquals(ChatTargetKind.ORDER, ChatActionCode.ORDER_START_CYCLE.targetKind)
+        assertEquals(ChatTargetKind.ORDER, ChatActionCode.ORDER_ABANDON_CYCLE.targetKind)
+        assertEquals(3, ChatActionCode.entries.size)
+    }
+
+    @Test
+    fun aBlockedCycleRootForAPlanningReasonIsProposedAtTheTaskVersion() {
+        for (reason in listOf("PLAN_INVALID", "PLAN_BUDGET_HOLD", "PLAN_CALL_FAILED")) {
+            val p = proposeChatActions(listOf(order(goal = "T1", version = 9).copy(cycleTask = task(reason = reason, version = 4))))
+            // The order has a cycle in progress, so no start; the replan targets the Task at the Task's version, not the order's (9).
+            assertEquals(listOf(ChatActionProposal(ChatActionCode.TASK_REPLAN, "T1", 4)), p, reason)
+        }
+    }
+
+    @Test
+    fun otherStatesAndReasonsGetNoReplan() {
+        val cases = listOf(
+            task(state = "PLANNING", reason = null),
+            task(state = "TASK_SUBMITTED", reason = "REPLAN_REQUESTED"),
+            task(state = "BLOCKED", reason = "CLAIM_EXPIRED"),
+            task(state = "BLOCKED", reason = "PENDING_PR_LIMIT"),
+            task(state = "BLOCKED", reason = null),
+            task(state = "FAILED", reason = "PLAN_INVALID"),
+        )
+        for (t in cases) {
+            val p = proposeChatActions(listOf(order(goal = "T1").copy(cycleTask = t)))
+            assertFalse(p.any { it.code == ChatActionCode.TASK_REPLAN }, t.toString())
+        }
+    }
+
+    @Test
+    fun aReplanIsOnlyForAnActiveOrder() {
+        val paused = order(state = "PAUSED", goal = "T1").copy(cycleTask = task())
+        val stopped = order(state = "STOPPED", goal = "T1").copy(cycleTask = task())
+        assertTrue(proposeChatActions(listOf(paused, stopped)).none { it.code == ChatActionCode.TASK_REPLAN })
+        assertEquals(1, proposeChatActions(listOf(order(goal = "T1").copy(cycleTask = task()))).count { it.code == ChatActionCode.TASK_REPLAN })
+    }
+
+    @Test
+    fun theReplanRuleAcceptsTheSamePlanningReasonsAsTheGoalPage() {
+        assertEquals(setOf("PLAN_INVALID", "PLAN_BUDGET_HOLD", "PLAN_CALL_FAILED"), REPLANNABLE_BLOCK_REASONS)
     }
 }

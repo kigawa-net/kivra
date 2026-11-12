@@ -14,6 +14,12 @@ class PlannerPromptTest {
     }
 
     @Test
+    fun theSystemPromptAsksForTargetedEditsToExistingFiles() {
+        val system = PlannerPrompt.system()
+        assertTrue(system.contains("For a change to an existing file, describe a targeted edit to that file, not a full rewrite of it."))
+    }
+
+    @Test
     fun theSystemPromptKeepsTheSchemaRules() {
         val system = PlannerPrompt.system()
         assertTrue(system.contains("\"sizeEstimate\":\"S\",\"dependsOn\":[]}]}"))

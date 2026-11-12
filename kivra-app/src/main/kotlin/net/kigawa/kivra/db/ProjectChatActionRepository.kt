@@ -108,7 +108,7 @@ class ProjectChatActionRepository(
             }
             val moved = row.targetId != null && versionOf[row.targetId] != null && versionOf[row.targetId] != row.expectedVersion
             execUpdate(
-                "UPDATE project_chat_actions SET state = ?, result_code = ?, resolved_at = ? WHERE action_id = ? AND state = ?",
+                "UPDATE project_chat_actions SET state = ?, active_key = NULL, result_code = ?, resolved_at = ? WHERE action_id = ? AND state = ?",
                 ChatActionState.EXPIRED.name,
                 if (moved) ChatResultCode.VERSION_MOVED else ChatResultCode.NO_LONGER_ELIGIBLE,
                 now, row.actionId, ChatActionState.PROPOSED.name,
@@ -150,7 +150,7 @@ class ProjectChatActionRepository(
      */
     fun resolve(actionId: String, state: ChatActionState, resultCode: String, resolvedBy: String?): Boolean = transaction(database) {
         val changed = execUpdate(
-            "UPDATE project_chat_actions SET state = ?, result_code = ?, resolved_at = ?, resolved_by = ? WHERE action_id = ? AND state = ?",
+            "UPDATE project_chat_actions SET state = ?, active_key = NULL, result_code = ?, resolved_at = ?, resolved_by = ? WHERE action_id = ? AND state = ?",
             state.name, resultCode, utcNow(clock), resolvedBy, actionId, ChatActionState.PROPOSED.name,
         )
         changed == 1
@@ -169,8 +169,8 @@ class ProjectChatActionRepository(
     private fun Transaction.insert(projectId: String, proposal: ChatActionProposal, now: LocalDateTime) {
         execUpdate(
             """
-            INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, expected_version, state, proposed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, expected_version, state, active_key, proposed_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
             """.trimIndent(),
             Ulid.generate(clock), projectId, proposal.code.name, proposal.targetId, proposal.expectedVersion,
             ChatActionState.PROPOSED.name, now,

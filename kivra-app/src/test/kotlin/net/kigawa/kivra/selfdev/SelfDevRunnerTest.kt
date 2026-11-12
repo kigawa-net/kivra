@@ -21,6 +21,9 @@ import net.kigawa.kivra.developer.DeveloperRefusal
 import net.kigawa.kivra.developer.DeveloperResult
 import net.kigawa.kivra.developer.DeveloperUnknown
 import net.kigawa.kivra.developer.FakeDeveloper
+import net.kigawa.kivra.github.CheckConclusion
+import net.kigawa.kivra.github.CheckRun
+import net.kigawa.kivra.github.CheckRunsSummary
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubPort
 import net.kigawa.kivra.github.PullRequestState
@@ -627,5 +630,218 @@ class SelfDevRunnerTest {
             assertEquals(1, h.github.commitCalls)
             assertEquals(emptyList(), h.github.commitsOnBranch)
         }
+    }
+
+    // ---- auto-test: CI check runs in PULL_REQUEST step ----
+
+    @Test
+    fun autoTestDisabledDoesNothingAndStillWaits() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new\n"),
+                config = SelfDevConfig(enabled = true, autoTestEnabled = false))
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.PULL_REQUEST), runner.advance(runId))
+            // Even with checks set, auto-test is off so it falls through to AWAITING_HUMAN_REVIEW
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), runner.advance(runId))
+        }
+    }
+
+    @Test
+    fun autoTestEnabledWithPassingChecksStillWaitsForHumanReview() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new\n"),
+                config = SelfDevConfig(enabled = true, autoTestEnabled = true))
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.PULL_REQUEST), runner.advance(runId))
+            val pr = h.github.pullRequests().single()
+            // Set passing CI checks
+            h.github.checks = CheckRunsSummary(
+                sha = pr.headSha,
+                runs = listOf(
+                    net.kigawa.kivra.github.CheckRun(id = 1, name = "test", headSha = pr.headSha, status = "completed",
+                        conclusion = net.kigawa.kivra.github.CheckConclusion.SUCCESS),
+                    net.kigawa.kivra.github.CheckRun(id = 2, name = "build", headSha = pr.headSha, status = "completed",
+                        conclusion = net.kigawa.kivra.github.CheckConclusion.SUCCESS),
+                ),
+                totalCount = 2,
+                complete = true,
+            )
+            // CI passed, falls through to AWAITING_HUMAN_REVIEW
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), runner.advance(runId))
+        }
+    }
+
+    @Test
+    fun autoTestEnabledWithFailingChecksReturnsCiFailed() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new\n"),
+                config = SelfDevConfig(enabled = true, autoTestEnabled = true))
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.PULL_REQUEST), runner.advance(runId))
+            val pr = h.github.pullRequests().single()
+            // Set failing CI check
+            h.github.checks = CheckRunsSummary(
+                sha = pr.headSha,
+                runs = listOf(
+                    net.kigawa.kivra.github.CheckRun(id = 1, name = "test", headSha = pr.headSha, status = "completed",
+                        conclusion = net.kigawa.kivra.github.CheckConclusion.FAILURE),
+                    net.kigawa.kivra.github.CheckRun(id = 2, name = "build", headSha = pr.headSha, status = "completed",
+                        conclusion = net.kigawa.kivra.github.CheckConclusion.SUCCESS),
+                ),
+                totalCount = 2,
+                complete = true,
+            )
+            // CI failed -> CI_FAILED
+            val result = runner.advance(runId)
+            assertIs<Failed>(result)
+            assertEquals(FailureCode.CI_FAILED, result.code)
+        }
+    }
+
+    @Test
+    fun autoTestEnabledWithPendingChecksReturnsCiWaiting() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new\n"),
+                config = SelfDevConfig(enabled = true, autoTestEnabled = true))
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.PULL_REQUEST), runner.advance(runId))
+            val pr = h.github.pullRequests().single()
+            // Set pending CI check
+            h.github.checks = CheckRunsSummary(
+                sha = pr.headSha,
+                runs = listOf(
+                    net.kigawa.kivra.github.CheckRun(id = 1, name = "test", headSha = pr.headSha, status = "in_progress",
+                        conclusion = null),
+                    net.kigawa.kivra.github.CheckRun(id = 2, name = "build", headSha = pr.headSha, status = "completed",
+                        conclusion = net.kigawa.kivra.github.CheckConclusion.SUCCESS),
+                ),
+                totalCount = 2,
+                complete = true,
+            )
+            // CI pending -> CI_WAITING
+            val result = runner.advance(runId)
+            assertIs<Waiting>(result)
+            assertEquals(WaitReason.CI_WAITING, result.reason)
+        }
+    }
+
+    @Test
+    fun autoTestEnabledWithUnreadableChecksFallsThrough() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db, proposal("docs/a.md" to "new\n"),
+                config = SelfDevConfig(enabled = true, autoTestEnabled = true))
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.PULL_REQUEST), runner.advance(runId))
+            // Do not set checks at all -> FakeGitHub returns NOT_FOUND (unreadable)
+            // Falls through to AWAITING_HUMAN_REVIEW
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW), runner.advance(runId))
+        }
+    }
+
+    @Test
+    fun checkCiStatusReturnsPassedWhenAllRequiredChecksSucceeded() = runBlocking {
+        val github = FakeGitHub()
+        val sha = github.pullRequests().size.toString() // dummy, use baseSha
+        val headSha = github.baseSha
+        github.checks = CheckRunsSummary(
+            sha = headSha,
+            runs = listOf(
+                net.kigawa.kivra.github.CheckRun(id = 1, name = "test", headSha = headSha, status = "completed",
+                    conclusion = net.kigawa.kivra.github.CheckConclusion.SUCCESS),
+                net.kigawa.kivra.github.CheckRun(id = 2, name = "build", headSha = headSha, status = "completed",
+                    conclusion = net.kigawa.kivra.github.CheckConclusion.SUCCESS),
+            ),
+            totalCount = 2,
+            complete = true,
+        )
+        assertEquals(CiCheckResult.Passed, checkCiStatus(github, github.repo, headSha, setOf("test", "build")))
+    }
+
+    @Test
+    fun checkCiStatusReturnsFailedWhenAnyRequiredCheckFailed() = runBlocking {
+        val github = FakeGitHub()
+        val headSha = github.baseSha
+        github.checks = CheckRunsSummary(
+            sha = headSha,
+            runs = listOf(
+                net.kigawa.kivra.github.CheckRun(id = 1, name = "test", headSha = headSha, status = "completed",
+                    conclusion = net.kigawa.kivra.github.CheckConclusion.FAILURE),
+                net.kigawa.kivra.github.CheckRun(id = 2, name = "build", headSha = headSha, status = "completed",
+                    conclusion = net.kigawa.kivra.github.CheckConclusion.SUCCESS),
+            ),
+            totalCount = 2,
+            complete = true,
+        )
+        val result = checkCiStatus(github, github.repo, headSha, setOf("test", "build"))
+        assertIs<CiCheckResult.Failed>(result)
+        assertEquals(listOf("test"), result.failedChecks)
+    }
+
+    @Test
+    fun checkCiStatusReturnsPendingWhenChecksStillInProgress() = runBlocking {
+        val github = FakeGitHub()
+        val headSha = github.baseSha
+        github.checks = CheckRunsSummary(
+            sha = headSha,
+            runs = listOf(
+                net.kigawa.kivra.github.CheckRun(id = 1, name = "test", headSha = headSha, status = "in_progress",
+                    conclusion = null),
+            ),
+            totalCount = 1,
+            complete = true,
+        )
+        assertEquals(CiCheckResult.Pending, checkCiStatus(github, github.repo, headSha, setOf("test", "build")))
+    }
+
+    @Test
+    fun checkCiStatusReturnsPendingWhenRequiredCheckHasNoRun() = runBlocking {
+        val github = FakeGitHub()
+        val headSha = github.baseSha
+        // Only "test" is present, "build" is missing
+        github.checks = CheckRunsSummary(
+            sha = headSha,
+            runs = listOf(
+                net.kigawa.kivra.github.CheckRun(id = 1, name = "test", headSha = headSha, status = "completed",
+                    conclusion = net.kigawa.kivra.github.CheckConclusion.SUCCESS),
+            ),
+            totalCount = 1,
+            complete = true,
+        )
+        assertEquals(CiCheckResult.Pending, checkCiStatus(github, github.repo, headSha, setOf("test", "build")))
+    }
+
+    @Test
+    fun checkCiStatusReturnsUnreadableOnGitHubError() = runBlocking {
+        val github = FakeGitHub()
+        // Do not set checks -> returns unused() -> NOT_FOUND
+        assertEquals(CiCheckResult.Unreadable, checkCiStatus(github, github.repo, github.baseSha, setOf("test")))
+    }
+
+    @Test
+    fun checkCiStatusTreatsNeutralAndSkippedAsPassed() = runBlocking {
+        val github = FakeGitHub()
+        val headSha = github.baseSha
+        github.checks = CheckRunsSummary(
+            sha = headSha,
+            runs = listOf(
+                net.kigawa.kivra.github.CheckRun(id = 1, name = "test", headSha = headSha, status = "completed",
+                    conclusion = net.kigawa.kivra.github.CheckConclusion.SUCCESS),
+                net.kigawa.kivra.github.CheckRun(id = 2, name = "build", headSha = headSha, status = "completed",
+                    conclusion = net.kigawa.kivra.github.CheckConclusion.NEUTRAL),
+            ),
+            totalCount = 2,
+            complete = true,
+        )
+        assertEquals(CiCheckResult.Passed, checkCiStatus(github, github.repo, headSha, setOf("test", "build")))
     }
 }

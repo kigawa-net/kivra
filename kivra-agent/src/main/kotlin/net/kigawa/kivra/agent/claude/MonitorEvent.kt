@@ -3,7 +3,7 @@ package net.kigawa.kivra.agent.claude
 import java.math.BigDecimal
 import java.math.RoundingMode
 import net.kigawa.kivra.agent.ProgressPhase
-import net.kigawa.kivra.agent.docker.DockerRunOutcome
+import net.kigawa.kivra.agent.backend.RunOutcome
 
 /**
  * The tools the monitor names (ADR 0012 §1). The CLI's tool name is matched against this list; any other name, including an MCP
@@ -76,7 +76,7 @@ sealed interface MonitorEvent {
     data object StopRequested : MonitorEvent
 
     /** The container has ended, with the runner's outcome. */
-    data class ProcessExitConfirmed(val outcome: DockerRunOutcome) : MonitorEvent
+    data class ProcessExitConfirmed(val outcome: RunOutcome) : MonitorEvent
 
     data class Warning(val code: MonitorWarning) : MonitorEvent
 

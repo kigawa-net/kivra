@@ -99,10 +99,12 @@ internal data class RenderedRepoFiles(
 /** Pure functions: the list, its size limit, and the path checks. No I/O. */
 internal object PlannerRepoFileList {
     /**
-     * The size limit of the list body (48 KB). A larger list is replaced by a directory summary. The full list of the real `main` is
-     * about 37 KB (Issue #293 follow-up), so it fits with room for the repository to grow.
+     * The size limit of the list body (160 KB). A larger list is replaced by a directory summary, and a summary hides the file names, so a
+     * Planner that is not told a file name writes a directory as a path (PATH_SHAPE) and the plan is refused (PLAN_INVALID, seen on dev on
+     * 2026-11-12). The list was about 37 KB when the old 48 KB limit was set (Issue #293 follow-up); `main` has grown to about 70 KB, so the
+     * limit now leaves room for it to double. A list of 160 KB is about 40,000 tokens, which is small next to the model's context.
      */
-    const val MAX_BYTES = 48 * 1024
+    const val MAX_BYTES = 160 * 1024
 
     /** Files at or above this size carry their size in KB (20 KB). */
     const val LARGE_FILE_BYTES = 20 * 1024L
@@ -212,5 +214,6 @@ internal object PlannerRepoFileList {
             "Sizes are given in KB for files of 20 KB or more."
     private const val SUMMARY_HEADER =
         "Repository files, SUMMARIZED by directory because the full list is larger than ${MAX_BYTES / 1024} KB. Each line is a directory and its " +
-            "file count. The files themselves are not listed."
+            "file count. The files themselves are not listed. A directory line (it ends with \"/\") is not a path: never write one in " +
+            "targetPaths. Use only a complete file path that the goal itself names."
 }

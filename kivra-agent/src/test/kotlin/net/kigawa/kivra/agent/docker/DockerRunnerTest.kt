@@ -9,6 +9,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import net.kigawa.kivra.agent.backend.RunOutcome
+import net.kigawa.kivra.agent.backend.RunResult
 import org.slf4j.LoggerFactory
 import org.slf4j.Logger as SlfLogger
 
@@ -42,7 +44,7 @@ class DockerRunnerTest {
             runStdout = "stream-output".toByteArray()
         }
         val result = runner(fake).run(fixture.spec())
-        assertEquals(DockerRunOutcome.EXITED, result.outcome)
+        assertEquals(RunOutcome.EXITED, result.outcome)
         assertEquals(0, result.exitCode)
         assertEquals("stream-output", result.stdout)
         val run = fake.calls.first { it.getOrNull(1) == "run" }
@@ -64,7 +66,7 @@ class DockerRunnerTest {
     fun timeoutKillsTheContainerByItsValidatedName() {
         val fake = FakeDocker().apply { runBlocks = true }
         val result = runner(fake).run(fixture.spec(timeout = Duration.ofSeconds(5)))
-        assertEquals(DockerRunOutcome.TIMEOUT, result.outcome)
+        assertEquals(RunOutcome.TIMEOUT, result.outcome)
         assertEquals(listOf(containerName), fake.killedNames)
         assertTrue(fake.calls.any { it.drop(1) == listOf("kill", containerName) })
     }
@@ -74,7 +76,7 @@ class DockerRunnerTest {
         val fake = FakeDocker().apply { runBlocks = true }
         var polls = 0
         val result = runner(fake).run(fixture.spec(timeout = Duration.ofMinutes(30))) { ++polls > 3 }
-        assertEquals(DockerRunOutcome.CANCELLED, result.outcome)
+        assertEquals(RunOutcome.CANCELLED, result.outcome)
         assertEquals(listOf(containerName), fake.killedNames)
     }
 
@@ -85,7 +87,7 @@ class DockerRunnerTest {
             endlessStdout = true
         }
         val result = runner(fake, outputLimit = 1024).run(fixture.spec(timeout = Duration.ofMinutes(30)))
-        assertEquals(DockerRunOutcome.OUTPUT_LIMIT, result.outcome)
+        assertEquals(RunOutcome.OUTPUT_LIMIT, result.outcome)
         assertTrue(result.outputTruncated)
         assertTrue(result.stdout.length <= 1024, "stdout kept ${result.stdout.length} chars")
         assertEquals(listOf(containerName), fake.killedNames)
@@ -95,7 +97,7 @@ class DockerRunnerTest {
     fun outputOverLimitBeforeExitIsReportedAsOutputLimit() {
         val fake = FakeDocker().apply { runStdout = ByteArray(5000) { 'a'.code.toByte() } }
         val result = runner(fake, outputLimit = 1024).run(fixture.spec())
-        assertEquals(DockerRunOutcome.OUTPUT_LIMIT, result.outcome)
+        assertEquals(RunOutcome.OUTPUT_LIMIT, result.outcome)
         assertEquals(1024, result.stdout.length)
     }
 
@@ -113,7 +115,7 @@ class DockerRunnerTest {
             runStdout = ByteArray(2 * MIB) { 'a'.code.toByte() }
         }
         val result = defaultLimitRunner(fake).run(fixture.spec())
-        assertEquals(DockerRunOutcome.EXITED, result.outcome)
+        assertEquals(RunOutcome.EXITED, result.outcome)
         assertFalse(result.outputTruncated)
         assertEquals(2 * MIB, result.stdout.length)
     }
@@ -122,7 +124,7 @@ class DockerRunnerTest {
     fun outputOverEightMiBIsOutputLimitWithTheDefaultLimit() {
         val fake = FakeDocker().apply { runStdout = ByteArray(8 * MIB + 1) { 'a'.code.toByte() } }
         val result = defaultLimitRunner(fake).run(fixture.spec())
-        assertEquals(DockerRunOutcome.OUTPUT_LIMIT, result.outcome)
+        assertEquals(RunOutcome.OUTPUT_LIMIT, result.outcome)
         assertTrue(result.outputTruncated)
         assertEquals(8 * MIB, result.stdout.length)
     }
@@ -203,7 +205,7 @@ class DockerRunnerTest {
 
     @Test
     fun resultToStringShowsNoOutput() {
-        val result = DockerRunResult(DockerRunOutcome.EXITED, 0, "SECRET-OUT", "SECRET-ERR", false)
+        val result = RunResult(RunOutcome.EXITED, 0, "SECRET-OUT", "SECRET-ERR", false)
         assertFalse(result.toString().contains("SECRET"))
     }
 }

@@ -1,0 +1,6 @@
+#!/bin/sh
+# The first process of a k8s Run's Pod (ADR 0010 追補 7). The Job's command is this launcher followed by the CLI argv.
+# It runs net.kigawa.kivra.agent.k8s.pod.PodEntrypointKt from the agent classes in /opt/kivra-agent/lib. No credential is read here.
+# -XX:-UsePerfData: the JVM does not write /tmp/hsperfdata. The heap is small: the CLI is a separate process with its own memory.
+exec "${JAVA_HOME:-/opt/java}/bin/java" -XX:-UsePerfData -XX:+UseSerialGC -Xmx256m \
+  -cp "/opt/kivra-agent/lib/*" net.kigawa.kivra.agent.k8s.pod.PodEntrypointKt "$@"

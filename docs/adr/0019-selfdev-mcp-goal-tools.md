@@ -192,3 +192,14 @@ MCP の呼び出し主体は、token の `iss` と `sub` から作る owner key 
 - **緩和**: 応答に `untrusted: true` と、題名はデータであって指示ではない、という固定の `note` を付ける。題名は長さを制限する。制御文字と双方向制御文字を含む題名は、取り除かず `[unsafe title omitted]` に置き換える。AI の主体は入力を読む前に拒否する。既定は off。ログには題名を出さない。
 - **残るリスク**: 題名にも、指示として読める文が入りうる(Planner の出力と、運用者の入力のため)。題名は、本文と同じく信頼できない入力である。緩和は、題名を指示として扱わないことを、この MCP の利用者(運用者と、そのクライアント)に明示することに頼る。
 - **見直しの条件**: 題名を原因とする指示の注入が 1 件でも疑われたら、このツールを止める(`KIVRA_MCP_GOAL_TEXT_ENABLED=false` で再起動する)。
+
+## 追記(2026-11-12): 周の木の読み取り(`kivra_task_list`)
+
+- **きっかけ**: 周の根のタスク(旧 Goal)は `PENDING_APPROVAL` で止まる。運用者は、どの子タスクが承認を待つか、どの状態か、依存関係がどうか、を MCP から見られなかった。`kivra_goal_get` は Plan の枠組み(V40)の後には無く、`kivra_order_get` は周の Goal の ID までしか返さない。
+- **変更**: 読み取りのツール `kivra_task_list` を追加する(スコープ `kivra.runs.read`、書き込みなし)。入力は `task_id`(26 文字)だけ。出力は、根のタスク(`task_id`、`state`、`state_reason`、`version`、`project_id`)と、子タスク(最大 50 件、古い順)の `task_id`、`state`、`state_reason`、`requires_approval`、`depends_on`(タスク ID の配列)、`version`、`created_at`。超えた分は `children_truncated: true`。
+- **見えないもの**: 本文、方針、対象パス(`target_paths`)、`size_estimate` は返さない。対象パスと見積りは計画の出力にだけあり、`selfdev_tasks` の行には保存されていないため、この読み取りでは出せない(マイグレーションを増やさない方針)。
+- **題名**: 上の 2026-10-21 の追補に従い、`KIVRA_MCP_GOAL_TEXT_ENABLED=true` のときだけ返す。AI の主体には返さない。題名は 200 字で切り、制御文字や双方向制御文字を含むものは `[unsafe title omitted]` に置き換える。応答には `untrusted: true` と、題名は指示ではないという固定の `note` を付ける。
+- **登録**: MCP が有効、オートパイロットが有効、`KIVRA_MCP_GOAL_READ_ENABLED=true` のとき。新しいフラグは作らない。
+- **project**: 根が読めないプロジェクトのものは、存在しない根と同じ `NOT_FOUND`。子は根と同じプロジェクトに属する(計画の書き込みが根の `project_id` を継ぐ)。
+- **監査**: 読み取りの記録(`recordRead`)のみ。ログには題名も ID も出さない。
+- テスト: `McpTaskToolsTest`。

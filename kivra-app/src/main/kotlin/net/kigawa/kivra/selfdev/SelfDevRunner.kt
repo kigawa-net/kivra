@@ -30,11 +30,14 @@ import net.kigawa.kivra.developer.DeveloperRequest
 import net.kigawa.kivra.developer.DeveloperResult
 import net.kigawa.kivra.developer.RepoFile
 import net.kigawa.kivra.github.BranchInfo
+import net.kigawa.kivra.github.CheckConclusion
+import net.kigawa.kivra.github.CheckRunsSummary
 import net.kigawa.kivra.github.CommitFilesRequest
 import net.kigawa.kivra.github.CreatePullRequest
 import net.kigawa.kivra.github.FileWrite
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubPort
+import net.kigawa.kivra.github.CheckRun
 import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.PullRequest
 import net.kigawa.kivra.github.PullRequestState
@@ -445,6 +448,15 @@ class SelfDevRunner(
             val closed = runs.closeAbandonedPullRequest(lease, currentVersion(lease))
             return Advanced(run.state, closed.state, PR_ABANDONED)
         }
+        // Auto-test: check CI status when enabled (ADR 0008 addendum, issue #XXX)
+        if (config.autoTestEnabled) {
+            when (val ci = checkCiStatus(github, config.repo, pullRequest.headSha, config.autoTestRequiredChecks)) {
+                CiCheckResult.Passed -> Unit // CI passed, fall through to rebaser / AWAITING_HUMAN_REVIEW
+                is CiCheckResult.Failed -> return Failed(FailureCode.CI_FAILED)
+                CiCheckResult.Pending -> return Waiting(WaitReason.CI_WAITING)
+                CiCheckResult.Unreadable -> Unit // Read failed, fall through to existing behavior
+            }
+        }
         val rebaser = prRebaser ?: return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
         val binding = runs.loadBinding(run.runId) ?: return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
         return when (val o = rebaser.look(lease, run, binding, pullRequest, { renewOrThrow(lease) }, { currentVersion(lease) })) {
@@ -605,4 +617,57 @@ class SelfDevRunner(
         fun incidentFixBody(issueNumber: Long, summary: String): String =
             "Kivra の自己修復(incident Issue #$issueNumber)による Draft PR です。マージは人間が行います。\n\n$summary"
     }
+}
+
+/** Result of checking CI check runs for an open pull request (auto-test, issue #XXX). */
+sealed interface CiCheckResult {
+    /** All required checks completed with SUCCESS. */
+    object Passed : CiCheckResult
+
+    /** One or more required checks completed with a non-success conclusion. */
+    data class Failed(val failedChecks: List<String>) : CiCheckResult
+
+    /** At least one required check is still in_progress or queued. */
+    object Pending : CiCheckResult
+
+    /** The check runs API could not be read (read error falls through to existing behavior). */
+    object Unreadable : CiCheckResult
+}
+
+/**
+ * Checks CI status for [sha] against [requiredChecks]. Returns [Passed] when all required checks succeeded,
+ * [Failed] when any failed, [Pending] when still running, and [Unreadable] when the API call failed.
+ */
+internal suspend fun checkCiStatus(
+    github: GitHubPort,
+    repo: net.kigawa.kivra.github.RepoRef,
+    sha: String,
+    requiredChecks: Set<String>,
+): CiCheckResult {
+    val summary = when (val r = github.getCheckRuns(repo, sha)) {
+        is GitHubResult.Success -> r.value
+        else -> return CiCheckResult.Unreadable
+    }
+    // Only consider runs matching the required check names
+    val relevant = summary.runs.filter { it.name in requiredChecks }
+    if (!summary.complete) return CiCheckResult.Pending
+
+    // Check for pending/in-progress runs among required checks
+    val pendingRuns = relevant.filter { it.status != "completed" }
+    if (pendingRuns.isNotEmpty()) return CiCheckResult.Pending
+
+    // Check for failed required checks
+    val failedChecks = relevant.filter {
+        it.status == "completed" && it.conclusion != CheckConclusion.SUCCESS &&
+            it.conclusion != CheckConclusion.NEUTRAL && it.conclusion != CheckConclusion.SKIPPED
+    }.map { it.name }
+
+    if (failedChecks.isNotEmpty()) return CiCheckResult.Failed(failedChecks)
+
+    // Check if all required checks have a run
+    val checkedNames = relevant.map { it.name }.toSet()
+    val missing = requiredChecks - checkedNames
+    if (missing.isNotEmpty()) return CiCheckResult.Pending
+
+    return CiCheckResult.Passed
 }

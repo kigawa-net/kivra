@@ -25,17 +25,17 @@ import net.kigawa.kivra.auth.resolveTaskApiAuthMode
  *   while the endpoint is off, and only to refuse `true`.
  * - `KIVRA_MCP_WRITE_RATE_PER_MINUTE`: write calls per principal per minute, 1 to 6000, default 5. Over the limit, 429. Read only when
  *   the write tool is enabled.
- * - `KIVRA_MCP_GOAL_READ_ENABLED`: `true` to register `kivra_goal_list` and `kivra_goal_get` (ADR 0019 S1). Off by default. Registered only
- *   while the autopilot is on, and needs `KIVRA_MCP_ENABLED=true`.
+ * - `KIVRA_MCP_GOAL_READ_ENABLED`: `true` to register `kivra_task_list` (the cycle root and its child tasks, read only; ADR 0019 addendum).
+ *   Off by default. Registered only while the autopilot is on, and needs `KIVRA_MCP_ENABLED=true`.
  * - `KIVRA_MCP_GOAL_STOP_ENABLED`: `true` to register `kivra_goal_stop` (ADR 0019 S1), an operator-only stop. Off by default. Needs
  *   `KIVRA_MCP_ENABLED=true` and `KIVRA_MCP_WRITE_ENABLED=true`, and the autopilot must be on (checked at startup). The AI principal is refused.
  * - `KIVRA_MCP_GOAL_SUBMIT_ENABLED`: `true` to register `kivra_goal_submit` (ADR 0019 S2), the operator's Goal submission. Off by default. Needs
  *   `KIVRA_MCP_ENABLED=true` and `KIVRA_MCP_WRITE_ENABLED=true`, and the autopilot must be on (checked at startup). The AI principal is refused.
  * - `KIVRA_MCP_GOAL_SUBMIT_DAILY_LIMIT`: goals one operator may submit over MCP per UTC day, 1 to 100, default 10. Read only when the submit
  *   tool is enabled. A replay does not count.
- * - `KIVRA_MCP_GOAL_TEXT_ENABLED`: `true` to register `kivra_goal_get_titles` (ADR 0019 amendment 2026-10-21), which returns the titles of a
- *   goal and of its latest proposed plan's tasks, to the operator only. Off by default. Needs `KIVRA_MCP_ENABLED=true` and
- *   `KIVRA_MCP_GOAL_READ_ENABLED=true`, and the autopilot must be on. The bodies and task instructions are never returned.
+ * - `KIVRA_MCP_GOAL_TEXT_ENABLED`: `true` to return the titles in `kivra_task_list` (ADR 0019 amendment 2026-10-21), to the operator only (never
+ *   to the AI principal). Off by default. Needs `KIVRA_MCP_ENABLED=true` and `KIVRA_MCP_GOAL_READ_ENABLED=true`, and the autopilot must be on.
+ *   The bodies and task instructions are never returned.
  */
 class McpSettings private constructor(
     val enabled: Boolean,

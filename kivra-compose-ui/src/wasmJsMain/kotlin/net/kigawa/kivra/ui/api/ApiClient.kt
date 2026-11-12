@@ -473,6 +473,14 @@ object ApiClient {
         postWrite("/api/selfdev/orders/${percentEncode(orderId)}/extend", ExtendOrderBody(version, addCycles, extendDays))
 
     /**
+     * 進行中の周の放棄(運用者のみ)。`POST /api/selfdev/orders/{id}/cycles/abandon`、本文 `{"expectedVersion": n, "reason": "1〜500 字"}`。
+     * 読んだ version を送る。動いている Task はサーバーが止めてから、周を失敗として閉じる。409 は版の競合や、放棄できない状態
+     * (NO_CYCLE_IN_PROGRESS など)。判定の詳細は OrderCycleRules.kt。
+     */
+    suspend fun abandonOrderCycle(orderId: String, version: Long, reason: String) =
+        postWrite("/api/selfdev/orders/${percentEncode(orderId)}/cycles/abandon", AbandonCycleBody(version, reason))
+
+    /**
      * order の停止要求。`POST /api/selfdev/orders/{id}/stop-requests`、本文 `{"version": n, "reasonCode": "..."}`。
      * reasonCode は要求できる 4 種のいずれか(一覧から選ぶ)。承認されるまで order は止まらない。403 は権限(STOP_REQUEST)。
      */
@@ -735,6 +743,21 @@ object ApiClient {
         )
 
 
+    /**
+     * チャットの提案を確定する。`POST /api/projects/{id}/chat/actions/{actionId}/confirm`、本文 `{}`。サーバーが提案の操作
+     * (周の開始・放棄)を実行し、結果の固定コードを返す。409 は既に処理済み。403 は権限(運用者のみ、AI 不可)。
+     */
+    suspend fun confirmChatAction(projectId: String, actionId: String): ApiChatActionResult {
+        val text = postWriteText("/api/projects/${percentEncode(projectId)}/chat/actions/${percentEncode(actionId)}/confirm", EmptyJsonBody())
+        return replyJson.decodeFromString(ApiChatActionResult.serializer(), text)
+    }
+
+    /** 提案を却下する。`POST .../chat/actions/{actionId}/dismiss`、本文 `{}`。何も実行しない。 */
+    suspend fun dismissChatAction(projectId: String, actionId: String): ApiChatActionResult {
+        val text = postWriteText("/api/projects/${percentEncode(projectId)}/chat/actions/${percentEncode(actionId)}/dismiss", EmptyJsonBody())
+        return replyJson.decodeFromString(ApiChatActionResult.serializer(), text)
+    }
+
     private val replyJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val ERROR_FIELD = Regex("\"error\"\\s*:\\s*\"([^\"]{0,200})\"")
@@ -771,6 +794,9 @@ object ApiClient {
 
 /** order の延長の本文(server `ExtendOrderRequest`)。フィールドは厳密に検査されるので、この三つだけ送る。 */
 @Serializable private class ExtendOrderBody(val version: Long, val addCycles: Int? = null, val extendDays: Int? = null)
+
+/** 周の放棄の本文(server `AbandonCycleRequest`)。フィールドは厳密に検査されるので、この二つだけ送る。 */
+@Serializable private class AbandonCycleBody(val expectedVersion: Long, val reason: String)
 
 /** 本文が空の JSON オブジェクト `{}`(フィールドなし)。 */
 @Serializable private class EmptyJsonBody

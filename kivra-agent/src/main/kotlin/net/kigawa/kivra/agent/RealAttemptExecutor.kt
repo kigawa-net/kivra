@@ -17,14 +17,15 @@ import net.kigawa.kivra.agent.claude.MonitorEvent
 import net.kigawa.kivra.agent.claude.ReportedUsage
 import net.kigawa.kivra.agent.claude.StreamJsonParser
 import net.kigawa.kivra.agent.claude.StreamReport
+import net.kigawa.kivra.agent.backend.RunBackend
+import net.kigawa.kivra.agent.backend.RunResult
+import net.kigawa.kivra.agent.backend.RunSpec
 import net.kigawa.kivra.agent.docker.CliCommand
-import net.kigawa.kivra.agent.docker.DockerLauncher
-import net.kigawa.kivra.agent.docker.DockerRunResult
-import net.kigawa.kivra.agent.docker.DockerRunSpec
-import net.kigawa.kivra.agent.docker.DockerRunner
-import net.kigawa.kivra.agent.docker.DockerSettings
-import net.kigawa.kivra.agent.docker.ProcessDockerLauncher
+import net.kigawa.kivra.agent.docker.CliOutputLimits
 import net.kigawa.kivra.agent.docker.TaskFile
+import net.kigawa.kivra.agent.k8s.PodInputSource
+import net.kigawa.kivra.agent.k8s.pod.PodInput
+import net.kigawa.kivra.agent.k8s.pod.PodReadout
 import net.kigawa.kivra.agent.workdir.AgentResult
 import net.kigawa.kivra.agent.workdir.CollectOutcome
 import net.kigawa.kivra.agent.workdir.DiffCollector
@@ -73,7 +74,7 @@ class RealExecutorSettings(
  * The real attempt executor (ADR 0010, runbook 6.5 and 6.10). For one claimed attempt it:
  *
  * 1. reads the public base commit into a host-side mirror and extracts it into a new work directory ([WorkDirPreparer]);
- * 2. runs the CLI in one container ([DockerRunner]). The container is stopped on the time limit, on a cancel request from kivra
+ * 2. runs the CLI in one container ([RunBackend]). The container is stopped on the time limit, on a cancel request from kivra
  *    (`cancelRequested`), on the STOP file, and when the coroutine is cancelled;
  * 3. after the container has stopped, classifies the stream ([StreamJsonParser], [CliOutcomeClassifier]) and collects the change set
  *    from the work directory ([DiffCollector]);
@@ -91,18 +92,15 @@ class RealAttemptExecutor(
     workRoot: Path,
     private val stopFile: Path,
     private val settings: RealExecutorSettings,
-    private val launcher: DockerLauncher = ProcessDockerLauncher,
-    private val pollMillis: Long = DockerRunner.DEFAULT_POLL_MILLIS,
+    /** Runs the containers and removes the orphans. Built by [createRunBackend] from the settings, so this class names no backend. */
+    private val backend: RunBackend,
+    /**
+     * Where a k8s backend reads the input of the run it is running (the repository, the base commit and the task). The executor registers
+     * each attempt here before the run and removes it after. The docker backend does not read it.
+     */
+    private val podInputs: AttemptPodInputs = AttemptPodInputs(),
 ) : AttemptExecutor {
     private val logger = LoggerFactory.getLogger(RealAttemptExecutor::class.java)
-    private val dockerSettings = DockerSettings(
-        dockerBinary = settings.dockerBinary,
-        dockerHost = settings.dockerHost,
-        workRoot = workRoot,
-        allowedNetworks = setOf(settings.network),
-        allowedImages = setOf(settings.image),
-        allowedModels = setOf(settings.model),
-    )
     private val mirror = PublicGitMirror(settings.gitBinary, workRoot.resolve(MIRROR_DIR_NAME))
     private val preparer = WorkDirPreparer(workRoot)
     private val changeRoot: Path = workRoot
@@ -181,7 +179,7 @@ class RealAttemptExecutor(
                 ),
             )
             state.prepared = work
-            val spec = DockerRunSpec(
+            val spec = RunSpec(
                 runId = attempt.runId,
                 attemptId = attempt.attemptId,
                 image = settings.image,
@@ -192,20 +190,22 @@ class RealAttemptExecutor(
                 maxTurns = attempt.limits.maxTurns,
                 model = settings.model,
                 budgetUsd = settings.budgetUsd,
+                outputLimitBytes = minOf(attempt.limits.maxOutputBytes, CliOutputLimits.MAX_TOTAL_BYTES).toInt(),
             )
-            val runner = DockerRunner(
-                dockerSettings,
-                launcher = launcher,
-                pollMillis = pollMillis,
-                outputLimitBytes = minOf(attempt.limits.maxOutputBytes, DockerRunner.DEFAULT_OUTPUT_LIMIT_BYTES.toLong()).toInt(),
-            )
-            runner.cleanupOrphans(attempt.runId)
+            // A refused spec throws here, before the orphans are removed or anything starts (as before the RunBackend split).
+            backend.validate(spec)
+            backend.cleanupOrphans(attempt.runId)
             monitor.record(MonitorEvent.AttemptStarted)
-            val result = runner.run(
-                spec,
-                onStdoutLine = monitor.stdoutListener(),
-                cancelRequested = { !job.isActive || Files.exists(stopFile) },
-            )
+            val result = try {
+                podInputs.register(attempt, settings.repo)
+                backend.run(
+                    spec,
+                    onStdoutLine = monitor.stdoutListener(),
+                    cancelRequested = { !job.isActive || Files.exists(stopFile) },
+                )
+            } finally {
+                podInputs.unregister(attempt)
+            }
             monitor.record(MonitorEvent.ProcessExitConfirmed(result.outcome))
             val report = StreamJsonParser().parse(result.stdout)
             RunState(result, report, CliOutcomeClassifier.classify(result, report))
@@ -227,14 +227,7 @@ class RealAttemptExecutor(
 
         val work = checkNotNull(state.prepared) { "the work directory is missing after a run" }
         val collected = withContext(Dispatchers.IO + NonCancellable) {
-            DiffCollector(changeRoot, attempt.limits.toDiffLimits()).collect(
-                runDir = work.runDir,
-                manifestPath = work.manifest,
-                summary = run.report.result?.resultText.orEmpty(),
-                exitStatus = checkNotNull(run.result.exitCode),
-                sessionId = run.report.result?.sessionId,
-                pathRules = pathRules,
-            )
+            collect(attempt, run, work, pathRules)
         }
         return when (collected) {
             is CollectOutcome.Rejected -> {
@@ -252,6 +245,29 @@ class RealAttemptExecutor(
                 AttemptOutcome.Failed(code, usage)
             }
             is CollectOutcome.Accepted -> submit(attempt, collected.result, usage, monitor)
+        }
+    }
+
+    /**
+     * Collects the change set. A run that gives a Pod readout (k8s) is not collected on the host: the Pod's claim is checked again with
+     * the real limits and path rules of the attempt, and the summary and the session id come from the CLI's output here
+     * ([PodReadout.Collected.finish]). Without a readout (docker) the host collects from the work directory, as it always did.
+     */
+    private fun collect(attempt: ClaimedAttempt, run: RunState, work: PreparedWorkDir, pathRules: PathRules): CollectOutcome {
+        val limits = attempt.limits.toDiffLimits()
+        val summary = run.report.result?.resultText.orEmpty()
+        val sessionId = run.report.result?.sessionId
+        return when (val readout = run.result.podReadout) {
+            null -> DiffCollector(changeRoot, limits).collect(
+                runDir = work.runDir,
+                manifestPath = work.manifest,
+                summary = summary,
+                exitStatus = checkNotNull(run.result.exitCode),
+                sessionId = sessionId,
+                pathRules = pathRules,
+            )
+            is PodReadout.Error -> CollectOutcome.Rejected(listOf(DiffRejectReason.RESULT_FIELD_INVALID))
+            is PodReadout.Collected -> readout.finish(summary, sessionId, limits, pathRules)
         }
     }
 
@@ -286,7 +302,7 @@ class RealAttemptExecutor(
         }
     }
 
-    private class RunState(val result: DockerRunResult, val report: StreamReport, val outcome: AgentRunOutcome)
+    private class RunState(val result: RunResult, val report: StreamReport, val outcome: AgentRunOutcome)
 
     /** What one attempt has produced so far, for the debug output. Written by [attemptOnce], read by [execute]. */
     private class AttemptState {
@@ -310,4 +326,39 @@ class RealAttemptExecutor(
                 else -> AgentErrorCode.BAD_OUTPUT
             }
     }
+}
+
+/**
+ * The input of the runs in flight, for the k8s backend ([PodInputSource]). [RealAttemptExecutor] registers an attempt before its run and
+ * removes it after. The repository must be a public GitHub one: the Pod fetches the base commit itself, with no credential.
+ */
+class AttemptPodInputs : PodInputSource {
+    private val attempts = java.util.concurrent.ConcurrentHashMap<String, Pair<ClaimedAttempt, RepoSource>>()
+
+    internal fun register(attempt: ClaimedAttempt, repo: RepoSource) {
+        attempts[key(attempt.runId, attempt.attemptId)] = attempt to repo
+    }
+
+    internal fun unregister(attempt: ClaimedAttempt) {
+        attempts.remove(key(attempt.runId, attempt.attemptId))
+    }
+
+    internal fun isRegistered(spec: RunSpec): Boolean = attempts.containsKey(key(spec.runId, spec.attemptId))
+
+    override fun inputFor(spec: RunSpec): PodInput {
+        val (attempt, repo) = attempts[key(spec.runId, spec.attemptId)] ?: error("no input is registered for the run")
+        val github = repo as? RepoSource.PublicGithub ?: error("the repository is not a public GitHub one")
+        return PodInput(
+            runId = attempt.runId,
+            attemptId = attempt.attemptId,
+            owner = github.owner,
+            repo = github.repo,
+            commit = attempt.baseSha,
+            title = attempt.task.value,
+            body = attempt.task.body,
+            truncated = attempt.task.truncated || attempt.task.bodyTruncated,
+        )
+    }
+
+    private fun key(runId: String, attemptId: String) = "$runId/$attemptId"
 }

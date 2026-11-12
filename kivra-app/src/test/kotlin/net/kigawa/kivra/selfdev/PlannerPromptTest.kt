@@ -14,10 +14,24 @@ class PlannerPromptTest {
     }
 
     @Test
+    fun theSystemPromptAsksForTargetedEditsToExistingFiles() {
+        val system = PlannerPrompt.system()
+        assertTrue(system.contains("For a change to an existing file, describe a targeted edit to that file, not a full rewrite of it."))
+    }
+
+    @Test
     fun theSystemPromptKeepsTheSchemaRules() {
         val system = PlannerPrompt.system()
         assertTrue(system.contains("\"sizeEstimate\":\"S\",\"dependsOn\":[]}]}"))
         assertTrue(system.contains("Use only these keys. Unknown keys are rejected. Do not add any other key."))
         assertTrue(system.contains("Do not plan changes to CI workflows, build files, dependency declarations, database migrations, ADRs, or credentials."))
+    }
+
+    @Test
+    fun theRepoFilePromptForbidsRecreatingListedFiles() {
+        val with = PlannerPrompt.system(repoFiles = true)
+        assertTrue(with.contains("Never write a task that creates or rewrites such a file from scratch"))
+        assertTrue(with.contains("You cannot see the file content."))
+        assertTrue(!PlannerPrompt.system().contains("from scratch"))
     }
 }

@@ -17,7 +17,7 @@ import kotlinx.serialization.json.long
 import net.kigawa.kivra.agent.claude.MonitorEvent
 import net.kigawa.kivra.agent.claude.MonitorTool
 import net.kigawa.kivra.agent.claude.MonitorWarning
-import net.kigawa.kivra.agent.docker.DockerRunOutcome
+import net.kigawa.kivra.agent.backend.RunOutcome
 
 private const val GENERATION = 3L
 
@@ -97,7 +97,7 @@ class MonitorEventSenderTest {
             MonitorEvent.ApiRetry(net.kigawa.kivra.agent.claude.ApiErrorKind.AUTHENTICATION),
             MonitorEvent.Cost(MonitorEvent.MAX_COST_MICROS),
             MonitorEvent.StopRequested,
-            MonitorEvent.ProcessExitConfirmed(DockerRunOutcome.OUTPUT_LIMIT),
+            MonitorEvent.ProcessExitConfirmed(RunOutcome.OUTPUT_LIMIT),
             MonitorEvent.Warning(MonitorWarning.BLOCK_LIMIT),
             MonitorEvent.Dropped(MonitorEvent.MAX_COUNT),
         )

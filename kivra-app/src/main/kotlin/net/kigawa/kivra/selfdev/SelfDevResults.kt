@@ -61,6 +61,9 @@ enum class WaitReason {
 
     /** CLI runtime: the coding attempt is queued or running on the local agent. The Run stays DEVELOPING; the next call looks again. */
     AWAITING_CODING_AGENT,
+
+    /** CI checks are still running. The runner polls until all required checks succeed or fail. */
+    CI_WAITING,
 }
 
 enum class SkipReason {
@@ -97,4 +100,7 @@ enum class FailureCode {
 
     /** The state machine refused a transition this call attempted. Indicates a bug, not a provider condition. */
     INVALID_TRANSITION,
+
+    /** One or more required CI check runs failed. */
+    CI_FAILED,
 }

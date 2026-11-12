@@ -9,6 +9,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import net.kigawa.kivra.agent.backend.RunOutcome
 import net.kigawa.kivra.agent.claude.AgentRunOutcome
 import net.kigawa.kivra.agent.claude.CliOutcomeClassifier
 import net.kigawa.kivra.agent.claude.StreamJsonParser
@@ -93,7 +94,7 @@ class CliRunIsolationTest {
     fun timeoutIsClassifiedAsTimeout() {
         val fake = FakeDocker().apply { runBlocks = true }
         val run = runner(fake).run(fixture.spec(timeout = Duration.ofSeconds(2)))
-        assertEquals(DockerRunOutcome.TIMEOUT, run.outcome)
+        assertEquals(RunOutcome.TIMEOUT, run.outcome)
         assertEquals(AgentRunOutcome.TIMEOUT, CliOutcomeClassifier.classify(run, StreamJsonParser().parse(run.stdout)))
     }
 

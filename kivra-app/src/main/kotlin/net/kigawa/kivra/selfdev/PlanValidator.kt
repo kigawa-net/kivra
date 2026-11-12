@@ -9,7 +9,6 @@ import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.core.patch.PatchPolicy
 import net.kigawa.kivra.core.patch.PatchPolicyConfig
 import net.kigawa.kivra.core.patch.PatchPolicyDefaults
-// NewTask removed in V40; PlanValidator temporarily disabled
 
 /*
  * Output schema and checks of the autopilot Planner (ADR 0011 section 3). Pure functions, no I/O, so every rule is testable without a

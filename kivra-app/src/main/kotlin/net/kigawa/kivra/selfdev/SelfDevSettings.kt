@@ -117,6 +117,11 @@ class SelfDevSettings private constructor(
         const val ENV_PR_REVIEW_TIMEOUT_DAYS = "KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS"
         const val ENV_ADVANCE_INTERVAL_SECONDS = "KIVRA_SELFDEV_ADVANCE_INTERVAL_SECONDS"
         const val ENV_MAX_ACTIVE_RUNS = "KIVRA_SELFDEV_MAX_ACTIVE_RUNS"
+        /** Automatic CI check of self-development pull requests (issue #XXX). Off by default. */
+        const val ENV_AUTO_TEST_ENABLED = "KIVRA_SELFDEV_AUTOTEST_ENABLED"
+
+        /** Comma-separated check run names that must succeed. Read only when [ENV_AUTO_TEST_ENABLED]. */
+        const val ENV_AUTO_TEST_REQUIRED_CHECKS = "KIVRA_SELFDEV_AUTOTEST_REQUIRED_CHECKS"
         /** `api` (default) or `cli`. Read only when enabled. See [runtime]. */
         const val ENV_RUNTIME = "KIVRA_SELFDEV_RUNTIME"
 
@@ -175,6 +180,18 @@ class SelfDevSettings private constructor(
             val maxActive = number(env, ENV_MAX_ACTIVE_RUNS, DEFAULT_MAX_ACTIVE_RUNS.toLong())
             check(maxActive >= 1) { "$ENV_MAX_ACTIVE_RUNS must be at least 1" }
 
+            val autoTestEnabled = env[ENV_AUTO_TEST_ENABLED]?.trim() == "true"
+            val autoTestRequiredChecks = if (autoTestEnabled) {
+                val raw = env[ENV_AUTO_TEST_REQUIRED_CHECKS]?.takeIf { it.isNotBlank() }
+                if (raw != null) {
+                    raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+                } else {
+                    setOf("test", "build")
+                }
+            } else {
+                emptySet()
+            }
+
             val config = SelfDevConfig(
                 enabled = true,
                 runtime = runtime(env),
@@ -183,6 +200,8 @@ class SelfDevSettings private constructor(
                 prReviewTimeout = Duration.ofDays(timeoutDays),
                 contextPathPrefixes = prefixes,
                 maxContextFileBytes = contextBytes,
+                autoTestEnabled = autoTestEnabled,
+                autoTestRequiredChecks = autoTestRequiredChecks,
             )
             val prRebase = prRebaseEnabled(env)
             return SelfDevSettings(

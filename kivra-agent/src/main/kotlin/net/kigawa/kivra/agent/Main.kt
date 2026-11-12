@@ -74,12 +74,15 @@ fun main() {
 private fun executorFor(config: AgentConfig, client: KivraAgentClient): AttemptExecutor {
     val real = config.realExecutor ?: return NotImplementedExecutor
     return try {
-        RealAttemptExecutor(client, config.workDir, config.stopFile, real)
+        RealAttemptExecutor(client, config.workDir, config.stopFile, real, createRunBackend(config.backend, real, config.workDir))
     } catch (e: DockerSpecException) {
         System.err.println("kivra-agent: the ${AgentConfig.ENV_EXECUTOR}=real settings are invalid")
         exitProcess(EXIT_EXECUTOR_CONFIG)
     } catch (e: WorkDirException) {
         System.err.println("kivra-agent: the ${AgentConfig.ENV_EXECUTOR}=real work directory is invalid")
+        exitProcess(EXIT_EXECUTOR_CONFIG)
+    } catch (e: ConfigException) {
+        System.err.println("kivra-agent: ${e.message}")
         exitProcess(EXIT_EXECUTOR_CONFIG)
     }
 }

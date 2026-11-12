@@ -15,6 +15,12 @@ import net.kigawa.kivra.github.RepoRef
  *
  * [prReviewTimeout]: an open pull request older than this (measured from the last run update) is closed by abandoning the run,
  * never by closing the pull request. kivra never merges and never closes a pull request.
+ *
+ * [autoTestEnabled]: whether the runner automatically checks CI status after opening a pull request. When enabled, the runner
+ * polls GitHub check runs until all [autoTestRequiredChecks] succeed, then transitions to merge verification instead of waiting
+ * for human review. Off by default.
+ *
+ * [autoTestRequiredChecks]: the check run names that must all succeed. Default is ["test", "build"]. Read only when [autoTestEnabled].
  */
 /**
  * How the DEVELOPING step produces its change set. [API] is the existing single model call (LlmDeveloper). [CLI] queues a coding attempt
@@ -38,6 +44,10 @@ data class SelfDevConfig(
     val maxContextFiles: Int = 10,
     val maxContextFileBytes: Long = 32L * 1024,
     val maxContextTotalBytes: Long = 128L * 1024,
+    /** Whether to automatically check CI status after opening a pull request (issue #XXX). Off by default. */
+    val autoTestEnabled: Boolean = false,
+    /** The check run names that must all succeed. Read only when [autoTestEnabled]. */
+    val autoTestRequiredChecks: Set<String> = setOf("test", "build"),
 ) {
     init {
         require(baseBranch.isNotBlank()) { "baseBranch must not be blank" }
@@ -47,5 +57,6 @@ data class SelfDevConfig(
         require(maxContextFiles >= 0) { "maxContextFiles must not be negative" }
         require(maxContextFileBytes > 0) { "maxContextFileBytes must be positive" }
         require(maxContextTotalBytes > 0) { "maxContextTotalBytes must be positive" }
+        require(autoTestRequiredChecks.isNotEmpty()) { "autoTestRequiredChecks must not be empty when autoTestEnabled" }
     }
 }

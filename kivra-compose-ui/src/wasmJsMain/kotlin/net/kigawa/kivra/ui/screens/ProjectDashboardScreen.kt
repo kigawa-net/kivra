@@ -7,11 +7,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -54,17 +51,7 @@ import net.kigawa.kivra.ui.api.ApiProjectBudget
 import net.kigawa.kivra.ui.api.ApiProjectDashboard
 import net.kigawa.kivra.ui.api.ApiRun
 import net.kigawa.kivra.ui.api.ApiSession
-import net.kigawa.kivra.ui.api.ApiChatAction
 import net.kigawa.kivra.ui.api.ApiChatMessage
-import net.kigawa.kivra.ui.CHAT_ACTION_CONFIRM_TITLE
-import net.kigawa.kivra.ui.WriteFailure
-import net.kigawa.kivra.ui.CHAT_ACTION_DISMISS_BUTTON_TEXT
-import net.kigawa.kivra.ui.CHAT_ACTION_TASK_TITLE_CAPTION
-import net.kigawa.kivra.ui.chatActionConfirmButtonText
-import net.kigawa.kivra.ui.chatActionConfirmMessage
-import net.kigawa.kivra.ui.chatActionFailureText
-import net.kigawa.kivra.ui.chatActionResultText
-import net.kigawa.kivra.ui.writeFailureOf
 import net.kigawa.kivra.ui.api.ApiChatSession
 import net.kigawa.kivra.ui.backfillExplain
 import net.kigawa.kivra.ui.backfillFailureText
@@ -145,10 +132,10 @@ private fun ProjectDashboardBody(
     }
     Spacer(Modifier.height(4.dp))
     Text(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Spacer(Modifier.height(4.dp))
+    Spacer(Modifier.height(8.dp))
     // このプロジェクトの項目への入口(サイドナビからはここへ移した)。
     ProjectLinks(links, approvalsBadge, Route.ProjectPage(projectId, NavDestination.Dashboard), onNavigate)
-    Spacer(Modifier.height(8.dp))
+    Spacer(Modifier.height(12.dp))
 
 
     // --- Run 関連：状態別件数 + 最近の Run ---
@@ -164,7 +151,7 @@ private fun ProjectDashboardBody(
                     Text("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(12.dp))
 
             SectionTitle("最近の Run")
             if (d.recentRuns.isEmpty()) {
@@ -176,33 +163,21 @@ private fun ProjectDashboardBody(
             }
         }
     }
-    Spacer(Modifier.height(8.dp))
+    Spacer(Modifier.height(12.dp))
 
     // --- 費用 ---
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             SectionTitle("費用（この Run に紐づく分）")
             Text(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(modifier = Modifier.weight(1f)) {
-                    DetailRow("確定", yenText(d.spend.committedJpy))
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    DetailRow("予約中", yenText(d.spend.reservedJpy))
-                }
-            }
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(modifier = Modifier.weight(1f)) {
-                    DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
-                }
-            }
+            DetailRow("確定", yenText(d.spend.committedJpy))
+            DetailRow("予約中", yenText(d.spend.reservedJpy))
+            DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
+            DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
             DetailRow("合計", yenText(d.spend.totalJpy))
         }
     }
-    Spacer(Modifier.height(8.dp))
+    Spacer(Modifier.height(12.dp))
 
     // --- 最近の活動 ---
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -217,7 +192,7 @@ private fun ProjectDashboardBody(
             }
         }
     }
-    Spacer(Modifier.height(8.dp))
+    Spacer(Modifier.height(12.dp))
 
     // プロジェクトごとのチャット（V53）。kivra Agentへの指示投入用。
     ProjectChatSection(projectId)
@@ -348,7 +323,7 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(8.dp))
             LoadedView(projects) { list ->
                 val choices = drainTargetChoices(list, projectId)
                 if (choices.isEmpty()) {
@@ -368,7 +343,7 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
                             Text(p.name)
                         }
                     }
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(enabled = targetId != null && !busy && !ApiSession.expired, onClick = { dryRun() }) {
                             Text("確認（dry-run）")
@@ -407,7 +382,7 @@ private fun ProjectDrainSection(projectId: String, projectName: String, onNaviga
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(8.dp))
             Button(
                 enabled = canDeleteEmptied(emptied, busy) && !ApiSession.expired,
                 onClick = {
@@ -620,7 +595,7 @@ private fun ProjectOperatorSection(projectId: String) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("リポジトリの対応（運用者のみ）", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(8.dp))
             LoadedList(repos, emptyText = REPO_EMPTY_MESSAGE) { list ->
                 list.forEach { repo ->
                     Row(
@@ -641,7 +616,7 @@ private fun ProjectOperatorSection(projectId: String) {
                     }
                 }
             }
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = repoInput,
@@ -664,9 +639,9 @@ private fun ProjectOperatorSection(projectId: String) {
                 )
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
             ProjectMembersSection(projectId)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
             Text("既存データの振り分け", style = MaterialTheme.typography.titleMedium)
             Text(
                 "プロジェクトが未設定の既存データだけを、repo の対応で振り分けます（全プロジェクトに効きます）。" +
@@ -674,7 +649,7 @@ private fun ProjectOperatorSection(projectId: String) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(enabled = !backfillBusy && !ApiSession.expired, onClick = { dryRun() }) {
                     Text("確認（dry-run）")
@@ -750,46 +725,11 @@ private fun ProjectOperatorSection(projectId: String) {
 @Composable
 private fun ProjectChatSection(projectId: String) {
     val scope = rememberCoroutineScope()
-    // チャットの読み直し。提案の確定・却下の後に増やして、提案の一覧を読み直す(ADR 0023)。
-    var chatReload by remember { mutableStateOf(0) }
-    val chat = rememberLoad(projectId, reload = chatReload) { loadChatSession(projectId) }
+    val chat = rememberLoad(projectId) { loadChatSession(projectId) }
     var inputText by remember { mutableStateOf("") }
     var sendBusy by remember { mutableStateOf(false) }
     var sendNotice by remember { mutableStateOf<ActionNotice?>(null) }
     val keys = remember { IdempotencyKeys() }
-    // 提案(ADR 0023)。確定は確認ダイアログの後、却下は即時。結果はサーバーの固定コードから文言にする。
-    var pendingAction by remember { mutableStateOf<ApiChatAction?>(null) }
-    var actionBusy by remember { mutableStateOf(false) }
-    var actionNotice by remember { mutableStateOf<ActionNotice?>(null) }
-
-    fun runChatAction(action: ApiChatAction, confirm: Boolean) {
-        actionBusy = true
-        actionNotice = null
-        scope.launch {
-            try {
-                val result = if (confirm) {
-                    ApiClient.confirmChatAction(projectId, action.actionId)
-                } else {
-                    ApiClient.dismissChatAction(projectId, action.actionId)
-                }
-                actionNotice = ActionNotice(
-                    chatActionResultText(result.state, result.resultCode),
-                    ok = result.state == "EXECUTED" || result.state == "DISMISSED",
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: ApiException) {
-                actionNotice = ActionNotice(chatActionFailureText(writeFailureOf(e.status)), ok = false)
-            } catch (e: Exception) {
-                actionNotice = ActionNotice(chatActionFailureText(WriteFailure.NETWORK), ok = false)
-            } finally {
-                pendingAction = null
-                actionBusy = false
-                // Read the chat again: a proposal that was resolved, or expired by the server, leaves the list.
-                chatReload++
-            }
-        }
-    }
 
     SectionTitle("チャット（kivra Agentへの指示）")
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -799,30 +739,12 @@ private fun ProjectChatSection(projectId: String) {
                 chat.value == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
                 chat.value!!.messages.isEmpty() -> Text("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else -> {
-                    Column(modifier = Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
-                        chat.value!!.messages.forEach { msg: ApiChatMessage ->
-                            ChatMessageRow(msg)
-                        }
+                    chat.value!!.messages.forEach { msg: ApiChatMessage ->
+                        ChatMessageRow(msg)
                     }
                 }
             }
-            // 提案のカード(サーバーが出したものだけ。AI や閲覧者には届かない)
-            chat.value?.actions?.forEach { action ->
-                ChatActionCard(
-                    action = action,
-                    enabled = !actionBusy && !ApiSession.expired,
-                    onConfirm = { pendingAction = action },
-                    onDismiss = { runChatAction(action, confirm = false) },
-                )
-            }
-            actionNotice?.let { n ->
-                Text(
-                    n.text,
-                    color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-            }
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(8.dp))
             // 入力エリア
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
@@ -884,47 +806,6 @@ private fun ProjectChatSection(projectId: String) {
                     color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp),
                 )
-            }
-        }
-    }
-    pendingAction?.let { action ->
-        ReasonDialog(
-            title = CHAT_ACTION_CONFIRM_TITLE,
-            message = chatActionConfirmMessage(action.label, action.code),
-            submitLabel = chatActionConfirmButtonText(action.code),
-            reasonLabel = null,
-            busy = actionBusy,
-            errorText = null,
-            onSubmit = { runChatAction(action, confirm = true) },
-            onDismiss = { if (!actionBusy) pendingAction = null },
-        )
-    }
-}
-
-/**
- * 1件の提案のカード。ラベルはサーバーの固定文言。確定は確認の後(呼び出し側)、「提案を閉じる」は提案を隠すだけで Task は変えない(ADR 0023)。
- * 承認の提案は、対象の Task 名を AI が書いた文章として、プレーンテキストで出す(指示としては扱わない)。
- */
-@Composable
-private fun ChatActionCard(action: ApiChatAction, enabled: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            Text("提案: ${action.label}", style = MaterialTheme.typography.bodyMedium)
-            action.detail?.let { detail ->
-                Spacer(Modifier.height(4.dp))
-                Text(detail.reasonText, style = MaterialTheme.typography.bodySmall)
-                Text(
-                    CHAT_ACTION_TASK_TITLE_CAPTION,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(detail.taskTitle, style = MaterialTheme.typography.bodyMedium)
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(enabled = enabled, onClick = onConfirm) { Text(chatActionConfirmButtonText(action.code)) }
-                Spacer(Modifier.width(8.dp))
-                OutlinedButton(enabled = enabled, onClick = onDismiss) { Text(CHAT_ACTION_DISMISS_BUTTON_TEXT) }
             }
         }
     }

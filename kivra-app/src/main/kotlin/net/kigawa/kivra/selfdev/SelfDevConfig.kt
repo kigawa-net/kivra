@@ -57,6 +57,6 @@ data class SelfDevConfig(
         require(maxContextFiles >= 0) { "maxContextFiles must not be negative" }
         require(maxContextFileBytes > 0) { "maxContextFileBytes must be positive" }
         require(maxContextTotalBytes > 0) { "maxContextTotalBytes must be positive" }
-        require(autoTestRequiredChecks.isNotEmpty()) { "autoTestRequiredChecks must not be empty when autoTestEnabled" }
+        require(!autoTestEnabled || autoTestRequiredChecks.isNotEmpty()) { "autoTestRequiredChecks must not be empty when autoTestEnabled" }
     }
 }

@@ -95,6 +95,7 @@ class ProjectChatActionRoutesTest {
     private fun enabledAutopilot(): AutopilotSettings = AutopilotSettings.fromEnv(
         mapOf(
             AutopilotSettings.ENV_ENABLED to "true",
+            "KIVRA_SELFDEV_AUTOTEST_ENABLED" to "false",
             "KIVRA_AGENT_API_ENABLED" to "true",
             "KIVRA_FX_USD_JPY" to "150",
             "KIVRA_FX_AS_OF" to "2026-10-18",
@@ -111,6 +112,7 @@ class ProjectChatActionRoutesTest {
                 "KIVRA_FX_USD_JPY" to "150",
                 "KIVRA_FX_AS_OF" to "2026-10-18",
                 "KIVRA_SELFDEV_RUNTIME" to "cli",
+                "KIVRA_SELFDEV_AUTOTEST_ENABLED" to "false",
                 "KIVRA_AGENT_API_ENABLED" to "true",
             ),
         ),

@@ -646,8 +646,6 @@ private fun ProjectOperatorSection(projectId: String) {
             Spacer(Modifier.height(16.dp))
             ProjectMembersSection(projectId)
             Spacer(Modifier.height(16.dp))
-            SelectableText("既存データの振り分け", style = MaterialTheme.typography.titleMedium)
-            SelectableText(
             Text("既存データの振り分け", style = MaterialTheme.typography.titleMedium)
             Text(
                 "プロジェクトが未設定の既存データだけを、repo の対応で振り分けます（全プロジェクトに効きます）。" +

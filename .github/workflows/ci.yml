@@ -22,7 +22,6 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v4
-        with:
 
       # 為替更新スクリプト(標準ライブラリだけ。ネットワークは使わない)。
       - name: Test fx-refresh.py
@@ -72,7 +71,6 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v4
-        with:
 
       # MariaDB 11: the same suite, including Flyway migration, unique / lease / transaction / Outbox concurrency.
       # Each test creates and drops its own schema (see TestDb).

@@ -131,14 +131,12 @@ private fun ProjectDashboardBody(
     d.project.description?.takeIf { it.isNotBlank() }?.let { description ->
         SelectableText(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    Spacer(Modifier.height(4.dp))
+    Spacer(Modifier.height(2.dp))
     SelectableText(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Text(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Spacer(Modifier.height(8.dp))
+    Spacer(Modifier.height(4.dp))
     // このプロジェクトの項目への入口(サイドナビからはここへ移した)。
     ProjectLinks(links, approvalsBadge, Route.ProjectPage(projectId, NavDestination.Dashboard), onNavigate)
-    Spacer(Modifier.height(12.dp))
-
+    Spacer(Modifier.height(8.dp))
 
     // --- Run 関連：状態別件数 + 最近の Run ---
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -172,7 +170,6 @@ private fun ProjectDashboardBody(
         Column(modifier = Modifier.padding(16.dp)) {
             SectionTitle("費用（この Run に紐づく分）")
             SelectableText(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             DetailRow("確定", yenText(d.spend.committedJpy))
             DetailRow("予約中", yenText(d.spend.reservedJpy))
             DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
@@ -648,8 +645,6 @@ private fun ProjectOperatorSection(projectId: String) {
             Spacer(Modifier.height(16.dp))
             SelectableText("既存データの振り分け", style = MaterialTheme.typography.titleMedium)
             SelectableText(
-            Text("既存データの振り分け", style = MaterialTheme.typography.titleMedium)
-            Text(
                 "プロジェクトが未設定の既存データだけを、repo の対応で振り分けます（全プロジェクトに効きます）。" +
                     "すでにプロジェクトを持つ行は変わりません。対応がない行は未設定のままです。まず確認（dry-run）をしてください。",
                 style = MaterialTheme.typography.bodySmall,

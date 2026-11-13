@@ -6,6 +6,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,14 +44,14 @@ fun BudgetScreen() {
     val loaded = rememberLoad(Unit, reloadKey) { BudgetRead(loadBudgetOrHidden()) }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        Text("予算", style = MaterialTheme.typography.headlineSmall)
+        SelectableText("予算", style = MaterialTheme.typography.headlineSmall)
         notice?.let { n ->
             Spacer(modifier = Modifier.height(8.dp))
-            Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+            SelectableText(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
         }
         Spacer(modifier = Modifier.height(16.dp))
 
-        loaded.error?.let { Text("エラー: $it", color = MaterialTheme.colorScheme.error) }
+        loaded.error?.let { SelectableText("エラー: $it", color = MaterialTheme.colorScheme.error) }
         val b = loaded.value?.budget
         if (b == null) {
             // 読み込み中だけスピナー。見せない利用者(401 / 403 / 404)は何も出さない。
@@ -60,10 +61,10 @@ fun BudgetScreen() {
             val used = b.usedValue
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("月: ${b.period}（JST の暦月。上限は月ごとに数えます）", style = MaterialTheme.typography.titleMedium)
+                    SelectableText("月: ${b.period}（JST の暦月。上限は月ごとに数えます）", style = MaterialTheme.typography.titleMedium)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Text("今月の使用額（確定と予約中の合計）", style = MaterialTheme.typography.bodySmall)
+                    SelectableText("今月の使用額（確定と予約中の合計）", style = MaterialTheme.typography.bodySmall)
                     LinearProgressIndicator(
                         progress = if (limit != null && used != null && limit > 0) {
                             (used / limit).coerceIn(0.0, 1.0).toFloat()
@@ -74,12 +75,12 @@ fun BudgetScreen() {
                     )
                     // 超過は文字でも示す(色だけに頼らない)。旧 UI の budget-bar-text と同じ。
                     val over = b.remainingJpy.toDoubleOrNull()?.let { it < 0 } == true
-                    Text(
+                    SelectableText(
                         budgetSummaryText(b),
                         color = if (over) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                     )
-                    Text("確定(API): ${moneyText(b.paths.api.committedJpy)} / 確定(CLI): ${moneyText(b.paths.cli.committedJpy)}")
-                    Text("未確定の予約: ${b.unpricedCount} 件")
+                    SelectableText("確定(API): ${moneyText(b.paths.api.committedJpy)} / 確定(CLI): ${moneyText(b.paths.cli.committedJpy)}")
+                    SelectableText("未確定の予約: ${b.unpricedCount} 件")
                 }
             }
             BudgetFxNotice()
@@ -143,8 +144,8 @@ private fun UnpricedReservationsSection(
     mayRelease: Boolean,
     onRelease: (ApiUnpricedReservation) -> Unit,
 ) {
-    Text("未確定の予約", style = MaterialTheme.typography.titleMedium)
-    Text(
+    SelectableText("未確定の予約", style = MaterialTheme.typography.titleMedium)
+    SelectableText(
         if (budget.unpricedCount == 0L) {
             "未確定の予約はありません。"
         } else {
@@ -155,16 +156,16 @@ private fun UnpricedReservationsSection(
     budget.unpriced.forEach { row ->
         Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("${reservationLabel(row.reservationKey)}（${budgetPathLabel(row.path)}）", style = MaterialTheme.typography.titleSmall)
+                SelectableText("${reservationLabel(row.reservationKey)}（${budgetPathLabel(row.path)}）", style = MaterialTheme.typography.titleSmall)
                 Spacer(modifier = Modifier.height(4.dp))
-                Text("金額 ${row.amountJpy} 円、期間 ${row.period}、状態 ${row.state}", style = MaterialTheme.typography.bodySmall)
-                Text("理由: ${BUDGET_REASON_TEXT[row.reason] ?: row.reason}", style = MaterialTheme.typography.bodySmall)
-                if (mayRelease) OutlinedButton(onClick = { onRelease(row) }) { Text("解除…") }
+                SelectableText("金額 ${row.amountJpy} 円、期間 ${row.period}、状態 ${row.state}", style = MaterialTheme.typography.bodySmall)
+                SelectableText("理由: ${BUDGET_REASON_TEXT[row.reason] ?: row.reason}", style = MaterialTheme.typography.bodySmall)
+                if (mayRelease) OutlinedButton(onClick = { onRelease(row) }) { SelectableText("解除…") }
             }
         }
     }
     if (budget.unpricedCount > budget.unpriced.size) {
-        Text(
+        SelectableText(
             "一覧は ${budget.unpriced.size} 件までです。残りは runbook §6.13 の SQL で確認してください。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

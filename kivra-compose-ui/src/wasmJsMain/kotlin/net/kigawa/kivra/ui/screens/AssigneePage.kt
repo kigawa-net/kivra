@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -178,29 +179,29 @@ fun AssigneesScreen(selectedProjectId: String? = null) {
     }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        Text("担当", style = MaterialTheme.typography.headlineSmall)
+        SelectableText("担当", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(8.dp))
 
         if (!visible) {
-            Text("この画面は、担当の管理の権限がある人だけが見られます。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SelectableText("この画面は、担当の管理の権限がある人だけが見られます。", color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
             writer.notice?.let { n ->
-                Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                SelectableText(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                 Spacer(modifier = Modifier.height(8.dp))
             }
             loaded.value?.let { list ->
-                Text("担当: ${list.size} 件", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectableText("担当: ${list.size} 件", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
 
             // 作成の欄。
             Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text("担当を作る", style = MaterialTheme.typography.titleMedium)
+                    SelectableText("担当を作る", style = MaterialTheme.typography.titleMedium)
                     OutlinedTextField(
                         value = nameInput,
                         onValueChange = { nameInput = it },
-                        label = { Text("表示名（1〜$ASSIGNEE_NAME_MAX 文字）") },
-                        supportingText = { Text("${codePointCount(nameInput)} / $ASSIGNEE_NAME_MAX") },
+                        label = { SelectableText("表示名（1〜$ASSIGNEE_NAME_MAX 文字）") },
+                        supportingText = { SelectableText("${codePointCount(nameInput)} / $ASSIGNEE_NAME_MAX") },
                         singleLine = true,
                         enabled = !writer.busy,
                         modifier = Modifier.fillMaxWidth(),
@@ -241,7 +242,7 @@ fun AssigneesScreen(selectedProjectId: String? = null) {
                             }
                         },
                         enabled = !writer.busy,
-                    ) { Text("担当を作る") }
+                    ) { SelectableText("担当を作る") }
                 }
             }
 
@@ -283,19 +284,19 @@ fun AssigneesScreen(selectedProjectId: String? = null) {
 private fun AssigneeRow(a: ApiAssignee, open: Boolean, writer: AssigneeWriter, onToggle: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(a.displayName, style = MaterialTheme.typography.titleMedium)
-            Text(
+            SelectableText(a.displayName, style = MaterialTheme.typography.titleMedium)
+            SelectableText(
                 "ロール: ${a.role} | 状態: ${assigneeStateLabel(a.state)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text(
+            SelectableText(
                 "メンバー: ${assigneeCountText(a.memberCount)} 人 | 有効なトークン: ${assigneeCountText(a.activeTokenCount)} 個",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(modifier = Modifier.height(4.dp))
-            OutlinedButton(onClick = onToggle) { Text(if (open) "閉じる" else "詳細") }
+            OutlinedButton(onClick = onToggle) { SelectableText(if (open) "閉じる" else "詳細") }
             if (open) {
                 AssigneeDetail(a = a, writer = writer)
             }
@@ -322,7 +323,7 @@ private fun AssigneeDetailBody(a: ApiAssignee, detail: ApiAssigneeDetail, writer
     val roleOptions: List<Pair<String?, String>> = ASSIGNEE_ROLES.map { it to (assigneeRoleLabel(it) ?: it) }
 
     // ロールと状態。
-    Text("ロールと状態", style = MaterialTheme.typography.titleSmall)
+    SelectableText("ロールと状態", style = MaterialTheme.typography.titleSmall)
     Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OptionPicker(
             label = "ロール",
@@ -331,28 +332,28 @@ private fun AssigneeDetailBody(a: ApiAssignee, detail: ApiAssigneeDetail, writer
             onSelect = { roleChoice = it },
             enabled = !busy,
         )
-        OutlinedButton(onClick = { askRoleChange(a, roleChoice, writer) }, enabled = !busy) { Text("ロールを変更…") }
+        OutlinedButton(onClick = { askRoleChange(a, roleChoice, writer) }, enabled = !busy) { SelectableText("ロールを変更…") }
         val active = a.state == "ACTIVE"
         OutlinedButton(onClick = { writer.ask(stateChange(a, enable = !active)) }, enabled = !busy) {
-            Text(if (active) "担当を無効にする…" else "担当を有効にする…")
+            SelectableText(if (active) "担当を無効にする…" else "担当を有効にする…")
         }
     }
 
     // メンバー。
     Spacer(modifier = Modifier.height(8.dp))
-    Text("メンバー（この担当として入れる人）", style = MaterialTheme.typography.titleSmall)
+    SelectableText("メンバー（この担当として入れる人）", style = MaterialTheme.typography.titleSmall)
     if (detail.memberRefs.isEmpty()) {
-        Text("紐付いている人はいません。", style = MaterialTheme.typography.bodySmall)
+        SelectableText("紐付いている人はいません。", style = MaterialTheme.typography.bodySmall)
     }
     detail.memberRefs.forEach { ref ->
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("参照: ${assigneeRefShort(ref)}", style = MaterialTheme.typography.bodySmall)
+            SelectableText("参照: ${assigneeRefShort(ref)}", style = MaterialTheme.typography.bodySmall)
             Spacer(modifier = Modifier.width(8.dp))
-            OutlinedButton(onClick = { writer.ask(memberUnbind(id, ref)) }, enabled = !busy) { Text("解除…") }
+            OutlinedButton(onClick = { writer.ask(memberUnbind(id, ref)) }, enabled = !busy) { SelectableText("解除…") }
         }
     }
     if (!canBindAssigneeMember(a.role)) {
-        Text(
+        SelectableText(
             "AI_APPROVER の担当には、人（Keycloak の sub）を紐付けられません。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -362,7 +363,7 @@ private fun AssigneeDetailBody(a: ApiAssignee, detail: ApiAssigneeDetail, writer
         OutlinedTextField(
             value = sub,
             onValueChange = { sub = it },
-            label = { Text("Keycloak の sub（入力した値は、送ったあとに消えます。画面には表示しません）") },
+            label = { SelectableText("Keycloak の sub（入力した値は、送ったあとに消えます。画面には表示しません）") },
             singleLine = true,
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
@@ -390,31 +391,31 @@ private fun AssigneeDetailBody(a: ApiAssignee, detail: ApiAssigneeDetail, writer
                 }
             },
             enabled = !busy,
-        ) { Text("紐付ける…") }
+        ) { SelectableText("紐付ける…") }
     }
 
     // トークン(AI と VIEWER で、有効な担当だけ発行できる)。
     Spacer(modifier = Modifier.height(8.dp))
-    Text("トークン", style = MaterialTheme.typography.titleSmall)
+    SelectableText("トークン", style = MaterialTheme.typography.titleSmall)
     when {
-        !canIssueAssigneeToken(a.role, "ACTIVE") -> Text(
+        !canIssueAssigneeToken(a.role, "ACTIVE") -> SelectableText(
             "このロールの担当は、トークンを持てません（AI と VIEWER だけです）。",
             style = MaterialTheme.typography.bodySmall,
         )
-        a.state != "ACTIVE" -> Text("無効な担当には、トークンを発行できません。", style = MaterialTheme.typography.bodySmall)
+        a.state != "ACTIVE" -> SelectableText("無効な担当には、トークンを発行できません。", style = MaterialTheme.typography.bodySmall)
         else -> Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = ttlInput,
                 onValueChange = { ttlInput = it },
-                label = { Text("有効期限（日数、1〜$ASSIGNEE_TTL_MAX_DAYS）") },
+                label = { SelectableText("有効期限（日数、1〜$ASSIGNEE_TTL_MAX_DAYS）") },
                 singleLine = true,
                 enabled = !busy,
             )
-            OutlinedButton(onClick = { askIssue(id, ttlInput, writer) }, enabled = !busy) { Text("トークンを発行…") }
+            OutlinedButton(onClick = { askIssue(id, ttlInput, writer) }, enabled = !busy) { SelectableText("トークンを発行…") }
         }
     }
     if (detail.tokens.isEmpty()) {
-        Text("トークンはありません。", style = MaterialTheme.typography.bodySmall)
+        SelectableText("トークンはありません。", style = MaterialTheme.typography.bodySmall)
     }
     detail.tokens.forEach { t -> TokenRow(assigneeId = id, token = t, enabled = !busy, writer = writer) }
 }
@@ -423,13 +424,13 @@ private fun AssigneeDetailBody(a: ApiAssignee, detail: ApiAssigneeDetail, writer
 @Composable
 private fun TokenRow(assigneeId: String, token: ApiAssigneeToken, enabled: Boolean, writer: AssigneeWriter) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
+        SelectableText(
             "参照: ${assigneeRefShort(token.tokenRef)} | ${assigneeTokenStateLabel(token.status)} | 期限: ${localDateTimeText(token.expiresAt)}",
             style = MaterialTheme.typography.bodySmall,
         )
         if (token.status == "ACTIVE") {
             Spacer(modifier = Modifier.width(8.dp))
-            OutlinedButton(onClick = { writer.ask(tokenRevoke(assigneeId, token.tokenRef)) }, enabled = enabled) { Text("失効…") }
+            OutlinedButton(onClick = { writer.ask(tokenRevoke(assigneeId, token.tokenRef)) }, enabled = enabled) { SelectableText("失効…") }
         }
     }
 }
@@ -529,31 +530,31 @@ private fun IssuedTokenDialog(token: ApiIssuedToken, onClose: () -> Unit) {
     var copyNote by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text("発行したトークン") },
+        title = { SelectableText("発行したトークン") },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                Text(
+                SelectableText(
                     "参照: ${assigneeRefShort(token.tokenRef)}、期限: ${localDateTimeText(token.expiresAt)}",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(ASSIGNEE_TOKEN_ONCE_TEXT, style = MaterialTheme.typography.bodySmall)
+                SelectableText(ASSIGNEE_TOKEN_ONCE_TEXT, style = MaterialTheme.typography.bodySmall)
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
                     value = token.token,
                     onValueChange = {},
                     readOnly = true,
-                    label = { Text("トークン（読み取り専用）") },
+                    label = { SelectableText("トークン（読み取り専用）") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (copyNote.isNotEmpty()) {
-                    Text(copyNote, style = MaterialTheme.typography.bodySmall)
+                    SelectableText(copyNote, style = MaterialTheme.typography.bodySmall)
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onClose) { Text("閉じる（二度と表示されません）") }
+            TextButton(onClick = onClose) { SelectableText("閉じる（二度と表示されません）") }
         },
         dismissButton = {
             TextButton(
@@ -564,7 +565,7 @@ private fun IssuedTokenDialog(token: ApiIssuedToken, onClose: () -> Unit) {
                         onFail = { copyNote = "コピーできませんでした。入力欄を選択して、手動でコピーしてください。" },
                     )
                 },
-            ) { Text("コピー") }
+            ) { SelectableText("コピー") }
         },
     )
 }

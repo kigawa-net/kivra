@@ -44,6 +44,8 @@ subprojects {
             // The H2 suite of kivra-app shares one test JVM and reached the Gradle default (512m) in CI (OutOfMemoryError in
             // the test executor). The default is too tight for the whole suite, so give each test JVM headroom.
             maxHeapSize = "1g"
+            // テスト並列実行: kivra-app(1940件)のテスト時間を短縮
+            maxParallelForks = 2
         }
     }
 }

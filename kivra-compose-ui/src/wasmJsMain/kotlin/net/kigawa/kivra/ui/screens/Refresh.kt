@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -68,13 +69,13 @@ internal fun <T> rememberLoad(identity: Any?, reload: Int = 0, load: suspend () 
 @Composable
 internal fun <T> ColumnScope.LoadedList(state: Loaded<List<T>>, emptyText: String, content: @Composable ColumnScope.(List<T>) -> Unit) {
     state.error?.let {
-        Text("エラー: $it", color = MaterialTheme.colorScheme.error)
+        SelectableText("エラー: $it", color = MaterialTheme.colorScheme.error)
         Spacer(Modifier.height(8.dp))
     }
     val items = state.value
     when {
         items == null -> if (state.error == null) CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-        items.isEmpty() -> Text(emptyText)
+        items.isEmpty() -> SelectableText(emptyText)
         else -> content(items)
     }
 }
@@ -82,7 +83,7 @@ internal fun <T> ColumnScope.LoadedList(state: Loaded<List<T>>, emptyText: Strin
 /** 詳細の表示。読み込み中はスピナー、失敗の文言は上に出し、読めていた値は残す。 */
 @Composable
 internal fun <T> LoadedView(state: Loaded<T>, content: @Composable (T) -> Unit) {
-    state.error?.let { Text("エラー: $it", color = MaterialTheme.colorScheme.error) }
+    state.error?.let { SelectableText("エラー: $it", color = MaterialTheme.colorScheme.error) }
     val value = state.value
     if (value != null) {
         content(value)

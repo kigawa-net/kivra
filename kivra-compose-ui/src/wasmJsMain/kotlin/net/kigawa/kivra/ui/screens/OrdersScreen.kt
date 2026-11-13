@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,7 +57,7 @@ fun OrdersScreen(projectId: String, onNavigate: (Route) -> Unit) {
     val perms = LocalCallerPermissions.current
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("order", style = MaterialTheme.typography.headlineSmall)
+        SelectableText("order", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
         if (isUnassigned(projectId)) {
@@ -90,24 +91,24 @@ private fun OrderCard(row: OrderTreeRow, onClick: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth().padding(start = 8.dp + indent, end = 8.dp, top = 8.dp, bottom = 8.dp).clickable(onClick = onClick)) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("order ${order.orderId}", style = MaterialTheme.typography.titleMedium)
-                AssistChip(onClick = { }, label = { Text("状態: ${st.label}") })
+                SelectableText("order ${order.orderId}", style = MaterialTheme.typography.titleMedium)
+                AssistChip(onClick = { }, label = { SelectableText("状態: ${st.label}") })
             }
             Spacer(modifier = Modifier.height(4.dp))
-            Text("深さ: ${order.depth} | 子の数: ${order.childCount}",
+            SelectableText("深さ: ${order.depth} | 子の数: ${order.childCount}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("使用: ${yenText(order.spentJpy)} / 予算: ${yenText(order.orderBudgetJpy)}",
+            SelectableText("使用: ${yenText(order.spentJpy)} / 予算: ${yenText(order.orderBudgetJpy)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("周: ${order.cyclesStarted} / ${order.maxCycles} | 連続して失敗した周: ${order.consecutiveFailedCycles}",
+            SelectableText("周: ${order.cyclesStarted} / ${order.maxCycles} | 連続して失敗した周: ${order.consecutiveFailedCycles}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("期限: ${displayTime(order.expiresAt)}",
+            SelectableText("期限: ${displayTime(order.expiresAt)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (reason != null) {
-                Text("理由: $reason",
+                SelectableText("理由: $reason",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -170,11 +171,11 @@ fun ApprovalsScreen(projectId: String) {
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("承認", style = MaterialTheme.typography.headlineSmall)
+        SelectableText("承認", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
         notice?.let { n ->
-            Text(
+            SelectableText(
                 n.text,
                 color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(bottom = 8.dp),
@@ -187,12 +188,12 @@ fun ApprovalsScreen(projectId: String) {
                     val digestOk = isValidStopDigest(approval.digest)
                     Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text("対象の order: ${approval.orderId}", style = MaterialTheme.typography.titleMedium)
+                            SelectableText("対象の order: ${approval.orderId}", style = MaterialTheme.typography.titleMedium)
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text("理由: ${orderCodeText(STOP_REASONS, approval.reasonCode)}",
+                            SelectableText("理由: ${orderCodeText(STOP_REASONS, approval.reasonCode)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("要求した主体: ${requesterKindText(approval.requesterKind)} | 要求の時刻: ${displayTime(approval.createdAt)} | 期限: ${displayTime(approval.expiresAt)}",
+                            SelectableText("要求した主体: ${requesterKindText(approval.requesterKind)} | 要求の時刻: ${displayTime(approval.createdAt)} | 期限: ${displayTime(approval.expiresAt)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             // 承認・却下は STOP_DECIDE の人だけ出す(旧 UI と同じ。サーバーも 403 で拒否する)。
@@ -205,7 +206,7 @@ fun ApprovalsScreen(projectId: String) {
                                         pendingApprove = approval
                                     },
                                 ) {
-                                    Text("承認")
+                                    SelectableText("承認")
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
                                 OutlinedButton(
@@ -219,7 +220,7 @@ fun ApprovalsScreen(projectId: String) {
                                         }
                                     },
                                 ) {
-                                    Text("拒否")
+                                    SelectableText("拒否")
                                 }
                             }
                         }

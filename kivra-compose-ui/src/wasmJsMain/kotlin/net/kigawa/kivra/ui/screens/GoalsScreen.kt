@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,7 +59,7 @@ fun GoalsScreen(projectId: String, onNavigate: (Route) -> Unit) {
     val read = autopilot.value ?: GoalAutopilot(AutopilotAvailability.LOADING, null)
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("開発目標", style = MaterialTheme.typography.headlineSmall)
+        SelectableText("開発目標", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(16.dp))
 
         if (isUnassigned(projectId)) {
@@ -82,13 +83,13 @@ fun GoalsScreen(projectId: String, onNavigate: (Route) -> Unit) {
                         val reason = goal.stateReason?.takeIf { it.isNotEmpty() }?.let { goalReasonText(it) }
                         Card(modifier = Modifier.fillMaxWidth().padding(8.dp).clickable { onNavigate(Route.GoalDetail(goal.taskId)) }) {
                             Column(modifier = Modifier.padding(16.dp)) {
-                                Text(goal.title, style = MaterialTheme.typography.titleMedium)
+                                SelectableText(goal.title, style = MaterialTheme.typography.titleMedium)
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Text("状態: ${st.label}",
+                                SelectableText("状態: ${st.label}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 if (reason != null) {
-                                    Text("理由: $reason",
+                                    SelectableText("理由: $reason",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
@@ -168,7 +169,7 @@ private fun GoalFormCard(projectId: String, targetRepo: String?, onSubmitted: ()
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
+            SelectableText(
                 "kivra が Goal から開発タスクを作り、承認したタスクだけを Run として投入します。PR のマージは人が行います。" +
                     "対象リポジトリ: ${targetRepo ?: "（未設定）"}（画面からは変えられません）。",
                 style = MaterialTheme.typography.bodySmall,
@@ -178,7 +179,7 @@ private fun GoalFormCard(projectId: String, targetRepo: String?, onSubmitted: ()
             OutlinedTextField(
                 value = title,
                 onValueChange = { title = it },
-                label = { Text("目的（1〜200 文字）") },
+                label = { SelectableText("目的（1〜200 文字）") },
                 enabled = !blocked,
                 isError = codePointCount(title) > TASK_TITLE_MAX,
                 supportingText = { CounterText(codePointCount(title), TASK_TITLE_MAX) },
@@ -188,7 +189,7 @@ private fun GoalFormCard(projectId: String, targetRepo: String?, onSubmitted: ()
             OutlinedTextField(
                 value = body,
                 onValueChange = { body = it },
-                label = { Text("背景・制約・受け入れ条件（任意、0〜8000 文字）") },
+                label = { SelectableText("背景・制約・受け入れ条件（任意、0〜8000 文字）") },
                 enabled = !blocked,
                 isError = codePointCount(body) > TASK_BODY_MAX,
                 supportingText = { CounterText(codePointCount(body), TASK_BODY_MAX) },
@@ -203,13 +204,13 @@ private fun GoalFormCard(projectId: String, targetRepo: String?, onSubmitted: ()
                 enabled = !blocked,
                 modifier = Modifier.align(Alignment.End),
             ) {
-                Text("Goal を送る")
+                SelectableText("Goal を送る")
             }
             if (ApiSession.expired) {
-                Text(SESSION_EXPIRED_MESSAGE, color = MaterialTheme.colorScheme.error)
+                SelectableText(SESSION_EXPIRED_MESSAGE, color = MaterialTheme.colorScheme.error)
             }
             result?.let { (text, ok) ->
-                Text(
+                SelectableText(
                     text,
                     color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 )

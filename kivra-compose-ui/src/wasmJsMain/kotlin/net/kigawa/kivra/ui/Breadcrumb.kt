@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -23,13 +24,13 @@ fun Breadcrumb(crumbs: List<Crumb>, onNavigate: (Route) -> Unit, modifier: Modif
         verticalArrangement = Arrangement.Center,
     ) {
         crumbs.forEachIndexed { index, crumb ->
-            if (index > 0) Text(" › ", style = MaterialTheme.typography.bodyLarge)
+            if (index > 0) SelectableText(" › ", style = MaterialTheme.typography.bodyLarge)
             val target = crumb.route
             if (target == null) {
-                Text(crumb.label, style = MaterialTheme.typography.titleMedium)
+                SelectableText(crumb.label, style = MaterialTheme.typography.titleMedium)
             } else {
                 TextButton(onClick = { onNavigate(target) }) {
-                    Text(crumb.label, style = MaterialTheme.typography.bodyLarge)
+                    SelectableText(crumb.label, style = MaterialTheme.typography.bodyLarge)
                 }
             }
         }

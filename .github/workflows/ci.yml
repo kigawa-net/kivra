@@ -22,6 +22,8 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-cache: true
 
       # 為替更新スクリプト(標準ライブラリだけ。ネットワークは使わない)。
       - name: Test fx-refresh.py
@@ -29,11 +31,11 @@ jobs:
 
       # H2 (MODE=MySQL): fast tests without external services.
       - name: Test (H2)
-        run: ./gradlew test --no-daemon --stacktrace
+        run: ./gradlew test
 
       # build は直前の test の結果を再利用する(H2 の設定のまま)。
       - name: Build
-        run: ./gradlew build --no-daemon
+        run: ./gradlew build
 
       - name: Upload test reports
         if: always()
@@ -71,6 +73,8 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-cache: true
 
       # MariaDB 11: the same suite, including Flyway migration, unique / lease / transaction / Outbox concurrency.
       # Each test creates and drops its own schema (see TestDb).
@@ -82,7 +86,7 @@ jobs:
           KIVRA_TEST_MARIADB_USER: root
           KIVRA_TEST_MARIADB_PASSWORD: test
           KIVRA_TEST_SHARD: ${{ matrix.shard }}
-        run: ./gradlew :kivra-app:test --rerun --no-daemon --stacktrace
+        run: ./gradlew :kivra-app:test --rerun
 
       - name: Upload test reports
         if: always()

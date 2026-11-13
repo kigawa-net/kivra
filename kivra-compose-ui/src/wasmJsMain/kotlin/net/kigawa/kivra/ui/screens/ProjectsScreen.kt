@@ -15,6 +15,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -63,10 +64,10 @@ fun ProjectsScreen(notice: String?, onNavigate: (Route) -> Unit, onProjectsChang
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
+        SelectableText("プロジェクト", style = MaterialTheme.typography.headlineSmall)
         notice?.let {
             Spacer(modifier = Modifier.height(8.dp))
-            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+            SelectableText(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
         }
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -90,15 +91,15 @@ fun ProjectsScreen(notice: String?, onNavigate: (Route) -> Unit, onProjectsChang
                             onNavigate(Route.ProjectPage(project.projectId, landingPageOf(project.projectId)))
                         }) {
                             Column(modifier = Modifier.padding(16.dp)) {
-                                Text(project.name, style = MaterialTheme.typography.titleMedium)
+                                SelectableText(project.name, style = MaterialTheme.typography.titleMedium)
                                 project.description?.takeIf { it.isNotBlank() }?.let { description ->
                                     Spacer(modifier = Modifier.height(4.dp))
-                                    Text(description,
+                                    SelectableText(description,
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Text(
+                                SelectableText(
                                     summaryLine(summaries.value?.get(project.projectId)),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -126,14 +127,14 @@ private fun UnassignedCard(onNavigate: (Route) -> Unit) {
         onNavigate(Route.ProjectPage(UNASSIGNED_PROJECT_ID, NavDestination.Tasks))
     }) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(UNASSIGNED_LABEL, style = MaterialTheme.typography.titleMedium)
-            Text(
+            SelectableText(UNASSIGNED_LABEL, style = MaterialTheme.typography.titleMedium)
+            SelectableText(
                 "プロジェクトに属さない既存のデータ(Run・開発目標・order・記憶)。作成はできません。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
+            SelectableText(
                 if (s?.unassignedRows == 0) "未分類のデータはありません" else summaryLine(s),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -199,12 +200,12 @@ private fun ProjectCreateCard(onCreated: () -> Unit) {
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("新しいプロジェクト", style = MaterialTheme.typography.titleMedium)
+            SelectableText("新しいプロジェクト", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("名前（1〜100 文字）") },
+                label = { SelectableText("名前（1〜100 文字）") },
                 enabled = !blocked,
                 singleLine = true,
                 isError = name.length > PROJECT_NAME_MAX,
@@ -215,7 +216,7 @@ private fun ProjectCreateCard(onCreated: () -> Unit) {
             OutlinedTextField(
                 value = description,
                 onValueChange = { description = it },
-                label = { Text("説明（任意、0〜500 文字）") },
+                label = { SelectableText("説明（任意、0〜500 文字）") },
                 enabled = !blocked,
                 isError = description.length > PROJECT_DESCRIPTION_MAX,
                 supportingText = { CounterText(description.length, PROJECT_DESCRIPTION_MAX) },
@@ -228,13 +229,13 @@ private fun ProjectCreateCard(onCreated: () -> Unit) {
                 enabled = !blocked && nameOk && descriptionOk,
                 modifier = Modifier.align(Alignment.End),
             ) {
-                Text("作成")
+                SelectableText("作成")
             }
             if (ApiSession.expired) {
-                Text(SESSION_EXPIRED_MESSAGE, color = MaterialTheme.colorScheme.error)
+                SelectableText(SESSION_EXPIRED_MESSAGE, color = MaterialTheme.colorScheme.error)
             }
             notice?.let { n ->
-                Text(
+                SelectableText(
                     n.text,
                     color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 )

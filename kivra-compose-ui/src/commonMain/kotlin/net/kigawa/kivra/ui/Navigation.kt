@@ -56,18 +56,22 @@ data class NavSection(val title: String?, val items: List<NavItem>)
 
 /**
  * サイドナビ(docs/design/16-site-structure.md §3)。
- * - 最後に: 「全体」の節(全体の予算・FX、自動化、担当)。
- * ホーム・プロジェクト一覧はサイドバーから削除。プロジェクト一覧から選択する。
+ * - 常に: ホーム、プロジェクト一覧。
+ * - 常に最後: 「全体」の節(全体の予算・FX、自動化、担当)。
  * プロジェクト配下の項目は、サイドナビには出さない。プロジェクトの一覧から選び、ダッシュボードのリンク([projectLinkTargets])で開く。
  * 権限や API の結果による出し分けは呼び出し側が行う([CallerPermissions.navVisible] など)。
  */
 fun sidebarSections(): List<NavSection> {
+    val top = NavSection(
+        title = null,
+        items = listOf(NavDestination.Home, NavDestination.Projects).map { NavItem(it, Route.Page(it)) },
+    )
     val global = NavSection(
         title = "全体",
         items = listOf(NavDestination.Budget, NavDestination.Autopilot, NavDestination.Assignees)
             .map { NavItem(it, Route.Page(it)) },
     )
-    return listOf(global)
+    return listOf(top, global)
 }
 
 /**

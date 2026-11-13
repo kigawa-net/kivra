@@ -12,6 +12,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,24 +51,24 @@ fun AutopilotScreen() {
 
     DetailPage {
         notice?.let { n ->
-            Text(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+            SelectableText(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             Spacer(Modifier.height(8.dp))
         }
         LoadedView(state) { status: ApiAutopilot ->
-            Text("自律運転", style = MaterialTheme.typography.headlineSmall)
+            SelectableText("自律運転", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(12.dp))
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
-                    Text(autopilotOverallText(status.paused, status.runsToday, status.maxRunsPerDay))
+                    SelectableText(autopilotOverallText(status.paused, status.runsToday, status.maxRunsPerDay))
                     Spacer(Modifier.height(4.dp))
-                    Text(autoMergeText(status.autoMergePaused))
+                    SelectableText(autoMergeText(status.autoMergePaused))
                     Spacer(Modifier.height(4.dp))
-                    Text("連続失敗: ${status.consecutiveFailures} 件")
+                    SelectableText("連続失敗: ${status.consecutiveFailures} 件")
                     Spacer(Modifier.height(4.dp))
                     DetailRow("対象リポジトリ", status.targetRepo?.takeIf { it.isNotBlank() } ?: "（未設定）")
                     if (status.breakerOpen) {
                         Spacer(Modifier.height(8.dp))
-                        Text(breakerOpenText(status.consecutiveFailures), color = MaterialTheme.colorScheme.error)
+                        SelectableText(breakerOpenText(status.consecutiveFailures), color = MaterialTheme.colorScheme.error)
                     }
                 }
             }
@@ -94,7 +95,7 @@ fun AutopilotScreen() {
                                 },
                             )
                         },
-                    ) { Text(autopilotToggleLabel(status.paused)) }
+                    ) { SelectableText(autopilotToggleLabel(status.paused)) }
                     if (status.breakerOpen) {
                         OutlinedButton(
                             enabled = !gate.busy,
@@ -112,7 +113,7 @@ fun AutopilotScreen() {
                                     },
                                 )
                             },
-                        ) { Text("サーキットブレーカーを手動で再開") }
+                        ) { SelectableText("サーキットブレーカーを手動で再開") }
                     }
                 }
             }

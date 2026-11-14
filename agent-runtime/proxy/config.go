@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 )
@@ -47,6 +48,13 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 			ServiceAccountID:  getenv("KIVRA_PROXY_WIF_SERVICE_ACCOUNT_ID"),
 			WorkspaceID:       getenv("KIVRA_PROXY_WIF_WORKSPACE_ID"),
 		},
+	}
+	if v := getenv("KIVRA_PROXY_KEYCLOAK_ALLOWED_IP"); v != "" {
+		ip := net.ParseIP(v)
+		if ip == nil || ip.IsUnspecified() {
+			return c, errors.New("KIVRA_PROXY_KEYCLOAK_ALLOWED_IP must be one IP address")
+		}
+		c.WIF.KeycloakAllowedIP = ip
 	}
 	switch c.AuthMode {
 	case "wif":

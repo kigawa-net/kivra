@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -24,6 +26,9 @@ type WIFConfig struct {
 	OrganizationID    string
 	ServiceAccountID  string
 	WorkspaceID       string
+	// KeycloakAllowedIP, when set, is the one address the WIF client may use for the Keycloak host on 443
+	// (split-horizon DNS: the cluster resolves the host to an internal LB). nil means unset.
+	KeycloakAllowedIP net.IP
 }
 
 const (
@@ -238,4 +243,64 @@ type exchangeRequest struct {
 	OrganizationID   string `json:"organization_id"`
 	ServiceAccountID string `json:"service_account_id"`
 	WorkspaceID      string `json:"workspace_id,omitempty"`
+}
+
+// dialFunc has the signature of http.Transport.DialContext.
+type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// newWIFHTTPClient returns the client for the WIF calls (Keycloak and the Anthropic token endpoint).
+// Unset: base is returned unchanged. Set: all WIF dials refuse non-public addresses, except that the
+// Keycloak host on 443 may connect to KeycloakAllowedIP. The CONNECT handler and the /anthropic
+// handler never use this client.
+func newWIFHTTPClient(cfg WIFConfig, base *http.Client) (*http.Client, error) {
+	if cfg.KeycloakAllowedIP == nil {
+		return base, nil
+	}
+	if base.Transport != nil {
+		return nil, errors.New("base client must use the default transport")
+	}
+	u, err := url.Parse(cfg.KeycloakTokenURL)
+	if err != nil || u.Hostname() == "" {
+		return nil, errors.New("KIVRA_PROXY_KEYCLOAK_TOKEN_URL is not a valid URL")
+	}
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	plain := (&net.Dialer{Timeout: dialTimeout, Control: rejectNonPublic}).DialContext
+	exact := (&net.Dialer{Timeout: dialTimeout, Control: allowOnlyIP(cfg.KeycloakAllowedIP)}).DialContext
+	t.DialContext = keycloakDialFunc(plain, u.Hostname(), cfg.KeycloakAllowedIP, net.DefaultResolver.LookupIPAddr, exact)
+	c := *base
+	c.Transport = t
+	return &c, nil
+}
+
+// keycloakDialFunc sends a dial to the Keycloak host on 443 to the allowed address only when the host
+// resolves to it. Every other dial, and a host that does not resolve to it, goes to plain.
+// exact dials the allowed address directly; the TLS name still comes from the request URL.
+func keycloakDialFunc(plain dialFunc, host string, allowed net.IP,
+	lookup func(ctx context.Context, host string) ([]net.IPAddr, error), exact dialFunc) dialFunc {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		h, port, err := net.SplitHostPort(addr)
+		if err != nil || port != "443" || !strings.EqualFold(h, host) {
+			return plain(ctx, network, addr)
+		}
+		ips, err := lookup(ctx, h)
+		if err == nil {
+			for _, ip := range ips {
+				if ip.IP.Equal(allowed) {
+					return exact(ctx, network, net.JoinHostPort(allowed.String(), port))
+				}
+			}
+		}
+		return plain(ctx, network, addr)
+	}
+}
+
+// allowOnlyIP is a Control hook that accepts exactly allowed:443 and refuses everything else.
+func allowOnlyIP(allowed net.IP) func(network, address string, _ syscall.RawConn) error {
+	return func(network, address string, _ syscall.RawConn) error {
+		host, port, err := net.SplitHostPort(address)
+		if err == nil && port == "443" && net.ParseIP(host).Equal(allowed) {
+			return nil
+		}
+		return errors.New("destination address is not the keycloak allowed address")
+	}
 }

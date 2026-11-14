@@ -309,3 +309,12 @@ ADR 0010 の決定 3・5・6(docker 引数の不変条件)を、Job のマニフ
 - stub モードで `KIVRA_AGENT_BACKEND=k8s` を指定しても、クラスタには接続しない(backend を組み立てるのは real のときだけ)。stub で起動チェックもしたいなら、別の判断になる。
 - 実行イメージは許可リストに 1 件だけ。CI の成果物のタグをどう固定するか(運用)。
 - `nodeSelector` の label を付けるノードが無いと、Job は `Pending` のまま動かない。運用の手順に入れる。
+
+### 10. プロキシ自身の Keycloak 取得の例外(2026-11-14)
+
+クラスタの CoreDNS は kigawa.net を社内の DNS(10.0.0.53)へ転送する(split-horizon)。そのため `user.kigawa.net` は、クラスタ内では社内 ingress LB の私的 IP `10.0.0.240` に解決され、プロキシの WIF 取得(Keycloak の client_credentials)が NetworkPolicy の except(私的帯域)で拒否される。
+
+- 対応: 設定 `KIVRA_PROXY_KEYCLOAK_ALLOWED_IP`(任意、IP 1 つ、未設定なら従来どおり)。設定したときに限り、プロキシの WIF クライアントだけが、`KIVRA_PROXY_KEYCLOAK_TOKEN_URL` のホストの 443 への接続を、その IP に解決された場合に限って通す。他の WIF の接続は非公開 IP を拒否する。
+- 範囲: **CONNECT には効かない**(許可リストに `user.kigawa.net` を足さない。足すと Job の Pod がプロキシ経由で社内 LB に届く)。`/anthropic` の経路と Anthropic 側の接続も変えない。
+- NetworkPolicy 側の対応は、kigawa-net-k8s の proxy の egress に `10.0.0.240/32` の TCP 443 だけを足す(CONNECT の経路には効かない)。
+- 実装の詳細は `agent-runtime/proxy/wif.go`(`newWIFHTTPClient`)、運用の注意は `agent-runtime/README.md`。

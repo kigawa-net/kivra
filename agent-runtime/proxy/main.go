@@ -44,8 +44,15 @@ func run() error {
 	var auth Authorizer
 	switch cfg.AuthMode {
 	case "wif":
-		auth = NewWIFAuth(cfg.WIF, client, nil)
+		wifClient, err := newWIFHTTPClient(cfg.WIF, client)
+		if err != nil {
+			return err
+		}
+		auth = NewWIFAuth(cfg.WIF, wifClient, nil)
 		logf("auth=wif upstream_host=%s", hostOf(cfg.Upstream))
+		if cfg.WIF.KeycloakAllowedIP != nil {
+			logf("auth=wif keycloak_private_ip_exception=enabled")
+		}
 	case "static-test":
 		auth = StaticAuth{Key: cfg.StaticKey}
 		logf("WARNING auth=static-test (test use only; not for production)")

@@ -60,6 +60,8 @@ proxy の交換手順(`proxy/wif.go`。参考: `kivra-model-gateway/.../Anthropi
 6. 上流が 401 を返したらキャッシュを捨てる。同じリクエストは再送しない。次の呼び出しで交換し直す。
 7. 失敗は固定メッセージだけを返す。JWT、トークン、レスポンス本文、client secret はログにもエラーにも出さない。
 
+**Keycloak の私的 IP の例外(split-horizon DNS)**: クラスタの CoreDNS は kigawa.net を社内 DNS へ転送するため、`user.kigawa.net` が社内 ingress LB の `10.0.0.240` に解決されることがある。`KIVRA_PROXY_KEYCLOAK_ALLOWED_IP=10.0.0.240` を設定すると、WIF クライアントだけが、Keycloak ホストの 443 をその IP へ通す(他の WIF の接続は非公開 IP を拒否する)。未設定なら従来どおり。CONNECT には効かないので、`user.kigawa.net` を `allowlist.txt` に足してはいけない。
+
 **実装言語の選択**: Go の標準ライブラリだけで書いた単一の静的バイナリにしました。WIF の交換は HTTP 2 回と JSON で書け、
 別の sidecar を足す必要がありません。単体試験(`go test`)も標準のまま書けます。nginx や squid では WIF の交換を書けないため除外しました。
 

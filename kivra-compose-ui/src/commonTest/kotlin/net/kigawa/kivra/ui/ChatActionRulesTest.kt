@@ -94,4 +94,22 @@ class ChatActionRulesTest {
         assertEquals("既に処理されています。チャットを読み直してください。", chatActionFailureText(WriteFailure.STALE))
         assertEquals(writeFailureText(WriteFailure.NETWORK), chatActionFailureText(WriteFailure.NETWORK))
     }
+
+    @Test
+    fun theChatAiCodesHaveConfirmTextsAndResultTexts() {
+        assertTrue(chatActionConfirmMessage("order の停止を要求する", "ORDER_STOP_REQUEST").contains("承認者が承認したとき"))
+        assertTrue(chatActionConfirmMessage("メンバーを追加する", "MEMBER_ADD").contains("メンバーに加えます"))
+        val remove = chatActionConfirmMessage("メンバーを削除する", "MEMBER_REMOVE")
+        assertTrue(remove.contains("削除します"))
+        assertTrue(remove.contains("無効化ではなく削除"))
+        assertEquals("確定", chatActionConfirmButtonText("MEMBER_REMOVE"))
+        assertEquals("最後の ADMIN は削除・変更できないため、実行しませんでした。", chatActionResultText("FAILED", "LAST_ADMIN"))
+        assertFalse(chatActionResultText("FAILED", "ASSIGNEE_NOT_FOUND").contains("ASSIGNEE"))
+    }
+
+    @Test
+    fun theMemberLineShowsTheNameOrTheIdAndTheRole() {
+        assertEquals("対象: Tanaka（役割: VIEWER）", chatActionMemberText("01ABC", "Tanaka", "VIEWER"))
+        assertEquals("対象: 01ABC", chatActionMemberText("01ABC", null, null))
+    }
 }

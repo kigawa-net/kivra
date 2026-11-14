@@ -77,11 +77,12 @@ internal val MIGRATION_FILES = mapOf(
     54 to "V54__selfdev_stop_pending_per_tree.sql",
     55 to "V55__project_chat.sql",
     56 to "V56__project_chat_actions.sql",
+    57 to "V57__project_chat_action_targets.sql",
 )
 
 /** The versions applied on the full chain. V22 and V30 are never used on this branch (reserved gaps), so the list skips them. */
 internal val EXPECTED_APPLIED_VERSIONS: List<String> =
-    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56")
+    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57")
 
 /**
  * Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved; V30 is left
@@ -320,6 +321,68 @@ class MigrationChainTest {
             assertEquals(projectId, transaction(db.database) {
                 execQuery("SELECT project_id FROM selfdev_tasks WHERE task_id = ?", taskId) { it.getString(1) }.single()
             })
+        }
+
+    /**
+     * V57 (ADR 0023 追補 5). The rows written on V56 keep their values: an order row gets ORDER, a Task code's row gets TASK, and both are RULE
+     * proposals. After V57 an assignee target and an AI proposal with a parameter are accepted, and an unknown kind or origin is refused.
+     */
+    @Test
+    fun `V57 keeps the V56 proposals, sets the Task rows' kind, and takes an assignee target and an AI origin`() =
+        TestDb { ds -> migrateOnly(ds, *MIGRATION_FILES.keys.filter { it <= 56 }.toIntArray()) }.use { db ->
+            val projectId = Ulid.generate()
+            val orderRow = Ulid.generate()
+            val taskRow = Ulid.generate()
+            transaction(db.database) {
+                execUpdate("INSERT INTO projects (project_id, name, created_at, updated_at) VALUES (?, 'p', NOW(6), NOW(6))", projectId)
+                // The V56 column list (an old Writer's INSERT).
+                for ((id, code) in listOf(orderRow to "ORDER_START_CYCLE", taskRow to "TASK_REPLAN")) {
+                    execUpdate(
+                        "INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, expected_version, state, active_key, proposed_at) " +
+                            "VALUES (?, ?, ?, ?, 1, 'PROPOSED', 1, NOW(6))",
+                        id, projectId, code, Ulid.generate(),
+                    )
+                }
+            }
+            runMigrations(db.dataSource)
+            classpathFlyway(db.dataSource).validate()
+            assertEquals(EXPECTED_APPLIED_VERSIONS, appliedVersions(db.dataSource))
+            fun kindAndOrigin(id: String) = transaction(db.database) {
+                execQuery("SELECT target_kind, origin FROM project_chat_actions WHERE action_id = ?", id) { it.getString(1) to it.getString(2) }.single()
+            }
+            assertEquals("ORDER" to "RULE", kindAndOrigin(orderRow))
+            assertEquals("TASK" to "RULE", kindAndOrigin(taskRow))
+            // An old Writer's INSERT still works after V57 (the new columns have defaults).
+            transaction(db.database) {
+                execUpdate(
+                    "INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, expected_version, state, active_key, proposed_at) " +
+                        "VALUES (?, ?, 'ORDER_START_CYCLE', ?, 2, 'PROPOSED', 1, NOW(6))",
+                    Ulid.generate(), projectId, Ulid.generate(),
+                )
+                execUpdate(
+                    "INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, target_kind, origin, param_code, " +
+                        "expected_version, state, active_key, proposed_at) VALUES (?, ?, 'MEMBER_ADD', ?, 'ASSIGNEE', 'AI', 'VIEWER', 0, 'PROPOSED', 1, NOW(6))",
+                    Ulid.generate(), projectId, "x".repeat(64),
+                )
+            }
+            assertFailsWith<Exception> {
+                transaction(db.database) {
+                    execUpdate(
+                        "INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, target_kind, origin, state, active_key, proposed_at) " +
+                            "VALUES (?, ?, 'MEMBER_ADD', ?, 'USER', 'AI', 'PROPOSED', 1, NOW(6))",
+                        Ulid.generate(), projectId, Ulid.generate(),
+                    )
+                }
+            }
+            assertFailsWith<Exception> {
+                transaction(db.database) {
+                    execUpdate(
+                        "INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, origin, state, active_key, proposed_at) " +
+                            "VALUES (?, ?, 'ORDER_STOP_REQUEST', ?, 'MODEL', 'PROPOSED', 1, NOW(6))",
+                        Ulid.generate(), projectId, Ulid.generate(),
+                    )
+                }
+            }
         }
 
     @Test

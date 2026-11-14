@@ -190,6 +190,28 @@ class SelfDevMemoryRepository(
         }
     }
 
+    /**
+     * One ACTIVE record of [projectId] by [recordId], or null (missing, deleted, of another project, or the memory is off). Read-only. The
+     * project chat's AI reads a record with it (ADR 0023 追補 5): another project's record is not found, whatever its id.
+     */
+    fun findInProject(recordId: String, projectId: String): MemoryRecordView? {
+        if (!enabled) return null
+        return transaction(database) {
+            execQuery(
+                "SELECT record_id, kind, source_kind, trust_tier, goal_id, body, code, count_value, created_at, project_id " +
+                    "FROM selfdev_memory_records WHERE status = 'ACTIVE' AND record_id = ? AND project_id = ?",
+                recordId, projectId,
+            ) { rs ->
+                MemoryRecordView(
+                    recordId = rs.getString(1), kind = rs.getString(2), source = rs.getString(3), tier = rs.getString(4),
+                    goalId = rs.getString(5), body = rs.getString(6), code = rs.getString(7),
+                    countValue = rs.getObject(8)?.let { (it as Number).toInt() }, createdAt = rs.getTimestamp(9).toLocalDateTime(),
+                    projectId = rs.getString(10),
+                )
+            }.firstOrNull()
+        }
+    }
+
     /** How many ACTIVE records match [filter], narrowed to [project] (ADR 0022 PR-D). Read-only. */
     fun count(filter: MemoryFilter, project: ProjectFilter = ProjectFilter.All): Int {
         if (!enabled) return 0

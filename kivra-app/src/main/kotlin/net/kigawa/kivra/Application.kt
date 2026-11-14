@@ -285,6 +285,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     // The order routes (ADR 0015 stage 1). Registered only when the orders are on; the operator check is the same as the goal routes'.
     // The project chat's action proposals (ADR 0023): shared by the chat read (the proposer) and the order routes (confirm and dismiss).
     val projectChatActions = net.kigawa.kivra.db.ProjectChatActionRepository(database)
+    val projectMembers = ProjectMemberRepository(database, java.time.Clock.systemUTC())
     val orderRoutes = if (orderRepo != null && operatorVerifier != null) {
         SelfDevOrderRouteDeps(
             operators = operatorVerifier,
@@ -298,9 +299,24 @@ internal fun Application.appModule(env: Map<String, String>) {
             projects = projectRepo,
             guard = permissionGuard,
             chatActions = projectChatActions,
+            // The confirmation of a member proposal of the chat's AI (ADR 0023 追補 5) uses the members routes' repository.
+            members = projectMembers,
         )
     } else {
         null
+    }
+    // The tools of the chat's AI (ADR 0023 追補 5): run as the operator who sent the message. Order tools and proposals only while the order
+    // routes are registered (a proposal is confirmed there); memory tools only while the memory is on.
+    val projectChatTools = projectChatReply?.let {
+        net.kigawa.kivra.chat.ChatToolDeps(
+            projects = projectRepo,
+            runs = runs,
+            members = projectMembers,
+            guard = permissionGuard,
+            orders = orderRoutes,
+            chatActions = projectChatActions,
+            memory = memoryRepo,
+        )
     }
     // Goal tools over MCP temporarily removed pending Task model migration (V40)
     val mcpDeps = buildMcpRouteDeps(
@@ -631,12 +647,13 @@ internal fun Application.appModule(env: Map<String, String>) {
             configureProjectRoutes(
                 projectRepo, runs, taskApiIdentityWithSession, permissionGuard, selfDevSettings.config?.repo,
                 backfill = ProjectBackfillRepository(database),
-                members = ProjectMemberRepository(database, java.time.Clock.systemUTC()),
+                members = projectMembers,
                 budgets = budgetStore,
                 drain = ProjectDrainRepository(database, budgetStore),
                 chatRepo = projectChatRepo,
                 chatActions = projectChatActions,
                 chatReply = projectChatReply,
+                chatTools = projectChatTools,
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

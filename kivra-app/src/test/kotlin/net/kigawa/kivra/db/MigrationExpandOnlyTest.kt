@@ -174,6 +174,10 @@ class MigrationExpandOnlyTest {
             "V54:DROP (ALTER TABLE SELFDEV_ORDER_STOP_REQUESTS DROP CONSTRAINT UK_SELFDEV_ORDER_STOP_ACTIVE)" to
                 "V54 drops the database-wide single PENDING stop request (ADR 0015 addendum 2026-11-11). The per-tree UNIQUE is added in " +
                 "the same migration, and the application checks the tree under the root lock for the rows with no tree_root_id.",
+            // V57 (ADR 0023 追補 5): the chat proposal's target widens from CHAR(26) to VARCHAR(64) for an assignee target.
+            "V57:MODIFY (ALTER TABLE PROJECT_CHAT_ACTIONS MODIFY COLUMN TARGET_ID VARCHAR(64) NOT NULL)" to
+                "V57 widens project_chat_actions.target_id from CHAR(26) to VARCHAR(64). It stays NOT NULL, and every value an old Writer " +
+                "writes (a 26-character ULID) still fits, so no Contract step is needed. The UNIQUE on the column is kept.",
         )
     }
 }

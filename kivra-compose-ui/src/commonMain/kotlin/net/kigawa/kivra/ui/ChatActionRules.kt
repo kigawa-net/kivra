@@ -20,7 +20,20 @@ fun chatActionConfirmMessage(label: String, code: String): String = when (code) 
         "PR は人がレビューしてマージするまで反映されません。"
     "TASK_REJECT" -> "「$label」を確定します。この Task は見送られ（スキップ）、実行されません。" +
         "この Task に依存する Task も実行されません。"
+    "ORDER_STOP_REQUEST" -> "「$label」を確定します。order の停止を要求します。停止は承認者が承認したときに行われ、それまで order は止まりません。"
+    "MEMBER_ADD" -> "「$label」を確定します。この担当者をプロジェクトのメンバーに加えます。役割に応じて、このプロジェクトの操作ができるようになります。"
+    "MEMBER_REMOVE" -> "「$label」を確定します。この担当者をプロジェクトのメンバーから削除します（無効化ではなく削除です）。" +
+        "このプロジェクトでの役割はなくなります。"
     else -> "「$label」を確定します。"
+}
+
+/** The caption of a proposal the chat's AI made (origin AI). The operator decides; nothing has run. */
+const val CHAT_ACTION_AI_ORIGIN_CAPTION = "AI の提案です。確定するまで何も実行されません。"
+
+/** The member line of a member proposal: the name (the operators' text) or the ID, and the role of an add. */
+fun chatActionMemberText(assigneeId: String, displayName: String?, role: String?): String {
+    val who = displayName?.takeIf { it.isNotBlank() } ?: assigneeId
+    return if (role != null) "対象: $who（役割: $role）" else "対象: $who"
 }
 
 /** The label of the confirm button: an approval and a rejection say what they do; the other codes keep 確定. */
@@ -65,6 +78,12 @@ fun chatActionResultText(state: String, resultCode: String?): String = when (res
     "TASK_NOT_APPROVABLE" -> "この Task は承認待ちではないため、実行しませんでした。チャットを読み直してください。"
     "TASK_NOT_REJECTABLE" -> "この Task は見送れる状態ではないため、実行しませんでした。チャットを読み直してください。"
     "SIBLING_RESOLVED" -> "同じ Task の別の提案が先に処理されたため、この提案は無効になりました。"
+    "PROJECT_NOT_FOUND" -> "プロジェクトが見つからないため、実行しませんでした。"
+    "ASSIGNEE_NOT_FOUND" -> "担当者が見つからないため、実行しませんでした。"
+    "NOT_MEMBER" -> "メンバーではないため、実行しませんでした。"
+    "ALREADY_MEMBER" -> "既にメンバーのため、実行しませんでした。"
+    "LAST_ADMIN" -> "最後の ADMIN は削除・変更できないため、実行しませんでした。"
+    "INVALID_ROLE" -> "役割が正しくないため、実行しませんでした。"
     else -> if (state == "EXECUTED") "実行しました。" else "実行しませんでした。チャットを読み直してください。"
 }
 

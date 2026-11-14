@@ -21,7 +21,7 @@ class ChatActionsTest {
     fun aRegistryCodeHasAFixedJapaneseLabel() {
         assertEquals("周を開始する", ChatActionCode.ORDER_START_CYCLE.label)
         assertEquals("進行中の周を放棄する", ChatActionCode.ORDER_ABANDON_CYCLE.label)
-        assertEquals(5, ChatActionCode.entries.size)
+        assertEquals(8, ChatActionCode.entries.size)
     }
 
     @Test
@@ -94,7 +94,26 @@ class ChatActionsTest {
         assertEquals(ChatTargetKind.TASK, ChatActionCode.TASK_REPLAN.targetKind)
         assertEquals(ChatTargetKind.ORDER, ChatActionCode.ORDER_START_CYCLE.targetKind)
         assertEquals(ChatTargetKind.ORDER, ChatActionCode.ORDER_ABANDON_CYCLE.targetKind)
-        assertEquals(5, ChatActionCode.entries.size)
+        assertEquals(8, ChatActionCode.entries.size)
+    }
+
+    @Test
+    fun theChatAiCodesHaveFixedLabelsAndTheirTargetKinds() {
+        assertEquals("order の停止を要求する", ChatActionCode.ORDER_STOP_REQUEST.label)
+        assertEquals(ChatTargetKind.ORDER, ChatActionCode.ORDER_STOP_REQUEST.targetKind)
+        assertEquals("メンバーを追加する", ChatActionCode.MEMBER_ADD.label)
+        assertEquals("メンバーを削除する", ChatActionCode.MEMBER_REMOVE.label)
+        assertEquals(ChatTargetKind.ASSIGNEE, ChatActionCode.MEMBER_ADD.targetKind)
+        assertEquals(ChatTargetKind.ASSIGNEE, ChatActionCode.MEMBER_REMOVE.targetKind)
+    }
+
+    @Test
+    fun theRulesNeverProposeAStopOrAMemberChange() {
+        val facts = listOf(order(), order(id = "O2", goal = "T1", stuck = true), order(id = "O3", state = "PAUSED"))
+        val codes = proposeChatActions(facts).map { it.code }.toSet()
+        assertFalse(ChatActionCode.ORDER_STOP_REQUEST in codes)
+        assertFalse(ChatActionCode.MEMBER_ADD in codes)
+        assertFalse(ChatActionCode.MEMBER_REMOVE in codes)
     }
 
     @Test

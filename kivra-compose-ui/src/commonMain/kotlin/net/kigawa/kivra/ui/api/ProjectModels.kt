@@ -130,7 +130,15 @@ data class ApiChatAction(
     val targetId: String? = null,
     val proposedAt: String = "",
     val detail: ApiChatActionDetail? = null,
+    /** RULE (the server's rules) or AI (the chat's AI proposed it; ADR 0023 追補 5). Absent from an older server: RULE. */
+    val origin: String = "RULE",
+    /** The member of a member proposal (MEMBER_ADD, MEMBER_REMOVE). */
+    val member: ApiChatActionMember? = null,
 )
+
+/** The member of a member proposal (server `ChatActionMember`). [displayName] is the operators' text; [role] is the add's fixed role code. */
+@Serializable
+data class ApiChatActionMember(val assigneeId: String, val displayName: String? = null, val role: String? = null)
 
 /**
  * What an approval proposal is about (server `ChatActionDetail`). [taskTitle] is AI-written text: shown as plain text, never interpreted.

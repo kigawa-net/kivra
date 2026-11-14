@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.core.chat.ENDED_TASK_STATES
 import net.kigawa.kivra.core.chat.ChatActionCode
+import net.kigawa.kivra.core.chat.ChatActionOrigin
 import net.kigawa.kivra.core.chat.ChatActionProposal
 import net.kigawa.kivra.core.chat.ChatActionState
 import net.kigawa.kivra.core.chat.ChatApprovalFact
@@ -15,6 +16,8 @@ import net.kigawa.kivra.core.chat.ChatOrderFacts
 import net.kigawa.kivra.core.chat.ChatResultCode
 import net.kigawa.kivra.core.chat.ChatTargetKind
 import net.kigawa.kivra.core.chat.ChatTaskFact
+import net.kigawa.kivra.core.chat.MEMBER_ABSENT
+import net.kigawa.kivra.core.chat.MEMBER_PRESENT
 import net.kigawa.kivra.core.chat.isCycleStuck
 import net.kigawa.kivra.core.chat.proposeChatActions
 import org.jetbrains.exposed.sql.Database
@@ -33,7 +36,24 @@ data class ProjectChatActionRow(
     val proposedAt: LocalDateTime,
     val resolvedAt: LocalDateTime?,
     val resolvedBy: String?,
+    /** What [targetId] names (V57; a [ChatTargetKind] name). ORDER for a row written before V57 by an order code. */
+    val targetKind: String = ChatTargetKind.ORDER.name,
+    /** Who proposed the row (V57; a [ChatActionOrigin] name). RULE for every row before V57. */
+    val origin: String = ChatActionOrigin.RULE.name,
+    /** A fixed parameter of the action (V57), never free text: the member role of a MEMBER_ADD. Null otherwise. */
+    val paramCode: String? = null,
 )
+
+/** The result of [ProjectChatActionRepository.proposeByAi]. Either way the operator sees one open proposal for the target. */
+sealed interface AiProposalResult {
+    val actionId: String
+
+    /** A new PROPOSED row was written. */
+    data class Created(override val actionId: String) : AiProposalResult
+
+    /** A proposal of the same project, code and target is already open (from the rules or an earlier AI call); nothing was written. */
+    data class AlreadyOpen(override val actionId: String) : AiProposalResult
+}
 
 /** The Task of an approval proposal as the chat card reads it at GET time: its raw title (planner-written, so the route sanitizes it) and state reason. */
 data class ChatApprovalTaskRow(val title: String, val stateReason: String?)
@@ -120,10 +140,13 @@ class ProjectChatActionRepository(
             }
             val current = row.targetId?.let { id ->
                 when (kindOf(row.code)) {
-                    ChatTargetKind.ORDER -> orderVersionOf[id]
+                    ChatTargetKind.ORDER -> orderVersionOf[id] ?: if (row.origin == ChatActionOrigin.AI.name) orderVersionRow(id) else null
                     ChatTargetKind.TASK -> taskVersionOf[id] ?: taskVersionRow(id)
+                    ChatTargetKind.ASSIGNEE -> membershipIn(projectId, id)
                 }
             }
+            // An AI proposal is not the rules' to withdraw: it stays open while its target is as it was when proposed (ADR 0023 追補 5).
+            if (row.origin == ChatActionOrigin.AI.name && current != null && current == row.expectedVersion) continue
             val moved = current != null && current != row.expectedVersion
             execUpdate(
                 "UPDATE project_chat_actions SET state = ?, active_key = NULL, result_code = ?, resolved_at = ? WHERE action_id = ? AND state = ?",
@@ -148,6 +171,64 @@ class ProjectChatActionRepository(
         }
         created
     }
+
+    /**
+     * Writes a proposal of the chat's AI (ADR 0023 追補 5): PROPOSED, origin AI, for [targetId] of [code]'s target kind, valid while the target's
+     * version (or, for a member, its membership) is [expectedVersion]. [paramCode] is a fixed parameter (the member role of MEMBER_ADD). Nothing
+     * runs here: the operator confirms on the screen. When a proposal of the same project, code and target is open already, nothing is written
+     * and that one is returned. Unlike the rules, an earlier resolved row of the same version does not block it: the operator asked again.
+     */
+    fun proposeByAi(projectId: String, code: ChatActionCode, targetId: String, expectedVersion: Long, paramCode: String? = null): AiProposalResult =
+        transaction(database) {
+            openRowOf(projectId, code, targetId)?.let { return@transaction AiProposalResult.AlreadyOpen(it) }
+            val id = Ulid.generate(clock)
+            try {
+                execUpdate(
+                    """
+                    INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, target_kind, origin, param_code, expected_version,
+                                                      state, active_key, proposed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    """.trimIndent(),
+                    id, projectId, code.name, targetId, code.targetKind.name, ChatActionOrigin.AI.name, paramCode, expectedVersion,
+                    ChatActionState.PROPOSED.name, utcNow(clock),
+                )
+                AiProposalResult.Created(id)
+            } catch (e: Exception) {
+                if (!e.isUniqueViolation()) throw e
+                null
+            }
+        } ?: transaction(database) {
+            // Another open proposal of the same key was written meanwhile (the UNIQUE on active_key): that one stands.
+            AiProposalResult.AlreadyOpen(checkNotNull(openRowOf(projectId, code, targetId)) { "the open proposal is gone" })
+        }
+
+    /** The membership of [assigneeId] in [projectId] as a member proposal's expected value: [MEMBER_PRESENT] or [MEMBER_ABSENT]. */
+    fun membership(projectId: String, assigneeId: String): Long = transaction(database) { membershipIn(projectId, assigneeId) }
+
+    /** The display name of an assignee, for a member proposal's card (an operator's text, shown to the operator), or null when it is missing. */
+    fun assigneeNameOf(assigneeId: String): String? = transaction(database) {
+        execQuery("SELECT display_name FROM selfdev_assignees WHERE assignee_id = ?", assigneeId) { it.getString(1) }.firstOrNull()
+    }
+
+    /** True when the assignee exists (whatever its state). */
+    fun assigneeExists(assigneeId: String): Boolean = transaction(database) {
+        execQuery("SELECT COUNT(*) FROM selfdev_assignees WHERE assignee_id = ?", assigneeId) { it.getLong(1) }.single() > 0
+    }
+
+    private fun Transaction.membershipIn(projectId: String, assigneeId: String): Long =
+        if (execQuery("SELECT COUNT(*) FROM project_members WHERE project_id = ? AND assignee_id = ?", projectId, assigneeId) { it.getLong(1) }
+                .single() > 0
+        ) MEMBER_PRESENT else MEMBER_ABSENT
+
+    private fun Transaction.openRowOf(projectId: String, code: ChatActionCode, targetId: String): String? =
+        execQuery(
+            "SELECT action_id FROM project_chat_actions WHERE project_id = ? AND action_code = ? AND target_id = ? AND state = ?",
+            projectId, code.name, targetId, ChatActionState.PROPOSED.name,
+        ) { it.getString(1) }.firstOrNull()
+
+    /** The current version of an order (one an AI proposal names, which may be a child), or null when it is gone. */
+    private fun Transaction.orderVersionRow(orderId: String): Long? =
+        execQuery("SELECT version FROM selfdev_orders WHERE order_id = ?", orderId) { it.getLong(1) }.firstOrNull()
 
     /** The open (PROPOSED) proposals of [projectId], oldest first. */
     fun proposed(projectId: String): List<ProjectChatActionRow> = transaction(database) {
@@ -214,11 +295,12 @@ class ProjectChatActionRepository(
     private fun Transaction.insert(projectId: String, proposal: ChatActionProposal, now: LocalDateTime) {
         execUpdate(
             """
-            INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, expected_version, state, active_key, proposed_at)
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+            INSERT INTO project_chat_actions (action_id, project_id, action_code, target_id, target_kind, origin, expected_version, state, active_key,
+                                              proposed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             """.trimIndent(),
-            Ulid.generate(clock), projectId, proposal.code.name, proposal.targetId, proposal.expectedVersion,
-            ChatActionState.PROPOSED.name, now,
+            Ulid.generate(clock), projectId, proposal.code.name, proposal.targetId, proposal.code.targetKind.name, ChatActionOrigin.RULE.name,
+            proposal.expectedVersion, ChatActionState.PROPOSED.name, now,
         )
     }
 
@@ -282,13 +364,16 @@ class ProjectChatActionRepository(
         proposedAt = getObject(8, LocalDateTime::class.java),
         resolvedAt = getObject(9, LocalDateTime::class.java),
         resolvedBy = getString(10),
+        targetKind = getString(11),
+        origin = getString(12),
+        paramCode = getString(13),
     )
 
     private companion object {
         const val MAX_ROOTS = 200
         val APPROVAL_CODES = setOf(ChatActionCode.TASK_APPROVE.name, ChatActionCode.TASK_REJECT.name)
         const val SELECT_COLUMNS = "SELECT action_id, project_id, action_code, target_id, expected_version, state, result_code, " +
-            "proposed_at, resolved_at, resolved_by FROM project_chat_actions"
+            "proposed_at, resolved_at, resolved_by, target_kind, origin, param_code FROM project_chat_actions"
     }
 }
 

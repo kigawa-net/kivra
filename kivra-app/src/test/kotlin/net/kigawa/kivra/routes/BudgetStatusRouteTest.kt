@@ -24,6 +24,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.BudgetOperatorStatus
+import net.kigawa.kivra.db.DailyBudgetStatus
 import net.kigawa.kivra.db.BudgetOperatorView
 import net.kigawa.kivra.db.UnpricedReservation
 import net.kigawa.kivra.modelgateway.ACKNOWLEDGE_NOT_COMPARABLE
@@ -94,6 +95,21 @@ class BudgetStatusRouteTest {
         statusApp(FixedView(over))
         val body = client.get("/api/admin/budget/status") { header("X-Test-Operator", "alice") }.bodyAsText()
         assertTrue(body.contains(""""remainingJpy":"-200""""), body)
+    }
+
+    @Test
+    fun `with a daily limit the current day's figures are added to the response`() = testApplication {
+        val daily = sampleStatus.copy(daily = DailyBudgetStatus("2026-11-14", yen("100"), yen("30"), yen("20")))
+        statusApp(FixedView(daily))
+        val body = client.get("/api/admin/budget/status") { header("X-Test-Operator", "alice") }.bodyAsText()
+        assertTrue(body.contains(""""dailyPeriod":"2026-11-14","dailyLimitJpy":"100","dailyCommittedJpy":"30","dailyReservedJpy":"20","dailyRemainingJpy":"50""""), body)
+    }
+
+    @Test
+    fun `without a daily limit the response has no daily keys, as before`() = testApplication {
+        statusApp(FixedView(sampleStatus))
+        val body = client.get("/api/admin/budget/status") { header("X-Test-Operator", "alice") }.bodyAsText()
+        assertFalse(body.contains("daily"), body)
     }
 
     @Test

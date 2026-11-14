@@ -18,6 +18,9 @@ import net.kigawa.kivra.ui.LocalCallerPermissions
 import net.kigawa.kivra.ui.OperatorAction
 import net.kigawa.kivra.ui.budgetPathLabel
 import net.kigawa.kivra.ui.budgetSummaryText
+import net.kigawa.kivra.ui.dailyBudgetOverspent
+import net.kigawa.kivra.ui.dailyBudgetSummaryText
+import net.kigawa.kivra.ui.dailyBudgetUsedPercent
 import net.kigawa.kivra.ui.moneyText
 import net.kigawa.kivra.ui.countText
 import net.kigawa.kivra.ui.assigneeStateText
@@ -81,6 +84,19 @@ fun BudgetScreen() {
                     )
                     SelectableText("確定(API): ${moneyText(b.paths.api.committedJpy)} / 確定(CLI): ${moneyText(b.paths.cli.committedJpy)}")
                     SelectableText("未確定の予約: ${b.unpricedCount} 件")
+                    // 日次の上限があるときだけ、本日の使用量を月次の隣に出す(テナント単位。上限が無ければ何も出さない)。
+                    dailyBudgetSummaryText(b)?.let { text ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        SelectableText("本日の使用量 / 日次上限（JST ${b.dailyPeriod.orEmpty()}）", style = MaterialTheme.typography.bodySmall)
+                        LinearProgressIndicator(
+                            progress = ((dailyBudgetUsedPercent(b) ?: 0) / 100f).coerceIn(0f, 1f),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        SelectableText(
+                            text,
+                            color = if (dailyBudgetOverspent(b)) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
                 }
             }
             BudgetFxNotice()

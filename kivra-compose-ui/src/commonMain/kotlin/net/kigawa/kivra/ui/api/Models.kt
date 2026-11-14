@@ -231,6 +231,12 @@ data class ApiBudget(
     val paths: ApiBudgetPaths,
     val unpricedCount: Long,
     val unpriced: List<ApiUnpricedReservation>,
+    // The current JST day's daily budget. All null when the tenant has no daily limit (the server omits them).
+    val dailyPeriod: String? = null,
+    val dailyLimitJpy: String? = null,
+    val dailyCommittedJpy: String? = null,
+    val dailyReservedJpy: String? = null,
+    val dailyRemainingJpy: String? = null,
 ) {
     val limitValue: Double? get() = limitJpy.toDoubleOrNull()
 

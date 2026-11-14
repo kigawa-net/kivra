@@ -5,10 +5,10 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.config.MapApplicationConfig
 import io.ktor.server.testing.testApplication
+import net.kigawa.kivra.appModule
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import net.kigawa.kivra.module
 
 class HealthRoutesTest {
     @Test
@@ -22,7 +22,7 @@ class HealthRoutesTest {
                 "kivra.lease.graceSeconds" to "5",
             )
         }
-        application { module() }
+        application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false")) }
 
         val response = client.get("/health")
         assertEquals(HttpStatusCode.OK, response.status)

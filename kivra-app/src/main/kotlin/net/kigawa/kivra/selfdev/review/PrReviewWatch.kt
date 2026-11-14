@@ -46,6 +46,8 @@ class PrReviewWatch(
     private val callTimeout: Duration = CALL_TIMEOUT,
     private val interval: Duration = INTERVAL,
     private val nonce: () -> String = PrReviewPrompt::newNonce,
+    /** The difficulty router (ADR 0023 追補 2). Null keeps the review on the hosted model, as before. */
+    private val router: net.kigawa.kivra.modelgateway.DifficultyRouter? = null,
 ) {
     /** What one Run's look came to: a comment posted, a review that did not post, a skip, or the hourly limit (ends the pass). */
     private enum class Step { POSTED, NOT_POSTED, SKIPPED, HOURLY_LIMIT }
@@ -124,9 +126,10 @@ class PrReviewWatch(
         val model = checkNotNull(settings.model) { "enabled review needs a model" }
         val task = store.task(runId) ?: PrReviewTask(title = "", body = null)
         val text = try {
-            val response = gateway.invoke(
-                PrReviewPrompt.request(number, head, model, budgetScopes, task, diff, nonce(), callTimeout),
-            )
+            val base = PrReviewPrompt.request(number, head, model, budgetScopes, task, diff, nonce(), callTimeout)
+            // The classifier reads the pull request's title and body only (never the diff).
+            val routed = router?.let { r -> r.apply(base, r.decide("selfdev.review", task.title + "\n" + (task.body ?: ""), base)) } ?: base
+            val response = gateway.invoke(routed)
             response.message.parts.filterIsInstance<Part.Text>().joinToString("") { it.text }
         } catch (e: CancellationException) {
             throw e

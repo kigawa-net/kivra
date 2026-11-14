@@ -27,7 +27,7 @@ spec:
         - name: kivra
           env:
             - name: KIVRA_SELFDEV_ENABLED
-              value: "true"
+              value: "false"
             # 為替(USD→JPY)のコメント。値は変えない。
             - name: KIVRA_FX_USD_JPY
               value: "165"

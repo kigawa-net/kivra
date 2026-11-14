@@ -1,9 +1,13 @@
 package net.kigawa.kivra.routes
 
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.receive
+import io.ktor.server.response.header
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondTextWriter
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
@@ -13,11 +17,13 @@ import io.ktor.server.routing.route
 import java.math.BigDecimal
 import java.time.ZoneOffset
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
+import net.kigawa.kivra.chat.ProjectChatReplier
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.chat.ChatActionCode
 import net.kigawa.kivra.core.chat.approvalReasonText
@@ -46,6 +52,9 @@ import net.kigawa.kivra.db.ProjectRow
 import net.kigawa.kivra.db.ProjectSpend
 import net.kigawa.kivra.db.RepoAddResult
 import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.modelgateway.GatewayException
+import net.kigawa.kivra.modelgateway.ModelEvent
+import net.kigawa.kivra.modelgateway.ModelResponse
 import org.slf4j.LoggerFactory
 
 @Serializable
@@ -98,6 +107,8 @@ internal fun Route.configureProjectRoutes(
     chatRepo: ProjectChatRepository? = null,
     /** The project chat's action proposals (ADR 0023): proposed on the chat read, for an operator who may act. Null: no actions. */
     chatActions: ProjectChatActionRepository? = null,
+    /** The AI reply of the chat (`POST /api/projects/{id}/chat/stream`). Null: the stream route is not registered. */
+    chatReply: ProjectChatReplier? = null,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -423,6 +434,33 @@ internal fun Route.configureProjectRoutes(
                     ?: chatRepo.createSession(projectId, input.title.ifBlank { DEFAULT_CHAT_TITLE })
                 val message = chatRepo.appendMessage(session.projectId, "user", input.content)
                 call.respond(HttpStatusCode.Created, message.toResponse())
+            }
+            // The AI reply, streamed as server-sent events over a POST. Registered only with a reply service (the self-development model gateway),
+            // so without it the chat only stores messages. Same checks as the POST. The user's message is stored first; see respondChatReply.
+            if (chatReply != null) {
+                post("chat/stream") {
+                    val principal = call.principalOr401() ?: return@post
+                    if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_chat_stream")) return@post
+                    if (!call.requireJsonSameOrigin()) return@post
+                    val projectId = call.pathParam("projectId")
+                        ?: return@post call.respond(HttpStatusCode.NotFound)
+                    if (projectRepo.get(projectId) == null || !mayReadProject(principal, projectId, "project_chat_stream")) {
+                        return@post call.respond(HttpStatusCode.NotFound)
+                    }
+                    val input = call.receive<ChatSendMessageRequest>()
+                    if (input.content.isBlank()) return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_content"))
+                    if (input.content.length > ProjectChatReplier.CONTENT_MAX) {
+                        return@post call.respond(HttpStatusCode.BadRequest, ProjectError("content_too_long"))
+                    }
+                    if (input.title.length > CHAT_TITLE_MAX) return@post call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_title"))
+                    val session = chatRepo.getSession(projectId)
+                        ?: chatRepo.createSession(projectId, input.title.ifBlank { DEFAULT_CHAT_TITLE })
+                    // The turn before this one (the same session) is stopped, and has stored its partial reply, before this message is stored.
+                    chatTurns.exclusive(session.projectId) {
+                        val message = chatRepo.appendMessage(session.projectId, "user", input.content)
+                        call.respondChatReply(chatRepo, chatReply, session.projectId, message)
+                    }
+                }
             }
         }
         get {
@@ -812,6 +850,87 @@ private fun approvalDetailOf(repo: ProjectChatActionRepository, taskId: String?)
 private fun ProjectChatMessageRow.toResponse() = ChatMessageResponse(
     id = id, sessionId = sessionId, role = role, content = content, createdAt = createdAt.toString(),
 )
+
+/** The `delta` frame of the chat reply stream: one piece of the text. */
+@Serializable
+private class ChatDeltaFrame(val text: String)
+
+/** The `error` frame of the chat reply stream: a fixed code (a gateway error kind, or NO_REPLY / EMPTY_REPLY). Never a message. */
+@Serializable
+private class ChatErrorFrame(val code: String)
+
+/** Orders the chat turns of a session: a new turn stops the one before it (see [ChatTurnRegistry]). */
+private val chatTurns = net.kigawa.kivra.chat.ChatTurnRegistry()
+private val chatReplyLog = LoggerFactory.getLogger("net.kigawa.kivra.project.chat")
+private val chatJson = Json
+
+/**
+ * Streams the reply to [userMessage] (already stored) as server-sent events. Frames: `user` (the stored message, first), `delta` (`{"text"}`),
+ * `done` (the stored assistant message, last on success) and `error` (`{"code"}`, last on failure). The response is 200 from the start, so every
+ * failure after it is an `error` frame.
+ *
+ * Storage, decided here: the assistant message is the complete text when the model completed the reply. When the reply ends early (a client
+ * that has gone, for example because the operator sent a new message, or a gateway failure or a stream that ends without a completion), the
+ * text generated so far is stored instead, unless it is blank. A refusal before any text, and an empty reply, store nothing. The user message
+ * stays, because it was stored before this runs. Storing happens before the `done` frame is written, so a client that goes just after the
+ * completion still has its reply stored.
+ */
+private suspend fun ApplicationCall.respondChatReply(
+    repo: ProjectChatRepository,
+    replier: ProjectChatReplier,
+    sessionId: String,
+    userMessage: ProjectChatMessageRow,
+) {
+    // Nothing may hold the frames back: no cache, and no proxy buffering (nginx honours X-Accel-Buffering).
+    response.header(HttpHeaders.CacheControl, "no-store")
+    response.header("X-Accel-Buffering", "no")
+    respondTextWriter(ContentType.Text.EventStream) {
+        writeChatFrame(this, "user", chatJson.encodeToString(ChatMessageResponse.serializer(), userMessage.toResponse()))
+        var completed: ModelResponse? = null
+        var failure: String? = null
+        val partial = StringBuilder()
+        // The text generated so far, stored when the reply ends early. Runs even when this coroutine is cancelled (a client that has gone).
+        suspend fun storePartial() {
+            val text = partial.toString()
+            if (text.isBlank()) return
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { repo.appendMessage(sessionId, "assistant", text) }
+        }
+        // A write to a client that has gone throws here; the exception ends the collection, which cancels the model call.
+        try {
+            replier.reply(sessionId).collect { event ->
+                when (event) {
+                    is ModelEvent.TextDelta -> partial.append(event.text).also { writeChatFrame(this, "delta", chatJson.encodeToString(ChatDeltaFrame.serializer(), ChatDeltaFrame(event.text))) }
+                    is ModelEvent.Completed -> { completed = event.response }
+                    is ModelEvent.Failed -> { failure = event.error.kind.name }
+                    else -> Unit
+                }
+            }
+        } catch (e: GatewayException) {
+            // Refused before the first event (no route, budget or policy).
+            failure = e.error.kind.name
+        } catch (e: Throwable) {
+            // The client went (or the call was cancelled): keep what was generated, then let the exception end the response.
+            storePartial()
+            throw e
+        }
+        val text = completed?.let { ProjectChatReplier.replyText(it) }
+        if (failure != null || text.isNullOrBlank()) {
+            val code = failure ?: if (completed == null) "NO_REPLY" else "EMPTY_REPLY"
+            storePartial()
+            chatReplyLog.warn("project chat reply incomplete: code={}", code)
+            writeChatFrame(this, "error", chatJson.encodeToString(ChatErrorFrame.serializer(), ChatErrorFrame(code)))
+            return@respondTextWriter
+        }
+        val stored = repo.appendMessage(sessionId, "assistant", text)
+        writeChatFrame(this, "done", chatJson.encodeToString(ChatMessageResponse.serializer(), stored.toResponse()))
+    }
+}
+
+/** One server-sent event: its `event` name and its single-line JSON `data`, then flushed. */
+private fun writeChatFrame(writer: java.io.Writer, event: String, data: String) {
+    writer.write("event: $event\ndata: $data\n\n")
+    writer.flush()
+}
 
 private const val DASHBOARD_RECENT_RUNS = 10
 

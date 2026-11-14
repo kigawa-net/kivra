@@ -12,17 +12,21 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.*
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.readUTF8Line
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import net.kigawa.kivra.ui.ChatStreamEvent
 import net.kigawa.kivra.ui.MemoryListFilter
 import net.kigawa.kivra.ui.ProjectApi
 import net.kigawa.kivra.ui.ReleaseKind
 import net.kigawa.kivra.ui.SubmitFailure
 import net.kigawa.kivra.ui.SubmitKind
 import net.kigawa.kivra.ui.SubmitResult
+import net.kigawa.kivra.ui.chatStreamEventOf
 import net.kigawa.kivra.ui.isValidAssigneeRef
 import net.kigawa.kivra.ui.memoryListQuery
 import net.kigawa.kivra.ui.percentEncode
@@ -588,6 +592,35 @@ object ApiClient {
         response.headers[HttpHeaders.ContentType]?.substringBefore(';')?.trim()
             ?.equals("application/json", ignoreCase = true) == true
 
+    /** server-sent events の応答か(`text/event-stream`、パラメータは問わない)。 */
+    private fun isEventStream(response: HttpResponse): Boolean =
+        response.headers[HttpHeaders.ContentType]?.substringBefore(';')?.trim()
+            ?.equals("text/event-stream", ignoreCase = true) == true
+
+    /**
+     * server-sent event のフレームを channel が閉じるまで読み、既知のイベントを受けた順に [onEvent] へ渡す。フレームは空行で終わる。
+     * 名前が無いフレーム、コメント行、知らない欄は読み捨てる。
+     */
+    private suspend fun readChatFrames(channel: ByteReadChannel, onEvent: (ChatStreamEvent) -> Unit) {
+        var name: String? = null
+        val data = StringBuilder()
+        while (true) {
+            val line = channel.readUTF8Line() ?: break
+            when {
+                line.isEmpty() -> {
+                    name?.let { chatStreamEventOf(it, data.toString()) }?.let(onEvent)
+                    name = null
+                    data.clear()
+                }
+                line.startsWith("event:") -> name = line.removePrefix("event:").removePrefix(" ")
+                line.startsWith("data:") -> {
+                    if (data.isNotEmpty()) data.append('\n')
+                    data.append(line.removePrefix("data:").removePrefix(" "))
+                }
+            }
+        }
+    }
+
     /**
      * Run の解放(運用者)。UNKNOWN は `POST .../release`、束縛なしの PR は `POST .../release-unbound-pr`(パスは [releasePath])。
      * 本文は `{"reason": "..."}` だけ(サーバーは余計なフィールドを拒否する)。冪等キーは取らない。
@@ -733,13 +766,50 @@ object ApiClient {
 
     /**
      * チャットメッセージ送信。`POST /api/projects/{id}/chat`、本文 `{content, title}`。
-     * 既存のセッションがあればそこに追加、無ければ title で新規作成。201。
+     * 既存のセッションがあればそこに追加、無ければ title で新規作成。201。返信は作らない(返信つきの送信は [streamChatReply])。
      */
     suspend fun sendChatMessage(projectId: String, content: String, title: String = "") =
         postWrite(
             "/api/projects/${percentEncode(projectId)}/chat",
             ChatSendMessageRequest(content, title),
         )
+
+    /**
+     * チャットへの送信と AI の返信の受信。`POST /api/projects/{id}/chat/stream`(server-sent events)。受けたイベントから順に [onEvent] を呼ぶ。
+     * 正常な終わりは [ChatStreamEvent.Done]、返信できなかった時は [ChatStreamEvent.Failed] で、どちらの後にも何も来ない。
+     * 両方が来ないまま接続が終わったら status を null にした [ApiException]。404 は返信の機能が無いサーバー(呼び出し側は [sendChatMessage] へ戻す)。
+     * 2xx で event-stream でない応答はサインイン画面への追従とみなし、セッション切れにする(旧 UI と同じ)。
+     */
+    suspend fun streamChatReply(projectId: String, content: String, title: String = "", onEvent: (ChatStreamEvent) -> Unit) {
+        checkSession()
+        ApiSession.hold()
+        var terminal = false
+        try {
+            try {
+                client.preparePost("/api/projects/${percentEncode(projectId)}/chat/stream") {
+                    contentType(ContentType.Application.Json)
+                    header(HttpHeaders.Accept, "text/event-stream")
+                    setBody(ChatSendMessageRequest(content, title))
+                }.execute { response ->
+                    if (!response.status.isSuccess()) throw failureOf(response, quiet = false)
+                    if (!isEventStream(response)) throw sessionLost(quiet = false)
+                    readChatFrames(response.bodyAsChannel()) { event ->
+                        if (event is ChatStreamEvent.Done || event is ChatStreamEvent.Failed) terminal = true
+                        onEvent(event)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ApiException) {
+                throw e
+            } catch (e: Exception) {
+                throw ApiException(null, NETWORK_FAILURE)
+            }
+            if (!terminal) throw ApiException(null, NETWORK_FAILURE)
+        } finally {
+            ApiSession.unhold()
+        }
+    }
 
 
     /**

@@ -17,6 +17,7 @@ import net.kigawa.kivra.db.PlanFence
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.modelgateway.BudgetDenial
 import net.kigawa.kivra.modelgateway.Capability
+import net.kigawa.kivra.modelgateway.DifficultyRouter
 import net.kigawa.kivra.modelgateway.DataClass
 import net.kigawa.kivra.modelgateway.ErrorKind
 import net.kigawa.kivra.modelgateway.FinishReason
@@ -40,6 +41,9 @@ import org.slf4j.LoggerFactory
 
 /** The model the Planner is pinned to (ADR 0011 section 3). It must be in the registry, active, at startup. */
 const val PLANNER_MODEL_ID = "claude-haiku-5-5"
+
+/** The registry id of the hosted provider the self-development calls are pinned to (the Anthropic provider of SelfDevWiring). */
+const val SELF_DEV_HOSTED_PROVIDER_ID = "anthropic"
 
 /** The principal the Planner's model calls are made under. Not a user identity. */
 const val SELF_DEV_PLANNER_PRINCIPAL = "selfdev-planner"
@@ -122,6 +126,8 @@ class AutopilotPlanner(
     /** The suppression shadow (ADR 0016 P3). Counts after a plan is stored; never changes the plan. */
     private val suppress: SuppressShadow = SuppressShadow.OFF,
     private val claimTokens: () -> String = { UUID.randomUUID().toString() },
+    /** The difficulty router (ADR 0023 追補 2). Null keeps the planner's call on the hosted model, as before. */
+    private val router: DifficultyRouter? = null,
 ) {
 
     suspend fun planTask(taskId: String): PlanAttempt {
@@ -138,7 +144,10 @@ class AutopilotPlanner(
         var attempt = 1
         while (true) {
             val response = try {
-                gateway.invoke(request(fence, attempt, claim.title, claim.body, repoList, rejectedPath))
+                val base = request(fence, attempt, claim.title, claim.body, repoList, rejectedPath)
+                // The classifier reads the claim's title and body only (never the repository file list).
+                val routed = router?.let { r -> r.apply(base, r.decide("selfdev.planner", claim.title + "\n" + claim.body, base)) } ?: base
+                gateway.invoke(routed)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: GatewayException) {
@@ -240,6 +249,7 @@ class AutopilotPlanner(
             ),
             requirements = Requirements(
                 requiredCapabilities = setOf(Capability.TEXT),
+                allowedProviders = setOf(SELF_DEV_HOSTED_PROVIDER_ID),
                 allowedModelIds = setOf(PLANNER_MODEL_ID),
             ),
             timeout = config.callTimeout.toKotlinDuration(),

@@ -126,7 +126,7 @@ class RestRolesTest {
                     ),
                 )
                 configureOperationApiRoutes(db.runs, db.journal, identity, guard)
-                configureRunViewRoutes(db.runs, identity, SelfDevSettings.fromEnv(emptyMap()), guard)
+                configureRunViewRoutes(db.runs, identity, SelfDevSettings.fromEnv(mapOf("KIVRA_SELFDEV_ENABLED" to "false")), guard)
                 configureRunExecutionRoutes(exec)
             }
         }

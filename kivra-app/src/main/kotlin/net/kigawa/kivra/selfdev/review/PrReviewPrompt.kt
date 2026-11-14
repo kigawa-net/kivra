@@ -76,6 +76,7 @@ object PrReviewPrompt {
         ),
         requirements = Requirements(
             requiredCapabilities = setOf(Capability.TEXT),
+            allowedProviders = setOf(net.kigawa.kivra.selfdev.SELF_DEV_HOSTED_PROVIDER_ID),
             allowedModelIds = setOf(model),
         ),
         timeout = callTimeout.toKotlinDuration(),

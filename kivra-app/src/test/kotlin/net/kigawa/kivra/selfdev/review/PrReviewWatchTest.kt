@@ -55,7 +55,7 @@ private const val GOOD = """{"verdict":"CONCERNS","findings":[{"severity":"HIGH"
 
 /** Replies in order. An exhausted script throws, which the gateway reports as a failed call. */
 private class ScriptedProvider(private val replies: MutableList<String>) : ModelProvider {
-    override val providerId: String = "ext"
+    override val providerId: String = "anthropic"
     var calls = 0
     override suspend fun health(target: ResolvedTarget) = ProviderHealth(ProviderHealthState.UP)
     override suspend fun listModels(target: ResolvedTarget) = emptyList<ProviderModelInfo>()
@@ -128,20 +128,20 @@ class PrReviewWatchTest {
                 "test-v1",
                 listOf(
                     ProviderEntry(
-                        "ext", "fake", TrustZone.EXTERNAL,
+                        "anthropic", "fake", TrustZone.EXTERNAL,
                         DataHandling(DataHandlingStatus.CONFIRMED, "tester", LocalDate.of(2026, 10, 1), "https://example.test/terms"),
                         true, "https://ext.example.test", "EXT_KEY",
                     ),
                 ),
                 listOf(
                     ModelEntry(
-                        MODEL, "ext", "review", Lifecycle.ACTIVE, null,
+                        MODEL, "anthropic", "review", Lifecycle.ACTIVE, null,
                         setOf(Capability.TEXT, Capability.SYSTEM_PROMPT), 100_000, 4096,
                         listOf(Price(BigDecimal("3"), BigDecimal("15"))), QualityTier.A,
                     ),
                 ),
             ),
-            mapOf("ext" to provider),
+            mapOf("anthropic" to provider),
             BudgetController(mapOf("tenant" to BudgetLimit(BigDecimal("100")))),
             devAllowInMemoryLedger = true,
         )

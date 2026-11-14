@@ -190,7 +190,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     )
     val projectRepo = ProjectRepository(database, java.time.Clock.systemUTC())
     val budgetConfig = BudgetConfig.from(environment.config)
-    val budgetStore = DbBudgetStore(database, budgetConfig.tenantId, budgetConfig.tenantLimit())
+    val budgetStore = DbBudgetStore(database, budgetConfig.tenantId, budgetConfig.tenantLimit(), dailyLimit = budgetConfig.dailyLimit())
     // Built only when the agent API is enabled. Nothing about the coding runtime is created otherwise. It is shared by the agent API
     // routes and, with KIVRA_SELFDEV_RUNTIME=cli, by the self-development runner (ADR 0010).
     val codingResults = DbCodingResultStore(database)
@@ -220,6 +220,15 @@ internal fun Application.appModule(env: Map<String, String>) {
         )
     } else {
         null
+    }
+    // The project chat's AI reply (streamed). It uses the self-development model gateway, so it exists only when self-development is enabled.
+    // Without it the chat routes only store the messages, as before.
+    val projectChatRepo = net.kigawa.kivra.db.ProjectChatRepository(database)
+    // Routing: the difficulty router (ADR 0023 追補) decides EASY (on-premises first, hosted fallback) or HARD (hosted only) per reply.
+    val projectChatReply = selfDevParts?.let { parts ->
+        parts.gateway?.let { gw ->
+            net.kigawa.kivra.chat.ProjectChatReplier(gw, projectChatRepo, listOf(budgetConfig.tenantId), router = parts.chatRouter)
+        }
     }
     // The roles (ADR 0020, PR 3a/3b/3c): off by default, and then the assignee store is not created or read. The order routes, the goal and memory routes (3b) and the REST routes of PR 3c (Task API, selfdev, budget and run admin, run views, execution) use the guard.
     val rolesSettings = RolesSettings.fromEnv(env, orderSettings, aiPrincipal)
@@ -625,8 +634,9 @@ internal fun Application.appModule(env: Map<String, String>) {
                 members = ProjectMemberRepository(database, java.time.Clock.systemUTC()),
                 budgets = budgetStore,
                 drain = ProjectDrainRepository(database, budgetStore),
-                chatRepo = net.kigawa.kivra.db.ProjectChatRepository(database),
+                chatRepo = projectChatRepo,
                 chatActions = projectChatActions,
+                chatReply = projectChatReply,
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

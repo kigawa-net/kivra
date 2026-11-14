@@ -241,7 +241,7 @@ class ReadyRoutesTest {
                 "kivra.lease.graceSeconds" to "5",
             )
         }
-        application { appModule(emptyMap()) }
+        application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false")) }
 
         val ready = client.get("/ready")
         assertEquals(HttpStatusCode.OK, ready.status)

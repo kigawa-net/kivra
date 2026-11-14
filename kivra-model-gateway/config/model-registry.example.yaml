@@ -15,6 +15,17 @@ providers:
     enabled: true
     endpoint: https://api.anthropic.com
     credentialRef: ANTHROPIC_API_KEY
+  # On-premises OpenAI-compatible server (vLLM / Ollama / llama.cpp) inside the cluster. PLACEHOLDER values: the real endpoint host
+  # comes from the deployment (KIVRA_SELFDEV_LOCAL_LLM_HOST, a trusted binding); only LOCAL may use http. No credential is used,
+  # so credentialRef is the fixed label "none". dataHandling stays UNKNOWN until the operator confirms where the data lives.
+  - id: local-llm
+    adapter: openai
+    trustZone: LOCAL
+    dataHandling:
+      status: UNKNOWN
+    enabled: true
+    endpoint: http://llm.example.internal:8000   # placeholder: cluster-internal host and port
+    credentialRef: none
 
 models:
   - id: claude-sonnet
@@ -30,3 +41,20 @@ models:
       outputPerMtok: "15.00"
       currency: USD
       sourceRef: "TODO: provider pricing page"
+
+  - id: local-chat
+    providerId: local-llm
+    providerModelName: local-model-name   # placeholder: the model name the server reports (GET /v1/models)
+    lifecycle: ACTIVE
+    # Declarations are the operator's claims. Verify each with the capability probe (design 05 section 12) against the real server before relying on it:
+    # STRUCTURED_OUTPUT_NATIVE is sent as response_format json_schema; TOOL_CALLING as OpenAI-style tools / tool_choice.
+    # A request needing a capability that is not declared here is never routed to this model.
+    capabilities: [TEXT, STREAMING, SYSTEM_PROMPT, STRUCTURED_OUTPUT_NATIVE, TOOL_CALLING]
+    contextWindowTokens: 8192     # placeholder: verify against the deployed server
+    maxOutputTokens: 1024         # placeholder: verify
+    qualityTier: C
+    price:                        # example: free on-premises (explicit zero, no exchange rate needed). Confirm the cost model.
+      inputPerMtok: "0"
+      outputPerMtok: "0"
+      currency: USD
+      sourceRef: "example: on-premises, no per-token charge"

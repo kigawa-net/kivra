@@ -16,6 +16,7 @@ import net.kigawa.kivra.modelgateway.GatewayError
 import net.kigawa.kivra.modelgateway.GatewayException
 import net.kigawa.kivra.modelgateway.GenerationParams
 import net.kigawa.kivra.modelgateway.Message
+import net.kigawa.kivra.modelgateway.DifficultyRouter
 import net.kigawa.kivra.modelgateway.ModelGateway
 import net.kigawa.kivra.modelgateway.ModelRequest
 import net.kigawa.kivra.modelgateway.ModelResponse
@@ -57,6 +58,8 @@ class LlmDeveloper(
     private val gateway: ModelGateway,
     private val config: DeveloperConfig,
     private val nonceSource: () -> String = DeveloperPrompt::newNonce,
+    /** The difficulty router (ADR 0023 追補 2). Null keeps every call on the configured providers, as before. */
+    private val router: DifficultyRouter? = null,
 ) : DeveloperPort {
 
     override suspend fun propose(request: DeveloperRequest): DeveloperResult {
@@ -90,7 +93,10 @@ class LlmDeveloper(
                 if (attempt > 1) add(Message(Role.USER, DeveloperPrompt.RETRY_NOTE))
             }
             val response = try {
-                gateway.invoke(modelRequest(request, attempt, messages))
+                val base = modelRequest(request, attempt, messages)
+                // The classifier reads only the task's title and description (never the repository files in the context).
+                val routed = router?.let { r -> r.apply(base, r.decide("selfdev.developer", request.taskTitle + "\n" + request.taskDescription, base)) } ?: base
+                gateway.invoke(routed)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: GatewayException) {

@@ -71,6 +71,16 @@ class ProjectChatRepository(
             .map { it.toMessageRow() }
     }
 
+    /** The last [limit] messages of [sessionId], oldest first. */
+    fun recentMessages(sessionId: String, limit: Int): List<ProjectChatMessageRow> = transaction(database) {
+        ProjectChatMessagesTable.selectAll()
+            .where { ProjectChatMessagesTable.sessionId eq sessionId }
+            .orderBy(ProjectChatMessagesTable.id to SortOrder.DESC)
+            .limit(limit)
+            .map { it.toMessageRow() }
+            .reversed()
+    }
+
     /** Appends a message to [sessionId] and touches the session's updated_at. */
     fun appendMessage(sessionId: String, role: String, content: String): ProjectChatMessageRow {
         val now = Instant.now(clock)

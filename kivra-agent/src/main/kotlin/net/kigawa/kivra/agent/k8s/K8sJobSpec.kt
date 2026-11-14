@@ -19,12 +19,18 @@ class K8sSpecException(message: String) : IllegalArgumentException(message)
  */
 class K8sSettings(
     namespace: String,
+    /** The value of the owner label (`kivra-owner`) of every Job of this agent. See [K8sNames.ownerLabel]. */
+    val ownerLabel: String,
     allowedImages: Set<String>,
     allowedModels: Set<String> = setOf(CliCommand.DEFAULT_MODEL),
 ) {
     val namespace: String = if (K8sNames.isDns1123Label(namespace)) namespace else throw K8sSpecException("namespace is invalid")
     val allowedImages: Set<String> = checkImages(allowedImages)
     val allowedModels: Set<String> = checkModels(allowedModels)
+
+    init {
+        if (!K8sNames.isLabelId(ownerLabel)) throw K8sSpecException("ownerLabel is invalid")
+    }
 
     override fun toString(): String = "K8sSettings(***)"
 
@@ -116,6 +122,14 @@ internal object K8sNames {
 
     /** A run or attempt id as a label value: the docker id pattern, at most 63 characters, not ending with `-`. */
     fun isLabelId(value: String): Boolean = value.length <= 63 && DockerPatterns.ID.matches(value) && !value.endsWith('-')
+
+    /**
+     * The owner label value of an agent: the first 8 bytes of SHA-256 of its client id, in hex (16 characters). A client id may be longer
+     * than a label value or hold characters a label does not take, so the label is derived; it is deterministic and does not show the id.
+     */
+    fun ownerLabel(clientId: String): String =
+        MessageDigest.getInstance("SHA-256").digest(clientId.toByteArray(Charsets.UTF_8)).take(8)
+            .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 
     /**
      * `kivra-run-<lower(runId), at most 30 chars>-<16 hex of SHA-256(runId, attemptId)>`. The hash keeps the name unique for any pair

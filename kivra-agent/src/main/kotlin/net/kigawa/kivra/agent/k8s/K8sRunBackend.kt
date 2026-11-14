@@ -55,6 +55,9 @@ class K8sRunBackend(
 ) : RunBackend {
     private val guard = K8sJobGuard(settings)
 
+    /** The Pod fetches the base commit and collects its own change set, so the host prepares no work directory (ADR 0010 追補 7 §6). */
+    override val usesHostWorkDir: Boolean get() = false
+
     override fun validate(spec: RunSpec) {
         manifestFor(toJobSpec(spec))
     }
@@ -83,8 +86,11 @@ class K8sRunBackend(
     }
 
     override fun cleanupOrphans(activeRunId: String?): Int? {
+        // Only this agent's Jobs: another agent may share the namespace, and its running Jobs are not orphans of this one.
+        val selector = "${K8sConstants.LABEL_AGENT_KEY}=${K8sConstants.LABEL_AGENT_VALUE}," +
+            "${K8sConstants.LABEL_OWNER_KEY}=${settings.ownerLabel}"
         val jobs = try {
-            api.listJobs(settings.namespace, "${K8sConstants.LABEL_AGENT_KEY}=${K8sConstants.LABEL_AGENT_VALUE}")
+            api.listJobs(settings.namespace, selector)
         } catch (e: KubeApiException) {
             return null
         }

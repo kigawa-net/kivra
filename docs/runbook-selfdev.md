@@ -1065,7 +1065,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 
 ### 6.6b k8s の Job マニフェストの生成と検査(ADR 0010 追補 7、PR 3)
 
-コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/k8s/`(`K8sJobSpec`、`K8sJobBuilder`、`K8sJobGuard`、`K8sConstants`)。Kubernetes API には接続しない。**この PR の範囲はマニフェストの生成と検査だけで、まだ k8s では動かない**(`KIVRA_AGENT_BACKEND=k8s` は引き続き設定エラーで拒否される)。
+コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/k8s/`(`K8sJobSpec`、`K8sJobBuilder`、`K8sJobGuard`、`K8sConstants`)。Kubernetes API には接続しない。**この PR の範囲はマニフェストの生成と検査だけ**(PR 3 の時点。現在の状態は §6.6d)。
 
 - `K8sJobBuilder` が Run ごとの Job(`batch/v1`、`backoffLimit: 0`、Pod 1 つ、コンテナ 1 つ、emptyDir 3 つ)を JSON の木で作る。argv と env は docker 側(`CliCommand`、`DockerConstants`)と同じ値を使う。
 - `K8sJobGuard` が許可リスト方式で検査する。未知のキー、欠けたキー、禁止項目(hostPath などの emptyDir 以外の volume、privileged、capabilities.add、host の名前空間、service account、init container、許可外の env・mount・image)は、それぞれ固有の理由で拒否する。例外の文言は理由だけで、値を含まない。
@@ -1075,7 +1075,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 
 ### 6.6c k8s のランナー(ADR 0010 追補 7、PR 4)
 
-コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/k8s/`(`K8sRunBackend`、`KubeApi`、`HttpKubeApi`)と `k8s/pod/`(`PodEntrypoint`、`PodProtocol`)。**この PR の範囲はランナーと Pod 内の entrypoint までで、まだ有効にしない**(`KIVRA_AGENT_BACKEND=k8s` は引き続き設定エラーで拒否される。有効化と配線は PR 5)。試験は fake の `KubeApi` とローカルの HTTP サーバーだけで行い、クラスタには接続しない。
+コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/k8s/`(`K8sRunBackend`、`KubeApi`、`HttpKubeApi`)と `k8s/pod/`(`PodEntrypoint`、`PodProtocol`)。**この PR の範囲はランナーと Pod 内の entrypoint まで**(PR 4 の時点。有効化と配線は PR 5c、§6.6d)。試験は fake の `KubeApi` とローカルの HTTP サーバーだけで行い、クラスタには接続しない。
 
 - `K8sRunBackend`(`RunBackend` の k8s 実装): Job のマニフェストを `K8sJobBuilder` で作り、**送信の直前に必ず `K8sJobGuard` で検査する**(拒否された manifest は送られない)。Pod が Running になったら、入力を exec の stdin で送り、コンテナのログを追う。ログは docker 側と同じ上限(`outputLimitBytes`、1 行 1 MiB)で読む。時間切れ(`timeout`、Job の `activeDeadlineSeconds`)、停止要求、出力の上限で止め、**どの終わり方でも Job を delete する**。`cleanupOrphans` は label `kivra-agent=1` の Job のうち、実行中の Run のもの以外を delete する。
 - 結果の受け取り(exec readout): Pod の entrypoint が CLI を実行し、差分を収集して `/work/.kivra/result.json` を書き、生きたまま待つ。agent は `cat` の exec で読む(上限 8 MiB、厳密に解釈)。`RunResult.podReadout` に入り、呼び出し側が `PodReadout.Collected.finish(summary, sessionId, limits, pathRules)` で再検査してから使う。
@@ -1087,7 +1087,7 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 
 #### 6.6c 追記: PR 5a(リポジトリ側の前提。2026-11-11)
 
-**まだ k8s は有効にしない**(`KIVRA_AGENT_BACKEND=k8s` は設定エラーで拒否されたまま。`RunBackendFactory` も拒否する)。
+**PR 5a の時点では k8s は有効にしていなかった**(有効化は PR 5c、§6.6d)。
 
 済み:
 - 実行用イメージ(`agent-runtime/image/Dockerfile`): `/usr/local/bin/kivra-pod-entrypoint`(`PodEntrypointKt` を `/opt/kivra-agent/lib/*` で起動する)と agent の jar を追加した。JDK 21 は元からあるので JRE は足していない(増えるのは jar だけ)。非 root(10001)、特権なしのまま。jar は名前付きビルドコンテキスト `agent-dist` で渡す(`cd.yml` の build-agent が `:kivra-agent:installDist` を先に実行して渡す)。渡さない従来の docker build(`install.sh`、`verify/run-all.sh`)は、jar の無いイメージになるだけで、docker バックエンドの挙動は変わらない。
@@ -1098,6 +1098,20 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 - kigawa-net-k8s リポジトリの manifest: プロキシの Deployment と Service、NetworkPolicy(Job の Pod はプロキシと DNS だけ)、agent の RBAC(§6.6c)、Secret、namespace の PodSecurity `restricted`。
 - 実クラスタでの検証(exec readout、Pod 内 entrypoint、公開リポジトリの取得、NetworkPolicy の強制、`podPidsLimit`)。
 - `RunBackendFactory` と `AgentConfig` の k8s の有効化(`HttpKubeApi.inCluster`、`K8sSettings`、`AttemptPodInputs` の配線)。k8s では Pod が自分で取得するので、host での作業ディレクトリの準備(現状は executor が先に行う)を省く整理も 5b で行う。
+
+### 6.6d k8s の有効化(ADR 0010 追補 7、PR 5c)
+
+コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/`(`AgentConfig.kt`、`RunBackendFactory.kt`、`RealAttemptExecutor.kt`、`Main.kt` の `executorFor`)と `k8s/`。**既定は docker のまま**。k8s は `KIVRA_AGENT_BACKEND=k8s` を指定したときだけ使う。**実クラスタでの検証は未実施**で、下の「未確認」が済むまで dev では有効にしない。
+
+- **設定**(`KIVRA_AGENT_EXECUTOR=real` のときだけ読む): `KIVRA_AGENT_K8S_NAMESPACE`、`KIVRA_AGENT_K8S_IMAGE`、`KIVRA_AGENT_K8S_PROXY_URL`。`KIVRA_AGENT_MODEL`、`KIVRA_AGENT_MAX_BUDGET_USD`、`KIVRA_AGENT_REPO` は docker と共通。`KIVRA_AGENT_DOCKER_*` と `KIVRA_AGENT_GIT_BIN` は k8s では読まない。
+- **起動時の検査(fail-closed)**: 設定の形式、`K8sSettings`(namespace、image、model、owner label)、`HttpKubeApi.inCluster()`(ServiceAccount の token と CA)。どれかが満たされないと、終了コード 2 で起動に失敗し、attempt は claim しない。エラーの文言は変数名か条件だけで、値を含まない。
+- **Job の所有者**: label `kivra-owner` は、client id の SHA-256 の先頭 8 バイトを 16 進にした値(client id をそのまま出さない)。孤児の掃除は `kivra-agent=1,kivra-owner=<値>` で絞るので、namespace を共有する別の agent の Job は消さない。
+- **Pod の配置**: `nodeSelector` は `canal-cni=enabled` に固定(ガードが他の値を拒否する)。運用者は、NetworkPolicy が効くノードにだけこの label を付ける(§3)。label の付いたノードが無いと Job は `Pending` のまま動かない。
+- **作業ディレクトリ**: k8s では host で mirror も作業ディレクトリも作らない(`RunBackend.usesHostWorkDir` が false)。Pod の entrypoint が公開リポジトリを取得し、差分を作る(§6.6c)。docker の経路は変えていない。
+- **配線**: `Main.executorFor` が 1 つの `AttemptPodInputs` を backend と executor の両方に渡す。別々だと、すべての Run が "no input is registered" で失敗する。`RunBackendFactoryTest.theBackendAndTheExecutorShareOneInputRegistry` は、この配線を壊すと落ちることを確かめた。
+- **CLI の認証**: Pod には秘密を渡さない。`ANTHROPIC_API_KEY` はダミー、`ANTHROPIC_BASE_URL` はプロキシを指す。Anthropic への認証は、docker と同じくプロキシ(WIF の短命トークン)が持つ。env は `DockerConstants.ENV_NAMES` の名前だけで、ガードが値の形を検査する。`automountServiceAccountToken: false` で、Pod に ServiceAccount のトークンは載らない。追加の配線は要らなかった。
+- **後片付け**: 成功、失敗、時間切れ、停止、出力上限のどの終わり方でも Job を delete する。`ttlSecondsAfterFinished`(3600 秒)は取りこぼしの保険。
+- **未確認(実クラスタ)**: NetworkPolicy の強制(§3)、exec readout の WebSocket 経路(§6.6c の既知の制約)、`podPidsLimit`、namespace の PodSecurity `restricted`、プロキシの Service への到達、kigawa-net-k8s の manifest(agent の RBAC、NetworkPolicy、Secret、namespace)、実行イメージの CI(§5 の 1)。
 
 ### 6.7 CLI の起動、task ファイル、stream-json の解析と分類(PR 7)
 
@@ -1376,13 +1390,16 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 | 変数 | 必須 | 内容 |
 | --- | --- | --- |
 | `KIVRA_AGENT_EXECUTOR` | 任意 | `stub`(既定)か `real`。ほかの値は起動に失敗する |
-| `KIVRA_AGENT_BACKEND` | 任意 | コンテナの実行先。`docker`(既定)。`k8s` は未実装のため起動に失敗する(ADR 0010 追補 7 の PR 4 で実装)。ほかの値も起動に失敗する。stub でも検査する |
-| `KIVRA_AGENT_DOCKER_BIN` | real で必須 | docker CLI の絶対パス |
+| `KIVRA_AGENT_BACKEND` | 任意 | コンテナの実行先。`docker`(既定)か `k8s`(Run ごとの Job。§6.6d)。ほかの値は起動に失敗する。stub でも検査する |
+| `KIVRA_AGENT_DOCKER_BIN` | docker の real で必須 | docker CLI の絶対パス |
 | `KIVRA_AGENT_DOCKER_HOST` | 任意 | rootless の `unix:///...`。docker CLI のプロセスにだけ渡す |
-| `KIVRA_AGENT_DOCKER_NETWORK` | real で必須 | 内部ネットワーク名(`--internal`。確認は運用) |
-| `KIVRA_AGENT_DOCKER_IMAGE` | real で必須 | 実行イメージ(`agent-runtime/image`) |
-| `KIVRA_AGENT_DOCKER_PROXY_URL` | real で必須 | `http://host:port`(egress プロキシ) |
-| `KIVRA_AGENT_GIT_BIN` | real で必須 | git の絶対パス(ホストで公開リポジトリを読むだけ) |
+| `KIVRA_AGENT_DOCKER_NETWORK` | docker の real で必須 | 内部ネットワーク名(`--internal`。確認は運用) |
+| `KIVRA_AGENT_DOCKER_IMAGE` | docker の real で必須 | 実行イメージ(`agent-runtime/image`) |
+| `KIVRA_AGENT_DOCKER_PROXY_URL` | docker の real で必須 | `http://host:port`(egress プロキシ) |
+| `KIVRA_AGENT_GIT_BIN` | docker の real で必須 | git の絶対パス(ホストで公開リポジトリを読むだけ。k8s では読まない) |
+| `KIVRA_AGENT_K8S_NAMESPACE` | k8s の real で必須 | Job を作る namespace(DNS-1123)。ほかの agent と共有してよい(Job は owner label で区別する) |
+| `KIVRA_AGENT_K8S_IMAGE` | k8s の real で必須 | 実行イメージ(許可リストは 1 件。`agent-runtime/image` の CI 成果物) |
+| `KIVRA_AGENT_K8S_PROXY_URL` | k8s の real で必須 | `http://host:port`(プロキシの Service) |
 | `KIVRA_AGENT_REPO` | real で必須 | `owner/repo`(公開 GitHub。資格情報は使わない) |
 | `KIVRA_AGENT_MODEL` | 任意 | CLI の `--model`。既定 `claude-haiku-5-5`。形式は `^[a-z0-9][a-z0-9.-]{0,63}$` |
 | `KIVRA_AGENT_MAX_BUDGET_USD` | 任意 | CLI の `--max-budget-usd`(1 アテンプトの費用上限、ドル)。既定 `0.50`。0.01 から 20.00、小数 2 桁まで(`0.5` は `0.50` に直す) |

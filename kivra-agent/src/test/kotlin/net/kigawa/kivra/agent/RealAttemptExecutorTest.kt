@@ -899,7 +899,7 @@ class RealAttemptExecutorPodReadoutTest {
         // The host work directory is changed differently: it must be ignored when the Pod gave a readout.
         val backend = FakeBackend(
             PodReadout.Collected(0, listOf(podChange()), emptyList()),
-            onRun = { spec -> Files.writeString(spec.workDir.resolve("kivra-agent/src/Hygiene.kt"), "fun host() = 1\n") },
+            onRun = { spec -> Files.writeString(spec.workDir!!.resolve("kivra-agent/src/Hygiene.kt"), "fun host() = 1\n") },
         )
         assertEquals(AttemptOutcome.ResultSubmitted, world.executor(backend = backend).execute(world.attempt()))
         val result = world.recorded.single { it.path.endsWith("/result") }
@@ -957,7 +957,7 @@ class RealAttemptExecutorPodReadoutTest {
     @Test
     fun withoutAReadoutTheHostCollectsTheWorkDirectoryAsBefore() = runBlocking {
         val world = World(docker = ScriptedDocker())
-        val backend = FakeBackend(null, onRun = { spec -> Files.writeString(spec.workDir.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") })
+        val backend = FakeBackend(null, onRun = { spec -> Files.writeString(spec.workDir!!.resolve("kivra-agent/src/Main.kt"), "fun a() = 2\n") })
         assertEquals(AttemptOutcome.ResultSubmitted, world.executor(backend = backend).execute(world.attempt()))
         val result = world.recorded.single { it.path.endsWith("/result") }
         assertTrue(result.body.contains(""""path":"kivra-agent/src/Main.kt","kind":"WRITE","fileKind":"REGULAR","content":"fun a() = 2\n""""))

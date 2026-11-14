@@ -40,20 +40,37 @@ import net.kigawa.kivra.agent.workdir.TaskInput
 import net.kigawa.kivra.agent.workdir.WorkDirPreparer
 import org.slf4j.LoggerFactory
 
-/** The settings of [RealAttemptExecutor]. Read only when `KIVRA_AGENT_EXECUTOR=real`. [toString] shows no value. */
+/**
+ * The k8s settings of [RealExecutorSettings] (ADR 0010 追補 7, PR 5c). Set only for the k8s backend. [toString] shows no value.
+ */
+class K8sExecutorSettings(
+    /** The namespace the Jobs are created in. */
+    val namespace: String,
+    /** The owner label of this agent's Jobs (see [net.kigawa.kivra.agent.k8s.K8sNames.ownerLabel]). */
+    val ownerLabel: String,
+) {
+    override fun toString(): String = "K8sExecutorSettings(***)"
+}
+
+/**
+ * The settings of [RealAttemptExecutor]. Read only when `KIVRA_AGENT_EXECUTOR=real`. [toString] shows no value.
+ *
+ * The docker fields are set for the docker backend, and [k8s] for the k8s backend. [AgentConfig] sets exactly the ones of its backend. [image]
+ * and [proxyUrl] are used by both: the run image and the egress proxy of the backend.
+ */
 class RealExecutorSettings(
-    /** The absolute path of the docker CLI (the rootless one of the agent's user). */
-    val dockerBinary: Path,
-    /** The `DOCKER_HOST` of the rootless socket (`unix:///...`), or null for the docker default. */
-    val dockerHost: String?,
-    /** The internal network of the run containers (`docker network create --internal`). */
-    val network: String,
+    /** The absolute path of the docker CLI (the rootless one of the agent's user). Docker only. */
+    val dockerBinary: Path? = null,
+    /** The `DOCKER_HOST` of the rootless socket (`unix:///...`), or null for the docker default. Docker only. */
+    val dockerHost: String? = null,
+    /** The internal network of the run containers (`docker network create --internal`). Docker only. */
+    val network: String? = null,
     /** The run image, for example `kivra-agent-runtime:<tag>`. */
     val image: String,
     /** The egress proxy, `http://host:port`. */
     val proxyUrl: String,
-    /** The absolute path of git, used only on the host to read the public base commit. */
-    val gitBinary: Path,
+    /** The absolute path of git, used only on the host to read the public base commit (docker only; the Pod fetches its own). */
+    val gitBinary: Path? = null,
     /** The repository the base commit is read from. The config only builds a public GitHub source; tests use a local one. */
     val repo: RepoSource,
     /** The `--model` of the CLI (`KIVRA_AGENT_MODEL`). The default is Haiku 5.5, the only model kivra's policy allows. */
@@ -66,6 +83,8 @@ class RealExecutorSettings(
     val newErrorCodes: Boolean = false,
     /** Sends the run's monitor events to kivra (`KIVRA_AGENT_MONITOR_EVENTS=1`). Off by default. See [MonitorSession] and ADR 0012. */
     val monitorEvents: Boolean = false,
+    /** The namespace and owner label of the k8s backend (`KIVRA_AGENT_BACKEND=k8s`). Null for docker. */
+    val k8s: K8sExecutorSettings? = null,
 ) {
     override fun toString(): String = "RealExecutorSettings(***)"
 }
@@ -73,7 +92,8 @@ class RealExecutorSettings(
 /**
  * The real attempt executor (ADR 0010, runbook 6.5 and 6.10). For one claimed attempt it:
  *
- * 1. reads the public base commit into a host-side mirror and extracts it into a new work directory ([WorkDirPreparer]);
+ * 1. reads the public base commit into a host-side mirror and extracts it into a new work directory ([WorkDirPreparer]). A backend
+ *    without a host work directory (k8s, [RunBackend.usesHostWorkDir]) skips this: its Pod does it;
  * 2. runs the CLI in one container ([RunBackend]). The container is stopped on the time limit, on a cancel request from kivra
  *    (`cancelRequested`), on the STOP file, and when the coroutine is cancelled;
  * 3. after the container has stopped, classifies the stream ([StreamJsonParser], [CliOutcomeClassifier]) and collects the change set
@@ -101,7 +121,14 @@ class RealAttemptExecutor(
     private val podInputs: AttemptPodInputs = AttemptPodInputs(),
 ) : AttemptExecutor {
     private val logger = LoggerFactory.getLogger(RealAttemptExecutor::class.java)
-    private val mirror = PublicGitMirror(settings.gitBinary, workRoot.resolve(MIRROR_DIR_NAME))
+
+    /** The host mirror, used only when the backend has a host work directory. A k8s Pod fetches the commit itself. */
+    private val mirror: PublicGitMirror? = if (backend.usesHostWorkDir) {
+        val git = settings.gitBinary ?: throw ConfigException("${AgentConfig.ENV_GIT_BIN} is required")
+        PublicGitMirror(git, workRoot.resolve(MIRROR_DIR_NAME))
+    } else {
+        null
+    }
     private val preparer = WorkDirPreparer(workRoot)
     private val changeRoot: Path = workRoot
     private val debugKeep: AttemptDebugKeep? = if (settings.debugKeep) AttemptDebugKeep(workRoot).also { it.prune() } else null
@@ -167,23 +194,14 @@ class RealAttemptExecutor(
         // The blocking work runs to its end even when the coroutine is cancelled: the container is stopped by the cancel check
         // below, and the work directory is removed afterwards. Nothing is left running on a cancel.
         val run = withContext(Dispatchers.IO + NonCancellable) {
-            mirror.sync(settings.repo)
-            val work = preparer.prepare(
-                attempt.runId,
-                attempt.attemptId,
-                mirror.openArchive(attempt.baseSha),
-                TaskInput(
-                    title = attempt.task.value,
-                    body = attempt.task.body,
-                    truncated = attempt.task.truncated || attempt.task.bodyTruncated,
-                ),
-            )
+            // The host work directory exists only for a backend that uses one (docker). For k8s the Pod does this itself.
+            val work = if (backend.usesHostWorkDir) prepareHostWorkDir(attempt) else null
             state.prepared = work
             val spec = RunSpec(
                 runId = attempt.runId,
                 attemptId = attempt.attemptId,
                 image = settings.image,
-                workDir = work.runDir,
+                workDir = work?.runDir,
                 network = settings.network,
                 proxyUrl = settings.proxyUrl,
                 timeout = Duration.ofSeconds(attempt.limits.maxRuntimeSeconds),
@@ -225,9 +243,8 @@ class RealAttemptExecutor(
             return AttemptOutcome.Failed(run.outcome.errorCode(settings.newErrorCodes) ?: AgentErrorCode.NEEDS_HUMAN, usage)
         }
 
-        val work = checkNotNull(state.prepared) { "the work directory is missing after a run" }
         val collected = withContext(Dispatchers.IO + NonCancellable) {
-            collect(attempt, run, work, pathRules)
+            collect(attempt, run, state.prepared, pathRules)
         }
         return when (collected) {
             is CollectOutcome.Rejected -> {
@@ -248,24 +265,43 @@ class RealAttemptExecutor(
         }
     }
 
+    /** Reads the base commit into the host mirror and extracts it into a new work directory (docker only; see [usesHostWorkDir]). */
+    private fun prepareHostWorkDir(attempt: ClaimedAttempt): PreparedWorkDir {
+        val host = checkNotNull(mirror) { "the host mirror is not used by this backend" }
+        host.sync(settings.repo)
+        return preparer.prepare(
+            attempt.runId,
+            attempt.attemptId,
+            host.openArchive(attempt.baseSha),
+            TaskInput(
+                title = attempt.task.value,
+                body = attempt.task.body,
+                truncated = attempt.task.truncated || attempt.task.bodyTruncated,
+            ),
+        )
+    }
+
     /**
      * Collects the change set. A run that gives a Pod readout (k8s) is not collected on the host: the Pod's claim is checked again with
      * the real limits and path rules of the attempt, and the summary and the session id come from the CLI's output here
      * ([PodReadout.Collected.finish]). Without a readout (docker) the host collects from the work directory, as it always did.
      */
-    private fun collect(attempt: ClaimedAttempt, run: RunState, work: PreparedWorkDir, pathRules: PathRules): CollectOutcome {
+    private fun collect(attempt: ClaimedAttempt, run: RunState, work: PreparedWorkDir?, pathRules: PathRules): CollectOutcome {
         val limits = attempt.limits.toDiffLimits()
         val summary = run.report.result?.resultText.orEmpty()
         val sessionId = run.report.result?.sessionId
         return when (val readout = run.result.podReadout) {
-            null -> DiffCollector(changeRoot, limits).collect(
-                runDir = work.runDir,
-                manifestPath = work.manifest,
-                summary = summary,
-                exitStatus = checkNotNull(run.result.exitCode),
-                sessionId = sessionId,
-                pathRules = pathRules,
-            )
+            null -> {
+                val prepared = checkNotNull(work) { "the work directory is missing after a run" }
+                DiffCollector(changeRoot, limits).collect(
+                    runDir = prepared.runDir,
+                    manifestPath = prepared.manifest,
+                    summary = summary,
+                    exitStatus = checkNotNull(run.result.exitCode),
+                    sessionId = sessionId,
+                    pathRules = pathRules,
+                )
+            }
             is PodReadout.Error -> CollectOutcome.Rejected(listOf(DiffRejectReason.RESULT_FIELD_INVALID))
             is PodReadout.Collected -> readout.finish(summary, sessionId, limits, pathRules)
         }

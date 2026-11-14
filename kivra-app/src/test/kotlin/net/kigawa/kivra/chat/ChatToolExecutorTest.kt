@@ -48,6 +48,7 @@ import net.kigawa.kivra.db.SelfDevSubmitResult
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.db.Ulid
 import net.kigawa.kivra.db.execUpdate
+import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.utcNow
 import net.kigawa.kivra.routes.PermissionGuard
 import net.kigawa.kivra.routes.SelfDevOrderRouteDeps
@@ -123,7 +124,12 @@ class ChatToolExecutorTest {
     )
 
     /** One database with every part the tools use. */
-    private inner class World(guard: PermissionGuard = offGuard(), memoryOn: Boolean = true, ordersOn: Boolean = true) {
+    private inner class World(
+        guard: PermissionGuard = offGuard(),
+        memoryOn: Boolean = true,
+        ordersOn: Boolean = true,
+        childDepth: String = "1",
+    ) {
         val db = TestDb().also { openDbs += it }
         val projects = ProjectRepository(db.database, Clock.systemUTC())
         val orders = SelfDevOrderRepository(db.database)
@@ -135,7 +141,10 @@ class ChatToolExecutorTest {
             operators = StubAuth,
             autopilot = enabledAutopilot(),
             orderSettings = OrderSettings.fromEnv(
-                mapOf(OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to ROOT_APPROVER, "KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP" to "3"),
+                mapOf(
+                    OrderSettings.ENV_ENABLED to "true", OrderSettings.ENV_ROOT_APPROVER to ROOT_APPROVER, "KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP" to "3",
+                    "KIVRA_SELFDEV_ORDER_MAX_DEPTH" to childDepth, "KIVRA_SELFDEV_ORDER_MAX_CHILDREN" to "20",
+                ),
                 enabledAutopilot(),
                 aiPrincipal = AI_PRINCIPAL,
             ),
@@ -428,5 +437,133 @@ class ChatToolExecutorTest {
         assertTrue(bodies.sumOf { it.length } <= ChatToolExecutor.MEMORY_TOTAL_MAX)
         assertTrue(records.any { it.jsonObject["body_omitted"] != null }, "the records past the total limit carry no text")
         assertEquals("true", result["truncated"]!!.jsonPrimitive.content)
+    }
+
+    // ---- order_create_child (ADR 0023 追補 6) ----
+
+    private fun World.create(
+        title: String = "チャットを中央表示にする",
+        instruction: String = "運用者の依頼: 「チャットを中央表示にして右サイドバーにしたい」\n期待する結果: チャットが画面の中央に出る。",
+        turn: ChatToolExecutor = turn(),
+    ): ChatToolOutcome = turn.call(ChatTool.ORDER_CREATE_CHILD, "title" to title, "instruction" to instruction)
+
+    private fun World.keyOf(orderId: String): String = transaction(db.database) {
+        execQuery("SELECT idempotency_key FROM selfdev_orders WHERE order_id = ?", orderId) { it.getString(1) }.single()
+    }
+
+    @Test
+    fun `a child order is created under the project's root as the operator, as the REST route creates it`() {
+        val w = World()
+        val root = w.root()
+        val created = w.create()
+        assertEquals(ChatToolStatus.OK, created.status, created.code)
+        val id = created.data["order_id"]!!.jsonPrimitive.content
+        assertEquals("ACTIVE", created.data["state"]!!.jsonPrimitive.content)
+        val child = assertNotNull(w.orders.get(id))
+        assertEquals(root.orderId, child.parentOrderId)
+        assertEquals(w.project, child.projectId)
+        assertEquals("チャットを中央表示にする", child.title)
+        assertTrue(child.policy.startsWith("運用者の依頼:"))
+        assertEquals(OPERATOR, child.createdBy, "the operator's principal, never the AI's")
+        assertEquals(1, child.maxCycles)
+        assertEquals(1, child.depth)
+        assertEquals(net.kigawa.kivra.db.DEFAULT_CYCLE_BUDGET_JPY, child.orderBudgetJpy)
+        assertTrue(w.keyOf(id).startsWith(ChatToolExecutor.AI_CHILD_KEY_PREFIX))
+        // The parent's allocation moved, as the REST route's creation moves it; the cycle is not started.
+        assertEquals(1, w.orders.get(root.orderId)!!.childCount)
+        assertNull(child.currentGoalId)
+        // The cycle may then be started with the existing tool, in the same turn.
+        assertEquals(ChatToolStatus.OK, w.turn().call(ChatTool.ORDER_START_CYCLE, "orderId" to id).status)
+    }
+
+    @Test
+    fun `an operator without ORDER_MANAGE, or with the children off, is not offered the creation`() {
+        assertFalse(ChatTool.ORDER_CREATE_CHILD in World(guard = roleGuard(Role.VIEWER)).turn().offered)
+        assertFalse(ChatTool.ORDER_CREATE_CHILD in World(childDepth = "0").turn().offered)
+        assertTrue(ChatTool.ORDER_CREATE_CHILD in World().turn().offered)
+    }
+
+    @Test
+    fun `without a root order it is not found, with a paused root it is refused, and another project's root is never used`() {
+        val w = World()
+        val foreign = w.root(w.other)
+        assertEquals(ChatToolOutcome(ChatToolStatus.FAILED, ChatToolExecutor.CODE_NOT_FOUND), w.create())
+        assertEquals(0, w.orders.get(foreign.orderId)!!.childCount)
+        val root = w.root()
+        w.orders.pauseByOperator(root.orderId, root.version, OPERATOR)
+        assertEquals(ChatToolOutcome(ChatToolStatus.FAILED, ChatToolExecutor.CODE_ROOT_NOT_ACTIVE), w.create())
+        assertEquals(0, w.orders.get(root.orderId)!!.childCount)
+    }
+
+    @Test
+    fun `two active roots are ambiguous and nothing is created`() {
+        val w = World()
+        w.root()
+        w.root()
+        assertEquals(ChatToolOutcome(ChatToolStatus.FAILED, ChatToolExecutor.CODE_AMBIGUOUS_ROOT), w.create())
+    }
+
+    @Test
+    fun `one child per turn, and the next turn may create again`() {
+        val w = World()
+        w.root()
+        val turn = w.turn()
+        assertEquals(ChatToolStatus.OK, w.create(title = "一つ目", turn = turn).status)
+        assertEquals(ChatToolOutcome(ChatToolStatus.FAILED, ChatToolExecutor.CODE_CREATE_LIMIT), w.create(title = "二つ目", turn = turn))
+        assertEquals(ChatToolStatus.OK, w.create(title = "二つ目").status)
+    }
+
+    @Test
+    fun `the AI creates at most five children per project and hour, counted by their creation time`() {
+        val w = World()
+        val root = w.root()
+        val limits = net.kigawa.kivra.db.ChildLimits(1, 20, 100)
+        val made = (1..5).map { n ->
+            val r = w.orders.createChild(root.orderId, "既存 $n", "p", 1, "${ChatToolExecutor.AI_CHILD_KEY_PREFIX}old-$n", OPERATOR, limits)
+            assertIs<net.kigawa.kivra.db.ChildCreateResult.Created>(r).order.orderId
+        }
+        // A child of an operator's own key does not count.
+        w.orders.createChild(root.orderId, "運用者の子", "p", 1, "operator-key", OPERATOR, limits)
+        assertEquals(ChatToolOutcome(ChatToolStatus.FAILED, ChatToolExecutor.CODE_HOURLY_CREATE_LIMIT), w.create())
+        // An hour later the old ones no longer count.
+        transaction(w.db.database) {
+            made.forEach { execUpdate("UPDATE selfdev_orders SET created_at = ? WHERE order_id = ?", utcNow(Clock.systemUTC()).minusHours(2), it) }
+        }
+        assertEquals(ChatToolStatus.OK, w.create().status)
+    }
+
+    @Test
+    fun `an active child of the same title is not created again, and its ID is returned`() {
+        val w = World()
+        w.root()
+        val first = w.create().data["order_id"]!!.jsonPrimitive.content
+        val again = w.create()
+        assertEquals(ChatToolStatus.FAILED, again.status)
+        assertEquals(ChatToolExecutor.CODE_ALREADY_EXISTS, again.code)
+        assertEquals(first, again.data["order_id"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `invalid creation arguments are refused before anything is read`() {
+        val w = World()
+        val root = w.root()
+        val t = w.turn()
+        assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x").code, "the instruction is required")
+        assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "a\nb", "instruction" to "x").code)
+        assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x".repeat(201), "instruction" to "x").code)
+        assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "y".repeat(2001)).code)
+        assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "a\u0007b").code)
+        assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "y", "maxCycles" to "0").code)
+        assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "y", "budget" to "9").code)
+        // Above the configured cap (3) but within the schema: a fixed code, nothing created.
+        assertEquals(ChatToolOutcome(ChatToolStatus.FAILED, "MAX_CYCLES_INVALID"), t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "y", "maxCycles" to "4"))
+        assertEquals(0, w.orders.get(root.orderId)!!.childCount)
+        // maxCycles as a JSON number is taken.
+        val withCycles = t.run(
+            "order_create_child",
+            JsonObject(mapOf("title" to JsonPrimitive("周 2"), "instruction" to JsonPrimitive("y"), "maxCycles" to JsonPrimitive(2))),
+        ).outcome
+        assertEquals(ChatToolStatus.OK, withCycles.status, withCycles.code)
+        assertEquals(2, w.orders.get(withCycles.data["order_id"]!!.jsonPrimitive.content)!!.maxCycles)
     }
 }

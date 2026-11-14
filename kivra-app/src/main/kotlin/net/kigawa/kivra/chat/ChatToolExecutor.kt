@@ -36,6 +36,11 @@ import net.kigawa.kivra.routes.pauseAsOperator
 import net.kigawa.kivra.routes.resumeAsOperator
 import net.kigawa.kivra.routes.startCycleAsOperator
 import net.kigawa.kivra.routes.updateAsOperator
+import net.kigawa.kivra.routes.createChildAsOperator
+import net.kigawa.kivra.routes.validatedPolicy
+import net.kigawa.kivra.routes.validatedText
+import net.kigawa.kivra.db.ChildCreateResult
+import net.kigawa.kivra.db.DEFAULT_CYCLE_BUDGET_JPY
 import net.kigawa.kivra.selfdev.memory.MemoryKind
 import net.kigawa.kivra.selfdev.memory.MemoryTier
 import org.slf4j.LoggerFactory
@@ -105,6 +110,9 @@ class ChatToolExecutor internal constructor(
     private val canManageOrders = allowed(Permission.ORDER_MANAGE)
     private val orders = deps.orders?.takeIf { it.ordersEnabled() }
 
+    /** One child order per turn (ADR 0023 追補 6). */
+    private var childCreated = false
+
     override val offered: List<ChatTool> = if (access.isAi || !allowed(Permission.READ)) {
         emptyList()
     } else {
@@ -119,12 +127,14 @@ class ChatToolExecutor internal constructor(
             orders != null && deps.chatActions != null && canManageOrders
         ChatTool.ORDER_STOP_REQUEST -> orders != null && deps.chatActions != null && allowed(Permission.STOP_REQUEST)
         ChatTool.PROJECT_UPDATE -> canManageOrders
+        // A child needs the children to be on (KIVRA_SELFDEV_ORDER_MAX_DEPTH >= 1); the REST route answers CHILDREN_DISABLED otherwise.
+        ChatTool.ORDER_CREATE_CHILD -> orders != null && canManageOrders && orders.orderSettings.maxDepth >= 1
         ChatTool.RUN_GET, ChatTool.RUN_LIST, ChatTool.PROJECT_GET, ChatTool.MEMORY_SEARCH, ChatTool.MEMORY_GET -> true
     }
 
     override fun run(wireName: String, arguments: JsonElement): ChatToolCallResult {
         val tool = ChatTool.fromWireName(wireName)
-        val args = ChatToolArguments.parse(arguments)
+        val args = ChatToolArguments.parse(arguments, tool?.let { ChatToolArguments.numberArgumentsOf(it).keys }.orEmpty())
         val outcome = when {
             tool == null -> ChatToolOutcome(ChatToolStatus.DENIED, CODE_UNKNOWN_TOOL)
             tool !in offered -> ChatToolOutcome(ChatToolStatus.DENIED, CODE_NOT_OFFERED)
@@ -237,6 +247,7 @@ class ChatToolExecutor internal constructor(
                 if (updated == null) notFound() else ok(buildJsonObject { put("project_id", updated.projectId) })
             }
         }
+        ChatTool.ORDER_CREATE_CHILD -> createChild(args)
         ChatTool.ORDER_ABANDON_CYCLE -> withOrder(args) { order ->
             when {
                 order.currentGoalId == null -> failed("NO_CYCLE_IN_PROGRESS")
@@ -265,6 +276,58 @@ class ChatToolExecutor internal constructor(
             // An assignee that is not a member of this project is not found here, as any ID outside the project.
             if (chatActions().membership(projectId, assignee) != MEMBER_PRESENT) notFound()
             else propose(ChatActionCode.MEMBER_REMOVE, assignee, MEMBER_PRESENT)
+        }
+    }
+
+    /**
+     * A child order under the project's root order, as `POST /api/selfdev/orders/{id}/children` creates it ([createChildAsOperator]), as the
+     * operator (ADR 0023 追補 6). The guards against a flood: one per turn ([CODE_CREATE_LIMIT]), [CHILD_CREATE_PER_HOUR] per project and hour
+     * (counted by the creations' key prefix [AI_CHILD_KEY_PREFIX] and their creation time), and no second ACTIVE child of the same title
+     * ([CODE_ALREADY_EXISTS], with its ID). The budget is fixed by the server: the default cycle budget per cycle; never chosen by the model.
+     */
+    private fun createChild(args: Map<String, String>): ChatToolOutcome {
+        if (childCreated) return failed(CODE_CREATE_LIMIT)
+        val deps = orders()
+        // The REST route's field checks, in code points.
+        val title = validatedText(args.getValue("title"), ChatToolArguments.ORDER_TITLE_MAX) ?: return ChatToolOutcome(ChatToolStatus.DENIED, CODE_INVALID_ARGUMENTS)
+        val policy = validatedPolicy(args.getValue("instruction")) ?: return ChatToolOutcome(ChatToolStatus.DENIED, CODE_INVALID_ARGUMENTS)
+        val maxCycles = args["maxCycles"]?.toInt() ?: 1
+        if (maxCycles !in 1..deps.orderSettings.maxCyclesCap) return failed("MAX_CYCLES_INVALID")
+        val roots = deps.orders.list(ROOT_SCAN_LIMIT, ProjectFilter.Only(projectId)).filter { it.parentOrderId == null }
+        if (roots.isEmpty()) return notFound()
+        val active = roots.filter { it.state == OrderState.ACTIVE }
+        val parent = when (active.size) {
+            0 -> return failed(CODE_ROOT_NOT_ACTIVE)
+            1 -> active.single()
+            else -> return failed(CODE_AMBIGUOUS_ROOT)
+        }
+        deps.orders.activeChildWithTitle(projectId, title)?.let { existing ->
+            return ChatToolOutcome(ChatToolStatus.FAILED, CODE_ALREADY_EXISTS, buildJsonObject {
+                put("order_id", existing.orderId)
+                put("state", existing.state.name)
+            })
+        }
+        if (deps.orders.countChildrenWithKeyPrefixWithin(projectId, AI_CHILD_KEY_PREFIX, java.time.Duration.ofHours(1)) >= CHILD_CREATE_PER_HOUR) {
+            return failed(CODE_HOURLY_CREATE_LIMIT)
+        }
+        val key = "$AI_CHILD_KEY_PREFIX${net.kigawa.kivra.db.Ulid.generate()}"
+        val budget = DEFAULT_CYCLE_BUDGET_JPY * maxCycles
+        return when (val r = deps.createChildAsOperator(parent.orderId, title, policy, budget, key, principal, maxCycles)) {
+            is ChildCreateResult.Created -> ok(buildJsonObject {
+                childCreated = true
+                put("order_id", r.order.orderId)
+                put("parent_order_id", parent.orderId)
+                put("state", r.order.state.name)
+                put("max_cycles", r.order.maxCycles)
+                put("version", r.order.version)
+                put("cycle_started", false)
+            })
+            is ChildCreateResult.Replayed -> ok(buildJsonObject {
+                put("order_id", r.order.orderId)
+                put("state", r.order.state.name)
+            })
+            is ChildCreateResult.Refused -> failed(r.reason.name)
+            ChildCreateResult.KeyConflict -> failed("KEY_CONFLICT")
         }
     }
 
@@ -400,6 +463,21 @@ class ChatToolExecutor internal constructor(
         const val CODE_INTERNAL_ERROR = "INTERNAL_ERROR"
         const val CODE_PROPOSED = "PROPOSED"
         const val CODE_ALREADY_PROPOSED = "ALREADY_PROPOSED"
+
+        // The child order's codes (ADR 0023 追補 6).
+        const val CODE_CREATE_LIMIT = "CREATE_LIMIT"
+        const val CODE_HOURLY_CREATE_LIMIT = "HOURLY_CREATE_LIMIT"
+        const val CODE_ALREADY_EXISTS = "ALREADY_EXISTS"
+        const val CODE_ROOT_NOT_ACTIVE = "ROOT_NOT_ACTIVE"
+        const val CODE_AMBIGUOUS_ROOT = "AMBIGUOUS_ROOT"
+
+        /** The idempotency key prefix of the children the chat's AI creates: their origin, counted by the hourly limit. */
+        const val AI_CHILD_KEY_PREFIX = "chat-ai:"
+
+        /** The most children the chat's AI may create in one project within an hour. */
+        const val CHILD_CREATE_PER_HOUR = 5
+
+        private const val ROOT_SCAN_LIMIT = 200
 
         private val BIDI = setOf('؜', '‎', '‏', '‪', '‫', '‬', '‭', '‮', '⁦', '⁧', '⁨', '⁩')
     }

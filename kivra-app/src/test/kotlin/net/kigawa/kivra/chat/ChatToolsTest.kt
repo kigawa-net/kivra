@@ -22,7 +22,7 @@ class ChatToolsTest {
         assertEquals(setOf(ChatTool.ORDER_GET, ChatTool.ORDER_LIST, ChatTool.RUN_GET, ChatTool.RUN_LIST, ChatTool.TASK_LIST, ChatTool.PROJECT_GET,
             ChatTool.MEMORY_SEARCH, ChatTool.MEMORY_GET),
             ChatTool.entries.filter { it.disposition == ChatToolDisposition.READ }.toSet())
-        assertEquals(setOf(ChatTool.ORDER_START_CYCLE, ChatTool.ORDER_PAUSE, ChatTool.ORDER_RESUME, ChatTool.PROJECT_UPDATE),
+        assertEquals(setOf(ChatTool.ORDER_START_CYCLE, ChatTool.ORDER_PAUSE, ChatTool.ORDER_RESUME, ChatTool.PROJECT_UPDATE, ChatTool.ORDER_CREATE_CHILD),
             ChatTool.entries.filter { it.disposition == ChatToolDisposition.IMMEDIATE }.toSet())
         assertEquals(setOf(ChatTool.ORDER_ABANDON_CYCLE, ChatTool.ORDER_STOP_REQUEST, ChatTool.MEMBER_ADD, ChatTool.MEMBER_REMOVE),
             ChatTool.entries.filter { it.disposition == ChatToolDisposition.PROPOSE }.toSet())
@@ -114,5 +114,27 @@ class ChatToolsTest {
         assertFalse(ChatToolArguments.isValid(ChatTool.MEMORY_SEARCH, mapOf("kind" to "SECRET")))
         assertFalse(ChatToolArguments.isValid(ChatTool.MEMORY_GET, mapOf("recordId" to "../$order")))
         assertFalse(ChatToolArguments.isValid(ChatTool.ORDER_STOP_REQUEST, mapOf("orderId" to order, "reason" to "x")), "no free text")
+    }
+
+    @Test
+    fun `a child order's arguments are a title, a multi-line instruction and an optional whole number of cycles`() {
+        val ok = mapOf("title" to "右サイドバー", "instruction" to "依頼:\n「チャットを中央に」\t制約: なし")
+        assertTrue(ChatToolArguments.isValid(ChatTool.ORDER_CREATE_CHILD, ok))
+        assertTrue(ChatToolArguments.isValid(ChatTool.ORDER_CREATE_CHILD, ok + ("maxCycles" to "2")))
+        assertFalse(ChatToolArguments.isValid(ChatTool.ORDER_CREATE_CHILD, ok + ("maxCycles" to "two")))
+        assertFalse(ChatToolArguments.isValid(ChatTool.ORDER_CREATE_CHILD, ok + ("maxCycles" to "11")))
+        assertFalse(ChatToolArguments.isValid(ChatTool.ORDER_CREATE_CHILD, mapOf("instruction" to "x")), "the title is required")
+        assertFalse(ChatToolArguments.isValid(ChatTool.ORDER_CREATE_CHILD, ok + ("title" to "a\nb")), "a title is one line")
+        assertFalse(ChatToolArguments.isValid(ChatTool.ORDER_CREATE_CHILD, ok + ("instruction" to "a\u001bb")))
+        assertFalse(ChatToolArguments.isValid(ChatTool.ORDER_CREATE_CHILD, ok + ("parentOrderId" to order)), "the parent is the server's choice")
+        // A number is taken for maxCycles only.
+        assertEquals(
+            mapOf("maxCycles" to "2"),
+            ChatToolArguments.parse(buildJsonObject { put("maxCycles", 2) }, setOf("maxCycles")),
+        )
+        assertNull(ChatToolArguments.parse(buildJsonObject { put("title", 2) }, setOf("maxCycles")))
+        val schema = ChatToolArguments.schemaOf(ChatTool.ORDER_CREATE_CHILD)
+        assertEquals(setOf("\"title\"", "\"instruction\""), schema["required"]!!.jsonArray.map { it.toString() }.toSet())
+        assertEquals("\"integer\"", schema["properties"]!!.jsonObject["maxCycles"]!!.jsonObject["type"].toString())
     }
 }

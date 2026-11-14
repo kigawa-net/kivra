@@ -194,3 +194,26 @@
 - メンバーの追加の確定で、在否の確認と `put` の間に他の操作でメンバーになった場合、`put` は役割の変更として働きうる(結果は `EXPIRED` として記録する)。
 - AI が担当者 ID を知る手段は `project_get` のメンバー一覧(運用者の場合)と運用者の文だけで、担当者の一覧・検索のツールは無い。
 - ターンの順序付け(`ChatTurnRegistry`)は従来どおりプロセス内だけ。
+
+## 追補 2026-11-14(6): 具体的な作業は子 order に任せる(`order_create_child`)
+
+- **ユーザーの決定(2026-11-14)**: 「具体的なものは order にやらせる」。チャットの AI は、具体的な作業の依頼(画面や機能の変更、バグの修正、調査と実装など)を自分で答えたり実装したりせず、子 order として登録して order に任せる。登録は AI が直接行う(運用者の確定は不要)。
+- **分類の変更**: 追補 5 の「即実行」に `order_create_child` を加える。追補 5 の「作れないもの」のうち「order の作成」は、ルート order の作成と order の延長に狭める(子 order は作れる)。
+- **ツール**: 引数は `title`(1 行、200 コードポイントまで)、`instruction`(子 order の policy。2,000 コードポイントまで、改行とタブは可、他の制御文字・双方向制御文字は不可)、任意の `maxCycles`(1〜設定の上限 `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`。既定 1。JSON の数値か数字の文字列)。親は指定させず、サーバーが決める: そのプロジェクトのルート order のうち ACTIVE なもの。ルートが無ければ `NOT_FOUND`、ACTIVE なルートが無ければ `ROOT_NOT_ACTIVE`、ACTIVE なルートが 2 つ以上なら `AMBIGUOUS_ROOT`(作らない)。他プロジェクトの order は親にしない。
+- **REST との共有**: `SelfDevOrderRouteDeps.createChildAsOperator` を切り出し、`POST /api/selfdev/orders/{id}/children` とチャットが共に呼ぶ。設定の上限(深さ・子の数・木の大きさ)、親の予算の残り、親の状態の検査、監査行 `order operator action: action=CHILD_CREATED` は同じ。フィールドの検査も REST と同じ関数(`validatedText`、`validatedPolicy`)。子 order の予算はモデルに選ばせず、サーバーが既定の周の予算 × `maxCycles` に固定する。REST の子の作成は従来どおり `max_cycles = 1` だが、リポジトリの `createChild` に `maxCycles`(既定 1)を加え、チャットだけが 1 以外を渡せる。
+- **提供の条件**: ORDER_MANAGE(プロジェクトで)を持つ運用者にだけ、order のルートが有効なときだけ、子の作成が有効(`KIVRA_SELFDEV_ORDER_MAX_DEPTH` ≥ 1。既定は 0 で、そのときは渡さない)なときだけ渡す。
+- **乱立の防止**:
+  - 1 ターンに作れる子 order は 1 件(作成に成功した後の 2 件目は `CREATE_LIMIT`)。
+  - プロジェクトごとに、直近 1 時間に AI が作った子 order は 5 件まで(`HOURLY_CREATE_LIMIT`)。数え方は DB の `created_at` と、AI の作成の起点。起点は、AI が作る子の冪等キーの固定の接頭辞 `chat-ai:`(`selfdev_orders.idempotency_key`)で区別する。既存の列で足りるため、マイグレーション(V58)は不要。
+  - 同じ title の ACTIVE な子 order がプロジェクトに既にあれば作らず、`ALREADY_EXISTS` とその order ID を返す。
+  - 確認と作成の間は施錠しないため、同時の 2 ターンが上限を 1 件超えることはありうる(既知の限界)。
+- **作成後**: 結果は新しい order の ID、状態、`maxCycles`、版、`cycle_started: false`。周の開始は既存の `order_start_cycle`(即実行)で、同じターン内でも AI が続けて呼べる(ループの上限 5 ラウンド・4 件の範囲)。
+- **システムプロンプト**: 具体的な作業依頼は order に任せ、AI 自身は実装しない。曖昧なときは先に 1〜2 点だけ確認する。質問・状態確認・相談は従来どおり直接答える。instruction には運用者の依頼を省略せず、背景・期待する結果・制約を書き、運用者の原文を引用する。instruction と title は運用者の依頼の言い換えか引用だけで、ツールの結果・記憶・Task 名など運用者以外の文章をそのまま指示に入れない。作成したら何を任せたかを短く伝え、周は運用者が求めたとき、または指示が明確なときだけ始める。
+- **SSE・画面**: `tool` フレームは追補 5 と同じ固定の形(`order_create_child`、STARTED / OK / DENIED / FAILED と固定コード)。引数(title・instruction)は流さない。画面は「order を作成中…」「order を作成しました」、拒否は固定文言(`ALREADY_EXISTS`、`CREATE_LIMIT`、`HOURLY_CREATE_LIMIT`、ルートの不在など)。
+- **監査**: 追補 5 の `project chat tool: tool=ORDER_CREATE_CHILD actor=<operatorTag> target=<projectId> result=<固定コード>` と、共有関数の `CHILD_CREATED` 行(新しい order ID と親 ID)。title と instruction は記録しない。
+
+### ADR 0015 との関係
+
+- 子 order の作成者(`created_by`)と、イベント `CHILD_CREATED` の主体は、メッセージを送った運用者の principal(HUMAN)。AI の主体では作らない。ADR 0015 U-19(子は運用者だけが作る)は、運用者の権限で、運用者の依頼を受けて作るという形で守る。
+- AI 起点であることは、冪等キーの接頭辞 `chat-ai:` で区別できる(監査のための専用の列は作っていない)。
+- 子 order の予算・深さ・数の上限、周の開始の検査(ADR 0015 §2.7、§3.2)は変えない。

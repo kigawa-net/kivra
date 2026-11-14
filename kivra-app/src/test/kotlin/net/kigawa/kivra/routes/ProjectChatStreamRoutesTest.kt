@@ -226,6 +226,27 @@ class ProjectChatStreamRoutesTest {
     }
 
     @Test
+    fun `an order creation without the order routes is a DENIED tool frame of fixed codes, and nothing of its arguments is streamed`() = TestDb().use { db ->
+        val provider = ToolRoundsProvider(
+            listOf(
+                ScriptedRound(calls = listOf("order_create_child" to mapOf("title" to "右サイドバー", "instruction" to "秘密の依頼文"))),
+                ScriptedRound(listOf("order を作れませんでした。")),
+            ),
+        )
+        testApplication {
+            setUp(db, chatTestGateway(provider), withTools = true)
+            val projectId = db.project()
+
+            val body = stream(projectId, """{"content":"チャットを中央表示にして"}""").bodyAsText()
+
+            assertTrue(body.contains("data: {\"name\":\"order_create_child\",\"status\":\"STARTED\"}"), body)
+            assertTrue(body.contains("data: {\"name\":\"order_create_child\",\"status\":\"DENIED\",\"code\":\"NOT_OFFERED\"}"), body)
+            assertFalse(body.contains("秘密の依頼文"))
+            assertFalse(body.contains("右サイドバー"))
+        }
+    }
+
+    @Test
     fun `a client that goes away after a tool call keeps the text so far`() = TestDb().use { db ->
         val provider = ToolRoundsProvider(
             listOf(

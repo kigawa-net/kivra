@@ -20,7 +20,7 @@ class ChatToolsTest {
     @Test
     fun `the reads run at once, the safe operations run at once, and the destructive ones are only proposed`() {
         assertEquals(setOf(ChatTool.ORDER_GET, ChatTool.ORDER_LIST, ChatTool.RUN_GET, ChatTool.RUN_LIST, ChatTool.TASK_LIST, ChatTool.PROJECT_GET,
-            ChatTool.MEMORY_SEARCH, ChatTool.MEMORY_GET),
+            ChatTool.MEMORY_SEARCH, ChatTool.MEMORY_GET, ChatTool.REPO_TREE, ChatTool.REPO_READ_FILE),
             ChatTool.entries.filter { it.disposition == ChatToolDisposition.READ }.toSet())
         assertEquals(setOf(ChatTool.ORDER_START_CYCLE, ChatTool.ORDER_PAUSE, ChatTool.ORDER_RESUME, ChatTool.PROJECT_UPDATE, ChatTool.ORDER_CREATE_CHILD),
             ChatTool.entries.filter { it.disposition == ChatToolDisposition.IMMEDIATE }.toSet())
@@ -37,7 +37,8 @@ class ChatToolsTest {
         assertFalse(ChatTool.ORDER_STOP_REQUEST in offered)
         assertFalse(ChatTool.MEMBER_REMOVE in offered)
         assertTrue(offered.all { it.disposition == ChatToolDisposition.READ })
-        assertEquals(ChatTool.entries.toSet(), ChatTool.offeredTo(canManageOrders = true, memoryEnabled = true).toSet())
+        assertEquals(ChatTool.entries.toSet(), ChatTool.offeredTo(canManageOrders = true, memoryEnabled = true, repoEnabled = true).toSet())
+        assertFalse(ChatTool.offeredTo(canManageOrders = true, memoryEnabled = true).any { it.needsRepo })
     }
 
     @Test

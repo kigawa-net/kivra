@@ -178,6 +178,10 @@ class MigrationExpandOnlyTest {
             "V57:MODIFY (ALTER TABLE PROJECT_CHAT_ACTIONS MODIFY COLUMN TARGET_ID VARCHAR(64) NOT NULL)" to
                 "V57 widens project_chat_actions.target_id from CHAR(26) to VARCHAR(64). It stays NOT NULL, and every value an old Writer " +
                 "writes (a 26-character ULID) still fits, so no Contract step is needed. The UNIQUE on the column is kept.",
+            // V58 (ADR 0023 追補 7): the policy CHECK widens from 2000 to 8000 characters.
+            "V58:DROP (ALTER TABLE SELFDEV_ORDERS DROP CONSTRAINT CK_SELFDEV_ORDERS_POLICY)" to
+                "V58 replaces the policy length CHECK with a wider one (1 to 8000). An old Writer writes 1 to 2000 characters, so its rows " +
+                    "pass the new CHECK as they passed the old one. No Contract step is needed.",
         )
     }
 }

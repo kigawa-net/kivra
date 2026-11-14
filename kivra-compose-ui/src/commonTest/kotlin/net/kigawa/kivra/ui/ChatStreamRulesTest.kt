@@ -77,4 +77,17 @@ class ChatStreamRulesTest {
         assertTrue(chatToolStatusText(ChatStreamEvent.Tool("order_create_child", "FAILED", "CREATE_LIMIT")).contains("1 件まで"))
         assertTrue(chatToolStatusText(ChatStreamEvent.Tool("order_create_child", "FAILED", "HOURLY_CREATE_LIMIT")).contains("1 時間"))
     }
+
+    @Test
+    fun `the repository reads say what they read, never the path`() {
+        assertEquals("リポジトリを確認中…", chatToolStatusText(ChatStreamEvent.Tool("repo_tree", "STARTED")))
+        assertEquals("ファイルを読み取り中…", chatToolStatusText(ChatStreamEvent.Tool("repo_read_file", "STARTED")))
+        assertEquals("ファイルを読み取りました", chatToolStatusText(ChatStreamEvent.Tool("repo_read_file", "OK", "OK")))
+        assertEquals(
+            "許可されていないファイルまたはリポジトリのため、読み取りませんでした",
+            chatToolStatusText(ChatStreamEvent.Tool("repo_read_file", "DENIED", "PATH_NOT_ALLOWED")),
+        )
+        assertTrue(chatToolStatusText(ChatStreamEvent.Tool("repo_read_file", "FAILED", "GITHUB_RATE_LIMITED")).contains("GitHub"))
+        assertTrue(chatToolStatusText(ChatStreamEvent.Tool("repo_tree", "FAILED", "REPO_CALL_LIMIT")).contains("上限"))
+    }
 }

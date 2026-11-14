@@ -211,7 +211,8 @@ private val ORDER_ID_SHAPE = Regex("[0-9A-Z]{26}")
 private val DIGEST_SHAPE = Regex("[0-9a-f]{64}")
 private const val LIST_LIMIT = 50
 private const val MAX_TITLE_CODE_POINTS = 200
-private const val MAX_POLICY_CODE_POINTS = 2_000
+/** An order's policy (V58, ADR 0023 追補 7): the limit of the Task body it becomes. Shared by the REST routes and the chat's child order. */
+internal const val MAX_POLICY_CODE_POINTS = 8_000
 private const val MAX_CHILD_KEY_CODE_POINTS = 128
 /** The largest value of DECIMAL(12,0), the budget columns' type. */
 private const val MAX_BUDGET_JPY = 999_999_999_999L
@@ -290,7 +291,7 @@ private const val MAX_ABANDON_REASON_CODE_POINTS = 500
 private const val ORDERS_DISABLED = "self-development orders are disabled"
 private const val INVALID_BODY = "invalid request body"
 private const val TITLE_INVALID = "title must be 1-200 characters without control characters"
-private const val POLICY_INVALID = "policy must be 1-2000 characters, and may contain line breaks but no other control characters"
+private const val POLICY_INVALID = "policy must be 1-8000 characters, and may contain line breaks but no other control characters"
 private const val ORDER_NOT_FOUND = "order not found"
 private const val REQUEST_NOT_FOUND = "stop request not found"
 private const val FORBIDDEN = "forbidden"
@@ -1085,7 +1086,7 @@ private fun OrderCycle.response() = CycleResponse(
     createdAt = createdAt.utc(),
 )
 
-/** Validates a policy: trimmed, 1 to 2000 code points, line breaks and tabs allowed, other control characters refused. Null when invalid. */
+/** Validates a policy: trimmed, 1 to 8000 code points ([MAX_POLICY_CODE_POINTS]), line breaks and tabs allowed, other control characters refused. Null when invalid. */
 internal fun validatedPolicy(raw: String): String? {
     val value = raw.trim()
     if (value.isEmpty()) return null

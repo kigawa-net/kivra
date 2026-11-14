@@ -44,6 +44,11 @@ import net.kigawa.kivra.db.DEFAULT_CYCLE_BUDGET_JPY
 import net.kigawa.kivra.selfdev.memory.MemoryKind
 import net.kigawa.kivra.selfdev.memory.MemoryTier
 import org.slf4j.LoggerFactory
+import kotlinx.coroutines.runBlocking
+import net.kigawa.kivra.github.GitHubFailureKind
+import net.kigawa.kivra.github.GitHubResult
+import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.selfdev.RepoEntry
 
 /** The fixed status of one tool call, as the SSE `tool` frame carries it. STARTED is the frame before the call; the others end it. */
 enum class ChatToolStatus { STARTED, OK, DENIED, PROPOSED, FAILED }
@@ -78,6 +83,8 @@ class ChatToolDeps(
     val orders: SelfDevOrderRouteDeps? = null,
     val chatActions: ProjectChatActionRepository? = null,
     val memory: SelfDevMemoryRepository? = null,
+    /** The repository reads (ADR 0023 追補 7). Null (self-development off): no repository tool. */
+    val repo: ChatRepoSource? = null,
 ) {
     /** The tools of one turn: the chat's project, run as the operator [principal]. The permissions are read once, here. */
     fun forTurn(projectId: String, principal: String): ChatToolExecutor = ChatToolExecutor(this, projectId, principal)
@@ -116,7 +123,9 @@ class ChatToolExecutor internal constructor(
     override val offered: List<ChatTool> = if (access.isAi || !allowed(Permission.READ)) {
         emptyList()
     } else {
-        ChatTool.offeredTo(canManageOrders, memoryEnabled = deps.memory != null && allowed(Permission.READ_TEXT)).filter(::serves)
+        val readText = allowed(Permission.READ_TEXT)
+        ChatTool.offeredTo(canManageOrders, memoryEnabled = deps.memory != null && readText, repoEnabled = deps.repo != null && readText)
+            .filter(::serves)
     }
 
     /** Whether this server serves [tool] for this operator: the parts it needs exist, and the operator holds the REST route's permission. */
@@ -129,7 +138,8 @@ class ChatToolExecutor internal constructor(
         ChatTool.PROJECT_UPDATE -> canManageOrders
         // A child needs the children to be on (KIVRA_SELFDEV_ORDER_MAX_DEPTH >= 1); the REST route answers CHILDREN_DISABLED otherwise.
         ChatTool.ORDER_CREATE_CHILD -> orders != null && canManageOrders && orders.orderSettings.maxDepth >= 1
-        ChatTool.RUN_GET, ChatTool.RUN_LIST, ChatTool.PROJECT_GET, ChatTool.MEMORY_SEARCH, ChatTool.MEMORY_GET -> true
+        ChatTool.RUN_GET, ChatTool.RUN_LIST, ChatTool.PROJECT_GET, ChatTool.MEMORY_SEARCH, ChatTool.MEMORY_GET,
+        ChatTool.REPO_TREE, ChatTool.REPO_READ_FILE -> true
     }
 
     override fun run(wireName: String, arguments: JsonElement): ChatToolCallResult {
@@ -147,9 +157,11 @@ class ChatToolExecutor internal constructor(
                 ChatToolOutcome(ChatToolStatus.FAILED, CODE_INTERNAL_ERROR)
             }
         }
-        // The target is an ID the arguments carry (a valid one only), or the project. Never a text argument.
+        // The target is an ID the arguments carry (a valid one only), or a repository path's hash (never the path), or the project. Never a
+        // text argument.
         val target = tool?.let { t ->
             ChatToolArguments.idArgumentsOf(t).firstNotNullOfOrNull { k -> args?.get(k)?.takeIf(ChatToolArguments::isId) }
+                ?: (args?.get("path") ?: args?.get("prefix"))?.takeIf { t.needsRepo }?.let { "path#${sha256(it).take(12)}" }
         } ?: projectId
         log.info(
             "project chat tool: tool={} actor={} target={} result={}",
@@ -248,6 +260,8 @@ class ChatToolExecutor internal constructor(
             }
         }
         ChatTool.ORDER_CREATE_CHILD -> createChild(args)
+        ChatTool.REPO_TREE -> repoCall { repoTree(args) }
+        ChatTool.REPO_READ_FILE -> repoCall { repoReadFile(args) }
         ChatTool.ORDER_ABANDON_CYCLE -> withOrder(args) { order ->
             when {
                 order.currentGoalId == null -> failed("NO_CYCLE_IN_PROGRESS")
@@ -278,6 +292,130 @@ class ChatToolExecutor internal constructor(
             else propose(ChatActionCode.MEMBER_REMOVE, assignee, MEMBER_PRESENT)
         }
     }
+
+    // ---- the repository reads (ADR 0023 追補 7) ----
+
+    /** The repository calls of this turn: at most [REPO_CALLS_PER_TURN], to spare GitHub's rate limit. */
+    private var repoCalls = 0
+
+    /** The characters of file text given to the model in this turn: at most [REPO_TURN_CHARS]. */
+    private var repoChars = 0
+
+    /** The head commit and the tree of each repository read in this turn (one GitHub listing per repository and turn). */
+    private val trees = HashMap<RepoRef, Pair<String, List<RepoEntry>>>()
+
+    private inline fun repoCall(block: () -> ChatToolOutcome): ChatToolOutcome {
+        if (repoCalls >= REPO_CALLS_PER_TURN) return failed(CODE_REPO_CALL_LIMIT)
+        repoCalls++
+        return block()
+    }
+
+    /** The repositories this project may read: its mapped repositories (sorted), or the self-development target when it has none. */
+    private fun allowedRepos(source: ChatRepoSource): List<RepoRef> {
+        val mapped = deps.projects.listRepos(projectId).sorted().mapNotNull { key ->
+            key.split('/').takeIf { it.size == 2 }?.let { runCatching { RepoRef(it[0], it[1]) }.getOrNull() }
+        }
+        return mapped.ifEmpty { listOf(source.defaultRepo) }
+    }
+
+    /** The repository a call reads: the `repo` argument when it is one of the allowed ones, or the first allowed one. Null: not allowed. */
+    private fun repoOf(source: ChatRepoSource, args: Map<String, String>): RepoRef? {
+        val allowed = allowedRepos(source)
+        val named = args["repo"] ?: return allowed.first()
+        return allowed.firstOrNull { it.toString() == named }
+    }
+
+    /** The head and the tree of [repo] (cached for the turn), or the fixed failure code. */
+    private fun treeOf(source: ChatRepoSource, repo: RepoRef): Pair<Pair<String, List<RepoEntry>>?, String?> {
+        trees[repo]?.let { return it to null }
+        val sha = when (val h = runBlocking { source.head(repo) }) {
+            is GitHubResult.Success -> h.value ?: return null to CODE_BRANCH_NOT_FOUND
+            is GitHubResult.Failure -> return null to githubCode(h.kind)
+            is GitHubResult.Unknown -> return null to CODE_GITHUB_UNAVAILABLE
+        }
+        val entries = when (val t = runBlocking { source.reader.listFiles(repo, sha) }) {
+            is GitHubResult.Success -> t.value
+            is GitHubResult.Failure -> return null to githubCode(t.kind)
+            is GitHubResult.Unknown -> return null to CODE_GITHUB_UNAVAILABLE
+        }
+        val tree = sha to entries
+        trees[repo] = tree
+        return tree to null
+    }
+
+    private fun githubCode(kind: GitHubFailureKind): String = "GITHUB_${kind.name}"
+
+    private fun repoTree(args: Map<String, String>): ChatToolOutcome {
+        val source = deps.repo ?: return notFound()
+        val repo = repoOf(source, args) ?: return ChatToolOutcome(ChatToolStatus.DENIED, CODE_REPO_NOT_ALLOWED)
+        val prefix = args["prefix"]?.let { ChatRepoSource.normalizedPath(it) ?: return ChatToolOutcome(ChatToolStatus.DENIED, CODE_PATH_REFUSED) }
+        val limit = args["limit"]?.toInt() ?: REPO_TREE_DEFAULT_LIMIT
+        val (tree, failure) = treeOf(source, repo)
+        if (tree == null) return failed(failure!!)
+        // Only the paths that may be read: inside the context prefixes, and well formed.
+        val matching = tree.second.asSequence()
+            .filter { ChatRepoSource.normalizedPath(it.path) == it.path && source.allows(it.path) }
+            .filter { prefix == null || it.path.startsWith(prefix) }
+            .sortedBy { it.path }
+            .toList()
+        return ok(buildJsonObject {
+            put("repo", repo.toString())
+            put("ref", source.baseBranch)
+            put("allowed_prefixes", JsonArray(source.prefixes.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            put("repos", JsonArray(allowedRepos(source).map { kotlinx.serialization.json.JsonPrimitive(it.toString()) }))
+            put("files", JsonArray(matching.take(limit).map { e ->
+                buildJsonObject {
+                    put("path", e.path)
+                    put("size_bytes", e.sizeBytes)
+                    put("readable", e.readable && e.sizeBytes <= source.maxFileBytes)
+                }
+            }))
+            put("total", matching.size)
+            put("truncated", matching.size > limit)
+        })
+    }
+
+    private fun repoReadFile(args: Map<String, String>): ChatToolOutcome {
+        val source = deps.repo ?: return notFound()
+        val repo = repoOf(source, args) ?: return ChatToolOutcome(ChatToolStatus.DENIED, CODE_REPO_NOT_ALLOWED)
+        val path = ChatRepoSource.normalizedPath(args.getValue("path"))?.takeIf { !it.endsWith("/") }
+            ?: return ChatToolOutcome(ChatToolStatus.DENIED, CODE_PATH_REFUSED)
+        if (!source.allows(path)) return ChatToolOutcome(ChatToolStatus.DENIED, CODE_PATH_NOT_ALLOWED)
+        val start = args["startLine"]?.toInt() ?: 1
+        val end = args["endLine"]?.toInt()
+        if (end != null && end < start) return ChatToolOutcome(ChatToolStatus.DENIED, CODE_INVALID_ARGUMENTS)
+        if (repoChars >= REPO_TURN_CHARS) return failed(CODE_TURN_READ_LIMIT)
+        val (tree, failure) = treeOf(source, repo)
+        if (tree == null) return failed(failure!!)
+        val entry = tree.second.firstOrNull { it.path == path } ?: return notFound()
+        if (!entry.readable) return failed(CODE_NOT_READABLE)
+        if (entry.sizeBytes > source.maxFileBytes) return failed(CODE_FILE_TOO_LARGE)
+        val text = when (val r = runBlocking { source.reader.readFile(repo, tree.first, path) }) {
+            // Binary, not UTF-8 or over the reader's limit: never returned as text.
+            is GitHubResult.Success -> r.value ?: return failed(CODE_NOT_TEXT)
+            is GitHubResult.Failure -> return failed(githubCode(r.kind))
+            is GitHubResult.Unknown -> return failed(CODE_GITHUB_UNAVAILABLE)
+        }
+        val lines = text.lines()
+        val from = (start - 1).coerceAtMost(lines.size)
+        val to = (end ?: lines.size).coerceAtMost(lines.size)
+        val selected = SecretFilter.redact(lines.subList(from, maxOf(from, to)).joinToString("\n"))
+        val room = minOf(REPO_FILE_CHARS, REPO_TURN_CHARS - repoChars)
+        val content = selected.take(room)
+        repoChars += content.length
+        return ok(buildJsonObject {
+            put("repo", repo.toString())
+            put("path", path)
+            put("start_line", from + 1)
+            put("end_line", maxOf(from, to))
+            put("total_lines", lines.size)
+            put("content", content)
+            put("truncated", content.length < selected.length)
+        })
+    }
+
+    private fun sha256(value: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
     /**
      * A child order under the project's root order, as `POST /api/selfdev/orders/{id}/children` creates it ([createChildAsOperator]), as the
@@ -478,6 +616,26 @@ class ChatToolExecutor internal constructor(
         const val CHILD_CREATE_PER_HOUR = 5
 
         private const val ROOT_SCAN_LIMIT = 200
+
+        // The repository reads (ADR 0023 追補 7).
+        /** The repository calls of one turn (the loop allows 4 rounds of 4 calls; this keeps GitHub's rate limit in mind). */
+        const val REPO_CALLS_PER_TURN = 12
+
+        /** The most characters of one file's text, and of all the file text of one turn, given to the model. */
+        const val REPO_FILE_CHARS = 8_000
+        const val REPO_TURN_CHARS = 40_000
+        const val REPO_TREE_DEFAULT_LIMIT = 100
+
+        const val CODE_REPO_CALL_LIMIT = "REPO_CALL_LIMIT"
+        const val CODE_TURN_READ_LIMIT = "TURN_READ_LIMIT"
+        const val CODE_REPO_NOT_ALLOWED = "REPO_NOT_ALLOWED"
+        const val CODE_PATH_REFUSED = "PATH_REFUSED"
+        const val CODE_PATH_NOT_ALLOWED = "PATH_NOT_ALLOWED"
+        const val CODE_NOT_READABLE = "NOT_READABLE"
+        const val CODE_FILE_TOO_LARGE = "FILE_TOO_LARGE"
+        const val CODE_NOT_TEXT = "NOT_TEXT"
+        const val CODE_BRANCH_NOT_FOUND = "BRANCH_NOT_FOUND"
+        const val CODE_GITHUB_UNAVAILABLE = "GITHUB_UNAVAILABLE"
 
         private val BIDI = setOf('؜', '‎', '‏', '‪', '‫', '‬', '‭', '‮', '⁦', '⁧', '⁨', '⁩')
     }

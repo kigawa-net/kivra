@@ -3,12 +3,12 @@ package net.kigawa.kivra.ui
 /*
  * order の作成の純粋ロジック(画面に依存しない)。旧 UI(kivra-app/src/main/resources/ui/app.js の ORDER_CREATE_MSG と
  * orderCreateFormState)とサーバー(SelfDevOrderRoutes.kt の POST /api/selfdev/orders)の規則に合わせる。
- * 題名は 1〜200 コードポイント、方針は 1〜2000 コードポイント(改行とタブは可、他の制御文字と双方向の制御文字は不可)、
+ * 題名は 1〜200 コードポイント、方針は 1〜8000 コードポイント(改行とタブは可、他の制御文字と双方向の制御文字は不可)、
  * 最大の周の数は 1〜10(サーバーの上限は設定で、超えると MAX_CYCLES_INVALID の 400)。
  */
 
 const val ORDER_TITLE_MAX = 200
-const val ORDER_POLICY_MAX = 2000
+const val ORDER_POLICY_MAX = 8000
 const val ORDER_MAX_CYCLES_MIN = 1
 const val ORDER_MAX_CYCLES_MAX = 10
 
@@ -16,7 +16,7 @@ const val ORDER_MAX_CYCLES_MAX = 10
 fun validatedOrderTitle(raw: String): String? = validatedTaskTitle(raw)
 
 /**
- * 方針の検査。trim 後、1〜2000 コードポイント。改行とタブは許し、それ以外の制御文字と双方向の制御文字は拒否する
+ * 方針の検査。trim 後、1〜8000 コードポイント。改行とタブは許し、それ以外の制御文字と双方向の制御文字は拒否する
  * (サーバーの validatedPolicy と同じ)。通れば trim 済みの値、通らなければ null。
  */
 fun validatedOrderPolicy(raw: String): String? {
@@ -43,7 +43,7 @@ fun parseMaxCycles(raw: String): Int? {
 
 const val ORDER_CREATED_MESSAGE = "order を作成しました。"
 const val ORDER_NO_PROJECT_MESSAGE = "プロジェクトを選んでください。"
-const val ORDER_BAD_MESSAGE = "題名は 1〜200 文字、方針は 1〜2000 文字で入力してください（制御文字は使えません）"
+const val ORDER_BAD_MESSAGE = "題名は 1〜200 文字、方針は 1〜8000 文字で入力してください（制御文字は使えません）"
 const val ORDER_MAX_CYCLES_MESSAGE = "最大の周の数は 1 以上の整数で、サーバーの上限以下にしてください"
 const val ORDER_SENDING_MESSAGE = "送信中です…"
 

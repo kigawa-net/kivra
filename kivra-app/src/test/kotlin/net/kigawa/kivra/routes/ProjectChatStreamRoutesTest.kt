@@ -247,6 +247,25 @@ class ProjectChatStreamRoutesTest {
     }
 
     @Test
+    fun `a repository read streams its tool frame without the path`() = TestDb().use { db ->
+        val provider = ToolRoundsProvider(
+            listOf(
+                ScriptedRound(calls = listOf("repo_read_file" to mapOf("path" to "docs/secret-plan.md"))),
+                ScriptedRound(listOf("読めませんでした。")),
+            ),
+        )
+        testApplication {
+            setUp(db, chatTestGateway(provider), withTools = true)
+            val projectId = db.project()
+
+            val body = stream(projectId, """{"content":"計画して"}""").bodyAsText()
+
+            assertTrue(body.contains("data: {\"name\":\"repo_read_file\",\"status\":\"STARTED\"}"), body)
+            assertFalse(body.contains("secret-plan"), "the path is never streamed")
+        }
+    }
+
+    @Test
     fun `a client that goes away after a tool call keeps the text so far`() = TestDb().use { db ->
         val provider = ToolRoundsProvider(
             listOf(

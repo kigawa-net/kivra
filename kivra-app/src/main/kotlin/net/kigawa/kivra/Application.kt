@@ -316,6 +316,8 @@ internal fun Application.appModule(env: Map<String, String>) {
             orders = orderRoutes,
             chatActions = projectChatActions,
             memory = memoryRepo,
+            // The repository reads (ADR 0023 追補 7): only while self-development is on (its GitHub reader and context rules).
+            repo = selfDevParts?.chatRepo,
         )
     }
     // Goal tools over MCP temporarily removed pending Task model migration (V40)

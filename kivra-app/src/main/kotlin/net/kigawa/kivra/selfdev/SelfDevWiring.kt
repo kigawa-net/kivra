@@ -24,6 +24,7 @@ import net.kigawa.kivra.github.RsaJwtSigner
 import net.kigawa.kivra.github.StaticTokenProvider
 import net.kigawa.kivra.github.TokenProvider
 import net.kigawa.kivra.github.githubHttpClient
+import net.kigawa.kivra.github.map
 import net.kigawa.kivra.modelgateway.AnthropicAuth
 import net.kigawa.kivra.modelgateway.AnthropicProvider
 import net.kigawa.kivra.modelgateway.AnthropicWifAuth
@@ -94,6 +95,8 @@ internal class SelfDevParts(
     val gateway: ModelGateway? = null,
     /** The difficulty router of the project chat's reply (ADR 0023 追補). Null when there is no model gateway. */
     val chatRouter: DifficultyRouter? = null,
+    /** The project chat AI's repository reads (ADR 0023 追補 7): the same GitHub reader and context rules as the developer's. */
+    val chatRepo: net.kigawa.kivra.chat.ChatRepoSource? = null,
 )
 
 /** The Anthropic client and its credential (Workload Identity Federation, or the bound static key), shared by the callers of the model. */
@@ -345,6 +348,14 @@ internal fun buildSelfDev(
         null
     }
     return SelfDevParts(
+        chatRepo = net.kigawa.kivra.chat.ChatRepoSource(
+            reader = reader,
+            branchHead = { repo, branch -> github.getBranch(repo, branch).map { it?.headSha } },
+            defaultRepo = config.repo,
+            baseBranch = config.baseBranch,
+            prefixes = config.contextPathPrefixes,
+            maxFileBytes = config.maxContextFileBytes,
+        ),
         chatRouter = gateway.let { DifficultyRouter(it, registry, localProviders.firstOrNull()?.id, PROVIDER_ID, DifficultyRoutingSettings.fromEnv(env).chatEnabled) },
         worker = worker,
         routes = SelfDevRouteDeps(runs, identity, config.repo, settings.maxActiveRuns, github, ProjectRepository(database, Clock.systemUTC())),

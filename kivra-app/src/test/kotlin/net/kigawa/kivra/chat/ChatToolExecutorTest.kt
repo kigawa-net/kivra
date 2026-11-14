@@ -189,7 +189,8 @@ class ChatToolExecutorTest {
     @Test
     fun `an operator who manages orders gets every tool, a viewer the reads only, and the AI none`() {
         val w = World()
-        assertEquals(ChatTool.entries.toSet(), w.turn().offered.toSet())
+        // Every tool but the repository reads (no self-development reader in this world).
+        assertEquals(ChatTool.entries.filterNot { it.needsRepo }.toSet(), w.turn().offered.toSet())
         assertEquals(emptyList(), w.turn(AI_PRINCIPAL).offered)
 
         val viewer = World(guard = roleGuard(Role.VIEWER))
@@ -551,7 +552,7 @@ class ChatToolExecutorTest {
         assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x").code, "the instruction is required")
         assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "a\nb", "instruction" to "x").code)
         assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x".repeat(201), "instruction" to "x").code)
-        assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "y".repeat(2001)).code)
+        assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "y".repeat(8001)).code)
         assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "a\u0007b").code)
         assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "y", "maxCycles" to "0").code)
         assertEquals(ChatToolExecutor.CODE_INVALID_ARGUMENTS, t.call(ChatTool.ORDER_CREATE_CHILD, "title" to "x", "instruction" to "y", "budget" to "9").code)

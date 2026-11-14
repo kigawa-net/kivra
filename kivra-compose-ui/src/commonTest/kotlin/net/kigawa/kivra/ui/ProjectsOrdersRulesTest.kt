@@ -186,8 +186,8 @@ class ProjectsOrdersRulesTest {
         assertNull(validatedOrderPolicy("a\u0000b"))
         assertNull(validatedOrderPolicy("a‮b"))
         assertNull(validatedOrderPolicy("   "))
-        assertEquals("a".repeat(2000), validatedOrderPolicy("a".repeat(2000)))
-        assertNull(validatedOrderPolicy("a".repeat(2001)))
+        assertEquals("a".repeat(8000), validatedOrderPolicy("a".repeat(8000)))
+        assertNull(validatedOrderPolicy("a".repeat(8001)))
     }
 
     @Test

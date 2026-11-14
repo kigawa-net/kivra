@@ -71,6 +71,8 @@ private fun chatToolSubject(name: String): String = when (name) {
     "task_list" -> "Task"
     "project_get" -> "プロジェクト"
     "memory_search", "memory_get" -> "プロジェクトの記憶"
+    "repo_tree" -> "リポジトリ"
+    "repo_read_file" -> "ファイル"
     "order_create_child" -> "order"
     "order_start_cycle" -> "周の開始"
     "order_pause" -> "order の一時停止"
@@ -84,7 +86,9 @@ private fun chatToolSubject(name: String): String = when (name) {
 }
 
 /** The reads (their STARTED is 「…を確認中…」); the rest are operations or proposals. */
-private val CHAT_READ_TOOLS = setOf("order_get", "order_list", "run_get", "run_list", "task_list", "project_get", "memory_search", "memory_get")
+private val CHAT_READ_TOOLS = setOf(
+    "order_get", "order_list", "run_get", "run_list", "task_list", "project_get", "memory_search", "memory_get", "repo_tree", "repo_read_file",
+)
 
 /** The proposals: the AI only proposes them, and the operator confirms with the button below. */
 private val CHAT_PROPOSAL_TOOLS = setOf("order_abandon_cycle", "order_stop_request", "member_add", "member_remove")
@@ -98,17 +102,24 @@ fun chatToolStatusText(event: ChatStreamEvent.Tool): String {
     val subject = chatToolSubject(event.name).let { if (it.last() in 'A'..'z') "$it " else it }
     val read = event.name in CHAT_READ_TOOLS
     val create = event.name == "order_create_child"
+    // A file read says it reads; the path is never shown (the frame does not carry it).
+    val fileRead = event.name == "repo_read_file"
     return when (event.status) {
-        "STARTED" -> if (read) "${subject}を確認中…" else if (create) "${subject}を作成中…" else "${subject}を実行中…"
-        "OK" -> if (read) "${subject}を確認しました" else if (create) "${subject}を作成しました" else "${subject}を実行しました"
+        "STARTED" -> if (fileRead) "ファイルを読み取り中…" else if (read) "${subject}を確認中…" else if (create) "${subject}を作成中…" else "${subject}を実行中…"
+        "OK" -> if (fileRead) "ファイルを読み取りました" else if (read) "${subject}を確認しました" else if (create) "${subject}を作成しました" else "${subject}を実行しました"
         "PROPOSED" -> "${subject}を提案しました（確定は下のボタン）"
-        "DENIED" -> "${subject}は許可されていないため、実行しませんでした"
+        "DENIED" -> if (event.name.startsWith("repo_")) "許可されていないファイルまたはリポジトリのため、読み取りませんでした"
+            else "${subject}は許可されていないため、実行しませんでした"
         else -> when (event.code) {
             "NOT_FOUND" -> "${subject.trimEnd()}: 対象がこのプロジェクトに見つかりませんでした"
             "ALREADY_EXISTS" -> "同じ名前の order が既にあるため、作成しませんでした"
             "CREATE_LIMIT" -> "order は 1 回の返信で 1 件まで作成できます"
             "HOURLY_CREATE_LIMIT" -> "1 時間に作成できる order の上限に達したため、作成しませんでした"
             "ROOT_NOT_ACTIVE", "AMBIGUOUS_ROOT" -> "親になるルート order が使えないため、作成しませんでした"
+            "REPO_CALL_LIMIT" -> "リポジトリの読み取りの回数の上限に達しました"
+            "TURN_READ_LIMIT" -> "1 回の返信で読めるファイルの量の上限に達しました"
+            "FILE_TOO_LARGE", "NOT_TEXT", "NOT_READABLE" -> "このファイルは読み取れません（大きすぎるか、テキストではありません）"
+            "GITHUB_RATE_LIMITED" -> "GitHub の利用制限のため、リポジトリを読めませんでした。時間をおいてください"
             else -> "${subject}を実行できませんでした"
         }
     }.let { if (event.name in CHAT_PROPOSAL_TOOLS && event.status == "STARTED") "${subject.trimEnd()}の提案を準備中…" else it }

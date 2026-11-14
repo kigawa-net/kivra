@@ -112,15 +112,15 @@
 
 | 項目 | kivra 側 | 相手側 | 本番での既定 |
 |---|---|---|---|
-| 読み取り | 実装済み(`getBranch` / `getPullRequest` / `findPullRequestsByHead` / `getCheckRuns` / `getCombinedStatus` / `getReviews` / `listTree` / `readFile`(GET のみ、自己開発の `RepoReader` 用)) | **未確認**(本リポジトリに実 GitHub への接続試験の記録なし。テストは MockEngine) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
-| 変更 | 実装済み: `createBranch` / `ensureRunBranch` / `createPullRequest` / `ensurePullRequest`。**Merge は存在しない** | **未確認**(本リポジトリの範囲外) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
-| ref 更新 | 実装済み: `commitFiles`(`kivra/run-*` のみ、`force=false`、`expectedHeadSha` と不一致なら書かず `CONFLICT`、ref 更新の結果不明は照合のみで再送しない)。本番では未配線 | **未確認**(本リポジトリの範囲外) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| 読み取り | 実装済み(`getBranch` / `getPullRequest` / `findPullRequestsByHead` / `getCheckRuns` / `getCombinedStatus` / `getReviews` / `listTree` / `readFile`(GET のみ、自己開発の `RepoReader` 用)) | **未確認**(本リポジトリに実 GitHub への接続試験の記録なし。テストは MockEngine) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED` が `false` 以外のときに構築。既定は有効。§4a) |
+| 変更 | 実装済み: `createBranch` / `ensureRunBranch` / `createPullRequest` / `ensurePullRequest`。**Merge は存在しない** | **未確認**(本リポジトリの範囲外) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED` が `false` 以外のときに構築。既定は有効。§4a) |
+| ref 更新 | 実装済み: `commitFiles`(`kivra/run-*` のみ、`force=false`、`expectedHeadSha` と不一致なら書かず `CONFLICT`、ref 更新の結果不明は照合のみで再送しない)。本番では未配線 | **未確認**(本リポジトリの範囲外) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED` が `false` 以外のときに構築。既定は有効。§4a) |
 | 冪等キー | なし。照合は run 専用ブランチ名と head による PR 検索で行う(`ensurePullRequest`) | **未確認**(GitHub API の冪等性機構は本リポジトリでは確認していない) | 無効 |
 | Receipt / Operation-ID | PR 番号と head SHA を応答と照合(`IDENTITY_MISMATCH` で拒否)。Merge 観測は `GitHubPrMergeAuthority`(観測のみ。作者は `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` と照合。自己開発の有効時のみ本番に配線、runbook §4.3) | — | 無効(自己開発: 有効時のみ構築) |
 | 条件付き DELETE | 実装なし(ref 削除は設計上除外) | — | 無効 |
 | 照合 API | `findPullRequestsByHead`、`getPullRequest`。404 は「merge されていない」と読まない | 確認済み(REST の該当 endpoint が存在することは、コードのテストが前提としている範囲のみ) | 無効 |
-| 認証 | `TokenProvider` を要求ごとに呼ぶ。GitHub App の installation token を既定とする(`InstallationTokenProvider`。JWT は RS256、PKCS#1 / PKCS#8 を受け、期限の 5 分前まで再利用、同時発行は 1 回に束ねる)。PAT は `StaticTokenProvider`(互換)。App の権限は `contents:write` / `pull_requests:write` / `metadata:read` のみ、インストール先は `kigawa-net/kivra` のみ | **未確認**(本番の App の作成・インストールと実 GitHub への接続は未実施。admin-panel #224 で扱う予定) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
-| レート制限 | 429、および `retry-after` / `x-ratelimit-remaining=0` の 403 を `RATE_LIMITED` に分類(自動再送は変更系では行わない) | **未確認** | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| 認証 | `TokenProvider` を要求ごとに呼ぶ。GitHub App の installation token を既定とする(`InstallationTokenProvider`。JWT は RS256、PKCS#1 / PKCS#8 を受け、期限の 5 分前まで再利用、同時発行は 1 回に束ねる)。PAT は `StaticTokenProvider`(互換)。App の権限は `contents:write` / `pull_requests:write` / `metadata:read` のみ、インストール先は `kigawa-net/kivra` のみ | **未確認**(本番の App の作成・インストールと実 GitHub への接続は未実施。admin-panel #224 で扱う予定) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED` が `false` 以外のときに構築。既定は有効。§4a) |
+| レート制限 | 429、および `retry-after` / `x-ratelimit-remaining=0` の 403 を `RATE_LIMITED` に分類(自動再送は変更系では行わない) | **未確認** | 無効(自己開発: `KIVRA_SELFDEV_ENABLED` が `false` 以外のときに構築。既定は有効。§4a) |
 | 課金 | 該当なし | **未確認** | — |
 | Merge | Kivra に Merge 経路はない。Human Merge のみ(#50 で Ruleset / 独立 Approval を設計) | — | **無効(Merge 不可)** |
 
@@ -131,14 +131,14 @@
 | 項目 | kivra 側 | 相手側 | 本番での既定 |
 |---|---|---|---|
 | 読み取り | 実装済み(`listModels`。`health` はローカルの資格情報確認のみで、ネットワーク呼び出し・課金なし) | **未確認**(実 API への接続試験の記録なし) | 無効(未結線) |
-| 変更(推論 `invoke` / `stream`) | 実装済み。送信前の失敗のみ再試行(`SendState.NOT_SENT`)。送信後は予約を確定値で精算し、requestId を UNKNOWN で封印 | — | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| 変更(推論 `invoke` / `stream`) | 実装済み。送信前の失敗のみ再試行(`SendState.NOT_SENT`)。送信後は予約を確定値で精算し、requestId を UNKNOWN で封印 | — | 無効(自己開発: `KIVRA_SELFDEV_ENABLED` が `false` 以外のときに構築。既定は有効。§4a) |
 | 冪等キー | Kivra 側の `requestId` を `RequestLedger` で管理。`Idempotency-Key` ヘッダは送っていない | **未確認** | 無効 |
 | Receipt / Operation-ID | 応答の `usage` を読む(入力・出力・キャッシュ読み取り・キャッシュ書き込み〔合計と 5 分 / 1 時間の内訳〕)。`usageComplete` は入出力トークンが揃ったかを示す | **未確認** | 無効 |
 | 照合 API | なし。UNKNOWN の requestId は再利用せず、新しい requestId を使う | — | 無効 |
 | thinking | `GenerationParams.thinking`(既定は未送信)。自己開発は `DeveloperConfig.thinking=DISABLED` で `"thinking":{"type":"disabled"}` を送る。Haiku 5.5 は既定の adaptive thinking で出力上限を使い切り text が空になった実例あり(dev, 2026-10-17、ADR 0008 追補)。無効化を拒否するモデルは 400 の `providerErrorType` としてログに出る | 無効化の受理は確認済み(dev, 2026-10-17、Haiku 5.5 で 200、`output_tokens=8`)。Models API の `capabilities.thinking` は未確認 | 無効 |
-| 認証 | 2 方式(どちらか一方のみ。§4a)。**推奨は Workload Identity Federation(WIF)**: k8s の projected ServiceAccount トークン(JWT)を `POST /v1/oauth/token` で Anthropic アクセストークンに交換し、`Authorization: Bearer` で送る(`AnthropicWifAuth`)。代替は静的キー(`x-api-key`、`StaticKeyAuth`)。WIF の前提: OAuth スコープは `workspace:inference` で足りる。JWT の `jti` は既定で 1 回限りのため、同じ JWT は再送しない(交換のたびにファイルを読み直し、ローテーションを待つ)。401 ではアクセストークンを破棄し、その場では再送しない。k8s の inline JWKS は、クラスターの署名鍵のローテーションに合わせて更新が必要。projected token は `expirationSeconds: 3600`、audience `https://api.anthropic.com` を前提とする。資格情報の値は本書・ログ・例外に出さない | **未確認**(Anthropic 側の仕様は公式の記述に基づく。実 API への接続試験の記録なし) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
-| レート制限 | 429 は `RATE_LIMITED`(`retry-after` を解釈)。送信前の失敗のみ再試行 | **未確認** | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
-| 課金 | 応答の usage から費用を算出し(`CostConverter`、USD→JPY)、耐久的な予算台帳(`DbBudgetStore`)に反映。キャッシュ書き込みは、レジストリの `cacheWrite5mPerMtok` / `cacheWrite1hPerMtok` で計上する。その単価が無いときは `UNKNOWN_COST`(0 円として扱わない。design 13 §11.8)。`ModelGateway` は耐久的 `RequestLedger` を要求し、既定は fail-fast | **未確認**(価格体系は本リポジトリに記録した価格カタログに依存) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED=true` のときだけ構築。既定は無効。§4a) |
+| 認証 | 2 方式(どちらか一方のみ。§4a)。**推奨は Workload Identity Federation(WIF)**: k8s の projected ServiceAccount トークン(JWT)を `POST /v1/oauth/token` で Anthropic アクセストークンに交換し、`Authorization: Bearer` で送る(`AnthropicWifAuth`)。代替は静的キー(`x-api-key`、`StaticKeyAuth`)。WIF の前提: OAuth スコープは `workspace:inference` で足りる。JWT の `jti` は既定で 1 回限りのため、同じ JWT は再送しない(交換のたびにファイルを読み直し、ローテーションを待つ)。401 ではアクセストークンを破棄し、その場では再送しない。k8s の inline JWKS は、クラスターの署名鍵のローテーションに合わせて更新が必要。projected token は `expirationSeconds: 3600`、audience `https://api.anthropic.com` を前提とする。資格情報の値は本書・ログ・例外に出さない | **未確認**(Anthropic 側の仕様は公式の記述に基づく。実 API への接続試験の記録なし) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED` が `false` 以外のときに構築。既定は有効。§4a) |
+| レート制限 | 429 は `RATE_LIMITED`(`retry-after` を解釈)。送信前の失敗のみ再試行 | **未確認** | 無効(自己開発: `KIVRA_SELFDEV_ENABLED` が `false` 以外のときに構築。既定は有効。§4a) |
+| 課金 | 応答の usage から費用を算出し(`CostConverter`、USD→JPY)、耐久的な予算台帳(`DbBudgetStore`)に反映。キャッシュ書き込みは、レジストリの `cacheWrite5mPerMtok` / `cacheWrite1hPerMtok` で計上する。その単価が無いときは `UNKNOWN_COST`(0 円として扱わない。design 13 §11.8)。`ModelGateway` は耐久的 `RequestLedger` を要求し、既定は fail-fast | **未確認**(価格体系は本リポジトリに記録した価格カタログに依存) | 無効(自己開発: `KIVRA_SELFDEV_ENABLED` が `false` 以外のときに構築。既定は有効。§4a) |
 
 ## 4. 本番 Capability が有効になる条件(Gate)
 
@@ -154,7 +154,7 @@
 
 ## 4a. 自己開発(ADR 0008)の有効化の手順
 
-既定は**無効**(fail-closed)。`KIVRA_SELFDEV_ENABLED=true` のときだけ、GitHub と Anthropic のクライアントを構築し、ワーカーと `/api/selfdev/*` を登録する。無効のときは、自己開発の秘密の環境変数を一切読まない(`SelfDevSettings`、テスト `SelfDevSettingsTest` と `SelfDevAppWiringTest`)。
+既定は**有効**(`KIVRA_SELFDEV_ENABLED` 未設定・空・`true`)。`false` のときだけ無効。有効なら GitHub と Anthropic のクライアントを構築し、ワーカーと `/api/selfdev/*` を登録する。有効化の前提(OIDC、資格情報、為替)を欠くと起動は失敗する(fail-closed)。無効のときは、自己開発の秘密の環境変数を一切読まない(`SelfDevSettings`、テスト `SelfDevSettingsTest` と `SelfDevAppWiringTest`)。
 
 有効化の前提(すべて満たしてから有効にする。値はこの文書に書かない):
 
@@ -177,7 +177,7 @@
 `kivra-app/src/test/kotlin/net/kigawa/kivra/capability/` のテストが、本番の既定を固定する。
 
 - `ProductionCapabilityDefaultsTest`: 既定の `application.conf`(環境変数の上書きなし)で、状態書き戻し・Reaper 自動削除・recl 変更・dev デモ・インメモリ dedup / journal が無効であること、および開発専用の有効化に `KIVRA_*` の指定が必要なこと。
-- `SelfDevCapabilityDefaultsTest`: 既定の設定で自己開発が無効であること(`KIVRA_SELFDEV_ENABLED` 未設定、共有の `application.conf`)。
+- `SelfDevCapabilityDefaultsTest`: 既定の設定で自己開発が有効であること(`KIVRA_SELFDEV_ENABLED` 未設定)。
 - `SelfDevAppWiringTest`: 無効のとき `/api/selfdev/*` が登録されず、自己開発の秘密の環境変数が読まれないこと。有効化に `oidc-jwt` が必要なこと。
 - `ProviderCompatibilityMatrixTest`: この文書があり、既知の Provider とアダプタ名をすべて列挙していること。`src/main` に新しい `*Adapter` クラスが増えたら、テストが失敗して本書の更新を促す。
 

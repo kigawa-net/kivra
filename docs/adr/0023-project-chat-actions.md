@@ -110,3 +110,28 @@
 
 - 承認と見送りの提案は、周の根の子 Task だけを見る。周の外や、計画の親の子は対象外(目標ページで操作する)。
 - 「提案を閉じる」で閉じた提案は、同じ版で出し直さない(段階 1 と同じ)。Task の版が動けば、新しい版で出る。
+
+## 追補 2026-11-14: チャットの AI 返信(ストリーミング)
+
+- **方式**: 返信は model gateway を直接呼ぶ(`ProjectChatReplier`)。Task も Run も作らない。ツールは渡さず、モデルは何も実行できない。返信の文は指示として扱わず、画面でも文章として出す。
+- **経路**: `POST /api/projects/{id}/chat/stream`(server-sent events)。本文とチェックは既存の `POST /chat` と同じ(ORDER_MANAGE、同一オリジン、プロジェクトの読み取り範囲)。運用者の文を先に保存し、その後に返信を流す。フレームは `user` → `delta`… → `done`(保存した返信)か `error`(固定コード)。
+- **保存の決まり**: モデルが完了した返信は、完全な本文を保存する。途中で終わった返信(モデルの途中失敗・gateway の途中失敗・完了の無い流れ・クライアントの切断・呼び出しのキャンセル)は、それまでに生成された部分の文を assistant メッセージとして保存する。空白だけの部分は保存しない。保存はキャンセルされた後でも行う(`NonCancellable`)。次の場合は何も保存しない: テキストが出る前の拒否(gateway の拒否・テキスト前の失敗)、空の返信。運用者の文は、いずれの場合も残る。切断の検出は次のフレームの書き込み時なので、完了の後に切断されても返信は保存される(`done` の前に保存するため)。
+- **履歴**: 直近 20 件(運用者の文を含む)。先頭が assistant になる窓は、先頭の assistant を落とす。
+- **予算**: 予算の scope はテナント 1 つ(開発エージェントと同じ)。principal は固定の `project-chat`、データ分類は INTERNAL、出力上限は 2,000 トークン、全体の期限は 120 秒。
+- **無効時**: self-development が無効で gateway が無い環境では経路を登録しない(従来どおり保存のみ)。
+- **Task の投入はしない**: チャットの送信は、Task の投入(`SELF_DEV`)を行わない。送信は返信だけを起こす。送信中も入力を受け付け、新しい送信は進行中の turn を cancel してから再実行する(cancel された turn は上の決まりで部分の文を保存する)。
+
+## 追補 2026-11-14(2): 難易度分類ルーティングと、ローカルからの外部フォールバックの例外
+
+- **判定**: `DifficultyRouter`(kivra-model-gateway)が、直近の運用者の文(チャット)の要約だけを、ローカルの同じモデルに短く分類させる(非ストリーム、出力 8 トークン、10 秒)。答えが `EASY` のときだけローカル優先。`HARD`、不正な答え、分類の失敗・タイムアウト、ローカルが無い、能力を宣言したローカルが無い、の場合は Anthropic のみ。分類の呼び出しは gateway 経由(予算・台帳)で、ローカルにしか送らない。
+- **能力**: 能力のハードフィルタは緩めない。要求が必要とする能力(TOOL_CALLING、STRUCTURED_OUTPUT_NATIVE、STREAMING など)を、registry で宣言したローカルのモデルが持つときだけ分類する。持たなければ分類の呼び出しを省く。
+- **フォールバックの例外**: `Requirements.allowExternalFallbackFromLocal`(既定 false)。ローカル優先の要求にだけ立て、ローカルが主のときに EXTERNAL へ 1 回だけ移れる。PUBLIC と INTERNAL のみ。RESTRICTED と SECRET は不可。LOCALITY の LOCAL_ONLY と、外部の data_handling 未確認は従来どおり除外される。出力の開始後の失敗は再実行もフォールバックもしない(既存の部分保存の挙動)。
+- **ローカルの HTTP エラー**: 408、409、429、5xx の応答は NOT_SENT とする(ローカルは課金が無く、出力も無い。再試行かフォールバックを可能にするための、LOCAL に限った判断)。
+- **チャットの配線**: `ProjectChatReplier` は `DifficultyRouter` を使う(ルーターが無いときは従来どおり Anthropic のみ)。キルスイッチは `KIVRA_MODEL_ROUTING_CHAT_ENABLED`(既定 true)。セルフ開発の配線は本追補の範囲外(下記)。
+- **未実装**: セルフ開発の呼び出し(LlmDeveloper、AutopilotPlanner、PrReviewWatch)へのルーター適用、`KIVRA_MODEL_ROUTING_SELFDEV_ENABLED` の利用、日次予算。
+
+## 追補 2026-11-14(3): セルフ開発の配線と、1 日ごとの予算
+
+- **セルフ開発の配線**: `LlmDeveloper`、`AutopilotPlanner`、`PrReviewWatch` の呼び出しを `DifficultyRouter` に通す。要約は、タスクのタイトルと指示文(計画は claim の題名と本文、レビューは PR の題名と本文)。リポジトリの内容、差分、シークレットは分類器に渡さない。キルスイッチは `KIVRA_MODEL_ROUTING_SELFDEV_ENABLED`(既定 true)。`StopJudgeClient` は gateway を使わず直接 HTTP のため対象外。
+- **モデル固定との関係**: 計画とレビューは Anthropic のモデル ID に固定されている。ローカル優先のときは、apply が有効なローカルモデルの ID を許可に加える。能力のフィルタは残るので、能力を満たさないローカルモデルは選ばれない。
+- **日次予算**: `kivra.budget.dailyLimitJpy`(env `KIVRA_BUDGET_TENANT_DAILY_LIMIT_JPY`)。未設定なら従来どおり。設定すると、テナントへの課金は月次に加えて日次(JST 暦日、スコープ `<tenant>:daily`、期間 `yyyy-MM-dd`)でも上限を確認する。予約は予約時の日付を保持し、ack と release は元の期間に対して行う。ローカルの費用 0 は消費しない。不正値は起動失敗(値は出さない)。マイグレーションは不要(既存の列 VARCHAR(16) と VARCHAR(128) に収まる)。日次の使用量の表示は未実装。

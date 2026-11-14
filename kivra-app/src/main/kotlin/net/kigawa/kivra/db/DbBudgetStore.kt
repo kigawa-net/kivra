@@ -8,6 +8,7 @@ import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.time.LocalDate
 import java.time.YearMonth
 import net.kigawa.kivra.modelgateway.ACKNOWLEDGE_MAX_MULTIPLE
 import net.kigawa.kivra.modelgateway.ACKNOWLEDGE_NOT_COMPARABLE
@@ -69,6 +70,11 @@ class DbBudgetStore(
     private val runLimit: BudgetLimit? = null,
     private val clock: Clock = Clock.systemUTC(),
     private val reservationTtl: Duration = Duration.ofMinutes(5),
+    /**
+     * The tenant's daily hard limit (JST calendar day, scope `<tenant>:daily`), or null for none. When set, every charge to the tenant also
+     * counts against its day, and a reservation is refused when the day would exceed it. Charged the same way as the monthly limit.
+     */
+    private val dailyLimit: BudgetLimit? = null,
 ) : BudgetPort, BudgetOperatorView {
     init {
         require(tenantScope.isNotBlank() && !tenantScope.startsWith(RUN_PREFIX) && !tenantScope.startsWith(PROJECT_PREFIX)) {
@@ -99,7 +105,8 @@ class DbBudgetStore(
         )
     }
 
-    override fun admission(scopes: List<String>, amount: BudgetAmount?): ReserveResult.Denied? {
+    override fun admission(requested: List<String>, amount: BudgetAmount?): ReserveResult.Denied? {
+        val scopes = withDaily(requested)
         preDenial(scopes, amount)?.let { return it }
         val micro = microOf(amount!!)
         return try {
@@ -131,7 +138,8 @@ class DbBudgetStore(
         true // unknown state: report soft exceeded (conservative)
     }
 
-    override fun reserve(key: String, scopes: List<String>, amount: BudgetAmount?): ReserveResult {
+    override fun reserve(key: String, requested: List<String>, amount: BudgetAmount?): ReserveResult {
+        val scopes = withDaily(requested)
         preDenial(scopes, amount)?.let { return it }
         val micro = microOf(amount!!)
         return try {
@@ -224,7 +232,7 @@ class DbBudgetStore(
         val micro = (if (amount.currency == tenantLimit.currency && amount.unit == tenantLimit.unit) microOrNull(amount) else null)
             ?: return SpendOutcome(SpendResult.FAILURE)
         // The tenant always; the project too when the Run has one (ADR 0022 PR-E). The project's limit does not gate a booking.
-        val scopes = listOfNotNull(tenantScope, projectId?.let { projectScope(it) })
+        val scopes = withDaily(listOfNotNull(tenantScope, projectId?.let { projectScope(it) }))
         ensurePeriodRows(scopes, clock.instant())
         return try {
             transaction<SpendOutcome>(database) {
@@ -650,6 +658,7 @@ class DbBudgetStore(
     /** The limit of a scope that has one in the configuration (tenant, run). Project limits are in the database: see [limitFor]. */
     private fun staticLimitFor(scopeId: String): BudgetLimit? = when {
         scopeId == tenantScope -> tenantLimit
+        scopeId == dailyScopeId() -> dailyLimit
         scopeId.startsWith(RUN_PREFIX) -> runLimit
         else -> null
     }
@@ -663,9 +672,22 @@ class DbBudgetStore(
 
     private fun isProjectScope(scopeId: String): Boolean = scopeId.startsWith(PROJECT_PREFIX)
 
-    /** The period a scope is charged to at [now]: the JST calendar month for the tenant and project scopes, lifetime for runs. */
-    private fun periodFor(scopeId: String, now: Instant): String =
-        if (scopeId == tenantScope || isProjectScope(scopeId)) YearMonth.from(now.atZone(JST)).toString() else PERIOD_ALL
+    /** The tenant's daily scope (its id is never a project or run id). It is in use only when a daily limit is configured. */
+    private fun dailyScopeId(): String = tenantScope + DAILY_SUFFIX
+
+    /** [scopes] with the tenant's daily scope added when the tenant is charged and a daily limit is configured. */
+    private fun withDaily(scopes: List<String>): List<String> =
+        if (dailyLimit != null && tenantScope in scopes && dailyScopeId() !in scopes) scopes + dailyScopeId() else scopes
+
+    /**
+     * The period a scope is charged to at [now]: the JST calendar day for the daily scope, the JST calendar month for the tenant and project
+     * scopes, lifetime for runs. The period is stored with each reservation, so a reservation settles against the day it was made.
+     */
+    private fun periodFor(scopeId: String, now: Instant): String = when {
+        scopeId == dailyScopeId() -> LocalDate.from(now.atZone(JST)).toString()
+        scopeId == tenantScope || isProjectScope(scopeId) -> YearMonth.from(now.atZone(JST)).toString()
+        else -> PERIOD_ALL
+    }
 
     /** A known cost in the limit's currency and unit, or null when it cannot be compared. */
     private fun knownMicro(a: BudgetAmount): Long? {
@@ -702,6 +724,9 @@ class DbBudgetStore(
         /** The most unpriced rows the operator screen lists. The count is still exact. */
         const val UNPRICED_LIST_LIMIT = 100
         const val PERIOD_ALL = "ALL"
+
+        /** Appended to the tenant scope id for its daily scope. */
+        const val DAILY_SUFFIX = ":daily"
         const val RESERVED = "RESERVED"
         const val LAPSED = "LAPSED"
         const val COMMITTED = "COMMITTED"

@@ -42,7 +42,7 @@ class SelfDevAppWiringTest {
     fun `with self-development off, its routes are not registered, even for an authenticated development caller`() = testApplication {
         environment { config = h2Config() }
         application {
-            appModule(TrapEnv(mapOf("KIVRA_AUTH_MODE" to "none", "KIVRA_RUNTIME_ENV" to "development")))
+            appModule(TrapEnv(mapOf("KIVRA_SELFDEV_ENABLED" to "false", "KIVRA_AUTH_MODE" to "none", "KIVRA_RUNTIME_ENV" to "development")))
         }
         assertEquals(HttpStatusCode.NotFound, client.post("/api/selfdev/tasks").status)
         assertEquals(HttpStatusCode.NotFound, client.get("/api/selfdev/runs").status)
@@ -59,6 +59,7 @@ class SelfDevAppWiringTest {
             appModule(
                 TrapEnv(
                     mapOf(
+                        "KIVRA_SELFDEV_ENABLED" to "false",
                         "KIVRA_AUTH_MODE" to "none",
                         "KIVRA_RUNTIME_ENV" to "development",
                         AutopilotSettings.ENV_ENABLED to "false",
@@ -81,6 +82,7 @@ class SelfDevAppWiringTest {
             appModule(
                 TrapEnv(
                     mapOf(
+                        "KIVRA_SELFDEV_ENABLED" to "false",
                         "KIVRA_AUTH_MODE" to "oidc-jwt",
                         "KIVRA_OIDC_ISSUER" to "https://user.kigawa.net/realms/kigawa-net",
                         "KIVRA_OIDC_AUDIENCE" to "kivra-dev",

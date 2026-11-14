@@ -11,7 +11,7 @@
 - 計画の自動作成と投入(オートパイロット)は [ADR 0011](adr/0011-selfdev-autopilot.md)(Proposed)。基盤、Planner、Dispatcher、UI と HTTP(PR A〜D)は main に実装済みで、既定では無効。運用手順は §7。E2E は PR E で追加(テストは `AutopilotE2ETest` / `AutopilotE2EAbnormalTest`)。dev では 2026-10-22 に有効化済みで、段階 2(`auto`)で動いていた。2026-11-10 に段階 3(`full`、§7.4d)へ上げた(k8s `kigawa-net-k8s#553`。運用者の判断。ADR 0011 §6.3 の昇格条件のうち、PR 30 件と `AUTO_SCOPE_EXCEEDED` / `CIRCUIT_OPEN` の 0 件は、昇格時に確認できていない)。手順は §7.5、戻し方は §7.5.5 と、k8s の `KIVRA_SELFDEV_AUTOPILOT_APPROVAL` を `auto` に戻す。
 - CLI 実行のイベント記録と Run ライブモニターの設計は [ADR 0012](adr/0012-run-events-and-live-monitor.md)。未実装(提案)。運用手順は実装 PR で足す。
 - 外部の MCP クライアントから kivra の自己開発を使う設計は [ADR 0013](adr/0013-kivra-mcp-server.md)。PR 1(読み取り)は main に実装済みで、既定では無効(§8)。PR 2(Keycloak)と PR 3(ingress)は未マージ。書き込みと停止は未実装。
-- 自己開発は既定で無効。`KIVRA_SELFDEV_ENABLED` が正確に `true` のときだけ有効になる。無効のときは、自己開発の他の環境変数を一切読まず、ワーカーも `/api/selfdev/*` も登録しない(`selfdev/SelfDevSettings.kt`、`Application.kt`)。
+- 自己開発は既定で有効。`KIVRA_SELFDEV_ENABLED` が未設定・空・`true` のとき有効で、`false` のときだけ無効になる(それ以外の値は起動失敗)。無効のときは、自己開発の他の環境変数を一切読まず、ワーカーも `/api/selfdev/*` も登録しない。有効にできない環境(開発用の compose や、資格情報の無いローカル)は `KIVRA_SELFDEV_ENABLED=false` を明示する(`selfdev/SelfDevSettings.kt`、`Application.kt`)。
 - 有効化すると、`SelfDevWorker` が起動し、`POST /api/selfdev/tasks`、`GET /api/selfdev/runs`、`GET /api/selfdev/runs/{id}` が登録される(`routes/SelfDevRoutes.kt`)。
 - 本番で動かすには、ブランチ保護、GitHub 認証(App 推奨。PAT は代替)、Anthropic 認証(WIF 推奨。静的キーは代替)、モデル registry、為替の設定が必要。§1 を参照する。
 - マージ検証(ADR 0008 の ⑩)は配線済み。有効時は `GitHubPrMergeAuthority` が、作者 `KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID` と head SHA を照合して、マージ済みの PR の Run を `COMPLETED` にする(§4.3)。無効時は `NoPrMergeAuthority`(完了しない)。
@@ -23,7 +23,7 @@
 
 | 項目 | 名前 | 内容 |
 |---|---|---|
-| キルスイッチ | `KIVRA_SELFDEV_ENABLED` | `true` のときだけ有効。`false` または空は無効。それ以外の値は起動失敗。実装済み |
+| キルスイッチ | `KIVRA_SELFDEV_ENABLED` | 既定は有効。未設定・空・`true` で有効、`false` だけで無効。それ以外の値は起動失敗。実装済み |
 | 認証 | `KIVRA_AUTH_MODE` | `oidc-jwt` が必須。 |
 | 実行環境 | `KIVRA_RUNTIME_ENV` | `development` と同時の有効化は拒否される |
 | GitHub 認証 | 推奨: GitHub App の `KIVRA_SELFDEV_GITHUB_APP_ID`、`KIVRA_SELFDEV_GITHUB_APP_INSTALLATION_ID`、`KIVRA_SELFDEV_GITHUB_APP_PRIVATE_KEY` の 3 つ。代替: PAT の `KIVRA_SELFDEV_GITHUB_TOKEN` | どちらか一方だけ。両方、またはどちらも無いと起動に失敗する。App の秘密鍵は、値が既存のファイルのパスならそのファイルを読み、そうでなければ PEM 本文として扱う。読めない鍵は起動に失敗する。PAT を使う場合は、管理者の権限を持たない専用の細粒度 PAT(`contents:write` と `pull_requests:write` のみ) |
@@ -83,7 +83,7 @@
 1. §1 の前提をすべて満たす。
 2. 全レプリカを新しいイメージにする。新旧が混在した状態で有効にしない。
 3. レプリカを 1 にする。上限(`KIVRA_SELFDEV_MAX_ACTIVE_RUNS`)の判定は、JVM 内の `synchronized` で直列化している(`DevelopmentRunRepository.submitTask`)。複数のレプリカでは、同時の投入で上限を超えうる。
-4. `KIVRA_SELFDEV_ENABLED=true` にして起動する。環境変数は起動時に一度だけ読まれるため、変更には再起動が要る。
+4. 自己開発を有効にして起動する(既定で有効。止める場合は `KIVRA_SELFDEV_ENABLED=false`)。環境変数は起動時に一度だけ読まれるため、変更には再起動が要る。
 5. ロールバックの準備として、新しい状態の Run(`PATCH_READY` と `UNKNOWN`)が残っていないことを確認する。読み取りの例は次のとおり。
 
    ```sql

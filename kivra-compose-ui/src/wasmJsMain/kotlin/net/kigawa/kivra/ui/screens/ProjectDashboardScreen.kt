@@ -29,8 +29,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
+import net.kigawa.kivra.ui.ChatStreamEvent
+import net.kigawa.kivra.ui.chatStreamErrorText
 import net.kigawa.kivra.ui.BACKFILL_DRY_DONE_MESSAGE
 import net.kigawa.kivra.ui.BACKFILL_RUN_DONE_MESSAGE
 import net.kigawa.kivra.ui.NavDestination
@@ -82,11 +85,6 @@ import net.kigawa.kivra.ui.projectRunStateText
 import net.kigawa.kivra.ui.showsProjectOperator
 import net.kigawa.kivra.ui.submitBlocked
 import net.kigawa.kivra.ui.yenText
-import net.kigawa.kivra.ui.IdempotencyKeys
-import net.kigawa.kivra.ui.SubmitKind
-import net.kigawa.kivra.ui.SubmitResult
-import net.kigawa.kivra.ui.taskSuccessText
-import net.kigawa.kivra.ui.validatedTaskTitle
 
 /**
  * プロジェクトのダッシュボード(`#/projects/<id>/dashboard`、旧 UI の project-dash): 状態別の件数、最近の Run、費用、最近の活動。
@@ -720,29 +718,39 @@ private fun ProjectOperatorSection(projectId: String) {
 
 /**
  * プロジェクトチャットセクション（V53）。メッセージの表示と送信を行う。
- * チャットメッセージはDBに保存され、同時にTaskとしてkivra Agentへ指示が投入される。
+ * 送信すると、運用者の文をすぐ表示し、AI の返信を生成中から文字ごとに追記する(`POST .../chat/stream`)。返信が済んだら履歴を読み直す。
+ * 送信のあとは従来どおり Task も投入する(チャットの文は kivra Agent への指示でもある)。
  */
 @Composable
 private fun ProjectChatSection(projectId: String) {
     val scope = rememberCoroutineScope()
     val chat = rememberLoad(projectId) { loadChatSession(projectId) }
+    // The history read after the last turn. It replaces the first load, so a finished turn is not shown twice.
+    var reloaded by remember(projectId) { mutableStateOf<ApiChatSession?>(null) }
+    // The turn in progress: the user's text and the reply so far. Null when no turn runs.
+    var turn by remember(projectId) { mutableStateOf<ChatTurn?>(null) }
     var inputText by remember { mutableStateOf("") }
     var sendBusy by remember { mutableStateOf(false) }
+    // The turn's coroutine. A new message cancels it and starts over; the cancelled turn's tail (reload, reset) is skipped.
+    var turnJob by remember { mutableStateOf<Job?>(null) }
     var sendNotice by remember { mutableStateOf<ActionNotice?>(null) }
-    val keys = remember { IdempotencyKeys() }
+    var replyNotice by remember { mutableStateOf<ActionNotice?>(null) }
+    val session = reloaded ?: chat.value
 
-    SectionTitle("チャット（kivra Agentへの指示）")
+    SectionTitle("チャット")
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
-            // メッセージ一覧
+            // メッセージ一覧。進行中の送信は、保存済みの履歴のあとに表示する。
             when {
-                chat.value == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-                chat.value!!.messages.isEmpty() -> SelectableText("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else -> {
-                    chat.value!!.messages.forEach { msg: ApiChatMessage ->
-                        ChatMessageRow(msg)
-                    }
-                }
+                session == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                session.messages.isEmpty() && turn == null -> SelectableText("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else -> session.messages.forEach { msg: ApiChatMessage -> ChatMessageRow(msg) }
+            }
+            turn?.let { t ->
+                ChatMessageRow(ApiChatMessage(id = 0, sessionId = projectId, role = "user", content = t.userText, createdAt = ""))
+                ChatMessageRow(
+                    ApiChatMessage(id = 0, sessionId = projectId, role = "assistant", content = t.reply.ifEmpty { "返信を生成中…" }, createdAt = ""),
+                )
             }
             Spacer(Modifier.height(8.dp))
             // 入力エリア
@@ -753,52 +761,72 @@ private fun ProjectChatSection(projectId: String) {
                     label = { SelectableText("指示を入力") },
                     placeholder = { SelectableText("指示を入力...") },
                     singleLine = true,
-                    enabled = !sendBusy && !ApiSession.expired,
+                    enabled = !ApiSession.expired,
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(8.dp))
                 Button(
-                    enabled = inputText.isNotBlank() && !sendBusy && !ApiSession.expired,
+                    enabled = inputText.isNotBlank() && !ApiSession.expired,
                     onClick = {
-                        if (submitBlocked(sendBusy, ApiSession.expired)) return@Button
+                        if (submitBlocked(false, ApiSession.expired)) return@Button
+                        // Stop the reply in progress: closing the stream makes the server drop the partial reply (it is never stored).
+                        turnJob?.cancel()
                         sendBusy = true
                         sendNotice = null
+                        replyNotice = null
                         val trimmed = inputText.trim()
                         inputText = ""
-                        scope.launch {
+                        turn = ChatTurn(userText = trimmed)
+                        turnJob = scope.launch {
                             var chatOk = false
+                            var replyFailure: String? = null
                             try {
-                                ApiClient.sendChatMessage(projectId, trimmed)
-                                chatOk = true
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                sendNotice = ActionNotice("チャットの保存に失敗しました", ok = false)
-                            }
-                            try {
-                                val title = validatedTaskTitle(trimmed) ?: trimmed
-                                val key = keys.keyFor(title)
-                                val result = ApiClient.submitTask(title, null, SubmitKind.SELF_DEV, projectId, key)
-                                keys.rotate()
-                                sendNotice = if (chatOk) {
-                                    ActionNotice(taskSuccessText(result, SubmitKind.SELF_DEV), ok = result !is SubmitResult.Failed)
-                                } else {
-                                    ActionNotice("Taskとして投入しました（チャットの保存は失敗しました）", ok = true)
+                                try {
+                                    ApiClient.streamChatReply(projectId, trimmed) { event ->
+                                        when (event) {
+                                            is ChatStreamEvent.User -> chatOk = true
+                                            is ChatStreamEvent.Delta -> turn = turn?.let { it.copy(reply = it.reply + event.text) }
+                                            is ChatStreamEvent.Done -> Unit
+                                            is ChatStreamEvent.Failed -> replyFailure = event.code
+                                        }
+                                    }
+                                } catch (e: ApiException) {
+                                    // 404: the server has no reply service. The message is stored as before, without a reply.
+                                    if (e.status != 404) throw e
+                                    ApiClient.sendChatMessage(projectId, trimmed)
+                                    chatOk = true
                                 }
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
-                                if (!chatOk) {
-                                    sendNotice = ActionNotice("送信に失敗しました", ok = false)
-                                }
-                            } finally {
-                                sendBusy = false
+                                if (!chatOk) sendNotice = ActionNotice("チャットの保存に失敗しました", ok = false)
+                                else replyFailure = "NETWORK"
                             }
+                            replyFailure?.let { code -> replyNotice = ActionNotice(chatStreamErrorText(code), ok = false) }
+                            // No Task is submitted from the chat: the reply is the model's, and a Task is created elsewhere.
+                            // The stored history first, then the turn's text goes: no gap in between.
+                            val fresh = try {
+                                loadChatSession(projectId)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                null
+                            }
+                            if (fresh != null) reloaded = fresh
+                            turn = null
+                            sendBusy = false
                         }
                     },
                 ) {
                     SelectableText("送信")
                 }
+            }
+            replyNotice?.let { n ->
+                SelectableText(
+                    n.text,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
             }
             sendNotice?.let { n ->
                 SelectableText(
@@ -810,6 +838,9 @@ private fun ProjectChatSection(projectId: String) {
         }
     }
 }
+
+/** A send in progress: the user's text, and the assistant's reply as it has streamed so far. */
+private data class ChatTurn(val userText: String, val reply: String = "")
 
 /** 1件のチャットメッセージの表示。roleによってスタイルを変える。 */
 @Composable

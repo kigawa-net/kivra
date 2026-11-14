@@ -289,7 +289,7 @@ class TaskApiModuleTest {
     @Test
     fun `module without KIVRA_AUTH_MODE exposes no Task API`() = testApplication {
         environment { config = h2Config("kivra_route_absent") }
-        application { appModule(emptyMap()) }
+        application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false")) }
         assertEquals(HttpStatusCode.NotFound, client.submitWith("""{"title":"t","idempotencyKey":"k"}""").status)
         assertEquals(HttpStatusCode.NotFound, client.readWith("/api/runs").status)
         assertEquals(HttpStatusCode.OK, client.get("/health").status)
@@ -298,7 +298,7 @@ class TaskApiModuleTest {
     @Test
     fun `module with oauth2-proxy requires an identity`() = testApplication {
         environment { config = h2Config("kivra_route_oauth") }
-        application { appModule(mapOf("KIVRA_AUTH_MODE" to "oauth2-proxy", "KIVRA_RUNTIME_ENV" to "development")) }
+        application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false", "KIVRA_AUTH_MODE" to "oauth2-proxy", "KIVRA_RUNTIME_ENV" to "development")) }
         assertEquals(HttpStatusCode.Unauthorized, client.get("/api/runs") { header("X-Auth-Request-Email", "") }.status)
         assertEquals(HttpStatusCode.OK, client.get("/api/runs") { header("X-Auth-Request-Email", ALICE) }.status)
     }
@@ -306,7 +306,7 @@ class TaskApiModuleTest {
     @Test
     fun `module with none in development accepts unauthenticated submits`() = testApplication {
         environment { config = h2Config("kivra_route_none") }
-        application { appModule(mapOf("KIVRA_AUTH_MODE" to "none", "KIVRA_RUNTIME_ENV" to "development")) }
+        application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false", "KIVRA_AUTH_MODE" to "none", "KIVRA_RUNTIME_ENV" to "development")) }
         assertEquals(HttpStatusCode.Accepted, client.submitWith("""{"title":"dev task","idempotencyKey":"dev-1"}""", email = null).status)
     }
 
@@ -315,7 +315,7 @@ class TaskApiModuleTest {
         assertFailsWith<IllegalArgumentException> {
             testApplication {
                 environment { config = h2Config("kivra_route_prod") }
-                application { appModule(mapOf("KIVRA_AUTH_MODE" to "oauth2-proxy")) }
+                application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false", "KIVRA_AUTH_MODE" to "oauth2-proxy")) }
                 startApplication()
             }
         }
@@ -326,7 +326,7 @@ class TaskApiModuleTest {
         assertFailsWith<IllegalArgumentException> {
             testApplication {
                 environment { config = h2Config("kivra_route_oidc_missing") }
-                application { appModule(mapOf("KIVRA_AUTH_MODE" to "oidc-jwt")) }
+                application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false", "KIVRA_AUTH_MODE" to "oidc-jwt")) }
                 startApplication()
             }
         }
@@ -338,6 +338,7 @@ class TaskApiModuleTest {
         application {
             appModule(
                 mapOf(
+                    "KIVRA_SELFDEV_ENABLED" to "false",
                     "KIVRA_AUTH_MODE" to "oidc-jwt",
                     "KIVRA_OIDC_ISSUER" to OidcTestTokens.ISSUER,
                     "KIVRA_OIDC_AUDIENCE" to OidcTestTokens.AUDIENCE,

@@ -31,6 +31,8 @@ services:
       KIVRA_DEV_DEMO_ENABLED: "true"
       KIVRA_RUNTIME_ENV: "development"
       KIVRA_AUTH_MODE: "none"
+      # Self-development is on by default; the dev stack has no GitHub / Anthropic credentials and no oidc-jwt, so it is pinned off.
+      KIVRA_SELFDEV_ENABLED: "false"
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:

@@ -91,10 +91,15 @@ class RoutingEngine(
         val selected = ArrayList<ModelRef>()
         if (scored.isNotEmpty()) {
             val primaryZone = registry.providers.getValue(scored.first().first.providerId).trustZone
+            val externalFallbackOk = req.requirements.allowExternalFallbackFromLocal &&
+                req.dataClass != DataClass.RESTRICTED && req.dataClass != DataClass.SECRET
             for ((m, _, _) in scored) {
                 if (selected.size >= maxAttempts) break
-                // Fallback must never move to a more outward trust zone than the primary.
-                if (registry.providers.getValue(m.providerId).trustZone.outwardness > primaryZone.outwardness) continue
+                val zone = registry.providers.getValue(m.providerId).trustZone
+                // Fallback must never move to a more outward trust zone than the primary. The one exception is an explicit opt-in
+                // from a LOCAL primary to an EXTERNAL provider, for PUBLIC and INTERNAL data (the candidate's own checks still apply).
+                val outward = zone.outwardness > primaryZone.outwardness
+                if (outward && !(externalFallbackOk && primaryZone == TrustZone.LOCAL && zone == TrustZone.EXTERNAL)) continue
                 selected.add(m.ref)
             }
         }

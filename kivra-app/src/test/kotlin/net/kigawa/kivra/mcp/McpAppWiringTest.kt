@@ -47,6 +47,7 @@ class McpAppWiringTest {
             appModule(
                 TrapEnv(
                     mapOf(
+                        "KIVRA_SELFDEV_ENABLED" to "false",
                         "KIVRA_AUTH_MODE" to "none",
                         "KIVRA_RUNTIME_ENV" to "development",
                         McpSettings.ENV_ENABLED to "false",

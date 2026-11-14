@@ -47,8 +47,9 @@ class AnthropicWifSettings(
 /**
  * Self-development settings from the environment (ADR 0008 part 7, Issue #56). Fail-closed:
  *
- * - `KIVRA_SELFDEV_ENABLED` is off unless it is exactly `true`. While it is off, **no other self-development variable is read**:
- *   no secret, no registry file, no GitHub or model client. [enabled] is false and [config] is null.
+ * - `KIVRA_SELFDEV_ENABLED` is on by default: unset or empty means on, `true` means on, and only an explicit `false` turns it off.
+ *   Any other value is a startup failure. While it is off, **no other self-development variable is read**: no secret, no registry
+ *   file, no GitHub or model client. [enabled] is false and [config] is null.
  * - When it is `true`, the deployment must use `KIVRA_AUTH_MODE=oidc-jwt` and must not be `KIVRA_RUNTIME_ENV=development`.
  *   The required settings must all be present. Every failure message names the variable, never its value.
  * - GitHub authentication is either `KIVRA_SELFDEV_GITHUB_TOKEN` (a PAT) or the three `KIVRA_SELFDEV_GITHUB_APP_*` variables
@@ -150,8 +151,8 @@ class SelfDevSettings private constructor(
 
         fun fromEnv(env: Map<String, String>): SelfDevSettings {
             when (val flag = env[ENV_ENABLED]?.trim()) {
-                null, "", "false" -> return disabled()
-                "true" -> Unit
+                null, "", "true" -> Unit
+                "false" -> return disabled()
                 else -> throw IllegalStateException("$ENV_ENABLED must be true or false")
             }
             check(env["KIVRA_AUTH_MODE"]?.trim() == "oidc-jwt") {

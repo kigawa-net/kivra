@@ -13,10 +13,21 @@ class RegistryLoaderTest {
         val p = r.providers.getValue("anthropic")
         assertEquals(TrustZone.EXTERNAL, p.trustZone)
         assertEquals(DataHandlingStatus.UNKNOWN, p.dataHandling.status)
-        val m = r.models.single()
+        val m = r.models.first { it.id == "claude-sonnet" }
         assertEquals("claude-sonnet-5-5", m.providerModelName)
         assertEquals(Lifecycle.ACTIVE, m.lifecycle)
         assertEquals(r.resolve(m.ref).provider.id, "anthropic")
+        // The on-premises example: LOCAL, plain-HTTP endpoint placeholder, no credential, conservative capabilities.
+        val local = r.providers.getValue("local-llm")
+        assertEquals(TrustZone.LOCAL, local.trustZone)
+        assertEquals("openai", local.adapter)
+        assertEquals("none", local.credentialRef)
+        val lm = r.models.first { it.id == "local-chat" }
+        assertEquals("local-llm", lm.providerId)
+        assertEquals(
+            setOf(Capability.TEXT, Capability.STREAMING, Capability.SYSTEM_PROMPT, Capability.STRUCTURED_OUTPUT_NATIVE, Capability.TOOL_CALLING),
+            lm.capabilities,
+        )
         assertFalse(text.contains("sk-"), "registry must not contain credentials")
     }
 

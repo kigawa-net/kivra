@@ -67,14 +67,21 @@ class SelfDevSettingsTest {
     }
 
     @Test
-    fun `unset or false keeps the feature off and reads no self-development variable`() {
-        assertFalse(SelfDevSettings.fromEnv(TrapEnv(emptyMap())).enabled)
+    fun `only an explicit false keeps the feature off and reads no self-development variable`() {
         assertFalse(SelfDevSettings.fromEnv(TrapEnv(mapOf("KIVRA_SELFDEV_ENABLED" to "false"))).enabled)
-        assertFalse(SelfDevSettings.fromEnv(TrapEnv(mapOf("KIVRA_SELFDEV_ENABLED" to ""))).enabled)
-        val off = SelfDevSettings.fromEnv(TrapEnv(emptyMap()))
+        val off = SelfDevSettings.fromEnv(TrapEnv(mapOf("KIVRA_SELFDEV_ENABLED" to "false")))
         assertNull(off.config)
         assertNull(off.githubAuth)
         assertNull(off.anthropicApiKeyEnvVar)
+    }
+
+    @Test
+    fun `unset or empty means on, so the requirements apply`() {
+        for (env in listOf(emptyMap(), mapOf("KIVRA_SELFDEV_ENABLED" to ""))) {
+            val e = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(env) }
+            assertTrue("KIVRA_AUTH_MODE" in e.message!!, e.message)
+        }
+        assertTrue(SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_ENABLED" to null)).enabled)
     }
 
     @Test
@@ -139,8 +146,8 @@ class SelfDevSettingsTest {
         }
         val unset = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv("KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID" to null)) }
         assertTrue("KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID" in unset.message!!)
-        assertFalse(SelfDevSettings.fromEnv(TrapEnv(emptyMap())).enabled)
-        assertNull(SelfDevSettings.fromEnv(TrapEnv(emptyMap())).githubBotUserId)
+        assertFalse(SelfDevSettings.fromEnv(TrapEnv(mapOf("KIVRA_SELFDEV_ENABLED" to "false"))).enabled)
+        assertNull(SelfDevSettings.fromEnv(TrapEnv(mapOf("KIVRA_SELFDEV_ENABLED" to "false"))).githubBotUserId)
     }
 
     @Test

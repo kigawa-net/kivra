@@ -86,26 +86,26 @@ class AutopilotTaskFlowTest {
     private inner class Harness(val db: TestDb, replies: List<String> = emptyList()) {
         val ops = SelfDevOperatorRepository(db.database)
         val control = SelfDevAutopilotControlRepository(db.database)
-        val provider = ScriptedProvider("ext", replies.toMutableList())
+        val provider = ScriptedProvider("anthropic", replies.toMutableList())
         val gateway = ModelGateway(
             ModelRegistry(
                 "test-v1",
                 listOf(
                     ProviderEntry(
-                        "ext", "fake", TrustZone.EXTERNAL,
+                        "anthropic", "fake", TrustZone.EXTERNAL,
                         DataHandling(DataHandlingStatus.CONFIRMED, "tester", LocalDate.of(2026, 10, 1), "https://example.test/terms"),
                         true, "https://ext.example.test", "EXT_KEY",
                     ),
                 ),
                 listOf(
                     ModelEntry(
-                        PLANNER_MODEL_ID, "ext", "haiku", Lifecycle.ACTIVE, null,
+                        PLANNER_MODEL_ID, "anthropic", "haiku", Lifecycle.ACTIVE, null,
                         setOf(Capability.TEXT, Capability.SYSTEM_PROMPT), 100_000, 4096,
                         listOf(Price(BigDecimal("3"), BigDecimal("15"))), QualityTier.A,
                     ),
                 ),
             ),
-            mapOf("ext" to provider),
+            mapOf("anthropic" to provider),
             BudgetController(mapOf("tenant" to BudgetLimit(BigDecimal("100")))),
             ledger = net.kigawa.kivra.db.DbRequestLedger(db.database),
         )

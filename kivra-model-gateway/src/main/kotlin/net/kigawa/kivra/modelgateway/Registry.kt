@@ -223,14 +223,18 @@ object RegistryLoader {
             )
         } else DataHandling(status)
         val endpoint = req(m, "endpoint", ctx)
+        val trustZone = enumOf(TrustZone::class.java, req(m, "trustZone", ctx), ctx)
         val uri = runCatching { java.net.URI(endpoint) }.getOrNull()
-        if (uri == null || !"https".equals(uri.scheme, ignoreCase = true) || uri.host == null || uri.userInfo != null) {
-            throw RegistryException("$ctx: endpoint must be an https URL without userinfo")
+        // Plain HTTP is allowed only for a LOCAL provider (an on-premises endpoint inside the cluster). Everything else is HTTPS.
+        val schemeOk = "https".equals(uri?.scheme, ignoreCase = true) ||
+            (trustZone == TrustZone.LOCAL && "http".equals(uri?.scheme, ignoreCase = true))
+        if (uri == null || !schemeOk || uri.host == null || uri.userInfo != null) {
+            throw RegistryException("$ctx: endpoint must be an https URL without userinfo (http only for trustZone LOCAL)")
         }
         return ProviderEntry(
             id = id,
             adapter = req(m, "adapter", ctx),
-            trustZone = enumOf(TrustZone::class.java, req(m, "trustZone", ctx), ctx),
+            trustZone = trustZone,
             dataHandling = handling,
             enabled = m["enabled"] as? Boolean ?: false,
             endpoint = endpoint,

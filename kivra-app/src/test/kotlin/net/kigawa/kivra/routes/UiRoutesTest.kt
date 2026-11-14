@@ -119,7 +119,7 @@ class UiRoutesTest {
     @Test
     fun `the site root is not registered without KIVRA_AUTH_MODE`() = testApplication {
         environment { config = h2Config() }
-        application { appModule(emptyMap()) }
+        application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false")) }
 
         assertEquals(HttpStatusCode.NotFound, client.get("/").status)
     }
@@ -127,7 +127,7 @@ class UiRoutesTest {
     @Test
     fun `ui is not registered without KIVRA_AUTH_MODE`() = testApplication {
         environment { config = h2Config() }
-        application { appModule(emptyMap()) }
+        application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false")) }
 
         assertEquals(HttpStatusCode.NotFound, client.get("/ui").status)
         assertEquals(HttpStatusCode.NotFound, client.get("/ui/compose").status)
@@ -138,7 +138,7 @@ class UiRoutesTest {
     fun `ui is registered when the task api is enabled in development`() = testApplication {
         environment { config = h2Config() }
         application {
-            appModule(mapOf("KIVRA_AUTH_MODE" to "none", "KIVRA_RUNTIME_ENV" to "development"))
+            appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false", "KIVRA_AUTH_MODE" to "none", "KIVRA_RUNTIME_ENV" to "development"))
         }
         val noFollow = createClient { followRedirects = false }
 

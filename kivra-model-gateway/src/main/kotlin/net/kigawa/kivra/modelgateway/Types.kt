@@ -68,6 +68,12 @@ data class Requirements(
     val locality: Locality = Locality.ANY,
     /** When set, only these model ids (`ModelEntry.id`) may be routed to. Null allows any model. A hard filter, never relaxed. */
     val allowedModelIds: Set<String>? = null,
+    /**
+     * Explicit exception to "no fallback to a more outward zone" (design 05 section 6.5): when the primary is a LOCAL provider, an
+     * EXTERNAL provider may follow it as a fallback. Only for PUBLIC and INTERNAL data (RESTRICTED and SECRET never leave the LOCAL zone),
+     * and only for failures before any output (the gateway's existing rule). Off by default.
+     */
+    val allowExternalFallbackFromLocal: Boolean = false,
 )
 
 /** Soft preference only. Never relaxes a hard constraint. */

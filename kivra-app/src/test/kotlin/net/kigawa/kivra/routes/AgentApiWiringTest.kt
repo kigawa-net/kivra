@@ -41,6 +41,7 @@ class AgentApiWiringTest {
     )
 
     private val oidc = mapOf(
+        "KIVRA_SELFDEV_ENABLED" to "false",
         "KIVRA_AUTH_MODE" to "oidc-jwt",
         "KIVRA_OIDC_ISSUER" to "https://user.kigawa.net/realms/kigawa-net",
         "KIVRA_OIDC_AUDIENCE" to "kivra-dev",

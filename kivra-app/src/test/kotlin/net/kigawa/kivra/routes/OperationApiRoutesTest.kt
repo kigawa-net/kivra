@@ -386,7 +386,7 @@ class OperationApiRoutesTest {
                 "kivra.lease.graceSeconds" to "5",
             )
         }
-        application { appModule(emptyMap()) }
+        application { appModule(mapOf("KIVRA_SELFDEV_ENABLED" to "false")) }
         assertEquals(HttpStatusCode.NotFound, client.get(pathOf("01AAAAAAAAAAAAAAAAAAAAAAAA")) { header("X-Auth-Request-Email", ALICE) }.status)
     }
 }

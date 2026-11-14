@@ -156,6 +156,21 @@ class HttpKubeApiTest {
         }
     }
 
+    @Test
+    fun inClusterRejectsAnEmptyTokenAtStartup() {
+        val dir = java.nio.file.Files.createTempDirectory("sa")
+        try {
+            java.nio.file.Files.writeString(dir.resolve("token"), " \n")
+            java.nio.file.Files.writeString(dir.resolve("ca.crt"), "not a certificate")
+            val code = assertFailsWith<KubeApiException> {
+                HttpKubeApi.inCluster(mapOf("KUBERNETES_SERVICE_HOST" to "10.0.0.1"), dir)
+            }.code
+            assertEquals("NOT_IN_CLUSTER", code)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
     // ---- exec framing ----
 
     @Test

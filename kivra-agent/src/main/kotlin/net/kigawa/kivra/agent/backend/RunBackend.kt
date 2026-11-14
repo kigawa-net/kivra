@@ -11,6 +11,13 @@ import java.time.Duration
  * Blocking, because a backend waits for a process or a job. The caller runs it on an IO dispatcher.
  */
 interface RunBackend {
+    /**
+     * True when the executor prepares the work directory on the host (the mirror, the archive and the task file) and collects the change set
+     * there. False when the run reads its own input and collects its own change set (k8s, where the Pod does both). The executor then does
+     * not touch the host work directory, and [RunSpec.workDir] is null.
+     */
+    val usesHostWorkDir: Boolean get() = true
+
     /** Checks [spec] and throws if it is refused. Nothing is started or removed. */
     fun validate(spec: RunSpec)
 
@@ -39,10 +46,10 @@ class RunSpec(
     val runId: String,
     val attemptId: String,
     val image: String,
-    /** The host path of the work directory of the attempt. */
-    val workDir: Path,
-    /** The internal network of the run. */
-    val network: String,
+    /** The host path of the work directory of the attempt. Null when the backend has no host work directory ([RunBackend.usesHostWorkDir]). */
+    val workDir: Path?,
+    /** The internal network of the run (docker). Null for a backend without one. */
+    val network: String?,
     /** The egress proxy, `http://host:port`. */
     val proxyUrl: String,
     /** The run's time limit. The run is stopped when it passes. */

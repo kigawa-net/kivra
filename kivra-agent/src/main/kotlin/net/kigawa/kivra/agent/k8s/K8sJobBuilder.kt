@@ -63,6 +63,7 @@ class K8sJobBuilder(private val settings: K8sSettings) {
                         put("hostPID", false)
                         put("hostIPC", false)
                         put("terminationGracePeriodSeconds", K8sConstants.TERMINATION_GRACE_SECONDS)
+                        putJsonObject("nodeSelector") { put(K8sConstants.NODE_SELECTOR_KEY, K8sConstants.NODE_SELECTOR_VALUE) }
                         putJsonObject("securityContext") {
                             put("runAsNonRoot", true)
                             put("runAsUser", DockerConstants.AGENT_UID)
@@ -136,6 +137,7 @@ class K8sJobBuilder(private val settings: K8sSettings) {
     /** The labels of the Job and of its Pod template. The same map is written to both, so the selectors agree. */
     private fun labels(spec: K8sJobSpec): Map<String, String> = linkedMapOf(
         K8sConstants.LABEL_AGENT_KEY to K8sConstants.LABEL_AGENT_VALUE,
+        K8sConstants.LABEL_OWNER_KEY to settings.ownerLabel,
         K8sConstants.LABEL_RUN_KEY to spec.runId,
         K8sConstants.LABEL_ATTEMPT_KEY to spec.attemptId,
     )

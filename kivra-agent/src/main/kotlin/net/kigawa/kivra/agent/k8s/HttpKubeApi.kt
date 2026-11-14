@@ -262,6 +262,8 @@ class HttpKubeApi(
             val tokenFile = serviceAccountDir.resolve("token")
             val ca = serviceAccountDir.resolve("ca.crt")
             if (!Files.isRegularFile(tokenFile) || !Files.isRegularFile(ca)) throw KubeApiException("NOT_IN_CLUSTER")
+            // Fail at startup (before any attempt is claimed) on an unreadable or empty token. It is still read on every request, for rotation.
+            if (Files.readString(tokenFile).isBlank()) throw KubeApiException("NOT_IN_CLUSTER")
             return HttpKubeApi(
                 baseUrl = URI.create("https://$hostPart:$port"),
                 token = { Files.readString(tokenFile).trim() },

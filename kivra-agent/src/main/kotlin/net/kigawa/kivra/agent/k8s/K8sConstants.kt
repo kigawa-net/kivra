@@ -67,6 +67,19 @@ internal object K8sConstants {
     const val LABEL_RUN_KEY = DockerConstants.LABEL_RUN_KEY
     const val LABEL_ATTEMPT_KEY = "kivra-attempt"
 
+    /**
+     * The label that names the agent which made the Job (ADR 0010 追補 7 PR 5c). Several agents may share one namespace, so the orphan
+     * cleanup selects on this label as well as on [LABEL_AGENT_KEY]. Its value is [K8sNames.ownerLabel] of the agent's client id.
+     */
+    const val LABEL_OWNER_KEY = "kivra-owner"
+
+    /**
+     * The node selector of the Pod (PR 5c). The Job runs only on a node that has this label, which the operator sets on the nodes where
+     * the NetworkPolicy is enforced (Calico, ADR 0010 追補 7 §3). Without it the egress rule would not hold.
+     */
+    const val NODE_SELECTOR_KEY = "canal-cni"
+    const val NODE_SELECTOR_VALUE = "enabled"
+
     /** The seccomp profile of the Pod. */
     const val SECCOMP_TYPE = "RuntimeDefault"
 

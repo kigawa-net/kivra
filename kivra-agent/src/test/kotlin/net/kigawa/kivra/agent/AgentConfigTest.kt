@@ -5,6 +5,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AgentConfigTest {
@@ -62,14 +64,81 @@ class AgentConfigTest {
         assertEquals(AgentConfig.ExecutorMode.REAL, real.executorMode)
     }
 
+    /** The k8s settings of a real executor, with the docker settings left out (k8s does not read them). */
+    private val k8sReal = arrayOf(
+        AgentConfig.ENV_BACKEND to "k8s",
+        AgentConfig.ENV_EXECUTOR to "real",
+        AgentConfig.ENV_K8S_NAMESPACE to "kivra-agent-runs",
+        AgentConfig.ENV_K8S_IMAGE to "kivra-agent-runtime:local",
+        AgentConfig.ENV_K8S_PROXY_URL to "http://kivra-agent-proxy:8080",
+        AgentConfig.ENV_REPO to "kigawa-net/kivra",
+    )
+
     @Test
-    fun backendK8sIsRefusedByNameWithoutTheValueAndForAnyExecutor() {
-        for (executor in listOf(null, "stub")) {
-            val e = rejected(AgentConfig.ENV_BACKEND to "k8s", AgentConfig.ENV_EXECUTOR to executor)
-            assertEquals(AgentConfig.ENV_BACKEND, e.message!!.substringBefore(" "))
-            assertTrue(e.message!!.contains("not implemented"))
-            assertFalse(e.message!!.contains("k8s"), "the error must not echo the value")
+    fun backendK8sIsAcceptedWithItsSettingsAndNeedsNoDockerSettings() {
+        val config = AgentConfig.fromEnv(env(*k8sReal))
+        assertEquals(AgentConfig.Backend.K8S, config.backend)
+        val real = assertNotNull(config.realExecutor)
+        assertEquals("kivra-agent-runs", real.k8s!!.namespace)
+        assertEquals(net.kigawa.kivra.agent.k8s.K8sNames.ownerLabel("kivra-agent-pc1"), real.k8s!!.ownerLabel)
+        assertEquals("kivra-agent-runtime:local", real.image)
+        assertEquals("http://kivra-agent-proxy:8080", real.proxyUrl)
+        assertNull(real.dockerBinary)
+        assertNull(real.network)
+        assertNull(real.gitBinary)
+    }
+
+    @Test
+    fun backendK8sWithTheStubIsAcceptedWithoutItsSettings() {
+        assertEquals(AgentConfig.Backend.K8S, AgentConfig.fromEnv(env(AgentConfig.ENV_BACKEND to "k8s")).backend)
+    }
+
+    @Test
+    fun backendK8sRefusesAMissingOrInvalidSettingByName() {
+        for (name in listOf(AgentConfig.ENV_K8S_NAMESPACE, AgentConfig.ENV_K8S_IMAGE, AgentConfig.ENV_K8S_PROXY_URL)) {
+            val e = rejected(*k8sReal.map { if (it.first == name) it.first to null else it }.toTypedArray())
+            assertEquals("$name is required", e.message)
         }
+        val badNamespace = rejected(*k8sReal.map { if (it.first == AgentConfig.ENV_K8S_NAMESPACE) it.first to "Bad_NS-SECRETVALUE" else it }.toTypedArray())
+        assertEquals("${AgentConfig.ENV_K8S_NAMESPACE} must be a Kubernetes namespace name", badNamespace.message)
+        assertFalse(badNamespace.message!!.contains("SECRETVALUE"))
+        val badImage = rejected(*k8sReal.map { if (it.first == AgentConfig.ENV_K8S_IMAGE) it.first to "bad image" else it }.toTypedArray())
+        assertEquals("${AgentConfig.ENV_K8S_IMAGE} must be an image name", badImage.message)
+        val badProxy = rejected(*k8sReal.map { if (it.first == AgentConfig.ENV_K8S_PROXY_URL) it.first to "https://proxy" else it }.toTypedArray())
+        assertEquals("${AgentConfig.ENV_K8S_PROXY_URL} must be http://host:port", badProxy.message)
+    }
+
+    @Test
+    fun dockerSettingsAreNotReadForK8sAndTheDockerBackendIsUnchanged() {
+        val docker = AgentConfig.fromEnv(
+            env(
+                AgentConfig.ENV_BACKEND to "docker",
+                AgentConfig.ENV_EXECUTOR to "real",
+                AgentConfig.ENV_DOCKER_BIN to "/usr/bin/docker",
+                AgentConfig.ENV_DOCKER_NETWORK to "kivra-agent-internal",
+                AgentConfig.ENV_DOCKER_IMAGE to "kivra-agent-runtime:local",
+                AgentConfig.ENV_DOCKER_PROXY_URL to "http://kivra-agent-proxy:8080",
+                AgentConfig.ENV_GIT_BIN to "/usr/bin/git",
+                AgentConfig.ENV_REPO to "kigawa-net/kivra",
+            ),
+        )
+        assertNull(docker.realExecutor!!.k8s)
+        assertEquals("kivra-agent-internal", docker.realExecutor!!.network)
+        // The k8s variables mean nothing to the docker backend, so setting them does not change it.
+        val withK8sVars = AgentConfig.fromEnv(
+            env(
+                AgentConfig.ENV_EXECUTOR to "real",
+                AgentConfig.ENV_DOCKER_BIN to "/usr/bin/docker",
+                AgentConfig.ENV_DOCKER_NETWORK to "kivra-agent-internal",
+                AgentConfig.ENV_DOCKER_IMAGE to "kivra-agent-runtime:local",
+                AgentConfig.ENV_DOCKER_PROXY_URL to "http://kivra-agent-proxy:8080",
+                AgentConfig.ENV_GIT_BIN to "/usr/bin/git",
+                AgentConfig.ENV_REPO to "kigawa-net/kivra",
+                AgentConfig.ENV_K8S_NAMESPACE to "not a namespace",
+            ),
+        )
+        assertEquals(AgentConfig.Backend.DOCKER, withK8sVars.backend)
+        assertNull(withK8sVars.realExecutor!!.k8s)
     }
 
     @Test

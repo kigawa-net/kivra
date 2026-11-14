@@ -30,7 +30,7 @@ import net.kigawa.kivra.agent.workdir.CollectOutcome
 import net.kigawa.kivra.agent.workdir.DiffRejectReason
 
 /** A log that serves [bytes] and then stays open (a followed log) until it is closed. */
-private class HangingStream(private val bytes: ByteArray) : InputStream() {
+internal class HangingStream(private val bytes: ByteArray) : InputStream() {
     private var pos = 0
     private val closed = CountDownLatch(1)
 
@@ -55,7 +55,7 @@ private class HangingStream(private val bytes: ByteArray) : InputStream() {
     }
 }
 
-private class FakeKubeApi : KubeApi {
+internal class FakeKubeApi : KubeApi {
     val created = CopyOnWriteArrayList<Pair<String, JsonObject>>()
     val deleted = CopyOnWriteArrayList<String>()
     val execs = CopyOnWriteArrayList<ExecCall>()
@@ -424,7 +424,7 @@ class K8sRunBackendTest {
         val removed = backend().cleanupOrphans("RUN-B")
         assertEquals(2, removed)
         assertEquals(listOf("job-a", "job-c"), api.deleted.toList())
-        assertEquals(listOf("kivra-agent=1"), api.listSelectors.toList())
+        assertEquals(listOf("kivra-agent=1,kivra-owner=$K8S_OWNER"), api.listSelectors.toList())
     }
 
     @Test

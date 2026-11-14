@@ -292,3 +292,20 @@ ADR 0010 の決定 3・5・6(docker 引数の不変条件)を、Job のマニフ
 リポジトリ内の前提は済んだ: 実行用イメージへの `kivra-pod-entrypoint` と agent の jar(CI で `installDist` を作り、名前付きコンテキストで渡す)、許可リストへの `github.com`、executor が `RunResult.podReadout` を `PodReadout.Collected.finish` で再検査して使う配線と `PodInputSource` の供給。k8s はまだ有効にしない(`AgentConfig` と `RunBackendFactory` は拒否のまま)。
 
 残り(PR 5b 以降): kigawa-net-k8s の manifest(プロキシの Deployment と Service、NetworkPolicy、RBAC、Secret、PodSecurity)、実クラスタでの検証、k8s の有効化。詳細は runbook の §6.6c 追記。
+
+### 9. PR 5c の実装状況(2026-11-14)
+
+済み(kivra リポジトリ内。既定は docker のまま):
+- 起動の配線: `KIVRA_AGENT_BACKEND=k8s` を受理する。k8s の設定(`KIVRA_AGENT_K8S_NAMESPACE`、`KIVRA_AGENT_K8S_IMAGE`、`KIVRA_AGENT_K8S_PROXY_URL`)は、real かつ k8s のときだけ読む。`RunBackendFactory` が `K8sRunBackend` を組み立てる。`HttpKubeApi.inCluster()` が失敗したら、起動は終了コード 2 で失敗する。
+- `AttemptPodInputs` は `Main.executorFor` で 1 つだけ作り、backend と executor に渡す。試験で、別々にすると落ちることを確かめた。
+- host の mirror と作業ディレクトリは、`RunBackend.usesHostWorkDir` が true のときだけ作る(docker は従来どおり、k8s は作らない)。
+- Job の所有者は label `kivra-owner`(client id の SHA-256 由来の値)。孤児の掃除はこの label で絞る。
+- Pod の `nodeSelector` は `canal-cni=enabled` に固定し、ガードが他の値を拒否する。
+- 認証は §2 の方針どおり。Pod に秘密は渡さず、`ANTHROPIC_API_KEY` はダミー、`ANTHROPIC_BASE_URL` はプロキシ。追加の配線は要らなかった。
+
+未実施: 実クラスタでの検証(§3 の NetworkPolicy の強制、exec readout の WebSocket、`podPidsLimit`、PodSecurity `restricted`)、kigawa-net-k8s の manifest、実行イメージの CI。これらが済むまで、dev で k8s は有効にしない。
+
+判断が要る点:
+- stub モードで `KIVRA_AGENT_BACKEND=k8s` を指定しても、クラスタには接続しない(backend を組み立てるのは real のときだけ)。stub で起動チェックもしたいなら、別の判断になる。
+- 実行イメージは許可リストに 1 件だけ。CI の成果物のタグをどう固定するか(運用)。
+- `nodeSelector` の label を付けるノードが無いと、Job は `Pending` のまま動かない。運用の手順に入れる。

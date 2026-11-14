@@ -31,6 +31,8 @@ enum class K8sGuardRule {
     /** The service account token is mounted, or a service account is named. */
     SERVICE_ACCOUNT_NOT_ALLOWED,
     HOST_NAMESPACE_NOT_ALLOWED,
+    /** A node selector other than the fixed one (the Pod must run where the NetworkPolicy is enforced). */
+    NODE_SELECTOR_NOT_ALLOWED,
     SYSCTLS_NOT_ALLOWED,
     HOST_ALIASES_NOT_ALLOWED,
     DNS_CONFIG_NOT_ALLOWED,
@@ -77,7 +79,7 @@ class K8sJobRejectedException(val rule: K8sGuardRule) : IllegalArgumentException
  * 1. Root: `batch/v1` `Job`. Metadata: the namespace is the settings', the labels are the three fixed keys, and the name is the one
  *    derived from the run and attempt labels, in DNS-1123 form.
  * 2. Job spec: `backoffLimit: 0`, `activeDeadlineSeconds` in 1..24h, the fixed TTL, and the template labels equal the Job labels.
- * 3. Pod: `restartPolicy: Never`, no service account (`automountServiceAccountToken: false`, no `serviceAccountName`), no host
+ * 3. Pod: `restartPolicy: Never`, the fixed `nodeSelector` (`canal-cni=enabled`), no service account (`automountServiceAccountToken: false`, no `serviceAccountName`), no host
  *    namespace, no `hostAliases`, `dnsConfig`, `sysctls`, `initContainers`. The Pod security context runs as 10001 and is RuntimeDefault.
  * 4. Container: exactly one, the fixed name, the allowed image, the fixed pull policy and working directory, the fixed argv (the
  *    `--max-turns`, `--model` and `--max-budget-usd` values checked by the same rules as the docker side), the fixed env names and
@@ -106,6 +108,9 @@ class K8sJobGuard(private val settings: K8sSettings) {
         val labels = metadata.obj("labels")
         labels.exactKeys(LABEL_KEYS, unknown = K8sGuardRule.LABEL_NOT_ALLOWED)
         if (labels.text(K8sConstants.LABEL_AGENT_KEY, K8sGuardRule.LABEL_NOT_ALLOWED) != K8sConstants.LABEL_AGENT_VALUE) {
+            fail(K8sGuardRule.LABEL_NOT_ALLOWED)
+        }
+        if (labels.text(K8sConstants.LABEL_OWNER_KEY, K8sGuardRule.LABEL_NOT_ALLOWED) != settings.ownerLabel) {
             fail(K8sGuardRule.LABEL_NOT_ALLOWED)
         }
         val runId = labels.text(K8sConstants.LABEL_RUN_KEY, K8sGuardRule.LABEL_NOT_ALLOWED)
@@ -147,9 +152,18 @@ class K8sJobGuard(private val settings: K8sSettings) {
         if (pod.integer("terminationGracePeriodSeconds", K8sGuardRule.FORBIDDEN_VALUE) != K8sConstants.TERMINATION_GRACE_SECONDS.toLong()) {
             fail(K8sGuardRule.FORBIDDEN_VALUE)
         }
+        checkNodeSelector(pod.obj("nodeSelector"))
         checkPodSecurity(pod.obj("securityContext"))
         checkContainers(pod.arr("containers"))
         checkVolumes(pod.arr("volumes"))
+    }
+
+    /** Exactly the fixed selector: the Pod runs only on a node where the NetworkPolicy is enforced. */
+    private fun checkNodeSelector(selector: JsonObject) {
+        selector.exactKeys(setOf(K8sConstants.NODE_SELECTOR_KEY), unknown = K8sGuardRule.NODE_SELECTOR_NOT_ALLOWED)
+        if (selector.text(K8sConstants.NODE_SELECTOR_KEY, K8sGuardRule.NODE_SELECTOR_NOT_ALLOWED) != K8sConstants.NODE_SELECTOR_VALUE) {
+            fail(K8sGuardRule.NODE_SELECTOR_NOT_ALLOWED)
+        }
     }
 
     private fun checkPodSecurity(sc: JsonObject) {
@@ -331,10 +345,12 @@ class K8sJobGuard(private val settings: K8sSettings) {
         const val AGENT_UID = DockerConstants.AGENT_UID.toLong()
 
         val ROOT_KEYS = setOf("apiVersion", "kind", "metadata", "spec")
-        val LABEL_KEYS = setOf(K8sConstants.LABEL_AGENT_KEY, K8sConstants.LABEL_RUN_KEY, K8sConstants.LABEL_ATTEMPT_KEY)
+        val LABEL_KEYS = setOf(
+            K8sConstants.LABEL_AGENT_KEY, K8sConstants.LABEL_OWNER_KEY, K8sConstants.LABEL_RUN_KEY, K8sConstants.LABEL_ATTEMPT_KEY,
+        )
         val POD_KEYS = setOf(
             "restartPolicy", "automountServiceAccountToken", "hostNetwork", "hostPID", "hostIPC",
-            "terminationGracePeriodSeconds", "securityContext", "containers", "volumes",
+            "terminationGracePeriodSeconds", "nodeSelector", "securityContext", "containers", "volumes",
         )
         val POD_FORBIDDEN = mapOf(
             "serviceAccountName" to K8sGuardRule.SERVICE_ACCOUNT_NOT_ALLOWED,

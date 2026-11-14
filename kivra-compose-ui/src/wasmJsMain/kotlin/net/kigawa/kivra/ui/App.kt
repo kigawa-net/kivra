@@ -296,7 +296,7 @@ private fun KivraAppContent(
                                     label = { Text(UNASSIGNED_LABEL) },
                                 )
                             }
-                            sidebarSections().forEach { section ->
+                            sidebarSections(route).forEach { section ->
                                 // 権限と自律運転・API の結果で隠す項目を外し、残りが無い節は見出しごと出さない。
                                 val items = section.items.filter {
                                     perms.navVisible(it.dest) &&
@@ -314,7 +314,8 @@ private fun KivraAppContent(
                                 }
                                 items.forEach { item ->
                                     NavigationDrawerItem(
-                                        selected = route.nav == item.dest && route.projectIdOrNull == item.target.projectIdOrNull,
+                                        selected = route.nav == item.dest && route.projectIdOrNull == item.target.projectIdOrNull &&
+                                            route.operationParent == item.target.operationParent,
                                         onClick = { navigate(item.target) },
                                         label = { Text(item.dest.label) },
                                     )
@@ -424,6 +425,7 @@ private fun KivraAppContent(
                             }
                             is Route.ProjectPage -> when (r.dest) {
                                 NavDestination.Dashboard -> ProjectDashboardScreen(r.projectId, navigate, visibleLinks(r.projectId), approvalsBadgeText(pendingApprovals))
+                                NavDestination.Operations -> OperationsScreen(navigate, NodeRef(r.projectId, NodeKind.PROJECT))
                                 NavDestination.Tasks -> TasksScreen(r.projectId, navigate)
                                 NavDestination.Goals -> GoalsScreen(r.projectId, navigate)
                                 NavDestination.Orders -> OrdersScreen(r.projectId, navigate)
@@ -440,7 +442,8 @@ private fun KivraAppContent(
                             )
                             is Route.Legacy -> Unit
                             is Route.RunDetail -> RunDetailScreen(r.runId, navigate)
-                            is Route.OperationDetail -> OperationDashboardScreen(r.operationId)
+                            is Route.OperationChildren -> OperationsScreen(navigate, NodeRef(r.operationId, NodeKind.OPERATION))
+                            is Route.OperationDetail -> OperationDashboardScreen(r.operationId, r.operationParent, navigate)
                             is Route.GoalDetail -> GoalDetailScreen(r.taskId, navigate)
                             is Route.OrderDetail -> OrderDetailScreen(r.orderId, navigate)
                             is Route.OrderCycles -> OrderCyclesScreen(r.orderId, navigate)

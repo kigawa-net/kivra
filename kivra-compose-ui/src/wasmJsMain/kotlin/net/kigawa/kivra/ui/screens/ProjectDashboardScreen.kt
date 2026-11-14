@@ -136,72 +136,78 @@ private fun ProjectDashboardBody(
     ProjectLinks(links, approvalsBadge, Route.ProjectPage(projectId, NavDestination.Dashboard), onNavigate)
     Spacer(Modifier.height(8.dp))
 
-    // --- Run 関連：状態別件数 + 最近の Run ---
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            SectionTitle("Run の状態別件数")
-            SelectableText(projectTotalText(d.tasks.total))
-            val rows = projectStateRows(d.tasks.byState)
-            if (rows.isEmpty()) {
-                SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                rows.forEach { (code, count) ->
-                    SelectableText("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        // 中央：プロジェクトごとのチャット（V53）。kivra Agentへの指示投入用。
+        Column(modifier = Modifier.weight(1f)) {
+            ProjectChatSection(projectId)
+        }
+
+        // 右サイド：Run・費用・活動と、運用者の操作。
+        Column(modifier = Modifier.width(320.dp)) {
+            // --- Run 関連：状態別件数 + 最近の Run ---
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    SectionTitle("Run の状態別件数")
+                    SelectableText(projectTotalText(d.tasks.total))
+                    val rows = projectStateRows(d.tasks.byState)
+                    if (rows.isEmpty()) {
+                        SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        rows.forEach { (code, count) ->
+                            SelectableText("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+
+                    SectionTitle("最近の Run")
+                    if (d.recentRuns.isEmpty()) {
+                        SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        d.recentRuns.forEach { run ->
+                            ProjectRunRow(run, showCreator = operator, onClick = { onNavigate(Route.RunDetail(run.runId)) })
+                        }
+                    }
                 }
             }
             Spacer(Modifier.height(12.dp))
 
-            SectionTitle("最近の Run")
-            if (d.recentRuns.isEmpty()) {
-                SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                d.recentRuns.forEach { run ->
-                    ProjectRunRow(run, showCreator = operator, onClick = { onNavigate(Route.RunDetail(run.runId)) })
+            // --- 費用 ---
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    SectionTitle("費用（この Run に紐づく分）")
+                    SelectableText(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    DetailRow("確定", yenText(d.spend.committedJpy))
+                    DetailRow("予約中", yenText(d.spend.reservedJpy))
+                    DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
+                    DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
+                    DetailRow("合計", yenText(d.spend.totalJpy))
                 }
             }
-        }
-    }
-    Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(12.dp))
 
-    // --- 費用 ---
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            SectionTitle("費用（この Run に紐づく分）")
-            SelectableText(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            DetailRow("確定", yenText(d.spend.committedJpy))
-            DetailRow("予約中", yenText(d.spend.reservedJpy))
-            DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
-            DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
-            DetailRow("合計", yenText(d.spend.totalJpy))
-        }
-    }
-    Spacer(Modifier.height(12.dp))
-
-    // --- 最近の活動 ---
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            SectionTitle("最近の活動")
-            if (d.activity.isEmpty()) {
-                SelectableText("最近の活動はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                d.activity.forEach { event: ApiProjectActivity ->
-                    SelectableText(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+            // --- 最近の活動 ---
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    SectionTitle("最近の活動")
+                    if (d.activity.isEmpty()) {
+                        SelectableText("最近の活動はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        d.activity.forEach { event: ApiProjectActivity ->
+                            SelectableText(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                        }
+                    }
                 }
             }
-        }
-    }
-    Spacer(Modifier.height(12.dp))
 
-    // プロジェクトごとのチャット（V53）。kivra Agentへの指示投入用。
-    ProjectChatSection(projectId)
-
-    if (operator) {
-        // 今月の予算は、プロジェクトの「予算」のページにある(設定と解除もそこで行う)。
-        TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectBudget)) }) {
-            SelectableText("今月の予算を見る（運用者のみ）")
+            if (operator) {
+                // 今月の予算は、プロジェクトの「予算」のページにある(設定と解除もそこで行う)。
+                TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectBudget)) }) {
+                    SelectableText("今月の予算を見る（運用者のみ）")
+                }
+                ProjectOperatorSection(projectId)
+                ProjectDrainSection(projectId, d.project.name, onNavigate)
+            }
         }
-        ProjectOperatorSection(projectId)
-        ProjectDrainSection(projectId, d.project.name, onNavigate)
     }
 }
 /**

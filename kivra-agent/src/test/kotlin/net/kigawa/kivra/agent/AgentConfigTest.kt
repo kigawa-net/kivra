@@ -109,6 +109,13 @@ class AgentConfigTest {
     }
 
     @Test
+    fun backendK8sAcceptsADottedProxyHostButDockerDoesNot() {
+        val dotted = "http://kivra-agent-proxy-svc.kigawa-net-kivra-dev-agent.svc:8080"
+        val config = AgentConfig.fromEnv(env(*k8sReal.map { if (it.first == AgentConfig.ENV_K8S_PROXY_URL) it.first to dotted else it }.toTypedArray()))
+        assertEquals(dotted, config.realExecutor!!.proxyUrl)
+    }
+
+    @Test
     fun dockerSettingsAreNotReadForK8sAndTheDockerBackendIsUnchanged() {
         val docker = AgentConfig.fromEnv(
             env(

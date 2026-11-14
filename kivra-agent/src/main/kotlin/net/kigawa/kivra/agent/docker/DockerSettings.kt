@@ -55,8 +55,16 @@ object DockerConstants {
 internal object ProxyEnv {
     private val PROXY = Regex("http://([a-z0-9][a-z0-9-]{0,62}):([0-9]{1,5})")
 
-    fun javaToolOptions(proxyUrl: String): String {
-        val match = PROXY.matchEntire(proxyUrl) ?: throw DockerSpecException("proxyUrl must be http://host:port")
+    /** The k8s variant: the host may be a dotted DNS name (a Service in another namespace, `svc.ns.svc`). The docker side keeps a single label. */
+    private val K8S_PROXY = Regex("http://(${DockerPatterns.K8S_HOST}):([0-9]{1,5})")
+
+    fun javaToolOptions(proxyUrl: String): String = options(PROXY.matchEntire(proxyUrl), proxyUrl)
+
+    /** Like [javaToolOptions], for a k8s Job: the host may be a dotted DNS name (whole name at most 253 characters). */
+    fun k8sJavaToolOptions(proxyUrl: String): String = options(K8S_PROXY.matchEntire(proxyUrl), proxyUrl)
+
+    private fun options(match: MatchResult?, proxyUrl: String): String {
+        if (match == null || match.groupValues[1].length > DockerPatterns.K8S_HOST_MAX) throw DockerSpecException("proxyUrl must be http://host:port")
         val port = match.groupValues[2].toIntOrNull()?.takeIf { it in 1..65535 }
             ?: throw DockerSpecException("proxy port is out of range")
         val host = match.groupValues[1]
@@ -71,6 +79,14 @@ internal object DockerPatterns {
     val IMAGE = Regex("[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?")
     val NETWORK = Regex("[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
     val PROXY_URL = Regex("http://[a-z0-9][a-z0-9-]{0,62}:[0-9]{1,5}")
+
+    /** A DNS name: one to six labels (each like the single-label proxy host), separated by dots. The k8s backend only; docker keeps [PROXY_URL]. */
+    const val K8S_HOST = "[a-z0-9][a-z0-9-]{0,62}(?:\\.[a-z0-9][a-z0-9-]{0,62}){0,5}"
+    const val K8S_HOST_MAX = 253
+    val K8S_PROXY_URL = Regex("http://$K8S_HOST:[0-9]{1,5}")
+
+    /** True for a k8s proxy URL: [K8S_PROXY_URL] and a host of at most [K8S_HOST_MAX] characters. */
+    fun isK8sProxyUrl(url: String): Boolean = K8S_PROXY_URL.matches(url) && url.removePrefix("http://").substringBeforeLast(':').length <= K8S_HOST_MAX
     val MEMORY = Regex("[1-9][0-9]{0,4}[mg]")
     val CPUS = Regex("(?!0+(?:\\.0+)?$)[0-9]{1,2}(?:\\.[0-9]{1,2})?")
     val DOCKER_HOST = Regex("unix:///[A-Za-z0-9._/-]{1,255}")

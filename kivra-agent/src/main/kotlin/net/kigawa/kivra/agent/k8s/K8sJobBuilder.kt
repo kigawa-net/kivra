@@ -152,7 +152,7 @@ class K8sJobBuilder(private val settings: K8sSettings) {
         "HTTPS_PROXY" to proxy,
         "HTTP_PROXY" to proxy,
         "NO_PROXY" to DockerConstants.NO_PROXY,
-        "JAVA_TOOL_OPTIONS" to ProxyEnv.javaToolOptions(proxy),
+        "JAVA_TOOL_OPTIONS" to ProxyEnv.k8sJavaToolOptions(proxy),
     )
 
     private fun JsonArrayBuilder.emptyDirVolume(name: String, sizeLimit: String) {

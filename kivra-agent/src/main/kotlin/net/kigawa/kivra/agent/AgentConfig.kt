@@ -152,7 +152,8 @@ class AgentConfig private constructor(
         private fun realExecutorSettings(env: Map<String, String>, clientId: String, backend: AgentConfig.Backend): RealExecutorSettings {
             val proxyEnv = if (backend == AgentConfig.Backend.K8S) ENV_K8S_PROXY_URL else ENV_DOCKER_PROXY_URL
             val proxyUrl = required(env, proxyEnv)
-            if (!DockerPatterns.PROXY_URL.matches(proxyUrl)) throw ConfigException("$proxyEnv must be http://host:port")
+            val proxyOk = if (backend == AgentConfig.Backend.K8S) DockerPatterns.isK8sProxyUrl(proxyUrl) else DockerPatterns.PROXY_URL.matches(proxyUrl)
+            if (!proxyOk) throw ConfigException("$proxyEnv must be http://host:port")
             val model = optional(env, ENV_MODEL) ?: CliCommand.DEFAULT_MODEL
             if (!DockerPatterns.MODEL.matches(model)) throw ConfigException("$ENV_MODEL must be a model id (letters, digits, dots, hyphens)")
             val budgetUsd = budgetUsd(env)

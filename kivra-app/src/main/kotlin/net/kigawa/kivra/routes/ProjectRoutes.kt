@@ -23,6 +23,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
+import net.kigawa.kivra.chat.ChatReplyEvent
+import net.kigawa.kivra.chat.ChatToolDeps
+import net.kigawa.kivra.chat.ChatToolRunner
 import net.kigawa.kivra.chat.ProjectChatReplier
 import net.kigawa.kivra.core.RunId
 import net.kigawa.kivra.core.chat.ChatActionCode
@@ -53,8 +56,6 @@ import net.kigawa.kivra.db.ProjectSpend
 import net.kigawa.kivra.db.RepoAddResult
 import net.kigawa.kivra.github.RepoRef
 import net.kigawa.kivra.modelgateway.GatewayException
-import net.kigawa.kivra.modelgateway.ModelEvent
-import net.kigawa.kivra.modelgateway.ModelResponse
 import org.slf4j.LoggerFactory
 
 @Serializable
@@ -109,6 +110,8 @@ internal fun Route.configureProjectRoutes(
     chatActions: ProjectChatActionRepository? = null,
     /** The AI reply of the chat (`POST /api/projects/{id}/chat/stream`). Null: the stream route is not registered. */
     chatReply: ProjectChatReplier? = null,
+    /** The tools of the chat's AI (ADR 0023 追補 5), run as the operator who sent the message. Null: the reply has no tool. */
+    chatTools: ChatToolDeps? = null,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -282,21 +285,9 @@ internal fun Route.configureProjectRoutes(
                     ?: return@put call.respond(HttpStatusCode.NotFound)
                 val input = call.receive<ProjectMemberRequest>()
                 if (input.role !in PROJECT_MEMBER_ROLES) return@put call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_role"))
-                when (members.put(projectId, assigneeId, input.role)) {
-                    MemberPutResult.CREATED -> {
-                        projectAdminLog.info(
-                            "project admin action: action=PROJECT_MEMBER_ADDED actor={} projectId={} target={} role={}",
-                            operatorTag(principal), projectId, operatorTag(assigneeId), input.role,
-                        )
-                        call.respond(HttpStatusCode.Created, ProjectMemberRoleResponse(assigneeId, input.role))
-                    }
-                    MemberPutResult.UPDATED -> {
-                        projectAdminLog.info(
-                            "project admin action: action=PROJECT_MEMBER_ROLE_CHANGED actor={} projectId={} target={} role={}",
-                            operatorTag(principal), projectId, operatorTag(assigneeId), input.role,
-                        )
-                        call.respond(ProjectMemberRoleResponse(assigneeId, input.role))
-                    }
+                when (members.addAsOperator(projectId, assigneeId, input.role, principal)) {
+                    MemberPutResult.CREATED -> call.respond(HttpStatusCode.Created, ProjectMemberRoleResponse(assigneeId, input.role))
+                    MemberPutResult.UPDATED -> call.respond(ProjectMemberRoleResponse(assigneeId, input.role))
                     MemberPutResult.UNCHANGED -> call.respond(ProjectMemberRoleResponse(assigneeId, input.role))
                     MemberPutResult.PROJECT_NOT_FOUND, MemberPutResult.ASSIGNEE_NOT_FOUND -> call.respond(HttpStatusCode.NotFound)
                     MemberPutResult.LAST_ADMIN -> call.respond(HttpStatusCode.Conflict, ProjectError("last_admin"))
@@ -311,14 +302,8 @@ internal fun Route.configureProjectRoutes(
                     ?: return@delete call.respond(HttpStatusCode.NotFound)
                 val assigneeId = call.pathParam("assigneeId")
                     ?: return@delete call.respond(HttpStatusCode.NotFound)
-                when (members.remove(projectId, assigneeId)) {
-                    MemberRemoveResult.REMOVED -> {
-                        projectAdminLog.info(
-                            "project admin action: action=PROJECT_MEMBER_REMOVED actor={} projectId={} target={}",
-                            operatorTag(principal), projectId, operatorTag(assigneeId),
-                        )
-                        call.respond(HttpStatusCode.NoContent)
-                    }
+                when (members.removeAsOperator(projectId, assigneeId, principal)) {
+                    MemberRemoveResult.REMOVED -> call.respond(HttpStatusCode.NoContent)
                     MemberRemoveResult.NOT_MEMBER, MemberRemoveResult.PROJECT_NOT_FOUND -> call.respond(HttpStatusCode.NotFound)
                     MemberRemoveResult.LAST_ADMIN -> call.respond(HttpStatusCode.Conflict, ProjectError("last_admin"))
                 }
@@ -458,7 +443,9 @@ internal fun Route.configureProjectRoutes(
                     // The turn before this one (the same session) is stopped, and has stored its partial reply, before this message is stored.
                     chatTurns.exclusive(session.projectId) {
                         val message = chatRepo.appendMessage(session.projectId, "user", input.content)
-                        call.respondChatReply(chatRepo, chatReply, session.projectId, message)
+                        // The tools run as this operator, in this project (ADR 0023 追補 5). The permissions are read once per turn.
+                        val runner = chatTools?.forTurn(session.projectId, principal)
+                        call.respondChatReply(chatRepo, chatReply, session.projectId, message, runner)
                     }
                 }
             }
@@ -482,7 +469,7 @@ internal fun Route.configureProjectRoutes(
             val projectId = call.pathParam("projectId")
                 ?: return@put call.respond(HttpStatusCode.NotFound)
             val input = call.receive<ProjectUpdateRequest>()
-            val project = projectRepo.update(projectId, input.name, input.description)
+            val project = projectRepo.updateAsOperator(projectId, input.name, input.description, principal)
             if (project == null) {
                 call.respond(HttpStatusCode.NotFound)
             } else {
@@ -773,7 +760,18 @@ data class ChatActionResponse(
     val targetId: String?,
     val proposedAt: String,
     val detail: ChatActionDetail? = null,
+    /** Who proposed it: RULE (the rule-based proposer) or AI (the chat's AI, through a tool; ADR 0023 追補 5). A fixed code. */
+    val origin: String = "RULE",
+    /** The member proposals only (MEMBER_ADD, MEMBER_REMOVE): the assignee and, for an add, the role. Read when the chat is read. */
+    val member: ChatActionMember? = null,
 )
+
+/**
+ * The member of a member proposal (ADR 0023 追補 5). [displayName] is the assignee's name as the operators set it (the members route shows the
+ * same name to the same operators); it is cut and a control or bidi character gives a fixed marker. [role] is the add's fixed role code.
+ */
+@Serializable
+data class ChatActionMember(val assigneeId: String, val displayName: String?, val role: String? = null)
 
 /**
  * What an approval proposal is about. [taskTitle] is AI-written text (the planner's): it is shown as plain text, marked as such, and never
@@ -832,6 +830,12 @@ private fun proposeChatActions(
             targetId = row.targetId,
             proposedAt = row.proposedAt.toString(),
             detail = if (code == ChatActionCode.TASK_APPROVE || code == ChatActionCode.TASK_REJECT) approvalDetailOf(repo, row.targetId) else null,
+            origin = row.origin,
+            member = if (code == ChatActionCode.MEMBER_ADD || code == ChatActionCode.MEMBER_REMOVE) {
+                row.targetId?.let { id -> ChatActionMember(id, repo.assigneeNameOf(id)?.let(::safeTaskTitle), row.paramCode) }
+            } else {
+                null
+            },
         )
     }
 }
@@ -859,6 +863,13 @@ private class ChatDeltaFrame(val text: String)
 @Serializable
 private class ChatErrorFrame(val code: String)
 
+/**
+ * The `tool` frame of the chat reply stream (ADR 0023 追補 5): the tool's wire name ("unknown" for a name the server does not know), its fixed
+ * status (STARTED, OK, DENIED, PROPOSED, FAILED) and, at the end of a call, its fixed code. Never the arguments or the result's data.
+ */
+@Serializable
+private class ChatToolFrame(val name: String, val status: String, val code: String? = null)
+
 /** Orders the chat turns of a session: a new turn stops the one before it (see [ChatTurnRegistry]). */
 private val chatTurns = net.kigawa.kivra.chat.ChatTurnRegistry()
 private val chatReplyLog = LoggerFactory.getLogger("net.kigawa.kivra.project.chat")
@@ -866,8 +877,11 @@ private val chatJson = Json
 
 /**
  * Streams the reply to [userMessage] (already stored) as server-sent events. Frames: `user` (the stored message, first), `delta` (`{"text"}`),
- * `done` (the stored assistant message, last on success) and `error` (`{"code"}`, last on failure). The response is 200 from the start, so every
- * failure after it is an `error` frame.
+ * `tool` (`{"name","status","code"}`, around each tool call of [runner]; ADR 0023 追補 5), `done` (the stored assistant message, last on success)
+ * and `error` (`{"code"}`, last on failure). The response is 200 from the start, so every failure after it is an `error` frame.
+ *
+ * Only the assistant's text is stored: the tool calls and their results are never written to the history. A tool call that started finishes
+ * before a cancellation is seen (see [ProjectChatReplier.converse]), and the text so far is then stored as below.
  *
  * Storage, decided here: the assistant message is the complete text when the model completed the reply. When the reply ends early (a client
  * that has gone, for example because the operator sent a new message, or a gateway failure or a stream that ends without a completion), the
@@ -880,13 +894,14 @@ private suspend fun ApplicationCall.respondChatReply(
     replier: ProjectChatReplier,
     sessionId: String,
     userMessage: ProjectChatMessageRow,
+    runner: ChatToolRunner?,
 ) {
     // Nothing may hold the frames back: no cache, and no proxy buffering (nginx honours X-Accel-Buffering).
     response.header(HttpHeaders.CacheControl, "no-store")
     response.header("X-Accel-Buffering", "no")
     respondTextWriter(ContentType.Text.EventStream) {
         writeChatFrame(this, "user", chatJson.encodeToString(ChatMessageResponse.serializer(), userMessage.toResponse()))
-        var completed: ModelResponse? = null
+        var completed: String? = null
         var failure: String? = null
         val partial = StringBuilder()
         // The text generated so far, stored when the reply ends early. Runs even when this coroutine is cancelled (a client that has gone).
@@ -897,12 +912,14 @@ private suspend fun ApplicationCall.respondChatReply(
         }
         // A write to a client that has gone throws here; the exception ends the collection, which cancels the model call.
         try {
-            replier.reply(sessionId).collect { event ->
+            replier.converse(sessionId, runner).collect { event ->
                 when (event) {
-                    is ModelEvent.TextDelta -> partial.append(event.text).also { writeChatFrame(this, "delta", chatJson.encodeToString(ChatDeltaFrame.serializer(), ChatDeltaFrame(event.text))) }
-                    is ModelEvent.Completed -> { completed = event.response }
-                    is ModelEvent.Failed -> { failure = event.error.kind.name }
-                    else -> Unit
+                    is ChatReplyEvent.TextDelta -> partial.append(event.text).also { writeChatFrame(this, "delta", chatJson.encodeToString(ChatDeltaFrame.serializer(), ChatDeltaFrame(event.text))) }
+                    is ChatReplyEvent.Tool -> writeChatFrame(
+                        this, "tool", chatJson.encodeToString(ChatToolFrame.serializer(), ChatToolFrame(event.name, event.status.name, event.code)),
+                    )
+                    is ChatReplyEvent.Completed -> { completed = event.text }
+                    is ChatReplyEvent.Failed -> { failure = event.code }
                 }
             }
         } catch (e: GatewayException) {
@@ -913,7 +930,7 @@ private suspend fun ApplicationCall.respondChatReply(
             storePartial()
             throw e
         }
-        val text = completed?.let { ProjectChatReplier.replyText(it) }
+        val text = completed
         if (failure != null || text.isNullOrBlank()) {
             val code = failure ?: if (completed == null) "NO_REPLY" else "EMPTY_REPLY"
             storePartial()
@@ -936,6 +953,51 @@ private const val DASHBOARD_RECENT_RUNS = 10
 
 /** Audit lines of the project administration: fixed codes and ids only. A repository name is never logged. */
 private val projectAdminLog = LoggerFactory.getLogger("net.kigawa.kivra.project.admin")
+
+/**
+ * Adds [assigneeId] to [projectId] with [role] (or changes its role), as the operator [principal], with the members route's audit line. Shared by
+ * `PUT /api/projects/{id}/members/{assigneeId}` and the confirmation of a chat proposal (MEMBER_ADD, ADR 0023 追補 5). The caller checked the
+ * permission (ORDER_MANAGE) and the role ([PROJECT_MEMBER_ROLES]).
+ */
+internal fun ProjectMemberRepository.addAsOperator(projectId: String, assigneeId: String, role: String, principal: String): MemberPutResult {
+    val r = put(projectId, assigneeId, role)
+    when (r) {
+        MemberPutResult.CREATED -> projectAdminLog.info(
+            "project admin action: action=PROJECT_MEMBER_ADDED actor={} projectId={} target={} role={}",
+            operatorTag(principal), projectId, operatorTag(assigneeId), role,
+        )
+        MemberPutResult.UPDATED -> projectAdminLog.info(
+            "project admin action: action=PROJECT_MEMBER_ROLE_CHANGED actor={} projectId={} target={} role={}",
+            operatorTag(principal), projectId, operatorTag(assigneeId), role,
+        )
+        else -> Unit
+    }
+    return r
+}
+
+/** Removes a member as the operator, with the members route's audit line. Shared by the DELETE route and a chat MEMBER_REMOVE confirmation. */
+internal fun ProjectMemberRepository.removeAsOperator(projectId: String, assigneeId: String, principal: String): MemberRemoveResult {
+    val r = remove(projectId, assigneeId)
+    if (r == MemberRemoveResult.REMOVED) {
+        projectAdminLog.info(
+            "project admin action: action=PROJECT_MEMBER_REMOVED actor={} projectId={} target={}",
+            operatorTag(principal), projectId, operatorTag(assigneeId),
+        )
+    }
+    return r
+}
+
+/**
+ * Updates the name and description of [projectId], as `PUT /api/projects/{id}` does (the same repository call). Shared with the chat's
+ * immediate tool (ADR 0023 追補 5), which also writes an audit line of ids only.
+ */
+internal fun ProjectRepository.updateAsOperator(projectId: String, name: String, description: String?, principal: String): ProjectRow? {
+    val updated = update(projectId, name, description)
+    if (updated != null) {
+        projectAdminLog.info("project admin action: action=PROJECT_UPDATED actor={} projectId={}", operatorTag(principal), projectId)
+    }
+    return updated
+}
 
 /** The audit mode of a drain: a dry run counts, a real drain writes. */
 private fun drainMode(dryRun: Boolean): String = if (dryRun) "DRY_RUN" else "EXECUTE"

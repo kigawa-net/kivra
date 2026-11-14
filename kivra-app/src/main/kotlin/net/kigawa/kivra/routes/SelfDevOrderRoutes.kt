@@ -22,6 +22,8 @@ import net.kigawa.kivra.core.chat.ChatActionCode
 import net.kigawa.kivra.core.chat.ChatActionState
 import net.kigawa.kivra.core.chat.ChatResultCode
 import net.kigawa.kivra.core.chat.ChatTargetKind
+import net.kigawa.kivra.core.chat.MEMBER_ABSENT
+import net.kigawa.kivra.core.chat.MEMBER_PRESENT
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.AbandonResult
 import net.kigawa.kivra.db.ChildCreateResult
@@ -40,6 +42,10 @@ import net.kigawa.kivra.db.OrderResult
 // SelfDevGoalRepository removed in V40
 import net.kigawa.kivra.db.ProjectChatActionRepository
 import net.kigawa.kivra.db.ProjectChatActionRow
+import net.kigawa.kivra.db.MemberPutResult
+import net.kigawa.kivra.db.MemberRemoveResult
+import net.kigawa.kivra.db.PROJECT_MEMBER_ROLES
+import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
@@ -84,6 +90,11 @@ class SelfDevOrderRouteDeps(
     ),
     /** The project chat's action proposals (ADR 0023): `/api/projects/{id}/chat/actions/...`. Null: those routes answer 503. */
     val chatActions: ProjectChatActionRepository? = null,
+    /**
+     * The members of a project, for the confirmation of a member proposal (MEMBER_ADD, MEMBER_REMOVE; ADR 0023 追補 5). The same repository
+     * calls as the members routes. Null: a member proposal fails with UNKNOWN_ACTION (nothing runs).
+     */
+    val members: ProjectMemberRepository? = null,
 )
 
 @Serializable
@@ -411,9 +422,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         val orderId = orderIdOf(call)
         val version = call.readVersion() ?: return@post
         if (orderId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
-        when (val r = deps.orders.pauseByOperator(orderId, version, caller.principal)) {
+        when (val r = deps.pauseAsOperator(orderId, version, caller.principal)) {
             is OrderResult.Moved -> {
-                operatorLog.info("order operator action: action=PAUSE actor={} orderId={} result=PAUSED", operatorTag(caller.principal), orderId)
                 call.respond(r.value.summary())
             }
             else -> call.respondOutcome(r)
@@ -427,9 +437,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         val orderId = orderIdOf(call)
         val version = call.readVersion() ?: return@post
         if (orderId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
-        when (val r = deps.orders.resumeByOperator(orderId, version, caller.principal)) {
+        when (val r = deps.resumeAsOperator(orderId, version, caller.principal)) {
             is OrderResult.Moved -> {
-                operatorLog.info("order operator action: action=RESUME actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), orderId)
                 call.respond(r.value.summary())
             }
             else -> call.respondOutcome(r)
@@ -501,12 +510,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
             ?: return@post call.respond(HttpStatusCode.BadRequest, OrderError(REASON_INVALID))
         if (request.version < 0) return@post call.respond(HttpStatusCode.BadRequest, OrderError(INVALID_BODY))
         if (orderId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
-        when (val r = deps.orders.requestStop(orderId, request.version, caller.principal, caller.kind, reason)) {
+        when (val r = deps.requestStopAs(orderId, request.version, caller.principal, caller.kind, reason)) {
             is OrderResult.Moved -> {
-                operatorLog.info(
-                    "order operator action: action=STOP_REQUESTED actor={} orderId={} reason={} result=STOP_REQUESTED",
-                    operatorTag(caller.principal), orderId, reason.name,
-                )
                 call.respond(HttpStatusCode.Created, r.value.response(deps.guard.can(caller.access, Permission.STOP_DECIDE)))
             }
             else -> call.respondOutcome(r)
@@ -604,7 +609,7 @@ private suspend fun SelfDevOrderRouteDeps.caller(call: ApplicationCall): OrderCa
 
 /** 503 while the feature is off. Returns false after responding. */
 private suspend fun SelfDevOrderRouteDeps.requireEnabled(call: ApplicationCall): Boolean {
-    if (orderSettings.enabled && autopilot.enabled && autopilot.config != null) return true
+    if (ordersEnabled()) return true
     call.respond(HttpStatusCode.ServiceUnavailable, OrderError(ORDERS_DISABLED))
     return false
 }
@@ -675,6 +680,47 @@ internal fun SelfDevOrderRouteDeps.startCycleAsOperator(orderId: String, expecte
 }
 
 /**
+ * A stop request (ADR 0015 section 4), shared by the REST route and a project chat confirmation (ADR 0023 追補 5), so the repository call and the
+ * audit line are the same. The caller authenticated and passed the permission check (STOP_REQUEST).
+ */
+internal fun SelfDevOrderRouteDeps.requestStopAs(
+    orderId: String,
+    expectedVersion: Long,
+    principal: String,
+    kind: OrderActor,
+    reason: StopRequestReason,
+): OrderResult<SelfDevOrderStopRequest> {
+    val r = orders.requestStop(orderId, expectedVersion, principal, kind, reason)
+    if (r is OrderResult.Moved) {
+        operatorLog.info(
+            "order operator action: action=STOP_REQUESTED actor={} orderId={} reason={} result=STOP_REQUESTED",
+            operatorTag(principal), orderId, reason.name,
+        )
+    }
+    return r
+}
+
+/**
+ * An operator's pause (ADR 0015), shared by the REST route and the project chat's immediate tool (ADR 0023 追補 5): the same repository call and
+ * the same audit line. The caller authenticated and passed the permission check (ORDER_MANAGE).
+ */
+internal fun SelfDevOrderRouteDeps.pauseAsOperator(orderId: String, expectedVersion: Long, principal: String): OrderResult<SelfDevOrder> {
+    val r = orders.pauseByOperator(orderId, expectedVersion, principal)
+    if (r is OrderResult.Moved) operatorLog.info("order operator action: action=PAUSE actor={} orderId={} result=PAUSED", operatorTag(principal), orderId)
+    return r
+}
+
+/** An operator's resume, shared as [pauseAsOperator] is. */
+internal fun SelfDevOrderRouteDeps.resumeAsOperator(orderId: String, expectedVersion: Long, principal: String): OrderResult<SelfDevOrder> {
+    val r = orders.resumeByOperator(orderId, expectedVersion, principal)
+    if (r is OrderResult.Moved) operatorLog.info("order operator action: action=RESUME actor={} orderId={} result=ACTIVE", operatorTag(principal), orderId)
+    return r
+}
+
+/** True while the order routes answer (the orders and the autopilot are on): the same condition as each route's 503. */
+internal fun SelfDevOrderRouteDeps.ordersEnabled(): Boolean = orderSettings.enabled && autopilot.enabled && autopilot.config != null
+
+/**
  * An operator's abandonment of the cycle in progress (ADR 0015 addendum 2026-11-11, section 3). The checks that decide before anything is written
  * (the order, the version, the state, the cycle) come first; the repository checks them again under the lock. A Task that still runs is stopped
  * first. Shared by the REST route and a project chat confirmation.
@@ -725,7 +771,11 @@ data class ChatActionResolvedResponse(val actionId: String, val state: String, v
  */
 internal fun ChatActionCode.permission(): Permission = when (this) {
     ChatActionCode.ORDER_START_CYCLE, ChatActionCode.ORDER_ABANDON_CYCLE -> Permission.ORDER_MANAGE
+    // The stop request is the REST route's permission (STOP_REQUEST), not ORDER_MANAGE.
+    ChatActionCode.ORDER_STOP_REQUEST -> Permission.STOP_REQUEST
     ChatActionCode.TASK_REPLAN, ChatActionCode.TASK_APPROVE, ChatActionCode.TASK_REJECT -> Permission.GOAL_WRITE
+    // The members routes' permission (ADR 0022 PR-D2): ORDER_MANAGE.
+    ChatActionCode.MEMBER_ADD, ChatActionCode.MEMBER_REMOVE -> Permission.ORDER_MANAGE
 }
 
 /** The permission a stored action needs: its code's, or ORDER_MANAGE for a code this build does not know (the chat's former check). */
@@ -801,6 +851,11 @@ private fun SelfDevOrderRouteDeps.runChatAction(
         ChatTargetKind.TASK -> if (operations.task(targetId)?.projectId != projectId) {
             return ChatActionState.FAILED to ChatResultCode.TASK_NOT_FOUND
         }
+        // A member proposal has no version: its expected value is the membership when proposed. A change since then expires it unrun.
+        ChatTargetKind.ASSIGNEE -> {
+            val repo = chatActions ?: return ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
+            if (repo.membership(projectId, targetId) != expected) return ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
+        }
     }
     return when (code) {
         ChatActionCode.ORDER_START_CYCLE -> when (val r = startCycleAsOperator(targetId, expected, principal)) {
@@ -815,6 +870,13 @@ private fun SelfDevOrderRouteDeps.runChatAction(
             CycleAbandonOutcome.Stale -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
             is CycleAbandonOutcome.Refused -> ChatActionState.FAILED to r.reason.name
             is CycleAbandonOutcome.TaskStopRefused -> ChatActionState.FAILED to ChatResultCode.TASK_STOP_REFUSED
+        }
+        // The REST stop request, as the operator (the same repository call and the same reason as a human's stop request).
+        ChatActionCode.ORDER_STOP_REQUEST -> when (val r = requestStopAs(targetId, expected, principal, OrderActor.HUMAN, StopRequestReason.OPERATOR_REQUEST)) {
+            is OrderResult.Moved -> ChatActionState.EXECUTED to ChatResultCode.OK
+            OrderResult.NotFound -> ChatActionState.FAILED to ChatResultCode.ORDER_NOT_FOUND
+            OrderResult.StaleVersion -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
+            is OrderResult.Refused -> ChatActionState.FAILED to r.reason.name
         }
         // The goal page's replan, on the Task the proposal names. Any refusal of the Task's transition is one fixed code: the operator
         // sees the Task is not in a replannable state, and nothing is retried.
@@ -837,6 +899,31 @@ private fun SelfDevOrderRouteDeps.runChatAction(
             TaskTransition.NotFound -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_FOUND
             TaskTransition.StaleVersion -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
             is TaskTransition.Refused -> ChatActionState.FAILED to ChatResultCode.TASK_NOT_REJECTABLE
+        }
+        // The members routes' add and removal, as the operator (ADR 0023 追補 5). The role is the row's fixed parameter, checked as the route
+        // checks its body. The membership was checked above; the repository checks the last ADMIN under the project's lock.
+        ChatActionCode.MEMBER_ADD -> {
+            val repo = members ?: return ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
+            val role = action.paramCode?.takeIf { it in PROJECT_MEMBER_ROLES } ?: return ChatActionState.FAILED to ChatResultCode.INVALID_ROLE
+            if (expected != MEMBER_ABSENT) return ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
+            when (repo.addAsOperator(projectId, targetId, role, principal)) {
+                MemberPutResult.CREATED -> ChatActionState.EXECUTED to ChatResultCode.OK
+                // A member already (added since the check): its role may have changed, but the add itself did not run as proposed.
+                MemberPutResult.UPDATED, MemberPutResult.UNCHANGED -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
+                MemberPutResult.PROJECT_NOT_FOUND -> ChatActionState.FAILED to ChatResultCode.PROJECT_NOT_FOUND
+                MemberPutResult.ASSIGNEE_NOT_FOUND -> ChatActionState.FAILED to ChatResultCode.ASSIGNEE_NOT_FOUND
+                MemberPutResult.LAST_ADMIN -> ChatActionState.FAILED to ChatResultCode.LAST_ADMIN
+            }
+        }
+        ChatActionCode.MEMBER_REMOVE -> {
+            val repo = members ?: return ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
+            if (expected != MEMBER_PRESENT) return ChatActionState.FAILED to ChatResultCode.UNKNOWN_ACTION
+            when (repo.removeAsOperator(projectId, targetId, principal)) {
+                MemberRemoveResult.REMOVED -> ChatActionState.EXECUTED to ChatResultCode.OK
+                MemberRemoveResult.NOT_MEMBER -> ChatActionState.EXPIRED to ChatResultCode.STALE_VERSION
+                MemberRemoveResult.PROJECT_NOT_FOUND -> ChatActionState.FAILED to ChatResultCode.PROJECT_NOT_FOUND
+                MemberRemoveResult.LAST_ADMIN -> ChatActionState.FAILED to ChatResultCode.LAST_ADMIN
+            }
         }
     }
 }

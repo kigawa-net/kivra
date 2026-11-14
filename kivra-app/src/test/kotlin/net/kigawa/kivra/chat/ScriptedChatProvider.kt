@@ -37,6 +37,9 @@ import net.kigawa.kivra.modelgateway.SendState
 import net.kigawa.kivra.modelgateway.StreamChunk
 import net.kigawa.kivra.modelgateway.TrustZone
 import net.kigawa.kivra.modelgateway.Usage
+import net.kigawa.kivra.modelgateway.Part
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /** The provider id of the test registry. */
 internal const val TEST_PROVIDER_ID = "anthropic"
@@ -109,7 +112,7 @@ internal fun chatTestGateway(provider: ModelProvider): ModelGateway {
                 providerModelName = "chat-model-name",
                 lifecycle = Lifecycle.ACTIVE,
                 retireAt = null,
-                capabilities = setOf(Capability.TEXT, Capability.STREAMING, Capability.SYSTEM_PROMPT),
+                capabilities = setOf(Capability.TEXT, Capability.STREAMING, Capability.SYSTEM_PROMPT, Capability.TOOL_CALLING),
                 contextWindowTokens = 100_000,
                 maxOutputTokens = 4_096,
                 prices = listOf(Price(BigDecimal("3"), BigDecimal("15"))),
@@ -123,4 +126,59 @@ internal fun chatTestGateway(provider: ModelProvider): ModelGateway {
         budget = BudgetController(mapOf(TEST_BUDGET_SCOPE to BudgetLimit(BigDecimal("100")))),
         ledger = InMemoryRequestLedger(),
     )
+}
+
+/** One round of [ToolRoundsProvider]: the text it streams, then the tool calls it makes (name and string arguments). */
+internal data class ScriptedRound(
+    val pieces: List<String> = emptyList(),
+    val calls: List<Pair<String, Map<String, String>>> = emptyList(),
+    val outputTokens: Long = 20,
+    /** Thrown after the pieces instead of finishing (a mid-round failure, or a CancellationException as a client that went). */
+    val tail: Throwable? = null,
+)
+
+/**
+ * A provider that answers each streamed call with the next of [rounds] (the last one again when they run out): its text, then its tool calls
+ * (as the adapters do: ToolCallCompleted chunks and ToolCall parts in the final message). Every request it gets is kept in [requests].
+ */
+internal class ToolRoundsProvider(private val rounds: List<ScriptedRound>) : ModelProvider {
+    val requests = mutableListOf<ModelRequest>()
+
+    override val providerId: String = TEST_PROVIDER_ID
+
+    override suspend fun health(target: ResolvedTarget) = ProviderHealth(ProviderHealthState.UP)
+
+    override suspend fun listModels(target: ResolvedTarget) = emptyList<ProviderModelInfo>()
+
+    override suspend fun invoke(req: ModelRequest, target: ResolvedTarget, ctx: CallContext): ModelResponse =
+        error("the chat reply streams; invoke is not used")
+
+    override fun stream(req: ModelRequest, target: ResolvedTarget, ctx: CallContext): Flow<StreamChunk> = flow {
+        requests += req
+        val round = rounds[minOf(requests.size - 1, rounds.size - 1)]
+        round.pieces.forEach { emit(StreamChunk.Text(it)) }
+        round.tail?.let { throw it }
+        val calls = round.calls.mapIndexed { i, (name, args) ->
+            Part.ToolCall("call-${requests.size}-$i", name, JsonObject(args.mapValues { JsonPrimitive(it.value) }))
+        }
+        calls.forEach { emit(StreamChunk.ToolCallCompleted(it.id, it.name, it.arguments)) }
+        val parts = buildList<Part> {
+            if (round.pieces.isNotEmpty()) add(Part.Text(round.pieces.joinToString("")))
+            addAll(calls)
+        }
+        val response = ModelResponse(
+            requestId = ctx.requestId,
+            attemptId = ctx.attemptId,
+            selected = ModelRef(target.provider.id, target.model.id, target.model.providerModelName),
+            message = Message(Role.ASSISTANT, parts),
+            structured = null,
+            finishReason = if (calls.isEmpty()) FinishReason.STOP else FinishReason.TOOL_CALL,
+            usage = Usage(inputTokens = 100, outputTokens = round.outputTokens),
+            cost = Cost.zero(),
+            latencyMs = 1,
+            routingDecisionId = ctx.routingDecisionId,
+            usageComplete = true,
+        )
+        emit(StreamChunk.Finished(response))
+    }
 }

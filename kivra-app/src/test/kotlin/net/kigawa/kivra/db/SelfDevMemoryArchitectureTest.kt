@@ -55,8 +55,9 @@ class SelfDevMemoryArchitectureTest {
         val public = SelfDevMemoryRepository::class.java.methods.map { it.name }.filter { it !in OBJECT_METHODS && !it.contains('$') }.toSet()
         // count and auditSummary are reads for the operator's list (ADR 0016 P2); neither writes, and the prefix check below still applies.
         // shadowFacts reads identities and codes for the suppression shadow (ADR 0016 P3); recordSuppressShadow writes one count row.
+        // findInProject is the project chat's read of one record (ADR 0023 追補 5); it only reads.
         assertEquals(
-            setOf("save", "search", "count", "auditSummary", "events", "deleteOne", "deleteByCondition", "purgeRetention", "shadowFacts", "recordSuppressShadow"),
+            setOf("save", "search", "findInProject", "count", "auditSummary", "events", "deleteOne", "deleteByCondition", "purgeRetention", "shadowFacts", "recordSuppressShadow"),
             public,
         )
         assertTrue(public.none { it.startsWith("insert") || it.startsWith("update") || it.startsWith("raw") || it.startsWith("write") })

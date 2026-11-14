@@ -24,6 +24,9 @@ enum class ChatActionCode(
     ORDER_START_CYCLE("周を開始する", ChatTargetKind.ORDER),
     ORDER_ABANDON_CYCLE("進行中の周を放棄する", ChatTargetKind.ORDER),
 
+    /** The same operation as `POST /api/selfdev/orders/{id}/stop-request` (permission STOP_REQUEST), as the operator. Always a proposal. */
+    ORDER_STOP_REQUEST("order の停止を要求する", ChatTargetKind.ORDER),
+
     /** The same operation as the goal page's replan button (`POST /api/selfdev/goals/{id}/replan`), on the cycle's root Task. */
     TASK_REPLAN("計画に失敗した周を再計画する", ChatTargetKind.TASK),
 
@@ -32,10 +35,34 @@ enum class ChatActionCode(
 
     /** The goal page's rejection (`POST /api/selfdev/tasks/{id}/reject`: the Task is skipped) of a child Task that waits (ADR 0023 stage 2). */
     TASK_REJECT("承認待ちの Task を見送る", ChatTargetKind.TASK),
+
+    /**
+     * The members route's add (`PUT /api/projects/{id}/members/{assigneeId}`), as the operator (ADR 0023 追補 5). Only the chat's AI proposes it;
+     * the rules never do. The target is the assignee; the expected value is the membership ([MEMBER_ABSENT]); the role is the row's parameter.
+     */
+    MEMBER_ADD("メンバーを追加する", ChatTargetKind.ASSIGNEE),
+
+    /**
+     * The members route's removal (`DELETE /api/projects/{id}/members/{assigneeId}`), as the operator (ADR 0023 追補 5). A removal, not a
+     * deactivation: the repository has no deactivation. Only the chat's AI proposes it. The expected value is [MEMBER_PRESENT].
+     */
+    MEMBER_REMOVE("メンバーを削除する", ChatTargetKind.ASSIGNEE),
 }
 
-/** The kind of row a proposal's target ID names (V56 keeps one target column for all codes). */
-enum class ChatTargetKind { ORDER, TASK }
+/**
+ * The kind of row a proposal's target ID names (V56 keeps one target column for all codes; V57 stores the kind too). An ASSIGNEE target has no
+ * version: its expected value is the membership ([MEMBER_PRESENT] or [MEMBER_ABSENT]) when the proposal was made.
+ */
+enum class ChatTargetKind { ORDER, TASK, ASSIGNEE }
+
+/** Who made a proposal (V57 `origin`): the rule-based proposer, or the chat's AI through a tool call. Never free text. */
+enum class ChatActionOrigin { RULE, AI }
+
+/** The expected value of a member proposal: the assignee is a member of the project. */
+const val MEMBER_PRESENT: Long = 1L
+
+/** The expected value of a member proposal: the assignee is not a member of the project. */
+const val MEMBER_ABSENT: Long = 0L
 
 /** The state of a proposal row (V56). PROPOSED is the only state that can still be confirmed or dismissed. */
 enum class ChatActionState { PROPOSED, EXECUTED, DISMISSED, EXPIRED, FAILED }
@@ -60,6 +87,14 @@ object ChatResultCode {
 
     /** The other approval proposal of the same Task was resolved first (executed, failed or expired): this alternative is expired. */
     const val SIBLING_RESOLVED = "SIBLING_RESOLVED"
+
+    // The member proposals (ADR 0023 追補 5): the members route's outcomes, as fixed codes.
+    const val PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"
+    const val ASSIGNEE_NOT_FOUND = "ASSIGNEE_NOT_FOUND"
+    const val NOT_MEMBER = "NOT_MEMBER"
+    const val ALREADY_MEMBER = "ALREADY_MEMBER"
+    const val LAST_ADMIN = "LAST_ADMIN"
+    const val INVALID_ROLE = "INVALID_ROLE"
 }
 
 /**

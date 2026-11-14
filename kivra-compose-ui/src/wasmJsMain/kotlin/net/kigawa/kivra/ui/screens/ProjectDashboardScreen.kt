@@ -34,6 +34,19 @@ import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.ChatStreamEvent
 import net.kigawa.kivra.ui.chatStreamErrorText
+import net.kigawa.kivra.ui.chatToolLines
+import net.kigawa.kivra.ui.CHAT_ACTION_AI_ORIGIN_CAPTION
+import net.kigawa.kivra.ui.CHAT_ACTION_CONFIRM_TITLE
+import net.kigawa.kivra.ui.CHAT_ACTION_DISMISS_BUTTON_TEXT
+import net.kigawa.kivra.ui.CHAT_ACTION_TASK_TITLE_CAPTION
+import net.kigawa.kivra.ui.WriteFailure
+import net.kigawa.kivra.ui.chatActionConfirmButtonText
+import net.kigawa.kivra.ui.chatActionConfirmMessage
+import net.kigawa.kivra.ui.chatActionFailureText
+import net.kigawa.kivra.ui.chatActionMemberText
+import net.kigawa.kivra.ui.chatActionResultText
+import net.kigawa.kivra.ui.writeFailureOf
+import net.kigawa.kivra.ui.api.ApiChatAction
 import net.kigawa.kivra.ui.BACKFILL_DRY_DONE_MESSAGE
 import net.kigawa.kivra.ui.BACKFILL_RUN_DONE_MESSAGE
 import net.kigawa.kivra.ui.NavDestination
@@ -719,7 +732,8 @@ private fun ProjectOperatorSection(projectId: String) {
 /**
  * プロジェクトチャットセクション（V53）。メッセージの表示と送信を行う。
  * 送信すると、運用者の文をすぐ表示し、AI の返信を生成中から文字ごとに追記する(`POST .../chat/stream`)。返信が済んだら履歴を読み直す。
- * 送信のあとは従来どおり Task も投入する(チャットの文は kivra Agent への指示でもある)。
+ * AI はツールでプロジェクトと order を読み、安全な操作は運用者の権限で実行し、破壊的な操作は提案だけを出す(ADR 0023 追補 5)。
+ * ツールの状況は固定の文言で表示し、提案は下のカードの確定ボタンで運用者が確定する。
  */
 @Composable
 private fun ProjectChatSection(projectId: String) {
@@ -736,6 +750,46 @@ private fun ProjectChatSection(projectId: String) {
     var sendNotice by remember { mutableStateOf<ActionNotice?>(null) }
     var replyNotice by remember { mutableStateOf<ActionNotice?>(null) }
     val session = reloaded ?: chat.value
+    // The proposals (ADR 0023): confirm after the dialog, dismiss at once. The result is the server's fixed code, made into text.
+    var pendingAction by remember { mutableStateOf<ApiChatAction?>(null) }
+    var actionBusy by remember { mutableStateOf(false) }
+    var actionNotice by remember { mutableStateOf<ActionNotice?>(null) }
+
+    suspend fun reloadChat() {
+        val fresh = try {
+            loadChatSession(projectId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        if (fresh != null) reloaded = fresh
+    }
+
+    fun runChatAction(action: ApiChatAction, confirm: Boolean) {
+        actionBusy = true
+        actionNotice = null
+        scope.launch {
+            try {
+                val result = if (confirm) ApiClient.confirmChatAction(projectId, action.actionId) else ApiClient.dismissChatAction(projectId, action.actionId)
+                actionNotice = ActionNotice(
+                    chatActionResultText(result.state, result.resultCode),
+                    ok = result.state == "EXECUTED" || result.state == "DISMISSED",
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ApiException) {
+                actionNotice = ActionNotice(chatActionFailureText(writeFailureOf(e.status)), ok = false)
+            } catch (e: Exception) {
+                actionNotice = ActionNotice(chatActionFailureText(WriteFailure.NETWORK), ok = false)
+            } finally {
+                pendingAction = null
+                actionBusy = false
+                // Read the chat again: a resolved or expired proposal leaves the list.
+                reloadChat()
+            }
+        }
+    }
 
     SectionTitle("チャット")
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -750,6 +804,31 @@ private fun ProjectChatSection(projectId: String) {
                 ChatMessageRow(ApiChatMessage(id = 0, sessionId = projectId, role = "user", content = t.userText, createdAt = ""))
                 ChatMessageRow(
                     ApiChatMessage(id = 0, sessionId = projectId, role = "assistant", content = t.reply.ifEmpty { "返信を生成中…" }, createdAt = ""),
+                )
+                // The AI's tool calls of this turn: fixed lines (「order を確認中…」, 「…を提案しました（確定は下のボタン）」). Not stored.
+                t.tools.forEach { (line, _) ->
+                    SelectableText(
+                        line,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 8.dp, top = 2.dp),
+                    )
+                }
+            }
+            // The open proposals (the server returns them only to an operator who may confirm them; never to the AI or a viewer).
+            session?.actions?.forEach { action ->
+                ChatActionCard(
+                    action = action,
+                    enabled = !actionBusy && !ApiSession.expired,
+                    onConfirm = { pendingAction = action },
+                    onDismiss = { runChatAction(action, confirm = false) },
+                )
+            }
+            actionNotice?.let { n ->
+                SelectableText(
+                    n.text,
+                    color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
             Spacer(Modifier.height(8.dp))
@@ -769,7 +848,7 @@ private fun ProjectChatSection(projectId: String) {
                     enabled = inputText.isNotBlank() && !ApiSession.expired,
                     onClick = {
                         if (submitBlocked(false, ApiSession.expired)) return@Button
-                        // Stop the reply in progress: closing the stream makes the server drop the partial reply (it is never stored).
+                        // Stop the reply in progress: closing the stream makes the server store the reply so far and stop.
                         turnJob?.cancel()
                         sendBusy = true
                         sendNotice = null
@@ -786,6 +865,7 @@ private fun ProjectChatSection(projectId: String) {
                                         when (event) {
                                             is ChatStreamEvent.User -> chatOk = true
                                             is ChatStreamEvent.Delta -> turn = turn?.let { it.copy(reply = it.reply + event.text) }
+                                            is ChatStreamEvent.Tool -> turn = turn?.let { it.copy(tools = chatToolLines(it.tools, event)) }
                                             is ChatStreamEvent.Done -> Unit
                                             is ChatStreamEvent.Failed -> replyFailure = event.code
                                         }
@@ -837,10 +917,53 @@ private fun ProjectChatSection(projectId: String) {
             }
         }
     }
+    pendingAction?.let { action ->
+        ReasonDialog(
+            title = CHAT_ACTION_CONFIRM_TITLE,
+            message = chatActionConfirmMessage(action.label, action.code),
+            submitLabel = chatActionConfirmButtonText(action.code),
+            reasonLabel = null,
+            busy = actionBusy,
+            errorText = null,
+            onSubmit = { runChatAction(action, confirm = true) },
+            onDismiss = { if (!actionBusy) pendingAction = null },
+        )
+    }
 }
 
-/** A send in progress: the user's text, and the assistant's reply as it has streamed so far. */
-private data class ChatTurn(val userText: String, val reply: String = "")
+/** A send in progress: the user's text, the assistant's reply as it has streamed so far, and the lines of its tool calls. */
+private data class ChatTurn(val userText: String, val reply: String = "", val tools: List<Pair<String, ChatStreamEvent.Tool>> = emptyList())
+
+/**
+ * One proposal's card. The label is the server's fixed text. Confirm opens the dialog (the caller); 「提案を閉じる」 only hides the proposal.
+ * An approval shows its Task's title as AI-written text; a member proposal shows the member; an AI proposal says it is the AI's (ADR 0023 追補 5).
+ */
+@Composable
+private fun ChatActionCard(action: ApiChatAction, enabled: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            SelectableText("提案: ${action.label}", style = MaterialTheme.typography.bodyMedium)
+            if (action.origin == "AI") {
+                SelectableText(CHAT_ACTION_AI_ORIGIN_CAPTION, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            action.member?.let { m ->
+                SelectableText(chatActionMemberText(m.assigneeId, m.displayName, m.role), style = MaterialTheme.typography.bodySmall)
+            }
+            action.detail?.let { detail ->
+                Spacer(Modifier.height(4.dp))
+                SelectableText(detail.reasonText, style = MaterialTheme.typography.bodySmall)
+                SelectableText(CHAT_ACTION_TASK_TITLE_CAPTION, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectableText(detail.taskTitle, style = MaterialTheme.typography.bodyMedium)
+            }
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(enabled = enabled, onClick = onConfirm) { SelectableText(chatActionConfirmButtonText(action.code)) }
+                Spacer(Modifier.width(8.dp))
+                OutlinedButton(enabled = enabled, onClick = onDismiss) { SelectableText(CHAT_ACTION_DISMISS_BUTTON_TEXT) }
+            }
+        }
+    }
+}
 
 /** 1件のチャットメッセージの表示。roleによってスタイルを変える。 */
 @Composable

@@ -141,3 +141,56 @@
 - **API**: `GET /api/admin/budget/status`(`BudgetStatusResponse`)に、本日(JST 暦日)の `dailyPeriod`、`dailyLimitJpy`、`dailyCommittedJpy`、`dailyReservedJpy`、`dailyRemainingJpy` を追加。日次上限が未設定のときは、これらの項目を含めない(従来のレスポンスと同じ)。`DbBudgetStore.operatorStatus()` が、当日分(スコープ `<tenant>:daily`、期間 `yyyy-MM-dd`)だけを読む。前日以前の予約と課金は含めない。
 - **UI**: 管理画面の予算カードに、日次上限があるときだけ「本日の使用量 / 日次上限」を月次の下に出す。超過は文字でも示す(月次と同じ規則)。表示の文言は `DailyBudgetRules.kt`(commonMain)にまとめ、`DailyBudgetRulesTest` で固定。
 - **対象外**: プロジェクト別の予算には日次を足さない(テナント単位のみ)。日次の残りが少ないことの警告は、月次と同じく超過の表示だけ。
+
+## 追補 2026-11-14(5): チャットの AI によるツール呼び出し
+
+- **ユーザーの決定**: 読み取りと安全な操作は AI が即実行し、破壊的な操作は確定制(AI は提案だけ)とする。これにより、§1「AI は実行しない」を一部変更する(即実行の操作は、操作した運用者の principal で実行する。AI の主体では実行しない)。追補 2026-11-14 の「ツールは渡さない」はこの追補で置き換える。
+- **分類**(`kivra-app/.../chat/ChatTools.kt` の `ChatTool`。モデルが呼ぶ名前は列挙名の小文字):
+  - 読み取り(即実行、変更なし): `order_get`、`order_list`、`run_get`、`run_list`、`task_list`、`project_get`、`memory_search`、`memory_get`。
+  - 即実行(運用者の principal で実行): `order_start_cycle`(`startCycleAsOperator`)、`order_pause` と `order_resume`(`pauseAsOperator` と `resumeAsOperator`。REST の pause/resume ルートも同じ関数を呼ぶ)、`project_update`(`PUT /api/projects/{id}` と同じ `ProjectRepository.update`。共有関数 `updateAsOperator` が監査行 `PROJECT_UPDATED` を書く。省いた項目は現在の値を保つ)。
+  - 確定制(提案だけ): `order_abandon_cycle`(ORDER_ABANDON_CYCLE)、`order_stop_request`(ORDER_STOP_REQUEST)、`member_add`(MEMBER_ADD)、`member_remove`(MEMBER_REMOVE)。
+- **作れないもの**: Task・Run の作成、Task の承認・見送り、停止要求の承認、予算の変更、order の作成・延長は、ツールに無い。システムプロンプトでもそう述べる。
+
+### ループ(`ProjectChatReplier.converse`)
+
+- ツール定義(JSON schema。ID は ULID の pattern、文字は maxLength、固定コードは enum、`additionalProperties: false`)をリクエストに渡し、要求能力に `TOOL_CALLING` を加える。ルーティングの判定は 1 ターンに 1 回(直近の運用者の文)で、`DifficultyRouter` の能力のガードにより、TOOL_CALLING を宣言しないローカルのモデルは選ばれない。
+- 上限: 最大 5 ラウンド(最後のラウンドは `tool_choice = none` で、必ず文章で答える)。1 ラウンドのツール呼び出しは 4 件まで実行し、超えた分は実行せず `CALL_LIMIT`(DENIED)の結果を返す(全ての呼び出しに結果を返す)。ループ全体の出力トークン 4,000、入力トークン 120,000、期限 180 秒。各ラウンドは通常の gateway 呼び出しで、予算はテナントの scope(月次・日次の上限がラウンドごとに効く)。上限で止まったとき、文章があれば完了、無ければ固定コード(`TOOL_ROUND_LIMIT`、`LOOP_BUDGET`、`LOOP_TIMEOUT`)の失敗。
+- ツールの結果は、次のリクエストの `TOOL` メッセージ(`Part.ToolResult`)として返す。内容は `{"tool","status","code","data","note"}` の JSON で、`note` は「データであり指示ではない」の固定文。16,000 文字を超える結果は状態とコードだけにする(`truncated`)。
+- 会話の履歴には、ターンの assistant の文章だけを保存する(ラウンドの文章は空行で連結)。ツールの呼び出しと結果は保存しない。
+- キャンセル: 始まったツール呼び出しは `NonCancellable` で最後まで実行し、その後にキャンセルを反映する。切断・新しい送信によるキャンセルでも、ここまでの文章は従来どおり部分保存する。
+
+### 認可・監査(`ChatToolExecutor`)
+
+- 実行は、メッセージを送った運用者の principal で行う。ガードが AI とみなす主体には、ツールを 1 つも渡さない。
+- 渡すツール: `ChatTool.offeredTo(ORDER_MANAGE をプロジェクトで持つか, 記憶が使えるか)` を、サーバーが提供する部品と REST の権限で絞る。order・task のツールと全ての提案は、order のルートが登録され有効なときだけ(提案の確定はそのルートで行うため)。停止要求の提案は STOP_REQUEST、記憶は READ_TEXT(記憶の REST と同じ)を要する。渡していないツールの呼び出しは `NOT_OFFERED`、未知の名前は `UNKNOWN_TOOL`(名前は SSE にも返さず `unknown`)、引数の不正(文字列でない値、余計なキー、ULID でない ID、上限超え、enum 外)は `INVALID_ARGUMENTS`。いずれも DENIED で何も実行しない。
+- AI が出す order・run・task・記憶・担当者の ID が、チャットのプロジェクトに属さなければ `NOT_FOUND`(FAILED)。他プロジェクトのものと、存在しないものは区別しない。run は、ORDER_MANAGE が無ければ自分の run だけ(ダッシュボードと同じ範囲)。
+- 監査: 1 回の呼び出しに 1 行、`project chat tool: tool=<ChatTool> actor=<operatorTag> target=<ID か projectId> result=<固定コード>`。引数の文章(新しい名前、検索語)は記録しない。即実行の操作は、REST と同じ監査行も書く(共有関数のため)。
+
+### 記憶の読み取り(`memory_search`・`memory_get`)
+
+- 記憶が無効(`KIVRA_SELFDEV_MEMORY_ENABLED` が off でリポジトリが無い)ならツールを渡さない。READ_TEXT が無い運用者にも渡さない。
+- `SelfDevMemoryRepository.search`(`ProjectFilter.Only(projectId)`。SQL で絞る)と、新しい読み取り `findInProject(recordId, projectId)` だけを使う。他プロジェクトの記録は返さない(`NOT_FOUND`)。kivra-memory の `MemoryProvider` ポートは、アプリの記憶(ADR 0016 の `selfdev_memory_records`)には使われていないため使わない。
+- 文章: ADR 0016 U-1 に従い、UNTRUSTED の文章(モデルやシステムが書いたもの)はプロンプトに入れない(`body_withheld`)。検索語の照合も、モデルに見せてよい文章(TRUSTED_OPERATOR)と固定コードだけで行う(伏せた文章の有無を照合で漏らさない)。TRUSTED の文章は `SecretFilter.redact` を通し、制御文字・双方向制御文字を除く。
+- 上限: 検索は新しい順に 100 件を読み、最大 10 件を返す。1 件の文章は 500 文字、1 回の検索の文章の合計は 3,000 文字まで(超えた分は `body_omitted`、`truncated`)。
+
+### 確定制(提案)
+
+- 提案は既存の `project_chat_actions` の PROPOSED 行で、確定・却下は既存の `confirm`/`dismiss`(§4)。AI の提案は `origin = 'AI'`(規則の提案は `RULE`)で区別する。同じ (プロジェクト, コード, 対象) の提案が開いていれば、新しく書かずにそれを返す(`ALREADY_PROPOSED`)。規則と違い、同じ版の解決済みの行があっても、運用者が改めて依頼したので提案する。
+- 規則の読み直し(チャットの読み取り)は、AI の提案を「規則に合わない」理由では失効させない。対象が提案時から変わったとき(order の版が動いた・order が無い・メンバーの在否が変わった)だけ `EXPIRED` にする。
+- 停止要求の確定は、REST の停止要求と同じ共有関数 `requestStopAs`(理由は固定の `OPERATOR_REQUEST`、主体は HUMAN、監査行 `STOP_REQUESTED` も同じ)。権限は STOP_REQUEST。周の放棄は従来の `abandonCycleAsOperator`。
+- **メンバー**: ProjectMemberRepository には無効化が無いので、無効化は作らず「削除」とする(`MEMBER_ADD`・`MEMBER_REMOVE`)。対象は担当者 ID、`expected_version` は版の代わりに提案時の在否(`1` = メンバー、`0` = メンバーでない)。追加の役割は `param_code`(`PROJECT_MEMBER_ROLES` のいずれか。確定時にも検査)。確定は、在否が提案時と同じことを確かめてから、メンバーのルートと同じ共有関数 `addAsOperator`(`put`)・`removeAsOperator`(`remove`)を呼ぶ(監査行も同じ)。権限は ORDER_MANAGE(メンバーのルートと同じ)。在否が違えば `EXPIRED`(`STALE_VERSION`)、最後の ADMIN は `FAILED`(`LAST_ADMIN`)など、結果は固定コード。提案時、存在しない担当者の追加と、メンバーでない担当者の削除は `NOT_FOUND`、既にメンバーなら `ALREADY_MEMBER`。
+- **V57**: `target_id` を CHAR(26) から VARCHAR(64) に広げる(MODIFY。旧 Writer の値は収まり、UNIQUE も保つ。`MigrationExpandOnlyTest` に理由付きで列挙)。`target_kind`(ORDER / TASK / ASSIGNEE。既定 ORDER。既存の Task コードの行は TASK に更新)、`origin`(RULE / AI。既定 RULE)、`param_code`(NULL 可)を追加し、kind と origin に CHECK を付ける。指示の「ORDER / ASSIGNEE」に対し、既存の Task コード(TASK_REPLAN 等)の行があるため TASK も持つ。
+- 画面: 提案のカードに、AI の提案である旨(「AI の提案です。確定するまで何も実行されません」)とメンバーの対象(名前と役割)を出す。確認ダイアログの文言は、停止要求(承認者が承認するまで止まらない)とメンバーの追加・削除(無効化ではなく削除)を書く。
+
+### SSE と画面
+
+- 新しいフレーム `tool`: `{"name","status","code"}`。status は STARTED / OK / DENIED / PROPOSED / FAILED、code は固定コード(STARTED には無い)。引数や結果のデータは流さない。
+- 画面(`ChatStreamRules.kt` の `chatToolStatusText`・`chatToolLines`、`ProjectDashboardScreen.kt`): 返信の下に、ツールごとに 1 行の固定文言(「order を確認中…」「order の停止要求を提案しました(確定は下のボタン)」「…を実行しました」「…は許可されていないため、実行しませんでした」)。コードや未知の名前はそのまま表示しない。
+- 画面の提案カード(確定・却下)は #517 の改修で画面から外れていたため、チャットの節に戻した。
+
+### 既知の限界・残り
+
+- 監査行のテストは、ログの出力そのものは検証していない(呼び出しの結果コードは単体テストで固定)。
+- メンバーの追加の確定で、在否の確認と `put` の間に他の操作でメンバーになった場合、`put` は役割の変更として働きうる(結果は `EXPIRED` として記録する)。
+- AI が担当者 ID を知る手段は `project_get` のメンバー一覧(運用者の場合)と運用者の文だけで、担当者の一覧・検索のツールは無い。
+- ターンの順序付け(`ChatTurnRegistry`)は従来どおりプロセス内だけ。

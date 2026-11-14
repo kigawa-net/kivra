@@ -166,7 +166,7 @@ class McpOrderTools(private val deps: McpOrderDeps) {
 }
 
 /** The order summary, field by field: the same fields as the REST summary, and no title or policy. */
-private fun SelfDevOrder.summaryJson(): JsonObject = buildJsonObject {
+internal fun SelfDevOrder.summaryJson(): JsonObject = buildJsonObject {
     put("order_id", orderId)
     put("parent_order_id", parentOrderId)
     put("depth", depth)

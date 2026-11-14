@@ -23,6 +23,9 @@ import kotlin.test.assertTrue
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.chat.ProjectChatReplier
 import net.kigawa.kivra.chat.ScriptedChatProvider
+import net.kigawa.kivra.chat.ScriptedRound
+import net.kigawa.kivra.chat.ToolRoundsProvider
+import net.kigawa.kivra.chat.ChatToolDeps
 import net.kigawa.kivra.chat.chatTestGateway
 import net.kigawa.kivra.db.ProjectBackfillRepository
 import net.kigawa.kivra.db.ProjectChatMessageRow
@@ -47,10 +50,13 @@ import kotlinx.coroutines.CancellationException
 class ProjectChatStreamRoutesTest {
     private val identity = TaskApiIdentity { headers -> headers["X-Test-Principal"]?.takeIf { it.isNotBlank() } }
 
-    private fun ApplicationTestBuilder.setUp(db: TestDb, gateway: ModelGateway?) {
+    private fun ApplicationTestBuilder.setUp(db: TestDb, gateway: ModelGateway?, withTools: Boolean = false) {
         val projects = ProjectRepository(db.database, Clock.systemUTC())
         val chats = ProjectChatRepository(db.database)
         val reply = gateway?.let { ProjectChatReplier(it, chats, listOf(TEST_TENANT_SCOPE)) }
+        val members = ProjectMemberRepository(db.database, Clock.systemUTC())
+        // The tools without the order routes: the project and run tools only (enough for the frames).
+        val tools = if (withTools) ChatToolDeps(projects, db.runs, members, offPermissionGuard()) else null
         application {
             install(ContentNegotiation) { json() }
             routing {
@@ -62,6 +68,7 @@ class ProjectChatStreamRoutesTest {
                     drain = ProjectDrainRepository(db.database, newDbStore(db, Clock.systemUTC())),
                     chatRepo = chats,
                     chatReply = reply,
+                    chatTools = tools,
                 )
             }
         }
@@ -191,6 +198,49 @@ class ProjectChatStreamRoutesTest {
             assertEquals(listOf("user", "assistant", "user", "assistant"), db.messages(projectId).map { it.role })
             val secondRequest = provider.requests.last().messages.drop(1).map { (it.parts.single() as Part.Text).text }
             assertEquals(listOf("one", "ok", "two"), secondRequest)
+        }
+    }
+
+    @Test
+    fun `a tool call streams tool frames of fixed codes, and only the assistant's text is stored`() = TestDb().use { db ->
+        val provider = ToolRoundsProvider(
+            listOf(
+                ScriptedRound(listOf("確認します。"), calls = listOf("project_get" to emptyMap())),
+                ScriptedRound(listOf("名前は Stream です。")),
+            ),
+        )
+        testApplication {
+            setUp(db, chatTestGateway(provider), withTools = true)
+            val projectId = db.project()
+
+            val body = stream(projectId, """{"content":"このプロジェクトの名前は?"}""").bodyAsText()
+
+            assertEquals(listOf("user", "delta", "tool", "tool", "delta", "delta", "done"), eventsOf(body))
+            assertTrue(body.contains("data: {\"name\":\"project_get\",\"status\":\"STARTED\"}"), body)
+            assertTrue(body.contains("data: {\"name\":\"project_get\",\"status\":\"OK\",\"code\":\"OK\"}"), body)
+            assertFalse(body.contains("Stream\",\"description"), "the tool's data is not streamed")
+            val stored = db.messages(projectId)
+            assertEquals(listOf("user", "assistant"), stored.map { it.role })
+            assertEquals("確認します。\n\n名前は Stream です。", stored[1].content)
+        }
+    }
+
+    @Test
+    fun `a client that goes away after a tool call keeps the text so far`() = TestDb().use { db ->
+        val provider = ToolRoundsProvider(
+            listOf(
+                ScriptedRound(listOf("確認します。"), calls = listOf("project_get" to emptyMap())),
+                ScriptedRound(listOf("途中"), tail = CancellationException("client gone")),
+            ),
+        )
+        testApplication {
+            setUp(db, chatTestGateway(provider), withTools = true)
+            val projectId = db.project()
+
+            runCatching { stream(projectId, """{"content":"hello"}""").bodyAsText() }
+
+            assertEquals(listOf("user", "assistant"), db.messages(projectId).map { it.role })
+            assertEquals("確認します。\n\n途中", db.messages(projectId)[1].content)
         }
     }
 

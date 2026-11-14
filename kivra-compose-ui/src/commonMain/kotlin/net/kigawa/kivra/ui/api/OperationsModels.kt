@@ -2,6 +2,17 @@ package net.kigawa.kivra.ui.api
 
 import kotlinx.serialization.Serializable
 
+/** プロジェクトを持たない Operation。Run の external operations とは別のドメイン。 */
+@Serializable
+data class ApiOperation(
+    val id: String,
+    val name: String,
+    val status: String,
+    val description: String,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
 /*
  * 運用の補助の応答の型(予算の為替、昇格条件、実行の経過)。Models.kt と分けて置く(共有ファイルの競合を減らすため)。
  * Unknown keys are ignored (ignoreUnknownKeys = true in ApiClient).

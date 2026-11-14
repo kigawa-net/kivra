@@ -69,6 +69,13 @@ class ApiException(val status: Int?, val detail: String, val code: String? = nul
  */
 object ApiClient {
 
+    private const val OPERATIONS_BASE_PATH = "/api/operations"
+
+    suspend fun getOperations(): List<ApiOperation> = getJson(OPERATIONS_BASE_PATH)
+
+    suspend fun getOperation(operationId: String): ApiOperation =
+        getJson("$OPERATIONS_BASE_PATH/${percentEncode(operationId)}")
+
     val client = HttpClient {
         install(ContentNegotiation) {
             json(Json {

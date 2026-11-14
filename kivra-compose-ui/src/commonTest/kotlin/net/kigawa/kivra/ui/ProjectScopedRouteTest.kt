@@ -174,14 +174,13 @@ class ProjectScopedRouteTest {
     }
 
     @Test
-    fun sidebarHasTheGlobalSectionOnly() {
-        // #504 removed the top section (Home / Projects): a project is chosen from the project list.
-        val sections = sidebarSections()
-        assertEquals(listOf("全体"), sections.map { it.title })
+    fun sidebarGlobalSectionIncludesOperationsInOrder() {
+        val global = sidebarSections().single { it.title == "全体" }
         assertEquals(
-            listOf(NavDestination.Budget, NavDestination.Autopilot, NavDestination.Assignees),
-            sections[0].items.map { it.dest },
+            listOf(NavDestination.Budget, NavDestination.Operations, NavDestination.Autopilot, NavDestination.Assignees),
+            global.items.map { it.dest },
         )
+        assertTrue(global.items.all { it.target == Route.Page(it.dest) })
     }
 
     @Test

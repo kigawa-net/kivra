@@ -14,6 +14,7 @@ class RouteTest {
 
     @Test
     fun globalListRoutesKeepTheirNames() {
+        assertEquals(Route.Page(NavDestination.Operations), parseRoute("#/operations"))
         assertEquals(Route.Page(NavDestination.Projects), parseRoute("#/projects"))
         assertEquals(Route.Page(NavDestination.Budget), parseRoute("#/budget"))
         assertEquals(Route.Page(NavDestination.Autopilot), parseRoute("#/autopilot"))
@@ -53,6 +54,8 @@ class RouteTest {
     @Test
     fun toHashAndParseRouteRoundTrip() {
         val routes = listOf(
+            Route.Page(NavDestination.Operations),
+            Route.OperationDetail("操作 / 1?#%"),
             Route.Page(NavDestination.Home),
             Route.Page(NavDestination.Projects),
             Route.Page(NavDestination.Budget),
@@ -95,5 +98,22 @@ class RouteTest {
     fun invalidHasNoCrumbsAndNoNav() {
         assertTrue(Route.Invalid("#/x/y/z/w").breadcrumbs().isEmpty())
         assertEquals(null, Route.Invalid("#/x").nav)
+    }
+
+    @Test
+    fun operationDetailStaysGlobalAndLinksBackToItsList() {
+        val operation = Route.OperationDetail("op/1")
+        assertEquals("#/operations/op%2F1", operation.toHash())
+        assertEquals(operation, parseRoute("#/operations/op%2F1?tab=info"))
+        assertEquals(NavDestination.Operations, operation.nav)
+        assertEquals(null, operation.projectIdOrNull)
+        assertEquals(operation, operation.withProjectOf(Route.ProjectPage("p1", NavDestination.Tasks)))
+        assertEquals(
+            listOf(Crumb("全体", null), Crumb("Operation", Route.Page(NavDestination.Operations)), Crumb("op/1", null)),
+            operation.breadcrumbs(),
+        )
+        assertTrue(parseRoute("#/operations/%ZZ") is Route.Invalid)
+        assertTrue(parseRoute("#/operations/op1/extra") is Route.Invalid)
+        assertTrue(parseRoute("#/projects/p1/operations/op1") is Route.Invalid)
     }
 }

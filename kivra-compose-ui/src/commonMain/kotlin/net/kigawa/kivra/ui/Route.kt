@@ -58,6 +58,11 @@ sealed interface Route {
         override val nav: NavDestination? get() = Tasks
     }
 
+    /** 全体の Operation のダッシュボード。プロジェクトには属さない。 */
+    data class OperationDetail(val operationId: String) : Route {
+        override val nav: NavDestination? get() = NavDestination.Operations
+    }
+
     /** 開発目標の詳細。 */
     data class GoalDetail(val taskId: String, val projectId: String? = null) : Route {
         override val nav: NavDestination? get() = Goals
@@ -124,6 +129,7 @@ private fun projectRoute(projectId: String, rest: List<String>): Route? {
 
 /** プロジェクトを持たない詳細(`#/goals/<id>` など)。旧い形の URL で、同じ画面を開く。 */
 private fun globalDetailRoute(kind: String, id: String, rest: List<String>): Route? = when {
+    rest.isEmpty() && kind == "operations" -> Route.OperationDetail(id)
     rest.isEmpty() && kind == "runs" -> Route.RunDetail(id)
     rest.isEmpty() && kind == "goals" -> Route.GoalDetail(id)
     rest.isEmpty() && kind == "orders" -> Route.OrderDetail(id)
@@ -153,6 +159,7 @@ fun Route.toHash(): String = when (this) {
     is Route.Legacy -> "#/${dest.route}"
     is Route.ProjectChooser -> "#/projects"
     is Route.RunDetail -> detailHash(projectId, "runs", runId)
+    is Route.OperationDetail -> "#/operations/${percentEncode(operationId)}"
     is Route.GoalDetail -> detailHash(projectId, "goals", taskId)
     is Route.OrderDetail -> detailHash(projectId, "orders", orderId)
     is Route.OrderCycles -> detailHash(projectId, "orders", orderId) + "/cycles"
@@ -168,6 +175,7 @@ val Route.projectIdOrNull: String?
     get() = when (this) {
         is Route.ProjectPage -> projectId
         is Route.RunDetail -> projectId
+        is Route.OperationDetail -> null
         is Route.GoalDetail -> projectId
         is Route.OrderDetail -> projectId
         is Route.OrderCycles -> projectId
@@ -179,6 +187,7 @@ fun Route.withProjectOf(current: Route): Route {
     val projectId = current.projectIdOrNull ?: return this
     return when (this) {
         is Route.RunDetail -> if (this.projectId == null) copy(projectId = projectId) else this
+        is Route.OperationDetail -> this
         is Route.GoalDetail -> if (this.projectId == null) copy(projectId = projectId) else this
         is Route.OrderDetail -> if (this.projectId == null) copy(projectId = projectId) else this
         is Route.OrderCycles -> if (this.projectId == null) copy(projectId = projectId) else this
@@ -222,6 +231,11 @@ fun Route.breadcrumbs(projectName: (String) -> String? = { null }): List<Crumb> 
         is Route.Legacy -> listOf(projectsCrumb, Crumb(dest.label, null))
         is Route.ProjectPage -> projectHead(projectId) + Crumb(dest.label, null)
         is Route.RunDetail -> detail(projectId, Tasks, listOf(Crumb(runId, null)))
+        is Route.OperationDetail -> listOf(
+            Crumb("全体", null),
+            Crumb(NavDestination.Operations.label, Route.Page(NavDestination.Operations)),
+            Crumb(operationId, null),
+        )
         is Route.GoalDetail -> detail(projectId, Goals, listOf(Crumb(taskId, null)))
         is Route.OrderDetail -> detail(projectId, Orders, listOf(Crumb(orderId, null)))
         is Route.OrderCycles -> detail(

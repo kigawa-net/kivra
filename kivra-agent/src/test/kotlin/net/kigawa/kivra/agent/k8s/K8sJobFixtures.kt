@@ -8,13 +8,14 @@ import kotlinx.serialization.json.JsonPrimitive
 
 internal const val K8S_NAMESPACE = "kivra-agent-runs"
 internal const val K8S_IMAGE = "kivra-agent-runtime:local"
+internal const val K8S_OWNER = "0f1e2d3c4b5a6978"
 internal const val K8S_PROXY = "http://kivra-agent-proxy:8080"
 internal const val K8S_RUN_ID = "01M545K02Q6YB4M5ZHAM5792CS"
 internal const val K8S_ATTEMPT_ID = "att-1"
 
 /** The settings and the standard spec that the tests build and then mutate. */
 internal object K8sFixture {
-    val settings: K8sSettings = K8sSettings(K8S_NAMESPACE, setOf(K8S_IMAGE))
+    val settings: K8sSettings = K8sSettings(K8S_NAMESPACE, K8S_OWNER, setOf(K8S_IMAGE))
 
     fun spec(
         runId: String = K8S_RUN_ID,

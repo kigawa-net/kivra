@@ -231,6 +231,22 @@ class K8sJobGuardTest {
             Triple("namespace other than the settings", K8sGuardRule.NAMESPACE_NOT_ALLOWED, golden.set("metadata", "namespace", value = str("default"))),
             Triple("kivra-agent label is 0", K8sGuardRule.LABEL_NOT_ALLOWED, golden.set("metadata", "labels", "kivra-agent", value = str("0"))),
             Triple("unknown label", K8sGuardRule.LABEL_NOT_ALLOWED, golden.set("metadata", "labels", "owner", value = str("me"))),
+            Triple("owner label of another agent", K8sGuardRule.LABEL_NOT_ALLOWED, golden.set("metadata", "labels", "kivra-owner", value = str("ffffffffffffffff"))),
+            Triple("owner label missing", K8sGuardRule.MISSING_FIELD, golden.remove("metadata", "labels", "kivra-owner")),
+            // The node selector: exactly canal-cni=enabled, so the Pod runs only where the NetworkPolicy is enforced.
+            Triple("node selector removed", K8sGuardRule.MISSING_FIELD, golden.remove("spec", "template", "spec", "nodeSelector")),
+            Triple(
+                "node selector with another key", K8sGuardRule.NODE_SELECTOR_NOT_ALLOWED,
+                golden.set("spec", "template", "spec", "nodeSelector", value = obj("canal-cni" to str("enabled"), "zone" to str("a"))),
+            ),
+            Triple(
+                "node selector with another value", K8sGuardRule.NODE_SELECTOR_NOT_ALLOWED,
+                golden.set("spec", "template", "spec", "nodeSelector", "canal-cni", value = str("disabled")),
+            ),
+            Triple(
+                "affinity in the Pod spec", K8sGuardRule.UNKNOWN_KEY,
+                golden.setPod("affinity", value = obj("nodeAffinity" to obj())),
+            ),
             Triple(
                 "template label differs from the Job label", K8sGuardRule.LABEL_NOT_ALLOWED,
                 golden.set("spec", "template", "metadata", "labels", "kivra-run", value = str("01OTHER")),

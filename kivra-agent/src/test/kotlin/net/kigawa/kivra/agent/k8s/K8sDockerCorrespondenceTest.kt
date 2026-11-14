@@ -52,7 +52,9 @@ class K8sDockerCorrespondenceTest {
         val dockerLabels = optionValues("--label=").associate { it.substringBefore('=') to it.substringAfter('=') }
         val jobLabels = stringMap((k8s["metadata"] as JsonObject)["labels"]!!.jsonObject)
         val podLabels = stringMap((k8s["spec"] as JsonObject)["template"]!!.jsonObject["metadata"]!!.jsonObject["labels"]!!.jsonObject)
-        assertEquals(dockerLabels, jobLabels.filterKeys { it != K8sConstants.LABEL_ATTEMPT_KEY })
+        // The attempt and owner labels are k8s-only: the docker side has no per-attempt label and one agent per host.
+        val k8sOnly = setOf(K8sConstants.LABEL_ATTEMPT_KEY, K8sConstants.LABEL_OWNER_KEY)
+        assertEquals(dockerLabels, jobLabels.filterKeys { it !in k8sOnly })
         assertEquals(jobLabels, podLabels)
     }
 

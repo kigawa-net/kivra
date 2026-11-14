@@ -94,10 +94,21 @@ class K8sJobBuilderTest {
 
     @Test
     fun settingsAreCheckedOnce() {
-        assertFailsWith<K8sSpecException> { K8sSettings("Bad", setOf(K8S_IMAGE)) }
-        assertFailsWith<K8sSpecException> { K8sSettings(K8S_NAMESPACE, emptySet()) }
-        assertFailsWith<K8sSpecException> { K8sSettings(K8S_NAMESPACE, setOf("bad image")) }
-        assertFailsWith<K8sSpecException> { K8sSettings(K8S_NAMESPACE, setOf(K8S_IMAGE), emptySet()) }
+        assertFailsWith<K8sSpecException> { K8sSettings("Bad", K8S_OWNER, setOf(K8S_IMAGE)) }
+        assertFailsWith<K8sSpecException> { K8sSettings(K8S_NAMESPACE, "bad owner", setOf(K8S_IMAGE)) }
+        assertFailsWith<K8sSpecException> { K8sSettings(K8S_NAMESPACE, K8S_OWNER, emptySet()) }
+        assertFailsWith<K8sSpecException> { K8sSettings(K8S_NAMESPACE, K8S_OWNER, setOf("bad image")) }
+        assertFailsWith<K8sSpecException> { K8sSettings(K8S_NAMESPACE, K8S_OWNER, setOf(K8S_IMAGE), emptySet()) }
+    }
+
+    @Test
+    fun ownerLabelIsDerivedFromTheClientIdAndIsALabelValue() {
+        val owner = K8sNames.ownerLabel("kivra-agent-pc1")
+        assertEquals(16, owner.length)
+        assertTrue(K8sNames.isLabelId(owner))
+        assertEquals(owner, K8sNames.ownerLabel("kivra-agent-pc1"))
+        assertFalse(owner.contains("pc1"), "the label does not show the client id")
+        assertFalse(owner == K8sNames.ownerLabel("kivra-agent-pc2"))
     }
 
     @Test
@@ -135,6 +146,7 @@ class K8sJobBuilderTest {
         "namespace": "kivra-agent-runs",
         "labels": {
             "kivra-agent": "1",
+            "kivra-owner": "0f1e2d3c4b5a6978",
             "kivra-run": "01M545K02Q6YB4M5ZHAM5792CS",
             "kivra-attempt": "att-1"
         }
@@ -147,6 +159,7 @@ class K8sJobBuilderTest {
             "metadata": {
                 "labels": {
                     "kivra-agent": "1",
+                    "kivra-owner": "0f1e2d3c4b5a6978",
                     "kivra-run": "01M545K02Q6YB4M5ZHAM5792CS",
                     "kivra-attempt": "att-1"
                 }
@@ -158,6 +171,9 @@ class K8sJobBuilderTest {
                 "hostPID": false,
                 "hostIPC": false,
                 "terminationGracePeriodSeconds": 10,
+                "nodeSelector": {
+                    "canal-cni": "enabled"
+                },
                 "securityContext": {
                     "runAsNonRoot": true,
                     "runAsUser": 10001,

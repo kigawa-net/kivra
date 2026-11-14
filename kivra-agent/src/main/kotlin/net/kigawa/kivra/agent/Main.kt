@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.agent.docker.DockerSpecException
+import net.kigawa.kivra.agent.k8s.HttpKubeApi
+import net.kigawa.kivra.agent.k8s.KubeApi
 import net.kigawa.kivra.agent.workdir.WorkDirException
 import org.slf4j.LoggerFactory
 
@@ -68,13 +70,23 @@ fun main() {
 }
 
 /**
- * The executor for this run. The stub unless `KIVRA_AGENT_EXECUTOR=real`. The real executor checks its docker and work root settings
+ * The executor for this run. The stub unless `KIVRA_AGENT_EXECUTOR=real`. The real executor checks its backend and work root settings
  * when it is built, so an invalid setting ends the start here (exit 2) and no attempt is claimed. The message names no value.
+ *
+ * The backend and the executor get the same [AttemptPodInputs]: the k8s backend reads each run's input from it, and a second instance
+ * would fail every run. [kubeApi] and [pollMillis] are for the tests; the defaults are the cluster and the backend's own poll interval.
  */
-private fun executorFor(config: AgentConfig, client: KivraAgentClient): AttemptExecutor {
+internal fun executorFor(
+    config: AgentConfig,
+    client: KivraAgentClient,
+    kubeApi: () -> KubeApi = { HttpKubeApi.inCluster() },
+    pollMillis: Long? = null,
+): AttemptExecutor {
     val real = config.realExecutor ?: return NotImplementedExecutor
+    val podInputs = AttemptPodInputs()
     return try {
-        RealAttemptExecutor(client, config.workDir, config.stopFile, real, createRunBackend(config.backend, real, config.workDir))
+        val backend = createRunBackend(config.backend, real, config.workDir, podInputs, pollMillis = pollMillis, kubeApi = kubeApi)
+        RealAttemptExecutor(client, config.workDir, config.stopFile, real, backend, podInputs)
     } catch (e: DockerSpecException) {
         System.err.println("kivra-agent: the ${AgentConfig.ENV_EXECUTOR}=real settings are invalid")
         exitProcess(EXIT_EXECUTOR_CONFIG)

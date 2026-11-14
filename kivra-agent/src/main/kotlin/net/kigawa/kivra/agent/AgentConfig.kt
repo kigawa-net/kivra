@@ -8,6 +8,7 @@ import java.time.Duration
 import net.kigawa.kivra.agent.docker.CliCommand
 import net.kigawa.kivra.agent.docker.DockerPatterns
 import net.kigawa.kivra.agent.docker.DockerSettings
+import net.kigawa.kivra.agent.k8s.K8sNames
 import net.kigawa.kivra.agent.workdir.RepoSource
 
 /**
@@ -56,8 +57,8 @@ class AgentConfig private constructor(
     enum class ExecutorMode { STUB, REAL }
 
     /**
-     * Where the containers run (`KIVRA_AGENT_BACKEND`). DOCKER is the default. K8S is named here so that it is refused by name; it is not
-     * implemented yet (ADR 0010 追補 7, PR 4), so [fromEnv] rejects it and nothing falls back to docker.
+     * Where the containers run (`KIVRA_AGENT_BACKEND`). DOCKER is the default. K8S runs one Job per run (ADR 0010 追補 7, PR 5c). The
+     * settings of the chosen backend are read only when `KIVRA_AGENT_EXECUTOR=real`.
      */
     enum class Backend { DOCKER, K8S }
 
@@ -77,6 +78,9 @@ class AgentConfig private constructor(
         const val ENV_DOCKER_NETWORK = "KIVRA_AGENT_DOCKER_NETWORK"
         const val ENV_DOCKER_IMAGE = "KIVRA_AGENT_DOCKER_IMAGE"
         const val ENV_DOCKER_PROXY_URL = "KIVRA_AGENT_DOCKER_PROXY_URL"
+        const val ENV_K8S_NAMESPACE = "KIVRA_AGENT_K8S_NAMESPACE"
+        const val ENV_K8S_IMAGE = "KIVRA_AGENT_K8S_IMAGE"
+        const val ENV_K8S_PROXY_URL = "KIVRA_AGENT_K8S_PROXY_URL"
         const val ENV_GIT_BIN = "KIVRA_AGENT_GIT_BIN"
         const val ENV_REPO = "KIVRA_AGENT_REPO"
         const val ENV_MODEL = "KIVRA_AGENT_MODEL"
@@ -112,6 +116,7 @@ class AgentConfig private constructor(
                 "real" -> ExecutorMode.REAL
                 else -> throw ConfigException("$ENV_EXECUTOR must be stub or real")
             }
+            val backend = backend(env)
             return AgentConfig(
                 kivraUrl = kivraUrl,
                 tokenUrl = tokenUrl,
@@ -124,25 +129,30 @@ class AgentConfig private constructor(
                 ),
                 stopFile = stopFile,
                 executorMode = executorMode,
-                realExecutor = if (executorMode == ExecutorMode.REAL) realExecutorSettings(env) else null,
-                backend = backend(env),
+                realExecutor = if (executorMode == ExecutorMode.REAL) realExecutorSettings(env, clientId, backend) else null,
+                backend = backend,
             )
         }
 
         /**
-         * Read on every start, also with the stub. `docker` (the default) or unset is docker. `k8s` is refused by name, because it is not
-         * implemented yet, and no other value is accepted. The message does not show the value.
+         * Read on every start, also with the stub. `docker` (the default) or unset is docker, and `k8s` is the Kubernetes backend. No other
+         * value is accepted. The message does not show the value.
          */
         private fun backend(env: Map<String, String>): AgentConfig.Backend = when (optional(env, ENV_BACKEND)) {
             null, "docker" -> AgentConfig.Backend.DOCKER
-            "k8s" -> throw ConfigException("$ENV_BACKEND names a backend that is not implemented yet; only docker runs")
+            "k8s" -> AgentConfig.Backend.K8S
             else -> throw ConfigException("$ENV_BACKEND must be docker or k8s")
         }
 
-        /** Read only for `KIVRA_AGENT_EXECUTOR=real`. The docker and git paths are absolute; the repository is `owner/repo`. */
-        private fun realExecutorSettings(env: Map<String, String>): RealExecutorSettings {
-            val proxyUrl = required(env, ENV_DOCKER_PROXY_URL)
-            if (!DockerPatterns.PROXY_URL.matches(proxyUrl)) throw ConfigException("$ENV_DOCKER_PROXY_URL must be http://host:port")
+        /**
+         * Read only for `KIVRA_AGENT_EXECUTOR=real`. The settings of [backend] only: docker reads the `KIVRA_AGENT_DOCKER_*` and git ones,
+         * k8s reads the `KIVRA_AGENT_K8S_*` ones (ADR 0010 追補 7, PR 5c). The proxy, the model, the budget and the repository are common.
+         * The repository is `owner/repo`.
+         */
+        private fun realExecutorSettings(env: Map<String, String>, clientId: String, backend: AgentConfig.Backend): RealExecutorSettings {
+            val proxyEnv = if (backend == AgentConfig.Backend.K8S) ENV_K8S_PROXY_URL else ENV_DOCKER_PROXY_URL
+            val proxyUrl = required(env, proxyEnv)
+            if (!DockerPatterns.PROXY_URL.matches(proxyUrl)) throw ConfigException("$proxyEnv must be http://host:port")
             val model = optional(env, ENV_MODEL) ?: CliCommand.DEFAULT_MODEL
             if (!DockerPatterns.MODEL.matches(model)) throw ConfigException("$ENV_MODEL must be a model id (letters, digits, dots, hyphens)")
             val budgetUsd = budgetUsd(env)
@@ -154,20 +164,50 @@ class AgentConfig private constructor(
             } catch (e: IllegalArgumentException) {
                 throw ConfigException("$ENV_REPO must be owner/repo")
             }
-            return RealExecutorSettings(
-                dockerBinary = absolutePath(env, ENV_DOCKER_BIN),
-                dockerHost = optional(env, ENV_DOCKER_HOST),
-                network = required(env, ENV_DOCKER_NETWORK),
-                image = required(env, ENV_DOCKER_IMAGE),
-                proxyUrl = proxyUrl,
-                gitBinary = absolutePath(env, ENV_GIT_BIN),
-                repo = repo,
-                model = model,
-                budgetUsd = budgetUsd,
-                debugKeep = debugKeep(env),
-                newErrorCodes = newErrorCodes(env),
-                monitorEvents = monitorEvents(env),
-            )
+            return when (backend) {
+                AgentConfig.Backend.DOCKER -> RealExecutorSettings(
+                    dockerBinary = absolutePath(env, ENV_DOCKER_BIN),
+                    dockerHost = optional(env, ENV_DOCKER_HOST),
+                    network = required(env, ENV_DOCKER_NETWORK),
+                    image = required(env, ENV_DOCKER_IMAGE),
+                    proxyUrl = proxyUrl,
+                    gitBinary = absolutePath(env, ENV_GIT_BIN),
+                    repo = repo,
+                    model = model,
+                    budgetUsd = budgetUsd,
+                    debugKeep = debugKeep(env),
+                    newErrorCodes = newErrorCodes(env),
+                    monitorEvents = monitorEvents(env),
+                )
+                AgentConfig.Backend.K8S -> RealExecutorSettings(
+                    image = k8sImage(env),
+                    proxyUrl = proxyUrl,
+                    repo = repo,
+                    model = model,
+                    budgetUsd = budgetUsd,
+                    debugKeep = debugKeep(env),
+                    newErrorCodes = newErrorCodes(env),
+                    monitorEvents = monitorEvents(env),
+                    k8s = K8sExecutorSettings(
+                        namespace = k8sNamespace(env),
+                        ownerLabel = K8sNames.ownerLabel(clientId),
+                    ),
+                )
+            }
+        }
+
+        /** A DNS-1123 label, as a namespace name. The message names the variable only. */
+        private fun k8sNamespace(env: Map<String, String>): String {
+            val namespace = required(env, ENV_K8S_NAMESPACE)
+            if (!K8sNames.isDns1123Label(namespace)) throw ConfigException("$ENV_K8S_NAMESPACE must be a Kubernetes namespace name")
+            return namespace
+        }
+
+        /** The run image of the k8s backend, in the same form as the docker image. */
+        private fun k8sImage(env: Map<String, String>): String {
+            val image = required(env, ENV_K8S_IMAGE)
+            if (image.length > 255 || !DockerPatterns.IMAGE.matches(image)) throw ConfigException("$ENV_K8S_IMAGE must be an image name")
+            return image
         }
 
         /**

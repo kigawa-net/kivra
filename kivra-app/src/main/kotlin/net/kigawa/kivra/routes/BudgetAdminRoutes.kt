@@ -8,6 +8,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import java.math.BigDecimal
 import java.time.Clock
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.kivra.auth.Permission
@@ -51,6 +52,7 @@ data class FxExpiryBody(val asOf: String, val daysLeft: Long, val expired: Boole
  * The operator's budget screen state (`GET /api/admin/budget/status`). Money is decimal yen as a string. [remainingJpy] is the
  * limit minus the committed total minus the open reservations (it may be negative when a late charge went over the limit).
  */
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class BudgetStatusResponse(
     val period: String,
@@ -61,6 +63,12 @@ data class BudgetStatusResponse(
     val paths: BudgetPathsBody,
     val unpricedCount: Long,
     val unpriced: List<UnpricedBody>,
+    // The daily figures of the current JST day. Omitted entirely when no daily limit is configured, so the response is then as before.
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val dailyPeriod: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val dailyLimitJpy: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val dailyCommittedJpy: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val dailyReservedJpy: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val dailyRemainingJpy: String? = null,
 )
 
 @Serializable
@@ -207,6 +215,11 @@ private fun BudgetOperatorStatus.toBody(): BudgetStatusResponse {
         reservedJpy = yenText(reservedJpy),
         remainingJpy = yenText(remaining),
         paths = BudgetPathsBody(api = PathCommittedBody(yenText(api)), cli = PathCommittedBody(yenText(cliCommittedJpy))),
+        dailyPeriod = daily?.period,
+        dailyLimitJpy = daily?.let { yenText(it.limitJpy) },
+        dailyCommittedJpy = daily?.let { yenText(it.committedJpy) },
+        dailyReservedJpy = daily?.let { yenText(it.reservedJpy) },
+        dailyRemainingJpy = daily?.let { yenText(it.limitJpy - it.committedJpy - it.reservedJpy) },
         unpricedCount = unpricedCount,
         unpriced = unpriced.map {
             UnpricedBody(

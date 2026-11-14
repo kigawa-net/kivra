@@ -135,3 +135,9 @@
 - **セルフ開発の配線**: `LlmDeveloper`、`AutopilotPlanner`、`PrReviewWatch` の呼び出しを `DifficultyRouter` に通す。要約は、タスクのタイトルと指示文(計画は claim の題名と本文、レビューは PR の題名と本文)。リポジトリの内容、差分、シークレットは分類器に渡さない。キルスイッチは `KIVRA_MODEL_ROUTING_SELFDEV_ENABLED`(既定 true)。`StopJudgeClient` は gateway を使わず直接 HTTP のため対象外。
 - **モデル固定との関係**: 計画とレビューは Anthropic のモデル ID に固定されている。ローカル優先のときは、apply が有効なローカルモデルの ID を許可に加える。能力のフィルタは残るので、能力を満たさないローカルモデルは選ばれない。
 - **日次予算**: `kivra.budget.dailyLimitJpy`(env `KIVRA_BUDGET_TENANT_DAILY_LIMIT_JPY`)。未設定なら従来どおり。設定すると、テナントへの課金は月次に加えて日次(JST 暦日、スコープ `<tenant>:daily`、期間 `yyyy-MM-dd`)でも上限を確認する。予約は予約時の日付を保持し、ack と release は元の期間に対して行う。ローカルの費用 0 は消費しない。不正値は起動失敗(値は出さない)。マイグレーションは不要(既存の列 VARCHAR(16) と VARCHAR(128) に収まる)。日次の使用量の表示は未実装。
+
+## 追補 2026-11-14(4): 日次予算の使用量表示
+
+- **API**: `GET /api/admin/budget/status`(`BudgetStatusResponse`)に、本日(JST 暦日)の `dailyPeriod`、`dailyLimitJpy`、`dailyCommittedJpy`、`dailyReservedJpy`、`dailyRemainingJpy` を追加。日次上限が未設定のときは、これらの項目を含めない(従来のレスポンスと同じ)。`DbBudgetStore.operatorStatus()` が、当日分(スコープ `<tenant>:daily`、期間 `yyyy-MM-dd`)だけを読む。前日以前の予約と課金は含めない。
+- **UI**: 管理画面の予算カードに、日次上限があるときだけ「本日の使用量 / 日次上限」を月次の下に出す。超過は文字でも示す(月次と同じ規則)。表示の文言は `DailyBudgetRules.kt`(commonMain)にまとめ、`DailyBudgetRulesTest` で固定。
+- **対象外**: プロジェクト別の予算には日次を足さない(テナント単位のみ)。日次の残りが少ないことの警告は、月次と同じく超過の表示だけ。

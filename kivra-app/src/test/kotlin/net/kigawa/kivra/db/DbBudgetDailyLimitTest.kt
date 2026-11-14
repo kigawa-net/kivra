@@ -74,6 +74,23 @@ class DbBudgetDailyLimitTest {
     }
 
     @Test
+    fun `the status shows the current JST day only, and no daily part without a daily limit`() = TestDb().use { db ->
+        val clock = MutableClock(day1)
+        val s = store(db, clock)
+        s.reserve("a", scopes, jpy("60"))
+        val today = s.operatorStatus().daily!!
+        assertEquals("2026-11-14", today.period)
+        assertEquals(0, today.committedJpy.compareTo(BigDecimal.ZERO))
+        assertEquals(0, today.reservedJpy.compareTo(BigDecimal("60")))
+        assertEquals(0, today.limitJpy.compareTo(BigDecimal("100")))
+        clock.now = day2
+        val next = s.operatorStatus().daily!!
+        assertEquals("2026-11-15", next.period)
+        assertEquals(0, next.reservedJpy.compareTo(BigDecimal.ZERO), "an earlier day's reservation is not on the new day")
+        assertEquals(null, store(db, clock, daily = null).operatorStatus().daily)
+    }
+
+    @Test
     fun `a zero-cost call does not consume the daily limit`() = TestDb().use { db ->
         val s = store(db, MutableClock(day1), daily = "1")
         repeat(3) { assertEquals(ReserveResult.Reserved, s.reserve("z$it", scopes, jpy("0"))) }

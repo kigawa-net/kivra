@@ -382,6 +382,16 @@ class DbBudgetStore(
             cliCommittedJpy = micro(cli),
             unpricedCount = count,
             unpriced = rows.take(UNPRICED_LIST_LIMIT),
+            daily = dailyLimit?.let { limit ->
+                // The current JST day only: a reservation or a charge on an earlier day is in its own period and is not shown here.
+                val day = periodFor(dailyScopeId(), now)
+                DailyBudgetStatus(
+                    period = day,
+                    limitJpy = limit.hard,
+                    committedJpy = micro(periodRow(dailyScopeId(), day)?.committed ?: 0L),
+                    reservedJpy = micro(reservedFor(dailyScopeId(), day)),
+                )
+            },
         )
     }
 
@@ -776,6 +786,16 @@ data class BudgetOperatorStatus(
     val cliCommittedJpy: BigDecimal,
     val unpricedCount: Long,
     val unpriced: List<UnpricedReservation>,
+    /** The tenant's daily usage on the current JST day, or null when no daily limit is configured. */
+    val daily: DailyBudgetStatus? = null,
+)
+
+/** The tenant's daily budget on one JST calendar day (scope `<tenant>:daily`). Amounts in yen. */
+data class DailyBudgetStatus(
+    val period: String,
+    val limitJpy: BigDecimal,
+    val committedJpy: BigDecimal,
+    val reservedJpy: BigDecimal,
 )
 
 /** One UNPRICED or LAPSED reservation on the tenant scope, as the operator can acknowledge it. [cli] is true for a `coding:` key. */

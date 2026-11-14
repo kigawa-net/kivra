@@ -114,6 +114,6 @@ class RouteTest {
         )
         assertTrue(parseRoute("#/operations/%ZZ") is Route.Invalid)
         assertTrue(parseRoute("#/operations/op1/extra") is Route.Invalid)
-        assertTrue(parseRoute("#/projects/p1/operations/op1") is Route.Invalid)
+        assertEquals(Route.OperationDetail("op1", "p1", NodeKind.PROJECT), parseRoute("#/projects/p1/operations/op1"))
     }
 }

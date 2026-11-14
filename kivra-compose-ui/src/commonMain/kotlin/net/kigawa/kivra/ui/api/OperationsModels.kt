@@ -2,7 +2,7 @@ package net.kigawa.kivra.ui.api
 
 import kotlinx.serialization.Serializable
 
-/** プロジェクトを持たない Operation。Run の external operations とは別のドメイン。 */
+/** Operation の API DTO。親コンテキストは UI の Node が保持する。Run の external operations とは別のドメイン。 */
 @Serializable
 data class ApiOperation(
     val id: String,

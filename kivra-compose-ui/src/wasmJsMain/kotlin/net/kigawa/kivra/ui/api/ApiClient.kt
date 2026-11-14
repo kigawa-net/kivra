@@ -75,7 +75,9 @@ object ApiClient {
 
     private const val OPERATIONS_BASE_PATH = "/api/operations"
 
-    suspend fun getOperations(): List<ApiOperation> = getJson(OPERATIONS_BASE_PATH)
+    /** null は親なしの一覧。親 ID を指定すると、その Project / Operation の子を取得する。 */
+    suspend fun getOperations(parentId: String? = null): List<ApiOperation> =
+        getJson(net.kigawa.kivra.ui.operationsPath(parentId))
 
     suspend fun getOperation(operationId: String): ApiOperation =
         getJson("$OPERATIONS_BASE_PATH/${percentEncode(operationId)}")

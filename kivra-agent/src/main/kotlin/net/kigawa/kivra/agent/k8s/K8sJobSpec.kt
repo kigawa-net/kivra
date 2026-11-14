@@ -87,7 +87,7 @@ class K8sJobSpec(
         requireLabelId("attemptId", attemptId)
         if (!K8sNames.isDns1123Label(namespace)) throw K8sSpecException("namespace is invalid")
         if (image.length > 255 || !DockerPatterns.IMAGE.matches(image)) throw K8sSpecException("image is invalid")
-        if (!DockerPatterns.PROXY_URL.matches(proxyUrl)) throw K8sSpecException("proxyUrl must be http://host:port")
+        if (!DockerPatterns.isK8sProxyUrl(proxyUrl)) throw K8sSpecException("proxyUrl must be http://host:port")
         if (timeout < MIN_TIMEOUT || timeout > MAX_TIMEOUT) throw K8sSpecException("timeout is out of range")
         if (!DockerPatterns.MEMORY.matches(memory)) throw K8sSpecException("memory is invalid")
         if (K8sQuantities.dockerMemoryToMi(memory) > K8sConstants.MAX_MEMORY_MI) throw K8sSpecException("memory is out of range")

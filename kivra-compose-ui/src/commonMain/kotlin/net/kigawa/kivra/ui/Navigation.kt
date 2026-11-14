@@ -13,6 +13,7 @@ sealed class NavDestination(val route: String, val label: String) {
     object Home : NavDestination("home", "ホーム")
     object Projects : NavDestination("projects", "プロジェクト")
     object Budget : NavDestination("budget", "予算・FX")
+    object Operations : NavDestination("operations", "Operation")
     object Autopilot : NavDestination("autopilot", "自動化")
     object Assignees : NavDestination("assignees", "担当")
 
@@ -28,7 +29,7 @@ sealed class NavDestination(val route: String, val label: String) {
 
     companion object {
         /** 全体の項目(route が一意になる。`#/<route>` で開く)。 */
-        val globalPages: List<NavDestination> by lazy { listOf(Home, Projects, Budget, Autopilot, Assignees) }
+        val globalPages: List<NavDestination> by lazy { listOf(Home, Projects, Budget, Operations, Autopilot, Assignees) }
 
         /** プロジェクト配下の項目(`#/projects/<id>/<route>` で開く)。サイドナビの並び順でもある。 */
         val projectPages: List<NavDestination> by lazy {
@@ -68,7 +69,7 @@ fun sidebarSections(): List<NavSection> {
     )
     val global = NavSection(
         title = "全体",
-        items = listOf(NavDestination.Budget, NavDestination.Autopilot, NavDestination.Assignees)
+        items = listOf(NavDestination.Budget, NavDestination.Operations, NavDestination.Autopilot, NavDestination.Assignees)
             .map { NavItem(it, Route.Page(it)) },
     )
     return listOf(top, global)

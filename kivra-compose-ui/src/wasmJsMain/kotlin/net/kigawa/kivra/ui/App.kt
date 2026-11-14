@@ -417,6 +417,7 @@ private fun KivraAppContent(
                                     onProjectsChanged = { projectsReload += 1 },
                                 )
                                 NavDestination.Budget -> BudgetScreen()
+                                NavDestination.Operations -> OperationsScreen(navigate)
                                 NavDestination.Autopilot -> AutopilotScreen()
                                 NavDestination.Assignees -> AssigneesScreen(null)
                                 else -> Unit
@@ -439,6 +440,7 @@ private fun KivraAppContent(
                             )
                             is Route.Legacy -> Unit
                             is Route.RunDetail -> RunDetailScreen(r.runId, navigate)
+                            is Route.OperationDetail -> OperationDashboardScreen(r.operationId)
                             is Route.GoalDetail -> GoalDetailScreen(r.taskId, navigate)
                             is Route.OrderDetail -> OrderDetailScreen(r.orderId, navigate)
                             is Route.OrderCycles -> OrderCyclesScreen(r.orderId, navigate)

@@ -53,6 +53,12 @@ enum class ChatTool(
     ORDER_PAUSE(ChatToolDisposition.IMMEDIATE, true, "Pause an active order of this project now (as the operator)."),
     ORDER_RESUME(ChatToolDisposition.IMMEDIATE, true, "Resume a paused order of this project now (as the operator)."),
     PROJECT_UPDATE(ChatToolDisposition.IMMEDIATE, true, "Change this project's name and/or description now (as the operator)."),
+    ORDER_CREATE_CHILD(
+        ChatToolDisposition.IMMEDIATE, true,
+        "Create a child order under this project's root order now (as the operator), to hand a concrete work request to an order. " +
+            "title: a short name. instruction: the operator's request restated or quoted in full, with its background, the expected result " +
+            "and the constraints. maxCycles: optional, 1 by default. At most one per turn. The cycle is not started: call order_start_cycle for that.",
+    ),
     ORDER_ABANDON_CYCLE(
         ChatToolDisposition.PROPOSE, true,
         "Propose abandoning the cycle in progress of an order. Only a proposal: the operator confirms it on the screen.",
@@ -102,6 +108,15 @@ object ChatToolArguments {
     const val DESCRIPTION_MAX = 512
     const val QUERY_MAX = 100
 
+    /** A child order's title: the order routes' limit (200 code points; checked again in code points by the execution). */
+    const val ORDER_TITLE_MAX = 200
+
+    /** A child order's instruction (its policy): the order routes' limit (2000 code points), line breaks and tabs allowed. */
+    const val ORDER_INSTRUCTION_MAX = 2_000
+
+    /** The largest maxCycles the schema allows (`MAX_CYCLES_CAP_LIMIT`); the execution checks the configured cap. */
+    const val MAX_CYCLES_LIMIT = 10
+
     /** The member roles a MEMBER_ADD may name: the members route's set ([PROJECT_MEMBER_ROLES]). Checked again at the confirmation. */
     val MEMBER_ROLES: List<String> = PROJECT_MEMBER_ROLES.toList()
 
@@ -124,12 +139,35 @@ object ChatToolArguments {
         else -> emptySet()
     }
 
-    /** The text arguments a tool takes (all optional), with their maximum length. */
+    /** The text arguments a tool takes, with their maximum length. Optional unless in [requiredTextArgumentsOf]. */
     fun textArgumentsOf(tool: ChatTool): Map<String, Int> = when (tool) {
         ChatTool.PROJECT_UPDATE -> mapOf("name" to NAME_MAX, "description" to DESCRIPTION_MAX)
         ChatTool.MEMORY_SEARCH -> mapOf("query" to QUERY_MAX)
+        ChatTool.ORDER_CREATE_CHILD -> mapOf("title" to ORDER_TITLE_MAX, "instruction" to ORDER_INSTRUCTION_MAX)
         else -> emptyMap()
     }
+
+    /** The text arguments that must be given. */
+    fun requiredTextArgumentsOf(tool: ChatTool): Set<String> = when (tool) {
+        ChatTool.ORDER_CREATE_CHILD -> setOf("title", "instruction")
+        else -> emptySet()
+    }
+
+    /** The text arguments that may hold line breaks and tabs (an order's instruction). Other control characters are refused still. */
+    fun multilineTextArgumentsOf(tool: ChatTool): Set<String> = when (tool) {
+        ChatTool.ORDER_CREATE_CHILD -> setOf("instruction")
+        else -> emptySet()
+    }
+
+    /** The whole-number arguments a tool takes (all optional), with their range. The model may send them as a JSON number or a string. */
+    fun numberArgumentsOf(tool: ChatTool): Map<String, IntRange> = when (tool) {
+        ChatTool.ORDER_CREATE_CHILD -> mapOf("maxCycles" to 1..MAX_CYCLES_LIMIT)
+        else -> emptyMap()
+    }
+
+    /** Non-blank, at most [max] characters, and no control character but a line break and a tab. */
+    fun isMultilineText(value: String?, max: Int): Boolean =
+        value != null && value.isNotBlank() && value.length <= max && value.none { it.isISOControl() && it != '\n' && it != '\t' }
 
     /** The fixed-code arguments a tool takes, with their allowed values and whether they are required. */
     fun codeArgumentsOf(tool: ChatTool): Map<String, Pair<List<String>, Boolean>> = when (tool) {
@@ -146,20 +184,31 @@ object ChatToolArguments {
         val ids = idArgumentsOf(tool)
         val text = textArgumentsOf(tool)
         val codes = codeArgumentsOf(tool)
-        if (!args.keys.all { it in ids || it in text || it in codes }) return false
+        val numbers = numberArgumentsOf(tool)
+        val multiline = multilineTextArgumentsOf(tool)
+        if (!args.keys.all { it in ids || it in text || it in codes || it in numbers }) return false
         if (tool == ChatTool.PROJECT_UPDATE && args.isEmpty()) return false
+        if (!requiredTextArgumentsOf(tool).all { it in args }) return false
         return ids.all { isId(args[it]) } &&
-            text.all { (name, max) -> args[name] == null || isText(args[name], max) } &&
-            codes.all { (name, rule) -> args[name]?.let { it in rule.first } ?: !rule.second }
+            text.all { (name, max) ->
+                val v = args[name]
+                v == null || if (name in multiline) isMultilineText(v, max) else isText(v, max)
+            } &&
+            codes.all { (name, rule) -> args[name]?.let { it in rule.first } ?: !rule.second } &&
+            numbers.all { (name, range) -> args[name]?.let { v -> v.toIntOrNull()?.let { it in range } == true } ?: true }
     }
 
     /**
      * The model's arguments as a map of strings, or null when they are not a JSON object of strings (a number, a nested object or a null is
      * refused: every argument of these tools is a string).
      */
-    fun parse(arguments: JsonElement): Map<String, String>? {
+    fun parse(arguments: JsonElement, numbers: Set<String> = emptySet()): Map<String, String>? {
         val obj = arguments as? JsonObject ?: return null
-        return obj.mapValues { (_, v) -> (v as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null }
+        return obj.mapValues { (k, v) ->
+            val p = v as? JsonPrimitive ?: return null
+            // A number is taken only for a number argument ([numbers]); its text is checked as a whole number by [isValid].
+            if (p.isString || (k in numbers && p !is kotlinx.serialization.json.JsonNull)) p.content else return null
+        }
     }
 
     /** The JSON schema of [tool]'s input: an object of string properties, the IDs required, no other property allowed. */
@@ -178,6 +227,13 @@ object ChatToolArguments {
                     put("maxLength", max)
                 }
             }
+            numberArgumentsOf(tool).forEach { (name, range) ->
+                putJsonObject(name) {
+                    put("type", "integer")
+                    put("minimum", range.first)
+                    put("maximum", range.last)
+                }
+            }
             codeArgumentsOf(tool).forEach { (name, rule) ->
                 putJsonObject(name) {
                     put("type", "string")
@@ -185,7 +241,7 @@ object ChatToolArguments {
                 }
             }
         }
-        val required = idArgumentsOf(tool) + codeArgumentsOf(tool).filterValues { it.second }.keys
+        val required = idArgumentsOf(tool) + requiredTextArgumentsOf(tool) + codeArgumentsOf(tool).filterValues { it.second }.keys
         putJsonArray("required") { required.forEach { add(JsonPrimitive(it)) } }
         put("additionalProperties", false)
     }

@@ -71,6 +71,7 @@ private fun chatToolSubject(name: String): String = when (name) {
     "task_list" -> "Task"
     "project_get" -> "プロジェクト"
     "memory_search", "memory_get" -> "プロジェクトの記憶"
+    "order_create_child" -> "order"
     "order_start_cycle" -> "周の開始"
     "order_pause" -> "order の一時停止"
     "order_resume" -> "order の再開"
@@ -96,13 +97,18 @@ fun chatToolStatusText(event: ChatStreamEvent.Tool): String {
     // An English word (order, Run, Task) takes a space before the particle, as the rest of the UI writes it.
     val subject = chatToolSubject(event.name).let { if (it.last() in 'A'..'z') "$it " else it }
     val read = event.name in CHAT_READ_TOOLS
+    val create = event.name == "order_create_child"
     return when (event.status) {
-        "STARTED" -> if (read) "${subject}を確認中…" else "${subject}を実行中…"
-        "OK" -> if (read) "${subject}を確認しました" else "${subject}を実行しました"
+        "STARTED" -> if (read) "${subject}を確認中…" else if (create) "${subject}を作成中…" else "${subject}を実行中…"
+        "OK" -> if (read) "${subject}を確認しました" else if (create) "${subject}を作成しました" else "${subject}を実行しました"
         "PROPOSED" -> "${subject}を提案しました（確定は下のボタン）"
         "DENIED" -> "${subject}は許可されていないため、実行しませんでした"
         else -> when (event.code) {
             "NOT_FOUND" -> "${subject.trimEnd()}: 対象がこのプロジェクトに見つかりませんでした"
+            "ALREADY_EXISTS" -> "同じ名前の order が既にあるため、作成しませんでした"
+            "CREATE_LIMIT" -> "order は 1 回の返信で 1 件まで作成できます"
+            "HOURLY_CREATE_LIMIT" -> "1 時間に作成できる order の上限に達したため、作成しませんでした"
+            "ROOT_NOT_ACTIVE", "AMBIGUOUS_ROOT" -> "親になるルート order が使えないため、作成しませんでした"
             else -> "${subject}を実行できませんでした"
         }
     }.let { if (event.name in CHAT_PROPOSAL_TOOLS && event.status == "STARTED") "${subject.trimEnd()}の提案を準備中…" else it }

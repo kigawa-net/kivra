@@ -460,6 +460,27 @@ class SelfDevOrderRepository(
      * ([ChildCreateResult.Replayed]), and [ChildCreateResult.KeyConflict] otherwise. The child takes the parent's target repo. Its lifetime
      * is 14 days, and never longer than the parent's.
      */
+    /** An ACTIVE child order of [projectId] whose title is [title], or null (the chat's duplicate check, ADR 0023 追補 6). Read only. */
+    fun activeChildWithTitle(projectId: String, title: String): SelfDevOrder? = transaction(database) {
+        execQuery(
+            "SELECT order_id FROM selfdev_orders WHERE project_id = ? AND parent_order_id IS NOT NULL AND state = ? AND title = ? " +
+                "ORDER BY created_at, order_id LIMIT 1",
+            projectId, OrderState.ACTIVE.name, title,
+        ) { it.getString(1) }.firstOrNull()?.let { getIn(it) }
+    }
+
+    /**
+     * The child orders of [projectId] created within the last [window] (by the database's creation time) whose idempotency key starts with
+     * [keyPrefix] (ADR 0023 追補 6: the chat's AI creates its children with a fixed key prefix, so the key is their origin). Read only.
+     */
+    fun countChildrenWithKeyPrefixWithin(projectId: String, keyPrefix: String, window: Duration): Int = transaction(database) {
+        val since = utcNow(clock).minus(window)
+        execQuery(
+            "SELECT COUNT(*) FROM selfdev_orders WHERE project_id = ? AND parent_order_id IS NOT NULL AND idempotency_key LIKE ? AND created_at >= ?",
+            projectId, "$keyPrefix%", since,
+        ) { it.getInt(1) }.single()
+    }
+
     fun createChild(
         parentId: String,
         title: String,
@@ -468,6 +489,8 @@ class SelfDevOrderRepository(
         idempotencyKey: String,
         createdBy: String,
         limits: ChildLimits,
+        /** The child's most cycles. The REST route gives 1 (as before); the chat's AI may give up to the cap (ADR 0023 追補 6). */
+        maxCycles: Int = 1,
     ): ChildCreateResult = try {
         transaction(database) {
             val now = utcNow(clock)
@@ -501,9 +524,9 @@ class SelfDevOrderRepository(
                 INSERT INTO selfdev_orders (order_id, parent_order_id, depth, root_slot, title, policy, target_repo, max_cycles,
                     cycles_started, consecutive_failed_cycles, state, expires_at, created_by, version, created_at, updated_at,
                     order_budget_jpy, allocated_jpy, child_count, idempotency_key, project_id)
-                VALUES (?, ?, ?, NULL, ?, ?, ?, 1, 0, 0, 'ACTIVE', ?, ?, 0, ?, ?, ?, 0, 0, ?, ?)
+                VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, 'ACTIVE', ?, ?, 0, ?, ?, ?, 0, 0, ?, ?)
                 """.trimIndent(),
-                childId, parentId, parent.depth + 1, title, policy, parent.targetRepo, lifetimeEnd, createdBy, now, now,
+                childId, parentId, parent.depth + 1, title, policy, parent.targetRepo, maxCycles, lifetimeEnd, createdBy, now, now,
                 orderBudgetJpy, idempotencyKey, parent.projectId,
             )
             val changed = execUpdate(

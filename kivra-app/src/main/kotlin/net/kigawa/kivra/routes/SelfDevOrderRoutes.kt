@@ -396,19 +396,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         // A child's cycle budget is the default (ADR 0015 section 3.2). A child whose budget is below it could never start a cycle.
         if (request.orderBudgetJpy < DEFAULT_CYCLE_BUDGET_JPY) return@post call.respond(HttpStatusCode.BadRequest, OrderError(BUDGET_BELOW_CYCLE))
         val parentId = orderIdOf(call) ?: return@post call.respond(HttpStatusCode.Conflict, OrderError(PARENT_NOT_ACTIVE, "PARENT_NOT_ACTIVE"))
-        val limits = ChildLimits(
-            maxDepth = deps.orderSettings.maxDepth,
-            maxChildren = deps.orderSettings.maxChildren,
-            maxTree = deps.orderSettings.maxTree,
-        )
-        when (val r = deps.orders.createChild(parentId, title, policy, request.orderBudgetJpy, key, caller.principal, limits)) {
-            is ChildCreateResult.Created -> {
-                operatorLog.info(
-                    "order operator action: action=CHILD_CREATED actor={} orderId={} parentOrderId={} depth={} result=ACTIVE",
-                    operatorTag(caller.principal), r.order.orderId, parentId, r.order.depth,
-                )
-                call.respond(HttpStatusCode.Created, r.order.summary())
-            }
+        when (val r = deps.createChildAsOperator(parentId, title, policy, request.orderBudgetJpy, key, caller.principal)) {
+            is ChildCreateResult.Created -> call.respond(HttpStatusCode.Created, r.order.summary())
             is ChildCreateResult.Replayed -> call.respond(HttpStatusCode.OK, r.order.summary())
             is ChildCreateResult.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedChildText(r.reason), r.reason.name))
             ChildCreateResult.KeyConflict -> call.respond(HttpStatusCode.Conflict, OrderError(KEY_CONFLICT, "KEY_CONFLICT"))
@@ -714,6 +703,31 @@ internal fun SelfDevOrderRouteDeps.pauseAsOperator(orderId: String, expectedVers
 internal fun SelfDevOrderRouteDeps.resumeAsOperator(orderId: String, expectedVersion: Long, principal: String): OrderResult<SelfDevOrder> {
     val r = orders.resumeByOperator(orderId, expectedVersion, principal)
     if (r is OrderResult.Moved) operatorLog.info("order operator action: action=RESUME actor={} orderId={} result=ACTIVE", operatorTag(principal), orderId)
+    return r
+}
+
+/**
+ * An operator's child order (ADR 0015 section 2.7), shared by `POST /api/selfdev/orders/{id}/children` and the chat's `order_create_child`
+ * (ADR 0023 追補 6): the same repository call, the same limits from the settings (depth, children, tree, the parent's budget) and the same audit
+ * line. The caller authenticated, passed ORDER_MANAGE and validated the fields. [maxCycles] is 1 for the REST route.
+ */
+internal fun SelfDevOrderRouteDeps.createChildAsOperator(
+    parentId: String,
+    title: String,
+    policy: String,
+    orderBudgetJpy: Long,
+    idempotencyKey: String,
+    principal: String,
+    maxCycles: Int = 1,
+): ChildCreateResult {
+    val limits = ChildLimits(maxDepth = orderSettings.maxDepth, maxChildren = orderSettings.maxChildren, maxTree = orderSettings.maxTree)
+    val r = orders.createChild(parentId, title, policy, orderBudgetJpy, idempotencyKey, principal, limits, maxCycles)
+    if (r is ChildCreateResult.Created) {
+        operatorLog.info(
+            "order operator action: action=CHILD_CREATED actor={} orderId={} parentOrderId={} depth={} result=ACTIVE",
+            operatorTag(principal), r.order.orderId, parentId, r.order.depth,
+        )
+    }
     return r
 }
 

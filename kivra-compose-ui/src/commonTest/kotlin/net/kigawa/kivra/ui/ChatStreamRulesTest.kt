@@ -65,4 +65,16 @@ class ChatStreamRulesTest {
     fun `the loop's limits get their own text`() {
         assertTrue(chatStreamErrorText("TOOL_ROUND_LIMIT").contains("上限"))
     }
+
+    @Test
+    fun `a child order's lines say it is being created and was created, and its refusals have their own text`() {
+        assertEquals("order を作成中…", chatToolStatusText(ChatStreamEvent.Tool("order_create_child", "STARTED")))
+        assertEquals("order を作成しました", chatToolStatusText(ChatStreamEvent.Tool("order_create_child", "OK", "OK")))
+        assertEquals(
+            "同じ名前の order が既にあるため、作成しませんでした",
+            chatToolStatusText(ChatStreamEvent.Tool("order_create_child", "FAILED", "ALREADY_EXISTS")),
+        )
+        assertTrue(chatToolStatusText(ChatStreamEvent.Tool("order_create_child", "FAILED", "CREATE_LIMIT")).contains("1 件まで"))
+        assertTrue(chatToolStatusText(ChatStreamEvent.Tool("order_create_child", "FAILED", "HOURLY_CREATE_LIMIT")).contains("1 時間"))
+    }
 }

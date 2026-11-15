@@ -139,9 +139,24 @@ class PodEntrypoint(
 
 /** Runs the real CLI. No shell; stdin is empty; stdout and stderr go to the container's. */
 internal object ProcessCliProcess : CliProcess {
+    /** The launcher moves `JAVA_TOOL_OPTIONS` here so that the entrypoint's own JVM stays quiet (see [childEnvironment]). */
+    const val CHILD_JAVA_TOOL_OPTIONS = "KIVRA_CHILD_JAVA_TOOL_OPTIONS"
+
+    /**
+     * The launcher unsets `JAVA_TOOL_OPTIONS` for the entrypoint's JVM, because the JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` to
+     * stderr and the container's log (which the agent parses as stream-json) would get a line that is not JSON. The CLI gets the
+     * value back here, so the JVMs that it starts (for example Gradle) still use the egress proxy.
+     */
+    fun childEnvironment(env: Map<String, String>): Map<String, String> {
+        val moved = env[CHILD_JAVA_TOOL_OPTIONS] ?: return env
+        return env.filterKeys { it != CHILD_JAVA_TOOL_OPTIONS } + ("JAVA_TOOL_OPTIONS" to moved)
+    }
+
     override fun run(argv: List<String>, workDir: Path): Int {
         val builder = ProcessBuilder(argv)
         builder.directory(workDir.toFile())
+        val childEnv = childEnvironment(System.getenv())
+        builder.environment().apply { clear(); putAll(childEnv) }
         builder.redirectInput(File("/dev/null"))
         builder.redirectOutput(ProcessBuilder.Redirect.INHERIT)
         builder.redirectError(ProcessBuilder.Redirect.INHERIT)

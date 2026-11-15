@@ -353,7 +353,8 @@ internal fun buildSelfDev(
             branchHead = { repo, branch -> github.getBranch(repo, branch).map { it?.headSha } },
             defaultRepo = config.repo,
             baseBranch = config.baseBranch,
-            prefixes = config.contextPathPrefixes,
+            // The chat's own readable paths, so widening them does not change what the Developer is shown (KIVRA_SELFDEV_CONTEXT_PREFIXES).
+            prefixes = chatRepoPrefixes(env) ?: config.contextPathPrefixes,
             maxFileBytes = config.maxContextFileBytes,
         ),
         chatRouter = gateway.let { DifficultyRouter(it, registry, localProviders.firstOrNull()?.id, PROVIDER_ID, DifficultyRoutingSettings.fromEnv(env).chatEnabled) },
@@ -407,3 +408,9 @@ private fun loadRegistry(path: String): ModelRegistry = try {
 } catch (_: Exception) {
     throw IllegalStateException("${SelfDevSettings.ENV_MODEL_REGISTRY_PATH} could not be loaded")
 }
+
+/** `KIVRA_CHAT_REPO_PREFIXES`: the paths the project chat may read (comma separated; a trailing `/` is a directory). Null when unset or blank. */
+internal const val ENV_CHAT_REPO_PREFIXES = "KIVRA_CHAT_REPO_PREFIXES"
+
+internal fun chatRepoPrefixes(env: Map<String, String>): List<String>? =
+    env[ENV_CHAT_REPO_PREFIXES]?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.takeIf { it.isNotEmpty() }

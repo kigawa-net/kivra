@@ -114,6 +114,20 @@ class PodEntrypoint(
         /** The summary used for the collection in the Pod. It is replaced by the agent. */
         const val SUMMARY_PLACEHOLDER = "collected in the pod"
 
+        /**
+         * Creates [root] (and no parent) with mode 0700 owned by the caller, or accepts it if it exists. The parent is the emptyDir `/work`,
+         * which is 2777, so the entrypoint cannot make `/work` itself 0700; the work root is a private subdirectory of it instead.
+         * An existing directory is tightened to 0700 (a Pod restart of the container keeps the emptyDir).
+         */
+        fun prepareWorkRoot(root: Path): Path {
+            val mode = java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")
+            if (!Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                Files.createDirectory(root, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(mode))
+            }
+            Files.setPosixFilePermissions(root, mode)
+            return root
+        }
+
         /** Waits until the process is ended from outside. */
         fun hold() {
             while (true) Thread.sleep(HOLD_MILLIS)
@@ -154,7 +168,12 @@ fun main(args: Array<String>) {
         mirror.syncCommit(input.source(), input.commit)
         mirror.openArchive(input.commit)
     }
-    val entrypoint = PodEntrypoint(Path.of(PodPaths.WORK_ROOT), Path.of(PodPaths.KIVRA_DIR), fetcher, ProcessCliProcess)
+    val workRoot = try {
+        PodEntrypoint.prepareWorkRoot(Path.of(PodPaths.WORK_ROOT))
+    } catch (e: IOException) {
+        exitProcess(2)
+    }
+    val entrypoint = PodEntrypoint(workRoot, Path.of(PodPaths.KIVRA_DIR), fetcher, ProcessCliProcess)
     if (args.isEmpty()) exitProcess(2)
     entrypoint.run(args.toList())
     PodEntrypoint.hold()

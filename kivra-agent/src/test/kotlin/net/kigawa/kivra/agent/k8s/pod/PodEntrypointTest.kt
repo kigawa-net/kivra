@@ -35,6 +35,36 @@ class PodEntrypointTest {
         )
     }
 
+    /** The Pod's `/work` is an emptyDir: root-owned and world-writable (2777 under fsGroup). The work root must be a private subdirectory. */
+    @Test
+    fun theWorkRootIsAPrivateSubdirectoryOfAWorldWritableEmptyDir() {
+        val emptyDir = Files.createTempDirectory("emptydir")
+        Files.setPosixFilePermissions(emptyDir, java.nio.file.attribute.PosixFilePermissions.fromString("rwxrwxrwx"))
+        // The directory itself is refused (this was the failure in the cluster: WORKDIR_FAILED before the CLI ran).
+        assertEquals(
+            WorkDirReason.WORKROOT_INVALID,
+            kotlin.test.assertFailsWith<WorkDirException> { net.kigawa.kivra.agent.workdir.WorkDirPreparer(emptyDir) }.reason,
+        )
+        val workRoot = PodEntrypoint.prepareWorkRoot(emptyDir.resolve("root"))
+        assertEquals(java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"), Files.getPosixFilePermissions(workRoot))
+        net.kigawa.kivra.agent.workdir.WorkDirPreparer(workRoot) // accepted
+    }
+
+    @Test
+    fun anExistingWorkRootIsTightenedTo0700() {
+        val parent = Files.createTempDirectory("emptydir")
+        val dir = Files.createDirectory(parent.resolve("root"))
+        Files.setPosixFilePermissions(dir, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"))
+        PodEntrypoint.prepareWorkRoot(dir)
+        assertEquals(java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"), Files.getPosixFilePermissions(dir))
+    }
+
+    @Test
+    fun theWorkRootConstantIsBelowWorkAndTheKivraDirIsNot() {
+        assertEquals("/work/root", PodPaths.WORK_ROOT)
+        assertEquals("/work/.kivra", PodPaths.KIVRA_DIR)
+    }
+
     private fun tar(vararg files: Pair<String, String>): ByteArray =
         tarOf(files.map { (name, text) -> TarSpec(name, content = text.toByteArray()) })
 

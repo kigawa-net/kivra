@@ -224,6 +224,25 @@ curl -X POST "https://<kivra-host>/api/admin/budget/acknowledge" \
   -d '{"scopeId":"<scopeId>","period":"<period>","reservationKey":"<reservationKey>","actualAmountJpy":"0","evidence":"<根拠の参照>","reason":"<理由>"}'
 ```
 
+#### 4.2a 費用不明の予約の自動解除(ADR 0003 追補 2026-11-15)
+
+**実装済み。既定は無効。** 費用不明(UNPRICED・LAPSED)の予約を、猶予の時間が過ぎたら自動で解除する。解除は §4.2 と同じ処理(`acknowledgeUnpriced`)で、実額は「不明」として扱い、**計上額は予約額(その呼び出しの上限額)のまま確定する**(0 円にはしない)。
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `KIVRA_BUDGET_UNPRICED_AUTO_RELEASE_ENABLED` | `false` | `true` で有効。空・`false` は無効。それ以外の値は起動失敗 |
+| `KIVRA_BUDGET_UNPRICED_AUTO_RELEASE_GRACE_SECONDS` | `600` | 費用不明になってから解除するまでの秒数。60 以上の整数。不正値は起動失敗(値はログに出ない) |
+
+- 動き: 60 秒ごとに、費用不明になってから(UNPRICED は確定時刻、LAPSED は予約の期限から)猶予を過ぎた予約を、古い順に 1 回 50 件まで解除する。残りは次の回。
+- 対象: テナント、プロジェクト(`project:<id>`)、日次(`<tenant>:daily`)のどのスコープの予約も対象。1 件の解除で、その予約のすべてのスコープの未価格数が 1 減る。**計上額が 0 円の予約(為替が使えないときの CLI の見積もりなど)は自動では解除しない**(上限額が分からないため)。これは §4.2 の手動解除で扱う。
+- 監査: `budget_acknowledgements` に、承認者 `system:auto-release`、理由 `AUTO_UPPER_BOUND`、根拠 `GRACE_ELAPSED`、`actual_known = false` で残る。手動の解除と区別するには、`operator_id = 'system:auto-release'` で絞る。
+- ログ: `budget unpriced auto release: code=AUTO_UPPER_BOUND released=<件数> alreadyReleased=<件数> failed=<件数>`(解除か失敗があった回だけ)。失敗は `code=AUTO_RELEASE_FAILED exception=<クラス名>`。予約キーと金額は出さない。失敗した予約は次の回に再試行される。
+- 複数の Pod: 各 Pod が動いても、解除はテナントのロックの中で行われ、既に解除された予約は「解除済み」になるだけで、二重に計上しない。
+- 予算への影響: 上限額で計上するので、残枠が足りなくなっても解除は行う。その後の予約は通常の上限で拒否される(`BUDGET`)。予算を静かに超えることは無い。
+- 状態の確認: `GET /api/admin/budget/status` の `autoReleasedCount`(累計の自動解除の件数)と `lastAutoReleaseAt`(直近の自動解除。無ければ項目なし)。画面への表示はまだ無い。
+- 止め方: `KIVRA_BUDGET_UNPRICED_AUTO_RELEASE_ENABLED=false`(またはこの変数を消す)にして再起動する。以後は §4.2 の手動解除だけになる。解除済みの予約は元に戻らない。
+- 有効化は k8s のマニフェストで行う(コードの既定は無効)。
+
 ### 4.3 PR_ABANDONED と、マージ済みの PR
 
 **実装済み(自動)。** `PULL_REQUEST` の Run は、次のいずれかで `CANCELLED` になり、監査の理由コードは `PR_ABANDONED` になる(`selfdev/SelfDevRunner.kt`、`db/DevelopmentRunRepository.kt`)。

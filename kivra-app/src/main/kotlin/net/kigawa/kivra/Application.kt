@@ -191,6 +191,9 @@ internal fun Application.appModule(env: Map<String, String>) {
     val projectRepo = ProjectRepository(database, java.time.Clock.systemUTC())
     val budgetConfig = BudgetConfig.from(environment.config)
     val budgetStore = DbBudgetStore(database, budgetConfig.tenantId, budgetConfig.tenantLimit(), dailyLimit = budgetConfig.dailyLimit())
+    // The automatic release of unpriced reservations (ADR 0003 追補 2026-11-15). Off unless KIVRA_BUDGET_UNPRICED_AUTO_RELEASE_ENABLED=true;
+    // an invalid setting fails the startup here.
+    val unpricedAutoRelease = net.kigawa.kivra.config.UnpricedAutoReleaseSettings.fromEnv(env)
     // Built only when the agent API is enabled. Nothing about the coding runtime is created otherwise. It is shared by the agent API
     // routes and, with KIVRA_SELFDEV_RUNTIME=cli, by the self-development runner (ADR 0010).
     val codingResults = DbCodingResultStore(database)
@@ -346,6 +349,9 @@ internal fun Application.appModule(env: Map<String, String>) {
     selfDevParts?.incidentFix?.start(this)
     // The memory's retention step (ADR 0016 section 9). Started only with the memory switch on.
     memoryRepo?.let { repo -> SelfDevMemoryRetentionWorker({ repo.purgeRetention() }, SelfDevMemoryRetentionWorker.DEFAULT_INTERVAL).start(this) }
+    if (unpricedAutoRelease.enabled) {
+        net.kigawa.kivra.db.UnpricedAutoReleaseWorker(budgetStore::autoReleaseUnpriced, unpricedAutoRelease.grace).start(this)
+    }
     // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD), unless the operator opted into
     // KIVRA_SELFDEV_ORDER_AUTO_RESUME_ON_STARTUP=true (default false). Nothing runs before this.
     orderSettings.startupHold(orderRepo)

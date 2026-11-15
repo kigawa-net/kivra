@@ -329,6 +329,28 @@ class CodingCostLedgerTest {
         assertEquals(CodingClaimOutcome.NothingToClaim, h.service.claim(AGENT))
     }
 
+    @Test
+    fun `an estimate released automatically after the grace lets the next claim through (ADR 0003 追補 2026-11-15)`() = TestDb().use { db ->
+        val h = Harness(db)
+        val attempt = h.queued(h.run())
+        h.claimed()
+        h.service.fail(attempt.attemptId, AGENT, 1, CodingErrorCode.CLI_NONZERO)
+        assertEquals(net.kigawa.kivra.modelgateway.BudgetDenial.UNKNOWN_COST, h.fixture.ledger.claimDenial())
+
+        // Within the grace: still refused.
+        assertEquals(net.kigawa.kivra.db.AutoReleaseReport(0, 0, 0), h.fixture.budget.autoReleaseUnpriced(java.time.Duration.ofMinutes(10), 50))
+        assertEquals(net.kigawa.kivra.modelgateway.BudgetDenial.UNKNOWN_COST, h.fixture.ledger.claimDenial())
+        // The booking is an hour old (the fixture's clock is fixed, so the row is moved back).
+        org.jetbrains.exposed.sql.transactions.transaction(db.database) {
+            execUpdate(
+                "UPDATE budget_reservations SET settled_at = ?",
+                java.time.LocalDateTime.ofInstant(COST_CLOCK.instant().minusSeconds(3_600), java.time.ZoneOffset.UTC),
+            )
+        }
+        assertEquals(net.kigawa.kivra.db.AutoReleaseReport(1, 0, 0), h.fixture.budget.autoReleaseUnpriced(java.time.Duration.ofMinutes(10), 50))
+        assertNull(h.fixture.ledger.claimDenial())
+    }
+
     // ---- ledger failure ----
 
     /** A cost port whose ledger cannot write. Every booking fails; the claim gate is open. */

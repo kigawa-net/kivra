@@ -69,6 +69,10 @@ data class BudgetStatusResponse(
     @EncodeDefault(EncodeDefault.Mode.NEVER) val dailyCommittedJpy: String? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val dailyReservedJpy: String? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER) val dailyRemainingJpy: String? = null,
+    /** How many unpriced reservations were released automatically (ADR 0003 追補 2026-11-15), all time. Omitted when none (as before). */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val autoReleasedCount: Long = 0,
+    /** The newest automatic release (UTC, ISO-8601), omitted when there has been none. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val lastAutoReleaseAt: String? = null,
 )
 
 @Serializable
@@ -220,6 +224,8 @@ private fun BudgetOperatorStatus.toBody(): BudgetStatusResponse {
         dailyCommittedJpy = daily?.let { yenText(it.committedJpy) },
         dailyReservedJpy = daily?.let { yenText(it.reservedJpy) },
         dailyRemainingJpy = daily?.let { yenText(it.limitJpy - it.committedJpy - it.reservedJpy) },
+        autoReleasedCount = autoReleasedCount,
+        lastAutoReleaseAt = lastAutoReleaseAt?.toInstant(java.time.ZoneOffset.UTC)?.toString(),
         unpricedCount = unpricedCount,
         unpriced = unpriced.map {
             UnpricedBody(

@@ -199,4 +199,16 @@ class PodEntrypointTest {
         entrypoint().run(listOf("claude"))
         assertNotNull(result())
     }
+
+    @Test
+    fun theCliGetsTheJavaToolOptionsBackThatTheLauncherMovedAway() {
+        val env = mapOf("PATH" to "/usr/bin", ProcessCliProcess.CHILD_JAVA_TOOL_OPTIONS to "-Dhttp.proxyHost=p")
+        assertEquals(mapOf("PATH" to "/usr/bin", "JAVA_TOOL_OPTIONS" to "-Dhttp.proxyHost=p"), ProcessCliProcess.childEnvironment(env))
+    }
+
+    @Test
+    fun theEnvironmentIsUnchangedWhenTheLauncherMovedNothing() {
+        val env = mapOf("PATH" to "/usr/bin")
+        assertEquals(env, ProcessCliProcess.childEnvironment(env))
+    }
 }

@@ -239,7 +239,7 @@
 - **分類**: 読み取り(即実行)。権限は READ_TEXT(記憶のツールと同じ。ORDER_MANAGE ではない)。self-development が無効(`ChatRepoSource` が無い)なら渡さない。
 - **部品**: self-development の `GitHubRepoReader`(`RepoReader`)と `GitHubPort.getBranch` を再利用する(`SelfDevWiring` が `ChatRepoSource` を作る)。読むのは既定のブランチ(`KIVRA_SELFDEV_BASE_BRANCH` 相当の `baseBranch`)の先頭。ブランチは AI に選ばせない。
 - **対象のリポジトリ**: プロジェクトの「リポジトリの対応」(`project_repos`)。対応が無ければ self-development の対象リポジトリ。複数なら、引数 `repo` がその許可リストにあるときだけ使い、無ければ名前順の先頭(決定論的)。許可リスト外は `REPO_NOT_ALLOWED`(DENIED)。AI が任意のリポジトリを指定することはできない。
-- **パス**: 前後の空白を除くだけで解決はしない。先頭の `/`、`\`、制御文字、空・`.`・`..`・`.git*` の区切りは `PATH_REFUSED`。読めるのは self-development のコンテキストと同じ規則のパスだけ(`KIVRA_SELFDEV_CONTEXT_PREFIXES`。`/` で終わる要素は接頭辞、他は完全一致)で、外は `PATH_NOT_ALLOWED`。`repo_tree` も許可されたパスだけを返す(既定の `README.md,docs/` ではソースは読めない。読ませるには環境変数で広げる)。
+- **パス**: 前後の空白を除くだけで解決はしない。先頭の `/`、`\`、制御文字、空・`.`・`..`・`.git*` の区切りは `PATH_REFUSED`。読めるのは許可されたパスだけ(`KIVRA_CHAT_REPO_PREFIXES`。未設定なら self-development のコンテキストと同じ `KIVRA_SELFDEV_CONTEXT_PREFIXES`。チャット専用の変数なので、広げても Developer に見せるファイルは変わらない。`/` で終わる要素は接頭辞、他は完全一致)で、外は `PATH_NOT_ALLOWED`。`repo_tree` も許可されたパスだけを返す(既定の `README.md,docs/` ではソースは読めない。読ませるには環境変数で広げる)。
 - **ファイル**: ツリーにあり、通常のファイル(symlink・submodule は `NOT_READABLE`)で、`KIVRA_SELFDEV_MAX_CONTEXT_FILE_BYTES` 以下(超えれば `FILE_TOO_LARGE`。取得もしない)。バイナリ・UTF-8 でないものは `NOT_TEXT`。内容は `SecretFilter.redact` を通す。行の範囲(`startLine`・`endLine`)を指定できる。
 - **上限**: 1 ファイル 8,000 文字(超えは `truncated`)、1 ターンの合計 40,000 文字(使い切ると `TURN_READ_LIMIT`)。GitHub のレート制限のため、1 ターンの repo ツールの呼び出しは 12 回まで(`REPO_CALL_LIMIT`)。ループは最大 4 ラウンド × 4 件 = 16 件のツール呼び出しなので、repo ツールだけ 12 に抑える。ツリーの取得はターン・リポジトリごとに 1 回(キャッシュ)。
 - **GitHub の失敗**: `GITHUB_<種類>`(例: `GITHUB_RATE_LIMITED`、`GITHUB_NOT_FOUND`)、結果不明は `GITHUB_UNAVAILABLE`、ブランチが無ければ `BRANCH_NOT_FOUND`。

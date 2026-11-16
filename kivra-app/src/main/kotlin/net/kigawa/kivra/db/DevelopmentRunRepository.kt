@@ -142,6 +142,37 @@ sealed interface StuckReleaseResult {
     data object TooRecent : StuckReleaseResult
 }
 
+/**
+ * Fixed state reason of an UNKNOWN self-development run whose coding attempt was orphaned, released automatically (ADR 0009 追補
+ * 2026-11-16). Distinct from [OPERATOR_RELEASED_REASON], so a manual and an automatic release can always be told apart.
+ */
+const val AUTO_RELEASED_ORPHAN_REASON = "AUTO_RELEASED_ORPHAN"
+
+/**
+ * The fixed actor of the automatic release, in the audit row. Not an operator: an operator's owner key never starts with `system:`
+ * (the same principal as the budget's automatic release, ADR 0003 追補 2026-11-15).
+ */
+const val SELF_DEV_AUTO_RELEASE_ACTOR = "system:auto-release"
+
+/** The fixed reason in the audit payload of an automatic release (there is no operator text). */
+const val AUTO_RELEASE_GRACE_ELAPSED = "GRACE_ELAPSED"
+
+/** The only UNKNOWN reason the automatic release takes (set by the coding runtime when an attempt's lease ran out). */
+const val CODING_ORPHANED_REASON = "CODING_ORPHANED"
+
+/** Result of [DevelopmentRunRepository.autoReleaseOrphanedSelfDev]. Every refusal writes nothing. */
+sealed interface OrphanReleaseResult {
+    /** The run was an orphaned UNKNOWN run and is now CANCELLED with [AUTO_RELEASED_ORPHAN_REASON]. */
+    data class Released(val run: DevelopmentRun) : OrphanReleaseResult
+
+    /**
+     * The run is not (or no longer) eligible: not a self-development run, not UNKNOWN with CODING_ORPHANED (for example already
+     * released by another replica or an operator), bound to a pull request, past DEVELOPING once, with an active attempt or a held
+     * lease, or updated within the grace.
+     */
+    data object NotEligible : OrphanReleaseResult
+}
+
 /** Result of [DevelopmentRunRepository.releaseUnboundPullRequestSelfDev]. */
 sealed interface UnboundPrReleaseResult {
     /** The run was an unbound PULL_REQUEST and is now CANCELLED. */
@@ -1154,6 +1185,128 @@ class DevelopmentRunRepository(
         // Read in this transaction: a nested transaction would not see the update above.
         val released = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.single().toDevelopmentRunOrNull()
         StuckReleaseResult.Released(checkNotNull(released) { "released run $runId has an unknown state" })
+    }
+
+    /**
+     * The candidates of the automatic release (ADR 0009 追補 2026-11-16): self-development runs in UNKNOWN with [CODING_ORPHANED_REASON],
+     * no pull request column set, last updated at least [grace] ago. Oldest first, at most [limit]. A candidate is only a hint: every
+     * condition is checked again under the row lock by [autoReleaseOrphanedSelfDev].
+     */
+    fun dueOrphanedSelfDev(grace: java.time.Duration, limit: Int): List<RunId> = transaction(database) {
+        val cutoff = utcNow(clock).minus(grace)
+        execQuery(
+            """
+            SELECT run_id FROM development_runs
+             WHERE state = ? AND state_reason = ? AND task_id LIKE ?
+               AND pr_number IS NULL AND pr_repository IS NULL AND pr_head_sha IS NULL AND pr_node_id IS NULL
+               AND updated_at <= ?
+             ORDER BY updated_at, run_id
+             LIMIT ?
+            """.trimIndent(),
+            DevelopmentRunState.UNKNOWN.name, CODING_ORPHANED_REASON, "$SELF_DEV_TASK_PREFIX%", cutoff, limit,
+        ) { RunId(it.getString(1)) }
+    }
+
+    /**
+     * The automatic release of one orphaned self-development run (ADR 0009 追補 2026-11-16): UNKNOWN -> CANCELLED with
+     * [AUTO_RELEASED_ORPHAN_REASON], by the fixed actor [SELF_DEV_AUTO_RELEASE_ACTOR]. Refused (nothing written) unless all of these hold,
+     * checked under the row lock:
+     * - a self-development run, in UNKNOWN with state reason [CODING_ORPHANED_REASON] (any other UNKNOWN stays for an operator);
+     * - no pull request column set (no binding, not even a partial one);
+     * - the run never reached PATCH_READY or PULL_REQUEST (its audit has no transition to either). Every GitHub write of a run (branch,
+     *   commit, pull request) happens from PATCH_READY on, and the coding agent holds no GitHub credential (ADR 0010), so such a run has
+     *   written nothing to GitHub;
+     * - no coding attempt in QUEUED, CLAIMED or RUNNING, and no worker holds an unexpired lease (DB clock);
+     * - the run was last updated at least [grace] ago.
+     *
+     * The update is guarded on state and version. The run row, its RUN_RELEASED audit event and its RunStateChanged outbox event are
+     * written in one transaction, exactly as for [releaseUnknownSelfDev]. A second call (another replica) finds the run CANCELLED and is
+     * NotEligible. Budget reservations and the Order's cycle are left alone, as for the operator's release.
+     */
+    fun autoReleaseOrphanedSelfDev(runId: RunId, grace: java.time.Duration): OrphanReleaseResult = transaction(database) {
+        val row = lockRun(runId)
+        if (row == null || !row[DevelopmentRunsTable.taskId].startsWith(SELF_DEV_TASK_PREFIX)) return@transaction OrphanReleaseResult.NotEligible
+        if (DevelopmentRunState.fromStorage(row[DevelopmentRunsTable.state]) != DevelopmentRunState.UNKNOWN ||
+            row[DevelopmentRunsTable.stateReason] != CODING_ORPHANED_REASON
+        ) {
+            return@transaction OrphanReleaseResult.NotEligible
+        }
+        if (row[DevelopmentRunsTable.prNumber] != null || row[DevelopmentRunsTable.prRepository] != null ||
+            row[DevelopmentRunsTable.prHeadSha] != null || row[DevelopmentRunsTable.prNodeId] != null
+        ) {
+            return@transaction OrphanReleaseResult.NotEligible
+        }
+        val reachedGitHubStep = execQuery(
+            "SELECT COUNT(*) FROM audit_events WHERE run_id = ? AND (payload LIKE ? OR payload LIKE ?)",
+            runId.value, "%\"to\":\"${DevelopmentRunState.PATCH_READY.name}\"%", "%\"to\":\"${DevelopmentRunState.PULL_REQUEST.name}\"%",
+        ) { it.getInt(1) }.single()
+        if (reachedGitHubStep > 0) return@transaction OrphanReleaseResult.NotEligible
+        val activeAttempts = execQuery(
+            "SELECT COUNT(*) FROM coding_attempts WHERE run_id = ? AND state IN ('QUEUED', 'CLAIMED', 'RUNNING')", runId.value,
+        ) { it.getInt(1) }.single()
+        if (activeAttempts > 0) return@transaction OrphanReleaseResult.NotEligible
+        val leased = execQuery(
+            "SELECT COUNT(*) FROM development_runs WHERE run_id = ? AND lease_owner IS NOT NULL AND lease_expires_at > ${DbTime.NOW}", runId.value,
+        ) { it.getInt(1) }.single()
+        if (leased > 0) return@transaction OrphanReleaseResult.NotEligible
+        if (java.time.Duration.between(row[DevelopmentRunsTable.updatedAt], utcNow(clock)) < grace) return@transaction OrphanReleaseResult.NotEligible
+        val version = row[DevelopmentRunsTable.version]
+        val taskId = row[DevelopmentRunsTable.taskId]
+        val traceId = row[DevelopmentRunsTable.traceId]
+        val updated = execUpdate(
+            """
+            UPDATE development_runs
+               SET state = ?, state_reason = ?, version = version + 1, updated_at = ?
+             WHERE run_id = ? AND version = ? AND state = ? AND state_reason = ?
+            """.trimIndent(),
+            DevelopmentRunState.CANCELLED.name, AUTO_RELEASED_ORPHAN_REASON, utcNow(clock), runId.value, version,
+            DevelopmentRunState.UNKNOWN.name, CODING_ORPHANED_REASON,
+        )
+        if (updated != 1) throw VersionConflictException("run $runId changed concurrently")
+        audit.append(
+            this, runId,
+            AuditEntry(
+                actor = SELF_DEV_AUTO_RELEASE_ACTOR, action = "RUN_RELEASED", result = "OK", resource = "task:$taskId", traceId = traceId,
+                payload = buildJsonObject {
+                    put("taskId", taskId)
+                    put("from", DevelopmentRunState.UNKNOWN.name)
+                    put("to", DevelopmentRunState.CANCELLED.name)
+                    put("reasonCode", AUTO_RELEASED_ORPHAN_REASON)
+                    put("reason", AUTO_RELEASE_GRACE_ELAPSED)
+                }.toString(),
+            ),
+        )
+        outbox.append(
+            this, runId, version + 1, "RunStateChanged",
+            transitionPayload(taskId, DevelopmentRunState.UNKNOWN, DevelopmentRunState.CANCELLED, AUTO_RELEASED_ORPHAN_REASON),
+            traceId,
+        )
+        // Read in this transaction: a nested transaction would not see the update above.
+        val released = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq runId.value }.single().toDevelopmentRunOrNull()
+        OrphanReleaseResult.Released(checkNotNull(released) { "released run $runId has an unknown state" })
+    }
+
+    /**
+     * One pass of the automatic release (ADR 0009 追補 2026-11-16): at most [limit] candidates of [dueOrphanedSelfDev], each released in
+     * its own transaction by [autoReleaseOrphanedSelfDev]. A candidate that is no longer eligible (another replica or an operator released
+     * it first, or it changed) counts as `alreadyReleased`. A candidate that throws counts as `failed` and is retried on the next pass;
+     * the exception never stops the others.
+     */
+    fun autoReleaseOrphanedRuns(grace: java.time.Duration, limit: Int): AutoReleaseReport {
+        var released = 0
+        var already = 0
+        var failed = 0
+        for (runId in dueOrphanedSelfDev(grace, limit)) {
+            try {
+                when (autoReleaseOrphanedSelfDev(runId, grace)) {
+                    is OrphanReleaseResult.Released -> released++
+                    OrphanReleaseResult.NotEligible -> already++
+                }
+            } catch (_: Exception) {
+                failed++
+            }
+        }
+        return AutoReleaseReport(released, already, failed)
     }
 
     private fun lockRun(runId: RunId): ResultRow? =

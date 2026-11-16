@@ -40,3 +40,7 @@ If app startup fails, inspect the app logs for Flyway or MariaDB errors; a healt
 - `/health` proves app startup/HTTP response, **not** assistant execution or end-to-end provider compatibility.
 
 Next milestone: Issue #106 Phase B read-only task listing plus a manually invoked FakeExecutionPort run preview, with explicit DEV_ONLY gating and no side effects.
+
+## k8s バックエンドの Run の確認
+
+Submit a Run, then check the `kivra-agent` logs for `attempt claimed` and `cli run ended`. The Job for the Pod is created in the `kigawa-net-kivra-dev-agent` namespace.

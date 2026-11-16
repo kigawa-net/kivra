@@ -47,6 +47,11 @@ class ModelGateway(
     devAllowInMemoryLedger: Boolean = false,
     /** Converts USD prices into the JPY budget (design 13 B2). Null keeps the native currency. */
     private val costConverter: CostConverter? = null,
+    private val rateLimiter: RateLimiter = RateLimiter(),
+    /** Inject a scanner with a live managed-credential supplier to include exact credential matching. */
+    private val secretScan: SecretScan = SecretScan(),
+    /** Classify calls at the trusted entry point; default is an executing task. */
+    private val rateLimitPriority: (ModelRequest) -> RateLimitPriority = { RateLimitPriority.RUNNING_TASK },
 ) {
     private val ledger: RequestLedger = ledger ?: if (devAllowInMemoryLedger) InMemoryRequestLedger() else throw IllegalStateException(
         "ModelGateway requires a durable RequestLedger; InMemoryRequestLedger is dev/test only (pass devAllowInMemoryLedger = true to opt in)",
@@ -177,6 +182,7 @@ class ModelGateway(
                     while (true) {
                         val attemptId = "${req.requestId}-a${++attemptNo}"
                         val key = ledgerKey(req.requestId, attemptNo)
+                        awaitRateLimit(req, target, attemptId, ref, decision)
                         val denied = budget.reserve(key, req.budgetScopes, reservation(req, target))
                         if (denied is ReserveResult.Denied) {
                             lastError = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = denied.code)
@@ -245,6 +251,7 @@ class ModelGateway(
                         } catch (e: Exception) {
                             if (finished) return@withTimeout // error after the terminal event: already settled, stay silent
                             val raw = ErrorClassifier.fromThrowable(e)
+                            if (raw.kind == ErrorKind.RATE_LIMITED) rateLimiter.rateLimited(ref.providerId, raw.retryAfterMs)
                             health.recordFailure(ref.providerId, raw.kind)
                             if (raw.sendState == SendState.NOT_SENT && !emitted) {
                                 budget.release(key)
@@ -283,7 +290,24 @@ class ModelGateway(
             audit.record(record(req, null, null, d, Usage.ZERO, null, 0, null, err))
             throw GatewayException(err)
         }
+        if (secretScan.detects(req)) {
+            val err = GatewayError(ErrorKind.POLICY_DENIED, "input contains a secret", code = "SECRET_DETECTED", sendState = SendState.NOT_SENT)
+            metrics.routeRejected("SECRET_DETECTED")
+            audit.record(record(req, null, null, d, Usage.ZERO, null, 0, null, err))
+            throw GatewayException(err)
+        }
         return d
+    }
+
+    private suspend fun awaitRateLimit(req: ModelRequest, target: ResolvedTarget, attemptId: String,
+                                       ref: ModelRef, decision: RoutingDecision) {
+        try {
+            rateLimiter.acquire(target.provider, req.principal,
+                Estimator.inputTokens(req) + Estimator.outputTokens(req, target.model).coerceAtLeast(0), rateLimitPriority(req))
+        } catch (e: GatewayException) {
+            auditAttempt(req, attemptId, ref, decision, Usage.ZERO, null, 0, null, e.error)
+            throw e
+        }
     }
 
     private suspend fun attemptLoop(req: ModelRequest, decision: RoutingDecision, flight: Flight): ModelResponse {
@@ -298,6 +322,7 @@ class ModelGateway(
             while (true) {
                 val attemptId = "${req.requestId}-a${++attemptNo}"
                 val key = ledgerKey(req.requestId, attemptNo)
+                awaitRateLimit(req, target, attemptId, ref, decision)
                 val denied = budget.reserve(key, req.budgetScopes, reservation(req, target))
                 if (denied is ReserveResult.Denied) {
                     last = GatewayError(ErrorKind.POLICY_DENIED, "budget: ${denied.reason}", code = denied.code, costReason = denied.costReason)
@@ -318,6 +343,7 @@ class ModelGateway(
                     throw e
                 } catch (e: Exception) {
                     val raw = ErrorClassifier.fromThrowable(e)
+                    if (raw.kind == ErrorKind.RATE_LIMITED) rateLimiter.rateLimited(ref.providerId, raw.retryAfterMs)
                     health.recordFailure(ref.providerId, raw.kind)
                     if (raw.sendState == SendState.NOT_SENT) {
                         // Proven not transmitted: release the reservation and allow retry / fallback under this requestId.

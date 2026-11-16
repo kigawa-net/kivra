@@ -14,6 +14,7 @@ import net.kigawa.kivra.agent.docker.DockerSpecException
 import net.kigawa.kivra.agent.k8s.HttpKubeApi
 import net.kigawa.kivra.agent.k8s.KubeApi
 import net.kigawa.kivra.agent.workdir.WorkDirException
+import net.kigawa.kivra.agent.backend.RunBackend
 import org.slf4j.LoggerFactory
 
 private const val SHUTDOWN_GRACE_SECONDS = 15L
@@ -86,6 +87,7 @@ internal fun executorFor(
     val podInputs = AttemptPodInputs()
     return try {
         val backend = createRunBackend(config.backend, real, config.workDir, podInputs, pollMillis = pollMillis, kubeApi = kubeApi)
+        removeLeftoversOfAPreviousProcess(backend)
         RealAttemptExecutor(client, config.workDir, config.stopFile, real, backend, podInputs)
     } catch (e: DockerSpecException) {
         System.err.println("kivra-agent: the ${AgentConfig.ENV_EXECUTOR}=real settings are invalid")
@@ -97,4 +99,19 @@ internal fun executorFor(
         System.err.println("kivra-agent: ${e.message}")
         exitProcess(EXIT_EXECUTOR_CONFIG)
     }
+}
+
+/**
+ * At start, nothing of this agent is running: the process that made the Jobs (or the containers) is gone, and the Deployment does not run
+ * two of them at once. Whatever the backend finds with this agent's labels is a leftover, for example from a process that was killed in
+ * a run. Without this, it would stay (and run the model through the egress proxy) until the next attempt, whose start removes it, or
+ * until the Job's own deadline. A failure here is not an error: the next attempt's cleanup tries again.
+ */
+internal fun removeLeftoversOfAPreviousProcess(backend: RunBackend) {
+    val removed = try {
+        backend.cleanupOrphans(null)
+    } catch (e: Exception) {
+        null
+    }
+    LoggerFactory.getLogger("net.kigawa.kivra.agent.Main").info("leftovers of a previous process removed: {}", removed ?: "unknown")
 }

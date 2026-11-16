@@ -30,6 +30,7 @@ import net.kigawa.kivra.db.ProjectDrainRepository
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.config.BudgetConfig
 import net.kigawa.kivra.config.FushaTaskConfigLoader
+import net.kigawa.kivra.config.AdmissionPolicyConfigLoader
 import net.kigawa.kivra.config.KivraConfig
 import net.kigawa.kivra.config.TaskPollerConfigLoader
 import net.kigawa.kivra.db.DbBudgetStore
@@ -463,7 +464,8 @@ internal fun Application.appModule(env: Map<String, String>) {
         )
         val pollerConfig = TaskPollerConfigLoader.from(environment.config)
         val leaderLeaseRepo = LeaderLeaseRepository(database)
-        val runAdmission = DbRunAdmission(database, runs, audit, policy = null)
+        val admissionPolicy = AdmissionPolicyConfigLoader.from(env)
+        val runAdmission = DbRunAdmission(database, runs, audit, policy = admissionPolicy)
         val defaultProfile = AgentProfile(
             name = "default",
             version = "1",
@@ -529,7 +531,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             leaderLeaseRepo = leaderLeaseRepo,
             runRepo = runs,
             config = requireNotNull(orchestratorSettings.config),
-            policy = null,
+            policy = admissionPolicy,
             outboxPublisher = outboxPublisher,
             agentManager = agentManager,
             reviewerPipeline = reviewerPipeline,

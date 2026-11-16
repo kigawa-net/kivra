@@ -7,7 +7,6 @@ import java.time.Clock
 import java.time.Duration
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.AuditRepository
-import net.kigawa.kivra.db.DbRequestLedger
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
@@ -32,15 +31,12 @@ import net.kigawa.kivra.modelgateway.AnthropicWifConfig
 import net.kigawa.kivra.modelgateway.BoundCredentialSource
 import net.kigawa.kivra.modelgateway.BudgetPort
 import net.kigawa.kivra.modelgateway.Capability
-import net.kigawa.kivra.modelgateway.CostConverter
 import net.kigawa.kivra.modelgateway.CredentialBinding
 import net.kigawa.kivra.modelgateway.DataClass
 import net.kigawa.kivra.modelgateway.DifficultyRouter
 import net.kigawa.kivra.modelgateway.DifficultyRoutingSettings
 import net.kigawa.kivra.modelgateway.Lifecycle
 import net.kigawa.kivra.modelgateway.ModelGateway
-import net.kigawa.kivra.modelgateway.ModelProvider
-import net.kigawa.kivra.modelgateway.OpenAiCompatProvider
 import net.kigawa.kivra.modelgateway.ModelRegistry
 import net.kigawa.kivra.modelgateway.RegistryLoader
 import net.kigawa.kivra.modelgateway.StaticKeyAuth
@@ -69,6 +65,7 @@ import net.kigawa.kivra.selfdev.review.PrReviewSettings
 import net.kigawa.kivra.selfdev.review.PrReviewWatch
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import net.kigawa.kivra.selfdev.memory.SuppressShadow
+import net.kigawa.kivra.llm.GatewayFactory
 import org.jetbrains.exposed.sql.Database
 
 /** The self-development components built by [buildSelfDev]. Built only when [SelfDevSettings.enabled] is true. */
@@ -110,9 +107,6 @@ private const val PROVIDER_ID = "anthropic"
 private const val ANTHROPIC_HOST = "api.anthropic.com"
 private const val ANTHROPIC_CREDENTIAL_REF = "ANTHROPIC_API_KEY"
 /** The registry adapter name of an on-premises OpenAI-compatible provider (vLLM / Ollama / llama.cpp). */
-private const val OPENAI_ADAPTER = "openai"
-/** The one host an on-premises OpenAI-compatible provider may reach. Required when the registry declares such a provider. */
-private const val ENV_LOCAL_LLM_HOST = "KIVRA_SELFDEV_LOCAL_LLM_HOST"
 private const val DEVELOPER_MAX_OUTPUT_TOKENS = 8_000
 
 /**
@@ -185,26 +179,15 @@ internal fun buildSelfDev(
             env,
         ),
     )
-    // On-premises OpenAI-compatible providers are registered only when the registry declares one. They carry no credential and
-    // reach only the host given by KIVRA_SELFDEV_LOCAL_LLM_HOST (a trusted binding; the registry cannot change it).
-    val localProviders = registry.providers.values.filter { it.adapter == OPENAI_ADAPTER }
-    check(localProviders.size <= 1) { "at most one openai-adapter provider is supported" }
-    check(localProviders.none { it.id == PROVIDER_ID }) { "an openai-adapter provider must not use the id $PROVIDER_ID" }
-    val localProviderMap: Map<String, ModelProvider> = if (localProviders.isEmpty()) emptyMap() else {
-        val host = checkNotNull(env[ENV_LOCAL_LLM_HOST]?.trim()?.takeIf { it.isNotEmpty() }) {
-            "$ENV_LOCAL_LLM_HOST is required when the registry has an openai-adapter provider"
-        }
-        val localCredentials = BoundCredentialSource(localProviders.map { CredentialBinding(it.id, host, it.credentialRef, null) }, env)
-        val localClient = HttpClient(CIO) { AnthropicProvider.installDefaults(this) }
-        localProviders.associate { it.id to OpenAiCompatProvider(localClient, localCredentials, it.id) }
-    }
-    val gateway = ModelGateway(
+    val localProviders = registry.providers.values.filter { it.adapter == "openai" }
+    val gateway = GatewayFactory.create(
         registry = registry,
-        providers = mapOf<String, ModelProvider>(PROVIDER_ID to AnthropicProvider(anthropicClient, anthropicAuth)) + localProviderMap,
+        anthropicClient = anthropicClient,
+        anthropicAuth = anthropicAuth,
         budget = budget,
-        ledger = DbRequestLedger(database),
-        devAllowInMemoryLedger = false,
-        costConverter = CostConverter(fx),
+        database = database,
+        fx = fx,
+        env = env,
     )
     // The self-development calls' difficulty routing (ADR 0023 追補 2). Off with KIVRA_MODEL_ROUTING_SELFDEV_ENABLED=false; with no
     // on-premises provider in the registry, every call stays as before.

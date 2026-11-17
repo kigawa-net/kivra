@@ -99,6 +99,7 @@ dependencies {
     testImplementation(libs.ktor.server.test.host)
     // Acceptance harness (issue #70): the exkes fake sits behind a MockEngine (FaultProxy). Test scope only.
     testImplementation(libs.ktor.client.mock)
+    testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.h2)
     // Shared MemoryMutationJournalPort Contract, run against the M0 adapter (Issue #91).
     testImplementation(testFixtures(project(":kivra-memory")))

@@ -62,6 +62,7 @@ class Orchestrator(
     private val reviewerPipeline: ReviewerPipeline?,
     private val plannerPipeline: PlannerPipeline?,
     private val reclContextSearch: ReclContextSearch?,
+    private val memoryScope: net.kigawa.kivra.memory.ScopeRef,
     private val reclSummaryWriter: ReclSummaryWriter?,
     private val orchestratorMetrics: OrchestratorMetrics?,
     private val killSwitch: KillSwitch?,
@@ -193,6 +194,19 @@ class Orchestrator(
         val requestId = "orchestrator:${task.id.value}:${task.updatedAt}"
         logger.info("orchestrator admission: admitting taskId={}, requestId={}",
             task.id.value, requestId)
+        // M5 reads are advisory only; the bundle is not forwarded to agents or planners.
+        reclContextSearch?.let { search ->
+            try {
+                val bundle = search.searchForTask(task, memoryScope, traceId = requestId, executionId = requestId)
+                logger.info("orchestrator memory: ContextBundle bundleId={}, taskId={}, items={}, warnings={}",
+                    bundle.bundleId, task.id.value, bundle.sections.sumOf { it.items.size }, bundle.warnings)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logger.warn("orchestrator memory: MEMORY_UNAVAILABLE taskId={}, exception={}",
+                    task.id.value, e.javaClass.simpleName)
+            }
+        }
         val result = admission.admit(task, requestId)
         when (result) {
             is AdmissionResult.Accepted -> {

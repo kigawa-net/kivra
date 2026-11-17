@@ -127,3 +127,54 @@ ADR 0008 の自己開発 Run は、外部結果が不明なとき `UNKNOWN` に�
 
 - 解放の経路は 3 つになる。`UNKNOWN`、束縛の無い `PULL_REQUEST`、止まった `DEVELOPING`。いずれも運用者が認証された主体として行い、監査と outbox を同じトランザクションで書く。
 - `DEVELOPING` の解放は条件が最も厳しい(動いている最中の Run を止めうるため)。運用手順は runbook §4.1c。
+
+## 追補(2026-11-16): 実行の lease 切れ(`CODING_ORPHANED`)の UNKNOWN を自動で解放する
+
+### 背景
+
+dev で agent の Pod が 13 時間 Unknown になり、coding attempt の lease が切れて ORPHANED になった。Run(01M7GZ61TWRRG5WTJM717JZC2E)は
+`UNKNOWN` / `CODING_ORPHANED`(PR なし)のまま残り、`SelfDevWorker` は `reason=AWAITING_OPERATOR` を出し続け、同時 Run 上限の枠を占有した。
+解放の手段は本文の手動解放(`POST /api/admin/selfdev/runs/{id}/release`)だけだった。
+
+### 決定(追補)
+
+**ユーザーの決定(2026-11-16)**: 自動で解放する。本 ADR の「将来、証拠に基づく自動の解放を入れるときは、この ADR を置き換える」は、置き換えずに
+次の形に限った例外として追補する。手動の解放はそのまま残す。
+
+1. **対象は原因が明確で副作用が無いものだけ。** 行をロック(`FOR UPDATE`)した下で、次をすべて満たす Run だけを解放する。満たさなければ何も書かない。
+   - 自己開発の Run(`taskId` が `selfdev:` で始まる)。
+   - 状態が `UNKNOWN` で、`state_reason` が `CODING_ORPHANED`。
+   - PR の列(`pr_number`、`pr_repository`、`pr_head_sha`、`pr_node_id`)がどれも空(束縛が無く、部分的な記録も無い)。
+   - 監査に `PATCH_READY` / `PULL_REQUEST` への遷移が無い。
+   - `QUEUED` / `CLAIMED` / `RUNNING` の coding attempt が無く、worker の lease が切れているか誰も持っていない(DB の時計)。
+   - 最終更新から猶予(`KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_GRACE_SECONDS`、既定 600 秒、下限 60 秒)が過ぎている。
+2. **GitHub への書き込みが無いことの根拠(コード上の事実)。** Run の GitHub への書き込み(ブランチ、コミット、PR)は、すべて `PATCH_READY` を
+   記録した後に行う(`SelfDevRunner`: 「PATCH_READY is committed before the first GitHub write」)。CLI と agent は GitHub の資格情報を持たず、
+   push しない(ADR 0010 決定 4)。`CODING_ORPHANED` は、`DEVELOPING` の Run に対して coding runtime の reconcile(`holdForOperator`、
+   `expectedFrom = DEVELOPING`)か、runner の advance が付ける。runner の再開(`PATCH_READY` からの advance)でも理論上は付きうるので、
+   `PATCH_READY` を一度でも通った Run は監査で見分けて除外する。こうして、対象の Run は GitHub に何も書いていない。
+   LLM(Claude Code CLI)の費用は、Run の解放とは別に、予算の予約(attempt の上限額で計上、ADR 0003 追補 2026-11-15)で扱われる。
+3. **他の UNKNOWN は対象外(手動のまま)。** `PR_NOT_FOUND` / `PR_AMBIGUOUS`(GitHub 上に PR やブランチがあるかもしれない)、
+   `GITHUB_UNKNOWN_OUTCOME`・`COMMIT_NOT_APPLIED_TWICE`(GitHub への書き込みの結果が不明)、`DEVELOPER_*`(LLM の呼び出し結果が不明で、
+   費用や結果の扱いを人が確かめる)、`CODING_QUEUE_EXPIRED`(agent が 24 時間来なかった。設定や配備の問題で、解放しても次も同じになる)、
+   `CODING_AUTH_REQUIRED` / `CODING_NEEDS_HUMAN`(人の対処が要ると明示されたもの)。どれも、原因か副作用を人が確かめる必要がある。
+   `CODING_ORPHANED` は「実行環境が消えて結果が返らない」ことが確定しており、GitHub への副作用も無いので、取り消しても失うものが無い。
+4. **同じ記録を同じトランザクションで書く。** `DevelopmentRunRepository.autoReleaseOrphanedSelfDev` が `UNKNOWN` → `CANCELLED` を行い、
+   `RUN_RELEASED` の監査と `RunStateChanged` の outbox を同じトランザクションで書く。操作者は固定の `system:auto-release`(運用者の owner key は
+   `system:` で始まらない。予算の自動解除と同じ主体)。`state_reason` は `AUTO_RELEASED_ORPHAN`(`OPERATOR_RELEASED` と区別できる。
+   `varchar(64)` に収まり、`development_runs.state_reason` に CHECK 制約は無い)。監査の payload の `reason` は固定コード `GRACE_ELAPSED`(自由文は無い)。
+   outbox の payload には `reasonCode` を入れる(束縛の無い PR・止まった DEVELOPING の解放と同じ)。
+5. **遷移表は変えない。** 汎用の `transition()`・`DevelopmentRunState` は変えず、`kivra-core` も変更しない。経路は本文の手動解放と同じく専用の関数だけ。
+   オートパイロットは `CANCELLED` の Run を従来どおり `RUN_RELEASED` として扱い、Order の周は失敗として見る。予算の予約には何も書かない。
+6. **スイッチと安全弁。** `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED`。コードの既定は false(有効化は k8s のマニフェスト)。不正値は起動失敗で、
+   値は出さない。自己開発が無効のときはこの設定を読まず(自己開発の変数はスイッチ以外読まない、という既存の不変条件)、動かない。60 秒ごとの 1 回で最大 20 件、古い順。各 Run は個別のトランザクションで、状態と版を条件に更新するので、複数の Pod が同時に動いても
+   二重に解放しない(後の側は対象外になるだけ)。失敗した Run は件数をログに出し(`failed=<件数>`、WARN)、次の回に再試行する。ログは件数と
+   固定コードだけで、Run の id・依頼文・理由の本文は出さない。
+7. **画面。** 理由 `AUTO_RELEASED_ORPHAN` の説明文を Compose UI に足す。監査の操作の表示名(`RUN_RELEASED` = 「運用者が解放」)は変えていない
+   (操作者の列が `system:auto-release` になる)。
+
+### 結果(追補)
+
+- `CODING_ORPHANED` の Run は、猶予の後に自動で `CANCELLED` になり、同時 Run 上限の枠が空く。原因(agent の停止)は直さないので、
+  agent が止まったままなら次の Run も同じ経過をたどる。agent の監視は別の作業。
+- 他の UNKNOWN は従来どおり運用者の解放を待つ。運用手順は runbook §4.1 の「自動の解放」。

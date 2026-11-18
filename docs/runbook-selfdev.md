@@ -444,7 +444,9 @@ kivra は PR を閉じない(下の §4.3a を有効にしたときの期限切�
 - `behind_by` が整数でない応答、または読めないときは、何もしない(追従しない)。
 
 **再束縛の条件**(すべて満たしたときだけ、Run に保存した head を新しい head に更新する)
-- (a) 新しい head がマージコミットで、親がちょうど 2 つ(異なる 2 つのコミット)で、一方が「旧 head」、もう一方が P。P は「現在の main の先頭」またはその祖先(compare API `main...P` の `ahead_by` が 0)。更新の後に main がさらに進んでも、P が main の履歴にあれば通る。
+- (a) 新しい head が次のどちらかの形。どちらでも P は「現在の main の先頭」またはその祖先(compare API `main...P` の `ahead_by` が 0)。更新の後に main がさらに進んでも、P が main の履歴にあれば通る。
+  - マージコミットで、親がちょうど 2 つ(異なる 2 つのコミット)で、一方が「旧 head」、もう一方が P。
+  - (2026-11-18 追加)親が 1 つ(P)のコミットで、P が旧 head ではない。人がブランチを main の上にリベースして force-push した形(実例: Run 01M7938HHQY5SD2W433XS9506M / PR #529)。差分は (b) で同じく検証するので、PR の変更が 1 行でも違えば通らない。親が main の上に無いもの(旧 head の上にコミットを足した、別のブランチへのリベース)と、複数のコミットに分けたリベース(先頭の親が main に無い)は通らない。
 - (b) PR 自身の差分が、更新の前後で同一。2 段で確かめる。
   - 段 1: 差分は、旧 head と main の merge-base からの差分と、main から新しい head までの差分で、ファイルの一覧、モード、内容のハッシュ(git の blob id)で比べる。一致すれば通す。
   - 段 2(段 1 が一致しないときだけ): main が同じファイルの別の箇所を変えると blob が必ず違うため、変更行を比べる。compare API `GET /compare/{merge-base}...{旧 head}` と `GET /compare/P...{新 head}` の `files` を読み、次をすべて満たすときだけ通す。(i) パスの集合が同じ。(ii) 各ファイルの `status` が `added`、`modified`、`removed` のいずれかで、両側で同じ(`renamed`、`copied` は通さない)。(iii) 各ファイルに `patch` がある(無いのはバイナリや巨大な差分)。(iv) 各ファイルの `+` と `-` の行(`@@` のヘッダーと文脈行を除く。`\ No newline at end of file` は含める)の列が、順序も含めて同じ。(v) ファイルの数が 300 未満。(vi) 変更したパスの mode が、旧 head と新 head の tree で同じ。(vii) patch の合計が 256 KiB 以下。
@@ -462,7 +464,7 @@ kivra は PR を閉じない(下の §4.3a を有効にしたときの期限切�
 **監査ログ**(`audit_events`、Run の ID で引く)
 - `PR_REBASE_ATTEMPTED`: 更新の要求の前に書く。要求の回数は、この行の数で数える(要求が失敗しても数える)。
 - `PR_REBASE_HELD`: 要求のあとに人に残った。理由コードを持つ。
-- `PR_REBASE_REBOUND`: 再束縛した。payload は `{"from": 旧 head の先頭 12 文字, "to": 新 head の先頭 12 文字, "reasonCode": "PR_REBASE_VERIFIED"}`。
+- `PR_REBASE_REBOUND`: 再束縛した。payload は `{"from": 旧 head の先頭 12 文字, "to": 新 head の先頭 12 文字, "reasonCode": "PR_REBASE_VERIFIED"}`。人のリベース(親が 1 つ)を再束縛したときは `reasonCode` が `PR_REBASE_VERIFIED_REBASED`。
 - 題名、本文、パス、ファイルの内容は、監査にも、ログにも出さない。
 
 **人に残るケース**(Run は PULL_REQUEST のまま。`Waiting` の理由コードに出る)
@@ -474,7 +476,7 @@ kivra は PR を閉じない(下の §4.3a を有効にしたときの期限切�
 | `GITHUB_PERMISSION` | App に権限が無い(403)。**有効化の前の確認事項**(下記) | App の権限を確認する |
 | `PR_REBASE_NOT_OBSERVED` | 要求は通ったが、新しい head が見えなかった | 後から届いた更新は、次の周期で検証されて再束縛される。届かなければ人が確認する |
 | `PR_REBASE_UPDATE_UNKNOWN` | 要求の応答が不明(再送はしない) | `NOT_OBSERVED` と同じ扱い |
-| `PR_REBASE_PARENTS_MISMATCH` | 新しい head の親が「旧 head と、main の先頭またはその祖先」の組にならない(人の push の可能性を含む) | 人が確認する |
+| `PR_REBASE_PARENTS_MISMATCH` | 新しい head の親が「旧 head と、main の先頭またはその祖先」の組にも、「main の先頭またはその祖先 1 つ」にもならない(人の push の可能性を含む) | 人が確認する。マージ済みなら `MERGE_NOT_VERIFIED code=HEAD_SHA_MISMATCH` で待機が続く。マージされた内容が Run の変更と同じことを確かめたうえで、運用者の判断で扱う |
 | `PR_REBASE_DIFF_CHANGED` | PR の差分が変わった(改ざんの可能性を含む)。段 1 と段 2 の両方で一致しない。再束縛しない | 人が差分を確認する |
 | `PR_REBASE_VERIFY_FAILED` | 読み取りに失敗した(ツリー、または compare API の変更ファイル一覧)、応答の形が不正、またはツリーが切り詰められた | 次の周期で再試行される。続くなら人が確認する |
 | `PR_REBASE_REBIND_FAILED` | 再束縛の DB 書き込みに失敗した(旧 head のまま。同じ transaction で巻き戻る) | DB とログを確認する |

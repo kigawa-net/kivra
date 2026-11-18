@@ -5,11 +5,17 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevTask
+import net.kigawa.kivra.db.TaskTransition
+import net.kigawa.kivra.routes.requeueAsOperator
 
 private val TASK_ID_SHAPE = Regex("[0-9A-Z]{26}")
+
+/** Scope of the requeue tool (ADR 0015 amendment 2026-11-18). Not implied by the read scope. */
+const val SCOPE_SELFDEV_REQUEUE = "kivra.selfdev.requeue"
 private const val TASK_CHILD_LIMIT = 50
 private const val TITLE_MAX_CODE_POINTS = 200
 private const val TITLE_UNSAFE = "[unsafe title omitted]"
@@ -76,6 +82,70 @@ class McpTaskTools(
             ToolOutcome(false, "task ${root.taskId}: ${root.state.name}, ${children.size} child task(s)", structured, "OK")
         }
     }
+}
+
+/**
+ * The write tool of the cycle tree (ADR 0015 amendment 2026-11-18): `kivra_task_requeue`. It is a thin adapter over the call that
+ * `POST /api/selfdev/tasks/{id}/requeue` makes ([requeueAsOperator]): the state machine, the version check and the fresh key are the
+ * repository's. The permission (GOAL_WRITE) is the dispatcher's, so the AI principal is refused before the handler runs.
+ *
+ * Registered only while the MCP write switch is on and the autopilot answers ([buildMcpRouteDeps]). The input is strict: `task_id` and
+ * `version`. The output has ids, fixed codes and the version, and no title or body.
+ */
+class McpTaskWriteTools(private val tasks: SelfDevOperatorRepository) {
+    fun tools(): List<McpTool> = listOf(taskRequeue())
+
+    private fun taskRequeue() = McpTool(
+        name = "kivra_task_requeue",
+        description = "Requeue a FAILED or CANCELLED task of the cycle tree (an operator's decision): it goes back to QUEUED and gets one new run. " +
+            "Give the task_id and the version (from kivra_task_list). Nothing else changes.",
+        inputSchema = objectSchema(
+            "task_id" to buildJsonObject {
+                put("type", "string")
+                put("pattern", "^[0-9A-Z]{26}\$")
+            },
+            "version" to buildJsonObject {
+                put("type", "integer")
+                put("minimum", 0)
+                put("description", "The task's version, as kivra_task_list returned it.")
+            },
+            required = listOf("task_id", "version"),
+        ),
+        scope = SCOPE_SELFDEV_REQUEUE,
+        write = true,
+        permission = Permission.GOAL_WRITE,
+    ) { caller, args -> requeue(caller, args) }
+
+    private fun requeue(caller: McpCaller, args: JsonObject): ToolOutcome {
+        args.requireOnly("task_id", "version")
+        val id = args.requiredString("task_id", TASK_ID_SHAPE)
+        val version = args.requiredVersion()
+        return when (val r = tasks.requeueAsOperator(id, version, caller.principal)) {
+            is TaskTransition.Moved -> ToolOutcome(
+                isError = false,
+                text = "task requeued",
+                structured = buildJsonObject {
+                    put("task_id", r.row.taskId)
+                    put("state", r.row.state.name)
+                    put("state_reason", r.row.stateReason?.name)
+                    put("version", r.row.version)
+                    put("project_id", r.row.projectId)
+                },
+                code = "QUEUED",
+            )
+            TaskTransition.NotFound -> refusal("TASK_NOT_FOUND", "task not found")
+            TaskTransition.StaleVersion -> refusal("STALE_VERSION", "the task changed; reload and try again")
+            is TaskTransition.Refused -> refusal(r.reason.name, "the state does not allow this operation")
+        }
+    }
+
+    /** A refusal as a tool result: `isError` and `structuredContent.error.code`, a fixed code and a fixed text. */
+    private fun refusal(code: String, text: String): ToolOutcome = ToolOutcome(
+        isError = true,
+        text = text,
+        structured = buildJsonObject { putJsonObject("error") { put("code", code) } },
+        code = code,
+    )
 }
 
 /** A title for the output: the fixed marker when it holds a control or a bidi character, else its first 200 code points. */

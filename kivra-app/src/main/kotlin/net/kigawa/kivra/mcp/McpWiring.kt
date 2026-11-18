@@ -48,6 +48,8 @@ fun buildMcpRouteDeps(
             emptyList()
         }) +
         (orders?.let { McpOrderTools(it).tools(settings.writeEnabled) } ?: emptyList()) +
+        // The requeue (ADR 0015 amendment 2026-11-18) needs the write switch and the autopilot, as the REST requeue needs the autopilot.
+        (if (settings.writeEnabled) tasks?.let { McpTaskWriteTools(it).tools() } ?: emptyList() else emptyList()) +
         (if (settings.goalReadEnabled) tasks?.let { McpTaskTools(it, settings.goalTextEnabled).tools() } ?: emptyList() else emptyList())
     return McpRouteDeps(
         settings = settings,

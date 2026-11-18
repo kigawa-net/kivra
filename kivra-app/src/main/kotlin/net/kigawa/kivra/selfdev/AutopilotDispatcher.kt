@@ -29,7 +29,8 @@ import org.slf4j.LoggerFactory
  * The periodic loop that submits the autopilot's tasks as Runs (ADR 0011 section 5). One [tick] runs these steps in order, each contained:
  *
  * 1. Records the outcome of every SUBMITTED task whose Run has ended: COMPLETED (PR_MERGED), FAILED (RUN_FAILED, or POLICY_REJECTED when the
- *    Run was refused by the PatchPolicy), CANCELLED (RUN_RELEASED). A failure feeds the circuit breaker. The task's move and the count are one
+ *    Run was refused by the PatchPolicy), CANCELLED (RUN_RELEASED). A failure feeds the circuit breaker; so does a CANCELLED Run that the
+ *    automatic release ended (ADR 0009 追補 2026-11-18). The task's move and the count are one
  *    transaction. The Run itself is never changed here.
  *    Then settles every plan root whose planned tasks have all ended (DONE, or STOPPED with TASKS_INCOMPLETE); a catch-up for the settlement.
  * 2. Stops here while the autopilot is paused (nothing is submitted; no state moves).
@@ -97,7 +98,14 @@ class AutopilotDispatcher(
             val (to, reason, succeeded) = when (run.state) {
                 DevelopmentRunState.COMPLETED -> Triple(TaskState.COMPLETED, AutopilotReason.PR_MERGED, true)
                 DevelopmentRunState.FAILED -> Triple(TaskState.FAILED, failureReasonOf(run.stateReason), false)
-                DevelopmentRunState.CANCELLED -> Triple(TaskState.CANCELLED, AutopilotReason.RUN_RELEASED, null)
+                // An automatic release (ADR 0009 追補 2026-11-18) ends a Run the agent could not finish (its lease ran out, or it asked for a
+                // human). It counts as a failure, so a host fault that repeats opens the breaker instead of cancelling the queue task by task.
+                // An operator's release or a cancel still does not count.
+                DevelopmentRunState.CANCELLED -> Triple(
+                    TaskState.CANCELLED,
+                    AutopilotReason.RUN_RELEASED,
+                    if (run.stateReason in net.kigawa.kivra.db.SELF_DEV_AUTO_RELEASE_REASONS.values) false else null,
+                )
                 else -> continue
             }
             val task = operations.task(submitted.taskId) ?: continue

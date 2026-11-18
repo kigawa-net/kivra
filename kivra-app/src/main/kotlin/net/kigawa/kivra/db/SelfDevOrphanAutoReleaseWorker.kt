@@ -10,10 +10,11 @@ import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 
 /**
- * The periodic automatic release of orphaned UNKNOWN self-development runs (ADR 0009 追補 2026-11-16). Each [tick] releases at most
- * [batch] runs that have been UNKNOWN with CODING_ORPHANED, without any GitHub write, for at least [grace]
- * ([DevelopmentRunRepository.autoReleaseOrphanedRuns]); the rest wait for the next tick. Started only while
- * `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED` is true (Application.kt).
+ * The periodic automatic release of UNKNOWN self-development runs (ADR 0009 追補 2026-11-16, 2026-11-18). Each [tick] releases at most
+ * [batch] runs that have been UNKNOWN with CODING_ORPHANED or CODING_NEEDS_HUMAN, without any GitHub write, for at least [grace]
+ * ([DevelopmentRunRepository.autoReleaseUnknownRuns]); the rest wait for the next tick. Started only while
+ * `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED` is true (Application.kt). The log line keeps its name and code from the first version and
+ * counts both reasons.
  *
  * A failure never stops the worker: a run that failed is retried on the next tick, and an exception is logged with its class name only.
  * The log carries counts and fixed codes only (no run ids, no task text, no reasons).

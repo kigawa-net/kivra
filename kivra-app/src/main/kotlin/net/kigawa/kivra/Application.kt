@@ -358,7 +358,7 @@ internal fun Application.appModule(env: Map<String, String>) {
         net.kigawa.kivra.db.UnpricedAutoReleaseWorker(budgetStore::autoReleaseUnpriced, unpricedAutoRelease.grace).start(this)
     }
     if (orphanAutoRelease?.enabled == true) {
-        net.kigawa.kivra.db.SelfDevOrphanAutoReleaseWorker(runs::autoReleaseOrphanedRuns, orphanAutoRelease.grace).start(this)
+        net.kigawa.kivra.db.SelfDevOrphanAutoReleaseWorker(runs::autoReleaseUnknownRuns, orphanAutoRelease.grace).start(this)
     }
     // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD), unless the operator opted into
     // KIVRA_SELFDEV_ORDER_AUTO_RESUME_ON_STARTUP=true (default false). Nothing runs before this.

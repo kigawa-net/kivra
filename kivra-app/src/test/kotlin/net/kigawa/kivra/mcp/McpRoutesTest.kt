@@ -177,7 +177,7 @@ class McpRoutesTest {
     }
 
     @Test
-    fun `the protected resource metadata (well-known) names the MCP resource, the issuer and the three scopes`() = TestDb().use { db ->
+    fun `the protected resource metadata (well-known) names the MCP resource, the issuer and the scopes`() = TestDb().use { db ->
         testApplication {
             setUp(db)
             val response = client.get("/.well-known/oauth-protected-resource") { header(HttpHeaders.Host, McpTestTokens.HOST) }
@@ -186,7 +186,9 @@ class McpRoutesTest {
             assertEquals(McpTestTokens.MCP_AUDIENCE, body["resource"]!!.jsonPrimitive.content)
             assertEquals(OidcTestTokens.ISSUER, body["authorization_servers"]!!.jsonArray[0].jsonPrimitive.content)
             assertEquals(
-                listOf("kivra.runs.read", "kivra.selfdev.start", "kivra.selfdev.stop"),
+                listOf(
+                    "kivra.runs.read", "kivra.selfdev.start", "kivra.selfdev.stop", "kivra.selfdev.requeue", "kivra.selfdev.order.manage",
+                ),
                 body["scopes_supported"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
             assertEquals(listOf("header"), body["bearer_methods_supported"]!!.jsonArray.map { it.jsonPrimitive.content })

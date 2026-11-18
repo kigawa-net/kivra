@@ -443,7 +443,7 @@ MCP(ADR 0013 の仕組みを使う):
 - **U-6 周の間隔と 1 日の周の数**。推奨: 間隔は 60 分、1 日は 3 周まで。
 - **U-7 同時に進む周の数**。推奨: 木全体で 1 つ。既存の同時 Run の上限(既定 1)と合わせる。
 - **U-8 段階 3 への昇格の数値**。推奨: ADR 0011 §6.3 と同じ(4 週間、70%)。
-- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけ。作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置く。
+- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけ。作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置く。（2026-11-18 の追補 §2 で、延長、再開、タスクの再投入を MCP に出すよう改めた。）
 - **U-10 作成の承認**。推奨: ルートの order で `max_cycles` が 2 以上、または既定を超える予算(累計 5,000 円超、1 周 1,000 円超)の場合は、人(ルートの承認者)の承認を要する。`max_cycles` が 1 で既定内なら承認は要らない。
 - **U-11 上限の変更**。推奨: 作成後の変更は認めない。上限を上げるには、承認つきの新しい order を作る。承認つきの更新は採らない。
 - **U-12 既定の上限と閲覧の範囲**。推奨: 総周回 10、期限 14 日、累計 5,000 円、1 周 1,000 円。閲覧は、運用者の全員が一覧を見られ、方針と理由は木の関係者(作成者と承認者)にだけ表示する。
@@ -967,3 +967,55 @@ U-14(有効化された後の起動で、全 `ACTIVE` を `PAUSED(STARTUP_HOLD)`
 - 理由は `payload_json` に先頭の部分しか残らない(上の 2.)。
 - 放棄は、Task の停止(1 つの transaction)と周の閉じ(別の transaction)の 2 段で行う。間に自動の評価が先に周を閉じると、放棄は 409(版の競合)になる。結果は同じ(Task は停止、周は失敗で閉じる)で、二重には数えない。
 - 放棄は連続失敗を 1 増やす。連続失敗が上限の order は自動の開始の対象にならない。
+
+## 追補(2026-11-18): MCP からの order の延長・再開と、タスクの再投入(U-9 の改め)
+
+### 1. 決定
+
+次の 3 つを MCP に出す。どれも REST と同じリポジトリ関数を呼び、規則(状態機械、版の検査、監査、outbox)は重複させない。
+
+| MCP ツール | REST の対応 | スコープ | 権限 |
+|---|---|---|---|
+| `kivra_order_extend` | `POST /api/selfdev/orders/{id}/extend` | `kivra.selfdev.order.manage` | `ORDER_MANAGE` |
+| `kivra_order_resume` | `POST /api/selfdev/orders/{id}/resume` | `kivra.selfdev.order.manage` | `ORDER_MANAGE` |
+| `kivra_task_requeue` | `POST /api/selfdev/tasks/{id}/requeue` | `kivra.selfdev.requeue` | `GOAL_WRITE` |
+
+- 3 つとも `KIVRA_MCP_WRITE_ENABLED=true` のときだけ `tools/list` に出る。`KIVRA_MCP_WRITE_ENABLED` が `false` なら、呼べば未知のツール(-32602)。
+- 専用のスコープを要求する。`kivra.runs.read` と `kivra.selfdev.stop` からは暗黙に付かない。
+- 入力は厳格(未知の項目は拒否)。自由な文字列は受けない。延長の日数と周の数は REST と同じ範囲(日数は 1〜`EXTEND_DAYS_LIMIT`、周の数は 1〜`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`)。
+- 監査の操作者は MCP の主体(所有者のキー)から作る。ログには `via=mcp` と固定のコード、ID だけを出す(`net.kigawa.kivra.selfdev.order.operator`)。
+
+### 2. U-9 を覆した点
+
+U-9(推奨)は、MCP に読み取りと停止の要求だけを置き、作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置くとしていた(§6 の 370 行目も同じ)。本追補は、そのうち **延長と再開** と **タスクの再投入** を MCP に出す。次は U-9 のとおり、引き続き MCP に出さない: 承認、却下、作成、子の作成、周の開始、一時停止、取り消し、周の放棄。
+
+### 3. なぜ許すか
+
+- 自己開発の order は、安全装置(予算、連続失敗、ブレーカー、起動時の保留)で止まることがある。その解除(延長、再開)と、失敗したタスクの再投入は、運用者が人の指示で行う判断である。
+- 運用者の JWT を持たない Claude(MCP のクライアント)から、この判断を人の指示どおりに実行できないと、運用者が UI や API を直接叩くしかなくなる。
+- 承認の経路(`approve`)は MCP に出さない。承認を MCP に出すと、AI のクライアントが承認者になりうる。延長と再開は承認者を必要としない操作で、承認の経路とは分ける。
+
+### 4. 守り方
+
+- **フラグ**: `KIVRA_MCP_WRITE_ENABLED=true` の既存の書き込みの切り替えに従う。切れば 3 つとも一覧から消える。
+- **スコープ**: 専用のスコープ。読み取りのトークンや停止だけのトークンでは呼べない(403 `insufficient_scope`)。
+- **権限**: 既存の権限表のまま。AI の役割(`AI`)は `ORDER_MANAGE` と `GOAL_WRITE` を持たない。AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL`)は、スコープを持っていても、ディスパッチャの権限検査で拒否される(`forbidden`)。ハンドラは、AI かどうかを比べない。
+- **規則**: 状態機械、版の検査(`STALE_VERSION`)、子の order に対する延長の拒否(`NOT_ROOT`)、上限は、すべてリポジトリの規則。MCP はそれを呼ぶだけ。
+- **書き込みの上限**: 既存の書き込みの毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
+
+### 5. 変えなかったもの
+
+- 承認、却下、取り消し、作成、子の作成、周の開始、一時停止、周の放棄は、MCP に出さない。`McpOrderToolsTest` は、それらの名前がツール一覧に無いことを引き続き固定する。
+- ロールとスコープの対応表(`TOKEN_ROLE_SCOPES`)は変えない。AI の役割のトークンに新しいスコープは付かない。
+- Keycloak の client scope は、この repo には無い(`kigawa01/k8s-system` の #280 側)。3 つのスコープを発行するかどうかは、そちらで決める。本追補は、kivra 側の検査だけを定める。
+
+### 6. 残るリスク
+
+- **プロジェクト単位の権限(ADR 0022 PR-D)は、MCP の書き込みでは検査しない**。REST の `checkInProject` は、対象タスクや order のプロジェクトを見る。MCP のディスパッチャは全体の権限だけを検査する。既存の `kivra_order_request_stop` と `kivra_selfdev_start` と同じ水準で、差分として残す。`KIVRA_SELFDEV_PROJECT_MODE=enforce` の環境に出す前に直す必要がある。
+- 運用者の判断を、人が一回ずつ確認する仕組みは無い。スコープを持つ主体は、その権限で延長と再開を行える。
+- 延長の日数と周の数は、MCP の入力が人の指示どおりかを検証できない。監査の行には数値を出さない(REST と同じ)ので、後から見るには DB の `selfdev_order_events` を見る。
+
+### 7. 確認したこと、確認できなかったこと
+
+- 確認: 3 つのツールは REST と同じリポジトリ関数を呼ぶ(`extendByOperator`、`resumeByOperator`、`requeueAsOperator`)。AI の主体は、スコープを持っていても拒否される(テスト)。スコープ不足、フラグ無効、不正な入力、正常系のテストを追加した(`McpOrderToolsTest`)。
+- 未確認: dev の Keycloak client `kivra-mcp` が 3 つのスコープを発行するか(k8s-system の側で確認する)。dev の `kivra/dev/kivra.yaml` は `KIVRA_MCP_WRITE_ENABLED=true`、`KIVRA_SELFDEV_ROLES_MODE=enforce`、`KIVRA_SELFDEV_ORDERS_ENABLED=true`。`KIVRA_SELFDEV_AI_PRINCIPAL` は未設定。

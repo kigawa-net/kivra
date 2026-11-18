@@ -35,14 +35,20 @@ import net.kigawa.kivra.auth.oidcOwnerKey
 import net.kigawa.kivra.core.autopilot.OrderState
 import net.kigawa.kivra.core.autopilot.StopRequestReason
 import net.kigawa.kivra.db.ChildCreateResult
+import net.kigawa.kivra.db.EXTEND_DAYS_LIMIT
 import net.kigawa.kivra.db.ChildLimits
 import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.OrderConflict
 import net.kigawa.kivra.db.OrderResult
+import net.kigawa.kivra.db.ProjectRepository
+import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
+import net.kigawa.kivra.db.SelfDevSubmitResult
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.db.execUpdate
 import net.kigawa.kivra.github.RepoRef
+import org.jetbrains.exposed.sql.transactions.transaction
 import org.slf4j.LoggerFactory
 
 /**
@@ -66,11 +72,21 @@ class McpOrderToolsTest {
     private val runTools = listOf("kivra_run_list", "kivra_run_get")
     private val readOrderTools = listOf("kivra_order_list", "kivra_order_get")
     private val stopTool = "kivra_order_request_stop"
+    private val manageScope = SCOPE_SELFDEV_ORDER_MANAGE
+    private val requeueScope = SCOPE_SELFDEV_REQUEUE
+    private val manageTools = listOf("kivra_order_extend", "kivra_order_resume")
+    private val requeueTool = "kivra_task_requeue"
+    /** An operator (a human, bob) with the decision scopes. */
+    private val operatorDecisions get() = McpTestTokens.token(subject = "sub-bob", scope = "$readScope $manageScope $requeueScope")
+    /** The AI principal (alice) with the same scopes: the scopes do not make it an operator. */
+    private val aiDecisions get() = McpTestTokens.token(subject = "sub-alice", scope = "$readScope $manageScope $requeueScope")
 
     private val title = "TITLE-MARKER-ORDER"
     private val policy = "POLICY-MARKER-ORDER"
     private val noSuchOrder = "0".repeat(25) + "1"
     private val CHILD_LIMITS = ChildLimits(maxDepth = 2, maxChildren = 5, maxTree = 15)
+    /** The cap of the cycles an extension may reach (`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` in the wiring). */
+    private val CYCLE_CAP = 3
 
     private fun env(writeEnabled: Boolean, writeRate: Int = 1000): Map<String, String> = mapOf(
         "KIVRA_AUTH_MODE" to "oidc-jwt",
@@ -86,12 +102,19 @@ class McpOrderToolsTest {
     )
 
     /** The production wiring as Application builds it. [orders] is null when the orders are off. */
-    private fun deps(db: TestDb, orders: SelfDevOrderRepository?, writeEnabled: Boolean = true, writeRate: Int = 1000): McpRouteDeps {
+    private fun deps(
+        db: TestDb,
+        orders: SelfDevOrderRepository?,
+        writeEnabled: Boolean = true,
+        writeRate: Int = 1000,
+        tasks: SelfDevOperatorRepository? = null,
+    ): McpRouteDeps {
         val e = env(writeEnabled, writeRate)
         return buildMcpRouteDeps(
             McpSettings.fromEnv(e), e, db.runs, repo,
             jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = true, maxActiveSelfDev = 1,
-            orders = orders?.let { McpOrderDeps(it, aliceOwner) },
+            orders = orders?.let { McpOrderDeps(it, aliceOwner, maxCyclesCap = CYCLE_CAP) },
+            tasks = tasks,
             projects = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()),
         )!!
     }
@@ -174,9 +197,10 @@ class McpOrderToolsTest {
                 setUp(deps(db, SelfDevOrderRepository(db.database)))
                 assertEquals(runTools + readOrderTools, listed(readOnlyToken))
                 assertEquals(runTools + readOrderTools + stopTool, listed(aiToken))
-                // The MCP client gets no approval, rejection, creation, cycle, pause, resume or cancel tool, whatever its scopes.
+                // The MCP client gets no approval, rejection, creation, cycle, pause or cancel tool, whatever its scopes. Resume and extend
+                // are listed only to the decision scope (see the tests of the decisions below).
                 val all = listed(aiToken)
-                for (name in listOf("approve", "reject", "cycles", "pause", "resume", "cancel", "create", "stop_requests")) {
+                for (name in listOf("approve", "reject", "cycles", "pause", "cancel", "create", "stop_requests")) {
                     assertFalse(all.any { it.contains(name) }, "no tool named like $name")
                 }
             }
@@ -438,6 +462,202 @@ class McpOrderToolsTest {
             assertFalse(everything.contains(marker), "a log line leaked a value")
         }
     }
+
+    // ---- the operator's decisions (ADR 0015 amendment 2026-11-18) -----------------
+
+    @Test
+    fun `the decision tools are listed only with the write switch and to their own scope, never to the read or stop scope`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        testApplication {
+            setUp(deps(db, orders, tasks = SelfDevOperatorRepository(db.database)))
+            assertEquals(runTools + readOrderTools + stopTool, listed(aiToken))
+            val withManage = listed(operatorDecisions)
+            assertTrue(withManage.containsAll(manageTools), "the decision scope lists extend and resume")
+            assertTrue(withManage.contains(requeueTool), "the requeue scope lists the requeue")
+        }
+        testApplication {
+            setUp(deps(db, orders, writeEnabled = false))
+            assertEquals(runTools + readOrderTools, listed(operatorDecisions))
+            for (name in manageTools + requeueTool) {
+                assertEquals(-32602, callTool(name, """{"order_id":"$noSuchOrder","version":0}""", operatorDecisions).rpcCode(), name)
+            }
+        }
+    }
+
+    @Test
+    fun `extend adds cycles and days through the repository, keeps the state, and answers the REST summary`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        val root = createRoot(orders)
+        testApplication {
+            setUp(deps(db, orders))
+            val out = callTool("kivra_order_extend", """{"order_id":"${root.orderId}","version":${root.version},"add_cycles":2,"extend_days":5}""", operatorDecisions)
+            assertFalse(out.isError(), out.toString())
+            val s = out.structured()
+            assertEquals(summaryKeys, s.keys)
+            assertEquals("ACTIVE", s["state"]!!.jsonPrimitive.content)
+            assertEquals("3", s["max_cycles"]!!.jsonPrimitive.content)
+            assertEquals((root.version + 1).toString(), s["version"]!!.jsonPrimitive.content)
+        }
+        val after = orders.get(root.orderId)!!
+        assertEquals(3, after.maxCycles)
+        assertEquals(OrderState.ACTIVE, after.state)
+        assertEquals(1, db.count("selfdev_orders", "order_id = '${root.orderId}' AND max_cycles = 3"))
+    }
+
+    @Test
+    fun `extend and resume need their own scope - without it the call is 403 insufficient_scope and nothing is written`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        val root = createRoot(orders)
+        testApplication {
+            setUp(deps(db, orders, tasks = SelfDevOperatorRepository(db.database)))
+            for (name in manageTools) {
+                val args = if (name == "kivra_order_extend") """{"order_id":"${root.orderId}","version":${root.version},"add_cycles":1}""" else
+                    """{"order_id":"${root.orderId}","version":${root.version}}"""
+                val response = rpc(call(name, args), readAndStopToken())
+                assertEquals(HttpStatusCode.Forbidden, response.status, name)
+                assertTrue(response.headers[HttpHeaders.WWWAuthenticate].orEmpty().contains("scope=\"$manageScope\""), name)
+            }
+            val requeue = rpc(call(requeueTool, """{"task_id":"$noSuchOrder","version":0}"""), readAndStopToken())
+            assertEquals(HttpStatusCode.Forbidden, requeue.status)
+            assertTrue(requeue.headers[HttpHeaders.WWWAuthenticate].orEmpty().contains("scope=\"$requeueScope\""))
+        }
+        assertEquals(1, orders.get(root.orderId)!!.maxCycles)
+    }
+
+    @Test
+    fun `the AI principal is refused extend and resume by the permission, whatever its scopes, and nothing is written`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        val root = createRoot(orders)
+        testApplication {
+            setUp(deps(db, orders))
+            val extend = callTool("kivra_order_extend", """{"order_id":"${root.orderId}","version":${root.version},"add_cycles":1}""", aiDecisions)
+            assertTrue(extend.isError())
+            assertEquals("forbidden", extend.structured()["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+            val resume = callTool("kivra_order_resume", """{"order_id":"${root.orderId}","version":${root.version}}""", aiDecisions)
+            assertTrue(resume.isError())
+        }
+        assertEquals(1, orders.get(root.orderId)!!.maxCycles)
+    }
+
+    @Test
+    fun `extend refuses bad input before the repository - unknown fields, neither field, out of range, strings and fractions`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        val root = createRoot(orders)
+        val v = root.version
+        val bad = listOf(
+            """{"order_id":"${root.orderId}","version":$v}""",
+            """{"order_id":"${root.orderId}","version":$v,"add_cycles":0}""",
+            """{"order_id":"${root.orderId}","version":$v,"add_cycles":${CYCLE_CAP + 1}}""",
+            """{"order_id":"${root.orderId}","version":$v,"add_cycles":"1"}""",
+            """{"order_id":"${root.orderId}","version":$v,"add_cycles":1.5}""",
+            """{"order_id":"${root.orderId}","version":$v,"add_cycles":99999999999}""",
+            """{"order_id":"${root.orderId}","version":$v,"extend_days":0}""",
+            """{"order_id":"${root.orderId}","version":$v,"extend_days":${EXTEND_DAYS_LIMIT + 1}}""",
+            """{"order_id":"${root.orderId}","version":$v,"add_cycles":1,"policy":"extend everything"}""",
+            """{"order_id":"${root.orderId}","version":$v,"add_cycles":1,"reason":"please, the budget is fine"}""",
+            """{"order_id":"not-an-id","version":$v,"add_cycles":1}""",
+            """{"order_id":"${root.orderId}","version":-1,"add_cycles":1}""",
+            """{"order_id":"${root.orderId}","version":"$v","add_cycles":1}""",
+        )
+        testApplication {
+            setUp(deps(db, orders))
+            for (args in bad) {
+                assertEquals(-32602, callTool("kivra_order_extend", args, operatorDecisions).rpcCode(), "refused: $args")
+            }
+        }
+        assertEquals(1, orders.get(root.orderId)!!.maxCycles)
+        assertEquals(v, orders.get(root.orderId)!!.version)
+    }
+
+    @Test
+    fun `extend answers a stale version and an unknown order as fixed codes, and a child order as a refusal with no write`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        val root = createRoot(orders)
+        val child = (orders.createChild(root.orderId, title, policy, 700, "mcp-decide-child", bobOwner, CHILD_LIMITS) as ChildCreateResult.Created).order
+        testApplication {
+            setUp(deps(db, orders))
+            val stale = callTool("kivra_order_extend", """{"order_id":"${root.orderId}","version":${root.version + 9},"add_cycles":1}""", operatorDecisions)
+            assertEquals("STALE_VERSION", stale.errorCode())
+            val missing = callTool("kivra_order_extend", """{"order_id":"$noSuchOrder","version":0,"add_cycles":1}""", operatorDecisions)
+            assertEquals("ORDER_NOT_FOUND", missing.errorCode())
+            val notRoot = callTool("kivra_order_extend", """{"order_id":"${child.orderId}","version":${child.version},"add_cycles":1}""", operatorDecisions)
+            assertTrue(notRoot.isError())
+            assertEquals(OrderConflict.NOT_ROOT.name, notRoot.errorCode())
+        }
+        assertEquals(1, orders.get(root.orderId)!!.maxCycles)
+    }
+
+    @Test
+    fun `resume moves a PAUSED order back to ACTIVE once per version, by an operator only`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        val root = createRoot(orders)
+        val paused = (orders.pauseByOperator(root.orderId, root.version, bobOwner) as OrderResult.Moved).value
+        testApplication {
+            setUp(deps(db, orders))
+            val refusedForAi = callTool("kivra_order_resume", """{"order_id":"${root.orderId}","version":${paused.version}}""", aiDecisions)
+            assertTrue(refusedForAi.isError())
+            assertEquals(OrderState.PAUSED, orders.get(root.orderId)!!.state)
+
+            val out = callTool("kivra_order_resume", """{"order_id":"${root.orderId}","version":${paused.version}}""", operatorDecisions)
+            assertFalse(out.isError(), out.toString())
+            assertEquals("ACTIVE", out.structured()["state"]!!.jsonPrimitive.content)
+            // The same version again is stale: one resume, one version step.
+            assertEquals("STALE_VERSION", callTool("kivra_order_resume", """{"order_id":"${root.orderId}","version":${paused.version}}""", operatorDecisions).errorCode())
+            assertEquals(-32602, callTool("kivra_order_resume", """{"order_id":"${root.orderId}","version":${paused.version},"reason":"x"}""", operatorDecisions).rpcCode())
+        }
+        assertEquals(OrderState.ACTIVE, orders.get(root.orderId)!!.state)
+    }
+
+    // ---- the requeue of a task of the cycle tree (ADR 0015 amendment 2026-11-18) ---------------------------------
+
+    /** A FAILED task of a project, with a real run (the task refers to it), as the REST requeue test sets it up. */
+    private fun failedTask(db: TestDb, operations: SelfDevOperatorRepository): String {
+        val projectId = ProjectRepository(db.database, java.time.Clock.systemUTC()).create("mcp project", null).projectId
+        val taskId = (operations.submitTask(bobOwner, "mcp-requeue-key", "first task", null, "kigawa-net/kivra", projectId) as SelfDevSubmitResult.Created)
+            .task.taskId
+        val run = db.runs.submitTask(bobOwner, "run-of-$taskId", "first task", selfDev = true, maxActiveSelfDev = null).run.runId.value
+        transaction(db.database) {
+            execUpdate("UPDATE selfdev_tasks SET state = 'FAILED', state_reason = 'RUN_FAILED', attempts = 1, run_id = ? WHERE task_id = ?", run, taskId)
+        }
+        return taskId
+    }
+
+    @Test
+    fun `requeue moves a FAILED task to QUEUED once per version, and the AI, a missing scope and a bad input change nothing`() = withTestDb { db ->
+        val operations = SelfDevOperatorRepository(db.database)
+        val taskId = failedTask(db, operations)
+        val version = operations.task(taskId)!!.version
+        testApplication {
+            setUp(deps(db, SelfDevOrderRepository(db.database), tasks = operations))
+            assertTrue(listed(operatorDecisions).contains(requeueTool))
+            assertFalse(listed(aiToken).contains(requeueTool))
+
+            val refusedForAi = callTool(requeueTool, """{"task_id":"$taskId","version":$version}""", aiDecisions)
+            assertTrue(refusedForAi.isError())
+            assertEquals("FAILED", operations.task(taskId)!!.state.name)
+
+            val noScope = rpc(call(requeueTool, """{"task_id":"$taskId","version":$version}"""), readAndStopToken())
+            assertEquals(HttpStatusCode.Forbidden, noScope.status)
+            assertEquals(-32602, callTool(requeueTool, """{"task_id":"$taskId","version":$version,"title":"x"}""", operatorDecisions).rpcCode())
+            assertEquals(-32602, callTool(requeueTool, """{"task_id":"not-an-id","version":$version}""", operatorDecisions).rpcCode())
+
+            val ok = callTool(requeueTool, """{"task_id":"$taskId","version":$version}""", operatorDecisions)
+            assertFalse(ok.isError(), ok.toString())
+            assertEquals("QUEUED", ok.structured()["state"]!!.jsonPrimitive.content)
+            assertEquals("OPERATOR_REQUEUED", ok.structured()["state_reason"]!!.jsonPrimitive.content)
+            assertFalse(ok.toString().contains("first task"), "the title is not returned")
+
+            assertEquals("STALE_VERSION", callTool(requeueTool, """{"task_id":"$taskId","version":$version}""", operatorDecisions).errorCode())
+            assertEquals("TASK_NOT_FOUND", callTool(requeueTool, """{"task_id":"$noSuchOrder","version":0}""", operatorDecisions).errorCode())
+        }
+        val row = operations.task(taskId)!!
+        assertEquals("QUEUED", row.state.name)
+        assertEquals("ap:$taskId:a1", row.idempotencyKey)
+        assertEquals(null, row.runId)
+    }
+
+    /** The read and stop scopes only: no decision scope. */
+    private fun readAndStopToken() = McpTestTokens.token(subject = "sub-bob", scope = readAndStop)
 
     private val summaryKeys = setOf(
         "order_id", "parent_order_id", "depth", "state", "state_reason", "cycles_started", "max_cycles", "current_goal_id",

@@ -2076,13 +2076,13 @@ dev での有効化の手順は §7.5。
 ### 7.4b 段階 2 の差分の再検査と `AUTO_SCOPE_EXCEEDED`(PR F)
 
 `approval = auto` のとき、承認なしで投入されたタスク(`approved_by` が無いタスク)は、コミットの前に、**実際の差分**で再検査される。
-範囲は段階 2 と同じ(`docs/**`、`kivra-*/src/test/**`、`README.md` だけ。denylist に触れない)。加えて、変更パスは 3 件以下、変更行は 200 行以下である。
+範囲は段階 2 と同じ(`docs/**`、`kivra-*/src/test/**`、`README.md` だけ。denylist に触れない)。加えて、変更パスは 3 件以下、変更行は 200 行以下である。変更行は、書き込みごとに旧内容との差分の「追加行数 + 削除行数」で数える(ADR 0011 §6.2 追補 2026-11-19)。小さな編集で大きなファイルを全文書き込みしても、差分が小さければ範囲内になる。新規ファイル、旧内容の読み取りに失敗したファイル、差分の計算の上限を超えたファイルは、新内容の全行数で数える(安全側)。
 範囲の外なら、PR は作られず、Run は `POLICY_REJECTED` で終わり、タスクは承認待ち(`PENDING_APPROVAL`、理由 `AUTO_SCOPE_EXCEEDED`)に戻り、Goal は `BLOCKED`(`AUTO_SCOPE_EXCEEDED`)になる。
 
 **運用者の見方**:
 - 画面で Goal の理由が「変更範囲が計画を超えました（運用者の確認が必要）」(`AUTO_SCOPE_EXCEEDED`)なら、この再検査で止まっている。
 - 失敗としては数えない。サーキットブレーカーは動かない。
-- ログには `autopilot scope exceeded: runId=... code=AUTO_SCOPE_EXCEEDED paths=<件数> lines=<行数>` が出る。パスと内容は出ない。差分の中身は、ログからは分からない。
+- ログには `autopilot scope exceeded: runId=... state=PENDING_APPROVAL reason=AUTO_SCOPE_EXCEEDED cause=<理由> paths=<件数> lines=<行数>` が出る。`cause` は `PATH_COUNT`(パス数が 3 を超えた)、`PATH_SCOPE`(許可リストの外)、`DENYLIST`(denylist に触れた)、`LINE_COUNT`(変更行が 200 を超えた)のどれか。`lines` が 201 のときは、差分が 200 を超えたことだけが分かる(正確な件数は出ない)。パスと内容は出ない。差分の中身は、ログからは分からない。
 - 範囲外の差分は、kivra に保存されない(作業ブランチも作られない)。内容を確かめられるのは、coding attempt の出力の保持(§6.12。既定は無効)が有効なときだけである。
 
 **再承認の手順**:

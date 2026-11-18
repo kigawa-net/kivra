@@ -313,9 +313,10 @@ class SelfDevRunner(
                     // ADR 0011 section 6.2: the actual diff of an auto-approved task is checked again before anything is committed. An
                     // out-of-scope change ends the run as a policy rejection, and the task waits for the operator (not counted as a failure).
                     val guard = autoScope
-                    val scope = guard?.check(run.runId, verdict.patch) { sizes[it] }
+                    val bases = if (guard != null) readBaseContents(verdict.patch, base, entries) else emptyMap()
+                    val scope = guard?.check(run.runId, verdict.patch, { sizes[it] }, { bases[it] })
                     if (guard != null && scope is AutoScopeVerdict.OutOfScope) {
-                        guard.settle(run.runId)
+                        guard.settle(run.runId, scope)
                         Step.Done(persistAdvance(lease, run, DevelopmentRunState.FAILED, POLICY_REJECTED))
                     } else {
                         Step.Go(verdict.patch)
@@ -327,6 +328,25 @@ class SelfDevRunner(
                 }
             }
         }
+    }
+
+    /**
+     * The base content of each written file that exists in the base tree, for the line diff of the re-check (ADR 0011 section 6.2). Read
+     * only when the change set has at most [AutoScopeRule.MAX_PATHS] distinct paths: a larger one is out of scope by its path count, so
+     * there is nothing to diff. A file that is new, excluded by the reader (binary, too large), or whose read fails is left out, and the
+     * guard then counts its whole new content (fail-closed). Logs nothing.
+     */
+    private suspend fun readBaseContents(patch: PatchSet, base: BranchInfo, entries: List<RepoEntry>): Map<String, String> {
+        val paths = patch.files.map { it.path }.distinct()
+        if (paths.size > AutoScopeRule.MAX_PATHS) return emptyMap()
+        val readable = entries.filter { it.readable }.mapTo(HashSet()) { it.path }
+        val out = HashMap<String, String>()
+        for (file in patch.files) {
+            if (file !is Write || file.path !in readable) continue
+            val content = (repoReader.readFile(config.repo, base.headSha, file.path) as? GitHubResult.Success)?.value ?: continue
+            out[file.path] = content
+        }
+        return out
     }
 
     /**

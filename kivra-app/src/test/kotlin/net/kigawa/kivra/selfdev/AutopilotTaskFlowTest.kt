@@ -1,9 +1,13 @@
 package net.kigawa.kivra.selfdev
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import java.math.BigDecimal
 import java.time.Duration
 import java.time.LocalDate
 import kotlinx.coroutines.runBlocking
+import org.slf4j.LoggerFactory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -364,11 +368,30 @@ class AutopilotTaskFlowTest {
         runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
         h.dispatcher().tick()
         val child = h.planned(root.taskId).single()
-        PlanTaskAutoScopeGuard(h.ops).settle(RunId(child.runId!!))
+        val verdict = AutoScopeVerdict.OutOfScope(paths = 1, lines = 201, reason = AutoScopeReason.LINE_COUNT)
+        val events = captureScopeLogs { PlanTaskAutoScopeGuard(h.ops).settle(RunId(child.runId!!), verdict) }
 
         val after = h.ops.task(child.taskId)!!
         assertEquals(TaskState.PENDING_APPROVAL, after.state)
         assertEquals(AutopilotReason.AUTO_SCOPE_EXCEEDED, after.stateReason)
+        // Fixed words and counts only: the run id, the cause code, the path count and the line count.
+        val line = events.single { it.formattedMessage.startsWith("autopilot scope exceeded") }.formattedMessage
+        assertEquals(
+            "autopilot scope exceeded: runId=${child.runId} state=PENDING_APPROVAL reason=AUTO_SCOPE_EXCEEDED " +
+                "cause=LINE_COUNT paths=1 lines=201",
+            line,
+        )
+    }
+
+    private fun captureScopeLogs(block: () -> Unit): List<ILoggingEvent> {
+        val logger = LoggerFactory.getLogger(PlanTaskAutoScopeGuard::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start(); logger.addAppender(it) }
+        try {
+            block()
+        } finally {
+            logger.detachAppender(appender)
+        }
+        return appender.list.toList()
     }
 
     @Test
@@ -385,10 +408,19 @@ class AutopilotTaskFlowTest {
         val inside = PatchSet(listOf(Write("kivra-app/src/main/kotlin/x.kt", "x\n")), "summary")
         val denied = PatchSet(listOf(Write("kivra-app/src/main/kotlin/net/kigawa/kivra/auth/Login.kt", "x\n")), "summary")
 
-        assertEquals(AutoScopeVerdict.InScope, PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, inside) { null })
-        assertEquals(AutoScopeVerdict.OutOfScope(1, 1), PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, denied) { null })
+        assertEquals(
+            AutoScopeVerdict.InScope,
+            PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, inside, { null }, { null }),
+        )
+        assertEquals(
+            AutoScopeVerdict.OutOfScope(1, 1, AutoScopeReason.DENYLIST),
+            PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, denied, { null }, { null }),
+        )
         // The same Run under the stage 2 rule is out of scope: the path is not docs, test sources or README.
-        assertEquals(AutoScopeVerdict.OutOfScope(1, 1), PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.AUTO).check(runId, inside) { null })
+        assertEquals(
+            AutoScopeVerdict.OutOfScope(1, 1, AutoScopeReason.PATH_SCOPE),
+            PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.AUTO).check(runId, inside, { null }, { null }),
+        )
     }
 
     @Test

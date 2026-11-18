@@ -130,27 +130,41 @@ curl -X POST "https://<kivra-host>/api/admin/selfdev/runs/<runId>/release" \
 - 再開時に、ブランチが現在の base の head に無い(base が動いただけでも起きる)。
 - LLM の呼び出し結果が不明。GitHub の書き込みの結果が不明。
 
-#### 4.1a 実行の lease 切れ(`CODING_ORPHANED`)の自動の解放(ADR 0009 追補 2026-11-16)
+#### 4.1a 実行の lease 切れ(`CODING_ORPHANED`)と `CODING_NEEDS_HUMAN` の自動の解放(ADR 0009 追補 2026-11-16、2026-11-18)
 
-**実装済み。既定は無効。** agent が止まって coding attempt の lease が切れた Run(`UNKNOWN` / `CODING_ORPHANED`)を、猶予の後に自動で
-`CANCELLED` にする。ほかの理由の `UNKNOWN`(`PR_NOT_FOUND`、`PR_AMBIGUOUS`、`GITHUB_UNKNOWN_OUTCOME`、`DEVELOPER_*`、`CODING_QUEUE_EXPIRED`、
-`CODING_NEEDS_HUMAN` など)は**対象外**で、上の手動の解放を使う。
+**実装済み。既定は無効。** 次の 2 つの理由の `UNKNOWN` の Run を、猶予の後に自動で `CANCELLED` にする。
+
+- `CODING_ORPHANED`: agent が止まって coding attempt の lease が切れた(2026-11-16 から)。
+- `CODING_NEEDS_HUMAN`: agent が attempt を `NEEDS_HUMAN` で fail した(2026-11-18 から)。agent のホスト側の異常(準備の失敗、git・展開・
+  docker の引数の検査、claim のパスのパターンが不正、kivra の 5xx や通信の失敗、その他の例外)か、stub の executor。
+
+ほかの理由の `UNKNOWN`(`PR_NOT_FOUND`、`PR_AMBIGUOUS`、`GITHUB_UNKNOWN_OUTCOME`、`COMMIT_NOT_APPLIED_TWICE`、`DEVELOPER_*`、
+`CODING_QUEUE_EXPIRED`、`CODING_AUTH_REQUIRED` など)は**対象外**で、上の手動の解放を使う。設定(スイッチと猶予)は 2 つの理由で共通で、
+変数名は最初の版の `ORPHAN` のまま。
 
 | 環境変数 | 既定 | 意味 |
 |---|---|---|
 | `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED` | `false` | `true` で有効。空・`false` は無効。それ以外の値は起動失敗 |
 | `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_GRACE_SECONDS` | `600` | 最終更新から解放するまでの秒数。60 以上の整数。不正値は起動失敗(値はログに出ない) |
 
-- 対象(すべて満たすもの): 自己開発の Run、状態 `UNKNOWN`・理由 `CODING_ORPHANED`、PR の列が空(束縛なし)、`PATCH_READY` / `PULL_REQUEST` を
+- 対象(すべて満たすもの): 自己開発の Run、状態 `UNKNOWN`・理由 `CODING_ORPHANED` か `CODING_NEEDS_HUMAN`、PR の列が空(束縛なし)、`PATCH_READY` / `PULL_REQUEST` を
   一度も通っていない(= GitHub に何も書いていない)、`QUEUED` / `CLAIMED` / `RUNNING` の attempt が無い、worker の lease が無い、最終更新から猶予が過ぎた。
 - 動き: 60 秒ごとに、古い順に 1 回 20 件まで。残りは次の回。各 Run は行をロックして条件を確かめ直してから更新する。
 - 記録: 手動の解放と同じく、同じトランザクションで `RUN_RELEASED` の監査と `RunStateChanged` の outbox を書く。操作者は `system:auto-release`、
-  `state_reason` は `AUTO_RELEASED_ORPHAN`、監査の `reason` は固定の `GRACE_ELAPSED`。手動の解放と区別するには、`state_reason` か監査の `actor` で絞る。
-- ログ: `selfdev orphan auto release: code=AUTO_RELEASED_ORPHAN released=<件数> alreadyReleased=<件数> failed=<件数>`(解放した回は INFO、
+  `state_reason` は `AUTO_RELEASED_ORPHAN`(元が `CODING_ORPHANED`)か `AUTO_RELEASED_NEEDS_HUMAN`(元が `CODING_NEEDS_HUMAN`)、
+  監査の `reason` は固定の `GRACE_ELAPSED`。手動の解放と区別するには、`state_reason` か監査の `actor` で絞る。
+- ログ: `selfdev orphan auto release: code=AUTO_RELEASED_ORPHAN released=<件数> alreadyReleased=<件数> failed=<件数>`(2 つの理由の合計。
+  行の形は最初の版のまま。解放した回は INFO、
   失敗があった回は WARN)。パス全体の失敗は `code=AUTO_RELEASE_FAILED exception=<クラス名>`。Run の id と理由の本文は出さない。失敗した Run は次の回に再試行される。
   `alreadyReleased` は、候補に挙がったがロックの下では対象外だった件数(別の Pod や運用者が先に解放した、条件が変わった)。
 - 複数の Pod: 状態と版を条件に更新するので、二重に解放しない。
-- 解放は原因を直さない。agent が止まったままなら、次の Run も `CODING_ORPHANED` になる(agent の状態は §6 を参照)。
+- 解放は原因を直さない。agent が止まったままなら次の Run も `CODING_ORPHANED` に、ホスト側の異常が残っていれば次の Run も `CODING_NEEDS_HUMAN` になる
+  (agent の状態は §6 を参照)。原因は agent のログ(`executor failed: class=...`、`claim path patterns refused`)で確かめる。
+- オートパイロット: 自動で解放された Run の task は従来どおり `CANCELLED`(`RUN_RELEASED`)になるが、**サーキットブレーカーには失敗として数える**
+  (運用者の解放と中止は数えない)。同じ異常が続くと `KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES`(既定 3)回でブレーカーが開き、
+  キューの task が 1 件ずつ取り消されていくことを止める。原因を直してからブレーカーを戻す。Order の周は従来から `CANCELLED` を失敗として数える。
+- 予算: attempt の費用は fail の時点で計上済み(`usage` があればその額、無ければ 1 attempt の予約額を費用不明として計上)。解放は予算に何も書かない
+  (手動の解放と同じ)。費用不明の分は §4.2a で扱う。
 - 止め方: `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED=false`(またはこの変数を消す)にして再起動する。以後は手動の解放だけになる。解放済みの Run は戻らない。
 - 自己開発が無効(`KIVRA_SELFDEV_ENABLED` が true でない)のときは、この設定を読まず、自動の解放も動かない(無効化したあとの UNKNOWN は手動で解放する)。
 - 有効化は k8s のマニフェストで行う(コードの既定は無効)。

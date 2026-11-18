@@ -46,6 +46,7 @@ class DisplayLabelsTest {
             "CODING_BAD_OUTPUT", "CODING_CLI_NONZERO", "CODING_CANCELLED", "CODING_FAILED", "CODING_ORPHANED", "CODING_QUEUE_EXPIRED",
             "CODING_RESULT_MISSING", "CODING_NO_ATTEMPT", "CODING_NOT_DEVELOPING", "CODING_ENQUEUE_REFUSED", "CODING_EMPTY_PATCH",
             "CODING_BUDGET_EXCEEDED", "CODING_OVERLOADED", "OPERATOR_RELEASED_UNBOUND_PR", "AUTO_RELEASED_ORPHAN",
+            "AUTO_RELEASED_NEEDS_HUMAN",
         )
         for (code in codes) {
             assertEquals(false, runReasonText(code).contains("不明な理由"), "$code has an explanation")

@@ -272,6 +272,28 @@ class AutopilotTaskFlowTest {
     }
 
     @Test
+    fun anAutomaticallyReleasedRunCancelsItsTaskAndCountsTowardTheBreakerButAnOperatorReleaseDoesNot() {
+        for ((reason, counts) in listOf("AUTO_RELEASED_NEEDS_HUMAN" to 1, "AUTO_RELEASED_ORPHAN" to 1, "OPERATOR_RELEASED" to 0)) {
+            TestDb().use { db ->
+                val h = Harness(db, listOf(plan(task("Docs"))))
+                val root = h.submitRoot()
+                runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+                h.dispatcher().tick()
+                val child = h.planned(root.taskId).single()
+                transaction(db.database) {
+                    execUpdate("UPDATE development_runs SET state = 'CANCELLED', state_reason = ? WHERE run_id = ?", reason, child.runId!!)
+                }
+                h.dispatcher().tick()
+
+                val after = h.ops.task(child.taskId)!!
+                assertEquals(TaskState.CANCELLED, after.state, reason)
+                assertEquals(AutopilotReason.RUN_RELEASED, after.stateReason, reason)
+                assertEquals(counts, h.control.read().consecutiveFailures, reason)
+            }
+        }
+    }
+
+    @Test
     fun thePendingPullRequestLimitBlocksAndClearsTheTask() = TestDb().use { db ->
         val h = Harness(db, listOf(plan(task("Docs"))))
         val root = h.submitRoot()

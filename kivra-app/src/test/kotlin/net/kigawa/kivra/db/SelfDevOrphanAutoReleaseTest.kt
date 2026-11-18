@@ -70,12 +70,87 @@ class SelfDevOrphanAutoReleaseTest {
         assertEquals(CodingRuntimeService.REASON_ORPHANED, CODING_ORPHANED_REASON)
         assertTrue(AUTO_RELEASED_ORPHAN_REASON.length <= 64, "fits state_reason varchar(64)")
         assertTrue(AUTO_RELEASED_ORPHAN_REASON != OPERATOR_RELEASED_REASON)
+        assertTrue(AUTO_RELEASED_NEEDS_HUMAN_REASON.length <= 64, "fits state_reason varchar(64)")
+        // The runner writes CODING_<code> for a NEEDS_HUMAN failure (CodingAttemptPatchSource).
+        assertEquals("CODING_" + net.kigawa.kivra.coding.CodingErrorCode.NEEDS_HUMAN.name, CODING_NEEDS_HUMAN_REASON)
+        assertEquals(
+            mapOf(CODING_ORPHANED_REASON to AUTO_RELEASED_ORPHAN_REASON, CODING_NEEDS_HUMAN_REASON to AUTO_RELEASED_NEEDS_HUMAN_REASON),
+            SELF_DEV_AUTO_RELEASE_REASONS,
+        )
+        assertEquals(4, (SELF_DEV_AUTO_RELEASE_REASONS.values + OPERATOR_RELEASED_REASON + OPERATOR_RELEASED_STUCK_REASON).toSet().size, "every released reason is distinct")
+    }
+
+    @Test
+    fun `a NEEDS_HUMAN run past the grace is released with its own reason, the audit and the outbox, once`() = TestDb().use { db ->
+        // The attempt the agent failed with NEEDS_HUMAN is terminal (FAILED), so it does not block the release.
+        val id = db.orphanedRun(reason = CODING_NEEDS_HUMAN_REASON, beforeHold = { runId ->
+            val queued = CodingAttemptRepository(db.database).enqueue(runId.value, "a".repeat(40), Duration.ofMinutes(5))
+            val attemptId = assertIs<EnqueueResult.Enqueued>(queued).attempt.attemptId
+            transaction(db.database) { execUpdate("UPDATE coding_attempts SET state = 'FAILED', error_code = 'NEEDS_HUMAN' WHERE attempt_id = ?", attemptId) }
+        })
+        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        val run = db.runs.get(id)!!
+        assertEquals(DevelopmentRunState.CANCELLED, run.state)
+        assertEquals(AUTO_RELEASED_NEEDS_HUMAN_REASON, run.stateReason)
+        assertEquals(
+            1,
+            db.count(
+                "audit_events",
+                "run_id = '$id' AND action = 'RUN_RELEASED' AND actor = '$SELF_DEV_AUTO_RELEASE_ACTOR' " +
+                    "AND payload LIKE '%\"from\":\"UNKNOWN\"%' AND payload LIKE '%\"reasonCode\":\"$AUTO_RELEASED_NEEDS_HUMAN_REASON\"%' " +
+                    "AND payload LIKE '%\"reason\":\"$AUTO_RELEASE_GRACE_ELAPSED\"%'",
+            ),
+        )
+        assertEquals(
+            1,
+            db.count(
+                "outbox_events",
+                "aggregate_id = '$id' AND event_type = 'RunStateChanged' AND aggregate_version = ${run.version} " +
+                    "AND payload LIKE '%\"reasonCode\":\"$AUTO_RELEASED_NEEDS_HUMAN_REASON\"%'",
+            ),
+        )
+        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50), "a second pass releases nothing")
+        assertIs<UnknownAutoReleaseResult.NotEligible>(db.runs.autoReleaseUnknownSelfDev(id, grace))
+        assertEquals(1, db.releasedAudits(id))
+        assertEquals(1, db.cancelOutbox(id))
+    }
+
+    @Test
+    fun `a NEEDS_HUMAN run within the grace, bound to a pull request, past PATCH_READY or not self-development is not released`() = TestDb().use { db ->
+        val recent = db.orphanedRun(reason = CODING_NEEDS_HUMAN_REASON, ageMinutes = 9)
+        val bound = db.orphanedRun(reason = CODING_NEEDS_HUMAN_REASON)
+        transaction(db.database) { execUpdate("UPDATE development_runs SET pr_number = 7, pr_repository = 'kigawa-net/kivra' WHERE run_id = ?", bound.value) }
+        val notSelfDev = db.orphanedRun(reason = CODING_NEEDS_HUMAN_REASON, selfDev = false)
+        // A resume from PATCH_READY maps any failure to UNKNOWN CODING_<code>; GitHub may have been written, so it stays.
+        val resumed = db.runs.submitTask("alice", "needs-human-resume", "README を直す", selfDev = true, maxActiveSelfDev = null).run.runId
+        db.forceState(resumed.value, DevelopmentRunState.DEVELOPING)
+        val lease = db.leases.acquire(resumed, "worker", Duration.ofMinutes(1), Duration.ZERO)!!
+        val ready = db.runs.transition(lease, db.runs.get(resumed)!!.version, DevelopmentRunState.PATCH_READY, "worker")
+        db.runs.transition(lease, ready.version, DevelopmentRunState.UNKNOWN, "worker", reason = CODING_NEEDS_HUMAN_REASON)
+        db.leases.release(lease)
+        db.age(resumed, 60)
+        assertEquals(AutoReleaseReport(0, 1, 0), db.runs.autoReleaseUnknownRuns(grace, 50), "only the resumed run is a candidate by its row")
+        for (id in listOf(recent, bound, notSelfDev, resumed)) {
+            assertIs<UnknownAutoReleaseResult.NotEligible>(db.runs.autoReleaseUnknownSelfDev(id, grace))
+            db.assertUntouched(id, CODING_NEEDS_HUMAN_REASON)
+        }
+    }
+
+    @Test
+    fun `one pass takes both reasons, each with its own released reason`() = TestDb().use { db ->
+        val orphan = db.orphanedRun(ageMinutes = 61)
+        val needsHuman = db.orphanedRun(reason = CODING_NEEDS_HUMAN_REASON, ageMinutes = 60)
+        val other = db.orphanedRun(reason = "PR_NOT_FOUND")
+        assertEquals(AutoReleaseReport(2, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertEquals(AUTO_RELEASED_ORPHAN_REASON, db.runs.get(orphan)!!.stateReason)
+        assertEquals(AUTO_RELEASED_NEEDS_HUMAN_REASON, db.runs.get(needsHuman)!!.stateReason)
+        db.assertUntouched(other, "PR_NOT_FOUND")
     }
 
     @Test
     fun `an orphaned run past the grace is released with the audit and the outbox in one go`() = TestDb().use { db ->
         val id = db.orphanedRun()
-        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
+        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
         val run = db.runs.get(id)!!
         assertEquals(DevelopmentRunState.CANCELLED, run.state)
         assertEquals(AUTO_RELEASED_ORPHAN_REASON, run.stateReason)
@@ -103,9 +178,9 @@ class SelfDevOrphanAutoReleaseTest {
     @Test
     fun `a second pass releases nothing more`() = TestDb().use { db ->
         val id = db.orphanedRun()
-        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
-        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
-        assertIs<OrphanReleaseResult.NotEligible>(db.runs.autoReleaseOrphanedSelfDev(id, grace))
+        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertIs<UnknownAutoReleaseResult.NotEligible>(db.runs.autoReleaseUnknownSelfDev(id, grace))
         assertEquals(1, db.releasedAudits(id))
         assertEquals(1, db.cancelOutbox(id))
     }
@@ -113,18 +188,18 @@ class SelfDevOrphanAutoReleaseTest {
     @Test
     fun `within the grace nothing is released`() = TestDb().use { db ->
         val id = db.orphanedRun(ageMinutes = 9)
-        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
-        assertIs<OrphanReleaseResult.NotEligible>(db.runs.autoReleaseOrphanedSelfDev(id, grace), "the lock-side check refuses it too")
+        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertIs<UnknownAutoReleaseResult.NotEligible>(db.runs.autoReleaseUnknownSelfDev(id, grace), "the lock-side check refuses it too")
         db.assertUntouched(id)
     }
 
     @Test
     fun `other UNKNOWN reasons stay for an operator`() = TestDb().use { db ->
-        val others = listOf("PR_NOT_FOUND", "PR_AMBIGUOUS", "GITHUB_UNKNOWN_OUTCOME", "DEVELOPER_OUTCOME_UNKNOWN", CodingRuntimeService.REASON_QUEUE_EXPIRED, "CODING_NEEDS_HUMAN")
+        val others = listOf("PR_NOT_FOUND", "PR_AMBIGUOUS", "GITHUB_UNKNOWN_OUTCOME", "DEVELOPER_OUTCOME_UNKNOWN", CodingRuntimeService.REASON_QUEUE_EXPIRED, "CODING_AUTH_REQUIRED", "CODING_RESULT_MISSING", "COMMIT_NOT_APPLIED_TWICE")
         val ids = others.map { it to db.orphanedRun(reason = it) }
-        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
+        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
         for ((reason, id) in ids) {
-            assertIs<OrphanReleaseResult.NotEligible>(db.runs.autoReleaseOrphanedSelfDev(id, grace), reason)
+            assertIs<UnknownAutoReleaseResult.NotEligible>(db.runs.autoReleaseUnknownSelfDev(id, grace), reason)
             db.assertUntouched(id, reason)
         }
     }
@@ -135,10 +210,10 @@ class SelfDevOrphanAutoReleaseTest {
         transaction(db.database) { execUpdate("UPDATE development_runs SET pr_number = 7, pr_repository = 'kigawa-net/kivra' WHERE run_id = ?", bound.value) }
         val headOnly = db.orphanedRun()
         transaction(db.database) { execUpdate("UPDATE development_runs SET pr_head_sha = ? WHERE run_id = ?", "b".repeat(40), headOnly.value) }
-        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
+        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
         // The lock-side check holds on its own as well (the candidate query is only a hint).
-        assertIs<OrphanReleaseResult.NotEligible>(db.runs.autoReleaseOrphanedSelfDev(bound, grace))
-        assertIs<OrphanReleaseResult.NotEligible>(db.runs.autoReleaseOrphanedSelfDev(headOnly, grace))
+        assertIs<UnknownAutoReleaseResult.NotEligible>(db.runs.autoReleaseUnknownSelfDev(bound, grace))
+        assertIs<UnknownAutoReleaseResult.NotEligible>(db.runs.autoReleaseUnknownSelfDev(headOnly, grace))
         db.assertUntouched(bound)
         db.assertUntouched(headOnly)
     }
@@ -153,7 +228,7 @@ class SelfDevOrphanAutoReleaseTest {
         db.leases.release(lease)
         db.age(id, 60)
         // It is a candidate by its row, but the audit shows the GitHub step, so the lock-side check refuses it.
-        assertEquals(AutoReleaseReport(0, 1, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
+        assertEquals(AutoReleaseReport(0, 1, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
         db.assertUntouched(id)
     }
 
@@ -161,8 +236,8 @@ class SelfDevOrphanAutoReleaseTest {
     fun `a run that is not self-development is not released`() = TestDb().use { db ->
         val id = db.orphanedRun(selfDev = false)
         assertFalse(db.runs.get(id)!!.taskId.startsWith(SELF_DEV_TASK_PREFIX))
-        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
-        assertIs<OrphanReleaseResult.NotEligible>(db.runs.autoReleaseOrphanedSelfDev(id, grace))
+        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertIs<UnknownAutoReleaseResult.NotEligible>(db.runs.autoReleaseUnknownSelfDev(id, grace))
         db.assertUntouched(id)
     }
 
@@ -170,7 +245,7 @@ class SelfDevOrphanAutoReleaseTest {
     fun `a run an operator already released is left alone`() = TestDb().use { db ->
         val id = db.orphanedRun()
         assertIs<ReleaseResult.Released>(db.runs.releaseUnknownSelfDev(id, "op-1", "確認した"))
-        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
+        assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
         val run = db.runs.get(id)!!
         assertEquals(OPERATOR_RELEASED_REASON, run.stateReason)
         assertEquals(1, db.releasedAudits(id))
@@ -187,7 +262,7 @@ class SelfDevOrphanAutoReleaseTest {
             execUpdate("UPDATE development_runs SET lease_owner = 'worker-1', lease_expires_at = TIMESTAMPADD(SECOND, 300, NOW(6)) WHERE run_id = ?", leased.value)
         }
         db.age(leased, 60)
-        assertEquals(AutoReleaseReport(0, 2, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
+        assertEquals(AutoReleaseReport(0, 2, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
         db.assertUntouched(withAttempt)
         db.assertUntouched(leased)
     }
@@ -195,12 +270,12 @@ class SelfDevOrphanAutoReleaseTest {
     @Test
     fun `one pass releases at most the batch, oldest first, and the next pass the rest`() = TestDb().use { db ->
         val ids = (1..3).map { db.orphanedRun(ageMinutes = 60L - it) }
-        assertEquals(AutoReleaseReport(2, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 2))
+        assertEquals(AutoReleaseReport(2, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 2))
         assertEquals(
             listOf(DevelopmentRunState.CANCELLED, DevelopmentRunState.CANCELLED, DevelopmentRunState.UNKNOWN),
             ids.map { db.runs.get(it)!!.state },
         )
-        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 2))
+        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 2))
     }
 
     @Test
@@ -209,9 +284,9 @@ class SelfDevOrphanAutoReleaseTest {
         val replica = DevelopmentRunRepository(
             org.jetbrains.exposed.sql.Database.connect(db.replicaDataSource()), db.outbox, db.audit, db.prAuthority,
         )
-        assertEquals(listOf(id), replica.dueOrphanedSelfDev(grace, 50))
-        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseOrphanedRuns(grace, 50))
-        assertIs<OrphanReleaseResult.NotEligible>(replica.autoReleaseOrphanedSelfDev(id, grace))
+        assertEquals(listOf(id), replica.dueAutoReleasableSelfDev(grace, 50))
+        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertIs<UnknownAutoReleaseResult.NotEligible>(replica.autoReleaseUnknownSelfDev(id, grace))
         assertEquals(1, db.releasedAudits(id))
         assertEquals(1, db.cancelOutbox(id))
     }
@@ -225,7 +300,7 @@ class SelfDevOrphanAutoReleaseTest {
         val pool = Executors.newFixedThreadPool(2)
         val go = CountDownLatch(1)
         try {
-            val futures = listOf(db.runs, replica).map { repo -> pool.submit<AutoReleaseReport> { go.await(); repo.autoReleaseOrphanedRuns(grace, 50) } }
+            val futures = listOf(db.runs, replica).map { repo -> pool.submit<AutoReleaseReport> { go.await(); repo.autoReleaseUnknownRuns(grace, 50) } }
             go.countDown()
             val reports = futures.map { it.get(30, TimeUnit.SECONDS) }
             assertEquals(4, reports.sumOf { it.released })

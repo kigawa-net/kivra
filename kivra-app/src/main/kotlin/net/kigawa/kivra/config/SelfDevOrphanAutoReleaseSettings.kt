@@ -3,7 +3,8 @@ package net.kigawa.kivra.config
 import java.time.Duration
 
 /**
- * The automatic release of orphaned UNKNOWN self-development runs (ADR 0009 追補 2026-11-16), read from the environment.
+ * The automatic release of UNKNOWN self-development runs (CODING_ORPHANED and CODING_NEEDS_HUMAN, ADR 0009 追補 2026-11-16 and 2026-11-18),
+ * read from the environment. The names keep `ORPHAN` from the first version; one switch and one grace cover both reasons.
  *
  * - `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED`: `true` turns it on. Unset, empty or `false` is off (the default in the code; the k8s
  *   manifest turns it on). Anything else fails the startup.

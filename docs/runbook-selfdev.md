@@ -289,7 +289,26 @@ curl -X POST "https://<kivra-host>/api/admin/budget/acknowledge" \
 - PR が閉じられた(マージされずに)。
 - 最終更新から `KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`(既定 7 日)を過ぎた。
 
-kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を記録する手順は無い。
+kivra は PR を閉じない(下の §4.3a を有効にしたときの期限切れを除く)。オペレーターが手動で `PR_ABANDONED` を記録する手順は無い。
+
+#### 4.3a 期限切れの PR を kivra が閉じる(ADR 0008 追補 2026-11-18、既定は無効)
+
+**実装済み。既定は無効。** `KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED=true` のとき、レビューの期限(`KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`)を過ぎた Run の PR を、Run を `CANCELLED`(`PR_ABANDONED`)にする前に kivra が閉じる。
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED` | `false` | `true` で有効。空・`false` は無効。それ以外の値は起動失敗(値はメッセージに出ない)。自己開発が有効なときだけ読む |
+
+- 対象: kivra の GitHub App の bot(`KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID`)が作り、Run に束縛された(PR 番号とリポジトリが一致する)開いている PR だけ。マージ済みの PR は閉じない(マージの経路が先に動き、Run は完了の検証に進む)。人が作った PR、束縛の無い PR、人が既に閉じた PR には何もしない(Run は従来どおり `PR_ABANDONED`)。
+- 閉じ方: PR の状態を closed にする(ブランチは消さない)。閉じた後に、固定のコメントを 1 回だけ付ける: 「レビュー待ちの期限が過ぎたため、kivra がこの PR を閉じました(Run <RunID>)。ブランチは残しています。続ける場合は、新しい Run として依頼してください。」依頼文や変更の内容は入れない。
+- 順序: **GitHub で閉じる → Run を取り消す**。閉じる書き込みが拒否された、または結果が不明なときは、Run は `PULL_REQUEST` のまま `AWAITING_PR_CLOSE`(コードは失敗の種類、または `PR_CLOSE_UNKNOWN`)で待ち、次の周期で PR を読み直してから再試行する。結果が不明だった閉じる処理が実は届いていれば、次の周期で閉じ済みと分かり、二度は送らずに取り消す。
+- コメント: 閉じた後に 1 回だけ。結果が不明なコメントも「付けた」として扱い、二度と付けない。コメントが拒否されても Run は取り消す(コメントは説明のためだけ)。
+- 上限: 閉じる試行は 1 つの Run につき 5 回まで(1 周期 1 回)。使い切ったら、PR は開いたまま Run を取り消す(この機能の前と同じ)。権限が無いなど、続く拒否で Run が待ち続けないため。
+- 監査(`audit_events`、Run の ID で引く。payload は PR 番号と固定コードだけ): `PR_ABANDON_CLOSE_ATTEMPTED`(各試行の前)、`PR_ABANDON_CLOSED`(`{"prNumber":n,"code":"PR_CLOSED_TIMEOUT"}`)、`PR_ABANDON_COMMENTED`(結果不明なら `code` が `PR_COMMENT_UNKNOWN`)、`PR_ABANDON_CLOSE_GAVE_UP`(`PR_CLOSE_GAVE_UP`)。これらの行は Run の更新時刻を動かさない。
+- ログ: `timed-out pull request closed: runId=… prNumber=… code=PR_CLOSED_TIMEOUT`、`… not closed yet: … code=<コード>`、`… left open: … code=PR_CLOSE_GAVE_UP`、`… comment not posted: …`。PR の題名・本文・変更は出さない。
+- App の権限: PR を閉じる書き込み(`PATCH /pulls/{n}`)とコメントには `pull_requests:write` が要る(要求済み)。403 のときは `PERMISSION` で再試行し、5 回で諦める。
+- 止め方: 変数を `false` にして(または消して)再起動する。閉じた PR は戻さない(必要なら人が再オープンする)。
+- 有効化は k8s のマニフェストで行う(コードの既定は無効)。
 
 **マージ済みの PR(ADR 0008 の ⑩、ADR 0011)。** PR を開いた直後に、Run は PR の束縛(binding: リポジトリ、PR 番号、node id、base、kivra が commit した head SHA)を記録する。マージ済みの PR は、binding があれば `TrustedPrMergeAuthority` で検証し、検証に通ったときだけ `COMPLETED` になる(理由 `PR_MERGED`)。検証は GitHub の読み取りだけで行い、PR 本文や人の申告は根拠にしない。kivra は PR をマージも閉じもしない。
 
@@ -300,6 +319,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 待機理由と意味:
 
 - `AWAITING_MERGE_VERIFICATION`: 認証器が答えない(未配線、または GitHub の一時的な障害)。自動で再試行する。
+- `AWAITING_PR_CLOSE`: レビューの期限が過ぎ、kivra が PR を閉じようとしているが、まだ閉じられていない(§4.3a。有効時のみ)。自動で再試行し、5 回で諦めて Run を取り消す。
 - `MERGE_NOT_VERIFIED`: 認証器が検証を拒否した。ログの `code` に固定の理由が出る(例: `HEAD_SHA_MISMATCH` は、マージ後に head が変わった、`AUTHOR_MISMATCH` は PR の作者が kivra の App ではない、`MERGE_COMMIT_SHA_MISSING` はマージの SHA が無い)。自動では解決しない。運用者が PR と Run を確認する。
 - `BINDING_MISSING`: PR は開いているが binding が無い。binding の記録より前に開かれた Run(既存の占有 Run)がこれに当たる。kivra は binding を自分で組み立てない(GitHub の値から推測しない)ため、完了させない。運用者が確認して解消する。束縛が無い Run は §4.1b で解放する(束縛がある Run は、この待機理由にならない)。
 

@@ -59,6 +59,12 @@ interface DevelopmentRunStore {
     /** The branch update attempts of the run: (all, at or after [since]). */
     fun countRebaseAttempts(runId: RunId, since: Instant): Pair<Int, Int>
 
+    /** Audits one step of the closing of a timed-out pull request (ADR 0008 追補 2026-11-18). Fenced; the run row is not touched. */
+    fun recordPrAbandonClose(lease: Lease, action: String, prNumber: Long, code: String?)
+
+    /** The attempts and the comment of the closing of the run's timed-out pull request so far. */
+    fun prAbandonCloseTrail(runId: RunId): net.kigawa.kivra.db.PrAbandonCloseTrail
+
     /** Moves the recorded pull request head to [toHead] and audits it, in one transaction (issue #276). Fenced. */
     fun rebindPullRequestHead(lease: Lease, expectedVersion: Long, fromHead: String, toHead: String, reasonCode: String)
 }
@@ -101,6 +107,11 @@ class DbDevelopmentRunStore(
         runs.recordRebaseHold(lease, fromHead, reasonCode, actor)
 
     override fun countRebaseAttempts(runId: RunId, since: Instant): Pair<Int, Int> = runs.countRebaseAttempts(runId, since)
+
+    override fun recordPrAbandonClose(lease: Lease, action: String, prNumber: Long, code: String?) =
+        runs.recordPrAbandonClose(lease, action, prNumber, code, actor)
+
+    override fun prAbandonCloseTrail(runId: RunId): net.kigawa.kivra.db.PrAbandonCloseTrail = runs.prAbandonCloseTrail(runId)
 
     override fun rebindPullRequestHead(lease: Lease, expectedVersion: Long, fromHead: String, toHead: String, reasonCode: String) =
         runs.rebindPullRequestHead(lease, expectedVersion, fromHead, toHead, reasonCode, actor)

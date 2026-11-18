@@ -32,6 +32,7 @@ import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.or
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
 import org.jetbrains.exposed.sql.count
 import org.jetbrains.exposed.sql.insert
@@ -234,6 +235,23 @@ class ActiveSelfDevLimitException : RuntimeException("active self-development ru
 const val PR_REBASE_ATTEMPTED = "PR_REBASE_ATTEMPTED"
 const val PR_REBASE_REBOUND = "PR_REBASE_REBOUND"
 const val PR_REBASE_HELD = "PR_REBASE_HELD"
+
+/**
+ * Audit actions of the closing of a timed-out pull request (ADR 0008 追補 2026-11-18). They carry the pull request number and fixed codes
+ * only: never a title, a body, the comment text or provider text.
+ * - [PR_ABANDON_CLOSE_ATTEMPTED]: written before the writes of one attempt (the attempts are counted from these rows).
+ * - [PR_ABANDON_COMMENTED]: the comment was posted, or its outcome is unknown (it is then never posted again).
+ * - [PR_ABANDON_CLOSED]: the pull request was closed by kivra.
+ * - [PR_ABANDON_CLOSE_GAVE_UP]: the attempts ran out; the run is abandoned with the pull request left as it is.
+ */
+const val PR_ABANDON_CLOSE_ATTEMPTED = "PR_ABANDON_CLOSE_ATTEMPTED"
+const val PR_ABANDON_COMMENTED = "PR_ABANDON_COMMENTED"
+const val PR_ABANDON_CLOSED = "PR_ABANDON_CLOSED"
+const val PR_ABANDON_CLOSE_GAVE_UP = "PR_ABANDON_CLOSE_GAVE_UP"
+private val PR_ABANDON_ACTIONS = setOf(PR_ABANDON_CLOSE_ATTEMPTED, PR_ABANDON_COMMENTED, PR_ABANDON_CLOSED, PR_ABANDON_CLOSE_GAVE_UP)
+
+/** What the audit holds about the closing of a run's timed-out pull request: the attempts so far, and whether the comment went out. */
+data class PrAbandonCloseTrail(val attempts: Int, val commented: Boolean)
 
 /** How many characters of a commit id an audit payload keeps. */
 const val HEAD_PREFIX_CHARS = 12
@@ -811,6 +829,39 @@ class DevelopmentRunRepository(
                 ),
             )
         }
+    }
+
+    /**
+     * Writes one audit row of the closing of a timed-out pull request (ADR 0008 追補 2026-11-18). Fenced by [lease]. Audit only: the run
+     * row is not touched (its version and `updated_at` stay, so the review timeout keeps counting from the same point). [action] is one of
+     * the PR_ABANDON_ actions; [code] is a fixed code or null.
+     */
+    fun recordPrAbandonClose(lease: Lease, action: String, prNumber: Long, code: String?, actor: String) {
+        require(action in PR_ABANDON_ACTIONS) { "not a pull request close action" }
+        require(code == null || CODE_SHAPE.matches(code)) { "code must be a fixed code" }
+        transaction(database) {
+            requireLease(lease)
+            val row = DevelopmentRunsTable.selectAll().where { DevelopmentRunsTable.runId eq lease.runId.value }.single()
+            audit.append(
+                this, lease.runId,
+                AuditEntry(
+                    actor = actor, action = action, result = "OK", resource = "task:${row[DevelopmentRunsTable.taskId]}",
+                    traceId = row[DevelopmentRunsTable.traceId],
+                    payload = buildJsonObject {
+                        put("prNumber", prNumber)
+                        if (code != null) put("code", code)
+                    }.toString(),
+                ),
+            )
+        }
+    }
+
+    /** The audit trail of the closing of the run's timed-out pull request (see [recordPrAbandonClose]). Read-only. */
+    fun prAbandonCloseTrail(runId: RunId): PrAbandonCloseTrail = transaction(database) {
+        val actions = AuditEventsTable.selectAll()
+            .where { (AuditEventsTable.runId eq runId.value) and (AuditEventsTable.action inList listOf(PR_ABANDON_CLOSE_ATTEMPTED, PR_ABANDON_COMMENTED)) }
+            .map { it[AuditEventsTable.action] }
+        PrAbandonCloseTrail(attempts = actions.count { it == PR_ABANDON_CLOSE_ATTEMPTED }, commented = PR_ABANDON_COMMENTED in actions)
     }
 
     /**

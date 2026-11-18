@@ -125,6 +125,11 @@ class SelfDevRunner(
      * incident issue. Null (the default, and the production value while `KIVRA_SELFDEV_AUTO_FIX_ENABLED` is off) changes nothing.
      */
     private val incidentOrigin: IncidentRunOrigin? = null,
+    /**
+     * Closes the pull request of a run whose review timed out, before the run is abandoned (ADR 0008 追補 2026-11-18). Null (the default,
+     * and the production value while `KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED` is off) leaves the pull request open, as before.
+     */
+    private val abandonCloser: PrAbandonCloser? = null,
 ) {
     init {
         require(config.runtime == SelfDevRuntime.API || coding != null) { "the CLI runtime needs a coding patch source" }
@@ -442,9 +447,15 @@ class SelfDevRunner(
             if (reconcileMergedHead(lease, run, pullRequest)) return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
             return completeMergedPullRequest(lease, run)
         }
-        val abandoned = pullRequest.state == PullRequestState.CLOSED ||
-            clock.instant().isAfter(run.updatedInstant().plus(config.prReviewTimeout))
+        val timedOut = clock.instant().isAfter(run.updatedInstant().plus(config.prReviewTimeout))
+        val abandoned = pullRequest.state == PullRequestState.CLOSED || timedOut
         if (abandoned) {
+            // ADR 0008 追補 2026-11-18: kivra's own timed-out pull request is closed first; the run is abandoned only once it is closed
+            // (or the closing is not applicable, or gave up). A close that did not land keeps the run, and the next call tries again.
+            if (timedOut && abandonCloser != null) {
+                val outcome = abandonCloser.closeTimedOut(lease, run, pullRequest) { renewOrThrow(lease) }
+                if (outcome is PrAbandonCloser.Outcome.Retry) return Waiting(WaitReason.AWAITING_PR_CLOSE, outcome.code)
+            }
             val closed = runs.closeAbandonedPullRequest(lease, currentVersion(lease))
             return Advanced(run.state, closed.state, PR_ABANDONED)
         }

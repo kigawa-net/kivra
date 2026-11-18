@@ -86,6 +86,11 @@ class SelfDevSettings private constructor(
     val prRebaseEnabled: Boolean = false,
     /** `KIVRA_SELFDEV_PR_REBASE_MAX_READS_PER_TICK` (issue #351). Read only when [prRebaseEnabled]. */
     val prRebaseMaxReadsPerTick: Int = PrRebaseSettings.DEFAULT_MAX_READS_PER_TICK,
+    /**
+     * `KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED` (ADR 0008 追補 2026-11-18). Off by default: a timed-out pull request is left open, as before.
+     * Read only when [enabled].
+     */
+    val prAbandonCloseEnabled: Boolean = false,
 ) {
     override fun toString(): String = "SelfDevSettings(enabled=$enabled)"
 
@@ -94,6 +99,9 @@ class SelfDevSettings private constructor(
 
         /** Keeps waiting pull requests on top of the base (issue #276). Off by default. */
         const val ENV_PR_REBASE_ENABLED = "KIVRA_SELFDEV_PR_REBASE_ENABLED"
+
+        /** Closes kivra's own pull request when its review times out (ADR 0008 追補 2026-11-18). Off by default. */
+        const val ENV_PR_ABANDON_CLOSE_ENABLED = "KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED"
 
         /** The GitHub read budget of one tick for the pull request branch update (issue #351). Read only when the update is on. */
         const val ENV_PR_REBASE_MAX_READS_PER_TICK = "KIVRA_SELFDEV_PR_REBASE_MAX_READS_PER_TICK"
@@ -218,8 +226,17 @@ class SelfDevSettings private constructor(
                 fx = fx,
                 prRebaseEnabled = prRebase,
                 prRebaseMaxReadsPerTick = if (prRebase) prRebaseMaxReadsPerTick(env) else PrRebaseSettings.DEFAULT_MAX_READS_PER_TICK,
+                prAbandonCloseEnabled = prAbandonCloseEnabled(env),
             )
         }
+
+        /** The message names the variable, never the value. */
+        private fun prAbandonCloseEnabled(env: Map<String, String>): Boolean =
+            when (env[ENV_PR_ABANDON_CLOSE_ENABLED]?.trim()) {
+                null, "", "false" -> false
+                "true" -> true
+                else -> throw IllegalStateException("$ENV_PR_ABANDON_CLOSE_ENABLED must be true or false")
+            }
 
         private fun prRebaseEnabled(env: Map<String, String>): Boolean =
             when (env[ENV_PR_REBASE_ENABLED]?.trim()) {

@@ -39,6 +39,12 @@ enum class WaitReason {
     AWAITING_HUMAN_REVIEW,
 
     /**
+     * The review timed out and kivra is closing its pull request (ADR 0008 追補 2026-11-18), but the close has not landed yet (the reason
+     * code is in [AdvanceResult.Waiting]). The run stays in PULL_REQUEST and the next call tries again, a bounded number of times.
+     */
+    AWAITING_PR_CLOSE,
+
+    /**
      * The pull request is merged, but the merge Authority cannot answer yet (no Authority in this deployment, or a provider
      * error). The run stays in PULL_REQUEST and is checked again on the next call.
      */

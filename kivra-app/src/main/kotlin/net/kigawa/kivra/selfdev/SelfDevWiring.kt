@@ -222,6 +222,18 @@ internal fun buildSelfDev(
     } else {
         null
     }
+    // Off unless KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED=true (ADR 0008 追補 2026-11-18). When off, a timed-out pull request is left open.
+    val abandonCloser = if (settings.prAbandonCloseEnabled) {
+        PrAbandonCloser(
+            repo = config.repo,
+            botUserId = botUserId.reveal().toLong(),
+            github = github,
+            closer = github,
+            runs = DbDevelopmentRunStore(runs),
+        )
+    } else {
+        null
+    }
     // Issue #226: the incident fix. Off unless its switch is exactly true. It needs the autopilot, which plans and dispatches the task it submits;
     // off, the runner gets no origin, so a Run is never marked as a fix.
     val fixSettings = IncidentFixSettings.fromEnv(env)
@@ -246,6 +258,7 @@ internal fun buildSelfDev(
         ),
         prRebaser = prRebaser,
         incidentOrigin = incidentOrigin,
+        abandonCloser = abandonCloser,
     )
     val worker = SelfDevWorker(
         activeRunIds = { runs.activeSelfDevRunIds() },

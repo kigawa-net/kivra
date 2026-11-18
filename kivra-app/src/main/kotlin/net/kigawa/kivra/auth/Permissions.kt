@@ -49,6 +49,12 @@ enum class Permission {
 
     /** Create, re-role, bind and disable assignees. */
     ASSIGNEE_MANAGE,
+
+    /** Submit a request for a Task (ADR 0025) and cancel one's own. Held by the roles that may submit a Task (SPEND_START). */
+    REQUEST_SUBMIT,
+
+    /** Approve or reject a Task request (ADR 0025). The requester must still differ from the decider. ADMIN and APPROVER hold it. */
+    REQUEST_DECIDE,
 }
 
 private val OPERATOR_PERMISSIONS = setOf(
@@ -60,14 +66,15 @@ private val OPERATOR_PERMISSIONS = setOf(
     Permission.GOAL_WRITE,
     Permission.SPEND_START,
     Permission.BUDGET_OVERRIDE,
+    Permission.REQUEST_SUBMIT,
 )
 
 /** The fixed table. The database holds only assignees, roles and bindings, never this. */
 val ROLE_PERMISSIONS: Map<Role, Set<Permission>> = mapOf(
-    Role.ADMIN to (OPERATOR_PERMISSIONS + Permission.STOP_DECIDE + Permission.ASSIGNEE_MANAGE),
+    Role.ADMIN to (OPERATOR_PERMISSIONS + Permission.STOP_DECIDE + Permission.ASSIGNEE_MANAGE + Permission.REQUEST_DECIDE),
     Role.OPERATOR to OPERATOR_PERMISSIONS,
-    Role.APPROVER to setOf(Permission.READ, Permission.STOP_REQUEST, Permission.STOP_DECIDE),
-    Role.AI to setOf(Permission.READ, Permission.STOP_REQUEST, Permission.SPEND_START),
+    Role.APPROVER to setOf(Permission.READ, Permission.STOP_REQUEST, Permission.STOP_DECIDE, Permission.REQUEST_DECIDE),
+    Role.AI to setOf(Permission.READ, Permission.STOP_REQUEST, Permission.SPEND_START, Permission.REQUEST_SUBMIT),
     Role.VIEWER to setOf(Permission.READ),
     Role.AI_APPROVER to setOf(Permission.STOP_DECIDE_AUTO, Permission.READ),
 )
@@ -214,7 +221,11 @@ class PermissionService(
         !legacyAdmin -> NO_ACCESS
         ownerKey == aiPrincipal -> PrincipalAccess(Role.AI, LEGACY_AI_PERMISSIONS, AccessSource.ENV_AI)
         ownerKey == rootApprover ->
-            PrincipalAccess(Role.OPERATOR, OPERATOR_PERMISSIONS + Permission.STOP_DECIDE, AccessSource.LEGACY_DEFAULT)
+            PrincipalAccess(
+                Role.OPERATOR,
+                OPERATOR_PERMISSIONS + Permission.STOP_DECIDE + Permission.REQUEST_DECIDE,
+                AccessSource.LEGACY_DEFAULT,
+            )
         else -> PrincipalAccess(Role.OPERATOR, OPERATOR_PERMISSIONS, AccessSource.LEGACY_DEFAULT)
     }
 

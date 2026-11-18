@@ -17,6 +17,7 @@ import net.kigawa.kivra.db.AuditTrailEntry
 import net.kigawa.kivra.db.DevelopmentRun
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.ProjectRepository
+import net.kigawa.kivra.db.REQUEST_RUN_KEY_PREFIX
 import net.kigawa.kivra.db.SELF_DEV_TASK_PREFIX
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.github.RepoRef
@@ -189,6 +190,11 @@ internal fun Route.configureTaskApiRoutes(runs: DevelopmentRunRepository, identi
         val key = validatedText(request.idempotencyKey, MAX_IDEMPOTENCY_KEY_CODE_POINTS)
         if (title == null || key == null) {
             call.respond(HttpStatusCode.BadRequest, TaskApiError("title must be 1-200 characters and idempotencyKey 1-128 characters, without control characters"))
+            return@post
+        }
+        // The prefix belongs to the Runs of approval requests (ADR 0025 section 3): a Task API key may not collide with them.
+        if (key.startsWith(REQUEST_RUN_KEY_PREFIX)) {
+            call.respond(HttpStatusCode.BadRequest, TaskApiError("idempotencyKey must not start with $REQUEST_RUN_KEY_PREFIX"))
             return@post
         }
         when (val result = runs.submitTask(principal, key, title)) {

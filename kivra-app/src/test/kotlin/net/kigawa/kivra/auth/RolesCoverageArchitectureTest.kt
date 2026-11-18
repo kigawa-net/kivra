@@ -145,6 +145,13 @@ class RolesCoverageArchitectureTest {
         "POST /api/selfdev/assignees/{id}/tokens" to Permission.ASSIGNEE_MANAGE,
         "GET /api/selfdev/assignees/{id}/tokens" to Permission.ASSIGNEE_MANAGE,
         "POST /api/selfdev/assignees/{id}/tokens/{tokenRef}/revoke" to Permission.ASSIGNEE_MANAGE,
+        // The approval requests for a Task (ADR 0025): submit and cancel by the requester, decide by an approver who is not the requester.
+        "POST /api/requests" to Permission.REQUEST_SUBMIT,
+        "GET /api/requests" to Permission.READ,
+        "GET /api/requests/{id}" to Permission.READ,
+        "POST /api/requests/{id}/approve" to Permission.REQUEST_DECIDE,
+        "POST /api/requests/{id}/reject" to Permission.REQUEST_DECIDE,
+        "POST /api/requests/{id}/cancel" to Permission.REQUEST_SUBMIT,
     )
 
     /** Routes that need no permission, on purpose: public pages and probes, the agent's own API (its own token), and the dev-only routes. */
@@ -316,6 +323,8 @@ class RolesCoverageArchitectureTest {
         // PR T3: the assignee admin API and /me share one `operators.authenticate(` (the roles' routes, then `guard.resolve`).
         "routes/SelfDevAssigneeRoutes.kt" to 1,
         "routes/TaskApiRoutes.kt" to 4,
+        // ADR 0025: the six approval-request handlers each resolve the Task API identity once.
+        "routes/TaskRequestRoutes.kt" to 6,
         "routes/OperationApiRoutes.kt" to 1,
         // Issue #387: the Project API now resolves the caller's Task API identity once per handler.
         "routes/ProjectRoutes.kt" to 1,

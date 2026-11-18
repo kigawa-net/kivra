@@ -882,8 +882,11 @@ data class BudgetOperatorStatus(
 /** An unpriced reservation due for the automatic release, with the scope and period an acknowledgement names. */
 data class DueUnpriced(val reservationKey: String, val scopeId: String, val period: String)
 
-/** The outcome of one automatic release pass: released now, released before (another replica), and failed (retried next pass). */
-data class AutoReleaseReport(val released: Int, val alreadyReleased: Int, val failed: Int)
+/**
+ * The outcome of one automatic release pass: released now, released before (another replica), and failed (retried next pass). [reasons]
+ * counts the released runs by their fixed state reason (empty when the pass does not release self-development runs by reason).
+ */
+data class AutoReleaseReport(val released: Int, val alreadyReleased: Int, val failed: Int, val reasons: Map<String, Int> = emptyMap())
 
 /** The tenant's daily budget on one JST calendar day (scope `<tenant>:daily`). Amounts in yen. */
 data class DailyBudgetStatus(

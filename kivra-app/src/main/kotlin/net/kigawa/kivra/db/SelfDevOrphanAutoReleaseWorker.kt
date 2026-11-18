@@ -36,13 +36,13 @@ class SelfDevOrphanAutoReleaseWorker(
         release(grace, batch).also { r ->
             if (r.failed > 0) {
                 logger.warn(
-                    "selfdev orphan auto release: code=AUTO_RELEASED_ORPHAN released={} alreadyReleased={} failed={}",
-                    r.released, r.alreadyReleased, r.failed,
+                    "selfdev orphan auto release: code=AUTO_RELEASED_ORPHAN released={} alreadyReleased={} failed={} reasons={}",
+                    r.released, r.alreadyReleased, r.failed, r.reasons,
                 )
             } else if (r.released > 0) {
                 logger.info(
-                    "selfdev orphan auto release: code=AUTO_RELEASED_ORPHAN released={} alreadyReleased={} failed={}",
-                    r.released, r.alreadyReleased, r.failed,
+                    "selfdev orphan auto release: code=AUTO_RELEASED_ORPHAN released={} alreadyReleased={} failed={} reasons={}",
+                    r.released, r.alreadyReleased, r.failed, r.reasons,
                 )
             }
         }

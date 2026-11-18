@@ -88,7 +88,7 @@ class SelfDevOrphanAutoReleaseTest {
             val attemptId = assertIs<EnqueueResult.Enqueued>(queued).attempt.attemptId
             transaction(db.database) { execUpdate("UPDATE coding_attempts SET state = 'FAILED', error_code = 'NEEDS_HUMAN' WHERE attempt_id = ?", attemptId) }
         })
-        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertEquals(AutoReleaseReport(1, 0, 0, mapOf(AUTO_RELEASED_NEEDS_HUMAN_REASON to 1)), db.runs.autoReleaseUnknownRuns(grace, 50))
         val run = db.runs.get(id)!!
         assertEquals(DevelopmentRunState.CANCELLED, run.state)
         assertEquals(AUTO_RELEASED_NEEDS_HUMAN_REASON, run.stateReason)
@@ -141,7 +141,10 @@ class SelfDevOrphanAutoReleaseTest {
         val orphan = db.orphanedRun(ageMinutes = 61)
         val needsHuman = db.orphanedRun(reason = CODING_NEEDS_HUMAN_REASON, ageMinutes = 60)
         val other = db.orphanedRun(reason = "PR_NOT_FOUND")
-        assertEquals(AutoReleaseReport(2, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertEquals(
+            AutoReleaseReport(2, 0, 0, mapOf(AUTO_RELEASED_ORPHAN_REASON to 1, AUTO_RELEASED_NEEDS_HUMAN_REASON to 1)),
+            db.runs.autoReleaseUnknownRuns(grace, 50),
+        )
         assertEquals(AUTO_RELEASED_ORPHAN_REASON, db.runs.get(orphan)!!.stateReason)
         assertEquals(AUTO_RELEASED_NEEDS_HUMAN_REASON, db.runs.get(needsHuman)!!.stateReason)
         db.assertUntouched(other, "PR_NOT_FOUND")
@@ -150,7 +153,7 @@ class SelfDevOrphanAutoReleaseTest {
     @Test
     fun `an orphaned run past the grace is released with the audit and the outbox in one go`() = TestDb().use { db ->
         val id = db.orphanedRun()
-        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertEquals(AutoReleaseReport(1, 0, 0, mapOf(AUTO_RELEASED_ORPHAN_REASON to 1)), db.runs.autoReleaseUnknownRuns(grace, 50))
         val run = db.runs.get(id)!!
         assertEquals(DevelopmentRunState.CANCELLED, run.state)
         assertEquals(AUTO_RELEASED_ORPHAN_REASON, run.stateReason)
@@ -178,7 +181,7 @@ class SelfDevOrphanAutoReleaseTest {
     @Test
     fun `a second pass releases nothing more`() = TestDb().use { db ->
         val id = db.orphanedRun()
-        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertEquals(AutoReleaseReport(1, 0, 0, mapOf(AUTO_RELEASED_ORPHAN_REASON to 1)), db.runs.autoReleaseUnknownRuns(grace, 50))
         assertEquals(AutoReleaseReport(0, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
         assertIs<UnknownAutoReleaseResult.NotEligible>(db.runs.autoReleaseUnknownSelfDev(id, grace))
         assertEquals(1, db.releasedAudits(id))
@@ -270,12 +273,12 @@ class SelfDevOrphanAutoReleaseTest {
     @Test
     fun `one pass releases at most the batch, oldest first, and the next pass the rest`() = TestDb().use { db ->
         val ids = (1..3).map { db.orphanedRun(ageMinutes = 60L - it) }
-        assertEquals(AutoReleaseReport(2, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 2))
+        assertEquals(AutoReleaseReport(2, 0, 0, mapOf(AUTO_RELEASED_ORPHAN_REASON to 2)), db.runs.autoReleaseUnknownRuns(grace, 2))
         assertEquals(
             listOf(DevelopmentRunState.CANCELLED, DevelopmentRunState.CANCELLED, DevelopmentRunState.UNKNOWN),
             ids.map { db.runs.get(it)!!.state },
         )
-        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 2))
+        assertEquals(AutoReleaseReport(1, 0, 0, mapOf(AUTO_RELEASED_ORPHAN_REASON to 1)), db.runs.autoReleaseUnknownRuns(grace, 2))
     }
 
     @Test
@@ -285,7 +288,7 @@ class SelfDevOrphanAutoReleaseTest {
             org.jetbrains.exposed.sql.Database.connect(db.replicaDataSource()), db.outbox, db.audit, db.prAuthority,
         )
         assertEquals(listOf(id), replica.dueAutoReleasableSelfDev(grace, 50))
-        assertEquals(AutoReleaseReport(1, 0, 0), db.runs.autoReleaseUnknownRuns(grace, 50))
+        assertEquals(AutoReleaseReport(1, 0, 0, mapOf(AUTO_RELEASED_ORPHAN_REASON to 1)), db.runs.autoReleaseUnknownRuns(grace, 50))
         assertIs<UnknownAutoReleaseResult.NotEligible>(replica.autoReleaseUnknownSelfDev(id, grace))
         assertEquals(1, db.releasedAudits(id))
         assertEquals(1, db.cancelOutbox(id))

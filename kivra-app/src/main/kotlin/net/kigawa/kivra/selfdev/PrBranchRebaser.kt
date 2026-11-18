@@ -70,13 +70,16 @@ private class ReadBudgetExhausted : RuntimeException(null, null, false, false)
  * - **Behind (`behind_by` > 0 by the compare API), mergeable with no conflict, the head is still the recorded one**: the update is
  *   requested with `expected_head_sha` (after the audit row of the attempt is written). The new head is then verified and, only if it
  *   passes, recorded.
- * - **The head differs from the recorded one** (an update that landed later, or a push by a person): the new head is verified in the same
- *   way, and only a passing head is recorded. A head that does not pass stays, and the run waits for a person.
+ * - **The head differs from the recorded one** (an update that landed later, or a push by a person, including a rebase onto `main`): the
+ *   new head is verified in the same way, and only a passing head is recorded. A head that does not pass stays, and the run waits for a
+ *   person. A rebased head is recorded with its own reason code ([VERIFIED_REBASED]), so the trail tells it from kivra's own update.
  *
  * Verification of a new head `N` against the recorded head `O` and the current `main` head `M` (all must hold):
- * (a) `N` is a merge commit whose two parents are exactly `O` and `P`, two different commits. `P` is `M` or an ancestor of `M`
- *     (the compare API reports `ahead_by` 0 for `M...P`): `main` may have moved on since the update was made, and the update is still
- *     the same change.
+ * (a) `N` is a merge commit whose two parents are exactly `O` and `P`, two different commits, **or** (a person rebased the branch onto
+ *     `main` and force-pushed, issue: Run 01M7938HHQY5SD2W433XS9506M / PR #529) `N` has exactly one parent `P`, and `P` is not `O`. In
+ *     both shapes `P` is `M` or an ancestor of `M` (the compare API reports `ahead_by` 0 for `M...P`): `main` may have moved on since the
+ *     update was made, and the update is still the same change. A single-parent `N` whose parent is not on `main` (a commit added on top
+ *     of the pull request, or a rebase onto another branch) is refused.
  * (b) The pull request's own change set is the same before and after: the files that differ between `merge-base(O, P)` and `O` (path, mode
  *     and blob hash, sorted) equal the files that differ between `P` and `N`. If they differ, the changed lines of the pull request
  *     are compared (second step, `sameChangedLines`): the same paths, statuses `added`/`modified`/`removed`, patches present and within a
@@ -156,9 +159,9 @@ class PrBranchRebaser(
         if (pullRequest.authorId != botUserId) return Outcome.NoAction
         if (pullRequest.headSha == binding.headSha) return updateIfBehind(lease, run, binding, pullRequest, renew, version)
         // The head differs from the recorded one: a landed update or a push by a person. Only a verified head is recorded.
-        val verdict = verify(binding.headSha, pullRequest.headSha)
+        val (rebased, verdict) = verifyShape(binding.headSha, pullRequest.headSha)
         if (verdict != null) return held(run, verdict)
-        return rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version)
+        return rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version, if (rebased) VERIFIED_REBASED else VERIFIED)
     }
 
     /** Runs [body]. A read past the tick's budget ends it as [Outcome.Deferred]; nothing written before that point is undone. */
@@ -223,9 +226,9 @@ class PrBranchRebaser(
         }
         val newHead = observeNewHead(pullRequest.number, binding.headSha)
         if (newHead == null) return holdAfterAttempt(lease, run, binding.headSha, updateCode ?: NOT_OBSERVED)
-        val verdict = verify(binding.headSha, newHead)
+        val (rebased, verdict) = verifyShape(binding.headSha, newHead)
         if (verdict != null) return holdAfterAttempt(lease, run, binding.headSha, verdict)
-        return rebind(lease, run, binding.headSha, newHead, renew, version)
+        return rebind(lease, run, binding.headSha, newHead, renew, version, if (rebased) VERIFIED_REBASED else VERIFIED)
     }
 
     /**
@@ -265,17 +268,31 @@ class PrBranchRebaser(
      * Verifies [newHead] against [oldHead] and the current base head. Returns null when it passes, else the fixed reason code. Every read
      * is a read-only GET, and a failed or truncated read is a refusal, never a pass.
      */
-    private suspend fun verify(oldHead: String, newHead: String): String? {
+    /**
+     * Verifies [newHead] and tells its shape of the new head: true when it is a single-parent (rebased) head. The second value is null when it passes,
+     * else the fixed reason code.
+     */
+    private suspend fun verifyShape(oldHead: String, newHead: String): Pair<Boolean, String?> {
+        var rebased = false
+        val verdict = verifyHead(oldHead, newHead) { rebased = it }
+        return rebased to verdict
+    }
+
+    private suspend fun verifyHead(oldHead: String, newHead: String, shape: (Boolean) -> Unit): String? {
         if (newHead == oldHead) return PARENTS_MISMATCH
         val main = when (val r = read { github.getBranch(repo, baseBranch) }) {
             is GitHubResult.Success -> r.value?.headSha ?: return VERIFY_FAILED
             else -> return VERIFY_FAILED
         }
         val parents = (read { port.getCommitParents(repo, newHead) } as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
-        // (a) A merge of exactly two different commits, one of them the recorded head. The other one is the base as it was when the
-        // update was made: it is the current base head or one of its ancestors (main may have moved again since then).
-        if (parents.size != 2 || parents.toSet().size != 2 || oldHead !in parents) return PARENTS_MISMATCH
-        val other = parents.single { it != oldHead }
+        // (a) A merge of exactly two different commits, one of them the recorded head; or a single commit (a rebase onto main by a person)
+        // whose parent is not the recorded head. The other parent is the base as it was when the update was made: it is the current base
+        // head or one of its ancestors (main may have moved again since then). Checked below with ahead_by.
+        val other = when {
+            parents.size == 2 && parents.toSet().size == 2 && oldHead in parents -> parents.single { it != oldHead }
+            parents.size == 1 && parents.single() != oldHead -> parents.single().also { shape(true) }
+            else -> return PARENTS_MISMATCH
+        }
         val ahead = (read { port.getAheadBy(repo, main, other) } as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
         if (ahead < 0) return VERIFY_FAILED
         if (ahead > 0) return PARENTS_MISMATCH
@@ -358,9 +375,9 @@ class PrBranchRebaser(
         if (!pullRequest.merged) return@withinBudget Outcome.NoAction
         if (pullRequest.authorId != botUserId) return@withinBudget Outcome.NoAction
         if (pullRequest.headSha == binding.headSha) return@withinBudget Outcome.NoAction
-        val verdict = verify(binding.headSha, pullRequest.headSha)
+        val (rebased, verdict) = verifyShape(binding.headSha, pullRequest.headSha)
         if (verdict != null) return@withinBudget held(run, verdict)
-        rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version)
+        rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version, if (rebased) VERIFIED_REBASED else VERIFIED)
     }
 
     private suspend fun treeOf(commitSha: String): RepoTree? =
@@ -391,11 +408,19 @@ class PrBranchRebaser(
         }
     }
 
-    private fun rebind(lease: Lease, run: DevelopmentRun, fromHead: String, toHead: String, renew: () -> Unit, version: () -> Long): Outcome {
+    private fun rebind(
+        lease: Lease,
+        run: DevelopmentRun,
+        fromHead: String,
+        toHead: String,
+        renew: () -> Unit,
+        version: () -> Long,
+        code: String = VERIFIED,
+    ): Outcome {
         renew()
         return try {
-            runs.rebindPullRequestHead(lease, version(), fromHead, toHead, VERIFIED)
-            logger.info("pull request head rebound: runId={} code={}", run.runId.value, VERIFIED)
+            runs.rebindPullRequestHead(lease, version(), fromHead, toHead, code)
+            logger.info("pull request head rebound: runId={} code={}", run.runId.value, code)
             Outcome.Rebound
         } catch (e: LeaseLostException) {
             throw e
@@ -448,6 +473,9 @@ class PrBranchRebaser(
         val CHANGE_STATUSES = setOf("added", "modified", "removed")
 
         const val VERIFIED = "PR_REBASE_VERIFIED"
+
+        /** A head a person rebased onto main (one parent on main), verified to carry the same change and recorded. */
+        const val VERIFIED_REBASED = "PR_REBASE_VERIFIED_REBASED"
         const val OVERLAPPING_PATHS = "PR_REBASE_OVERLAPPING_PATHS"
         const val LIMIT_TOTAL = "PR_REBASE_LIMIT_TOTAL"
         const val UPDATE_UNKNOWN = "PR_REBASE_UPDATE_UNKNOWN"

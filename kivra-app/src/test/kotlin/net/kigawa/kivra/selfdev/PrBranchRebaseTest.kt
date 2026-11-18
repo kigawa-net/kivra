@@ -6,6 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import net.kigawa.kivra.core.DevelopmentRunState
 import net.kigawa.kivra.core.RunCompletionMode
@@ -368,6 +369,108 @@ class PrBranchRebaseTest {
             assertEquals(0, h.port.updateCalls)
             // The head move is audited as a rebind only: it is not an update request, so no attempt is counted.
             assertEquals(listOf(PR_REBASE_REBOUND), db.rebaseRows(runId).map { it.first })
+        }
+    }
+
+    /**
+     * Run 01M7938HHQY5SD2W433XS9506M / PR #529: a person rebased the branch onto main (one commit whose parent is main, the same change)
+     * and force-pushed, then squash-merged. The rebased head carries the recorded change, so it is recorded and the run completes.
+     */
+    @Test
+    fun aMergedPullRequestThatAPersonRebasedOntoMainWithTheSameChangeIsRecordedAndCompleted() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainMoves()
+            h.registerMerge(PERSON, "blob-new", parents = listOf(MAIN))
+            h.github.setPullHead(h.pr().number, PERSON)
+            h.humanMerges()
+            db.prAuthority.answer = { b -> FakeTrustedPrMergeAuthority.merged(b).copy(headSha = h.pr().headSha) }
+
+            assertEquals(Advanced(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.COMPLETED, "PR_MERGED"), h.runner().advance(runId))
+            assertEquals(PERSON, h.binding(runId))
+            assertEquals(0, h.port.updateCalls)
+            assertEquals(
+                listOf(PR_REBASE_REBOUND to """{"from":"${old.take(12)}","to":"${PERSON.take(12)}","reasonCode":"PR_REBASE_VERIFIED_REBASED"}"""),
+                db.rebaseRows(runId),
+            )
+        }
+    }
+
+    @Test
+    fun aRebasedHeadWhoseLinesMatchAfterMainChangedTheSameFileIsRecorded() = runBlocking {
+        // main changed docs/a.md too, so the blobs differ: the second step compares the changed lines (as for a merge head).
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val old = h.head()
+            h.mainChangesSamePath()
+            h.git.commit(PERSON, listOf(MAIN), BASE_TREE + ("docs/a.md" to ("100644" to "blob-rebased")))
+            h.compareOf(h.github.baseSha, old, listOf(modified("docs/a.md", BEFORE_PATCH)))
+            h.compareOf(MAIN, PERSON, listOf(modified("docs/a.md", "@@ -1,2 +1,2 @@\n-old\n+new\n main line\n")))
+            h.github.setPullHead(h.pr().number, PERSON)
+            h.humanMerges()
+            db.prAuthority.answer = { b -> FakeTrustedPrMergeAuthority.merged(b).copy(headSha = h.pr().headSha) }
+
+            assertEquals(Advanced(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.COMPLETED, "PR_MERGED"), h.runner().advance(runId))
+            assertEquals(PERSON, h.binding(runId))
+        }
+    }
+
+    @Test
+    fun aRebasedHeadThatIsNotTheSameChangeOrNotOnMainIsNotRecordedAndTheRunIsNotCompleted() = runBlocking {
+        val cases = listOf(
+            // The rebased commit changes the file differently from the recorded change.
+            "a different change" to { h: Harness -> h.registerMerge(PERSON, "blob-tampered", parents = listOf(MAIN)); "PR_REBASE_DIFF_CHANGED" },
+            // The rebased commit adds a file the recorded change did not have.
+            "an extra file" to { h: Harness ->
+                h.git.commit(PERSON, listOf(MAIN), BASE_TREE + ("other.md" to ("100644" to "blob-other")) + ("docs/a.md" to ("100644" to "blob-new")) + ("extra.md" to ("100644" to "blob-x")))
+                h.compareOf(h.github.baseSha, h.head(), listOf(modified("docs/a.md", BEFORE_PATCH)))
+                h.compareOf(MAIN, PERSON, listOf(modified("docs/a.md", BEFORE_PATCH), ComparedFile("extra.md", "added", "@@ -0,0 +1 @@\n+x\n")))
+                "PR_REBASE_DIFF_CHANGED"
+            },
+            // One parent, but not on main (rebased onto another branch).
+            "a parent off main" to { h: Harness ->
+                h.git.commit(OTHER, listOf(h.github.baseSha), BASE_TREE)
+                h.registerMerge(PERSON, "blob-new", parents = listOf(OTHER))
+                "PR_REBASE_PARENTS_MISMATCH"
+            },
+        )
+        for ((name, setUp) in cases) {
+            TestDb().use { db ->
+                val h = Harness(db)
+                val runId = h.openedRun()
+                val old = h.head()
+                h.mainMoves()
+                val code = setUp(h)
+                h.github.setPullHead(h.pr().number, PERSON)
+                h.humanMerges()
+                db.prAuthority.answer = { b -> FakeTrustedPrMergeAuthority.merged(b).copy(headSha = h.pr().headSha) }
+
+                // The rebind is refused, and the Authority then refuses the head mismatch: the run waits, as before.
+                repeat(2) { assertEquals(Waiting(WaitReason.MERGE_NOT_VERIFIED, "HEAD_SHA_MISMATCH"), h.runner().advance(runId), name) }
+                assertEquals(DevelopmentRunState.PULL_REQUEST, db.runs.get(runId)!!.state, name)
+                assertEquals(old, h.binding(runId), name)
+                assertEquals(emptyList(), db.rebaseRows(runId), "$name ($code)")
+            }
+        }
+    }
+
+    @Test
+    fun anOpenPullRequestThatAPersonRebasedOntoMainIsRecordedWithItsOwnCode() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            h.mainMoves()
+            h.registerMerge(PERSON, "blob-new", parents = listOf(MAIN))
+            h.github.setPullHead(h.pr().number, PERSON)
+
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_VERIFIED"), h.runner().advance(runId))
+            assertEquals(PERSON, h.binding(runId))
+            assertEquals(0, h.port.updateCalls)
+            assertEquals(listOf(PR_REBASE_REBOUND), db.rebaseRows(runId).map { it.first })
+            assertTrue(db.rebaseRows(runId).single().second!!.contains("PR_REBASE_VERIFIED_REBASED"))
         }
     }
 

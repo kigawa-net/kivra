@@ -2037,7 +2037,24 @@ dev での有効化の手順は §7.5。
 
 **タスクの失敗で止まった Goal**: 投入したタスクが失敗(`FAILED`)し、残りが見送り(`SKIPPED`)になって、全タスクが終わると、Dispatcher が Goal を `中止` にする(理由は「タスクが完了せずに終わった」。ADR 0011 §2.8)。
 手で止めたのではないので、「中止」の表示を見たら、まず詳細のタスクの状態と、§4.5 の失敗の原因を確かめる。全タスクが `COMPLETED` で終わったときは `完了` になる。
-次のタスクは投入されない。やり直すときは、新しい Goal を出す(`FAILED` のタスクを戻す HTTP の操作は無い)。
+次のタスクは投入されない。やり直すときは、下の「再投入」で `FAILED` のタスクを戻すか、新しい Goal を出す。
+
+**失敗したタスクの再投入と、止まったタスクの見送り(ADR 0011 追補 2026-11-18)**: 計画の途中のタスクが失敗(`FAILED`)や解放(`CANCELLED`)で終わると、
+それに依存する後続のタスクは `投入待ち`(`QUEUED`)のまま止まり、Goal も終わらない(自動の再投入はしない。§2.8)。運用者が次のどちらかを選ぶ。
+
+- **再投入**: `POST /api/selfdev/tasks/{id}/requeue`(`{"version": n}`、権限は承認と同じ `GOAL_WRITE`。AI の主体は 403)。画面ではタスクの詳細の「再投入」。
+  `FAILED` / `CANCELLED` のタスクが `投入待ち`(理由 `OPERATOR_REQUEUED`)に戻り、次の投入で **新しい Run が 1 つ**作られる(**費用が発生する**)。
+  投入キーは `ap:<taskId>:a<回数>` に作り直すので、再投入のたびに別の Run になり、同じ再投入が二重に Run を作ることは無い。同じ `version` で 2 回送ると、2 回目は 409(何も書かない)。
+  前の Run との結び付き(`run_id`)は外れる(前の Run は Run の一覧に残る)。承認者(`approved_by`)は変えない(再投入は承認ではない)。
+  計画が決着済み(Goal が `完了` / `中止`)のときは 409。計画の親(Goal の行)も 409。原因(§4.5、`CODING_CLI_NONZERO` など)を直さずに再投入すると、同じ失敗を繰り返す。
+- **見送り**: `POST /api/selfdev/tasks/{id}/reject`(承認待ちの見送りと同じ操作)。遷移表が許す `承認待ち` / `投入待ち` / `FAILED` / `CANCELLED` のタスクを `見送り`(`OPERATOR_SKIPPED`)にする。
+  投入済み(`SUBMITTED`)などは 409。依存先を見送っても後続は投入されない(依存は `COMPLETED` だけを満たす)ので、後続も見送る。全タスクが終わると、Goal は `中止`(タスクが完了せずに終わった)で決着する。
+- ログ: `autopilot operator action: action=TASK_REQUEUED actor=<ダイジェスト> taskId=… result=QUEUED reason=OPERATOR_REQUEUED`(見送りは `TASK_REJECTED`)。
+
+**投入されずに待っているタスクの見え方(ログ)**: Dispatcher は 10 秒ごとに、ガードの手前で投入しなかった `投入待ち` のタスクを数え、件数が前回から変わったとき、または 10 分ごとに 1 行出す。
+`autopilot dispatch waiting: dependencyPending=<依存先が未完了> dependencyFailed=<依存先が FAILED / CANCELLED / SKIPPED / STOPPED> orderHeld=<order が ACTIVE でない> siblingInFlight=<同じ計画の別タスクが投入中> refused=<その他の拒否>`。
+件数と固定の語だけで、タスクの ID・題名・本文は出ない。`dependencyFailed` が 0 でなければ、上の再投入か見送りが要る。`orderHeld` は order の一時停止・期限切れ(§7 の order の延長と再開)。
+起動時には `autopilot dispatcher started: intervalSeconds=10 batch=20 maxPendingPrs=… maxRunsPerDay=…` が 1 行出る。ガード(ブレーカー、PR 上限、予算、日次上限)に当たったタスクは、従来どおり `BLOCKED` になり、`autopilot dispatch blocked` が出る。
 投入の主体は、タスクを承認した運用者。承認が無い自動承認のタスクは、Goal を作った人の名で投入される(`approved_by` が無いとき)。
 
 **再計画**: Goal が `停止中` で、理由が計画段階(`PLAN_INVALID` / `PLAN_BUDGET_HOLD` / `PLAN_CALL_FAILED`)のときだけ、「再計画する」が出る(`POST .../replan`)。Planner が新しい計画を作る。計画の回数の上限は 3 回。

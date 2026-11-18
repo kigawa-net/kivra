@@ -180,6 +180,22 @@ internal fun SelfDevOperatorRepository.rejectAsOperator(taskId: String, expected
     return result
 }
 
+/**
+ * An operator's requeue of a FAILED or CANCELLED Task (`POST /api/selfdev/tasks/{id}/requeue`, ADR 0011 section 5.4): the Task goes back to
+ * QUEUED with a fresh key, so the dispatcher makes one new Run for it. Kept as a function like approve and reject, so another entry point
+ * (a project chat action) can share the transition and the audit line. The caller passed GOAL_WRITE.
+ */
+internal fun SelfDevOperatorRepository.requeueAsOperator(taskId: String, expectedVersion: Long, principal: String): TaskTransition {
+    val result = requeueTask(taskId, expectedVersion)
+    if (result is TaskTransition.Moved) {
+        operatorLog.info(
+            "autopilot operator action: action=TASK_REQUEUED actor={} taskId={} result=QUEUED reason={}",
+            operatorTag(principal), taskId, AutopilotReason.OPERATOR_REQUEUED,
+        )
+    }
+    return result
+}
+
 internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
     get("/api/selfdev/autopilot") {
         val caller = deps.requireOperator(call) ?: return@get
@@ -392,6 +408,23 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
             is TaskTransition.Moved -> {
                 call.respond(HttpStatusCode.OK, r.row.summary())
             }
+            else -> call.respondTransition(r)
+        }
+    }
+
+    post("/api/selfdev/tasks/{id}/requeue") {
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        val taskId = taskIdOf(call)
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.task_requeue", "TASK_REQUEUE", deps.projectOfTask(taskId))) return@post
+        val version = call.readVersion() ?: return@post
+        if (taskId == null) {
+            call.respond(HttpStatusCode.NotFound, GoalError(TASK_NOT_FOUND))
+            return@post
+        }
+        when (val r = deps.operations.requeueAsOperator(taskId, version, principal)) {
+            is TaskTransition.Moved -> call.respond(HttpStatusCode.OK, r.row.summary())
             else -> call.respondTransition(r)
         }
     }

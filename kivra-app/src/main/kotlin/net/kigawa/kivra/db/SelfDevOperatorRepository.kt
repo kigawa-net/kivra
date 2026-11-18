@@ -175,6 +175,10 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
     }
 
+    /**
+     * An operator skips a task: any state the transition table lets go to SKIPPED with OPERATOR_SKIPPED (PENDING_APPROVAL, QUEUED, FAILED,
+     * CANCELLED; ADR 0011 section 5.4). The table decides; the update is guarded on the state that was checked. A plan root is refused.
+     */
     fun skipTask(taskId: String, expectedVersion: Long): TaskTransition = transaction(database) {
         val current = lockWithParent(taskId) ?: return@transaction TaskTransition.NotFound
         if (current.version != expectedVersion) return@transaction TaskTransition.StaleVersion
@@ -183,10 +187,35 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         if (decision is TransitionDecision.Refused) return@transaction TaskTransition.Refused(decision.reason)
         val now = utcNow(clock)
         val changed = execUpdate(
-            "UPDATE selfdev_tasks SET state = 'SKIPPED', state_reason = 'OPERATOR_SKIPPED', version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = 'PENDING_APPROVAL'",
-            now, taskId, expectedVersion)
+            "UPDATE selfdev_tasks SET state = 'SKIPPED', state_reason = 'OPERATOR_SKIPPED', version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = ?",
+            now, taskId, expectedVersion, current.state.name)
         if (changed != 1) return@transaction TaskTransition.StaleVersion
         settlePlanOf(current.parentTaskId, now)
+        TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
+    }
+
+    /**
+     * An operator submits a FAILED or CANCELLED task again (ADR 0011 section 5.4): -> QUEUED with OPERATOR_REQUEUED, only on an edge of the
+     * transition table. Refused for a plan root, and when the plan has already settled (DONE or STOPPED, [reopensUnderClosedPlan]).
+     *
+     * Each requeue costs a new Run, so it is guarded twice: the version (a second request with the same version is StaleVersion and writes
+     * nothing), and a fresh idempotency key `ap:<task>:a<attempts>` (the attempts grow with every submission, so each requeue makes exactly
+     * one new Run, and a repeated submission of the same requeue finds that same Run). The previous Run is detached (`run_id` NULL), so an
+     * interrupted submission is picked up again by the dispatcher like a first one. `approved_by` is left as it is: a requeue is not an
+     * approval, and an auto-approved task keeps its scope check.
+     */
+    fun requeueTask(taskId: String, expectedVersion: Long): TaskTransition = transaction(database) {
+        val current = lockWithParent(taskId) ?: return@transaction TaskTransition.NotFound
+        if (current.version != expectedVersion) return@transaction TaskTransition.StaleVersion
+        if (current.isPlanRoot) return@transaction TaskTransition.Refused(TransitionRefusal.GUARD_FAILED)
+        if (reopensUnderClosedPlan(current)) return@transaction TaskTransition.Refused(TransitionRefusal.GUARD_FAILED)
+        val decision = checkTaskTransition(current.state, TaskState.QUEUED, AutopilotReason.OPERATOR_REQUEUED, contextOf(current))
+        if (decision is TransitionDecision.Refused) return@transaction TaskTransition.Refused(decision.reason)
+        val key = "ap:${current.taskId}:a${current.attempts}"
+        val changed = execUpdate(
+            "UPDATE selfdev_tasks SET state = 'QUEUED', state_reason = 'OPERATOR_REQUEUED', idempotency_key = ?, run_id = NULL, version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = ?",
+            key, utcNow(clock), taskId, expectedVersion, current.state.name)
+        if (changed != 1) return@transaction TaskTransition.StaleVersion
         TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
     }
 
@@ -362,6 +391,19 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         SelfDevTasksTable.selectAll()
             .where { SelfDevTasksTable.taskId inList ids }
             .associate { it[SelfDevTasksTable.taskId] to TaskState.valueOf(it[SelfDevTasksTable.state]) }
+    }
+
+    /**
+     * True when another planned task of [task]'s plan is SUBMITTING or SUBMITTED (one Run per plan at a time, ADR 0011 section 5.1). A read
+     * for the dispatcher's waiting summary; [beginSubmission] checks the same under the root's lock. A task with no plan root is false.
+     */
+    fun siblingInFlight(task: SelfDevTask): Boolean {
+        val parent = task.parentTaskId ?: return false
+        return transaction(database) {
+            execQuery(
+                "SELECT COUNT(*) FROM selfdev_tasks WHERE parent_task_id = ? AND task_id <> ? AND state IN ('SUBMITTING', 'SUBMITTED')", parent, task.taskId,
+            ) { it.getLong(1) }.single() > 0
+        }
     }
 
     /**

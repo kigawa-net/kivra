@@ -70,9 +70,10 @@ private class ReadBudgetExhausted : RuntimeException(null, null, false, false)
  * - **Behind (`behind_by` > 0 by the compare API), mergeable with no conflict, the head is still the recorded one**: the update is
  *   requested with `expected_head_sha` (after the audit row of the attempt is written). The new head is then verified and, only if it
  *   passes, recorded.
- * - **The head differs from the recorded one** (an update that landed later, or a push by a person, including a rebase onto `main`): the
- *   new head is verified in the same way, and only a passing head is recorded. A head that does not pass stays, and the run waits for a
- *   person. A rebased head is recorded with its own reason code ([VERIFIED_REBASED]), so the trail tells it from kivra's own update.
+ * - **The head differs from the recorded one** (an update that landed later, or a push by a person): the new head is verified in the same
+ *   way, and only a passing head is recorded. A head that does not pass stays, and the run waits for a person. A pull request that is
+ *   already **merged** also accepts a head a person rebased onto `main` (one parent), recorded with its own reason code
+ *   ([VERIFIED_REBASED]); an open pull request does not, so the auto-merge never decides on a head a person pushed.
  *
  * Verification of a new head `N` against the recorded head `O` and the current `main` head `M` (all must hold):
  * (a) `N` is a merge commit whose two parents are exactly `O` and `P`, two different commits, **or** (a person rebased the branch onto
@@ -159,7 +160,7 @@ class PrBranchRebaser(
         if (pullRequest.authorId != botUserId) return Outcome.NoAction
         if (pullRequest.headSha == binding.headSha) return updateIfBehind(lease, run, binding, pullRequest, renew, version)
         // The head differs from the recorded one: a landed update or a push by a person. Only a verified head is recorded.
-        val (rebased, verdict) = verifyShape(binding.headSha, pullRequest.headSha)
+        val (rebased, verdict) = verifyShape(binding.headSha, pullRequest.headSha, allowRebased = false)
         if (verdict != null) return held(run, verdict)
         return rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version, if (rebased) VERIFIED_REBASED else VERIFIED)
     }
@@ -226,7 +227,7 @@ class PrBranchRebaser(
         }
         val newHead = observeNewHead(pullRequest.number, binding.headSha)
         if (newHead == null) return holdAfterAttempt(lease, run, binding.headSha, updateCode ?: NOT_OBSERVED)
-        val (rebased, verdict) = verifyShape(binding.headSha, newHead)
+        val (rebased, verdict) = verifyShape(binding.headSha, newHead, allowRebased = false)
         if (verdict != null) return holdAfterAttempt(lease, run, binding.headSha, verdict)
         return rebind(lease, run, binding.headSha, newHead, renew, version, if (rebased) VERIFIED_REBASED else VERIFIED)
     }
@@ -272,13 +273,13 @@ class PrBranchRebaser(
      * Verifies [newHead] and tells its shape of the new head: true when it is a single-parent (rebased) head. The second value is null when it passes,
      * else the fixed reason code.
      */
-    private suspend fun verifyShape(oldHead: String, newHead: String): Pair<Boolean, String?> {
+    private suspend fun verifyShape(oldHead: String, newHead: String, allowRebased: Boolean): Pair<Boolean, String?> {
         var rebased = false
-        val verdict = verifyHead(oldHead, newHead) { rebased = it }
+        val verdict = verifyHead(oldHead, newHead, allowRebased) { rebased = it }
         return rebased to verdict
     }
 
-    private suspend fun verifyHead(oldHead: String, newHead: String, shape: (Boolean) -> Unit): String? {
+    private suspend fun verifyHead(oldHead: String, newHead: String, allowRebased: Boolean, shape: (Boolean) -> Unit): String? {
         if (newHead == oldHead) return PARENTS_MISMATCH
         val main = when (val r = read { github.getBranch(repo, baseBranch) }) {
             is GitHubResult.Success -> r.value?.headSha ?: return VERIFY_FAILED
@@ -290,7 +291,7 @@ class PrBranchRebaser(
         // head or one of its ancestors (main may have moved again since then). Checked below with ahead_by.
         val other = when {
             parents.size == 2 && parents.toSet().size == 2 && oldHead in parents -> parents.single { it != oldHead }
-            parents.size == 1 && parents.single() != oldHead -> parents.single().also { shape(true) }
+            allowRebased && parents.size == 1 && parents.single() != oldHead -> parents.single().also { shape(true) }
             else -> return PARENTS_MISMATCH
         }
         val ahead = (read { port.getAheadBy(repo, main, other) } as? GitHubResult.Success)?.value ?: return VERIFY_FAILED
@@ -375,7 +376,7 @@ class PrBranchRebaser(
         if (!pullRequest.merged) return@withinBudget Outcome.NoAction
         if (pullRequest.authorId != botUserId) return@withinBudget Outcome.NoAction
         if (pullRequest.headSha == binding.headSha) return@withinBudget Outcome.NoAction
-        val (rebased, verdict) = verifyShape(binding.headSha, pullRequest.headSha)
+        val (rebased, verdict) = verifyShape(binding.headSha, pullRequest.headSha, allowRebased = true)
         if (verdict != null) return@withinBudget held(run, verdict)
         rebind(lease, run, binding.headSha, pullRequest.headSha, renew, version, if (rebased) VERIFIED_REBASED else VERIFIED)
     }

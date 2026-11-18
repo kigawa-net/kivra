@@ -458,19 +458,21 @@ class PrBranchRebaseTest {
     }
 
     @Test
-    fun anOpenPullRequestThatAPersonRebasedOntoMainIsRecordedWithItsOwnCode() = runBlocking {
+    fun anOpenPullRequestThatAPersonRebasedOntoMainIsNotRebound() = runBlocking {
+        // The rebased shape is accepted only for a merged pull request (the stuck run of PR #529). An open pull request keeps the old
+        // rule: the auto-merge must not decide on a head a person pushed, so the head stays unbound and the run waits for a person.
         TestDb().use { db ->
             val h = Harness(db)
             val runId = h.openedRun()
+            val old = h.head()
             h.mainMoves()
             h.registerMerge(PERSON, "blob-new", parents = listOf(MAIN))
             h.github.setPullHead(h.pr().number, PERSON)
 
-            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_VERIFIED"), h.runner().advance(runId))
-            assertEquals(PERSON, h.binding(runId))
+            assertEquals(Waiting(WaitReason.AWAITING_HUMAN_REVIEW, "PR_REBASE_PARENTS_MISMATCH"), h.runner().advance(runId))
+            assertEquals(old, h.binding(runId))
             assertEquals(0, h.port.updateCalls)
-            assertEquals(listOf(PR_REBASE_REBOUND), db.rebaseRows(runId).map { it.first })
-            assertTrue(db.rebaseRows(runId).single().second!!.contains("PR_REBASE_VERIFIED_REBASED"))
+            assertEquals(emptyList(), db.rebaseRows(runId))
         }
     }
 

@@ -20,6 +20,13 @@ class PlannerPromptTest {
     }
 
     @Test
+    fun theSystemPromptForbidsInvestigationOnlyTasks() {
+        val system = PlannerPrompt.system()
+        assertTrue(system.contains("Every task must change at least one file."))
+        assertTrue(system.contains("A task that only reads, checks, investigates or reports"))
+    }
+
+    @Test
     fun theSystemPromptKeepsTheSchemaRules() {
         val system = PlannerPrompt.system()
         assertTrue(system.contains("\"sizeEstimate\":\"S\",\"dependsOn\":[]}]}"))

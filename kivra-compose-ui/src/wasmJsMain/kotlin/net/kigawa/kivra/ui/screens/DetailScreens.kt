@@ -29,6 +29,8 @@ import net.kigawa.kivra.ui.canExtendOrder
 import net.kigawa.kivra.ui.canPauseOrder
 import net.kigawa.kivra.ui.canRequestOrderStop
 import net.kigawa.kivra.ui.canResumeOrder
+import net.kigawa.kivra.ui.canRequeueTask
+import net.kigawa.kivra.ui.canSkipStuckTask
 import net.kigawa.kivra.ui.canStopGoal
 import net.kigawa.kivra.ui.releaseButtonLabel
 import net.kigawa.kivra.ui.releaseKindOf
@@ -300,6 +302,27 @@ fun GoalDetailScreen(taskId: String, onNavigate: (Route) -> Unit) {
             } else {
                 notice?.let { n ->
                     SelectableText(n.text, color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(12.dp))
+                }
+                // 失敗・解放・投入待ちで止まったタスクの再投入と見送り(ADR 0011 追補 2026-11-18)。GOAL_WRITE の人だけ。
+                val requeue = canRequeueTask(goal.state, goal.revision)
+                val skip = canSkipStuckTask(goal.state, goal.revision)
+                if ((requeue || skip) && perms.can(GatedOperation.APPROVE_GOAL)) {
+                    Row {
+                        if (requeue) {
+                            Button(
+                                enabled = !busy,
+                                onClick = { act("タスクを再投入しました（新しい Run の投入を待っています）。") { ApiClient.requeueTask(goal.taskId, goal.version) } },
+                            ) { SelectableText("再投入") }
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        if (skip) {
+                            OutlinedButton(
+                                enabled = !busy,
+                                onClick = { act("タスクを見送りました。") { ApiClient.rejectGoal(goal.taskId, goal.version) } },
+                            ) { SelectableText("見送る") }
+                        }
+                    }
                     Spacer(Modifier.height(12.dp))
                 }
             }

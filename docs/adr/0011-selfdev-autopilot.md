@@ -221,7 +221,7 @@ PR E で、§2.9 の PR C への申し送り(1)〜(3)を実装した。V19 の�
 - **投入の直前の Goal の検査**: `QUEUED → SUBMITTING` の CAS と同じトランザクションで、Goal の行をロック(`SELECT ... FOR UPDATE`。中止と一時停止も同じ行を更新する)して読み直す。Goal が `TASKS_QUEUED` / `RUNNING` でなければ投入しない(`GOAL_NOT_DISPATCHABLE`、ログには ID と理由コードだけ)。`SUBMITTING` のまま残ったタスクを再開するときも、同じ検査を行う(ロックは短い。その後に Run を作るまでの間は、§5.4 の「投入中のものには触れない」と同じ扱い)。
 - **中止と投入の競合**: 中止は、未投入のタスク(`QUEUED`)の版を進めるので、Dispatcher の CAS が失敗する。Goal の検査は、一時停止のように、タスクの版を進めない操作への防御である。
 - **投入の主体**: §2.6 の順序(タスク、Goal の承認者、Goal の作成者)。段階 2 の自動承認のタスクは、運用者が計画を承認していればその承認者、していなければ Goal の作成者の名で投入される。
-- **全タスクが終端になった Goal**: `RUNNING` / `TASKS_QUEUED` / `BLOCKED` から、全タスクが `COMPLETED` / `FAILED` / `SKIPPED` になったとき、全部が `COMPLETED` なら `DONE`(`RUNNING` のみ、従来どおり)、そうでなければ `STOPPED` に `TASKS_INCOMPLETE` の理由で進める。`STOPPED` の辺の理由に `TASKS_INCOMPLETE` を足した(表と網羅テストを更新)。`FAILED` と `CANCELLED` は、§2.8 のとおり運用者が再投入できる状態だが、Goal を終わらせる判定では終端として数える(再投入の HTTP 操作は無く、Goal が `STOPPED` になった後に自動で投入されることは無い)。
+- **全タスクが終端になった Goal**: `RUNNING` / `TASKS_QUEUED` / `BLOCKED` から、全タスクが `COMPLETED` / `FAILED` / `SKIPPED` になったとき、全部が `COMPLETED` なら `DONE`(`RUNNING` のみ、従来どおり)、そうでなければ `STOPPED` に `TASKS_INCOMPLETE` の理由で進める。`STOPPED` の辺の理由に `TASKS_INCOMPLETE` を足した(表と網羅テストを更新)。`FAILED` と `CANCELLED` は、§2.8 のとおり運用者が再投入できる状態だが、Goal を終わらせる判定では終端として数える(Goal が `STOPPED` になった後に自動で投入されることは無い。再投入の HTTP 操作は 2026-11-18 の追補で足したが、決着済みの計画のタスクは再投入できない)。
 - **終端化のしかた**: `STOPPED` を「中止」として使うのは、既存の状態の中で表すため(マイグレーションは足さない。`state_reason` は `VARCHAR(64)` で、新しい理由を足すのは Kotlin の列挙だけ)。
 - **残る点(未決)**: 中止された Goal の `SUBMITTING` のタスクは、そのまま残る(§5.4)。運用者が見て判断する。
 
@@ -335,7 +335,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 
 - **自動で解消するもの**(滞留、日次上限、予算の期間): 次の tick で再評価される。運用者の操作は要らない。
 - **手動のもの**(`CIRCUIT_OPEN`、`AUTO_SCOPE_EXCEEDED`): 運用者が理由を確認し、再開する。再開は連続失敗の計数を 0 に戻す(`CIRCUIT_OPEN` のとき)。原因が直っていないまま再開しても、再び 3 件で止まる。`AUTO_SCOPE_EXCEEDED` の再開は、そのタスクを運用者が承認し直すこと(§2.8d)。承認すると、タスクは新しい投入キーで投入され、Goal は再開する。
-- **失敗したタスク**(`FAILED` / `CANCELLED`): 自動で再投入しない。運用者が `再投入`(`QUEUED` に戻す)か `SKIPPED` を選ぶ。自動の再投入は、同じ失敗の繰り返しを招くため採らない。
+- **失敗したタスク**(`FAILED` / `CANCELLED`): 自動で再投入しない。運用者が `再投入`(`QUEUED` に戻す。`POST /api/selfdev/tasks/{id}/requeue`)か `SKIPPED`(`POST /api/selfdev/tasks/{id}/reject`)を選ぶ。自動の再投入は、同じ失敗の繰り返しを招くため採らない(2026-11-18 の追補で HTTP の操作を実装した)。
 - **UNKNOWN の Run**: ADR 0009 の運用者の解放(`release` または `release-unbound-pr`)を使う。解放後、タスクは `CANCELLED` になり、運用者が上の再投入を選ぶ。
 - **Goal の中止**: 残りのタスクを `SKIPPED` にし、既に作られた PR はそのまま残す。PR の扱い(閉じる、残す)は人が決める。kivra は PR を閉じず、マージもしない(ADR 0008、ADR 0009)。
 
@@ -492,3 +492,47 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 - 段階 2 の差分の再検査で、範囲外の変更が 1 件でも自動で PR になったとき。段階 2 を止め、判定の方法を見直す。
 - 費用の実測が、月次の割当ての 50% を大きく超えたとき。割当てと上限を見直す。
 - 計画の品質(マージされた率)が低い状態が続いたとき。Planner の入力と検証を見直す。
+
+## 追補(2026-11-18): 投入されない理由のログと、運用者の再投入・見送り
+
+### 背景
+
+dev で、`QUEUED` / `AUTO_APPROVED` のタスクが 6 件、何日も Run にならなかった。調べると、どれもガード(ブレーカー・PR 上限・予算・日次上限)の手前で止まっていた。
+
+- 5 件は、依存先が `FAILED`(または依存先の依存先が `QUEUED` のまま)。本文 §5.4 のとおり自動の再投入はしない。
+- 1 件は、order が期限切れで `PAUSED` の order のタスク。
+
+Dispatcher はこれらを何も書かずに飛ばす(`continue`)ので、ログが一切出ず、「動いていない」ように見えた。また、§5.4 の運用者の `再投入` には HTTP の操作が無かった。
+`見送り`(`skipTask`)は、遷移表に `QUEUED` / `FAILED` / `CANCELLED` → `SKIPPED` の辺があるのに、更新の条件が `PENDING_APPROVAL` に固定されていた。このため、後続を進める手段が Goal の中止しか無かった。
+
+### 決定(追補)
+
+**ユーザーの決定(2026-11-18)**: ログと再投入の API を足す。自動の再投入・自動の見送りは足さない(§5.4 のまま)。
+
+1. **待ちの要約のログ**: Dispatcher は、1 回の投入の処理で、次を数える。
+   - 依存先が未完了(`dependencyPending`)
+   - 依存先が `COMPLETED` 以外で終わった(`dependencyFailed`: `FAILED` / `CANCELLED` / `SKIPPED` / `STOPPED`)
+   - order が `ACTIVE` でない(`orderHeld`)
+   - 同じ計画の別タスクが投入中(`siblingInFlight`)
+   - そのほかの投入の拒否(`refused`)
+
+   件数が前回から変わったとき、または 10 分ごとに、`autopilot dispatch waiting: …` を 1 行出す。件数と固定の語だけで、タスクの ID・題名・本文は出さない。起動時には `autopilot dispatcher started` を 1 行出す。
+   兄弟の検査は、日次の枠を取る前に読み取りで行う(`beginSubmission` は従来どおり、親のロックの下で同じ検査をする)。
+2. **見送り**: `skipTask` の更新の条件を「検査した現在の状態」にした。遷移表(`AutopilotStates.kt`)にある辺(`PENDING_APPROVAL` / `QUEUED` / `FAILED` / `CANCELLED` → `SKIPPED`、理由 `OPERATOR_SKIPPED`)だけが通る。辺は足していない。HTTP は既存の `POST /api/selfdev/tasks/{id}/reject`(承認待ちの見送りと共通)。
+3. **再投入**: `POST /api/selfdev/tasks/{id}/requeue`。`FAILED` / `CANCELLED` → `QUEUED`(`OPERATOR_REQUEUED`。遷移表の既存の辺)。
+   - 認可・同一オリジンの検査・版の検査は承認と同じ。権限は `GOAL_WRITE` で、プロジェクトの範囲で検査し、AI の主体は 403。
+   - 監査行は `autopilot operator action: action=TASK_REQUEUED`。関数(`requeueAsOperator`)にしてあり、承認・見送りと同じく、ほかの入口と共有できる。
+   - 拒否する場合: 計画の親、計画が決着済み(`DONE` / `STOPPED`、`reopensUnderClosedPlan`)。
+   - **費用の多重化を防ぐ**:
+     - 版の CAS により、同じ版の 2 回目は何も書かない。
+     - 投入キーを `ap:<taskId>:a<attempts>`(承認のやり直しと同じ方式)に作り直す。`attempts` は投入のたびに増えるので、再投入 1 回につき Run は 1 つになり、同じ再投入の投入をやり直しても同じ Run が返る。
+     - 前の Run の結び付き(`run_id`)は外す。中断した投入を Dispatcher の既存の経路(`run_id IS NULL` の `SUBMITTING`)で拾うため。
+     - `approved_by` は変えない。再投入は承認ではなく、自動承認のタスクの範囲の検査(§6.2)もそのまま効く。
+4. **画面**: タスクの詳細に、`FAILED` / `CANCELLED` なら「再投入」、`QUEUED` / `FAILED` / `CANCELLED` なら「見送る」を出す。計画の親には出さない。権限は承認と同じ。
+   チャットの操作(ADR 0023)には、まだ足していない。
+
+### 結果(追補)
+
+- 投入されない理由が、件数としてログに出る。依存先の失敗で止まった計画は、運用者が再投入か見送りで進められる。運用手順は runbook §7.4。
+- 自動では進まない(§5.4 のまま)。依存先の失敗が続くと、運用者が操作するまで止まる(ログに `dependencyFailed` として出続ける)。
+

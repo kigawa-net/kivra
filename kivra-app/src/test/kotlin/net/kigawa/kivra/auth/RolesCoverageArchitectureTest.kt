@@ -125,6 +125,7 @@ class RolesCoverageArchitectureTest {
         "POST /api/selfdev/goals/{id}/stop" to Permission.GOAL_STOP,
         "POST /api/selfdev/tasks/{id}/approve" to Permission.GOAL_WRITE,
         "POST /api/selfdev/tasks/{id}/reject" to Permission.GOAL_WRITE,
+        "POST /api/selfdev/tasks/{id}/requeue" to Permission.GOAL_WRITE,
         "GET /api/selfdev/memory" to Permission.READ_TEXT,
         "POST /api/selfdev/memory/{id}/delete" to Permission.GOAL_WRITE,
         "POST /api/selfdev/memory/delete-by-condition" to Permission.GOAL_WRITE,

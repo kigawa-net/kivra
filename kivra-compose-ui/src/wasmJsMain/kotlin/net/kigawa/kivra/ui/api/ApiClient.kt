@@ -451,6 +451,13 @@ object ApiClient {
         postWrite("/api/selfdev/tasks/${percentEncode(taskId)}/reject", VersionRequest(version))
 
     /**
+     * 失敗・解放されたタスクの再投入。`POST /api/selfdev/tasks/{id}/requeue`、本文 `{"version": n}`。新しい Run が 1 つ作られる(費用が発生する)。
+     * 409 は version の競合、再投入できない状態、または計画が決着済み。403 は権限(GOAL_WRITE)。
+     */
+    suspend fun requeueTask(taskId: String, version: Long) =
+        postWrite("/api/selfdev/tasks/${percentEncode(taskId)}/requeue", VersionRequest(version))
+
+    /**
      * 自律運転の状態。`GET /api/selfdev/autopilot`。503 `AUTOPILOT_DISABLED` は無効(節を出さない)、403 は READ の無い利用者。
      */
     suspend fun getAutopilot(): ApiAutopilot = getJson("/api/selfdev/autopilot")

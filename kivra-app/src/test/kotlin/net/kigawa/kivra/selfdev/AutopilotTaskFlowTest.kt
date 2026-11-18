@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import net.kigawa.kivra.core.RunId
@@ -22,6 +23,7 @@ import net.kigawa.kivra.db.SelfDevSubmitResult
 import net.kigawa.kivra.db.SelfDevTask
 import net.kigawa.kivra.db.TaskTransition
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.execUpdate
 import net.kigawa.kivra.modelgateway.BudgetController
 import net.kigawa.kivra.modelgateway.BudgetLimit
@@ -116,12 +118,18 @@ class AutopilotTaskFlowTest {
             config = PlannerConfig(budgetScopes = listOf("tenant"), autopilot = autopilot(approval)),
         )
 
-        fun dispatcher(maxActive: Int = 5, budget: Boolean = true, maxPendingPrs: Int = 3) = AutopilotDispatcher(
+        fun dispatcher(
+            maxActive: Int = 5,
+            budget: Boolean = true,
+            maxPendingPrs: Int = 3,
+            clock: java.time.Clock = java.time.Clock.systemUTC(),
+        ) = AutopilotDispatcher(
             database = db.database,
             runs = db.runs,
             config = autopilot(AutopilotApproval.REQUIRED, maxPendingPrs = maxPendingPrs),
             maxActiveSelfDev = maxActive,
             budgetAllows = { budget },
+            clock = clock,
         )
 
         /** Every task of these tests belongs to one project (ADR 0022 PR-F: a task without one is refused). */
@@ -524,5 +532,157 @@ class AutopilotTaskFlowTest {
         val failed = h.ops.task(child.taskId)!!
         val requeue = h.ops.moveTask(child.taskId, failed.version, TaskState.QUEUED, AutopilotReason.OPERATOR_REQUEUED)
         assertEquals(TaskTransition.Refused(TransitionRefusal.GUARD_FAILED), requeue)
+    }
+
+    // ---- the waiting summary and the operator's requeue / skip (ADR 0011 addendum 2026-11-18) ----
+
+    private class StepClock(var now: java.time.Instant = java.time.Instant.parse("2026-11-18T00:00:00Z")) : java.time.Clock() {
+        override fun getZone(): java.time.ZoneId = java.time.ZoneOffset.UTC
+        override fun withZone(zone: java.time.ZoneId?): java.time.Clock = this
+        override fun instant(): java.time.Instant = now
+    }
+
+    private fun <T> capturingDispatcherLog(body: (() -> List<String>) -> T): T {
+        val logger = org.slf4j.LoggerFactory.getLogger(AutopilotDispatcher::class.java) as ch.qos.logback.classic.Logger
+        val appender = ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().apply { start() }
+        logger.addAppender(appender)
+        try {
+            return body { appender.list.map { it.formattedMessage }.filter { it.startsWith("autopilot dispatch waiting") } }
+        } finally {
+            logger.detachAppender(appender)
+        }
+    }
+
+    /** Plans First and Second (Second depends on First), submits First, and fails its Run. Returns (First, Second) after the outcome. */
+    private fun Harness.firstFailed(d: AutopilotDispatcher): Pair<SelfDevTask, SelfDevTask> {
+        val root = submitRoot()
+        runBlocking { planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+        d.tick()
+        val byTitle = planned(root.taskId).associateBy { it.title }
+        val first = byTitle.getValue("First")
+        setRunState(first.runId!!, "FAILED")
+        d.tick()
+        return ops.task(first.taskId)!! to ops.task(byTitle.getValue("Second").taskId)!!
+    }
+
+    @Test
+    fun aTaskLeftWaitingIsSummarisedOnceWhenTheCountsChangeAndAgainAfterTenMinutes() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("First"), task("Second", deps = "[1]"))))
+        val clock = StepClock()
+        val d = h.dispatcher(clock = clock)
+        capturingDispatcherLog { lines ->
+            val root = h.submitRoot()
+            runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+            d.tick()
+            assertEquals(
+                listOf("autopilot dispatch waiting: dependencyPending=1 dependencyFailed=0 orderHeld=0 siblingInFlight=0 refused=0"),
+                lines(),
+            )
+            d.tick()
+            assertEquals(1, lines().size, "the same counts are not logged again within ten minutes")
+
+            val first = h.planned(root.taskId).single { it.title == "First" }
+            h.setRunState(first.runId!!, "FAILED")
+            d.tick()
+            assertEquals("autopilot dispatch waiting: dependencyPending=0 dependencyFailed=1 orderHeld=0 siblingInFlight=0 refused=0", lines().last())
+            d.tick()
+            assertEquals(2, lines().size)
+            clock.now = clock.now.plus(java.time.Duration.ofMinutes(10))
+            d.tick()
+            assertEquals(3, lines().size, "a lasting wait is logged again after ten minutes")
+            // Counts and fixed words only: no task id, title or body.
+            assertTrue(lines().none { it.contains(first.taskId) || it.contains("Second") || it.contains("First") })
+        }
+    }
+
+    @Test
+    fun anOrderHeldTaskIsCountedAsHeld() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("Docs"))))
+        val d = AutopilotDispatcher(
+            database = db.database, runs = db.runs, config = autopilot(AutopilotApproval.REQUIRED), maxActiveSelfDev = 5,
+            budgetAllows = { true }, orderGate = { false },
+        )
+        capturingDispatcherLog { lines ->
+            val root = h.submitRoot()
+            runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+            d.tick()
+            assertEquals(TaskState.QUEUED, h.planned(root.taskId).single().state)
+            assertEquals(listOf("autopilot dispatch waiting: dependencyPending=0 dependencyFailed=0 orderHeld=1 siblingInFlight=0 refused=0"), lines())
+        }
+    }
+
+    @Test
+    fun aRequeuedTaskGetsANewKeyAndExactlyOneNewRunEachTime() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("First"), task("Second", deps = "[1]"))))
+        val d = h.dispatcher()
+        val (first, _) = h.firstFailed(d)
+        assertEquals(TaskState.FAILED, first.state)
+        val failedRun = first.runId!!
+
+        val requeued = assertIs<TaskTransition.Moved>(h.ops.requeueTask(first.taskId, first.version)).row
+        assertEquals(TaskState.QUEUED, requeued.state)
+        assertEquals(AutopilotReason.OPERATOR_REQUEUED, requeued.stateReason)
+        assertEquals("ap:${first.taskId}:a1", requeued.idempotencyKey)
+        assertNull(requeued.runId)
+        // A second request with the same version writes nothing.
+        assertEquals(TaskTransition.StaleVersion, h.ops.requeueTask(first.taskId, first.version))
+
+        d.tick()
+        d.tick()
+        val again = h.ops.task(first.taskId)!!
+        assertEquals(TaskState.SUBMITTED, again.state)
+        assertTrue(again.runId != null && again.runId != failedRun)
+        val runsAfterOne = transaction(db.database) { execQuery("SELECT COUNT(*) FROM development_runs") { it.getInt(1) }.single() }
+        assertEquals(2, runsAfterOne, "one Run per requeue, however many passes")
+
+        // A second failure and a second requeue: another key, another Run.
+        h.setRunState(again.runId!!, "FAILED")
+        d.tick()
+        val failedTwice = h.ops.task(first.taskId)!!
+        assertEquals(TaskState.FAILED, failedTwice.state)
+        assertEquals("ap:${first.taskId}:a2", assertIs<TaskTransition.Moved>(h.ops.requeueTask(first.taskId, failedTwice.version)).row.idempotencyKey)
+        d.tick()
+        val third = h.ops.task(first.taskId)!!.runId
+        assertTrue(third != null && third != again.runId && third != failedRun)
+    }
+
+    @Test
+    fun requeueIsRefusedForATaskThatDidNotFailAPlanRootAndASettledPlan() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("First"), task("Second", deps = "[1]"))))
+        val d = h.dispatcher()
+        val (first, second) = h.firstFailed(d)
+        assertEquals(TaskState.QUEUED, second.state)
+        assertIs<TaskTransition.Refused>(h.ops.requeueTask(second.taskId, second.version))
+        val root = h.ops.task(first.parentTaskId!!)!!
+        assertIs<TaskTransition.Refused>(h.ops.requeueTask(root.taskId, root.version))
+
+        // The operator skips the waiting task: the plan has ended (FAILED + SKIPPED) and settles STOPPED. The FAILED task is then not reopened.
+        assertIs<TaskTransition.Moved>(h.ops.skipTask(second.taskId, second.version))
+        assertEquals(TaskState.STOPPED, h.ops.task(root.taskId)!!.state)
+        val failed = h.ops.task(first.taskId)!!
+        assertIs<TaskTransition.Refused>(h.ops.requeueTask(failed.taskId, failed.version))
+        assertEquals(TaskState.FAILED, h.ops.task(first.taskId)!!.state)
+    }
+
+    @Test
+    fun skipFollowsTheTransitionTable() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("First"), task("Second", deps = "[1]"))))
+        val d = h.dispatcher()
+        val root = h.submitRoot()
+        runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+        d.tick()
+        val byTitle = h.planned(root.taskId).associateBy { it.title }
+        val submitted = h.ops.task(byTitle.getValue("First").taskId)!!
+        // SUBMITTED has no edge to SKIPPED: refused, nothing written.
+        assertIs<TaskTransition.Refused>(h.ops.skipTask(submitted.taskId, submitted.version))
+        assertEquals(TaskState.SUBMITTED, h.ops.task(submitted.taskId)!!.state)
+        // A FAILED task and a QUEUED task are skipped (both edges are in the table); the plan then settles.
+        h.setRunState(submitted.runId!!, "FAILED")
+        d.tick()
+        val failed = h.ops.task(submitted.taskId)!!
+        assertEquals(AutopilotReason.OPERATOR_SKIPPED, assertIs<TaskTransition.Moved>(h.ops.skipTask(failed.taskId, failed.version)).row.stateReason)
+        val queued = h.ops.task(byTitle.getValue("Second").taskId)!!
+        assertIs<TaskTransition.Moved>(h.ops.skipTask(queued.taskId, queued.version))
+        assertEquals(TaskState.STOPPED, h.ops.task(root.taskId)!!.state)
     }
 }

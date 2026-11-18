@@ -52,6 +52,18 @@ class SelfDevSettingsTest {
     }
 
     @Test
+    fun `closing a timed-out pull request is off by default, only true turns it on, and any other value is a startup error without the value`() {
+        val key = SelfDevSettings.ENV_PR_ABANDON_CLOSE_ENABLED
+        assertEquals("KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED", key)
+        assertFalse(SelfDevSettings.fromEnv(enabledEnv()).prAbandonCloseEnabled)
+        assertFalse(SelfDevSettings.fromEnv(enabledEnv(key to "")).prAbandonCloseEnabled)
+        assertFalse(SelfDevSettings.fromEnv(enabledEnv(key to "false")).prAbandonCloseEnabled)
+        assertTrue(SelfDevSettings.fromEnv(enabledEnv(key to "true")).prAbandonCloseEnabled)
+        val e = assertFailsWith<IllegalStateException> { SelfDevSettings.fromEnv(enabledEnv(key to "sometimes")) }
+        assertFalse(e.message!!.contains("sometimes"))
+    }
+
+    @Test
     fun `the pull request read budget per tick defaults to 40, is read only when the update is on, and is bounded to 25 through 200`() {
         val on = "KIVRA_SELFDEV_PR_REBASE_ENABLED" to "true"
         val budget = "KIVRA_SELFDEV_PR_REBASE_MAX_READS_PER_TICK"

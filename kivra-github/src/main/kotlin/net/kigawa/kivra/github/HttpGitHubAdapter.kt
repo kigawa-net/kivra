@@ -125,7 +125,7 @@ class HttpGitHubAdapter(
     private val tokens: TokenProvider,
     private val config: GitHubAdapterConfig = GitHubAdapterConfig(),
     private val backoff: suspend (attempt: Int) -> Unit = { delay(200L * (1L shl (it - 1))) },
-) : GitHubPort, GitHubIssueReader, PrBranchPort {
+) : GitHubPort, GitHubIssueReader, PrBranchPort, PrClosePort {
     private val json = Json { ignoreUnknownKeys = true }
 
     private class Raw(val status: Int, val body: String, val headers: Map<String, String>)
@@ -868,6 +868,21 @@ class HttpGitHubAdapter(
         }
         val id = (parse(raw) as? JsonObject)?.long("id") ?: return protocol("comment id")
         return GitHubResult.Success(id)
+    }
+
+    override suspend fun closePullRequest(repo: RepoRef, number: Int): GitHubResult<Unit> {
+        require(number > 0) { "number must be positive" }
+        val payload = JsonObject(mapOf("state" to JsonPrimitive("closed")))
+        // Exactly one send. A 422 is a validation failure (not a ref update), so it is not mapped to CONFLICT.
+        val raw = when (val r = mutate(HttpMethod.Patch, "close pull request", "${repoPath(repo)}/pulls/$number", payload)) {
+            is GitHubResult.Success -> r.value
+            is GitHubResult.Failure -> return r
+            is GitHubResult.Unknown -> return r
+        }
+        val o = parse(raw) as? JsonObject ?: return protocol("pr")
+        if (o.long("number")?.toInt() != number) return mismatch()
+        if (o.str("state") != "closed") return protocol("pr.state")
+        return GitHubResult.Success(Unit)
     }
 
     override suspend fun createIssue(repo: RepoRef, request: CreateIssue): GitHubResult<Long> {

@@ -151,3 +151,46 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 - 将来 Issue 由来のテキストを扱う場合(⑪)は、そのテキストを信頼できない入力として再検討する(`textContent` のみ、長さ制限は維持)。
 - `/api/selfdev/*` の応答には引き続きタイトルを含めない。
 - 本追補は、自己開発の認可・状態・PR の扱いを変えない。
+
+## 追補(2026-11-18): レビューの期限を過ぎた PR は、フラグ有効時に限って kivra が閉じる
+
+### 背景
+
+`PULL_REQUEST` の Run は、レビューの期限(`KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`、既定 7 日)を過ぎると `CANCELLED`(`PR_ABANDONED`)になる。
+しかし、本 ADR の「kivra は PR を閉じない」により、PR は GitHub 上で開いたまま残る。dev では、PR #540(Run 01M7CT4GSRQHWCWK2PCHYA9TDD)が、
+main が同じファイルを変えたため更新されず(`PR_REBASE_OVERLAPPING_PATHS`)、人のレビュー待ちのまま残った。期限で Run が取り消されても、
+開いた PR が残り、人が見るべきものかどうかが分からない。
+
+### 決定(追補)
+
+**ユーザーの決定(2026-11-18)**: 期限切れの PR は kivra が閉じる。本 ADR の「kivra は PR を閉じない」を、次の形に限って変更する。
+
+1. **フラグ**: `KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED`。コードの既定は無効(有効化は k8s のマニフェスト)。無効のときは従来どおり、PR は残る。
+   自己開発が無効のときは読まない。不正値は起動失敗で、値は出さない。
+2. **対象**: 期限で `PR_ABANDONED` になる Run のうち、kivra の App の bot が作り、Run に束縛された PR だけ。マージ済みの PR は閉じない
+   (マージの経路が先に動き、Run の結果を上書きしない)。人が作った PR、束縛の無い PR、人が閉じた PR は触らない。kivra はマージしない、は変えない。
+3. **順序は GitHub が先**: 閉じる → Run を取り消す。閉じられなければ Run は取り消さず(`AWAITING_PR_CLOSE`)、次の周期で PR を読み直して再試行する。
+   理由: 先に Run を取り消すと、`CANCELLED` の Run は周期の対象から外れるので、閉じる処理の再試行のために別の仕組み(未処理の一覧と別の worker)が要る。
+   GitHub を先にすれば、既存の周期と lease の中で再試行でき、「Run は取り消されたのに PR が開いたまま」を作らない。閉じる書き込みは、閉じ済みの PR に
+   もう一度送っても害が無い。結果が不明なものは、次の周期の読み直しで閉じ済みかどうかが分かる。
+4. **コメントは 1 回**: 閉じた後に固定の文(Run ID だけを含み、依頼文や変更は含まない)を 1 回だけ付ける。結果が不明なコメントは「付けた」として
+   扱い、二度と付けない(重複より欠落を選ぶ)。コメントの失敗では Run を止めない。
+5. **上限**: 閉じる試行は 1 つの Run につき 5 回。使い切ったら PR を開いたまま Run を取り消す(この追補の前と同じ)。続く拒否(権限など)で
+   Run が待ち続けることを防ぐ。
+6. **記録**: 監査に `PR_ABANDON_CLOSE_ATTEMPTED` / `PR_ABANDON_CLOSED` / `PR_ABANDON_COMMENTED` / `PR_ABANDON_CLOSE_GAVE_UP`(PR 番号と固定コードだけ)。
+   これらは Run の行を更新しない(期限の起点を動かさない)。ブランチは消さない。
+7. **書き込みの口は分ける**: 閉じる呼び出し(`PATCH /pulls/{n}`、`state=closed`)は `GitHubPort` に足さず、専用の `PrClosePort` に置く。
+   `GitHubPort` は「close / update / merge / force / delete の操作を持たない」ことをリフレクションのテストで固定しており、`update-branch` も同じ理由で
+   `PrBranchPort` に分けている。コメントは既存の `GitHubPort.createPullRequestComment` を使う。
+
+### 危険と対策
+
+- **人がレビュー中の PR を閉じうる**: 期限は Run の最終更新から数えるので、人がコメントやレビューをしていても閉じる。対策: 既定は無効、期限は
+  環境変数で延ばせる。閉じた PR は人が再オープンでき、ブランチも残る(ただし Run は取り消し済みで、kivra は再オープンした PR を追わない)。
+- **作り直しのループ・費用**: この追補は Run を作り直さない。続きは人か Order・オートパイロットの計画が新しい Run として決める。LLM の費用は増えない。
+- **書き込みの誤り**: 閉じる対象は束縛と作者で二重に確かめる。応答は PR 番号と `closed` を確かめ、違えば失敗として再試行する。
+
+### 結果(追補)
+
+- フラグ有効時、期限切れの Run は、PR を閉じて(コメント付き)から `CANCELLED` になる。運用手順は runbook §4.3a。
+

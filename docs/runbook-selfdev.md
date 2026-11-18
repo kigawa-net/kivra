@@ -1594,6 +1594,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 - **デプロイ順序**: (1) kivra の対応版(`AgentErrorCode` に `EMPTY_PATCH`、`BUDGET_EXCEEDED`、`OVERLOADED` を受理する版)を先にデプロイする。(2) そのあとで、エージェントを動かす PC の `/etc/kivra-agent/agent.env` に `KIVRA_AGENT_NEW_ERROR_CODES=1` を書き、ユニットを再起動する(§6.11 の `systemctl --user restart kivra-agent.service`)。kivra の対応版より先に `1` にすると、新しいコードが拒否されて `fail` が届かない。
 - 戻し方: 行を消すか `0` にして、ユニットを再起動する。kivra 側のコードは削除しない(旧いエージェントが従来のコードを送り続けるため)。
 - `install.sh` の雛形には `#KIVRA_AGENT_NEW_ERROR_CODES=1` の行を入れてある(既定では無効)。
+- **k8s の agent(dev)**: 2026-11-19 の確認で、dev の `kivra-agent` Deployment(`KIVRA_AGENT_EXECUTOR=real`)には `KIVRA_AGENT_NEW_ERROR_CODES` が無く、既定の `0` で動いていた。その結果、変更が無い結果は `EMPTY_PATCH` ではなく `CLI_NONZERO` で届き、Run の理由は `CODING_CLI_NONZERO` になる(agent のログでは `change set rejected: reasons=EMPTY_PATCH code=CLI_NONZERO`)。kivra の対応版は dev に入っている(image が #231 を含む)ので、Deployment の env に `KIVRA_AGENT_NEW_ERROR_CODES=1` を入れると `CODING_EMPTY_PATCH` になる。Deployment の env は kigawa-net-k8s 側の変更(本リポジトリの外)。
 
 ### 6.11 ローカル PC へのインストールと常駐(PR 10)
 

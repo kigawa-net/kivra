@@ -443,7 +443,7 @@ MCP(ADR 0013 の仕組みを使う):
 - **U-6 周の間隔と 1 日の周の数**。推奨: 間隔は 60 分、1 日は 3 周まで。
 - **U-7 同時に進む周の数**。推奨: 木全体で 1 つ。既存の同時 Run の上限(既定 1)と合わせる。
 - **U-8 段階 3 への昇格の数値**。推奨: ADR 0011 §6.3 と同じ(4 週間、70%)。
-- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけ。作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置く。（2026-11-18 の追補 §2 で、延長、再開、タスクの再投入を MCP に出すよう改めた。2026-11-19 の追補 §8 で、タスクの承認と見送りも MCP に出すよう改めた。2026-11-19 の追補 §9 で、根の order の作成も MCP に出すよう改めた。子の作成、一時停止、承認は、なお MCP に出さない。）
+- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけ。作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置く。（2026-11-18 の追補 §2 で、延長、再開、タスクの再投入を MCP に出すよう改めた。2026-11-19 の追補 §8 で、タスクの承認と見送りも MCP に出すよう改めた。2026-11-19 の追補 §9 で、根の order の作成も MCP に出すよう改めた。2026-11-19 の追補 §10 で、BLOCKED の計画の再計画も MCP に出すよう改めた。子の作成、一時停止、承認は、なお MCP に出さない。）
 - **U-10 作成の承認**。推奨: ルートの order で `max_cycles` が 2 以上、または既定を超える予算(累計 5,000 円超、1 周 1,000 円超)の場合は、人(ルートの承認者)の承認を要する。`max_cycles` が 1 で既定内なら承認は要らない。
 - **U-11 上限の変更**。推奨: 作成後の変更は認めない。上限を上げるには、承認つきの新しい order を作る。承認つきの更新は採らない。
 - **U-12 既定の上限と閲覧の範囲**。推奨: 総周回 10、期限 14 日、累計 5,000 円、1 周 1,000 円。閲覧は、運用者の全員が一覧を見られ、方針と理由は木の関係者(作成者と承認者)にだけ表示する。
@@ -987,7 +987,7 @@ U-14(有効化された後の起動で、全 `ACTIVE` を `PAUSED(STARTUP_HOLD)`
 
 ### 2. U-9 を覆した点
 
-U-9(推奨)は、MCP に読み取りと停止の要求だけを置き、作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置くとしていた(§6 の 370 行目も同じ)。本追補は、そのうち **延長と再開** と **タスクの再投入** を MCP に出す。次は U-9 のとおり、引き続き MCP に出さない: 承認、却下、作成、子の作成、周の開始、一時停止、取り消し、周の放棄。（タスクの承認と見送りは、2026-11-19 の §8 で MCP に出した。order の承認(停止要求の承認)と却下は、引き続き出さない。）
+U-9(推奨)は、MCP に読み取りと停止の要求だけを置き、作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置くとしていた(§6 の 370 行目も同じ)。本追補は、そのうち **延長と再開** と **タスクの再投入** を MCP に出す。次は U-9 のとおり、引き続き MCP に出さない: 承認、却下、作成、子の作成、周の開始、一時停止、取り消し、周の放棄。（タスクの承認と見送りは、2026-11-19 の §8 で MCP に出した。根の order の作成は §9 で、BLOCKED の計画の再計画は §10 で MCP に出した。order の承認(停止要求の承認)と却下は、引き続き出さない。）
 
 ### 3. なぜ許すか
 
@@ -1124,3 +1124,49 @@ AI が自分で order を作り続けると、AI が自分の依頼を増やし�
 - 確認(テスト `McpOrderToolsTest`): 正常系(REST と同じ項目、題名と本文が返らないこと、行の内容)、スコープ不足(403)、AI の主体の拒否(スコープを持っても)、フラグ無効、不正な入力(未知の項目、型違い、範囲外、長さ、制御文字、双方向制御文字、小数)、プロジェクトが無い場合、対象の未設定、監査の行(ID と固定コードだけ)、検証の共有(`checkRootOrderFields` の境界の答え)。
 - 確認: `RolesCoverageArchitectureTest`(表の行と権限)、`McpRoutesTest`(scopes_supported)、`SelfDevOrderRoutesTest`(REST の作成の答えは変わらない)。
 - 未確認: dev の Keycloak client `kivra-mcp` が `kivra.selfdev.order.create` を発行するか(`kigawa01/k8s-system` の側)。プロジェクト単位の権限が ENFORCE のときの作成の拒否(テストは既定の権限の場合だけ)。dev での実際の作成と、自動の周が無い設定での動作。
+
+
+## 追補(2026-11-19): MCP からの再計画(BLOCKED の計画を戻す、U-9 の改め)
+
+### 10.1 決定
+
+`kivra_task_replan` を MCP に出す。REST の `POST /api/selfdev/goals/{id}/replan`(UI の「再計画」ボタン)と同じリポジトリ関数(`replanBlocked`)を、同じラッパー(`replanAsOperator`)で呼ぶ。遷移、版の検査、規則は重複させない。
+
+| MCP ツール | REST の対応 | スコープ | 権限 |
+|---|---|---|---|
+| `kivra_task_replan` | `POST /api/selfdev/goals/{id}/replan`(`replanAsOperator`) | `kivra.selfdev.task.decide` | `GOAL_WRITE` |
+
+- 入力は `task_id`(ルートの task、つまり goal の ID)と `version` だけ(厳格。未知の項目は -32602)。`version` は `kivra_task_list` の値。
+- 遷移は `BLOCKED` から `TASK_SUBMITTED`(`REPLAN_REQUESTED`)だけ。`BLOCKED` 以外は `NO_EDGE` で拒否し、何も書かない。版が違えば `STALE_VERSION`。
+- 出力は ID、状態、状態の理由、版、プロジェクト ID。題名と本文は返さない。
+- `KIVRA_MCP_WRITE_ENABLED=true` かつ autopilot が有効のときだけ `tools/list` に出る。
+- ツールの説明は、`PLAN_CALL_FAILED`、`PLAN_INVALID`、`PLAN_BUDGET_HOLD` で止まった計画を対象にし、予算の保留は予算が空いてから再計画するよう書く。
+
+### 10.2 なぜ許すか
+
+- BLOCKED の計画を運用者の JWT が無いと再開できないと、`PLAN_CALL_FAILED` のたびに UI の操作が要る。MCP の利用者(運用者のトークンを持つ Claude)が、原因を直した後に自分で戻せるようにする。
+- 再計画は実行ではない。計画の段階に戻すだけで、タスクは投入されない。計画が再び失敗すれば、再び `BLOCKED` で止まる。
+- `kivra_task_approve` と `kivra_task_skip` と同じく、運用者の判断である。
+
+### 10.3 scope を新設しない理由
+
+新しいスコープを足すと、Keycloak の client `kivra-mcp` の変更が要る(`kigawa01/k8s-system` の側)。再計画は承認と見送りと同じ運用者の判断なので、既存の `kivra.selfdev.task.decide` を使う。読み取り、停止、延長、再投入のスコープからは暗黙に付かない。
+
+### 10.4 守り方
+
+- **フラグ**: `KIVRA_MCP_WRITE_ENABLED` と autopilot。切れば一覧から消え、呼べば -32602。
+- **スコープ**: `kivra.selfdev.task.decide`(承認と見送りと共有)。無ければ 403 `insufficient_scope`。
+- **権限**: 既存の権限表のまま(`GOAL_WRITE`)。AI の主体は、スコープを持っていても拒否される(`forbidden`)。ハンドラは AI かどうかを比べない。
+- **監査**: `net.kigawa.kivra.selfdev.autopilot.operator` の行に `via=mcp` を付けて出る(`action=REPLAN via=mcp`)。ID と固定コードだけを出す。REST の行(`via` なし)は変えない。`replanAsOperator` に `viaMcp` の引数を足して、同じ関数の中で行を分けた。
+- **書き込みの上限**: 既存の書き込みの毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
+
+### 10.5 残るリスク
+
+- **プロジェクト単位の権限(ADR 0022 PR-D)は検査しない**。§8.5 と同じ。`KIVRA_SELFDEV_PROJECT_MODE=enforce` の環境に出す前に直す必要がある。
+- **根以外の BLOCKED を指せる**。REST と同じく、`replanBlocked` は根かどうかを見ない。子のタスク(実行中の dispatch guard で BLOCKED になったもの)を指すと、`TASK_SUBMITTED` に戻り、計画の対象になる。運用者が `kivra_task_list` の値で指す前提。ツールの説明は計画の根を前提に書いた。
+- 再計画が計画の失敗を直すわけではない。原因(承認の枠、予算、計画の入力)を直さずに再計画すると、同じ理由で再び `BLOCKED` になる。
+
+### 10.6 確認したこと、確認できなかったこと
+
+- 確認(テスト `McpTaskToolsTest`): 正常系(`BLOCKED` から `TASK_SUBMITTED`、版が一つ上がる、題名と本文が返らない)、`BLOCKED` 以外の拒否(`NO_EDGE`、何も書かない)、見つからない Task(`TASK_NOT_FOUND`)、版の不一致、予算の保留の理由での正常系、スコープ不足(403)、AI の拒否、フラグ無効、autopilot 無効、不正な入力、監査の行(`via=mcp`、ID と固定コードだけ)。`RolesCoverageArchitectureTest`(表の行と権限)。
+- 未確認: dev の Keycloak client `kivra-mcp` が `kivra.selfdev.task.decide` を発行するか(承認と見送りと同じ。`kigawa01/k8s-system` の側)。dev での実際の再計画と、再計画後の計画の結果。

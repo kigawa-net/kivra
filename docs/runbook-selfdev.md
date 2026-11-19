@@ -2842,7 +2842,7 @@ order が有効(`KIVRA_SELFDEV_ORDERS_ENABLED=true` かつ `KIVRA_SELFDEV_AUTOPI
 - 題名、方針、目標の本文、`digest` は返さない。ログと監査には、固定のコード、ID、主体のハッシュだけが出る(`net.kigawa.kivra.selfdev.order.operator`、`via=mcp`)。
 - 有効化: order と MCP を有効にし、停止の要求も使うなら `KIVRA_MCP_WRITE_ENABLED=true` を加える(dev で先に確かめる)。戻すには該当の変数を `false` にして再起動する。order の状態は DB に残り、起動時に既存の `ACTIVE` は `PAUSED`(`STARTUP_HOLD`)になる。
 
-### 8.8b 運用者の判断のツール(延長、再開、order の作成、タスクの再投入、タスクの承認と見送り、ADR 0015 追補 2026-11-18・2026-11-19、既定は無効)
+### 8.8b 運用者の判断のツール(延長、再開、order の作成、タスクの再投入、タスクの承認と見送り、タスクの再計画、ADR 0015 追補 2026-11-18・2026-11-19、既定は無効)
 
 `KIVRA_MCP_WRITE_ENABLED=true` かつ order が有効のとき(延長、再開、作成)、または `KIVRA_MCP_WRITE_ENABLED=true` かつ autopilot が有効なとき(再投入、承認、見送り)に登録する。どれも REST と同じリポジトリ関数を呼ぶ。
 
@@ -2854,6 +2854,7 @@ order が有効(`KIVRA_SELFDEV_ORDERS_ENABLED=true` かつ `KIVRA_SELFDEV_AUTOPI
 | `kivra_task_requeue` | `kivra.selfdev.requeue` | `task_id`、`version`(`kivra_task_list` の値) | `task_id`、`state`(`QUEUED`)、`state_reason`、`version`、`project_id`。題名と本文は返さない。拒否は `TASK_NOT_FOUND`、`STALE_VERSION` など |
 | `kivra_task_approve` | `kivra.selfdev.task.decide` | `task_id`、`version`(`kivra_task_list` の値) | 同上(`state` は `QUEUED`)。承認待ち(`PENDING_APPROVAL`、`AUTO_SCOPE_EXCEEDED` を含む)だけ。拒否は `TASK_NOT_FOUND`、`STALE_VERSION`、遷移の拒否の理由コード |
 | `kivra_task_skip` | `kivra.selfdev.task.decide` | `task_id`、`version` | 同上(`state` は `SKIPPED`)。UI の「見送る」と同じ REST(`/reject`)の経路。承認待ち、投入待ち、`FAILED`、`CANCELLED` のタスク |
+| `kivra_task_replan` | `kivra.selfdev.task.decide` | `task_id`(ルートの task、goal の ID)、`version`(`kivra_task_list` の値) | `task_id`、`state`(`TASK_SUBMITTED`)、`state_reason`(`REPLAN_REQUESTED`)、`version`、`project_id`。UI の「再計画」と同じ REST(`/api/selfdev/goals/{id}/replan`)の経路。`BLOCKED` のタスクだけ(`PLAN_CALL_FAILED`、`PLAN_INVALID`、`PLAN_BUDGET_HOLD`)。拒否は `TASK_NOT_FOUND`、`STALE_VERSION`、`NO_EDGE`(`BLOCKED` 以外) |
 
 - `KIVRA_MCP_WRITE_ENABLED=false` のときは一つも出ず、呼べば -32602(未知のツール)。書き込みの毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
 - スコープが無いトークンは 403 と `insufficient_scope`。読み取りや停止のスコープからは暗黙に付かない。
@@ -2864,6 +2865,7 @@ order が有効(`KIVRA_SELFDEV_ORDERS_ENABLED=true` かつ `KIVRA_SELFDEV_AUTOPI
 - 入力は厳格。未知の項目(`policy`、`reason` など)、型違い、範囲外、小数は -32602 で、何も書かれない。
 - `kivra_task_approve` の注意: **承認は範囲の再検査を行わない**(§7.4b)。`AUTO_SCOPE_EXCEEDED` で止まったタスクを承認すると、差分を確かめないまま `QUEUED` になる。承認の前に、計画の内容と、同じ原因が直っているかを確かめる。
 - 監査: 承認と見送りは、`net.kigawa.kivra.selfdev.autopilot.operator` の行に `via=mcp` を付けて出る(`action=TASK_APPROVED` / `action=TASK_REJECTED`)。
+- `kivra_task_replan` の注意: **予算の保留(`PLAN_BUDGET_HOLD`)の計画は、予算が空いてから再計画する**。空いていないうちに戻すと、同じ保留で再び `BLOCKED` になる。`PLAN_CALL_FAILED` は呼び出しの原因を直してから戻す。再計画はタスクを投入しない(計画の段階に戻すだけ)。根以外の `BLOCKED` も REST と同じく指せるので、対象は `kivra_task_list` の根の ID で確かめる。監査は `action=REPLAN via=mcp`。
 - 注意: プロジェクト単位の権限(ADR 0022 PR-D)は、これらの MCP ツールでは検査されない(ディスパッチャは全体の権限だけを見る)。`KIVRA_SELFDEV_PROJECT_MODE` を enforce にする前に直す。
 - 有効化の順序: dev で `KIVRA_MCP_WRITE_ENABLED=true` は既に有効。スコープ `kivra.selfdev.order.manage`、`kivra.selfdev.requeue`、`kivra.selfdev.task.decide`、`kivra.selfdev.order.create` を Keycloak の client `kivra-mcp` に足す(`kigawa01/k8s-system` 側。この repo には無い)。その後、運用者のトークンで `tools/list` に出ることを確かめる。作成のツールは `kivra.selfdev.order.create` を付けたトークンにだけ出る。
 - 戻す: 該当のスコープを付けない(一覧から消える)、または `KIVRA_MCP_WRITE_ENABLED=false` にして再デプロイする。書き込みのツール全部が止まり、読み取りは残る。作成だけを止めるには、`kivra.selfdev.order.create` を Keycloak の client `kivra-mcp` から外す(トークンの次の発行から効く。既に発行されたトークンは、その有効期限まで使える)。

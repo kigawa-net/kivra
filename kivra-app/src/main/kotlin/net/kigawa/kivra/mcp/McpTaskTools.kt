@@ -11,6 +11,7 @@ import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevTask
 import net.kigawa.kivra.db.TaskTransition
 import net.kigawa.kivra.routes.operatorTag
+import net.kigawa.kivra.routes.replanAsOperator
 import net.kigawa.kivra.routes.requeueAsOperator
 import org.slf4j.LoggerFactory
 
@@ -105,13 +106,16 @@ class McpTaskTools(
  *   It takes a task waiting for approval, including one the scope check stopped (`AUTO_SCOPE_EXCEEDED`). The scope is not checked again.
  * - `kivra_task_skip` (ADR 0015 amendment 2026-11-19): `POST /api/selfdev/tasks/{id}/reject`, which the UI's「見送る」button calls, through
  *   [SelfDevOperatorRepository.skipTask]. Scope `kivra.selfdev.task.decide`, shared with the approve.
+ * - `kivra_task_replan` (ADR 0015 amendment 2026-11-19 §10): `POST /api/selfdev/goals/{id}/replan` (the UI's「再計画」button), through
+ *   [replanAsOperator]. It takes a BLOCKED plan root back to TASK_SUBMITTED so the planner plans it again. Scope
+ *   `kivra.selfdev.task.decide`, shared with the approve and the skip (a replan is the same operator decision).
  *
  * The permission (GOAL_WRITE) is the dispatcher's, so the AI principal is refused before the handler runs. Registered only while the MCP
  * write switch is on and the autopilot answers ([buildMcpRouteDeps]). The input is strict: `task_id` and `version`. The output has ids,
- * fixed codes and the version, and no title or body. The approve and the skip write their own operator line with `via=mcp`.
+ * fixed codes and the version, and no title or body. The approve, the skip and the replan write their own operator line with `via=mcp`.
  */
 class McpTaskWriteTools(private val tasks: SelfDevOperatorRepository) {
-    fun tools(): List<McpTool> = listOf(taskRequeue(), taskApprove(), taskSkip())
+    fun tools(): List<McpTool> = listOf(taskRequeue(), taskApprove(), taskSkip(), taskReplan())
 
     private fun taskApprove() = McpTool(
         name = "kivra_task_approve",
@@ -133,6 +137,41 @@ class McpTaskWriteTools(private val tasks: SelfDevOperatorRepository) {
         write = true,
         permission = Permission.GOAL_WRITE,
     ) { caller, args -> decide(caller, args, DecisionKind.SKIP) }
+
+    private fun taskReplan() = McpTool(
+        name = "kivra_task_replan",
+        description = "Send a BLOCKED plan back to planning (an operator's decision): it goes to TASK_SUBMITTED and the planner plans it again. " +
+            "Use it for a plan stopped by PLAN_CALL_FAILED, PLAN_INVALID or PLAN_BUDGET_HOLD. A PLAN_BUDGET_HOLD plan: replan it only after " +
+            "the budget has room again. Give the task_id (the cycle root's id) and the version (from kivra_task_list). Nothing else changes.",
+        inputSchema = taskDecisionSchema(),
+        scope = SCOPE_SELFDEV_TASK_DECIDE,
+        write = true,
+        permission = Permission.GOAL_WRITE,
+    ) { caller, args -> replan(caller, args) }
+
+    /** The replan: the REST route's function, with the MCP marker in its audit line. A task that is not BLOCKED is refused (NO_EDGE). */
+    private fun replan(caller: McpCaller, args: JsonObject): ToolOutcome {
+        args.requireOnly("task_id", "version")
+        val id = args.requiredString("task_id", TASK_ID_SHAPE)
+        val version = args.requiredVersion()
+        return when (val r = tasks.replanAsOperator(id, version, caller.principal, viaMcp = true)) {
+            is TaskTransition.Moved -> ToolOutcome(
+                isError = false,
+                text = "plan sent back to planning",
+                structured = buildJsonObject {
+                    put("task_id", r.row.taskId)
+                    put("state", r.row.state.name)
+                    put("state_reason", r.row.stateReason?.name)
+                    put("version", r.row.version)
+                    put("project_id", r.row.projectId)
+                },
+                code = "TASK_SUBMITTED",
+            )
+            TaskTransition.NotFound -> refusal("TASK_NOT_FOUND", "task not found")
+            TaskTransition.StaleVersion -> refusal("STALE_VERSION", "the task changed; reload and try again")
+            is TaskTransition.Refused -> refusal(r.reason.name, "the state does not allow this operation")
+        }
+    }
 
     private enum class DecisionKind { APPROVE, SKIP }
 

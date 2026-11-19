@@ -128,8 +128,8 @@ class AutoScopeGuardTest {
     }
 
     @Test
-    fun `an unknown base falls back to the whole new content (fail-closed)`() {
-        // The base is known to be almost the same, but the read failed (null): the whole 201 lines count.
+    fun `a new file without a base counts its whole new content`() {
+        // A new file has no base-tree entry; its 201 newly added lines exceed the cap.
         val content = "x\n".repeat(201)
         assertEquals(
             AutoScopeVerdict.OutOfScope(1, 201, AutoScopeReason.LINE_COUNT),

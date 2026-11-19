@@ -1,6 +1,7 @@
 package net.kigawa.kivra.selfdev
 
 import java.security.SecureRandom
+import net.kigawa.kivra.core.patch.PatchPolicyDefaults
 
 /*
  * Prompt construction for the autopilot Planner (ADR 0011 section 3). Pure functions, no I/O.
@@ -27,6 +28,17 @@ internal object PlannerPrompt {
         return "The path \"$shown\" in the previous answer is not allowed. Allowed paths match one of: " +
             "${ALLOWED_PATTERNS.joinToString(", ")}. Use only complete paths from the repository file list, and reply again with " +
             "only the JSON object described in the instructions."
+    }
+
+    /**
+     * The note for a retry after a target path that is an existing file larger than the limit (ADR 0011 section 3, 追補 2026-11-19).
+     * [rejectedPath] is the Planner's own output, so it is cut and stripped the same way as in [pathRetryNote].
+     */
+    fun fileTooLargeRetryNote(rejectedPath: String): String {
+        val shown = PlannerRepoFileList.stripForNote(rejectedPath).replace('"', '_').replace('\\', '_')
+        return "The file \"$shown\" in the previous answer is larger than ${PatchPolicyDefaults.MAX_FILE_BYTES / 1024} KB, so a task " +
+            "cannot change it. Write the change to a smaller file instead, or to a new file. Reply again with only the JSON object " +
+            "described in the instructions."
     }
 
     private val random = SecureRandom()
@@ -77,6 +89,9 @@ internal object PlannerPrompt {
         }
         appendLine()
         appendLine("TASK SIZE")
+        appendLine("A file larger than ${PatchPolicyDefaults.MAX_FILE_BYTES / 1024} KB (${PatchPolicyDefaults.MAX_FILE_BYTES} bytes) cannot be")
+        appendLine("changed by a task. A plan that names such a file as a target path is refused by a check, and you are asked again.")
+        appendLine("Do not name such a file. Write the change to another file, or to a new file.")
         appendLine("In one task, do not read or rewrite a whole large file (about 50 KB or 1,000 lines or more). A change to a large")
         appendLine("file is split into several smaller tasks, for example one per feature or one per function.")
         appendLine("Keep the number of files that one task touches small.")
@@ -122,5 +137,5 @@ internal object PlannerPrompt {
     private const val MAX_TITLE_CHARS = PlanValidator.MAX_TITLE_CHARS
     private const val MAX_BODY_CHARS = PlanValidator.MAX_BODY_CHARS
     private const val MAX_PATHS = PlanValidator.MAX_PATHS_PER_TASK
-    private val ALLOWED_PATTERNS = net.kigawa.kivra.core.patch.PatchPolicyDefaults.ALLOWED_PATH_PATTERNS
+    private val ALLOWED_PATTERNS = PatchPolicyDefaults.ALLOWED_PATH_PATTERNS
 }

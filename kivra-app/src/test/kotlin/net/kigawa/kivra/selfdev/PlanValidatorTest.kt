@@ -6,6 +6,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import net.kigawa.kivra.core.autopilot.TaskState
+import net.kigawa.kivra.core.patch.PatchPolicyConfig
+import net.kigawa.kivra.core.patch.PatchPolicyDefaults
 
 /** The Planner's output rules (ADR 0011 section 3) and the approval rules (sections 4 and 6.1). Pure: no model, no database. */
 class PlanValidatorTest {
@@ -233,5 +235,55 @@ class PlanValidatorTest {
         assertEquals("a b", PlanValidator.singleLine("a\nb"))
         // A CRLF is two control characters, so two spaces: nothing is joined into one word.
         assertEquals("a  b", PlanValidator.singleLine("a\r\nb"))
+    }
+
+    private val limit = PatchPolicyDefaults.MAX_FILE_BYTES
+
+    private fun refusedBySize(text: String, sizes: Map<String, Long>?): PlanCheck.Invalid =
+        assertIs<PlanCheck.Invalid>(PlanValidator.validate(text, required, sizes))
+
+    @Test
+    fun `the size limit is the PatchPolicy limit, 200 KiB, and is defined once`() {
+        assertEquals(200L * 1024, limit)
+        assertEquals(limit, PatchPolicyConfig().maxFileBytes)
+    }
+
+    @Test
+    fun `an existing target file over the limit refuses the plan, and the refusal carries that path`() {
+        val check = refusedBySize(plan(task(paths = """["docs/big.md"]""")), mapOf("docs/big.md" to limit + 1))
+        assertEquals(PlanRejectReason.FILE_TOO_LARGE, check.reason)
+        assertEquals("docs/big.md", check.path)
+    }
+
+    @Test
+    fun `one large file among the target paths refuses the task, and a denylisted large file is refused too`() {
+        val paths = """["docs/a.md","kivra-app/src/main/kotlin/A.kt"]"""
+        assertEquals(
+            PlanRejectReason.FILE_TOO_LARGE,
+            refusedBySize(plan(task(paths = paths)), mapOf("kivra-app/src/main/kotlin/A.kt" to limit + 1)).reason,
+        )
+        assertEquals(
+            PlanRejectReason.FILE_TOO_LARGE,
+            refusedBySize(plan(task(paths = """["docs/adr/0001.md"]""")), mapOf("docs/adr/0001.md" to limit + 1)).reason,
+        )
+    }
+
+    @Test
+    fun `an existing file of exactly the limit is accepted, and one byte more is refused`() {
+        assertIs<PlanCheck.Valid>(PlanValidator.validate(plan(task(paths = """["docs/a.md"]""")), required, mapOf("docs/a.md" to limit)))
+        assertEquals(
+            PlanRejectReason.FILE_TOO_LARGE,
+            refusedBySize(plan(task(paths = """["docs/a.md"]""")), mapOf("docs/a.md" to limit + 1)).reason,
+        )
+    }
+
+    @Test
+    fun `a new file is never too large, and neither is a file whose size is not known`() {
+        // A path not in the base tree is a new file: it is not in the map.
+        assertIs<PlanCheck.Valid>(PlanValidator.validate(plan(task(paths = """["docs/new.md"]""")), required, mapOf("docs/a.md" to limit + 1)))
+        // Without a size map (the tree could not be read) the check is not made; PatchPolicy still checks at write time.
+        assertIs<PlanCheck.Valid>(PlanValidator.validate(plan(task(paths = """["docs/a.md"]""")), required, null))
+        assertFalse(PlanValidator.isTooLargeToChange("docs/a.md", null))
+        assertFalse(PlanValidator.isTooLargeToChange("docs/new.md", mapOf("docs/a.md" to limit + 1)))
     }
 }

@@ -61,6 +61,13 @@ sealed interface PatchVerdict {
 
 /** Default path patterns. Pinned by tests: changing them is a deliberate review decision. */
 object PatchPolicyDefaults {
+    /**
+     * The largest file, in bytes, that a change may write (and the largest existing file a plan may name, ADR 0011 section 3). The one
+     * definition: [PatchPolicyConfig.maxFileBytes] and the Planner's pre-check (`PlanValidator`) both use it. kivra-agent keeps its own copy
+     * (DiffLimits), which CodingLimitsContractTest pins to the same value.
+     */
+    const val MAX_FILE_BYTES: Long = 200L * 1024
+
     /** Glob patterns (`*`, `**`, `?`). Matched case-sensitively. A path must match at least one. */
     val ALLOWED_PATH_PATTERNS: List<String> = listOf(
         "kivra-*/src/**",
@@ -108,7 +115,7 @@ data class PatchPolicyConfig(
     val allowedPathPatterns: List<String> = PatchPolicyDefaults.ALLOWED_PATH_PATTERNS,
     val deniedPathPatterns: List<String> = PatchPolicyDefaults.DENIED_PATH_PATTERNS,
     val maxFiles: Int = 20,
-    val maxFileBytes: Long = 200L * 1024,
+    val maxFileBytes: Long = PatchPolicyDefaults.MAX_FILE_BYTES,
     val maxTotalBytes: Long = 1024L * 1024,
     val maxDeletes: Int = 5,
     val maxPathChars: Int = 200,

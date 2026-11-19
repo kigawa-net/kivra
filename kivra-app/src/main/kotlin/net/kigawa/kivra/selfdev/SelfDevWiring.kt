@@ -268,9 +268,11 @@ internal fun buildSelfDev(
     )
     // Built only when the autopilot is enabled. Nothing about planning exists otherwise (ADR 0011, PR B).
     val planWorker: PlannerWorker? = autopilot.config?.takeIf { autopilot.enabled }?.let { autopilotConfig ->
-        // The Planner's file list reads the same GitHub adapter, on the configured base branch (Issue #293). Off when the switch is off.
-        val repoFiles = if (autopilotConfig.plannerRepoTree) PlannerRepoFiles(github, config.repo, config.baseBranch) else null
-        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevOperatorRepository(database), tenantId, repoFiles, memory, suppress, selfDevRouter)
+        // The Planner's file list reads the same GitHub adapter, on the configured base branch (Issue #293). The list is off when its switch
+        // is off. The file sizes for the target-path pre-check (ADR 0011 section 3) come from the same reader and are always read.
+        val repoTree = PlannerRepoFiles(github, config.repo, config.baseBranch)
+        val repoFiles = if (autopilotConfig.plannerRepoTree) repoTree else null
+        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevOperatorRepository(database), tenantId, repoFiles, repoTree, memory, suppress, selfDevRouter)
     }
     // ADR 0014 S1: the shadow judgement. Built only with the autopilot and its shadow switch on; it reads GitHub and writes the audit only.
     val autoMergeShadow: AutoMergeShadowWatch? = buildAutoMergeShadowWatch(
@@ -379,6 +381,7 @@ private fun buildPlanWorker(
     operations: SelfDevOperatorRepository,
     tenantId: String,
     repoFiles: PlannerRepoFiles?,
+    repoSizes: PlannerRepoFiles,
     memory: SelfDevMemoryRecorder,
     suppress: SuppressShadow,
     router: DifficultyRouter?,
@@ -391,6 +394,7 @@ private fun buildPlanWorker(
         gateway = gateway,
         config = PlannerConfig(budgetScopes = listOf(tenantId), autopilot = config),
         repoFiles = repoFiles,
+        repoSizes = repoSizes,
         memory = memory,
         suppress = suppress,
         router = router,

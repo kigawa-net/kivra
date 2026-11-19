@@ -138,6 +138,15 @@ class PlanValidatorTest {
     }
 
     @Test
+    fun `dependencies outside the range of earlier tasks are refused - a negative, a number past the plan, or a self reference late in the plan`() {
+        assertEquals(PlanRejectReason.DEPENDENCY, invalid(plan(task(), task(deps = "[-1]"))), "negative")
+        assertEquals(PlanRejectReason.DEPENDENCY, invalid(plan(task(), task(deps = "[3]"))), "past the plan")
+        assertEquals(PlanRejectReason.DEPENDENCY, invalid(plan(task(), task(deps = "[999999999]"))), "large")
+        assertEquals(PlanRejectReason.DEPENDENCY, invalid(plan(task(), task(), task(deps = "[2,3]"))), "self among earlier")
+        assertEquals(PlanRejectReason.DEPENDENCY, invalid(plan(task(), task(deps = "[0,1]"))), "zero among valid")
+    }
+
+    @Test
     fun `a denylisted path makes the task need approval under auto too, and the model cannot say otherwise`() {
         // docs/adr is in the docs allowlist and on the denylist: the denylist wins. The task is never auto-queued.
         val result = valid(plan(task(paths = """["docs/adr/0099.md"]""", size = "\"S\"")), auto).tasks.single()

@@ -196,6 +196,7 @@ private suspend fun ApplicationCall.respondMetadata(deps: McpRouteDeps, resource
         authorizationServers = listOf(deps.issuer),
         scopesSupported = listOf(
             "kivra.runs.read", "kivra.selfdev.start", "kivra.selfdev.stop", SCOPE_SELFDEV_REQUEUE, SCOPE_SELFDEV_ORDER_MANAGE,
+            SCOPE_SELFDEV_TASK_DECIDE,
         ),
         bearerMethodsSupported = listOf("header"),
     )

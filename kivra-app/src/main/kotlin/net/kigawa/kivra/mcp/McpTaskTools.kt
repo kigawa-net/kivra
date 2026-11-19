@@ -10,12 +10,23 @@ import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevTask
 import net.kigawa.kivra.db.TaskTransition
+import net.kigawa.kivra.routes.operatorTag
 import net.kigawa.kivra.routes.requeueAsOperator
+import org.slf4j.LoggerFactory
 
 private val TASK_ID_SHAPE = Regex("[0-9A-Z]{26}")
 
 /** Scope of the requeue tool (ADR 0015 amendment 2026-11-18). Not implied by the read scope. */
 const val SCOPE_SELFDEV_REQUEUE = "kivra.selfdev.requeue"
+
+/**
+ * Scope of the task approve and skip tools (ADR 0015 amendment 2026-11-19). Not implied by the read scope or the requeue scope. The
+ * permission check (GOAL_WRITE) refuses the AI principal whatever the scope says.
+ */
+const val SCOPE_SELFDEV_TASK_DECIDE = "kivra.selfdev.task.decide"
+
+/** The operator log of the autopilot, the same name as the REST task routes' (SelfDevGoalRoutes): fixed codes and IDs only. */
+private val taskOperatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.autopilot.operator")
 private const val TASK_CHILD_LIMIT = 50
 private const val TITLE_MAX_CODE_POINTS = 200
 private const val TITLE_UNSAFE = "[unsafe title omitted]"
@@ -85,15 +96,97 @@ class McpTaskTools(
 }
 
 /**
- * The write tool of the cycle tree (ADR 0015 amendment 2026-11-18): `kivra_task_requeue`. It is a thin adapter over the call that
- * `POST /api/selfdev/tasks/{id}/requeue` makes ([requeueAsOperator]): the state machine, the version check and the fresh key are the
- * repository's. The permission (GOAL_WRITE) is the dispatcher's, so the AI principal is refused before the handler runs.
+ * The write tools of the cycle tree. Each is a thin adapter over the repository call that its REST route makes, so the state machine, the
+ * version check and the fresh key are the repository's:
  *
- * Registered only while the MCP write switch is on and the autopilot answers ([buildMcpRouteDeps]). The input is strict: `task_id` and
- * `version`. The output has ids, fixed codes and the version, and no title or body.
+ * - `kivra_task_requeue` (ADR 0015 amendment 2026-11-18): `POST /api/selfdev/tasks/{id}/requeue` ([requeueAsOperator]). Scope
+ *   `kivra.selfdev.requeue`.
+ * - `kivra_task_approve` (ADR 0015 amendment 2026-11-19): `POST /api/selfdev/tasks/{id}/approve`, through [SelfDevOperatorRepository.approveTask].
+ *   It takes a task waiting for approval, including one the scope check stopped (`AUTO_SCOPE_EXCEEDED`). The scope is not checked again.
+ * - `kivra_task_skip` (ADR 0015 amendment 2026-11-19): `POST /api/selfdev/tasks/{id}/reject`, which the UI's「見送る」button calls, through
+ *   [SelfDevOperatorRepository.skipTask]. Scope `kivra.selfdev.task.decide`, shared with the approve.
+ *
+ * The permission (GOAL_WRITE) is the dispatcher's, so the AI principal is refused before the handler runs. Registered only while the MCP
+ * write switch is on and the autopilot answers ([buildMcpRouteDeps]). The input is strict: `task_id` and `version`. The output has ids,
+ * fixed codes and the version, and no title or body. The approve and the skip write their own operator line with `via=mcp`.
  */
 class McpTaskWriteTools(private val tasks: SelfDevOperatorRepository) {
-    fun tools(): List<McpTool> = listOf(taskRequeue())
+    fun tools(): List<McpTool> = listOf(taskRequeue(), taskApprove(), taskSkip())
+
+    private fun taskApprove() = McpTool(
+        name = "kivra_task_approve",
+        description = "Approve a task that waits for approval (PENDING_APPROVAL, including one stopped with AUTO_SCOPE_EXCEEDED). It goes to QUEUED " +
+            "and runs. An operator's decision. Approving does NOT re-check the change's scope. Give the task_id and the version (from " +
+            "kivra_task_list). Nothing else changes.",
+        inputSchema = taskDecisionSchema(),
+        scope = SCOPE_SELFDEV_TASK_DECIDE,
+        write = true,
+        permission = Permission.GOAL_WRITE,
+    ) { caller, args -> decide(caller, args, DecisionKind.APPROVE) }
+
+    private fun taskSkip() = McpTool(
+        name = "kivra_task_skip",
+        description = "Skip a task of the cycle tree (an operator's decision): it goes to SKIPPED and is not run. Works on a task that waits for " +
+            "approval, is queued, or is FAILED or CANCELLED. Give the task_id and the version (from kivra_task_list). Nothing else changes.",
+        inputSchema = taskDecisionSchema(),
+        scope = SCOPE_SELFDEV_TASK_DECIDE,
+        write = true,
+        permission = Permission.GOAL_WRITE,
+    ) { caller, args -> decide(caller, args, DecisionKind.SKIP) }
+
+    private enum class DecisionKind { APPROVE, SKIP }
+
+    private fun taskDecisionSchema(): JsonObject = objectSchema(
+        "task_id" to buildJsonObject {
+            put("type", "string")
+            put("pattern", "^[0-9A-Z]{26}\$")
+        },
+        "version" to buildJsonObject {
+            put("type", "integer")
+            put("minimum", 0)
+            put("description", "The task's version, as kivra_task_list returned it.")
+        },
+        required = listOf("task_id", "version"),
+    )
+
+    /** The approve and the skip: the same input and the same answer; the repository call and the audit action differ. */
+    private fun decide(caller: McpCaller, args: JsonObject, kind: DecisionKind): ToolOutcome {
+        args.requireOnly("task_id", "version")
+        val id = args.requiredString("task_id", TASK_ID_SHAPE)
+        val version = args.requiredVersion()
+        val result = when (kind) {
+            DecisionKind.APPROVE -> tasks.approveTask(id, version, caller.principal)
+            DecisionKind.SKIP -> tasks.skipTask(id, version)
+        }
+        return when (result) {
+            is TaskTransition.Moved -> {
+                // The same action name as the REST route (approve: TASK_APPROVED; the UI's skip is the REST reject: TASK_REJECTED), with via=mcp.
+                val (action, code, text) = when (kind) {
+                    DecisionKind.APPROVE -> Triple("TASK_APPROVED", "QUEUED", "task approved")
+                    DecisionKind.SKIP -> Triple("TASK_REJECTED", "SKIPPED", "task skipped")
+                }
+                taskOperatorLog.info(
+                    "autopilot operator action: action={} via=mcp actor={} taskId={} result={}",
+                    action, operatorTag(caller.principal), id, result.row.state.name,
+                )
+                ToolOutcome(
+                    isError = false,
+                    text = text,
+                    structured = buildJsonObject {
+                        put("task_id", result.row.taskId)
+                        put("state", result.row.state.name)
+                        put("state_reason", result.row.stateReason?.name)
+                        put("version", result.row.version)
+                        put("project_id", result.row.projectId)
+                    },
+                    code = code,
+                )
+            }
+            TaskTransition.NotFound -> refusal("TASK_NOT_FOUND", "task not found")
+            TaskTransition.StaleVersion -> refusal("STALE_VERSION", "the task changed; reload and try again")
+            is TaskTransition.Refused -> refusal(result.reason.name, "the state does not allow this operation")
+        }
+    }
 
     private fun taskRequeue() = McpTool(
         name = "kivra_task_requeue",

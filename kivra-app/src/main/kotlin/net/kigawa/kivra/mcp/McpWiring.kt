@@ -39,6 +39,8 @@ fun buildMcpRouteDeps(
 ): McpRouteDeps? {
     if (!settings.enabled) return null
     val oidc = OidcJwtConfig.fromEnv(env).copy(audience = checkNotNull(settings.audience))
+    // The one guard of the routes and of the order tools (the project check of a creation). Without [guard], the roles are off.
+    val permissionGuard = guard ?: legacyPermissionGuard(orders?.aiPrincipal)
     // The order tools are registered only while the orders are on ([orders] is null otherwise).
     // Goal tools temporarily removed pending Task model migration (V40).
     val tools = McpRunTools(runs, targetRepo).tools() +
@@ -47,7 +49,7 @@ fun buildMcpRouteDeps(
         } else {
             emptyList()
         }) +
-        (orders?.let { McpOrderTools(it).tools(settings.writeEnabled) } ?: emptyList()) +
+        (orders?.let { McpOrderTools(it, permissionGuard).tools(settings.writeEnabled) } ?: emptyList()) +
         // The requeue (ADR 0015 amendment 2026-11-18) and the approve and skip (amendment 2026-11-19) need the write switch and the autopilot,
         // as the REST routes need the autopilot.
         (if (settings.writeEnabled) tasks?.let { McpTaskWriteTools(it).tools() } ?: emptyList() else emptyList()) +
@@ -56,10 +58,7 @@ fun buildMcpRouteDeps(
         settings = settings,
         verifier = McpJwtVerifier(oidc, jwkProvider ?: RefreshingJwkProvider(oidc.jwksUrl), settings.agentRole),
         issuer = oidc.issuer,
-        dispatcher = McpDispatcher(
-            tools, McpRateLimiter(settings.writeRatePerMinute),
-            guard ?: legacyPermissionGuard(orders?.aiPrincipal),
-        ),
+        dispatcher = McpDispatcher(tools, McpRateLimiter(settings.writeRatePerMinute), permissionGuard),
         rateLimiter = McpRateLimiter(settings.ratePerMinute),
         tokenAuth = tokenAuth,
     )

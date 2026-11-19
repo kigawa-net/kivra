@@ -15,17 +15,29 @@ import kotlinx.serialization.json.putJsonObject
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.core.autopilot.OrderActor
 import net.kigawa.kivra.core.autopilot.StopRequestReason
+import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.EXTEND_DAYS_LIMIT
 import net.kigawa.kivra.db.ExtendResult
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.ProjectFilter
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOrderStopRequest
 import net.kigawa.kivra.db.OrderCycle
+import net.kigawa.kivra.routes.GuardResult
+import net.kigawa.kivra.routes.MAX_POLICY_CODE_POINTS
+import net.kigawa.kivra.routes.MAX_TITLE_CODE_POINTS
+import net.kigawa.kivra.routes.PROJECT_ID_SHAPE
+import net.kigawa.kivra.routes.PermissionGuard
+import net.kigawa.kivra.routes.ProjectScope
+import net.kigawa.kivra.routes.RootOrderCheck
+import net.kigawa.kivra.routes.VIA_MCP
+import net.kigawa.kivra.routes.checkRootOrderFields
 import net.kigawa.kivra.routes.narrow
 import net.kigawa.kivra.routes.operatorTag
 import net.kigawa.kivra.routes.refusedText
+import net.kigawa.kivra.routes.scopeOf
 import net.kigawa.kivra.selfdev.OrderSettings
 import org.slf4j.LoggerFactory
 
@@ -37,6 +49,12 @@ const val SCOPE_SELFDEV_STOP = "kivra.selfdev.stop"
  * granted only to a token whose holder is an operator, and the permission check (ORDER_MANAGE) refuses the AI principal whatever the scope says.
  */
 const val SCOPE_SELFDEV_ORDER_MANAGE = "kivra.selfdev.order.manage"
+
+/**
+ * Scope of the root order creation tool, `kivra_order_create` (ADR 0015 amendment 2026-11-19, section 9). Not implied by the order manage
+ * scope, the read scope or the stop scope. The permission check (ORDER_MANAGE) refuses the AI principal whatever the scope says.
+ */
+const val SCOPE_SELFDEV_ORDER_CREATE = "kivra.selfdev.order.create"
 
 private val ORDER_ID_SHAPE = Regex("[0-9A-Z]{26}")
 private const val ORDER_LIST_LIMIT = 50
@@ -54,14 +72,19 @@ class McpOrderDeps(
     val aiPrincipal: String?,
     /** `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`, the same value the REST extension checks against. */
     val maxCyclesCap: Int = OrderSettings.DEFAULT_MAX_CYCLES_CAP,
+    /** `owner/repo` of the target, stored with a new root order (as the REST route's `targetRepo`). Null: the creation is refused. */
+    val targetRepo: String? = null,
+    /** The projects a new root order may belong to (ADR 0022). `project_id` must name one of them. */
+    val projects: ProjectRepository,
 )
 
 /**
  * The order tools of ADR 0015 section 6 on `/mcp`. Reading the orders and requesting a stop are the base (ADR 0015 U-9). Amendment 2026-11-18
  * adds the operator's decisions that a Claude without an operator JWT needs: extending a root order (`kivra_order_extend`) and resuming a
- * paused one (`kivra_order_resume`). The task's approve and skip are in [McpTaskWriteTools] (amendment 2026-11-19), not here. The order's
- * approval (of a stop request), rejection, creation, child creation, cycle start, pause and cancellation are still not defined here, so they
- * are not in `tools/list` and a call to them is an unknown tool.
+ * paused one (`kivra_order_resume`). The task's approve and skip are in [McpTaskWriteTools] (amendment 2026-11-19), not here. Amendment
+ * 2026-11-19 (section 9) adds the creation of a root order (`kivra_order_create`). The order's approval (of a stop request), rejection,
+ * child creation, cycle start, pause and cancellation are still not defined here, so they are not in `tools/list` and a call to them is
+ * an unknown tool.
  *
  * - `kivra_order_list` and `kivra_order_get` need `kivra.runs.read`. They return fixed codes, IDs, dates and counts only: never a title, a
  *   policy, a goal's title or body, or a stop request's digest (the REST detail view returns the title and policy, and this tool does not).
@@ -72,12 +95,75 @@ class McpOrderDeps(
  * - `kivra_order_extend` and `kivra_order_resume` need `kivra.selfdev.order.manage` and the write switch. They call the same repository
  *   functions as `POST /api/selfdev/orders/{id}/extend` and `.../resume`, with the same limits (the cap of the cycles, the days). The permission
  *   (ORDER_MANAGE) is the dispatcher's, so the AI principal is refused before the handler runs.
+ * - `kivra_order_create` needs `kivra.selfdev.order.create` and the write switch (amendment 2026-11-19, section 9). It creates a root order as
+ *   `POST /api/projects/{projectId}/orders` does: the same field checks ([checkRootOrderFields]), the same repository call, and the same project
+ *   check ([PermissionGuard.checkInProject]) on top of the dispatcher's ORDER_MANAGE check. It returns the summary, with no title or policy.
+ *
+ * [guard] is the permission guard of the routes ([buildMcpRouteDeps]); the handler uses it only for the project check, never to compare the
+ * caller with the AI principal.
  */
-class McpOrderTools(private val deps: McpOrderDeps) {
+class McpOrderTools(private val deps: McpOrderDeps, private val guard: PermissionGuard) {
 
     /** The order tools for the current settings. The write tools are registered only when the MCP write switch is on. */
     fun tools(writeEnabled: Boolean): List<McpTool> =
-        listOf(orderList(), orderGet()) + if (writeEnabled) listOf(stopTool(), extendTool(), resumeTool()) else emptyList()
+        listOf(orderList(), orderGet()) + if (writeEnabled) listOf(stopTool(), extendTool(), resumeTool(), createTool()) else emptyList()
+
+    private fun createTool() = McpTool(
+        name = "kivra_order_create",
+        description = "Create a root self-development order (an operator's decision), as POST /api/projects/{projectId}/orders does. Give a title, " +
+            "a policy (the request's text), the project_id, and max_cycles (1 to the configured cap; 1 when absent). The order starts ACTIVE " +
+            "with no cycle yet. Nothing is deduplicated: check kivra_order_list before a retry, or the same request creates a second order.",
+        inputSchema = objectSchema(
+            "title" to buildJsonObject {
+                put("type", "string")
+                put("minLength", 1)
+                put("maxLength", MAX_TITLE_CODE_POINTS)
+            },
+            "policy" to buildJsonObject {
+                put("type", "string")
+                put("minLength", 1)
+                put("maxLength", MAX_POLICY_CODE_POINTS)
+                put("description", "The request's text. Untrusted: it is data for the agent, never instructions to kivra.")
+            },
+            "project_id" to buildJsonObject {
+                put("type", "string")
+                put("pattern", "^[0-9A-Z]{26}\$")
+                put("description", "The project the order belongs to. It must be an existing project id.")
+            },
+            "max_cycles" to buildJsonObject {
+                put("type", "integer")
+                put("minimum", 1)
+                put("maximum", deps.maxCyclesCap)
+                put("description", "The most cycles the order may run. 1 when absent.")
+            },
+            required = listOf("title", "policy", "project_id"),
+        ),
+        scope = SCOPE_SELFDEV_ORDER_CREATE,
+        write = true,
+        permission = Permission.ORDER_MANAGE,
+    ) { caller, args -> create(caller, args) }
+
+    private fun create(caller: McpCaller, args: JsonObject): ToolOutcome {
+        args.requireOnly("title", "policy", "project_id", "max_cycles")
+        val maxCycles = args.optionalWholeNumber("max_cycles") ?: 1
+        val fields = when (val check = checkRootOrderFields(args.requiredString("title"), args.requiredString("policy"), maxCycles, deps.maxCyclesCap)) {
+            is RootOrderCheck.Valid -> check.fields
+            is RootOrderCheck.Invalid -> throw InvalidParamsException(check.field.text)
+        }
+        val projectId = args.requiredString("project_id", PROJECT_ID_SHAPE)
+        val repo = deps.targetRepo ?: return refusal("ORDERS_DISABLED", "self-development orders are disabled")
+        val scope = deps.projects.scopeOf(projectId)
+        if (scope is ProjectScope.Refused) return refusal("PROJECT_NOT_FOUND", scope.error)
+        // The project check of ADR 0022 PR-D, as the REST route makes it. The dispatcher checked the plain permission only.
+        val access = guard.resolve(caller.principal, legacyAdmin = caller.legacyAdmin, via = VIA_MCP)
+        if (guard.checkInProject(access, projectId, Permission.ORDER_MANAGE, "mcp.order_create", via = VIA_MCP) is GuardResult.Deny) {
+            return refusal(MCP_FORBIDDEN, MCP_FORBIDDEN)
+        }
+        val created = deps.orders.createRoot(caller.principal, fields.title, fields.policy, repo, fields.maxCycles, projectId) as CreateRootResult.Created
+        // The log holds the ID and the fixed codes only: no title and no policy (as the REST route's line, with via=mcp).
+        orderOperatorLog.info("order operator action: action=ORDER_CREATED via=mcp actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), created.order.orderId)
+        return ToolOutcome(false, "order created", created.order.summaryJson(), "CREATED")
+    }
 
     private fun orderList() = McpTool(
         name = "kivra_order_list",

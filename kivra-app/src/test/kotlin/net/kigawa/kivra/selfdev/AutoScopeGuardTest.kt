@@ -138,11 +138,25 @@ class AutoScopeGuardTest {
     }
 
     @Test
-    fun `an input over the diff size bound is counted as the whole new content`() {
+    fun `an existing file with an unreadable base fails closed even when the replacement is short`() {
+        val v = verdict(
+            AutopilotApproval.AUTO,
+            Write("docs/a.md", "one line\n"),
+            sizeOf = { 10_000L },
+            baseOf = { null },
+        )
+        assertEquals(AutoScopeVerdict.OutOfScope(1, 201, AutoScopeReason.LINE_COUNT), v)
+        assertEquals(201L, changedLines(null, "one line\n", existsInBase = true))
+    }
+
+    @Test
+    fun `an input over the diff size bound fails closed instead of overlooking a mass deletion`() {
         val base = "a\n".repeat(AutoScopeRule.MAX_DIFF_CHARS / 2)
-        // The input is over the bound, so the diff is not computed: the rule counts the whole new content (1 line), fail-closed.
-        assertEquals(1L, changedLines(base, "a\n"))
-        assertEquals(AutoScopeVerdict.InScope, verdict(AutopilotApproval.AUTO, Write("docs/a.md", "a\n"), baseOf = { base }))
+        assertEquals(201L, changedLines(base, "a\n"))
+        assertEquals(
+            AutoScopeVerdict.OutOfScope(1, 201, AutoScopeReason.LINE_COUNT),
+            verdict(AutopilotApproval.AUTO, Write("docs/a.md", "a\n"), sizeOf = { 2_000_000L }, baseOf = { base }),
+        )
     }
 
     @Test

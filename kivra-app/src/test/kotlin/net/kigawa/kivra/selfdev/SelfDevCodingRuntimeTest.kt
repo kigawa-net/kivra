@@ -45,6 +45,7 @@ class SelfDevCodingRuntimeTest {
         val runtime: SelfDevRuntime = SelfDevRuntime.CLI,
         val files: Map<String, String> = defaultFiles,
         val developer: FakeDeveloper = FakeDeveloper.returning(DevFixtures.proposed("docs/a.md" to "from the model\n")),
+        val autoScope: AutoScopeGuard? = null,
     ) {
         val github = FakeGitHub()
 
@@ -58,6 +59,7 @@ class SelfDevCodingRuntimeTest {
             taskTexts = FixedTaskTextSource(DevFixtures.taskText),
             clock = Clock.systemUTC(),
             coding = source,
+            autoScope = autoScope,
         )
 
         fun newRun(): RunId = db.runs.create("task-${System.nanoTime()}", "test", RunCompletionMode.PR_ONLY).runId
@@ -163,6 +165,50 @@ class SelfDevCodingRuntimeTest {
             assertEquals(1, source.calls)
             assertEquals(0, h.developer.callCount)
             assertEquals(listOf("createRef", "commit", "createPr"), h.github.writes)
+        }
+    }
+
+    /** Records what the runner gives the re-check (the base content per path) and returns a fixed verdict. */
+    private class RecordingGuard(private val verdict: AutoScopeVerdict) : AutoScopeGuard {
+        val bases = HashMap<String, String?>()
+        val settled = ArrayList<AutoScopeVerdict.OutOfScope>()
+
+        override fun check(runId: RunId, patch: PatchSet, sizeOf: (String) -> Long?, baseOf: (String) -> String?): AutoScopeVerdict {
+            for (file in patch.files) bases[file.path] = baseOf(file.path)
+            return verdict
+        }
+
+        override fun settle(runId: RunId, verdict: AutoScopeVerdict.OutOfScope) {
+            settled += verdict
+        }
+    }
+
+    @Test
+    fun `the re-check gets the base content of a written file that exists, and nothing for a new file`() = runBlocking {
+        TestDb().use { db ->
+            val guard = RecordingGuard(AutoScopeVerdict.InScope)
+            val h = Harness(db, FixedCodingSource(ready("docs/a.md" to "new text\n", "docs/new.md" to "fresh\n")), autoScope = guard)
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.PULL_REQUEST), runner.advance(runId))
+            assertEquals(mapOf("docs/a.md" to "old text\n", "docs/new.md" to null), guard.bases)
+            assertTrue(guard.settled.isEmpty())
+        }
+    }
+
+    @Test
+    fun `an out of scope verdict settles the run as a policy rejection, with no GitHub write`() = runBlocking {
+        TestDb().use { db ->
+            val verdict = AutoScopeVerdict.OutOfScope(paths = 1, lines = 201, reason = AutoScopeReason.LINE_COUNT)
+            val guard = RecordingGuard(verdict)
+            val h = Harness(db, FixedCodingSource(ready("docs/a.md" to "new text\n")), autoScope = guard)
+            val runner = h.runner()
+            val runId = h.newRun()
+            runner.advance(runId)
+            assertEquals(Advanced(DevelopmentRunState.DEVELOPING, DevelopmentRunState.FAILED, "POLICY_REJECTED"), runner.advance(runId))
+            assertEquals(listOf(verdict), guard.settled)
+            assertTrue(h.github.writes.isEmpty())
         }
     }
 

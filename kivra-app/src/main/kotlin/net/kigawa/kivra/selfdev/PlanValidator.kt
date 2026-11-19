@@ -116,6 +116,11 @@ object PlanValidator {
     internal fun isFullScopePath(path: String): Boolean = policy.allowsPath(path)
 
     /**
+     * True when [path] is on the denylist (the PatchPolicy denylist and the extra denylist of ADR 0011 section 4). The same under every mode.
+     */
+    internal fun isDenylistedPath(path: String): Boolean = autoPolicy.deniesPath(path)
+
+    /**
      * True when the Planner may name [path] in a task: the same rule as [validate] (the allowlist, and not denylisted). Used to choose the
      * repository files the Planner is shown, so a listed path is always one the validator accepts. It never accepts a path by itself.
      */

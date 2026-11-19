@@ -334,7 +334,7 @@ class SelfDevRunner(
      * The base content of each written file that exists in the base tree, for the line diff of the re-check (ADR 0011 section 6.2). Read
      * only when the change set has at most [AutoScopeRule.MAX_PATHS] distinct paths: a larger one is out of scope by its path count, so
      * there is nothing to diff. A file that is new, excluded by the reader (binary, too large), or whose read fails is left out, and the
-     * guard then counts its whole new content (fail-closed). Logs nothing.
+     * guard rejects a known existing file if its base cannot be read (fail-closed). Genuinely new files count their full new content. Logs nothing.
      */
     private suspend fun readBaseContents(patch: PatchSet, base: BranchInfo, entries: List<RepoEntry>): Map<String, String> {
         val paths = patch.files.map { it.path }.distinct()

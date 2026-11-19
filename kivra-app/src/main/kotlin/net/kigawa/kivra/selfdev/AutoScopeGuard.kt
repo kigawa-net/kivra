@@ -75,7 +75,7 @@ internal fun autoScopeOf(
     val paths = patch.files.map { it.path }.toSet()
     val lines = patch.files.sumOf { file ->
         when (file) {
-            is Write -> changedLines(baseOf(file.path), file.content)
+            is Write -> changedLines(baseOf(file.path), file.content, sizeOf(file.path) != null)
             is Delete -> sizeOf(file.path) ?: (AutoScopeRule.MAX_LINES + 1)
         }
     }
@@ -109,13 +109,13 @@ internal object AutoScopeRule {
 }
 
 /**
- * The changed lines of one write: the lines added plus the lines removed against [base] (the same as the `+` and `-` counts of a line diff,
- * summed). Fail-closed: when [base] is null (a new file, or a read that failed), when the input is over [AutoScopeRule.MAX_DIFF_CHARS], or
- * when the diff is over [AutoScopeRule.MAX_LINES], the count is the full new content (or one over the cap), so the rule never passes a
- * change it could not measure.
+ * The changed lines of one write: additions plus deletions against [base]. For a genuinely new file ([existsInBase] is false),
+ * count its entire content. A known existing file whose base cannot be read, or an oversized comparison, must fail closed even
+ * when the new content is short: otherwise a large deletion can bypass the 200-line cap.
  */
-internal fun changedLines(base: String?, content: String): Long {
-    if (base == null || base.length + content.length > AutoScopeRule.MAX_DIFF_CHARS) return lineCount(content)
+internal fun changedLines(base: String?, content: String, existsInBase: Boolean = false): Long {
+    if (base == null) return if (existsInBase) AutoScopeRule.MAX_LINES + 1 else lineCount(content)
+    if (base.length.toLong() + content.length > AutoScopeRule.MAX_DIFF_CHARS) return AutoScopeRule.MAX_LINES + 1
     val distance = LineDiff.indelDistance(splitLines(base), splitLines(content), AutoScopeRule.MAX_LINES.toInt())
     return distance?.toLong() ?: (AutoScopeRule.MAX_LINES + 1)
 }

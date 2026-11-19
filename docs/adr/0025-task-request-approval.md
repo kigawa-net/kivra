@@ -15,7 +15,7 @@
 2. 状態は `PENDING → APPROVED / REJECTED / CANCELLED` の 3 通り。`CANCELLED` は依頼者だけが、`PENDING` の間だけ行える。決定後の行は変わらない(`run_id` の紐付けを除く)。
 3. 依頼者と承認者は別人。自己承認は、リポジトリ層の条件と DB の CHECK の両方で禁止する。
 4. 権限は 2 つ。`REQUEST_SUBMIT`(依頼と取消)は、`SPEND_START` を持つ役割と同じ ADMIN、OPERATOR、AI に付ける。承認と却下の `REQUEST_DECIDE` は ADMIN と APPROVER に付ける。依頼権限を持つ役割は、もともと Run を作れるので、承認で権限が広がることは無い。
-5. 依頼はプロジェクト(ADR 0022)に属さない。プロジェクトの読み取り範囲の判定は行わない(後続で検討する)。
+5. 依頼はプロジェクト(ADR 0022)の配下に置く。パスは `/api/projects/{projectId}/requests` で、`projectId` は ULID(`[0-9A-Z]{26}`)でなければ 404、存在しないプロジェクトも 404。作成・読み取り・承認・却下・取消のどれも、まず役割を(プロジェクト指定なしで)確認し、プロジェクトを解決したあと、そのプロジェクトでの役割を `checkInProject` で確認する(停止要求と同じ 2 回の permit)。本文に `projectId` を書くときはパスと一致しなければならず、違えば 400 `PROJECT_MISMATCH`。ほかのプロジェクトの依頼は 404。`task_requests.project_id` は CHAR(26) NOT NULL で `projects` への FK、索引は `(project_id, state, created_at)`。承認で作る Run の扱いは変えない。
 6. 応答に承認者の識別子は出さない。監査の行は承認者のオーナーキーの SHA-256 先頭 12 桁(`actor_ref`)だけを持つ。
 7. 却下の理由は任意で、500 文字以内の自由記述として依頼の行に保存する。ログと監査の行には出さない。
 8. 件数の上限は設けない(未決事項)。
@@ -37,15 +37,15 @@
 
 | メソッド・パス | 権限 | 応答 |
 |---|---|---|
-| `POST /api/requests` | `REQUEST_SUBMIT` | body `{"title", "idempotencyKey"}`。新規は 201、同じ (依頼者, idempotencyKey) の再送は 200、title が違えば 409 |
-| `GET /api/requests` | `READ` | 自分の依頼を新しい順に最大 50 件。`REQUEST_DECIDE` を持つ者には、ほかの人の `PENDING` の依頼も含める(決裁できる分) |
-| `GET /api/requests/{id}` | `READ` | 依頼者本人、または `REQUEST_DECIDE` を持つ依頼者でない者。それ以外と存在しない ID は 404 |
-| `POST /api/requests/{id}/approve` | `REQUEST_DECIDE` | 200 と依頼(`runId` を含む)。依頼者本人は 403。存在しない、または見えない依頼は 404。`PENDING` でも `APPROVED`(`runId` 未紐付け)でもなければ 409 |
-| `POST /api/requests/{id}/reject` | `REQUEST_DECIDE` | body は省略可、または `{"reason": "..."}`。200。依頼者本人は 403、404、`PENDING` でなければ 409 |
-| `POST /api/requests/{id}/cancel` | `REQUEST_SUBMIT` | 200。依頼者でなければ 404(存在を見せない)。`PENDING` でなければ 409 |
+| `POST /api/projects/{projectId}/requests` | `REQUEST_SUBMIT` | body `{"title", "idempotencyKey", "projectId"(省略可)}`。同じキーを別のプロジェクトで使うと 409。新規は 201、同じ (依頼者, idempotencyKey) の再送は 200、title が違えば 409 |
+| `GET /api/projects/{projectId}/requests` | `READ` | 自分の依頼を新しい順に最大 50 件。`REQUEST_DECIDE` を持つ者には、ほかの人の `PENDING` の依頼も含める(決裁できる分) |
+| `GET /api/projects/{projectId}/requests/{id}` | `READ` | 依頼者本人、または `REQUEST_DECIDE` を持つ依頼者でない者。それ以外と存在しない ID は 404 |
+| `POST /api/projects/{projectId}/requests/{id}/approve` | `REQUEST_DECIDE` | 200 と依頼(`runId` を含む)。依頼者本人は 403。存在しない、または見えない依頼は 404。`PENDING` でも `APPROVED`(`runId` 未紐付け)でもなければ 409 |
+| `POST /api/projects/{projectId}/requests/{id}/reject` | `REQUEST_DECIDE` | body は省略可、または `{"reason": "..."}`。200。依頼者本人は 403、404、`PENDING` でなければ 409 |
+| `POST /api/projects/{projectId}/requests/{id}/cancel` | `REQUEST_SUBMIT` | 200。依頼者でなければ 404(存在を見せない)。`PENDING` でなければ 409 |
 
 - 作成は 201 とする。Task API の 202 は「非同期に実行される」ことを示すが、依頼は実行されないため、ここでは使わない。
-- 依頼の応答の形: `requestId`、`title`、`state`、`createdAt`、`decidedAt`、`decisionNote`、`runId`。`requestedBy` は、決裁者が見る依頼(ほかの人の依頼)にだけ入る。
+- 依頼の応答の形: `requestId`、`projectId`、`title`、`state`、`createdAt`、`decidedAt`、`decisionNote`、`runId`。`requestedBy` は、決裁者が見る依頼(ほかの人の依頼)にだけ入る。
 - 入力は `validatedText`(title 1〜200 文字、idempotencyKey 1〜128 文字、reason 500 文字。制御文字と双方向制御文字は不可)。mutating は `requireJsonSameOrigin`。認証は Task API と同じ `TaskApiIdentity`。
 
 ### 3. 承認と Run の作成(整合性)
@@ -79,8 +79,8 @@
 
 ### 6. データベース(V60、expand のみ)
 
-- `task_requests`: `request_id` CHAR(26) PK、`requested_by` VARCHAR(255)、`idempotency_key` VARCHAR(128)、`title` VARCHAR(200)、`state` VARCHAR(16)、`decided_by` VARCHAR(255) NULL、`decided_at` DATETIME(6) NULL、`decision_note` VARCHAR(500) NULL、`run_id` CHAR(26) NULL(FK は `development_runs`)、`created_at` DATETIME(6)。
-  - `UNIQUE (requested_by, idempotency_key)`。
+- `task_requests`: `request_id` CHAR(26) PK、`project_id` CHAR(26) NOT NULL(FK は `projects`)、`requested_by` VARCHAR(255)、`idempotency_key` VARCHAR(128)、`title` VARCHAR(200)、`state` VARCHAR(16)、`decided_by` VARCHAR(255) NULL、`decided_at` DATETIME(6) NULL、`decision_note` VARCHAR(500) NULL、`run_id` CHAR(26) NULL(FK は `development_runs`)、`created_at` DATETIME(6)。
+  - `UNIQUE (requested_by, idempotency_key)`。索引 `(project_id, state, created_at)`。
   - `CHECK state IN (...)`。
   - `CHECK` 決定の整合: `PENDING` と `CANCELLED` 以外の状態は `decided_by` が NOT NULL。
   - `CHECK (decided_by IS NULL OR decided_by <> requested_by)`(自己承認の禁止)。

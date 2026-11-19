@@ -22,6 +22,7 @@ import org.jetbrains.exposed.sql.update
 /** Exposed definitions mirroring V61__task_requests.sql (ADR 0025). The migration is the source of truth for DDL. */
 object TaskRequestsTable : Table("task_requests") {
     val requestId = char("request_id", 26)
+    val projectId = char("project_id", 26)
     val requestedBy = varchar("requested_by", 255)
     val idempotencyKey = varchar("idempotency_key", 128)
     val title = varchar("title", 200)
@@ -49,6 +50,7 @@ enum class TaskRequestState { PENDING, APPROVED, REJECTED, CANCELLED }
 /** A row of `task_requests`. [decidedBy] is an owner key and is never shown to a caller (ADR 0025 section 1). */
 data class TaskRequest(
     val requestId: String,
+    val projectId: String,
     val requestedBy: String,
     val idempotencyKey: String,
     val title: String,
@@ -105,14 +107,15 @@ class TaskRequestRepository(
 ) {
 
     /** A new request in PENDING, or the request the same (requester, key) already made. */
-    fun submit(requester: String, idempotencyKey: String, title: String): TaskRequestSubmitResult {
-        findByKey(requester, idempotencyKey)?.let { return replayOrConflict(it, title) }
+    fun submit(projectId: String, requester: String, idempotencyKey: String, title: String): TaskRequestSubmitResult {
+        findByKey(requester, idempotencyKey)?.let { return replayOrConflict(it, projectId, title) }
         val requestId = Ulid.generate(clock)
         try {
             transaction(database) {
                 val now = utcNow(clock)
                 TaskRequestsTable.insert {
                     it[TaskRequestsTable.requestId] = requestId
+                    it[TaskRequestsTable.projectId] = projectId
                     it[requestedBy] = requester
                     it[TaskRequestsTable.idempotencyKey] = idempotencyKey
                     it[TaskRequestsTable.title] = title
@@ -125,15 +128,17 @@ class TaskRequestRepository(
             if (!e.isUniqueViolation()) throw e
             // Lost the race with the same key: the winner's row is committed, so a fresh transaction sees it.
             val existing = findByKey(requester, idempotencyKey) ?: throw e
-            return replayOrConflict(existing, title)
+            return replayOrConflict(existing, projectId, title)
         }
-        return TaskRequestSubmitResult.Created(get(requestId)!!)
+        return TaskRequestSubmitResult.Created(get(projectId, requestId)!!)
     }
 
-    private fun replayOrConflict(existing: TaskRequest, title: String): TaskRequestSubmitResult =
-        if (existing.title == title) TaskRequestSubmitResult.Replayed(existing) else TaskRequestSubmitResult.ConflictingTitle(existing)
+    /** The same key with another title or in another project is a conflict: a key names one request. */
+    private fun replayOrConflict(existing: TaskRequest, projectId: String, title: String): TaskRequestSubmitResult =
+        if (existing.title == title && existing.projectId == projectId) TaskRequestSubmitResult.Replayed(existing) else TaskRequestSubmitResult.ConflictingTitle(existing)
 
-    fun get(requestId: String): TaskRequest? = transaction(database) { readIn(requestId) }
+    /** The request, only when it belongs to [projectId]: another project's request is absent. */
+    fun get(projectId: String, requestId: String): TaskRequest? = transaction(database) { readIn(requestId)?.takeIf { it.projectId == projectId } }
 
     private fun findByKey(requester: String, idempotencyKey: String): TaskRequest? = transaction(database) {
         TaskRequestsTable.selectAll()
@@ -145,13 +150,14 @@ class TaskRequestRepository(
      * The requests [principal] made, newest first, at most [limit]. With [decidable], also the PENDING requests of the other requesters:
      * the ones this caller may decide.
      */
-    fun list(principal: String, decidable: Boolean, limit: Int): List<TaskRequest> = transaction(database) {
+    fun list(projectId: String, principal: String, decidable: Boolean, limit: Int): List<TaskRequest> = transaction(database) {
         val own = TaskRequestsTable.requestedBy eq principal
-        val condition = if (decidable) {
+        val visible = if (decidable) {
             own or ((TaskRequestsTable.state eq TaskRequestState.PENDING.name) and (TaskRequestsTable.requestedBy neq principal))
         } else {
             own
         }
+        val condition = (TaskRequestsTable.projectId eq projectId) and visible
         TaskRequestsTable.selectAll()
             .where { condition }
             .orderBy(TaskRequestsTable.createdAt to SortOrder.DESC, TaskRequestsTable.requestId to SortOrder.DESC)
@@ -163,13 +169,14 @@ class TaskRequestRepository(
      * PENDING to APPROVED or REJECTED by [decider]. The decider must not be the requester: the check is first here, and the database
      * CHECK enforces it too. [note] is the rejecter's optional reason; it is stored only in the row.
      */
-    fun decide(requestId: String, decider: String, approve: Boolean, note: String?): TaskRequestTransition = transaction(database) {
-        val current = readIn(requestId) ?: return@transaction TaskRequestTransition.NotFound
+    fun decide(projectId: String, requestId: String, decider: String, approve: Boolean, note: String?): TaskRequestTransition = transaction(database) {
+        val current = readIn(requestId)?.takeIf { it.projectId == projectId } ?: return@transaction TaskRequestTransition.NotFound
         if (current.requestedBy == decider) return@transaction TaskRequestTransition.OwnRequest
         val target = if (approve) TaskRequestState.APPROVED else TaskRequestState.REJECTED
         val now = utcNow(clock)
         val updated = TaskRequestsTable.update({
             (TaskRequestsTable.requestId eq requestId) and
+                (TaskRequestsTable.projectId eq projectId) and
                 (TaskRequestsTable.state eq TaskRequestState.PENDING.name) and
                 (TaskRequestsTable.requestedBy neq decider)
         }) {
@@ -185,11 +192,12 @@ class TaskRequestRepository(
     }
 
     /** PENDING to CANCELLED by the requester. A request another caller made is [TaskRequestTransition.NotFound]. */
-    fun cancel(requestId: String, requester: String): TaskRequestTransition = transaction(database) {
-        val current = readIn(requestId)?.takeIf { it.requestedBy == requester } ?: return@transaction TaskRequestTransition.NotFound
+    fun cancel(projectId: String, requestId: String, requester: String): TaskRequestTransition = transaction(database) {
+        val current = readIn(requestId)?.takeIf { it.projectId == projectId && it.requestedBy == requester } ?: return@transaction TaskRequestTransition.NotFound
         val now = utcNow(clock)
         val updated = TaskRequestsTable.update({
             (TaskRequestsTable.requestId eq requestId) and
+                (TaskRequestsTable.projectId eq projectId) and
                 (TaskRequestsTable.state eq TaskRequestState.PENDING.name) and
                 (TaskRequestsTable.requestedBy eq requester)
         }) {
@@ -236,6 +244,7 @@ class TaskRequestRepository(
 
     private fun ResultRow.toTaskRequest() = TaskRequest(
         requestId = this[TaskRequestsTable.requestId],
+        projectId = this[TaskRequestsTable.projectId],
         requestedBy = this[TaskRequestsTable.requestedBy],
         idempotencyKey = this[TaskRequestsTable.idempotencyKey],
         title = this[TaskRequestsTable.title],

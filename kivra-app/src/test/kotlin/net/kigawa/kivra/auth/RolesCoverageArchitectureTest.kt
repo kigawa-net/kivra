@@ -146,12 +146,12 @@ class RolesCoverageArchitectureTest {
         "GET /api/selfdev/assignees/{id}/tokens" to Permission.ASSIGNEE_MANAGE,
         "POST /api/selfdev/assignees/{id}/tokens/{tokenRef}/revoke" to Permission.ASSIGNEE_MANAGE,
         // The approval requests for a Task (ADR 0025): submit and cancel by the requester, decide by an approver who is not the requester.
-        "POST /api/requests" to Permission.REQUEST_SUBMIT,
-        "GET /api/requests" to Permission.READ,
-        "GET /api/requests/{id}" to Permission.READ,
-        "POST /api/requests/{id}/approve" to Permission.REQUEST_DECIDE,
-        "POST /api/requests/{id}/reject" to Permission.REQUEST_DECIDE,
-        "POST /api/requests/{id}/cancel" to Permission.REQUEST_SUBMIT,
+        "POST /api/projects/{projectId}/requests" to Permission.REQUEST_SUBMIT,
+        "GET /api/projects/{projectId}/requests" to Permission.READ,
+        "GET /api/projects/{projectId}/requests/{id}" to Permission.READ,
+        "POST /api/projects/{projectId}/requests/{id}/approve" to Permission.REQUEST_DECIDE,
+        "POST /api/projects/{projectId}/requests/{id}/reject" to Permission.REQUEST_DECIDE,
+        "POST /api/projects/{projectId}/requests/{id}/cancel" to Permission.REQUEST_SUBMIT,
     )
 
     /** Routes that need no permission, on purpose: public pages and probes, the agent's own API (its own token), and the dev-only routes. */

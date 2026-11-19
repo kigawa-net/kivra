@@ -33,6 +33,7 @@ import net.kigawa.kivra.auth.PermissionService
 import net.kigawa.kivra.auth.Role
 import net.kigawa.kivra.auth.RolesDefault
 import net.kigawa.kivra.auth.TaskApiIdentity
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.TaskRequestRepository
 import net.kigawa.kivra.db.TaskRequestState
 import net.kigawa.kivra.db.TaskRequestSubmitResult
@@ -77,13 +78,21 @@ class TaskRequestRoutesTest {
         ),
     )
 
+    private var project = ""
+
+    private fun ensureProject(db: TestDb) {
+        if (project.isEmpty()) project = ProjectRepository(db.database, java.time.Clock.systemUTC()).create("Requests", null).projectId
+    }
+
     private fun ApplicationTestBuilder.setUp(db: TestDb, guard: PermissionGuard = offGuard()) {
         val requests = TaskRequestRepository(db.database)
+        val projects = ProjectRepository(db.database, java.time.Clock.systemUTC())
+        ensureProject(db)
         application {
             install(ContentNegotiation) { json() }
             routing {
                 configureTaskApiRoutes(db.runs, identity, guard = guard)
-                configureTaskRequestRoutes(requests, db.runs, identity, guard)
+                configureTaskRequestRoutes(requests, db.runs, identity, guard, projects)
             }
         }
     }
@@ -104,7 +113,7 @@ class TaskRequestRoutesTest {
     }
 
     private suspend fun HttpClient.submit(who: String, title: String, key: String): HttpResponse =
-        postJson("/api/requests", who, """{"title":"$title","idempotencyKey":"$key"}""")
+        postJson("/api/projects/$project/requests", who, """{"title":"$title","idempotencyKey":"$key"}""")
 
     private suspend fun HttpResponse.obj(): JsonObject = Json.parseToJsonElement(bodyAsText()).jsonObject
 
@@ -119,11 +128,44 @@ class TaskRequestRoutesTest {
     fun `every request route is 401 without an identity`() = TestDb().use { db ->
         testApplication {
             setUp(db)
-            assertEquals(HttpStatusCode.Unauthorized, client.postJson("/api/requests", null, """{"title":"t","idempotencyKey":"k"}""").status)
-            assertEquals(HttpStatusCode.Unauthorized, client.getAs("/api/requests", null).status)
-            assertEquals(HttpStatusCode.Unauthorized, client.getAs("/api/requests/$NO_SUCH_REQUEST", null).status)
-            assertEquals(HttpStatusCode.Unauthorized, client.postJson("/api/requests/$NO_SUCH_REQUEST/approve", null).status)
+            assertEquals(HttpStatusCode.Unauthorized, client.postJson("/api/projects/$project/requests", null, """{"title":"t","idempotencyKey":"k"}""").status)
+            assertEquals(HttpStatusCode.Unauthorized, client.getAs("/api/projects/$project/requests", null).status)
+            assertEquals(HttpStatusCode.Unauthorized, client.getAs("/api/projects/$project/requests/$NO_SUCH_REQUEST", null).status)
+            assertEquals(HttpStatusCode.Unauthorized, client.postJson("/api/projects/$project/requests/$NO_SUCH_REQUEST/approve", null).status)
             assertEquals(0, db.count("task_requests"))
+        }
+    }
+
+    @Test
+    fun `the project in the path must be a ULID of a known project, and the body project must match it`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            val body = """{"title":"t","idempotencyKey":"k"}"""
+            // Not a ULID, and a ULID of no project: the same 404.
+            assertEquals(HttpStatusCode.NotFound, client.postJson("/api/projects/not-a-ulid/requests", ALICE, body).status)
+            assertEquals(HttpStatusCode.NotFound, client.postJson("/api/projects/$NO_SUCH_REQUEST/requests", ALICE, body).status)
+            assertEquals(HttpStatusCode.NotFound, client.getAs("/api/projects/$NO_SUCH_REQUEST/requests", ALICE).status)
+            // The body project, when given, is the path's.
+            val mismatch = client.postJson("/api/projects/$project/requests", ALICE, """{"title":"t","idempotencyKey":"k","projectId":"$NO_SUCH_REQUEST"}""")
+            assertEquals(HttpStatusCode.BadRequest, mismatch.status)
+            assertEquals("PROJECT_MISMATCH", mismatch.obj().str("error"))
+            assertEquals(HttpStatusCode.Created, client.postJson("/api/projects/$project/requests", ALICE, """{"title":"t","idempotencyKey":"k","projectId":"$project"}""").status)
+            assertEquals(1, db.count("task_requests"))
+        }
+    }
+
+    @Test
+    fun `a request of another project is not found through this project`() = TestDb().use { db ->
+        testApplication {
+            setUp(db)
+            val id = client.submit(ALICE, "Write the release notes", "rn-1").requestId()
+            val other = ProjectRepository(db.database, java.time.Clock.systemUTC()).create("Other", null).projectId
+            assertEquals(HttpStatusCode.NotFound, client.getAs("/api/projects/$other/requests/$id", ALICE).status)
+            assertEquals(HttpStatusCode.NotFound, client.postJson("/api/projects/$other/requests/$id/approve", ROOT).status)
+            assertEquals(HttpStatusCode.NotFound, client.postJson("/api/projects/$other/requests/$id/cancel", ALICE).status)
+            assertEquals(0, client.getAs("/api/projects/$other/requests", ALICE).items().size)
+            assertEquals(1, client.getAs("/api/projects/$project/requests", ALICE).items().size)
+            assertEquals(HttpStatusCode.OK, client.postJson("/api/projects/$project/requests/$id/approve", ROOT).status)
         }
     }
 
@@ -150,10 +192,10 @@ class TaskRequestRoutesTest {
             assertEquals(HttpStatusCode.BadRequest, client.submit(ALICE, "", "k").status)
             // The JSON escape \u0007 is a control character once decoded: the title is refused.
             assertEquals(HttpStatusCode.BadRequest, client.submit(ALICE, "bad\\u0007title", "k").status)
-            assertEquals(HttpStatusCode.BadRequest, client.postJson("/api/requests", ALICE, "not json").status)
+            assertEquals(HttpStatusCode.BadRequest, client.postJson("/api/projects/$project/requests", ALICE, "not json").status)
             assertEquals(
                 HttpStatusCode.UnsupportedMediaType,
-                client.postJson("/api/requests", ALICE, """{"title":"t","idempotencyKey":"k"}""", contentType = "text/plain").status,
+                client.postJson("/api/projects/$project/requests", ALICE, """{"title":"t","idempotencyKey":"k"}""", contentType = "text/plain").status,
             )
             assertEquals(0, db.count("task_requests"))
         }
@@ -165,8 +207,8 @@ class TaskRequestRoutesTest {
             setUp(db)
             val mine = client.submit(ALICE, "mine", "a-1").requestId()
             val bobs = client.submit(BOB, "bob's", "b-1").requestId()
-            assertEquals(listOf(mine), client.getAs("/api/requests", ALICE).items().map { it.str("requestId") })
-            val decider = client.getAs("/api/requests", ROOT).items()
+            assertEquals(listOf(mine), client.getAs("/api/projects/$project/requests", ALICE).items().map { it.str("requestId") })
+            val decider = client.getAs("/api/projects/$project/requests", ROOT).items()
             assertEquals(setOf(mine, bobs), decider.map { it.str("requestId") }.toSet(), "the root decides, so it sees the PENDING requests of the others")
             assertEquals(BOB, decider.single { it.str("requestId") == bobs }.str("requestedBy"))
         }
@@ -177,10 +219,10 @@ class TaskRequestRoutesTest {
         testApplication {
             setUp(db)
             val id = client.submit(ALICE, "mine", "a-1").requestId()
-            assertEquals(HttpStatusCode.OK, client.getAs("/api/requests/$id", ALICE).status)
-            assertEquals(HttpStatusCode.NotFound, client.getAs("/api/requests/$id", BOB).status)
-            assertEquals(HttpStatusCode.OK, client.getAs("/api/requests/$id", ROOT).status)
-            assertEquals(HttpStatusCode.NotFound, client.getAs("/api/requests/$NO_SUCH_REQUEST", ALICE).status)
+            assertEquals(HttpStatusCode.OK, client.getAs("/api/projects/$project/requests/$id", ALICE).status)
+            assertEquals(HttpStatusCode.NotFound, client.getAs("/api/projects/$project/requests/$id", BOB).status)
+            assertEquals(HttpStatusCode.OK, client.getAs("/api/projects/$project/requests/$id", ROOT).status)
+            assertEquals(HttpStatusCode.NotFound, client.getAs("/api/projects/$project/requests/$NO_SUCH_REQUEST", ALICE).status)
         }
     }
 
@@ -189,8 +231,8 @@ class TaskRequestRoutesTest {
         testApplication {
             setUp(db)
             val id = client.submit(ALICE, "Write the release notes", "rn-1").requestId()
-            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/requests/$id/approve", ALICE).status)
-            val approved = client.postJson("/api/requests/$id/approve", ROOT)
+            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/projects/$project/requests/$id/approve", ALICE).status)
+            val approved = client.postJson("/api/projects/$project/requests/$id/approve", ROOT)
             assertEquals(HttpStatusCode.OK, approved.status)
             val body = approved.obj()
             assertEquals("APPROVED", body.str("state"))
@@ -208,8 +250,8 @@ class TaskRequestRoutesTest {
         testApplication {
             setUp(db)
             val id = client.submit(ALICE, "Write the release notes", "rn-1").requestId()
-            assertEquals(HttpStatusCode.OK, client.postJson("/api/requests/$id/approve", ROOT).status)
-            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/requests/$id/approve", ROOT).status)
+            assertEquals(HttpStatusCode.OK, client.postJson("/api/projects/$project/requests/$id/approve", ROOT).status)
+            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/projects/$project/requests/$id/approve", ROOT).status)
             assertEquals(1, db.count("development_runs"))
         }
     }
@@ -218,15 +260,16 @@ class TaskRequestRoutesTest {
     fun `an approval whose run was not linked is finished by the next approval, with the same single Run`() = TestDb().use { db ->
         // The state a failed link leaves behind: APPROVED with no run. The repository makes it directly, as a crash would.
         val requests = TaskRequestRepository(db.database)
-        val request = (requests.submit(ALICE, "rn-2", "Write the release notes") as TaskRequestSubmitResult.Created).request
-        requests.decide(request.requestId, ROOT, approve = true, note = null)
+        ensureProject(db)
+        val request = (requests.submit(project, ALICE, "rn-2", "Write the release notes") as TaskRequestSubmitResult.Created).request
+        requests.decide(project, request.requestId, ROOT, approve = true, note = null)
         testApplication {
             setUp(db)
-            val body = client.postJson("/api/requests/${request.requestId}/approve", ROOT).obj()
+            val body = client.postJson("/api/projects/$project/requests/${request.requestId}/approve", ROOT).obj()
             assertEquals("APPROVED", body.str("state"))
             assertNotNull(body.str("runId"))
             assertEquals(1, db.count("development_runs"))
-            assertEquals(TaskRequestState.APPROVED, requests.get(request.requestId)!!.state)
+            assertEquals(TaskRequestState.APPROVED, requests.get(project, request.requestId)!!.state)
         }
     }
 
@@ -235,12 +278,12 @@ class TaskRequestRoutesTest {
         testApplication {
             setUp(db)
             val id = client.submit(ALICE, "Risky", "r-1").requestId()
-            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/requests/$id/reject", ALICE).status)
-            val rejected = client.postJson("/api/requests/$id/reject", ROOT, """{"reason":"not this week"}""")
+            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/projects/$project/requests/$id/reject", ALICE).status)
+            val rejected = client.postJson("/api/projects/$project/requests/$id/reject", ROOT, """{"reason":"not this week"}""")
             assertEquals(HttpStatusCode.OK, rejected.status)
             assertEquals("not this week", rejected.obj().str("decisionNote"))
-            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/requests/$id/approve", ROOT).status)
-            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/requests/$id/reject", ROOT).status)
+            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/projects/$project/requests/$id/approve", ROOT).status)
+            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/projects/$project/requests/$id/reject", ROOT).status)
             assertEquals(0, db.count("development_runs"))
         }
     }
@@ -252,12 +295,12 @@ class TaskRequestRoutesTest {
             val a = client.submit(ALICE, "A", "a-1").requestId()
             val b = client.submit(ALICE, "B", "b-1").requestId()
             val c = client.submit(ALICE, "C", "c-1").requestId()
-            assertEquals(HttpStatusCode.OK, client.postJson("/api/requests/$a/reject", ROOT, body = "").status)
-            val blank = client.postJson("/api/requests/$b/reject", ROOT, """{"reason":"  "}""")
+            assertEquals(HttpStatusCode.OK, client.postJson("/api/projects/$project/requests/$a/reject", ROOT, body = "").status)
+            val blank = client.postJson("/api/projects/$project/requests/$b/reject", ROOT, """{"reason":"  "}""")
             assertEquals(HttpStatusCode.OK, blank.status)
             assertNull(blank.obj().str("decisionNote"))
-            assertEquals(HttpStatusCode.BadRequest, client.postJson("/api/requests/$c/reject", ROOT, """{"reason":"${"x".repeat(501)}"}""").status)
-            assertEquals(TaskRequestState.PENDING.name, client.getAs("/api/requests/$c", ALICE).obj().str("state"))
+            assertEquals(HttpStatusCode.BadRequest, client.postJson("/api/projects/$project/requests/$c/reject", ROOT, """{"reason":"${"x".repeat(501)}"}""").status)
+            assertEquals(TaskRequestState.PENDING.name, client.getAs("/api/projects/$project/requests/$c", ALICE).obj().str("state"))
         }
     }
 
@@ -266,11 +309,11 @@ class TaskRequestRoutesTest {
         testApplication {
             setUp(db)
             val id = client.submit(ALICE, "Cancel me", "c-1").requestId()
-            assertEquals(HttpStatusCode.NotFound, client.postJson("/api/requests/$id/cancel", ROOT).status)
-            assertEquals(HttpStatusCode.NotFound, client.postJson("/api/requests/$id/cancel", BOB).status)
-            assertEquals("CANCELLED", client.postJson("/api/requests/$id/cancel", ALICE).obj().str("state"))
-            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/requests/$id/approve", ROOT).status)
-            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/requests/$id/cancel", ALICE).status)
+            assertEquals(HttpStatusCode.NotFound, client.postJson("/api/projects/$project/requests/$id/cancel", ROOT).status)
+            assertEquals(HttpStatusCode.NotFound, client.postJson("/api/projects/$project/requests/$id/cancel", BOB).status)
+            assertEquals("CANCELLED", client.postJson("/api/projects/$project/requests/$id/cancel", ALICE).obj().str("state"))
+            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/projects/$project/requests/$id/approve", ROOT).status)
+            assertEquals(HttpStatusCode.Conflict, client.postJson("/api/projects/$project/requests/$id/cancel", ALICE).status)
             assertEquals(0, db.count("development_runs"))
         }
     }
@@ -289,14 +332,14 @@ class TaskRequestRoutesTest {
         testApplication {
             setUp(db, enforceGuard())
             assertEquals(HttpStatusCode.Forbidden, client.submit(VIEWER, "v", "v-1").status)
-            assertEquals(HttpStatusCode.OK, client.getAs("/api/requests", VIEWER).status)
+            assertEquals(HttpStatusCode.OK, client.getAs("/api/projects/$project/requests", VIEWER).status)
             val id = client.submit(ALICE, "By alice", "a-1").requestId()
-            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/requests/$id/approve", VIEWER).status)
-            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/requests/$id/approve", ALICE).status)
-            assertEquals(HttpStatusCode.OK, client.postJson("/api/requests/$id/approve", APPROVER).status)
+            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/projects/$project/requests/$id/approve", VIEWER).status)
+            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/projects/$project/requests/$id/approve", ALICE).status)
+            assertEquals(HttpStatusCode.OK, client.postJson("/api/projects/$project/requests/$id/approve", APPROVER).status)
             val aiId = client.submit(AI, "By the AI", "ai-1").requestId()
-            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/requests/$aiId/approve", AI).status)
-            assertEquals(HttpStatusCode.OK, client.postJson("/api/requests/$aiId/cancel", AI).status)
+            assertEquals(HttpStatusCode.Forbidden, client.postJson("/api/projects/$project/requests/$aiId/approve", AI).status)
+            assertEquals(HttpStatusCode.OK, client.postJson("/api/projects/$project/requests/$aiId/cancel", AI).status)
         }
     }
 }

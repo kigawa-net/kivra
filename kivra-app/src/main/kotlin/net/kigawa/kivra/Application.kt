@@ -681,7 +681,7 @@ internal fun Application.appModule(env: Map<String, String>) {
         }
         if (taskApiIdentityWithSession != null) {
             configureTaskApiRoutes(runs, taskApiIdentityWithSession, selfDevSettings.config?.repo, permissionGuard, projectRepo)
-            configureTaskRequestRoutes(TaskRequestRepository(database), runs, taskApiIdentityWithSession, permissionGuard)
+            configureTaskRequestRoutes(TaskRequestRepository(database), runs, taskApiIdentityWithSession, permissionGuard, projectRepo)
             configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentityWithSession, permissionGuard)
             configureProjectRoutes(
                 projectRepo, runs, taskApiIdentityWithSession, permissionGuard, selfDevSettings.config?.repo,

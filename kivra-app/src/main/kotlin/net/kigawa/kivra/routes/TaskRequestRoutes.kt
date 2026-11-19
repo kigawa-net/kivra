@@ -14,6 +14,7 @@ import kotlinx.serialization.json.Json
 import net.kigawa.kivra.auth.Permission
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.DevelopmentRunRepository
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAssigneeRepository
 import net.kigawa.kivra.db.TaskRequest
 import net.kigawa.kivra.db.TaskRequestRepository
@@ -25,13 +26,13 @@ import net.kigawa.kivra.db.requestRunKey
 import org.slf4j.LoggerFactory
 
 /*
- * Approval requests for a Task (ADR 0025). A requester asks "may this title be run?"; a decider who is not the requester approves or
+ * Approval requests for a Task (ADR 0025), under /api/projects/{projectId}/requests. A requester asks "may this title be run?"; a decider who is not the requester approves or
  * rejects it; approval creates one Run through the same submission as POST /api/tasks. Authentication is the Task API's
- * (TaskApiIdentity). Each handler checks its permission first, and the route table in RolesCoverageArchitectureTest names it.
+ * (TaskApiIdentity). Each handler checks its permission first (the role, then the project: see [authorizeInProject]), and the route table in RolesCoverageArchitectureTest names it.
  */
 
 @Serializable
-data class SubmitRequestRequest(val title: String, val idempotencyKey: String)
+data class SubmitRequestRequest(val title: String, val idempotencyKey: String, val projectId: String? = null)
 
 @Serializable
 data class RejectRequestRequest(val reason: String? = null)
@@ -43,6 +44,7 @@ data class RejectRequestRequest(val reason: String? = null)
 @Serializable
 data class TaskRequestResponse(
     val requestId: String,
+    val projectId: String,
     val title: String,
     val state: String,
     val createdAt: String,
@@ -57,11 +59,15 @@ private data class RequestApiError(val error: String)
 
 private const val MAX_REQUEST_REASON_CODE_POINTS = 500
 private const val REQUEST_LIST_LIMIT = 50
+private const val REQUEST_PROJECT_MISMATCH = "PROJECT_MISMATCH"
+private const val REQUEST_PROJECT_NOT_FOUND = "project not found"
+private val REQUEST_PROJECT_ID_SHAPE = Regex("[0-9A-Z]{26}")
 
 private val requestLog = LoggerFactory.getLogger("net.kigawa.kivra.task.request")
 
 internal fun TaskRequest.toResponse(showRequester: Boolean): TaskRequestResponse = TaskRequestResponse(
     requestId = requestId,
+    projectId = projectId,
     title = title,
     state = state.name,
     createdAt = createdAt.toInstant(ZoneOffset.UTC).toString(),
@@ -74,25 +80,57 @@ internal fun TaskRequest.toResponse(showRequester: Boolean): TaskRequestResponse
 /** The actor as the logs and the audit rows show it: the first 12 hex digits of the owner key's SHA-256. Never the key. */
 private fun actorOf(principal: String): String = SelfDevAssigneeRepository.actorRef(principal)
 
+/**
+ * The two permits of a project-scoped request route (the pattern of the stop request): the role without a project, then, once the project
+ * is known to exist, the role in that project. Returns the project id, or null after answering 403 or 404. [projectId] that is not a ULID,
+ * or names no project, is the same 404.
+ */
+private suspend fun authorizeInProject(
+    call: ApplicationCall,
+    guard: PermissionGuard,
+    projects: ProjectRepository,
+    principal: String,
+    permission: Permission,
+    route: String,
+): String? {
+    if (!guard.permits(principal, permission, route)) {
+        call.respond(HttpStatusCode.Forbidden, RequestApiError("forbidden"))
+        return null
+    }
+    val projectId = call.pathParam("projectId")?.takeIf { REQUEST_PROJECT_ID_SHAPE.matches(it) }
+    if (projectId == null || projects.get(projectId) == null) {
+        call.respond(HttpStatusCode.NotFound, RequestApiError(REQUEST_PROJECT_NOT_FOUND))
+        return null
+    }
+    if (guard.checkInProject(guard.resolve(principal, legacyAdmin = true), projectId, permission, route) is GuardResult.Deny) {
+        call.respond(HttpStatusCode.Forbidden, RequestApiError("forbidden"))
+        return null
+    }
+    return projectId
+}
+
 internal fun Route.configureTaskRequestRoutes(
     requests: TaskRequestRepository,
     runs: DevelopmentRunRepository,
     identity: TaskApiIdentity,
     guard: PermissionGuard = offPermissionGuard(),
+    projects: ProjectRepository,
 ) {
-    post("/api/requests") {
+    post("/api/projects/{projectId}/requests") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, RequestApiError("unauthorized"))
             return@post
         }
-        if (!guard.permits(principal, Permission.REQUEST_SUBMIT, "request_submit")) {
-            call.respond(HttpStatusCode.Forbidden, RequestApiError("forbidden"))
-            return@post
-        }
+        val projectId = authorizeInProject(call, guard, projects, principal, Permission.REQUEST_SUBMIT, "request_submit") ?: return@post
         if (!call.requireJsonSameOrigin()) return@post
         val body = try { call.receive<SubmitRequestRequest>() } catch (_: Exception) {
             call.respond(HttpStatusCode.BadRequest, RequestApiError("invalid request body"))
+            return@post
+        }
+        // The body may repeat the project; it must be the path's (the path decides the project).
+        if (body.projectId != null && body.projectId != projectId) {
+            call.respond(HttpStatusCode.BadRequest, RequestApiError(REQUEST_PROJECT_MISMATCH))
             return@post
         }
         val title = validatedText(body.title, MAX_TASK_TITLE_CODE_POINTS)
@@ -101,40 +139,34 @@ internal fun Route.configureTaskRequestRoutes(
             call.respond(HttpStatusCode.BadRequest, RequestApiError("title must be 1-200 characters and idempotencyKey 1-128 characters, without control characters"))
             return@post
         }
-        when (val result = requests.submit(principal, key, title)) {
+        when (val result = requests.submit(projectId, principal, key, title)) {
             is TaskRequestSubmitResult.Created -> call.respond(HttpStatusCode.Created, result.request.toResponse(showRequester = false))
             is TaskRequestSubmitResult.Replayed -> call.respond(HttpStatusCode.OK, result.request.toResponse(showRequester = false))
-            is TaskRequestSubmitResult.ConflictingTitle -> call.respond(HttpStatusCode.Conflict, RequestApiError("idempotency key was already used with a different title"))
+            is TaskRequestSubmitResult.ConflictingTitle -> call.respond(HttpStatusCode.Conflict, RequestApiError("idempotency key was already used with a different title or project"))
         }
     }
 
-    get("/api/requests") {
+    get("/api/projects/{projectId}/requests") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, RequestApiError("unauthorized"))
             return@get
         }
-        if (!guard.permits(principal, Permission.READ, "request_list")) {
-            call.respond(HttpStatusCode.Forbidden, RequestApiError("forbidden"))
-            return@get
-        }
+        val projectId = authorizeInProject(call, guard, projects, principal, Permission.READ, "request_list") ?: return@get
         // A decider also sees the PENDING requests of the others: the ones it may decide (ADR 0025 section 2).
         val decider = guard.can(guard.resolve(principal, legacyAdmin = true), Permission.REQUEST_DECIDE)
-        val rows = requests.list(principal, decidable = decider, limit = REQUEST_LIST_LIMIT)
+        val rows = requests.list(projectId, principal, decidable = decider, limit = REQUEST_LIST_LIMIT)
         call.respond(rows.map { it.toResponse(showRequester = decider && it.requestedBy != principal) })
     }
 
-    get("/api/requests/{id}") {
+    get("/api/projects/{projectId}/requests/{id}") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, RequestApiError("unauthorized"))
             return@get
         }
-        if (!guard.permits(principal, Permission.READ, "request_get")) {
-            call.respond(HttpStatusCode.Forbidden, RequestApiError("forbidden"))
-            return@get
-        }
-        val request = call.pathParam("id")?.let { requests.get(it) }
+        val projectId = authorizeInProject(call, guard, projects, principal, Permission.READ, "request_get") ?: return@get
+        val request = call.pathParam("id")?.let { requests.get(projectId, it) }
         val decider = guard.can(guard.resolve(principal, legacyAdmin = true), Permission.REQUEST_DECIDE)
         // Another caller's request is the same 404 as a missing one (the Task API's rule). A decider sees the requests it may decide.
         if (request == null || (request.requestedBy != principal && !decider)) {
@@ -144,23 +176,20 @@ internal fun Route.configureTaskRequestRoutes(
         }
     }
 
-    post("/api/requests/{id}/approve") {
+    post("/api/projects/{projectId}/requests/{id}/approve") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, RequestApiError("unauthorized"))
             return@post
         }
-        if (!guard.permits(principal, Permission.REQUEST_DECIDE, "request_approve")) {
-            call.respond(HttpStatusCode.Forbidden, RequestApiError("forbidden"))
-            return@post
-        }
+        val projectId = authorizeInProject(call, guard, projects, principal, Permission.REQUEST_DECIDE, "request_approve") ?: return@post
         if (!call.requireJsonSameOrigin()) return@post
         val requestId = call.pathParam("id")
         if (requestId == null) {
             call.respond(HttpStatusCode.NotFound, RequestApiError("request not found"))
             return@post
         }
-        when (val result = requests.decide(requestId, principal, approve = true, note = null)) {
+        when (val result = requests.decide(projectId, requestId, principal, approve = true, note = null)) {
             TaskRequestTransition.NotFound -> call.respond(HttpStatusCode.NotFound, RequestApiError("request not found"))
             TaskRequestTransition.OwnRequest -> call.respond(HttpStatusCode.Forbidden, RequestApiError("a requester may not decide its own request"))
             is TaskRequestTransition.Moved -> {
@@ -180,16 +209,13 @@ internal fun Route.configureTaskRequestRoutes(
         }
     }
 
-    post("/api/requests/{id}/reject") {
+    post("/api/projects/{projectId}/requests/{id}/reject") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, RequestApiError("unauthorized"))
             return@post
         }
-        if (!guard.permits(principal, Permission.REQUEST_DECIDE, "request_reject")) {
-            call.respond(HttpStatusCode.Forbidden, RequestApiError("forbidden"))
-            return@post
-        }
+        val projectId = authorizeInProject(call, guard, projects, principal, Permission.REQUEST_DECIDE, "request_reject") ?: return@post
         if (!call.requireJsonSameOrigin()) return@post
         // The reason is optional: an empty body, or a body with no reason, is a rejection without one.
         val text = call.receiveText()
@@ -212,7 +238,7 @@ internal fun Route.configureTaskRequestRoutes(
             call.respond(HttpStatusCode.NotFound, RequestApiError("request not found"))
             return@post
         }
-        when (val result = requests.decide(requestId, principal, approve = false, note = reason)) {
+        when (val result = requests.decide(projectId, requestId, principal, approve = false, note = reason)) {
             TaskRequestTransition.NotFound -> call.respond(HttpStatusCode.NotFound, RequestApiError("request not found"))
             TaskRequestTransition.OwnRequest -> call.respond(HttpStatusCode.Forbidden, RequestApiError("a requester may not decide its own request"))
             is TaskRequestTransition.Moved -> {
@@ -223,23 +249,20 @@ internal fun Route.configureTaskRequestRoutes(
         }
     }
 
-    post("/api/requests/{id}/cancel") {
+    post("/api/projects/{projectId}/requests/{id}/cancel") {
         val principal = identity.principal(call.request.headers)
         if (principal == null) {
             call.respond(HttpStatusCode.Unauthorized, RequestApiError("unauthorized"))
             return@post
         }
-        if (!guard.permits(principal, Permission.REQUEST_SUBMIT, "request_cancel")) {
-            call.respond(HttpStatusCode.Forbidden, RequestApiError("forbidden"))
-            return@post
-        }
+        val projectId = authorizeInProject(call, guard, projects, principal, Permission.REQUEST_SUBMIT, "request_cancel") ?: return@post
         if (!call.requireJsonSameOrigin()) return@post
         val requestId = call.pathParam("id")
         if (requestId == null) {
             call.respond(HttpStatusCode.NotFound, RequestApiError("request not found"))
             return@post
         }
-        when (val result = requests.cancel(requestId, principal)) {
+        when (val result = requests.cancel(projectId, requestId, principal)) {
             is TaskRequestTransition.Moved -> {
                 requestLog.info("task request action: action=CANCELLED actor={} requestId={} result=CANCELLED", actorOf(principal), requestId)
                 call.respond(result.request.toResponse(showRequester = false))
@@ -272,7 +295,7 @@ private suspend fun linkRunAndRespond(
         }
     }
     // Null when another call linked the run first. That run is the same one (the key is idempotent), so the current row is answered.
-    val linked = requests.linkRun(request.requestId, run.runId.value, decider) ?: requests.get(request.requestId) ?: request
+    val linked = requests.linkRun(request.requestId, run.runId.value, decider) ?: requests.get(request.projectId, request.requestId) ?: request
     requestLog.info("task request action: action=RUN_LINKED actor={} requestId={} result=APPROVED", actorOf(decider), request.requestId)
     call.respond(linked.toResponse(showRequester = true))
 }

@@ -146,12 +146,22 @@ private val operatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.auto
 /**
  * An operator's replan of a BLOCKED Task (the goal page's button, `POST /api/selfdev/goals/{id}/replan`). The goal route and a project chat
  * confirmation (ADR 0023, TASK_REPLAN) both run it, so the transition and the audit line are the same. The caller authenticated and passed the
- * GOAL_WRITE check.
+ * GOAL_WRITE check. [viaMcp] marks the audit line with `via=mcp` for the MCP tool `kivra_task_replan` (ADR 0015 amendment 2026-11-19 §10); the
+ * REST line has no `via`, as before.
  */
-internal fun SelfDevOperatorRepository.replanAsOperator(taskId: String, expectedVersion: Long, principal: String): TaskTransition {
+internal fun SelfDevOperatorRepository.replanAsOperator(
+    taskId: String,
+    expectedVersion: Long,
+    principal: String,
+    viaMcp: Boolean = false,
+): TaskTransition {
     val result = replanBlocked(taskId, expectedVersion)
     if (result is TaskTransition.Moved) {
-        operatorLog.info("autopilot operator action: action=REPLAN actor={} taskId={} reason={}", operatorTag(principal), taskId, AutopilotReason.REPLAN_REQUESTED)
+        if (viaMcp) {
+            operatorLog.info("autopilot operator action: action=REPLAN via=mcp actor={} taskId={} reason={}", operatorTag(principal), taskId, AutopilotReason.REPLAN_REQUESTED)
+        } else {
+            operatorLog.info("autopilot operator action: action=REPLAN actor={} taskId={} reason={}", operatorTag(principal), taskId, AutopilotReason.REPLAN_REQUESTED)
+        }
     }
     return result
 }

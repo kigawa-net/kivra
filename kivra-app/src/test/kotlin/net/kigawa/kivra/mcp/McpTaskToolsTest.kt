@@ -366,7 +366,9 @@ class McpTaskToolsTest {
     // ---- the approve and the skip (ADR 0015 amendment 2026-11-19) ---------------------------------------------------
 
     private val decideScope = SCOPE_SELFDEV_TASK_DECIDE
-    private val decideTools = listOf("kivra_task_approve", "kivra_task_skip")
+    private val decideTools = listOf("kivra_task_approve", "kivra_task_skip", "kivra_task_replan")
+    /** The approve and the skip only: a plan root is refused by GUARD_FAILED for these two, while the replan answers NO_EDGE (see below). */
+    private val rootRefusedTools = listOf("kivra_task_approve", "kivra_task_skip")
     /** An operator (bob) with the decide scope. */
     private val decideBob get() = McpTestTokens.token(subject = "sub-bob", scope = "$readScope $decideScope")
     /** The AI principal (alice) with the same scope: the scope does not make it an operator. */
@@ -530,7 +532,7 @@ class McpTaskToolsTest {
                 assertEquals("TASK_NOT_FOUND", callTool(name, """{"task_id":"$noSuchTask","version":0}""", decideBob).refusalCode(), name)
             }
             // A plan root is not run itself, so neither decision applies to it (the repository refuses it).
-            for (name in decideTools) {
+            for (name in rootRefusedTools) {
                 val refused = callTool(name, """{"task_id":"${fx.root}","version":$rootVersion}""", decideBob)
                 assertTrue(refused.isError(), name)
                 assertEquals("GUARD_FAILED", refused.refusalCode(), name)
@@ -541,6 +543,142 @@ class McpTaskToolsTest {
             assertEquals(TaskState.QUEUED, fx.ops.task(queued.taskId)!!.state)
         }
         assertEquals(rootVersion, fx.ops.task(fx.root)!!.version)
+    }
+
+    // ---- the replan (ADR 0015 amendment 2026-11-19 §10) -------------------------------------------------------------
+
+    /** Puts the root into BLOCKED with a planning reason, as the planner's block does (the test sets the row; the planner is not run). */
+    private fun blockRoot(db: TestDb, taskId: String, reason: String) {
+        transaction(db.database) {
+            execUpdate("UPDATE selfdev_tasks SET state = 'BLOCKED', state_reason = ? WHERE task_id = ?", reason, taskId)
+        }
+    }
+
+    @Test
+    fun `replan sends a BLOCKED plan back to TASK_SUBMITTED once per version, and names no title or body`() = withTestDb { db ->
+        val fx = Fixture(db)
+        blockRoot(db, fx.root, "PLAN_CALL_FAILED")
+        val blocked = fx.ops.task(fx.root)!!
+        assertEquals(TaskState.BLOCKED, blocked.state)
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            val out = callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":${blocked.version}}""", decideBob)
+            assertFalse(out.isError(), out.toString())
+            assertEquals("TASK_SUBMITTED", out.structured()["state"]!!.jsonPrimitive.content)
+            assertEquals("REPLAN_REQUESTED", out.structured()["state_reason"]!!.jsonPrimitive.content)
+            assertEquals(blocked.version + 1, out.structured()["version"]!!.jsonPrimitive.content.toLong())
+            assertFalse(out.toString().contains(rootMarker), "the title is not returned")
+            assertFalse(out.toString().contains(bodyMarker), "the body is not returned")
+            assertEquals(
+                "STALE_VERSION",
+                callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":${blocked.version}}""", decideBob).refusalCode(),
+            )
+        }
+        val row = fx.ops.task(fx.root)!!
+        assertEquals(TaskState.TASK_SUBMITTED, row.state)
+        assertEquals(blocked.version + 1, row.version)
+    }
+
+    @Test
+    fun `replan refuses a task that is not BLOCKED with NO_EDGE, and a missing one as TASK_NOT_FOUND, with no write`() = withTestDb { db ->
+        val fx = Fixture(db)
+        val rootVersion = fx.ops.task(fx.root)!!.version
+        assertEquals(TaskState.PENDING_APPROVAL, fx.ops.task(fx.root)!!.state)
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            val refused = callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":$rootVersion}""", decideBob)
+            assertTrue(refused.isError())
+            assertEquals("NO_EDGE", refused.refusalCode())
+            assertEquals("TASK_NOT_FOUND", callTool("kivra_task_replan", """{"task_id":"$noSuchTask","version":0}""", decideBob).refusalCode())
+        }
+        val row = fx.ops.task(fx.root)!!
+        assertEquals(TaskState.PENDING_APPROVAL, row.state)
+        assertEquals(rootVersion, row.version)
+    }
+
+    @Test
+    fun `replan of a BLOCKED plan with a budget hold is accepted the same way`() = withTestDb { db ->
+        val fx = Fixture(db)
+        blockRoot(db, fx.root, "PLAN_BUDGET_HOLD")
+        val blocked = fx.ops.task(fx.root)!!
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            val out = callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":${blocked.version}}""", decideBob)
+            assertFalse(out.isError(), out.toString())
+        }
+        assertEquals(TaskState.TASK_SUBMITTED, fx.ops.task(fx.root)!!.state)
+    }
+
+    @Test
+    fun `replan needs its scope, the write switch and the autopilot, and the AI principal is refused`() = withTestDb { db ->
+        val fx = Fixture(db)
+        blockRoot(db, fx.root, "PLAN_INVALID")
+        val blocked = fx.ops.task(fx.root)!!
+        val args = """{"task_id":"${fx.root}","version":${blocked.version}}"""
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            val noScope = rpc(call("kivra_task_replan", args), McpTestTokens.token(subject = "sub-bob", scope = readScope))
+            assertEquals(HttpStatusCode.Forbidden, noScope.status)
+            assertTrue(noScope.headers[HttpHeaders.WWWAuthenticate].orEmpty().contains("scope=\"$decideScope\""))
+            val ai = callTool("kivra_task_replan", args, decideAi)
+            assertTrue(ai.isError())
+            assertEquals("forbidden", ai.refusalCode())
+        }
+        testApplication {
+            setUp(deps(db, fx.ops, writeEnabled = false))
+            assertFalse(listed(decideBob).contains("kivra_task_replan"), "not listed without the write switch")
+        }
+        testApplication {
+            setUp(decisionDeps(db, null))
+            assertFalse(listed(decideBob).contains("kivra_task_replan"), "not listed while the autopilot is off")
+        }
+        assertEquals(TaskState.BLOCKED, fx.ops.task(fx.root)!!.state)
+    }
+
+    @Test
+    fun `replan refuses bad input before the repository`() = withTestDb { db ->
+        val fx = Fixture(db)
+        blockRoot(db, fx.root, "PLAN_CALL_FAILED")
+        val blocked = fx.ops.task(fx.root)!!
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            for (args in listOf(
+                """{"task_id":"${fx.root}","version":${blocked.version},"reason":"retry"}""",
+                """{"task_id":"not-an-id","version":${blocked.version}}""",
+                """{"task_id":"${fx.root}"}""",
+                """{"task_id":"${fx.root}","version":1.5}""",
+            )) {
+                assertEquals(-32602, callTool("kivra_task_replan", args, decideBob).rpcCode(), args)
+            }
+        }
+        assertEquals(TaskState.BLOCKED, fx.ops.task(fx.root)!!.state)
+    }
+
+    @Test
+    fun `the replan writes its operator line with via=mcp and the ids and codes only`() {
+        val logger = LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start() }
+        logger.addAppender(appender)
+        var rootId = ""
+        try {
+            withTestDb { db ->
+                val fx = Fixture(db)
+                rootId = fx.root
+                blockRoot(db, fx.root, "PLAN_CALL_FAILED")
+                testApplication {
+                    setUp(decisionDeps(db, fx.ops))
+                    callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":${fx.ops.task(fx.root)!!.version}}""", decideBob)
+                }
+            }
+        } finally {
+            logger.detachAppender(appender)
+        }
+        val lines = appender.list.map { it.formattedMessage }
+        assertTrue(lines.any { it.contains("action=REPLAN") && it.contains("via=mcp") && it.contains("taskId=$rootId") })
+        val everything = lines.joinToString("\n")
+        for (marker in listOf(rootMarker, bodyMarker, "sub-bob", "sub-alice", bobOwner, aliceOwner)) {
+            assertFalse(everything.contains(marker), "a log line leaked a value: $marker")
+        }
     }
 
     @Test

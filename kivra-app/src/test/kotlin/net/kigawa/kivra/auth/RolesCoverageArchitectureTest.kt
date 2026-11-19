@@ -260,6 +260,7 @@ class RolesCoverageArchitectureTest {
         "kivra_task_requeue" to Permission.GOAL_WRITE,
         "kivra_task_approve" to Permission.GOAL_WRITE,
         "kivra_task_skip" to Permission.GOAL_WRITE,
+        "kivra_task_replan" to Permission.GOAL_WRITE,
         // "kivra_goal_stop" to Permission.GOAL_STOP,
         // "kivra_goal_submit" to Permission.GOAL_WRITE,
     )

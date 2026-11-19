@@ -11,11 +11,14 @@ import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.RepoRef
 import net.kigawa.kivra.github.TreeEntry
 import net.kigawa.kivra.github.TreeEntryType
+import net.kigawa.kivra.modelgateway.SecretScan
 import org.slf4j.LoggerFactory
 
 /*
  * The repository file list shown to the autopilot Planner (Issue #293). Read-only: one `listTree` of the base branch, cached for a short
  * time. Only the paths the validator would accept are listed (the allowlist, minus the denylist), so the Planner does not have to guess.
+ * A path that the model gateway's secret scan would refuse is left out too (ADR 0011 追補 2026-11-19): the gateway refuses the whole
+ * request when any of its text matches, so one such path would fail every plan.
  * The same read gives the size of every regular file, for the pre-check of a plan's target paths (ADR 0011 section 3, 追補 2026-11-19).
  *
  * The list is data from the repository, not instructions. A path that contains a control or an invisible character (such as a bidi
@@ -129,8 +132,15 @@ internal object PlannerRepoFileList {
     private val REGULAR_FILE_MODES = setOf("100644", "100755")
 
     /**
-     * The list of the regular files that [isPlannable] accepts, or null when none does. A file whose path has an unsafe character or is
-     * too long is left out (and counted in [RenderedRepoFiles.omittedUnsafe]). Symlinks, submodules and directories are not listed.
+     * The secret scan of the model gateway, with its default rules (no credentials are bound to it). The gateway's own scanner uses the
+     * default too, so the same path gets the same answer here and at the gateway.
+     */
+    private val gatewayScan = SecretScan()
+
+    /**
+     * The list of the regular files that [isPlannable] accepts, or null when none does. A file whose path has an unsafe character, is
+     * too long, or is refused by the gateway's secret scan is left out (and counted in [RenderedRepoFiles.omittedUnsafe]). Symlinks,
+     * submodules and directories are not listed.
      */
     fun render(entries: List<TreeEntry>, isPlannable: (String) -> Boolean, maxBytes: Int = MAX_BYTES): RenderedRepoFiles? {
         val files = ArrayList<Pair<String, Long>>()
@@ -138,7 +148,7 @@ internal object PlannerRepoFileList {
         for (entry in entries) {
             if (entry.type != TreeEntryType.BLOB || entry.mode !in REGULAR_FILE_MODES) continue
             if (!isPlannable(entry.path)) continue
-            if (!isSafePath(entry.path)) {
+            if (!isSafePath(entry.path) || gatewayScan.detectsText(entry.path)) {
                 omitted++
                 continue
             }
@@ -218,6 +228,8 @@ internal object PlannerRepoFileList {
         for ((path, _) in files) {
             val key = dirSegments(path).take(depth).joinToString("/")
             val dir = if (key.isEmpty()) "(top level)" else "$key/"
+            // A directory line is gateway text too. A line the gateway would refuse is dropped, and the files under it are not counted.
+            if (gatewayScan.detectsText(dir)) continue
             counts[dir] = (counts[dir] ?: 0) + 1
         }
         return buildString {

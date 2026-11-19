@@ -19,6 +19,7 @@ import net.kigawa.kivra.github.RepoRef
 import net.kigawa.kivra.github.RepoTree
 import net.kigawa.kivra.github.TreeEntry
 import net.kigawa.kivra.github.TreeEntryType
+import net.kigawa.kivra.modelgateway.SecretScan
 
 private fun blob(path: String, size: Long = 100, mode: String = "100644") = TreeEntry(path, TreeEntryType.BLOB, mode, size)
 
@@ -121,32 +122,34 @@ class PlannerRepoFileListTest {
         assertTrue("docs/small.md" in lines, rendered.text)
     }
 
+    // The names in the summary tests are short on purpose. A long name with digits is refused by the gateway's secret scan (see the
+    // refused-path test below), so it would be left out and change the list that these tests are about.
     @Test
     fun `a list over the size limit becomes a directory summary that says so and fits the limit`() {
-        val entries = (1..4000).map { blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/gen/F$it.kt") }
+        val entries = (1..8000).map { blob("kivra-app/src/gen/F$it.kt") }
         val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
 
         assertTrue(rendered.summarized)
-        assertEquals(4000, rendered.fileCount)
+        assertEquals(8000, rendered.fileCount)
         assertTrue(rendered.text.contains("SUMMARIZED"), rendered.text)
-        assertTrue(rendered.text.contains("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/gen/ 4000 files"), rendered.text)
+        assertTrue(rendered.text.contains("kivra-app/src/gen/ 8000 files"), rendered.text)
         assertFalse(rendered.text.contains("F1.kt"))
         assertTrue(rendered.text.toByteArray(Charsets.UTF_8).size <= PlannerRepoFileList.MAX_BYTES)
     }
 
     @Test
     fun `a list the size of the real main (about 1,000 files, 70 KB) stays complete and is not summarized`() {
-        val entries = (1..1000).map { blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/pkg${it % 40}/SomeFileName$it.kt") }
+        val entries = (1..1000).map { blob("kivra-app/src/pkg${it % 40}/SomeFile$it.kt") }
         val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
 
         assertFalse(rendered.summarized)
         assertEquals(1000, rendered.fileCount)
-        assertTrue(rendered.text.contains("SomeFileName1.kt"), rendered.text)
+        assertTrue(rendered.text.contains("SomeFile1.kt"), rendered.text)
     }
 
     @Test
     fun `the summary header says that a directory line is not a path`() {
-        val entries = (1..4000).map { blob("kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/gen/F$it.kt") }
+        val entries = (1..8000).map { blob("kivra-app/src/gen/F$it.kt") }
         val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
 
         assertTrue(rendered.text.contains("is not a path: never write one in targetPaths"), rendered.text)
@@ -154,13 +157,13 @@ class PlannerRepoFileListTest {
 
     @Test
     fun `when the full directory summary is still too large, the depth is reduced until it fits`() {
-        val entries = (1..5000).map { blob("kivra-app/src/main/kotlin/pkg$it/sub/F.kt") }
+        val entries = (1..8000).map { blob("kivra-app/src/pkg$it/sub/F.kt") }
         val rendered = assertNotNull(PlannerRepoFileList.render(entries, allowed))
 
         assertTrue(rendered.summarized)
         assertTrue(rendered.text.toByteArray(Charsets.UTF_8).size <= PlannerRepoFileList.MAX_BYTES)
-        // Depth 4 (kivra-app/src/main/kotlin) is the first that fits: one line for all 5000 packages.
-        assertTrue(rendered.text.contains("kivra-app/src/main/kotlin/ 5000 files"), rendered.text)
+        // Depth 3 (kivra-app/src/) is the first that fits: one line for all 8000 packages.
+        assertTrue(rendered.text.contains("kivra-app/src/ 8000 files"), rendered.text)
         assertFalse(rendered.text.contains("pkg1/"))
     }
 
@@ -191,6 +194,60 @@ class PlannerRepoFileListTest {
         assertEquals(5, rendered.omittedUnsafe)
         assertFalse(rendered.text.any { it.code == 0x202E || it.code == 0x200B || it.code == 0x07 || it.code == 0xA0 })
         assertFalse(rendered.text.contains("aaaa"))
+    }
+
+    /**
+     * Paths that the model gateway's secret scan refuses (its candidate run is a whole path without its extension, and the entropy of a
+     * long lower-case path with digits passes 4.0). The gateway refuses a request when any of its text matches, so such a path in the
+     * list would fail every plan (PLAN_CALL_FAILED with errorCode SECRET_DETECTED).
+     */
+    private val gatewayRefusedPaths = listOf(
+        "docs/adr/0003-unknown-cost-release-by-audited-operator-action.md",
+        "docs/adr/0004-budget-port-is-authoritative-budgetcheck-observation-only.md",
+        "docs/adr/0007-policy-storage-and-agent-unreachability.md",
+        "docs/adr/0014-selfdev-low-risk-auto-merge.md",
+        "kivra-app/src/test/kotlin/net/kigawa/kivra/db/M0MemoryMutationJournalAdapterContractTest.kt",
+        "kivra-app/src/test/kotlin/net/kigawa/kivra/db/M0MemoryMutationJournalAdapterTest.kt",
+    )
+
+    @Test
+    fun `a path that the gateway secret scan refuses is left out and counted, and the list it leaves passes the scan`() {
+        val ordinary = listOf(
+            "docs/adr/0011-selfdev-autopilot.md",
+            "docs/runbook-selfdev.md",
+            "kivra-app/src/main/kotlin/net/kigawa/kivra/selfdev/PlannerRepoFiles.kt",
+        )
+        val entries = (gatewayRefusedPaths + ordinary).map { blob(it) }
+        val rendered = assertNotNull(PlannerRepoFileList.render(entries, { true }))
+
+        assertEquals(gatewayRefusedPaths.size, rendered.omittedUnsafe)
+        assertEquals(ordinary.size, rendered.fileCount)
+        assertFalse(rendered.summarized)
+        gatewayRefusedPaths.forEach { assertFalse(rendered.text.contains(it), "a refused path is in the list") }
+        ordinary.forEach { assertTrue(rendered.text.contains(it), "an ordinary path is missing: $it") }
+        // The same scan the gateway runs on the request text: the list must not make the request refused.
+        assertFalse(SecretScan().detectsText(rendered.text))
+        // Each refused path is refused by the gateway rule on its own, so the list above is exactly what the scan removed.
+        gatewayRefusedPaths.forEach { assertTrue(SecretScan().detectsText(it), "not refused by the gateway rule: $it") }
+    }
+
+    @Test
+    fun `a directory summary also leaves out the refused paths, and its text passes the gateway scan`() {
+        val ordinary = (1..40).map { "docs/notes/file$it.md" }
+        val entries = (gatewayRefusedPaths + ordinary).map { blob(it) }
+        // A small limit forces the summary. The refused paths are not counted in any directory line.
+        val rendered = assertNotNull(PlannerRepoFileList.render(entries, { true }, maxBytes = 400))
+
+        assertTrue(rendered.summarized)
+        assertEquals(gatewayRefusedPaths.size, rendered.omittedUnsafe)
+        assertFalse(SecretScan().detectsText(rendered.text))
+    }
+
+    @Test
+    fun `the fixed texts of the Planner prompt pass the gateway scan without a list`() {
+        assertFalse(SecretScan().detectsText(PlannerPrompt.system(repoFiles = true)))
+        assertFalse(SecretScan().detectsText(PlannerPrompt.system(repoFiles = false)))
+        assertFalse(SecretScan().detectsText(PlannerPrompt.RETRY_NOTE))
     }
 
     @Test

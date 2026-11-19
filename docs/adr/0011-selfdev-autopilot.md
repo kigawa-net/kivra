@@ -602,3 +602,47 @@ dev の Run 01M7SHST… は、タスク「docs/runbook-selfdev.md に計画検�
   CLI の経路の PatchPolicy で止まる(費用は戻らない)。
 - `PATH_NOT_ALLOWED` と `FILE_TOO_LARGE` の両方を、計画の検証の理由コードとして扱う。理由の列挙は、既存の固定リストに 1 つ足しただけである。
 - 運用の手順は runbook §7.2c。
+
+## 追補(2026-11-19): Planner のファイル一覧から、ゲートウェイの秘密検出に当たるパスを外す
+
+### 背景
+
+dev で、自己開発の計画が全て `BLOCKED(PLAN_CALL_FAILED)` になった。ログは `planner call failed: ... errorKind=POLICY_DENIED errorCode=SECRET_DETECTED
+sendState=NOT_SENT`。直前の `planner repo files: files=853 summarized=false bytes=64018 omittedUnsafe=0` から、ファイル一覧(§3 の
+`PlannerRepoFiles`、Issue #293)の中のパスが原因だと分かった。
+
+原因は 2 つの規則の食い違いである。
+
+- ゲートウェイは、依頼の本文のどこか 1 つでも `SecretScan`(`kivra-model-gateway`、既定の規則、認証情報は束縛しない)に当たると、依頼全体を
+  送らずに拒否する(`SECRET_DETECTED`)。`SecretScan` の候補は `[A-Za-z0-9_+/=-]{32,}` で、`/` を含むので、`docs/adr/` のようなディレクトリ部分が
+  ファイル名と 1 つの並びになる。拡張子の `.` の手前で切れ、英字と数字を両方含み、エントロピーが 4.0 以上なら当たる。語らしさの除外は無い。
+- `kivra-memory` の `SecretFilter` は、別の実装である。語らしい英小文字の長い並びを除外し、候補に `/` を含まない。記憶の保存と表示で使う。
+  原因の調査の初めは `SecretFilter` が使われていると考えたが、ゲートウェイは `SecretFilter` を使わない。
+
+`origin/main` のツリー(1,059 件)では、`SecretScan` の規則に当たるパスは 96 件あった(`docs/adr/` 11 件、`docs/design/` 7 件、
+`kivra-app/src/main/resources/db/migration/` の 57 件、`kivra-agent` の k8s パッケージ、`kivra-app` のテストのクラス名など)。
+一覧に 1 件でも入ると、依頼全体が拒否され、計画は作れない。
+
+### 決定(追補)
+
+1. **除外の判定**: ゲートウェイと同じ `SecretScan` の規則を、`SecretScan.detectsText(text)` として公開する(`detects(req)` と同じ判定。
+   `detects` は、テキスト部分の判定に同じ規則を使う)。二重に規則を書かない。`PlannerRepoFileList` は、既定の `SecretScan()` で判定する。
+   ゲートウェイの既定も `SecretScan()` で、認証情報は束縛しない。
+2. **除外の位置**: `PlannerRepoFileList.render` の中で、許可パスと禁止パスの判定の後、既存の `isSafePath` と並べて判定する。
+   当たるパスは一覧に入れず、`omittedUnsafe` に数える(パス名は出さない)。
+3. **ディレクトリ要約**: 要約の行(`dir/ N files`)も、同じ判定で当たれば落とす。
+4. **安全弁**: 一覧を除いた後も依頼が拒否されるのは、題名・本文(運用者または MCP が書いた文面)か、再試行の文(Planner 自身の出力)が当たる場合だけである。
+   これは `PLAN_CALL_FAILED` のまま残し、ログの `errorCode=SECRET_DETECTED` で見分ける(runbook §7.2b)。新しい理由コード `PLAN_SECRET_DETECTED` は
+   足さない。足すと、`AutopilotReason`、計画段階の `BLOCKED` の辺、チャットと MCP の再計画の集合、UI の `GoalReplanRules` と表示名、
+   ADR と runbook に波及するため、この修正の範囲に入れない。題名・本文の判定は、運用者が文面を直して再計画すれば解消する。
+5. **除外の代償**: 除外したパスは Planner から見えない。そのため、`docs/adr/` の大部分と、マイグレーションファイル(`db/migration/`)は、
+   一覧に出ない。Planner がそれらを名指しすると `PATH_NOT_ALLOWED` で再試行になる。既存の計画の検証は変えない。
+
+### 結果(追補)
+
+- 全ての計画が `PLAN_CALL_FAILED(SECRET_DETECTED)` で止まる、という不具合は解消する(一覧の中のパスは、ゲートウェイの規則に当たらない)。
+- 一覧の中の、ゲートウェイの規則に当たるパスは 0 件になる。除外数は `omittedUnsafe` で確かめられる。
+- 除外により、一覧に出ない既存ファイルがある。見えないファイルを Planner が名指しすると、再試行になる。
+- 根本の改善は、`SecretScan` の候補を `/` で区切ること(ディレクトリ部分を除く)、または語らしさの除外を入れることである。どちらも、
+  ゲートウェイの秘密検出の規則そのものの変更なので、別の決定として扱う。この追補では変えない。
+- 運用の見分け方と手順は runbook §7.2b と §7.2c。

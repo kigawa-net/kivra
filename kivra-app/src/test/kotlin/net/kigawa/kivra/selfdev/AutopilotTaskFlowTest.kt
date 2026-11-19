@@ -27,6 +27,13 @@ import net.kigawa.kivra.db.SelfDevSubmitResult
 import net.kigawa.kivra.db.SelfDevTask
 import net.kigawa.kivra.db.TaskTransition
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.github.GitHubFailureKind
+import net.kigawa.kivra.github.GitHubPort
+import net.kigawa.kivra.github.GitHubResult
+import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.github.RepoTree
+import net.kigawa.kivra.github.TreeEntry
+import net.kigawa.kivra.github.TreeEntryType
 import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.execUpdate
 import net.kigawa.kivra.modelgateway.BudgetController
@@ -116,10 +123,11 @@ class AutopilotTaskFlowTest {
             ledger = net.kigawa.kivra.db.DbRequestLedger(db.database),
         )
 
-        fun planner(approval: AutopilotApproval = AutopilotApproval.REQUIRED) = AutopilotPlanner(
+        fun planner(approval: AutopilotApproval = AutopilotApproval.REQUIRED, repoSizes: PlannerRepoFiles? = null) = AutopilotPlanner(
             operations = ops,
             gateway = gateway,
             config = PlannerConfig(budgetScopes = listOf("tenant"), autopilot = autopilot(approval)),
+            repoSizes = repoSizes,
         )
 
         fun dispatcher(
@@ -157,6 +165,43 @@ class AutopilotTaskFlowTest {
 
     private fun task(title: String, paths: String = "\"docs/a.md\"", size: String = "S", deps: String = "[]") =
         """{"title":"$title","body":"body of $title","targetPaths":[$paths],"sizeEstimate":"$size","dependsOn":$deps}"""
+
+    /** Lists [entries] as the base tree, or fails the listing when [entries] is null. Every other GitHub call is the shared fake's. */
+    private class ListedTree(private val entries: List<TreeEntry>?) : GitHubPort by FakeGitHub() {
+        override suspend fun listTree(repo: RepoRef, ref: String): GitHubResult<RepoTree> =
+            entries?.let { GitHubResult.Success(RepoTree("a".repeat(40), it, truncated = false)) }
+                ?: GitHubResult.Failure(GitHubFailureKind.TREE_TRUNCATED, GitHubFailureKind.TREE_TRUNCATED.code)
+    }
+
+    private val bigAndSmall = listOf(
+        TreeEntry("docs/big.md", TreeEntryType.BLOB, "100644", 300L * 1024),
+        TreeEntry("docs/small.md", TreeEntryType.BLOB, "100644", 1024L),
+    )
+
+    @Test
+    fun aPlanThatNamesAnExistingFileOverTheLimitIsRefusedAndTheFlowAsksForAnotherPlan() = TestDb().use { db ->
+        // The first answer names the large file: the check refuses it before anything is stored, and the second answer is planned.
+        val h = Harness(db, listOf(plan(task("Big", paths = "\"docs/big.md\"")), plan(task("Small", paths = "\"docs/small.md\""))))
+        val root = h.submitRoot()
+        val sizes = PlannerRepoFiles(ListedTree(bigAndSmall), RepoRef("kigawa-net", "kivra"), "main")
+
+        val attempt = runBlocking { h.planner(repoSizes = sizes).planTask(root.taskId) }
+
+        assertEquals(PlanAttempt.Proposed(taskCount = 1, queuedCount = 0), attempt)
+        assertEquals(2, h.provider.calls)
+        assertEquals(listOf("Small"), h.planned(root.taskId).map { it.title })
+    }
+
+    @Test
+    fun aPlanIsNotRefusedBySizeWhenTheTreeCannotBeRead() = TestDb().use { db ->
+        // Fail-open, as the Planner's file list: the write-time PatchPolicy still checks the change.
+        val h = Harness(db, listOf(plan(task("Big", paths = "\"docs/big.md\""))))
+        val root = h.submitRoot()
+        val sizes = PlannerRepoFiles(ListedTree(null), RepoRef("kigawa-net", "kivra"), "main")
+
+        assertEquals(PlanAttempt.Proposed(taskCount = 1, queuedCount = 0), runBlocking { h.planner(repoSizes = sizes).planTask(root.taskId) })
+        assertEquals(1, h.provider.calls)
+    }
 
     @Test
     fun plannerWritesPlannedTasksAndTheRootWaitsForApproval() = TestDb().use { db ->

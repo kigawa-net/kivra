@@ -248,6 +248,33 @@ class PlannerRepoFilesTest {
         val github = TreeGitHub { tree(blob("gradle/wrapper.jar")) }
         assertNull(PlannerRepoFiles(github, REPO, "main", clock = clock).list())
     }
+
+    @Test
+    fun `the sizes of the regular files come from the same cached read, and symlinks and trees are not in them`() = runBlocking {
+        val github = TreeGitHub {
+            tree(
+                blob("docs/a.md", size = 10),
+                blob("docs/link.md", size = 5, mode = "120000"),
+                TreeEntry("docs", TreeEntryType.TREE, "040000", null),
+                blob("gradle/wrapper.jar", size = 7),
+            )
+        }
+        val files = PlannerRepoFiles(github, REPO, "main", clock = clock)
+
+        assertEquals(mapOf("docs/a.md" to 10L, "gradle/wrapper.jar" to 7L), files.fileSizes())
+        assertTrue(files.list()!!.contains("docs/a.md"))
+        assertEquals(1, github.calls)
+    }
+
+    @Test
+    fun `a failed tree read gives no sizes, and the failure is not cached`() = runBlocking {
+        val github = TreeGitHub { GitHubResult.Failure(GitHubFailureKind.TREE_TRUNCATED, GitHubFailureKind.TREE_TRUNCATED.code) }
+        val files = PlannerRepoFiles(github, REPO, "main", clock = clock)
+
+        assertNull(files.fileSizes())
+        assertNull(files.fileSizes())
+        assertEquals(2, github.calls)
+    }
 }
 
 class PlannerRepoFilesPromptTest {
@@ -284,6 +311,23 @@ class PlannerRepoFilesPromptTest {
         assertTrue(withList.contains("<repo-data> element listing the repository's files"))
         assertTrue(withList.contains("Use targetPaths only with paths from that list"))
         assertTrue(withList.contains("TASK SIZE"))
+    }
+
+    @Test
+    fun `the system prompt gives the 200 KB rule and says that the check refuses such a plan`() {
+        val prompt = PlannerPrompt.system()
+        assertTrue(prompt.contains("larger than 200 KB (204800 bytes) cannot be"), prompt)
+        assertTrue(prompt.contains("refused by a check"), prompt)
+    }
+
+    @Test
+    fun `the file-too-large retry note names the file and says to use a smaller or a new file`() {
+        val note = PlannerPrompt.fileTooLargeRetryNote("docs/big\".md")
+        assertTrue(note.contains("\"docs/big_.md\""), note)
+        assertTrue(note.contains("larger than 200 KB"), note)
+        assertTrue(note.contains("smaller file"), note)
+        assertTrue(note.contains("new file"), note)
+        assertFalse(note.contains("Goal"))
     }
 
     @Test

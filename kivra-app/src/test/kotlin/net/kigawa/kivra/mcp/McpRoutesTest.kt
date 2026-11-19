@@ -188,7 +188,7 @@ class McpRoutesTest {
             assertEquals(
                 listOf(
                     "kivra.runs.read", "kivra.selfdev.start", "kivra.selfdev.stop", "kivra.selfdev.requeue", "kivra.selfdev.order.manage",
-                    "kivra.selfdev.task.decide",
+                    "kivra.selfdev.task.decide", "kivra.selfdev.order.create",
                 ),
                 body["scopes_supported"]!!.jsonArray.map { it.jsonPrimitive.content },
             )

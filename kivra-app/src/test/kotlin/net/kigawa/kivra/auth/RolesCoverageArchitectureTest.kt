@@ -254,6 +254,7 @@ class RolesCoverageArchitectureTest {
         // "kivra_goal_get_titles" to Permission.READ_TEXT,
         "kivra_selfdev_start" to Permission.SPEND_START,
         "kivra_order_request_stop" to Permission.STOP_REQUEST,
+        "kivra_order_create" to Permission.ORDER_MANAGE,
         "kivra_order_extend" to Permission.ORDER_MANAGE,
         "kivra_order_resume" to Permission.ORDER_MANAGE,
         "kivra_task_requeue" to Permission.GOAL_WRITE,

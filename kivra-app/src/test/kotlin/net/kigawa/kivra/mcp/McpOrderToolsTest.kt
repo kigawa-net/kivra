@@ -41,6 +41,11 @@ import net.kigawa.kivra.db.CreateRootResult
 import net.kigawa.kivra.db.OrderConflict
 import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.ProjectRepository
+import net.kigawa.kivra.routes.RootOrderCheck
+import net.kigawa.kivra.routes.RootOrderField
+import net.kigawa.kivra.routes.MAX_POLICY_CODE_POINTS
+import net.kigawa.kivra.routes.MAX_TITLE_CODE_POINTS
+import net.kigawa.kivra.routes.checkRootOrderFields
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
@@ -108,12 +113,15 @@ class McpOrderToolsTest {
         writeEnabled: Boolean = true,
         writeRate: Int = 1000,
         tasks: SelfDevOperatorRepository? = null,
+        targetRepo: String? = "kigawa-net/kivra",
     ): McpRouteDeps {
         val e = env(writeEnabled, writeRate)
         return buildMcpRouteDeps(
             McpSettings.fromEnv(e), e, db.runs, repo,
             jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = true, maxActiveSelfDev = 1,
-            orders = orders?.let { McpOrderDeps(it, aliceOwner, maxCyclesCap = CYCLE_CAP) },
+            orders = orders?.let {
+                McpOrderDeps(it, aliceOwner, maxCyclesCap = CYCLE_CAP, targetRepo = targetRepo, projects = ProjectRepository(db.database, java.time.Clock.systemUTC()))
+            },
             tasks = tasks,
             projects = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()),
         )!!
@@ -658,6 +666,197 @@ class McpOrderToolsTest {
 
     /** The read and stop scopes only: no decision scope. */
     private fun readAndStopToken() = McpTestTokens.token(subject = "sub-bob", scope = readAndStop)
+
+    // ---- kivra_order_create (ADR 0015 amendment 2026-11-19, section 9) ---------------------------------------
+
+    private val createScope = SCOPE_SELFDEV_ORDER_CREATE
+    private val createTool = "kivra_order_create"
+    /** An operator (bob, a human) with the create scope. */
+    private val operatorCreate get() = McpTestTokens.token(subject = "sub-bob", scope = "$readScope $createScope")
+    /** The AI principal (alice) with the create scope: the scope does not make it an operator. */
+    private val aiCreate get() = McpTestTokens.token(subject = "sub-alice", scope = "$readScope $createScope")
+    private val createTitle = "CREATE-TITLE-MARKER"
+    private val createPolicy = "CREATE-POLICY-MARKER"
+
+    private fun newProject(db: TestDb): String =
+        ProjectRepository(db.database, java.time.Clock.systemUTC()).create("Order create", null).projectId
+
+    /** The arguments of a creation, as JSON text. [extra] is appended as more members (for example `"max_cycles":2`). */
+    private fun createArgs(projectId: String, title: String = createTitle, policy: String = createPolicy, extra: String = ""): String =
+        """{"title":"$title","policy":"$policy","project_id":"$projectId"$extra}"""
+
+    private fun countOrders(db: TestDb): Int = db.count("selfdev_orders")
+
+    @Test
+    fun `kivra_order_create is listed only with the write switch and to its own scope`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        testApplication {
+            setUp(deps(db, orders))
+            assertFalse(listed(operatorDecisions).contains(createTool), "the decision scope does not list the creation")
+            assertFalse(listed(aiToken).contains(createTool))
+            assertTrue(listed(operatorCreate).contains(createTool))
+            assertTrue(listed(aiCreate).contains(createTool), "listed to the AI token too; the permission refuses the call")
+        }
+        testApplication {
+            setUp(deps(db, orders, writeEnabled = false))
+            assertFalse(listed(operatorCreate).contains(createTool))
+            assertEquals(-32602, callTool(createTool, createArgs(newProject(db)), operatorCreate).rpcCode())
+        }
+    }
+
+    @Test
+    fun `an operator creates a root order as the REST route does, returns the summary and no title or policy`() = withTestDb { db ->
+        val orders = SelfDevOrderRepository(db.database)
+        val project = newProject(db)
+        testApplication {
+            setUp(deps(db, orders))
+            val out = callTool(createTool, createArgs(project, extra = ""), operatorCreate)
+            assertFalse(out.isError(), out.toString())
+            val s = out.structured()
+            assertEquals(summaryKeys, s.keys)
+            assertEquals("ACTIVE", s["state"]!!.jsonPrimitive.content)
+            assertEquals("1", s["max_cycles"]!!.jsonPrimitive.content)
+            assertEquals(project, s["project_id"]!!.jsonPrimitive.content)
+            assertFalse(out.toString().contains(createTitle), "the title is not returned")
+            assertFalse(out.toString().contains(createPolicy), "the policy is not returned")
+            val orderId = s["order_id"]!!.jsonPrimitive.content
+            val row = orders.get(orderId)!!
+            assertEquals(createTitle, row.title)
+            assertEquals(createPolicy, row.policy)
+            assertEquals("kigawa-net/kivra", row.targetRepo)
+            assertEquals(bobOwner, row.createdBy)
+            assertEquals(project, row.projectId)
+            assertEquals(null, row.parentOrderId)
+        }
+        assertEquals(1, countOrders(db))
+    }
+
+    @Test
+    fun `the creation needs its own scope - without it the call is 403 insufficient_scope and nothing is written`() = withTestDb { db ->
+        val project = newProject(db)
+        testApplication {
+            setUp(deps(db, SelfDevOrderRepository(db.database)))
+            val response = rpc(call(createTool, createArgs(project)), operatorDecisions)
+            assertEquals(HttpStatusCode.Forbidden, response.status)
+            assertTrue(response.headers[HttpHeaders.WWWAuthenticate].orEmpty().contains("scope=\"$createScope\""))
+            assertEquals(-32003, response.json().rpcCode())
+        }
+        assertEquals(0, countOrders(db))
+    }
+
+    @Test
+    fun `the AI principal is refused the creation by the permission, whatever its scopes, and nothing is written`() = withTestDb { db ->
+        val project = newProject(db)
+        testApplication {
+            setUp(deps(db, SelfDevOrderRepository(db.database)))
+            val out = callTool(createTool, createArgs(project), aiCreate)
+            assertTrue(out.isError())
+            assertEquals("forbidden", out.structured()["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
+        }
+        assertEquals(0, countOrders(db))
+    }
+
+    @Test
+    fun `the creation refuses bad input before the repository - unknown, missing, typed, out of range and unsafe text`() = withTestDb { db ->
+        val project = newProject(db)
+        val longTitle = "a".repeat(MAX_TITLE_CODE_POINTS + 1)
+        val longPolicy = "a".repeat(MAX_POLICY_CODE_POINTS + 1)
+        val cases = listOf(
+            """{"title":"t","policy":"p","project_id":"$project","budget_jpy":1000}""",
+            """{"title":"t","project_id":"$project"}""",
+            """{"policy":"p","project_id":"$project"}""",
+            """{"title":"t","policy":"p"}""",
+            """{"title":"t","policy":"p","project_id":"not-a-project-id"}""",
+            """{"title":7,"policy":"p","project_id":"$project"}""",
+            """{"title":"","policy":"p","project_id":"$project"}""",
+            """{"title":"$longTitle","policy":"p","project_id":"$project"}""",
+            """{"title":"t\u0007x","policy":"p","project_id":"$project"}""",
+            """{"title":"t","policy":"$longPolicy","project_id":"$project"}""",
+            """{"title":"t","policy":"p\u202Eq","project_id":"$project"}""",
+            """{"title":"t","policy":"p","project_id":"$project","max_cycles":0}""",
+            """{"title":"t","policy":"p","project_id":"$project","max_cycles":4}""",
+            """{"title":"t","policy":"p","project_id":"$project","max_cycles":"2"}""",
+            """{"title":"t","policy":"p","project_id":"$project","max_cycles":1.5}""",
+        )
+        testApplication {
+            setUp(deps(db, SelfDevOrderRepository(db.database)))
+            for (args in cases) {
+                assertEquals(-32602, callTool(createTool, args, operatorCreate).rpcCode(), args.take(80))
+            }
+        }
+        assertEquals(0, countOrders(db))
+    }
+
+    @Test
+    fun `the creation answers a missing project, a missing target and a cap of the cycles as fixed refusals, and writes nothing`() = withTestDb { db ->
+        val project = newProject(db)
+        testApplication {
+            setUp(deps(db, SelfDevOrderRepository(db.database)))
+            val noProject = callTool(createTool, createArgs(noSuchOrder), operatorCreate)
+            assertTrue(noProject.isError())
+            assertEquals("PROJECT_NOT_FOUND", noProject.errorCode())
+            val atCap = callTool(createTool, createArgs(project, extra = ",\"max_cycles\":$CYCLE_CAP"), operatorCreate)
+            assertFalse(atCap.isError(), "the cap itself is allowed")
+            assertEquals("$CYCLE_CAP", atCap.structured()["max_cycles"]!!.jsonPrimitive.content)
+        }
+        testApplication {
+            setUp(deps(db, SelfDevOrderRepository(db.database), targetRepo = null))
+            val noTarget = callTool(createTool, createArgs(project), operatorCreate)
+            assertEquals("ORDERS_DISABLED", noTarget.errorCode())
+        }
+        assertEquals(1, countOrders(db))
+    }
+
+    @Test
+    fun `the creation is audited with the ID and fixed codes only, never the title or the policy`() {
+        val logger = LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start() }
+        logger.addAppender(appender)
+        var orderId = ""
+        try {
+            TestDb().use { db ->
+                val project = newProject(db)
+                testApplication {
+                    setUp(deps(db, SelfDevOrderRepository(db.database)))
+                    val out = callTool(createTool, createArgs(project), operatorCreate)
+                    orderId = out.structured()["order_id"]!!.jsonPrimitive.content
+                }
+            }
+        } finally {
+            logger.detachAppender(appender)
+        }
+        val lines = appender.list.map { it.formattedMessage }
+        assertTrue(lines.any { it.contains("action=ORDER_CREATED") && it.contains("via=mcp") && it.contains("orderId=$orderId") })
+        assertTrue(lines.any { it.startsWith("mcp.call") && it.contains("tool=kivra_order_create") && it.contains("outcome=CREATED") })
+        val everything = lines.joinToString("\n")
+        for (marker in listOf(createTitle, createPolicy, "sub-bob", bobOwner)) {
+            assertFalse(everything.contains(marker), "a log line leaked a value")
+        }
+    }
+
+    @Test
+    fun `the field checks are one set of rules for the REST route and the tool, at the limits`() {
+        // The REST route and kivra_order_create both call checkRootOrderFields, so the same boundary answers come from both.
+        val ok = checkRootOrderFields("a".repeat(MAX_TITLE_CODE_POINTS), "p".repeat(MAX_POLICY_CODE_POINTS), 1, CYCLE_CAP)
+        assertIs<RootOrderCheck.Valid>(ok)
+        assertEquals(
+            RootOrderField.TITLE,
+            assertIs<RootOrderCheck.Invalid>(checkRootOrderFields("a".repeat(MAX_TITLE_CODE_POINTS + 1), "p", 1, CYCLE_CAP)).field,
+        )
+        assertEquals(
+            RootOrderField.POLICY,
+            assertIs<RootOrderCheck.Invalid>(checkRootOrderFields("t", "p".repeat(MAX_POLICY_CODE_POINTS + 1), 1, CYCLE_CAP)).field,
+        )
+        assertEquals(
+            RootOrderField.MAX_CYCLES,
+            assertIs<RootOrderCheck.Invalid>(checkRootOrderFields("t", "p", CYCLE_CAP + 1, CYCLE_CAP)).field,
+        )
+        assertEquals(
+            RootOrderField.MAX_CYCLES,
+            assertIs<RootOrderCheck.Invalid>(checkRootOrderFields("t", "p", 0, CYCLE_CAP)).field,
+        )
+        assertEquals(RootOrderField.TITLE, assertIs<RootOrderCheck.Invalid>(checkRootOrderFields("  ", "p", 1, CYCLE_CAP)).field)
+    }
 
     private val summaryKeys = setOf(
         "order_id", "parent_order_id", "depth", "state", "state_reason", "cycles_started", "max_cycles", "current_goal_id",

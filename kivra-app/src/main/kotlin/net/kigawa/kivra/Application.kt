@@ -335,7 +335,14 @@ internal fun Application.appModule(env: Map<String, String>) {
         tokenAuth = if (rolesSettings.mode == PermissionMode.OFF) null else McpTokenAuth.forDatabase(database, rolesSettings.mode),
         selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns, projects = projectRepo,
         // The order tools serve only while the orders answer (the same condition as the REST routes' requireEnabled).
-        orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, aiPrincipal, orderSettings.maxCyclesCap) },
+        orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let {
+            McpOrderDeps(
+                it, aiPrincipal, orderSettings.maxCyclesCap,
+                // The target and the projects of a new root order: the REST route's (POST /api/projects/{projectId}/orders).
+                targetRepo = selfDevSettings.config?.repo?.let { repo -> "${repo.owner}/${repo.repo}" },
+                projects = projectRepo,
+            )
+        },
         // The cycle tree tool (kivra_task_list) serves only while the autopilot answers, as the REST task routes do.
         tasks = SelfDevOperatorRepository(database).takeIf { autopilotSettings.config != null },
         // Goal tools temporarily removed pending Task model migration (V40)

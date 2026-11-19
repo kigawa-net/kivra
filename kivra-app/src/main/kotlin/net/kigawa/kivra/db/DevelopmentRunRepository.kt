@@ -1366,17 +1366,21 @@ class DevelopmentRunRepository(
         var released = 0
         var already = 0
         var failed = 0
+        val reasons = mutableMapOf<String, Int>()
         for (runId in dueAutoReleasableSelfDev(grace, limit)) {
             try {
-                when (autoReleaseUnknownSelfDev(runId, grace)) {
-                    is UnknownAutoReleaseResult.Released -> released++
+                when (val result = autoReleaseUnknownSelfDev(runId, grace)) {
+                    is UnknownAutoReleaseResult.Released -> {
+                        released++
+                        result.run.stateReason?.let { reasons.merge(it, 1, Int::plus) }
+                    }
                     UnknownAutoReleaseResult.NotEligible -> already++
                 }
             } catch (_: Exception) {
                 failed++
             }
         }
-        return AutoReleaseReport(released, already, failed)
+        return AutoReleaseReport(released, already, failed, reasons)
     }
 
     private fun lockRun(runId: RunId): ResultRow? =

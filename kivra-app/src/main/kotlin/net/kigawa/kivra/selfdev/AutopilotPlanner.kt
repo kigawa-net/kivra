@@ -154,6 +154,7 @@ class AutopilotPlanner(
                 val base = request(fence, attempt, claim.title, claim.body, repoList, retryDetail)
                 // The classifier reads the claim's title and body only (never the repository file list).
                 val routed = router?.let { r -> r.apply(base, r.decide("selfdev.planner", claim.title + "\n" + claim.body, base)) } ?: base
+                logger.info("planner call started: taskId={} attempt={}", taskId, attempt)
                 gateway.invoke(routed)
             } catch (e: CancellationException) {
                 throw e

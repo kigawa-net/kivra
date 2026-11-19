@@ -2087,7 +2087,7 @@ dev での有効化の手順は §7.5。
 
 **再承認の手順**:
 1. 原因を確かめる。計画(Plan)の対象パスと、Run の失敗の理由(`POLICY_REJECTED`)を見る。このタスクの変更が正当なら、範囲を広げる別の Goal を出すか、手で PR を作る方が安全である(自動の範囲は広げない)。
-2. 承認し直す: 詳細の該当タスクで「承認」(`POST /api/selfdev/tasks/{planId}-{番号}/approve`)。承認すると、タスクは新しい投入キーで `QUEUED` になり、Goal は `BLOCKED` から `RUNNING`(または `TASKS_QUEUED`)へ戻る。次の tick で投入される(新しい Run)。
+2. 承認し直す: 詳細の該当タスクで「承認」(`POST /api/selfdev/tasks/{planId}-{番号}/approve`。MCP の `kivra_task_approve` でも同じ。§8.8b)。承認すると、タスクは新しい投入キーで `QUEUED` になり、Goal は `BLOCKED` から `RUNNING`(または `TASKS_QUEUED`)へ戻る。次の tick で投入される(新しい Run)。
 3. 承認したタスクは、再検査の対象外になる。差分が範囲外でも、承認者の判断でコミットされる。承認の前に、計画の内容を確かめる。
 4. 見送るなら「見送り」(`reject`)。タスクは `SKIPPED` になり、Goal の残りは進む。
 
@@ -2718,7 +2718,7 @@ SELECT kind, COUNT(*) AS n
 - `KIVRA_MCP_ALLOWED_ORIGINS`(任意)。カンマ区切りの `Origin`(例 `https://kivra-dev.kigawa.net`)。`Origin` ヘッダーが付いたリクエストは、一覧に一致する必要がある。`Origin` が無いリクエスト(非ブラウザのクライアント)は通す。
 - `KIVRA_MCP_RATE_PER_MINUTE`(任意、既定 60、1〜6000)。主体(所有者のキー)ごとに、1 分あたりの上限。超えると 429。
 - `KIVRA_AGENT_REQUIRED_ROLE`(任意)。設定されていれば、そのロールを持つトークンは 403(エージェントは MCP の呼び出し元ではない)。`aud` の検査で、エージェントのトークンは既に 401 になる。これは多層防御。
-- `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。order が有効なときは、停止の要求のツール `kivra_order_request_stop` も登録する(§8.8)。さらに延長、再開、タスクの再投入のツールも登録する(§8.8b)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
+- `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。order が有効なときは、停止の要求のツール `kivra_order_request_stop` も登録する(§8.8)。さらに延長、再開、タスクの再投入、タスクの承認と見送りのツールも登録する(§8.8b)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
 - `KIVRA_MCP_WRITE_RATE_PER_MINUTE`(任意、既定 5、1〜6000)。書き込みの呼び出しの、主体ごとの 1 分あたりの上限。読み取りの上限(`KIVRA_MCP_RATE_PER_MINUTE`)とは別。超えると 429。書き込みが無効のときは読まれない。
 - `KIVRA_MCP_GOAL_READ_ENABLED`、`KIVRA_MCP_GOAL_STOP_ENABLED`、`KIVRA_MCP_GOAL_SUBMIT_ENABLED`、`KIVRA_MCP_GOAL_TEXT_ENABLED`(任意、既定 `false`)。`KIVRA_MCP_GOAL_TEXT_ENABLED` は題名の読み取り(§8.9 の末尾)。Goal の読み取り、中止、投入のツール(§8.9)。どれも `KIVRA_MCP_ENABLED=true` と オートパイロットが要る。中止と投入は `KIVRA_MCP_WRITE_ENABLED=true` も要る。MCP が off のまま `true` にすると起動を止める。
 - `KIVRA_MCP_GOAL_SUBMIT_DAILY_LIMIT`(任意、既定 10、1〜100)。`kivra_goal_submit` で、運用者 1 人が UTC の 1 日に投入できる Goal の件数。冪等の再送は数えない。
@@ -2818,29 +2818,33 @@ order が有効(`KIVRA_SELFDEV_ORDERS_ENABLED=true` かつ `KIVRA_SELFDEV_AUTOPI
 | `kivra_order_request_stop` | `kivra.selfdev.stop` | `order_id`、`version`(0 以上の整数)、`reason`(`OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN` のどれか) | 要求の `request_id`、`state`、`reason_code`、`requester_kind`、`order_version`。**`KIVRA_MCP_WRITE_ENABLED=true` のときだけ登録される** |
 
 - 入力は厳格。未知の項目(`policy`、`reason` 以外の自由な文を含む)、列挙外の理由、型違い、負の版は -32602 で、何も書かれない。
-- **停止の要求が基本**。承認、却下、取り消し、作成、周の開始、一時停止は、MCP には無い(ADR 0015 U-9)。延長と再開は §8.8b のツールで行える(ADR 0015 追補 2026-11-18)。承認は REST の `approve` だけで、要求した主体は承認できない(`SAME_PRINCIPAL`。REST は 403)。
+- **停止の要求が基本**。order の承認(停止要求の承認)、却下、取り消し、作成、周の開始、一時停止は、MCP には無い(ADR 0015 U-9)。延長と再開は §8.8b のツールで行える(ADR 0015 追補 2026-11-18)。停止要求の承認は REST の `approve` だけで、要求した主体は承認できない(`SAME_PRINCIPAL`。REST は 403)。タスクの承認と見送りは §8.8b のツールで行える(ADR 0015 追補 2026-11-19)。
 - 認可は REST と同じ。MCP の主体(所有者のキー)が `KIVRA_SELFDEV_AI_PRINCIPAL` と一致すれば AI の主体、それ以外は人の運用者。停止の要求は REST と同じく両方ができ、遷移の可否はリポジトリの規則で決まる。
 - 拒否は REST と同じ固定コードを `structuredContent.error.code` に返す(例: `STOP_ALREADY_PENDING`、`STALE_VERSION`、`ORDER_NOT_FOUND`)。理由の文は固定の文だけ。
 - 題名、方針、目標の本文、`digest` は返さない。ログと監査には、固定のコード、ID、主体のハッシュだけが出る(`net.kigawa.kivra.selfdev.order.operator`、`via=mcp`)。
 - 有効化: order と MCP を有効にし、停止の要求も使うなら `KIVRA_MCP_WRITE_ENABLED=true` を加える(dev で先に確かめる)。戻すには該当の変数を `false` にして再起動する。order の状態は DB に残り、起動時に既存の `ACTIVE` は `PAUSED`(`STARTUP_HOLD`)になる。
 
-### 8.8b 運用者の判断のツール(延長、再開、タスクの再投入、ADR 0015 追補 2026-11-18、既定は無効)
+### 8.8b 運用者の判断のツール(延長、再開、タスクの再投入、タスクの承認と見送り、ADR 0015 追補 2026-11-18・2026-11-19、既定は無効)
 
-`KIVRA_MCP_WRITE_ENABLED=true` かつ order が有効のとき(延長と再開)、または autopilot が有効なとき(再投入)に登録する。どれも REST と同じリポジトリ関数を呼ぶ。
+`KIVRA_MCP_WRITE_ENABLED=true` かつ order が有効のとき(延長と再開)、または `KIVRA_MCP_WRITE_ENABLED=true` かつ autopilot が有効なとき(再投入、承認、見送り)に登録する。どれも REST と同じリポジトリ関数を呼ぶ。
 
 | ツール | 必要なスコープ | 入力 | 出力(`structuredContent`) |
 |---|---|---|---|
 | `kivra_order_extend` | `kivra.selfdev.order.manage` | `order_id`、`version`、`add_cycles`(任意、1〜`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`)、`extend_days`(任意、1〜3650)。どちらか一つ以上 | REST の詳細と同じ項目(`order_id`、`state`、`max_cycles`、`version` など)。拒否は `error.code`(`STALE_VERSION`、`ORDER_NOT_FOUND`、`NOT_ROOT`、`TERMINAL` など) |
 | `kivra_order_resume` | `kivra.selfdev.order.manage` | `order_id`、`version` | 同上。`PAUSED` の root と、祖先が有効な order だけ再開できる。拒否は固定のコード |
 | `kivra_task_requeue` | `kivra.selfdev.requeue` | `task_id`、`version`(`kivra_task_list` の値) | `task_id`、`state`(`QUEUED`)、`state_reason`、`version`、`project_id`。題名と本文は返さない。拒否は `TASK_NOT_FOUND`、`STALE_VERSION` など |
+| `kivra_task_approve` | `kivra.selfdev.task.decide` | `task_id`、`version`(`kivra_task_list` の値) | 同上(`state` は `QUEUED`)。承認待ち(`PENDING_APPROVAL`、`AUTO_SCOPE_EXCEEDED` を含む)だけ。拒否は `TASK_NOT_FOUND`、`STALE_VERSION`、遷移の拒否の理由コード |
+| `kivra_task_skip` | `kivra.selfdev.task.decide` | `task_id`、`version` | 同上(`state` は `SKIPPED`)。UI の「見送る」と同じ REST(`/reject`)の経路。承認待ち、投入待ち、`FAILED`、`CANCELLED` のタスク |
 
 - `KIVRA_MCP_WRITE_ENABLED=false` のときは一つも出ず、呼べば -32602(未知のツール)。書き込みの毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
 - スコープが無いトークンは 403 と `insufficient_scope`。読み取りや停止のスコープからは暗黙に付かない。
 - AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL`)は、スコープを持っていても拒否される(`forbidden`)。AI の役割は `ORDER_MANAGE` と `GOAL_WRITE` を持たないため。
 - 延長の数値は監査の行に出ない。見るには `selfdev_order_events` を見る。
 - 入力は厳格。未知の項目(`policy`、`reason` など)、型違い、範囲外、小数は -32602 で、何も書かれない。
+- `kivra_task_approve` の注意: **承認は範囲の再検査を行わない**(§7.4b)。`AUTO_SCOPE_EXCEEDED` で止まったタスクを承認すると、差分を確かめないまま `QUEUED` になる。承認の前に、計画の内容と、同じ原因が直っているかを確かめる。
+- 監査: 承認と見送りは、`net.kigawa.kivra.selfdev.autopilot.operator` の行に `via=mcp` を付けて出る(`action=TASK_APPROVED` / `action=TASK_REJECTED`)。
 - 注意: プロジェクト単位の権限(ADR 0022 PR-D)は、これらの MCP ツールでは検査されない(ディスパッチャは全体の権限だけを見る)。`KIVRA_SELFDEV_PROJECT_MODE` を enforce にする前に直す。
-- 有効化の順序: dev で `KIVRA_MCP_WRITE_ENABLED=true` は既に有効。スコープ `kivra.selfdev.order.manage` と `kivra.selfdev.requeue` を Keycloak の client `kivra-mcp` に足す(`kigawa01/k8s-system` 側。この repo には無い)。その後、運用者のトークンで `tools/list` に出ることを確かめる。
+- 有効化の順序: dev で `KIVRA_MCP_WRITE_ENABLED=true` は既に有効。スコープ `kivra.selfdev.order.manage`、`kivra.selfdev.requeue`、`kivra.selfdev.task.decide` を Keycloak の client `kivra-mcp` に足す(`kigawa01/k8s-system` 側。この repo には無い)。その後、運用者のトークンで `tools/list` に出ることを確かめる。
 - 戻す: 該当のスコープを付けない(一覧から消える)、または `KIVRA_MCP_WRITE_ENABLED=false` にして再デプロイする。書き込みのツール全部が止まり、読み取りは残る。
 
 ### 8.9 Goal のツール(ADR 0019 S1、既定は無効)

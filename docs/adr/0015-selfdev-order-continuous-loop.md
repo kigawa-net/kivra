@@ -443,7 +443,7 @@ MCP(ADR 0013 の仕組みを使う):
 - **U-6 周の間隔と 1 日の周の数**。推奨: 間隔は 60 分、1 日は 3 周まで。
 - **U-7 同時に進む周の数**。推奨: 木全体で 1 つ。既存の同時 Run の上限(既定 1)と合わせる。
 - **U-8 段階 3 への昇格の数値**。推奨: ADR 0011 §6.3 と同じ(4 週間、70%)。
-- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけ。作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置く。（2026-11-18 の追補 §2 で、延長、再開、タスクの再投入を MCP に出すよう改めた。）
+- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけ。作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置く。（2026-11-18 の追補 §2 で、延長、再開、タスクの再投入を MCP に出すよう改めた。2026-11-19 の追補 §8 で、タスクの承認と見送りも MCP に出すよう改めた。）
 - **U-10 作成の承認**。推奨: ルートの order で `max_cycles` が 2 以上、または既定を超える予算(累計 5,000 円超、1 周 1,000 円超)の場合は、人(ルートの承認者)の承認を要する。`max_cycles` が 1 で既定内なら承認は要らない。
 - **U-11 上限の変更**。推奨: 作成後の変更は認めない。上限を上げるには、承認つきの新しい order を作る。承認つきの更新は採らない。
 - **U-12 既定の上限と閲覧の範囲**。推奨: 総周回 10、期限 14 日、累計 5,000 円、1 周 1,000 円。閲覧は、運用者の全員が一覧を見られ、方針と理由は木の関係者(作成者と承認者)にだけ表示する。
@@ -987,7 +987,7 @@ U-14(有効化された後の起動で、全 `ACTIVE` を `PAUSED(STARTUP_HOLD)`
 
 ### 2. U-9 を覆した点
 
-U-9(推奨)は、MCP に読み取りと停止の要求だけを置き、作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置くとしていた(§6 の 370 行目も同じ)。本追補は、そのうち **延長と再開** と **タスクの再投入** を MCP に出す。次は U-9 のとおり、引き続き MCP に出さない: 承認、却下、作成、子の作成、周の開始、一時停止、取り消し、周の放棄。
+U-9(推奨)は、MCP に読み取りと停止の要求だけを置き、作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置くとしていた(§6 の 370 行目も同じ)。本追補は、そのうち **延長と再開** と **タスクの再投入** を MCP に出す。次は U-9 のとおり、引き続き MCP に出さない: 承認、却下、作成、子の作成、周の開始、一時停止、取り消し、周の放棄。（タスクの承認と見送りは、2026-11-19 の §8 で MCP に出した。order の承認(停止要求の承認)と却下は、引き続き出さない。）
 
 ### 3. なぜ許すか
 
@@ -1019,3 +1019,51 @@ U-9(推奨)は、MCP に読み取りと停止の要求だけを置き、作成�
 
 - 確認: 3 つのツールは REST と同じリポジトリ関数を呼ぶ(`extendByOperator`、`resumeByOperator`、`requeueAsOperator`)。AI の主体は、スコープを持っていても拒否される(テスト)。スコープ不足、フラグ無効、不正な入力、正常系のテストを追加した(`McpOrderToolsTest`)。
 - 未確認: dev の Keycloak client `kivra-mcp` が 3 つのスコープを発行するか(k8s-system の側で確認する)。dev の `kivra/dev/kivra.yaml` は `KIVRA_MCP_WRITE_ENABLED=true`、`KIVRA_SELFDEV_ROLES_MODE=enforce`、`KIVRA_SELFDEV_ORDERS_ENABLED=true`。`KIVRA_SELFDEV_AI_PRINCIPAL` は未設定。
+
+### 8. 2026-11-19: approve と skip を許す理由(タスクの承認と見送り)
+
+#### 8.1 決定
+
+次の 2 つを MCP に出す。どちらも REST と同じリポジトリ関数を呼び、遷移、版の検査、監査の規則は重複させない。
+
+| MCP ツール | REST の対応 | スコープ | 権限 |
+|---|---|---|---|
+| `kivra_task_approve` | `POST /api/selfdev/tasks/{id}/approve`(`approveTask`) | `kivra.selfdev.task.decide` | `GOAL_WRITE` |
+| `kivra_task_skip` | `POST /api/selfdev/tasks/{id}/reject`(`skipTask`) | `kivra.selfdev.task.decide` | `GOAL_WRITE` |
+
+- 見送りの REST は `reject` を選んだ。UI の「見送る」は、承認待ちでも投入待ちでも `reject` を呼ぶ(`ApiClient.rejectGoal`)。`skip` は MCP のツール名だけで、REST の経路は `reject` である。
+- 入力は `task_id` と `version` だけ(厳格。未知の項目は -32602)。出力は ID、固定の状態コード、版、プロジェクト ID で、題名と本文は返さない。
+- `KIVRA_MCP_WRITE_ENABLED=true` かつ autopilot が有効のときだけ `tools/list` に出る。
+- 承認は、差分の再検査(ADR 0011 §6.2、runbook §7.4b)を行わない。`AUTO_SCOPE_EXCEEDED` で止まったタスクも、承認すると `QUEUED` になる。ツールの説明に、その旨を書いた。
+
+#### 8.2 なぜ許すか
+
+- 自己開発の自動運転は、差分の再検査(`AUTO_SCOPE_EXCEEDED`)で承認待ちに戻ることがある。その解除は、承認者(運用者)が人の指示で行う判断である。承認待ちのタスクは `QUEUED` に進むまで投入されない。
+- 運用者の JWT を持たない Claude(MCP のクライアント)から承認できないと、ガードを直した後も、運用者が UI を手で操作するしかなくなる。
+- 見送りは、承認待ちのタスクを実行させない操作で、承認より影響が小さい。同じ理由で一組に入れた。
+
+#### 8.3 守り方
+
+- **フラグ**: `KIVRA_MCP_WRITE_ENABLED=true` と autopilot の両方。切れば 2 つとも一覧から消える。
+- **スコープ**: 専用のスコープ `kivra.selfdev.task.decide`。読み取り、停止、延長、再投入のスコープからは暗黙に付かない(403 `insufficient_scope`)。
+- **権限**: 既存の権限表のまま(`GOAL_WRITE`)。AI の役割(`AI`)は `GOAL_WRITE` を持たないため、AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL`)は、スコープを持っていても、ディスパッチャの権限検査で拒否される(`forbidden`)。
+- **規則**: 承認は `TaskState` の遷移と `OPERATOR_APPROVED`、見送りは `OPERATOR_SKIPPED` の遷移。計画の親(計画の根)は両方とも拒否する(`GUARD_FAILED`)。
+- **監査**: 操作者は MCP の主体(所有者のキー)から作り、`net.kigawa.kivra.selfdev.autopilot.operator` の行に `via=mcp` を付けて出す(`action=TASK_APPROVED` / `action=TASK_REJECTED`)。ログには ID と固定コードだけを出す。REST の行(`via` なし)は変えない。
+- **書き込みの上限**: 既存の書き込みの毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
+
+#### 8.4 範囲外(今回は出さない)
+
+- 却下(goal の `reject`)、goal の中止(`stop`)、タスクの作成と計画。
+- order の承認(停止要求の承認)と却下。
+- 承認の再検査を MCP から省くこと。承認は再検査しない、というのが既存の規則であり、それを変えない。
+
+#### 8.5 残るリスク
+
+- **プロジェクト単位の権限(ADR 0022 PR-D)は、この 2 つでも検査しない**。REST の `checkInProject` は対象タスクのプロジェクトを見るが、MCP のディスパッチャは全体の権限だけを見る。§6 の残るリスクと同じ差分。`KIVRA_SELFDEV_PROJECT_MODE=enforce` の環境に出す前に直す必要がある。
+- 承認の差分は kivra に保存されない(runbook §7.4b)。スコープを持つ主体は、差分を見ずに承認できる。承認の前に計画の内容を確かめるのは、指示を受けた運用者の側の責任になる。
+- 運用者の判断を、人が一回ずつ確認する仕組みは無い(§6 と同じ)。
+
+#### 8.6 確認したこと、確認できなかったこと
+
+- 確認(テスト `McpTaskToolsTest`): 正常系(承認、見送り、`AUTO_SCOPE_EXCEEDED` の承認)、スコープ不足(403)、フラグ無効、不正な入力、AI の拒否、版の不一致、見つからない Task、計画の根と状態が合わない場合の拒否、監査の行(`via=mcp`、ID と固定コードだけ)。
+- 未確認: dev の Keycloak client `kivra-mcp` が `kivra.selfdev.task.decide` を発行するか(`kigawa01/k8s-system` の側で確認する)。承認と見送りの実機での動作。

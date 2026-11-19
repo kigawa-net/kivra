@@ -59,8 +59,9 @@ class McpOrderDeps(
 /**
  * The order tools of ADR 0015 section 6 on `/mcp`. Reading the orders and requesting a stop are the base (ADR 0015 U-9). Amendment 2026-11-18
  * adds the operator's decisions that a Claude without an operator JWT needs: extending a root order (`kivra_order_extend`) and resuming a
- * paused one (`kivra_order_resume`). Approval, rejection, creation, child creation, cycle start, pause and cancellation are still not defined
- * here, so they are not in `tools/list` and a call to them is an unknown tool.
+ * paused one (`kivra_order_resume`). The task's approve and skip are in [McpTaskWriteTools] (amendment 2026-11-19), not here. The order's
+ * approval (of a stop request), rejection, creation, child creation, cycle start, pause and cancellation are still not defined here, so they
+ * are not in `tools/list` and a call to them is an unknown tool.
  *
  * - `kivra_order_list` and `kivra_order_get` need `kivra.runs.read`. They return fixed codes, IDs, dates and counts only: never a title, a
  *   policy, a goal's title or body, or a stop request's digest (the REST detail view returns the title and policy, and this tool does not).

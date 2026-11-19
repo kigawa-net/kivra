@@ -25,6 +25,17 @@ class SecretScanTest {
         assertFalse(scan.detects(request(text = "a".repeat(100))))
     }
 
+    @Test fun detectsTextUsesTheSameRuleAsARequestTextPart() {
+        val scan = SecretScan { listOf("", "rotated-value") }
+        listOf(token, "aB3dE5fG7hI9jK1lM2nO4pQ6rS8tU0vW", "api_key=samplecredentialvalue", "rotated-value",
+            "docs/adr/0004-budget-port-is-authoritative-budgetcheck-observation-only.md", "docs/runbook-selfdev.md",
+            "Please review this Kotlin function and explain the result.").forEach {
+            assertEquals(scan.detects(request(text = it)), scan.detectsText(it), "rules differ for a text")
+        }
+        assertTrue(scan.detectsText("docs/adr/0004-budget-port-is-authoritative-budgetcheck-observation-only.md"))
+        assertFalse(scan.detectsText("docs/runbook-selfdev.md"))
+    }
+
     @Test fun managedCredentialsAreReadOnEachScan() {
         var value = "short-value"
         val scan = SecretScan { listOf("", value) }

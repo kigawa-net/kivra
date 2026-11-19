@@ -8,17 +8,15 @@ import kotlin.math.log2
 
 /** Conservative defense in depth. Results contain fixed reasons only, never matched text or offsets. */
 class SecretScan(private val credentials: () -> Collection<String> = { emptyList() }) {
+    /**
+     * True when [text] is refused on its own: the same rule that [detects] applies to each text part. The Planner's file list uses it so
+     * that a path the gateway would refuse is never sent (a path is a text, not a request part).
+     */
+    fun detectsText(text: String): Boolean = unsafeText(text, knownCredentials())
+
     fun detects(req: ModelRequest): Boolean {
-        val known = credentials().filter { it.isNotEmpty() }
-        fun unsafe(s: String): Boolean = known.any { s.contains(it) } || patterns.any { it.containsMatchIn(s) } ||
-            candidates.findAll(s).any { match ->
-                val value = match.value
-                value.any { it.isLetter() } && value.any { it.isDigit() } &&
-                    value.groupingBy { it }.eachCount().values.sumOf { count ->
-                        val p = count.toDouble() / value.length
-                        -p * log2(p)
-                    } >= 4.0
-            }
+        val known = knownCredentials()
+        fun unsafe(s: String): Boolean = unsafeText(s, known)
         fun jsonUnsafe(value: JsonElement): Boolean = when (value) {
             is JsonObject -> value.any { unsafe(it.key) || jsonUnsafe(it.value) }
             is JsonArray -> value.any { jsonUnsafe(it) }
@@ -35,6 +33,18 @@ class SecretScan(private val credentials: () -> Collection<String> = { emptyList
                 unsafe(it.name) || jsonUnsafe(it.schema)
             } == true
     }
+
+    private fun knownCredentials(): List<String> = credentials().filter { it.isNotEmpty() }
+
+    private fun unsafeText(s: String, known: List<String>): Boolean =
+        known.any { s.contains(it) } || patterns.any { it.containsMatchIn(s) } || candidates.findAll(s).any { match ->
+            val value = match.value
+            value.any { it.isLetter() } && value.any { it.isDigit() } &&
+                value.groupingBy { it }.eachCount().values.sumOf { count ->
+                    val p = count.toDouble() / value.length
+                    -p * log2(p)
+                } >= 4.0
+        }
 
     companion object {
         private val candidates = Regex("[A-Za-z0-9_+/=-]{32,}")

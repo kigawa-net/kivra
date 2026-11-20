@@ -43,15 +43,16 @@ class NodeTest {
     }
 
     @Test
-    fun parentKindsWithTheSameIdHaveDifferentRoutesAndSidebarTargets() {
+    fun parentKindsWithTheSameIdHaveDifferentRoutesAndTheSameSidebar() {
         val projectParent = NodeRef("same", NodeKind.PROJECT)
         val operationParent = NodeRef("same", NodeKind.OPERATION)
         val projectChild = operationRoute("child", projectParent)
         val operationChild = operationRoute("child", operationParent)
         assertNotEquals(projectChild.toHash(), operationChild.toHash())
-        assertEquals(Route.ProjectPage("same", NavDestination.Operations), sidebarSections(projectChild)[1].items.single().target)
-        assertEquals(Route.OperationChildren("same"), sidebarSections(operationChild)[1].items.single().target)
-        assertEquals(Route.Page(NavDestination.Operations), sidebarSections(operationChild).last().items[1].target)
+        // サイドナビは常にホーム・プロジェクトの 2 項目だけ(親の Operation 一覧への節は出さない)。
+        val twoItems = listOf(NavDestination.Home, NavDestination.Projects)
+        assertEquals(twoItems, sidebarSections(projectChild).single().items.map { it.dest })
+        assertEquals(twoItems, sidebarSections(operationChild).single().items.map { it.dest })
     }
 
     @Test

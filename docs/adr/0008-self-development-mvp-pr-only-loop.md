@@ -194,3 +194,37 @@ main が同じファイルを変えたため更新されず(`PR_REBASE_OVERLAPPI
 
 - フラグ有効時、期限切れの Run は、PR を閉じて(コメント付き)から `CANCELLED` になる。運用手順は runbook §4.3a。
 
+## 追補(2026-11-20): マージ後の追加コミットは、Run に記録した head の祖先なら完了を妨げない
+
+### 背景
+
+マージ前に人が PR のブランチへ commit を積むと、PR の最終 head は Run に記録した head と違う。認証器(`PrMergeVerifier`)は
+head の完全一致を求めるので、`MERGE_NOT_VERIFIED code=HEAD_SHA_MISMATCH` で待機が続き、Run は `COMPLETED` にならない。
+実例: Run 01M7T5PRSNTXZE5AJ8D4PJ11WD(PR #581、マージ commit 6d1fed9c)、および PR #529 の古い Run。依存するタスクは塞がったまま。
+
+### 決定(追補)
+
+1. **許すもの**: PR がマージ済みで、記録した head(束縛の head)が、マージ時の PR の head の**祖先**のとき(ブランチは前にだけ進んだ)。
+   GitHub の compare API `GET /compare/{記録した head}...{最終 head}` の `behind_by` が 0 であることで確かめる(記録した head が最終 head に
+   含まれる)。リポジトリ、PR 番号、node id、base、作者(App の bot)の照合は従来どおり。
+2. **許さないもの**: 記録した head が最終 head の祖先でないもの(履歴の書き換え、force-push で記録した commit が消えた、別のブランチへの
+   リベース)。`behind_by` が 0 でない、compare が 404 の定まった答え、形式の不正は、従来どおり `HEAD_SHA_MISMATCH` で待機する。
+   PR が開いているときは、head が動いていても祖先の確認をしない(マージ前の head の変化は従来どおり拒否する)。
+3. **不確かなら閉じる**: compare の一時的な失敗(認証、権限、レート制限、5xx、通信、結果不明)は `AWAITING_MERGE_VERIFICATION` で待ち、
+   次の tick で再試行する。完了はしない。
+4. **記録**: 完了した Run の `RUN_TRANSITION` 監査の payload に `extraCommitsAfterBinding: true` と `mergedHeadSha` を入れる。
+   ログは `run completed with extra commits after the binding` の情報行。`completion_merge_sha` の意味は変えない(マージ commit の SHA)。
+5. **判定の置き場**: 祖先の確認は認証器の実装(`GitHubPrMergeAuthority`)が行い、`ObservedPullRequest.recordedHeadIsAncestor` で報告する。
+   既定は `false`(確認していない、の意味)なので、コアの照合は head が動いたら拒否する。`VerifiedPrMerge.headSha` は記録した head のまま。
+   マージ時の head は `mergedHeadSha` に入る。DB の完了照合(`headSha` が束縛の head と一致すること)は変えない。
+
+### 危険と対策
+
+- **人が積んだ commit の中身は kivra が見ていない**: マージ自体が人の承認に当たる(GitHub 上でマージしたのは人)。kivra は差分を検査せず、
+  PR の作者(App の bot)と束縛の照合だけを続ける。記録した head を含むことは、Run の作業が最終 head に残っていることを示すが、
+  追加の commit が中身を変えていないことは示さない。運用者は監査の `extraCommitsAfterBinding` で該当 Run を確認できる。
+- **記録した head の祖先でも、PR の内容が別物になりうる**: 追加の commit が既存の変更を打ち消す場合も祖先の判定は通る。
+  これは許す。拒否すると人の正当なレビュー後の修正が完了できなくなるため。
+- **compare の誤答**: 応答の `behind_by` が 0 のときだけ祖先と見なす(整数でない値、符号、文字列は形式の不正として拒否)。
+  `ahead_by` は見ない(記録した head と最終 head が同じでないことは、呼び出し前に確かめている)。
+

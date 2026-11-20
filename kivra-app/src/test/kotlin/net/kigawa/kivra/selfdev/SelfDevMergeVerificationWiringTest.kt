@@ -13,6 +13,8 @@ import net.kigawa.kivra.developer.DeveloperPort
 import net.kigawa.kivra.developer.FakeDeveloper
 import net.kigawa.kivra.github.GitHubFailureKind
 import net.kigawa.kivra.github.GitHubPrMergeAuthority
+import net.kigawa.kivra.github.GitHubResult
+import net.kigawa.kivra.github.RepoRef
 import net.kigawa.kivra.selfdev.AdvanceResult.Advanced
 import net.kigawa.kivra.selfdev.AdvanceResult.Waiting
 
@@ -40,8 +42,15 @@ class SelfDevMergeVerificationWiringTest {
             taskTexts = FixedTaskTextSource(DevFixtures.taskText),
         )
 
-        /** The same installation that buildSelfDev performs. */
-        fun install() = deferred.install(GitHubPrMergeAuthority(github, BOT_USER_ID))
+        /**
+         * The same installation that buildSelfDev performs. [behindBy] answers the ancestry question (`behind_by` of the compare);
+         * the default is a definitive not-found, so a moved head is refused as before.
+         */
+        fun install(
+            behindBy: suspend (RepoRef, String, String) -> GitHubResult<Int> = { _, _, _ ->
+                GitHubResult.Failure(GitHubFailureKind.NOT_FOUND, "compare not found")
+            },
+        ) = deferred.install(GitHubPrMergeAuthority(github, BOT_USER_ID, behindBy = behindBy))
 
         /** Advances a new run until its pull request is open. */
         suspend fun openedRun(): RunId {
@@ -112,6 +121,24 @@ class SelfDevMergeVerificationWiringTest {
             assertEquals(Waiting(WaitReason.MERGE_NOT_VERIFIED, "HEAD_SHA_MISMATCH"), h.runner().advance(runId))
             assertEquals(DevelopmentRunState.PULL_REQUEST, h.runs.get(runId)!!.state)
             assertEquals(0, h.completedEvents())
+        }
+    }
+
+    @Test
+    fun aHeadThatMovedForwardPastTheBindingCompletesWhenTheBoundHeadIsItsAncestor() = runBlocking {
+        TestDb().use { db ->
+            val h = Harness(db)
+            val runId = h.openedRun()
+            val bound = h.runs.loadPullRequestBinding(runId)!!.headSha
+            // The double answers "behind_by 0" only for the bound head: the bound head is an ancestor of the moved head.
+            h.install(behindBy = { _, base, _ ->
+                if (base == bound) GitHubResult.Success(0) else GitHubResult.Failure(GitHubFailureKind.NOT_FOUND, "compare not found")
+            })
+            h.github.setPullHead(h.prNumber(), "e5".repeat(20))
+            h.github.humanMerges(h.prNumber())
+            assertEquals(Advanced(DevelopmentRunState.PULL_REQUEST, DevelopmentRunState.COMPLETED, "PR_MERGED"), h.runner().advance(runId))
+            assertEquals(1, h.completedEvents())
+            assertEquals(1, db.count("audit_events", "run_id = '${runId.value}' AND action = 'RUN_TRANSITION' AND payload LIKE '%extraCommitsAfterBinding%'"))
         }
     }
 

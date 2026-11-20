@@ -321,9 +321,22 @@ kivra は PR を閉じない(下の §4.3a を有効にしたときの期限切�
 - `AWAITING_MERGE_VERIFICATION`: 認証器が答えない(未配線、または GitHub の一時的な障害)。自動で再試行する。
 - `AWAITING_PR_CLOSE`: レビューの期限が過ぎ、kivra が PR を閉じようとしているが、まだ閉じられていない(§4.3a。有効時のみ)。自動で再試行し、5 回で諦めて Run を取り消す。
 - `MERGE_NOT_VERIFIED`: 認証器が検証を拒否した。ログの `code` に固定の理由が出る(例: `HEAD_SHA_MISMATCH` は、マージ後に head が変わった、`AUTHOR_MISMATCH` は PR の作者が kivra の App ではない、`MERGE_COMMIT_SHA_MISSING` はマージの SHA が無い)。自動では解決しない。運用者が PR と Run を確認する。
+  - `HEAD_SHA_MISMATCH` のうち、マージ後に人が commit を積んだだけ(記録した head が最終 head の祖先)のものは、§4.3b により自動で完了する(ADR 0008 追補 2026-11-20)。自動で完了しないのは、記録した head が最終 head の祖先でない場合(force-push などで履歴が書き換わった場合)だけ。
 - `BINDING_MISSING`: PR は開いているが binding が無い。binding の記録より前に開かれた Run(既存の占有 Run)がこれに当たる。kivra は binding を自分で組み立てない(GitHub の値から推測しない)ため、完了させない。運用者が確認して解消する。束縛が無い Run は §4.1b で解放する(束縛がある Run は、この待機理由にならない)。
 
 ログは `self-development run waiting: runId=... reason=... code=...` の形で出る(`code` は固定の理由コードだけ)。
+
+#### 4.3b マージ後に人が commit を積んだ PR(ADR 0008 追補 2026-11-20、実装済み・常時有効)
+
+**実装済み。** PR をマージする前に、人が PR のブランチへ commit を積むと、最終 head は Run に記録した head と違う。以前は `MERGE_NOT_VERIFIED code=HEAD_SHA_MISMATCH` で待機が続き、Run は `COMPLETED` にならなかった(例: Run 01M7T5PRSNTXZE5AJ8D4PJ11WD / PR #581)。
+
+- 完了する条件(すべて満たすとき): PR がマージ済み、リポジトリ・PR 番号・node id・base・作者(App の bot)が Run の束縛と一致、記録した head が最終 head の祖先(compare API の `behind_by` が 0)。
+- 完了しない条件: 記録した head が最終 head の祖先でない(履歴の書き換え、force-push で記録した commit が消えた、別のブランチへのリベース)。この場合は従来どおり `HEAD_SHA_MISMATCH` で待機する。運用者が PR と Run を確認する。compare の一時的な失敗は `AWAITING_MERGE_VERIFICATION` で待ち、次の tick で再試行する。
+- 監査: 完了した Run の `RUN_TRANSITION`(`audit_events`、Run の ID で引く)の payload に `"extraCommitsAfterBinding":true` と `"mergedHeadSha"` が入る。ログは `run completed with extra commits after the binding: runId=… prNumber=… boundHead=… mergedHead=…`。
+- 確認の SQL の例: `SELECT run_id, payload FROM audit_events WHERE action = 'RUN_TRANSITION' AND payload LIKE '%extraCommitsAfterBinding%';`
+- 判断の注意: kivra は追加の commit の中身を検査しない。マージ自体が人の承認に当たる。記録した head を含むことは、追加の commit が既存の変更を消していないことを示さない。
+- 有効化・停止の操作は無い(常時有効)。元に戻すには、コードを戻すしかない。
+- 既に `HEAD_SHA_MISMATCH` で待っている Run は、次の tick で再評価される(手動の操作は要らない)。ただし、記録した head が最終 head の祖先でない Run は、引き続き待機する。
 
 ### 4.4 キルスイッチで止める
 

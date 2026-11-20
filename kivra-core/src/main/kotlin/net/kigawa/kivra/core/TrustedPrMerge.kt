@@ -86,6 +86,11 @@ data class ObservedPullRequest(
     val merged: Boolean,
     val mergeCommitSha: String?,
     val authorId: Long?,
+    /**
+     * True only when the implementation checked with the provider that the bound head is an ancestor of [headSha] (the branch
+     * only moved forward). The default is false, so a head that moved is refused unless that check was made.
+     */
+    val recordedHeadIsAncestor: Boolean = false,
 )
 
 /**
@@ -100,8 +105,10 @@ class VerifiedPrMerge private constructor(
     val prNumber: Long,
     val prNodeId: String,
     val baseRef: String,
-    /** The PR head as merged (equal to the bound head). */
+    /** The head the run recorded at binding (the bound head). The merged head may be a later one, see [mergedHeadSha]. */
     val headSha: String,
+    /** The PR head as GitHub reports it at merge. Equal to [headSha] unless commits were pushed after the binding. */
+    val mergedHeadSha: String,
     val merged: Boolean,
     val mergeCommitSha: String,
     val policyRevision: String,
@@ -113,11 +120,20 @@ class VerifiedPrMerge private constructor(
         require(SHA40.matches(mergeCommitSha)) { "mergeCommitSha must be 40 lowercase hex chars" }
     }
 
+    /** True when commits were pushed to the pull request after the binding and before the merge (the branch moved forward). */
+    val extraCommitsAfterBinding: Boolean
+        get() = mergedHeadSha != headSha
+
     override fun toString(): String = "VerifiedPrMerge(runId=${runId.value}, prNumber=$prNumber, observedAt=$observedAt)"
 
     companion object {
         /** Internal to kivra-core: only [PrMergeVerifier] calls it. */
-        internal fun issue(binding: PullRequestBinding, mergeCommitSha: String, observedAt: Instant): VerifiedPrMerge = VerifiedPrMerge(
+        internal fun issue(
+            binding: PullRequestBinding,
+            mergeCommitSha: String,
+            mergedHeadSha: String,
+            observedAt: Instant,
+        ): VerifiedPrMerge = VerifiedPrMerge(
             runId = binding.runId,
             repository = binding.repository,
             repositoryId = binding.repositoryId,
@@ -125,6 +141,7 @@ class VerifiedPrMerge private constructor(
             prNodeId = binding.prNodeId,
             baseRef = binding.baseRef,
             headSha = binding.headSha,
+            mergedHeadSha = mergedHeadSha,
             merged = true,
             mergeCommitSha = mergeCommitSha,
             policyRevision = binding.policyRevision,
@@ -153,6 +170,10 @@ internal object PrMergeVerifier {
     /**
      * Every identity field must match exactly (repository name case-insensitively). The PR must be authored by
      * [expectedAuthorId] (a missing author id is refused), must be merged, and must carry a merge SHA.
+     *
+     * The merged head must be the bound head, or, when the PR is merged and the implementation reported
+     * [ObservedPullRequest.recordedHeadIsAncestor], a later head that contains the bound head. Any other moved head is
+     * HEAD_SHA_MISMATCH.
      */
     fun verify(
         binding: PullRequestBinding,
@@ -166,12 +187,14 @@ internal object PrMergeVerifier {
         if (observed.number != binding.prNumber) return refuse("PR_NUMBER_MISMATCH")
         if (observed.nodeId != binding.prNodeId) return refuse("PR_NODE_ID_MISMATCH")
         if (observed.baseRef != binding.baseRef) return refuse("BASE_REF_MISMATCH")
-        if (!SHA40.matches(observed.headSha) || observed.headSha != binding.headSha) return refuse("HEAD_SHA_MISMATCH")
+        if (!SHA40.matches(observed.headSha)) return refuse("HEAD_SHA_MISMATCH")
+        val headMoved = observed.headSha != binding.headSha
+        if (headMoved && !(observed.merged && observed.recordedHeadIsAncestor)) return refuse("HEAD_SHA_MISMATCH")
         if (observed.authorId == null || observed.authorId != expectedAuthorId) return refuse("AUTHOR_MISMATCH")
         if (!observed.merged) return refuse("NOT_MERGED")
         val mergeSha = observed.mergeCommitSha
         if (mergeSha == null || !SHA40.matches(mergeSha)) return refuse("MERGE_COMMIT_SHA_MISSING")
-        return PrMergeVerification.Verified(VerifiedPrMerge.issue(binding, mergeSha, observedAt))
+        return PrMergeVerification.Verified(VerifiedPrMerge.issue(binding, mergeSha, observed.headSha, observedAt))
     }
 }
 
@@ -191,6 +214,10 @@ interface TrustedPrMergeAuthority {
  *
  * [expectedAuthorId] is the provider user id that must have opened the pull request (the kivra App bot). It is supplied
  * by whoever builds the Authority, not stored per run, so it needs no binding column.
+ *
+ * Extra commits after the binding (ADR 0008 追補 2026-11-20): a merged pull request whose head moved past the bound head
+ * verifies only when the implementation reports [ObservedPullRequest.recordedHeadIsAncestor]. The implementation sets it
+ * only after the provider showed that the bound head is an ancestor of the merged head.
  */
 abstract class PrMergeAuthorityBase(
     private val expectedAuthorId: Long,

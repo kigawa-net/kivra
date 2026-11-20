@@ -57,10 +57,8 @@ data class NavSection(val title: String?, val items: List<NavItem>)
 
 /**
  * サイドナビ(docs/design/16-site-structure.md §3)。
- * - 常に: ホーム、プロジェクト一覧。
- * - 常に最後: 「全体」の節(全体の予算・FX、自動化、担当)。
- * プロジェクト配下の項目はダッシュボードのリンク([projectLinkTargets])で開く。
- * 親付き Operation の一覧・詳細では、その親の Operation 一覧への節も出す。
+ * ホーム、プロジェクト一覧の 2 項目だけを出す。
+ * 他の項目([globalPages] など)の画面・route・権限はそのまま残す。
  * 権限や API の結果による出し分けは呼び出し側が行う([CallerPermissions.navVisible] など)。
  */
 fun sidebarSections(current: Route? = null): List<NavSection> {
@@ -68,16 +66,7 @@ fun sidebarSections(current: Route? = null): List<NavSection> {
         title = null,
         items = listOf(NavDestination.Home, NavDestination.Projects).map { NavItem(it, Route.Page(it)) },
     )
-    val global = NavSection(
-        title = "全体",
-        items = listOf(NavDestination.Budget, NavDestination.Operations, NavDestination.Autopilot, NavDestination.Assignees)
-            .map { NavItem(it, Route.Page(it)) },
-    )
-    val parent = current?.operationParent
-    val context = parent?.let {
-        NavSection("親: ${it.id}", listOf(NavItem(NavDestination.Operations, Node(it, it.id).operationsRoute())))
-    }
-    return listOfNotNull(top, context, global)
+    return listOf(top)
 }
 
 /**

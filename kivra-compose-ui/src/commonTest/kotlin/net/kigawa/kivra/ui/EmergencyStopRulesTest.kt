@@ -48,11 +48,10 @@ class EmergencyStopRulesTest {
     }
 
     @Test
-    fun autopilotRouteIsInTheGlobalSection() {
+    fun autopilotRouteStillParsesAndIsNotInTheSidebar() {
         assertEquals(Route.Page(NavDestination.Autopilot), parseRoute("#/autopilot"))
         assertEquals("#/autopilot", Route.Page(NavDestination.Autopilot).toHash())
-        val global = sidebarSections().first { it.title == "全体" }
-        assertTrue(global.items.any { it.dest == NavDestination.Autopilot })
+        assertTrue(sidebarSections().flatMap { it.items }.none { it.dest == NavDestination.Autopilot })
     }
 
     @Test

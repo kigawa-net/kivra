@@ -156,7 +156,7 @@ internal fun buildSelfDev(
         )
     }
     val github = HttpGitHubAdapter(githubClient, tokens, githubConfig)
-    prMergeAuthority.install(GitHubPrMergeAuthority(github, botUserId.reveal().toLong()))
+    prMergeAuthority.install(GitHubPrMergeAuthority(github, botUserId.reveal().toLong(), behindBy = github::getBehindBy))
     val reader = GitHubRepoReader(github)
 
     val registry: ModelRegistry = loadRegistry(checkNotNull(settings.modelRegistryPath))

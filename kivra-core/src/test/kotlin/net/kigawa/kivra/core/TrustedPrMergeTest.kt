@@ -4,6 +4,7 @@ import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -34,7 +35,10 @@ class TrustedPrMergeTest {
         merged: Boolean = true,
         mergeCommitSha: String? = merge,
         authorId: Long? = botId,
-    ) = ObservedPullRequest(repository, repositoryId, number, nodeId, baseRef, headSha, merged, mergeCommitSha, authorId)
+        recordedHeadIsAncestor: Boolean = false,
+    ) = ObservedPullRequest(
+        repository, repositoryId, number, nodeId, baseRef, headSha, merged, mergeCommitSha, authorId, recordedHeadIsAncestor,
+    )
 
     private fun verify(o: ObservedPullRequest) = PrMergeVerifier.verify(binding, botId, o, now)
 
@@ -122,5 +126,39 @@ class TrustedPrMergeTest {
                 PrMergeObservation.Found(observed().copy(number = 8L))
         }
         assertEquals("PR_NUMBER_MISMATCH", assertIs<PrMergeVerification.Refused>(authority.verifyMerge(binding)).reason)
+    }
+
+    private val movedHead = "e5".repeat(20)
+
+    @Test
+    fun `a merged head that moved forward verifies when the bound head is reported as its ancestor, and keeps both heads`() {
+        val v = assertIs<PrMergeVerification.Verified>(verify(observed(headSha = movedHead, recordedHeadIsAncestor = true))).merge
+        assertEquals(head, v.headSha)
+        assertEquals(movedHead, v.mergedHeadSha)
+        assertTrue(v.extraCommitsAfterBinding)
+        assertEquals(merge, v.mergeCommitSha)
+    }
+
+    @Test
+    fun `a merge at the bound head reports no extra commits`() {
+        val v = assertIs<PrMergeVerification.Verified>(verify(observed())).merge
+        assertEquals(head, v.mergedHeadSha)
+        assertFalse(v.extraCommitsAfterBinding)
+    }
+
+    @Test
+    fun `a moved head is refused unless the ancestry was reported, and the default is not reported`() {
+        assertEquals("HEAD_SHA_MISMATCH", refusedReason(observed(headSha = movedHead)))
+        assertEquals("HEAD_SHA_MISMATCH", refusedReason(observed(headSha = movedHead, recordedHeadIsAncestor = false)))
+        // An ancestry report never excuses a head that is not a 40-hex SHA.
+        assertEquals("HEAD_SHA_MISMATCH", refusedReason(observed(headSha = "not-a-sha", recordedHeadIsAncestor = true)))
+    }
+
+    @Test
+    fun `an ancestry report does not verify an open or unauthored pull request, and identity is still checked`() {
+        assertEquals("HEAD_SHA_MISMATCH", refusedReason(observed(headSha = movedHead, merged = false, mergeCommitSha = null, recordedHeadIsAncestor = true)))
+        assertEquals("AUTHOR_MISMATCH", refusedReason(observed(headSha = movedHead, authorId = 1L, recordedHeadIsAncestor = true)))
+        assertEquals("PR_NUMBER_MISMATCH", refusedReason(observed(headSha = movedHead, number = 8L, recordedHeadIsAncestor = true)))
+        assertEquals("MERGE_COMMIT_SHA_MISSING", refusedReason(observed(headSha = movedHead, mergeCommitSha = null, recordedHeadIsAncestor = true)))
     }
 }

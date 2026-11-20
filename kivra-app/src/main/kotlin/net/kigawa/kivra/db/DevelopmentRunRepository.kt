@@ -38,6 +38,7 @@ import org.jetbrains.exposed.sql.count
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.slf4j.LoggerFactory
 
 data class DevelopmentRun(
     val runId: RunId,
@@ -281,6 +282,7 @@ class DevelopmentRunRepository(
     private val prMergeAuthority: TrustedPrMergeAuthority,
     private val clock: Clock = Clock.systemUTC(),
 ) {
+    private val logger = LoggerFactory.getLogger(DevelopmentRunRepository::class.java)
 
     /** Creates a run in CREATED (version 0) with its audit and outbox events. [completionMode] is fixed for the run's lifetime. */
     fun create(taskId: String, actor: String, completionMode: RunCompletionMode, traceId: String? = null): DevelopmentRun {
@@ -989,9 +991,20 @@ class DevelopmentRunRepository(
                 put("from", from.name)
                 put("to", DevelopmentRunState.COMPLETED.name)
                 put("mergeSha", merge.mergeCommitSha)
+                // Commits pushed after the binding (ADR 0008 追補 2026-11-20). The bound head is an ancestor of the merged head.
+                if (merge.extraCommitsAfterBinding) {
+                    put("extraCommitsAfterBinding", true)
+                    put("mergedHeadSha", merge.mergedHeadSha)
+                }
             }.toString()
             audit.append(this, lease.runId, AuditEntry(actor = actor, action = "RUN_TRANSITION", result = "OK", resource = "task:$taskId", traceId = traceId, payload = payload))
             outbox.append(this, lease.runId, expectedVersion + 1, "RunCompleted", payload, traceId)
+        }
+        if (merge.extraCommitsAfterBinding) {
+            logger.info(
+                "run completed with extra commits after the binding: runId={} prNumber={} boundHead={} mergedHead={}",
+                lease.runId.value, merge.prNumber, merge.headSha, merge.mergedHeadSha,
+            )
         }
         return get(lease.runId)!!
     }

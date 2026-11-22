@@ -1,7 +1,9 @@
 package net.kigawa.kivra.ui.screens
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,7 +21,12 @@ import androidx.compose.material3.Text
 import net.kigawa.kivra.ui.SelectableText
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,12 +34,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
+import net.kigawa.kivra.ui.CHAT_LIST_HEIGHT_DP
+import net.kigawa.kivra.ui.CHAT_NEAR_BOTTOM_DP
 import net.kigawa.kivra.ui.ChatStreamEvent
+import net.kigawa.kivra.ui.isNearBottom
+import net.kigawa.kivra.ui.shouldAutoScroll
 import net.kigawa.kivra.ui.chatStreamErrorText
 import net.kigawa.kivra.ui.chatToolLines
 import net.kigawa.kivra.ui.CHAT_ACTION_AI_ORIGIN_CAPTION
@@ -797,45 +809,59 @@ private fun ProjectChatSection(projectId: String) {
         }
     }
 
+    // The message list: a fixed height, scrolled inside. The input box below it is always visible.
+    val rows = chatListRows(projectId, session, turn, actionNotice)
+    val listState = rememberLazyListState()
+    val nearBottomPx = with(LocalDensity.current) { CHAT_NEAR_BOTTOM_DP.dp.roundToPx() }
+    // The next change of the list goes to the newest message whatever the reader's position: the first load and the user's own send.
+    var forceScroll by remember(projectId) { mutableStateOf(true) }
+    val lastIndex = rows.lastIndex
+    LaunchedEffect(lastIndex, turn?.reply?.length, turn?.tools?.size) {
+        if (lastIndex < 0) return@LaunchedEffect
+        val info = listState.layoutInfo
+        // Read before the new rows are laid out: this is where the reader was when the content changed.
+        val lastVisible = info.visibleItemsInfo.lastOrNull()
+        val near = isNearBottom(
+            lastVisibleIndex = lastVisible?.index ?: -1,
+            itemCount = info.totalItemsCount,
+            lastItemBottomPx = lastVisible?.let { it.offset + it.size } ?: 0,
+            viewportEndPx = info.viewportEndOffset,
+            thresholdPx = nearBottomPx,
+        )
+        if (!shouldAutoScroll(contentChanged = true, nearBottom = near, forceScroll = forceScroll)) return@LaunchedEffect
+        forceScroll = false
+        listState.scrollToNewest(lastIndex)
+    }
+
     SectionTitle("チャット")
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
-            // メッセージ一覧。進行中の送信は、保存済みの履歴のあとに表示する。
-            when {
-                session == null -> CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-                session.messages.isEmpty() && turn == null -> SelectableText("メッセージはありません。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else -> session.messages.forEach { msg: ApiChatMessage -> ChatMessageRow(msg) }
-            }
-            turn?.let { t ->
-                ChatMessageRow(ApiChatMessage(id = 0, sessionId = projectId, role = "user", content = t.userText, createdAt = ""))
-                ChatMessageRow(
-                    ApiChatMessage(id = 0, sessionId = projectId, role = "assistant", content = t.reply.ifEmpty { "返信を生成中…" }, createdAt = ""),
-                )
-                // The AI's tool calls of this turn: fixed lines (「order を確認中…」, 「…を提案しました（確定は下のボタン）」). Not stored.
-                t.tools.forEach { (line, _) ->
-                    SelectableText(
-                        line,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 8.dp, top = 2.dp),
-                    )
+            LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().height(CHAT_LIST_HEIGHT_DP.dp)) {
+                items(rows, key = { it.key }) { row ->
+                    when (row) {
+                        is ChatListRow.Loading -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                        is ChatListRow.Note -> SelectableText(row.text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        is ChatListRow.Message -> ChatMessageRow(row.msg)
+                        is ChatListRow.Tool -> SelectableText(
+                            row.line,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 8.dp, top = 2.dp),
+                        )
+                        // The open proposals (the server returns them only to an operator who may confirm them; never to the AI or a viewer).
+                        is ChatListRow.Action -> ChatActionCard(
+                            action = row.action,
+                            enabled = !actionBusy && !ApiSession.expired,
+                            onConfirm = { pendingAction = row.action },
+                            onDismiss = { runChatAction(row.action, confirm = false) },
+                        )
+                        is ChatListRow.Notice -> SelectableText(
+                            row.notice.text,
+                            color = if (row.notice.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
                 }
-            }
-            // The open proposals (the server returns them only to an operator who may confirm them; never to the AI or a viewer).
-            session?.actions?.forEach { action ->
-                ChatActionCard(
-                    action = action,
-                    enabled = !actionBusy && !ApiSession.expired,
-                    onConfirm = { pendingAction = action },
-                    onDismiss = { runChatAction(action, confirm = false) },
-                )
-            }
-            actionNotice?.let { n ->
-                SelectableText(
-                    n.text,
-                    color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
             }
             Spacer(Modifier.height(8.dp))
             // 入力エリア
@@ -862,6 +888,8 @@ private fun ProjectChatSection(projectId: String) {
                         val trimmed = inputText.trim()
                         inputText = ""
                         turn = ChatTurn(userText = trimmed)
+                        // The user's own send always shows the new message, even when the reader was up in the history.
+                        forceScroll = true
                         turnJob = scope.launch {
                             var chatOk = false
                             var replyFailure: String? = null
@@ -939,6 +967,54 @@ private fun ProjectChatSection(projectId: String) {
 
 /** A send in progress: the user's text, the assistant's reply as it has streamed so far, and the lines of its tool calls. */
 private data class ChatTurn(val userText: String, val reply: String = "", val tools: List<Pair<String, ChatStreamEvent.Tool>> = emptyList())
+
+/** One row of the chat's message list, in display order. [key] is unique within the list. */
+private sealed interface ChatListRow {
+    val key: String
+
+    data class Loading(override val key: String = "loading") : ChatListRow
+    data class Note(override val key: String = "note", val text: String) : ChatListRow
+    data class Message(override val key: String, val msg: ApiChatMessage) : ChatListRow
+    data class Tool(override val key: String, val line: String) : ChatListRow
+    data class Action(override val key: String, val action: ApiChatAction) : ChatListRow
+    data class Notice(override val key: String = "notice", val notice: ActionNotice) : ChatListRow
+}
+
+/**
+ * The rows of the message list: the saved history (or a placeholder while it loads), then the turn in progress, then the open proposals and
+ * the last notice. A turn's tool lines are fixed text (「order を確認中…」), not stored.
+ */
+private fun chatListRows(projectId: String, session: ApiChatSession?, turn: ChatTurn?, actionNotice: ActionNotice?): List<ChatListRow> = buildList {
+    when {
+        session == null -> add(ChatListRow.Loading())
+        session.messages.isEmpty() && turn == null -> add(ChatListRow.Note(text = "メッセージはありません。"))
+        else -> session.messages.forEach { add(ChatListRow.Message("m${it.id}", it)) }
+    }
+    turn?.let { t ->
+        add(ChatListRow.Message("turn-user", ApiChatMessage(id = 0, sessionId = projectId, role = "user", content = t.userText, createdAt = "")))
+        add(
+            ChatListRow.Message(
+                "turn-reply",
+                ApiChatMessage(id = 0, sessionId = projectId, role = "assistant", content = t.reply.ifEmpty { "返信を生成中…" }, createdAt = ""),
+            ),
+        )
+        t.tools.forEachIndexed { i, (line, _) -> add(ChatListRow.Tool("tool-$i", line)) }
+    }
+    session?.actions?.forEach { add(ChatListRow.Action("action-${it.actionId}", it)) }
+    actionNotice?.let { add(ChatListRow.Notice(notice = it)) }
+}
+
+/** Scrolls to the last row, then to its end: a row taller than the viewport is only fully shown once the list stops moving. */
+private suspend fun LazyListState.scrollToNewest(lastIndex: Int) {
+    scrollToItem(lastIndex)
+    var steps = 0
+    while (canScrollForward && steps < MAX_SCROLL_STEPS) {
+        scrollBy(layoutInfo.viewportSize.height.toFloat())
+        steps++
+    }
+}
+
+private const val MAX_SCROLL_STEPS = 200
 
 /**
  * One proposal's card. The label is the server's fixed text. Confirm opens the dialog (the caller); 「提案を閉じる」 only hides the proposal.

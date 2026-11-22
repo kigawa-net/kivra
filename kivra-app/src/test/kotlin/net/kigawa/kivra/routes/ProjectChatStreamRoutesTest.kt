@@ -1,6 +1,7 @@
 package net.kigawa.kivra.routes
 
 import io.ktor.client.request.header
+import io.ktor.client.request.get
 import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
@@ -22,6 +23,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.chat.ProjectChatReplier
+import net.kigawa.kivra.chat.ChatHistoryCompactor
+import net.kigawa.kivra.chat.SummaryChatProvider
 import net.kigawa.kivra.chat.ScriptedChatProvider
 import net.kigawa.kivra.chat.ScriptedRound
 import net.kigawa.kivra.chat.ToolRoundsProvider
@@ -30,6 +33,7 @@ import net.kigawa.kivra.chat.chatTestGateway
 import net.kigawa.kivra.db.ProjectBackfillRepository
 import net.kigawa.kivra.db.ProjectChatMessageRow
 import net.kigawa.kivra.db.ProjectChatRepository
+import net.kigawa.kivra.db.ProjectChatSummaryRepository
 import net.kigawa.kivra.db.ProjectDrainRepository
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectRepository
@@ -42,6 +46,9 @@ import net.kigawa.kivra.modelgateway.Part
 import net.kigawa.kivra.modelgateway.ModelGateway
 import net.kigawa.kivra.modelgateway.SendState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeout
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * `POST /api/projects/{id}/chat/stream` on H2: the frames of a completed reply, the stored messages (the assistant message only when the model
@@ -50,14 +57,18 @@ import kotlinx.coroutines.CancellationException
 class ProjectChatStreamRoutesTest {
     private val identity = TaskApiIdentity { headers -> headers["X-Test-Principal"]?.takeIf { it.isNotBlank() } }
 
-    private fun ApplicationTestBuilder.setUp(db: TestDb, gateway: ModelGateway?, withTools: Boolean = false) {
+    private fun ApplicationTestBuilder.setUp(db: TestDb, gateway: ModelGateway?, withTools: Boolean = false, compression: Boolean = false) {
         val projects = ProjectRepository(db.database, Clock.systemUTC())
         val chats = ProjectChatRepository(db.database)
-        val reply = gateway?.let { ProjectChatReplier(it, chats, listOf(TEST_TENANT_SCOPE)) }
         val members = ProjectMemberRepository(db.database, Clock.systemUTC())
         // The tools without the order routes: the project and run tools only (enough for the frames).
         val tools = if (withTools) ChatToolDeps(projects, db.runs, members, offPermissionGuard()) else null
         application {
+            val reply = gateway?.let {
+                val budgetScopes = listOf(TEST_TENANT_SCOPE)
+                val compactor = if (compression) ChatHistoryCompactor(it, chats, ProjectChatSummaryRepository(db.database), budgetScopes, this) else null
+                ProjectChatReplier(it, chats, budgetScopes, compactor = compactor)
+            }
             install(ContentNegotiation) { json() }
             routing {
                 configureProjectRoutes(
@@ -115,6 +126,41 @@ class ProjectChatStreamRoutesTest {
             assertEquals(listOf("user", "assistant"), stored.map { it.role })
             assertEquals("What is the status?", stored[0].content)
             assertEquals("Hello", stored[1].content)
+        }
+    }
+
+    @Test
+    fun `done and the stored reply are available while background compression is still running`() = TestDb().use { db ->
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val gateway = chatTestGateway(SummaryChatProvider {
+            started.complete(Unit)
+            finish.await()
+            "summary-only"
+        })
+        testApplication {
+            setUp(db, gateway, compression = true)
+            val projectId = db.project()
+            val chats = ProjectChatRepository(db.database)
+            chats.createSession(projectId, "Chat")
+            val covered = chats.appendMessage(projectId, "user", "covered-original")
+            ProjectChatSummaryRepository(db.database).upsert(projectId, covered.id, "summary-only")
+            repeat(30) { chats.appendMessage(projectId, if (it % 2 == 0) "user" else "assistant", "m$it") }
+            try {
+                val body = withTimeout(10.seconds) { stream(projectId, """{"content":"latest"}""").bodyAsText() }
+                withTimeout(10.seconds) { started.await() }
+                assertEquals(listOf("user", "delta", "delta", "done"), eventsOf(body))
+                assertFalse(body.contains("summary-only"))
+                assertEquals("Hello", db.messages(projectId).last().content)
+                assertEquals(1, ProjectChatSummaryRepository(db.database).find(projectId)?.generation)
+                val history = client.get("/api/projects/$projectId/chat") { header("X-Test-Principal", "operator") }
+                assertEquals(HttpStatusCode.OK, history.status)
+                val historyBody = history.bodyAsText()
+                assertFalse(historyBody.contains("summary-only"))
+                assertTrue(historyBody.contains("covered-original"))
+            } finally {
+                finish.complete(Unit)
+            }
         }
     }
 

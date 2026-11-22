@@ -14,6 +14,8 @@ import net.kigawa.kivra.auth.RefreshingJwkProvider
 import net.kigawa.kivra.auth.RequiredRole
 import net.kigawa.kivra.auth.resolveOperatorVerifier
 import net.kigawa.kivra.auth.resolveTaskApiIdentity
+import net.kigawa.kivra.chat.ChatHistoryCompactor
+import net.kigawa.kivra.chat.ProjectChatReplier
 import net.kigawa.kivra.coding.CodingReconcileWorker
 import net.kigawa.kivra.coding.CodingRuntimeService
 import net.kigawa.kivra.coding.buildCodingCostLedger
@@ -46,6 +48,8 @@ import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.NoPrMergeAuthority
 import net.kigawa.kivra.db.OutboxRepository
 import net.kigawa.kivra.db.ProjectRepository
+import net.kigawa.kivra.db.ProjectChatRepository
+import net.kigawa.kivra.db.ProjectChatSummaryRepository
 import net.kigawa.kivra.db.connectDatabase
 import net.kigawa.kivra.db.createDataSource
 import net.kigawa.kivra.db.migrateDatabase
@@ -223,11 +227,15 @@ internal fun Application.appModule(env: Map<String, String>) {
     }
     // The project chat's AI reply (streamed). It uses the self-development model gateway, so it exists only when self-development is enabled.
     // Without it the chat routes only store the messages, as before.
-    val projectChatRepo = net.kigawa.kivra.db.ProjectChatRepository(database)
+    val projectChatRepo = ProjectChatRepository(database)
     // Routing: the difficulty router (ADR 0023 追補) decides EASY (on-premises first, hosted fallback) or HARD (hosted only) per reply.
     val projectChatReply = selfDevParts?.let { parts ->
         parts.gateway?.let { gw ->
-            net.kigawa.kivra.chat.ProjectChatReplier(gw, projectChatRepo, listOf(budgetConfig.tenantId), router = parts.chatRouter)
+            val budgetScopes = listOf(budgetConfig.tenantId)
+            val compactor = if (env["KIVRA_CHAT_COMPRESSION_ENABLED"]?.trim().toBoolean()) {
+                ChatHistoryCompactor(gw, projectChatRepo, ProjectChatSummaryRepository(database), budgetScopes, this)
+            } else null
+            ProjectChatReplier(gw, projectChatRepo, budgetScopes, router = parts.chatRouter, compactor = compactor)
         }
     }
     // The roles (ADR 0020, PR 3a/3b/3c): off by default, and then the assignee store is not created or read. The order routes, the goal and memory routes (3b) and the REST routes of PR 3c (Task API, selfdev, budget and run admin, run views, execution) use the guard.

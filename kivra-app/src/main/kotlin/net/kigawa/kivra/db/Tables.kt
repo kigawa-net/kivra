@@ -243,6 +243,15 @@ object ProjectChatMessagesTable : Table("project_chat_messages") {
     override val primaryKey = PrimaryKey(id)
 }
 
+internal object ProjectChatSummariesTable : Table("project_chat_summaries") {
+    val sessionId = char("session_id", 26)
+    val coversUpToMessageId = long("covers_up_to_message_id")
+    val body = text("body")
+    val generation = integer("generation")
+    val createdAt = datetime("created_at")
+    override val primaryKey = PrimaryKey(sessionId)
+}
+
 /** Orchestrator leader lease (V41). Single-row table for leader election. */
 object LeaderLeasesTable : Table("orchestrator_leader_lease") {
     val id = integer("id").default(0)

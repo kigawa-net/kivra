@@ -940,6 +940,7 @@ private suspend fun ApplicationCall.respondChatReply(
         }
         val stored = repo.appendMessage(sessionId, "assistant", text)
         writeChatFrame(this, "done", chatJson.encodeToString(ChatMessageResponse.serializer(), stored.toResponse()))
+        replier.afterReply(sessionId, stored.id)
     }
 }
 

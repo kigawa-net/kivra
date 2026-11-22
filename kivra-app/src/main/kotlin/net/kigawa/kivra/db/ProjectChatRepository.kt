@@ -4,6 +4,7 @@ import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -72,13 +73,41 @@ class ProjectChatRepository(
     }
 
     /** The last [limit] messages of [sessionId], oldest first. */
-    fun recentMessages(sessionId: String, limit: Int): List<ProjectChatMessageRow> = transaction(database) {
-        ProjectChatMessagesTable.selectAll()
-            .where { ProjectChatMessagesTable.sessionId eq sessionId }
-            .orderBy(ProjectChatMessagesTable.id to SortOrder.DESC)
+    fun recentMessages(sessionId: String, limit: Int): List<ProjectChatMessageRow> =
+        recentMessages(sessionId, limit, afterId = null)
+
+    internal fun recentMessages(
+        sessionId: String,
+        limit: Int,
+        afterId: Long?,
+        throughId: Long? = null,
+    ): List<ProjectChatMessageRow> = chatMessagesById(sessionId, afterId, throughId, limit, SortOrder.DESC).reversed()
+
+    internal fun oldestMessages(
+        sessionId: String,
+        afterId: Long,
+        throughId: Long,
+        limit: Int,
+    ): List<ProjectChatMessageRow> = chatMessagesById(sessionId, afterId, throughId, limit, SortOrder.ASC)
+
+    private fun chatMessagesById(
+        sessionId: String,
+        afterId: Long?,
+        throughId: Long?,
+        limit: Int,
+        order: SortOrder,
+    ): List<ProjectChatMessageRow> = transaction(database) {
+        val messages = ProjectChatMessagesTable
+        messages.selectAll()
+            .where {
+                var filter = messages.sessionId eq sessionId
+                if (afterId != null) filter = filter and (messages.id greater afterId)
+                if (throughId != null) filter = filter and (messages.id lessEq throughId)
+                filter
+            }
+            .orderBy(messages.id to order)
             .limit(limit)
             .map { it.toMessageRow() }
-            .reversed()
     }
 
     /** Appends a message to [sessionId] and touches the session's updated_at. */

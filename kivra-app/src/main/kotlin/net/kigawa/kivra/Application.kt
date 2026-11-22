@@ -342,6 +342,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                 // The target and the projects of a new root order: the REST route's (POST /api/projects/{projectId}/orders).
                 targetRepo = selfDevSettings.config?.repo?.let { repo -> "${repo.owner}/${repo.repo}" },
                 projects = projectRepo,
+                operations = SelfDevOperatorRepository(database),
             )
         },
         // The cycle tree tool (kivra_task_list) serves only while the autopilot answers, as the REST task routes do.

@@ -32,6 +32,10 @@ import net.kigawa.kivra.ui.canResumeOrder
 import net.kigawa.kivra.ui.canRequeueTask
 import net.kigawa.kivra.ui.canSkipStuckTask
 import net.kigawa.kivra.ui.canStopGoal
+import net.kigawa.kivra.ui.SPLIT_APPROVED_DONE
+import net.kigawa.kivra.ui.SPLIT_REJECTED_DONE
+import net.kigawa.kivra.ui.canDecideSplitProposal
+import net.kigawa.kivra.ui.splitProposalStateText
 import net.kigawa.kivra.ui.releaseButtonLabel
 import net.kigawa.kivra.ui.releaseKindOf
 import net.kigawa.kivra.ui.releaseTextsOf
@@ -397,6 +401,8 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
     val perms = LocalCallerPermissions.current
     val gate = rememberOperatorWriteGate()
     val state = rememberLoad(orderId, reloadKey) { ApiClient.getOrder(orderId) }
+    // 子 order の提案(ルートの order だけが持つ)。承認・却下の後は読み直す。
+    val proposals = rememberLoad(orderId, reloadKey) { ApiClient.getSplitProposals(orderId) }
 
     // 停止要求以外の操作を一つ送る。成否にかかわらず読み直す(旧 UI の ordAfterWrite と同じ)。
     val send: (OperatorAction, String, suspend () -> Unit) -> Unit = { action, doneText, call ->
@@ -466,6 +472,38 @@ fun OrderDetailScreen(orderId: String, onNavigate: (Route) -> Unit) {
                 }
             }
             Spacer(Modifier.height(12.dp))
+            if (order.parentOrderId == null) {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp)) {
+                        SelectableText("子 order の提案", style = MaterialTheme.typography.titleMedium)
+                        SelectableText("Planner が出した案です。承認すると、その題名・方針・周の上限で子 order を作ります。", style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(4.dp))
+                        LoadedView(proposals) { list ->
+                            if (list.isEmpty()) SelectableText("提案はありません")
+                            list.forEach { p ->
+                                Column(Modifier.padding(vertical = 6.dp)) {
+                                    DetailRow("題名", p.title)
+                                    DetailRow("方針", p.instruction)
+                                    DetailRow("周の上限", p.maxCycles.toString())
+                                    DetailRow("状態", splitProposalStateText(p.state))
+                                    p.createdChildOrderId?.let { DetailRow("作られた子 order", it) }
+                                    if (perms.can(GatedOperation.DECIDE_SPLIT_PROPOSAL) && canDecideSplitProposal(p.state)) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            Button(enabled = !gate.busy, onClick = {
+                                                send(OperatorAction.APPROVE_SPLIT, SPLIT_APPROVED_DONE) { ApiClient.approveSplitProposal(order.orderId, p.proposalId) }
+                                            }) { SelectableText("承認") }
+                                            OutlinedButton(enabled = !gate.busy, onClick = {
+                                                send(OperatorAction.REJECT_SPLIT, SPLIT_REJECTED_DONE) { ApiClient.rejectSplitProposal(order.orderId, p.proposalId) }
+                                            }) { SelectableText("却下") }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
             // 運用操作。ボタンは権限と状態で出し分ける(サーバーが最終判定し、403 / 409 は固定の文言で出す)。
             val showPause = perms.can(GatedOperation.MANAGE_ORDER) && canPauseOrder(order.state)
             val showResume = perms.can(GatedOperation.MANAGE_ORDER) && canResumeOrder(order.state, order.stateReason)

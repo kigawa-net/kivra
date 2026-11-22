@@ -85,6 +85,10 @@ class RolesCoverageArchitectureTest {
         "GET /api/selfdev/orders/{id}/cycles" to Permission.READ,
         "POST /api/selfdev/orders/{id}/cycles" to Permission.ORDER_MANAGE,
         "POST /api/selfdev/orders/{id}/children" to Permission.ORDER_MANAGE,
+        // The Planner's child proposals (ADR 0015 addendum 2026-11-22, PR2): reading is READ; approving creates the child (ORDER_MANAGE, U-19).
+        "GET /api/selfdev/orders/{id}/split-proposals" to Permission.READ,
+        "POST /api/selfdev/orders/{id}/split-proposals/{proposalId}/approve" to Permission.ORDER_MANAGE,
+        "POST /api/selfdev/orders/{id}/split-proposals/{proposalId}/reject" to Permission.ORDER_MANAGE,
         "POST /api/selfdev/orders/{id}/pause" to Permission.ORDER_MANAGE,
         "POST /api/selfdev/orders/{id}/resume" to Permission.ORDER_MANAGE,
         "POST /api/selfdev/orders/{id}/extend" to Permission.ORDER_MANAGE,

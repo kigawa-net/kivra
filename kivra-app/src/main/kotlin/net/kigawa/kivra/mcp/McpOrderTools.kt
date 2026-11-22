@@ -22,7 +22,9 @@ import net.kigawa.kivra.db.OrderResult
 import net.kigawa.kivra.db.ProjectFilter
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevOrder
+import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrderRepository
+import net.kigawa.kivra.db.SplitProposal
 import net.kigawa.kivra.db.SelfDevOrderStopRequest
 import net.kigawa.kivra.db.OrderCycle
 import net.kigawa.kivra.routes.GuardResult
@@ -58,6 +60,8 @@ const val SCOPE_SELFDEV_ORDER_CREATE = "kivra.selfdev.order.create"
 
 private val ORDER_ID_SHAPE = Regex("[0-9A-Z]{26}")
 private const val ORDER_LIST_LIMIT = 50
+/** The most proposals kivra_order_get returns for one order (at most 3 per plan; a few plans in a row). */
+private const val ORDER_PROPOSAL_LIMIT = 50
 
 /** The order's operator log, the same name as the REST routes' (SelfDevOrderRoutes): fixed codes and IDs only. */
 private val orderOperatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.order.operator")
@@ -76,6 +80,8 @@ class McpOrderDeps(
     val targetRepo: String? = null,
     /** The projects a new root order may belong to (ADR 0022). `project_id` must name one of them. */
     val projects: ProjectRepository,
+    /** The child order proposals of an order (V60), read by kivra_order_get. Read only: no decision is made over MCP (ADR 0015 addendum 2026-11-22). */
+    val operations: SelfDevOperatorRepository,
 )
 
 /**
@@ -184,7 +190,8 @@ class McpOrderTools(private val deps: McpOrderDeps, private val guard: Permissio
     private fun orderGet() = McpTool(
         name = "kivra_order_get",
         description = "Get one order by order_id: its parent id, depth, child count, state and reason code, budget and spent amounts in JPY, " +
-            "its cycles (goal ids and goal states), and its pending stop request (if any) without the digest. No title or policy text.",
+            "its cycles (goal ids and goal states), its pending stop request (if any) without the digest, and its child order proposals " +
+            "(split_proposals: the Planner's suggestions, read only, with no title or instruction text). No title or policy text.",
         inputSchema = objectSchema(
             "order_id" to orderIdSchema(),
             required = listOf("order_id"),
@@ -203,10 +210,12 @@ class McpOrderTools(private val deps: McpOrderDeps, private val guard: Permissio
         } else {
             val pending = deps.orders.pendingStopRequestOf(id)
             val cycles = deps.orders.cyclesOf(id)
+            val proposals = deps.operations.splitProposalsOf(id, ORDER_PROPOSAL_LIMIT)
             val structured = buildJsonObject {
                 order.summaryJson().forEach { (key, value) -> put(key, value) }
                 put("pending_stop_request", pending?.json() ?: JsonNull)
                 put("cycles", JsonArray(cycles.map { it.json() }))
+                put("split_proposals", JsonArray(proposals.map { it.json() }))
             }
             ToolOutcome(false, "order ${order.orderId}: ${order.state.name}", structured, "OK")
         }
@@ -403,6 +412,20 @@ private fun SelfDevOrderStopRequest.json(): JsonObject = buildJsonObject {
     put("state", state.name)
     put("order_version", orderVersion)
     put("expires_at", expiresAt.utc())
+    put("created_at", createdAt.utc())
+}
+
+/**
+ * A child order proposal (V60, ADR 0015 addendum 2026-11-22) without its title and instruction: those are the Planner's text, and this tool
+ * returns none. An operator reads them in the REST detail or the UI. A proposal's state is read here only; this tool never decides one.
+ */
+private fun SplitProposal.json(): JsonObject = buildJsonObject {
+    put("proposal_id", proposalId)
+    put("plan_id", planId)
+    put("ordinal", ordinal)
+    put("max_cycles", maxCycles)
+    put("state", state.name)
+    put("created_child_order_id", createdChildOrderId)
     put("created_at", createdAt.utc())
 }
 

@@ -42,6 +42,7 @@ import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectMemberStore
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAssigneeRepository
+import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.TaskSubmitResult
 import net.kigawa.kivra.db.TestDb
@@ -155,7 +156,7 @@ class McpReadScopeTest {
         return buildMcpRouteDeps(
             McpSettings.fromEnv(e), e, db.runs, repo,
             jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = true, maxActiveSelfDev = 1,
-            orders = McpOrderDeps(SelfDevOrderRepository(db.database), null, projects = ProjectRepository(db.database, clock)),
+            orders = McpOrderDeps(SelfDevOrderRepository(db.database), null, projects = ProjectRepository(db.database, clock), operations = SelfDevOperatorRepository(db.database)),
             guard = guard,
             projects = ProjectRepository(db.database, clock),
         )!!

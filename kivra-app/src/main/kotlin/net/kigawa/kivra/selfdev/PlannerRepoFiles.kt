@@ -11,11 +11,15 @@ import net.kigawa.kivra.github.GitHubResult
 import net.kigawa.kivra.github.RepoRef
 import net.kigawa.kivra.github.TreeEntry
 import net.kigawa.kivra.github.TreeEntryType
+import net.kigawa.kivra.modelgateway.SecretScan
 import org.slf4j.LoggerFactory
 
 /*
  * The repository file list shown to the autopilot Planner (Issue #293). Read-only: one `listTree` of the base branch, cached for a short
  * time. Only the paths the validator would accept are listed (the allowlist, minus the denylist), so the Planner does not have to guess.
+ * A path that the model gateway's secret scan would refuse is left out too (ADR 0011 追補 2026-11-19): the gateway refuses the whole
+ * request when any of its text matches, so one such path would fail every plan.
+ * The same read gives the size of every regular file, for the pre-check of a plan's target paths (ADR 0011 section 3, 追補 2026-11-19).
  *
  * The list is data from the repository, not instructions. A path that contains a control or an invisible character (such as a bidi
  * override) is left out: removing such a character would turn it into a different path. Any failure of the read gives no list at all,
@@ -34,21 +38,34 @@ class PlannerRepoFiles(
         require(!ttl.isNegative && !ttl.isZero) { "ttl must be positive" }
     }
 
-    private class Cached(val at: Instant, val list: String?)
+    /** One read of the base tree: the rendered list (null when there is none to show) and the size of each regular file. */
+    private class TreeRead(val list: String?, val fileSizes: Map<String, Long>)
+
+    private class Cached(val at: Instant, val tree: TreeRead)
 
     private val mutex = Mutex()
     private var cached: Cached? = null
 
-    /** The list body (without the data element), or null when it cannot be read. Only a successful read is cached. */
-    suspend fun list(): String? = mutex.withLock {
+    /** The list body (without the data element), or null when it cannot be read. */
+    suspend fun list(): String? = tree()?.list
+
+    /**
+     * The size in bytes of each regular file of the base tree, or null when the tree cannot be read. A path that is not in the map is not
+     * in the base tree (a new file). The caller decides what null means: the Planner's pre-check lets the plan through (fail-open, as the
+     * list does), because the write-time PatchPolicy check is the gate that always runs.
+     */
+    suspend fun fileSizes(): Map<String, Long>? = tree()?.fileSizes
+
+    /** Only a successful read is cached. */
+    private suspend fun tree(): TreeRead? = mutex.withLock {
         val now = clock.instant()
-        cached?.takeIf { Duration.between(it.at, now) < ttl }?.let { return it.list }
+        cached?.takeIf { Duration.between(it.at, now) < ttl }?.let { return it.tree }
         val fresh = read()
         if (fresh != null) cached = Cached(now, fresh)
         fresh
     }
 
-    private suspend fun read(): String? {
+    private suspend fun read(): TreeRead? {
         val result = try {
             github.listTree(repo, ref)
         } catch (e: CancellationException) {
@@ -59,17 +76,17 @@ class PlannerRepoFiles(
         }
         return when (result) {
             is GitHubResult.Success -> {
+                val sizes = PlannerRepoFileList.regularFileSizes(result.value.entries)
                 val rendered = PlannerRepoFileList.render(result.value.entries, PlanValidator::allowsPlannedPath, maxBytes)
                 if (rendered == null) {
                     logger.info("planner repo files unavailable: reason=NO_PLANNABLE_FILES")
-                    null
                 } else {
                     logger.info(
                         "planner repo files: files={} summarized={} bytes={} omittedUnsafe={}",
                         rendered.fileCount, rendered.summarized, rendered.text.toByteArray(Charsets.UTF_8).size, rendered.omittedUnsafe,
                     )
-                    rendered.text
                 }
+                TreeRead(rendered?.text, sizes)
             }
             is GitHubResult.Failure -> {
                 logger.warn("planner repo files unavailable: reason={}", result.kind.name)
@@ -115,8 +132,15 @@ internal object PlannerRepoFileList {
     private val REGULAR_FILE_MODES = setOf("100644", "100755")
 
     /**
-     * The list of the regular files that [isPlannable] accepts, or null when none does. A file whose path has an unsafe character or is
-     * too long is left out (and counted in [RenderedRepoFiles.omittedUnsafe]). Symlinks, submodules and directories are not listed.
+     * The secret scan of the model gateway, with its default rules (no credentials are bound to it). The gateway's own scanner uses the
+     * default too, so the same path gets the same answer here and at the gateway.
+     */
+    private val gatewayScan = SecretScan()
+
+    /**
+     * The list of the regular files that [isPlannable] accepts, or null when none does. A file whose path has an unsafe character, is
+     * too long, or is refused by the gateway's secret scan is left out (and counted in [RenderedRepoFiles.omittedUnsafe]). Symlinks,
+     * submodules and directories are not listed.
      */
     fun render(entries: List<TreeEntry>, isPlannable: (String) -> Boolean, maxBytes: Int = MAX_BYTES): RenderedRepoFiles? {
         val files = ArrayList<Pair<String, Long>>()
@@ -124,7 +148,7 @@ internal object PlannerRepoFileList {
         for (entry in entries) {
             if (entry.type != TreeEntryType.BLOB || entry.mode !in REGULAR_FILE_MODES) continue
             if (!isPlannable(entry.path)) continue
-            if (!isSafePath(entry.path)) {
+            if (!isSafePath(entry.path) || gatewayScan.detectsText(entry.path)) {
                 omitted++
                 continue
             }
@@ -163,6 +187,14 @@ internal object PlannerRepoFileList {
         return RenderedRepoFiles((kept + tail).joinToString("\n"), summarized = true, fileCount = files.size, omittedUnsafe = omitted)
     }
 
+    /** The size in bytes of each regular file of [entries] (a blob with a regular file mode and a known size). */
+    fun regularFileSizes(entries: List<TreeEntry>): Map<String, Long> = buildMap {
+        for (entry in entries) {
+            val size = entry.sizeBytes ?: continue
+            if (entry.type == TreeEntryType.BLOB && entry.mode in REGULAR_FILE_MODES) put(entry.path, size)
+        }
+    }
+
     /** True when the path has no control, format (bidi and zero-width), private-use, unassigned, separator or non-ASCII space character, and is short enough. */
     fun isSafePath(path: String): Boolean =
         path.isNotEmpty() && path.codePointCount(0, path.length) <= MAX_PATH_CHARS && path.codePoints().allMatch { isSafeCodePoint(it) }
@@ -196,6 +228,8 @@ internal object PlannerRepoFileList {
         for ((path, _) in files) {
             val key = dirSegments(path).take(depth).joinToString("/")
             val dir = if (key.isEmpty()) "(top level)" else "$key/"
+            // A directory line is gateway text too. A line the gateway would refuse is dropped, and the files under it are not counted.
+            if (gatewayScan.detectsText(dir)) continue
             counts[dir] = (counts[dir] ?: 0) + 1
         }
         return buildString {

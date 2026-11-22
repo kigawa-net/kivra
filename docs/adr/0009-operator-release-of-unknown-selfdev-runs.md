@@ -127,3 +127,97 @@ ADR 0008 の自己開発 Run は、外部結果が不明なとき `UNKNOWN` に�
 
 - 解放の経路は 3 つになる。`UNKNOWN`、束縛の無い `PULL_REQUEST`、止まった `DEVELOPING`。いずれも運用者が認証された主体として行い、監査と outbox を同じトランザクションで書く。
 - `DEVELOPING` の解放は条件が最も厳しい(動いている最中の Run を止めうるため)。運用手順は runbook §4.1c。
+
+## 追補(2026-11-16): 実行の lease 切れ(`CODING_ORPHANED`)の UNKNOWN を自動で解放する
+
+### 背景
+
+dev で agent の Pod が 13 時間 Unknown になり、coding attempt の lease が切れて ORPHANED になった。Run(01M7GZ61TWRRG5WTJM717JZC2E)は
+`UNKNOWN` / `CODING_ORPHANED`(PR なし)のまま残り、`SelfDevWorker` は `reason=AWAITING_OPERATOR` を出し続け、同時 Run 上限の枠を占有した。
+解放の手段は本文の手動解放(`POST /api/admin/selfdev/runs/{id}/release`)だけだった。
+
+### 決定(追補)
+
+**ユーザーの決定(2026-11-16)**: 自動で解放する。本 ADR の「将来、証拠に基づく自動の解放を入れるときは、この ADR を置き換える」は、置き換えずに
+次の形に限った例外として追補する。手動の解放はそのまま残す。
+
+1. **対象は原因が明確で副作用が無いものだけ。** 行をロック(`FOR UPDATE`)した下で、次をすべて満たす Run だけを解放する。満たさなければ何も書かない。
+   - 自己開発の Run(`taskId` が `selfdev:` で始まる)。
+   - 状態が `UNKNOWN` で、`state_reason` が `CODING_ORPHANED`。
+   - PR の列(`pr_number`、`pr_repository`、`pr_head_sha`、`pr_node_id`)がどれも空(束縛が無く、部分的な記録も無い)。
+   - 監査に `PATCH_READY` / `PULL_REQUEST` への遷移が無い。
+   - `QUEUED` / `CLAIMED` / `RUNNING` の coding attempt が無く、worker の lease が切れているか誰も持っていない(DB の時計)。
+   - 最終更新から猶予(`KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_GRACE_SECONDS`、既定 600 秒、下限 60 秒)が過ぎている。
+2. **GitHub への書き込みが無いことの根拠(コード上の事実)。** Run の GitHub への書き込み(ブランチ、コミット、PR)は、すべて `PATCH_READY` を
+   記録した後に行う(`SelfDevRunner`: 「PATCH_READY is committed before the first GitHub write」)。CLI と agent は GitHub の資格情報を持たず、
+   push しない(ADR 0010 決定 4)。`CODING_ORPHANED` は、`DEVELOPING` の Run に対して coding runtime の reconcile(`holdForOperator`、
+   `expectedFrom = DEVELOPING`)か、runner の advance が付ける。runner の再開(`PATCH_READY` からの advance)でも理論上は付きうるので、
+   `PATCH_READY` を一度でも通った Run は監査で見分けて除外する。こうして、対象の Run は GitHub に何も書いていない。
+   LLM(Claude Code CLI)の費用は、Run の解放とは別に、予算の予約(attempt の上限額で計上、ADR 0003 追補 2026-11-15)で扱われる。
+3. **他の UNKNOWN は対象外(手動のまま)。** `PR_NOT_FOUND` / `PR_AMBIGUOUS`(GitHub 上に PR やブランチがあるかもしれない)、
+   `GITHUB_UNKNOWN_OUTCOME`・`COMMIT_NOT_APPLIED_TWICE`(GitHub への書き込みの結果が不明)、`DEVELOPER_*`(LLM の呼び出し結果が不明で、
+   費用や結果の扱いを人が確かめる)、`CODING_QUEUE_EXPIRED`(agent が 24 時間来なかった。設定や配備の問題で、解放しても次も同じになる)、
+   `CODING_AUTH_REQUIRED` / `CODING_NEEDS_HUMAN`(人の対処が要ると明示されたもの)。どれも、原因か副作用を人が確かめる必要がある。
+   `CODING_ORPHANED` は「実行環境が消えて結果が返らない」ことが確定しており、GitHub への副作用も無いので、取り消しても失うものが無い。
+4. **同じ記録を同じトランザクションで書く。** `DevelopmentRunRepository.autoReleaseOrphanedSelfDev` が `UNKNOWN` → `CANCELLED` を行い、
+   `RUN_RELEASED` の監査と `RunStateChanged` の outbox を同じトランザクションで書く。操作者は固定の `system:auto-release`(運用者の owner key は
+   `system:` で始まらない。予算の自動解除と同じ主体)。`state_reason` は `AUTO_RELEASED_ORPHAN`(`OPERATOR_RELEASED` と区別できる。
+   `varchar(64)` に収まり、`development_runs.state_reason` に CHECK 制約は無い)。監査の payload の `reason` は固定コード `GRACE_ELAPSED`(自由文は無い)。
+   outbox の payload には `reasonCode` を入れる(束縛の無い PR・止まった DEVELOPING の解放と同じ)。
+5. **遷移表は変えない。** 汎用の `transition()`・`DevelopmentRunState` は変えず、`kivra-core` も変更しない。経路は本文の手動解放と同じく専用の関数だけ。
+   オートパイロットは `CANCELLED` の Run を従来どおり `RUN_RELEASED` として扱い、Order の周は失敗として見る。予算の予約には何も書かない。
+6. **スイッチと安全弁。** `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED`。コードの既定は false(有効化は k8s のマニフェスト)。不正値は起動失敗で、
+   値は出さない。自己開発が無効のときはこの設定を読まず(自己開発の変数はスイッチ以外読まない、という既存の不変条件)、動かない。60 秒ごとの 1 回で最大 20 件、古い順。各 Run は個別のトランザクションで、状態と版を条件に更新するので、複数の Pod が同時に動いても
+   二重に解放しない(後の側は対象外になるだけ)。失敗した Run は件数をログに出し(`failed=<件数>`、WARN)、次の回に再試行する。ログは件数と
+   固定コードだけで、Run の id・依頼文・理由の本文は出さない。
+7. **画面。** 理由 `AUTO_RELEASED_ORPHAN` の説明文を Compose UI に足す。監査の操作の表示名(`RUN_RELEASED` = 「運用者が解放」)は変えていない
+   (操作者の列が `system:auto-release` になる)。
+
+### 結果(追補)
+
+- `CODING_ORPHANED` の Run は、猶予の後に自動で `CANCELLED` になり、同時 Run 上限の枠が空く。原因(agent の停止)は直さないので、
+  agent が止まったままなら次の Run も同じ経過をたどる。agent の監視は別の作業。
+- 他の UNKNOWN は従来どおり運用者の解放を待つ。運用手順は runbook §4.1 の「自動の解放」。
+
+## 追補(2026-11-18): `CODING_NEEDS_HUMAN` の UNKNOWN も自動で解放する
+
+### 背景
+
+dev で Run 01M7EK9Y9NJNKZRHMTB20MVNKH が `UNKNOWN` / `CODING_NEEDS_HUMAN`(PR なし)のまま 2026-11-15 から残り、`AWAITING_OPERATOR` を
+出し続けた。2026-11-16 の追補は `CODING_NEEDS_HUMAN` を「人の対処が要ると明示されたもの」として対象外にしていた。
+
+### 決定(追補)
+
+**ユーザーの決定(2026-11-18)**: `CODING_NEEDS_HUMAN` も自動で解放する。2026-11-16 の追補の決定 3 のうち、`CODING_NEEDS_HUMAN` を対象外とした部分を変更する。
+
+1. **`CODING_NEEDS_HUMAN` が付く経路(コード上の事実)。** agent(`kivra-agent`)が attempt を `fail(NEEDS_HUMAN)` で終えたときだけ。
+   - stub の executor(`KIVRA_AGENT_EXECUTOR` 未設定・`stub`): 何も実行せずに返す。
+   - claim のパスのパターンが不正: CLI を起動する前に返す。
+   - executor の例外(`AgentLoop.executeOrNeedsHuman`): 準備(git、展開)、docker の引数の検査、kivra の 5xx や通信の失敗、その他の I/O の失敗。
+     409 / 404(lease を失った)は fail を送らない。
+   kivra 側(`CodingAttemptPatchSource.failedWith`)は、`DEVELOPING` の Run でこの失敗を読むと `UNKNOWN` / `CODING_NEEDS_HUMAN` にする。
+   `PATCH_READY` からの再開では、どの失敗も `CODING_<code>` の `UNKNOWN` になるので、同じ理由が `PATCH_READY` の Run にも付きうる。
+2. **副作用が残らないこと。** 2026-11-16 の追補と同じ条件で絞る(PR の列が空、監査に `PATCH_READY` / `PULL_REQUEST` が無い、
+   `QUEUED` / `CLAIMED` / `RUNNING` の attempt が無い、lease が無い、猶予が過ぎた)。`PATCH_READY` からの再開で付いた Run は、監査の条件で外れる。
+   - GitHub: agent は GitHub の資格情報を持たず(ADR 0010)、`DEVELOPING` までの Run は GitHub に何も書いていない。
+   - attempt: `NEEDS_HUMAN` の attempt は `FAILED`(終端)で、lease も無い。
+   - 予算: 費用は `fail` の時点で、kivra(`CodingRuntimeService.fail`)が計上済み(`usage` があればその額、無ければ 1 attempt の予約額を費用不明として)。
+     解放は予算に何も書かない。手動の解放と同じ。費用不明の分は ADR 0003 追補 2026-11-15 の自動解除で扱われる。
+   - 結果: agent が結果を送れず `NEEDS_HUMAN` になった場合、作業の結果は失われるが、外部への書き込みは無い。
+3. **区別できる理由コード。** `state_reason` は `AUTO_RELEASED_NEEDS_HUMAN`(`varchar(64)` に収まる)。`CODING_ORPHANED` は従来どおり
+   `AUTO_RELEASED_ORPHAN`。監査・outbox・操作者(`system:auto-release`)・トランザクションは 2026-11-16 の追補と同じ。
+4. **スイッチと猶予は共通。** 同じ worker、同じ `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED`、同じ猶予。`NEEDS_HUMAN` は attempt が終端になった時点で
+   確定していて、`ORPHANED` のように遅れて結果が届く余地を見る必要は無い。猶予は運用者が気づいて見る時間として、同じ値で足りる。変数名は最初の版のまま。
+5. **繰り返しの歯止め(ブレーカー)。** `NEEDS_HUMAN` はホスト側の設定や環境の異常で起き、直るまで次の attempt も同じになりやすい。これまでは
+   `UNKNOWN` が同時 Run 上限の枠を占有して、事実上それ以上進まなかった。自動で解放すると、オートパイロットはキューの次の task を投入し、それも
+   同じく失敗して取り消される(task が 1 件ずつ失われ、1 attempt の予約額が積み上がる)。そこで、**自動で解放された Run(`AUTO_RELEASED_ORPHAN`・
+   `AUTO_RELEASED_NEEDS_HUMAN`)は、オートパイロットのサーキットブレーカーで失敗として数える**(`AutopilotDispatcher`)。task の状態は従来どおり
+   `CANCELLED`(`RUN_RELEASED`)。運用者の解放と中止は従来どおり数えない。Order の周は従来から `CANCELLED` を失敗として数え、連続の失敗で止まる。
+6. **対象外のまま。** `PR_NOT_FOUND` / `PR_AMBIGUOUS`、`GITHUB_UNKNOWN_OUTCOME`・`COMMIT_NOT_APPLIED_TWICE`、`DEVELOPER_*`、`CODING_QUEUE_EXPIRED`、
+   `CODING_AUTH_REQUIRED`(認証の失敗。人が資格情報を直すまで同じになる。ユーザーの決定の範囲外)、そのほかの結果不明の理由。理由は 2026-11-16 の追補の決定 3 と同じ。
+
+### 結果(追補)
+
+- `CODING_NEEDS_HUMAN` の Run も、猶予の後に `CANCELLED` になり、同時 Run 上限の枠が空く。原因(ホスト側の異常)は直さない。
+- 同じ異常が続くときは、オートパイロットのブレーカーが連続の失敗で開いて止まる(`CODING_ORPHANED` にも同じ歯止めが入る)。
+- 運用手順は runbook §4.1a。

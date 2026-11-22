@@ -63,6 +63,15 @@ fun releasePath(runId: String, kind: ReleaseKind): String {
 /** Goal に中止を出すか。終端でなければ出す(app.js と同じ。計画の親タスクでも出す)。 */
 fun canStopGoal(state: String): Boolean = state !in GOAL_TERMINAL_STATES
 
+/**
+ * 失敗・解放されたタスクの再投入(`POST /api/selfdev/tasks/{id}/requeue`、ADR 0011 追補 2026-11-18)を出すか。計画の親(revision > 0)は出さない。
+ * 計画が決着済みかどうかは画面では分からないので、出すかは状態だけで決め、拒否はサーバーの 409 で伝える。
+ */
+fun canRequeueTask(state: String, revision: Int): Boolean = revision == 0 && state in setOf("FAILED", "CANCELLED")
+
+/** 投入待ち・失敗・解放されたタスクの見送り(`POST /api/selfdev/tasks/{id}/reject`)を出すか。承認待ちの見送りは承認の行が出す。 */
+fun canSkipStuckTask(state: String, revision: Int): Boolean = revision == 0 && state in setOf("QUEUED", "FAILED", "CANCELLED")
+
 /** 実額の入力が形式に合うか。空欄は「実額不明」として許す(送らない)。app.js の budgetFormState と同じ。 */
 fun isValidBudgetActual(raw: String): Boolean {
     val text = raw.trim()

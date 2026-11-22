@@ -114,6 +114,20 @@ class PodEntrypoint(
         /** The summary used for the collection in the Pod. It is replaced by the agent. */
         const val SUMMARY_PLACEHOLDER = "collected in the pod"
 
+        /**
+         * Creates [root] (and no parent) with mode 0700 owned by the caller, or accepts it if it exists. The parent is the emptyDir `/work`,
+         * which is 2777, so the entrypoint cannot make `/work` itself 0700; the work root is a private subdirectory of it instead.
+         * An existing directory is tightened to 0700 (a Pod restart of the container keeps the emptyDir).
+         */
+        fun prepareWorkRoot(root: Path): Path {
+            val mode = java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")
+            if (!Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                Files.createDirectory(root, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(mode))
+            }
+            Files.setPosixFilePermissions(root, mode)
+            return root
+        }
+
         /** Waits until the process is ended from outside. */
         fun hold() {
             while (true) Thread.sleep(HOLD_MILLIS)
@@ -125,9 +139,24 @@ class PodEntrypoint(
 
 /** Runs the real CLI. No shell; stdin is empty; stdout and stderr go to the container's. */
 internal object ProcessCliProcess : CliProcess {
+    /** The launcher moves `JAVA_TOOL_OPTIONS` here so that the entrypoint's own JVM stays quiet (see [childEnvironment]). */
+    const val CHILD_JAVA_TOOL_OPTIONS = "KIVRA_CHILD_JAVA_TOOL_OPTIONS"
+
+    /**
+     * The launcher unsets `JAVA_TOOL_OPTIONS` for the entrypoint's JVM, because the JVM prints `Picked up JAVA_TOOL_OPTIONS: ...` to
+     * stderr and the container's log (which the agent parses as stream-json) would get a line that is not JSON. The CLI gets the
+     * value back here, so the JVMs that it starts (for example Gradle) still use the egress proxy.
+     */
+    fun childEnvironment(env: Map<String, String>): Map<String, String> {
+        val moved = env[CHILD_JAVA_TOOL_OPTIONS] ?: return env
+        return env.filterKeys { it != CHILD_JAVA_TOOL_OPTIONS } + ("JAVA_TOOL_OPTIONS" to moved)
+    }
+
     override fun run(argv: List<String>, workDir: Path): Int {
         val builder = ProcessBuilder(argv)
         builder.directory(workDir.toFile())
+        val childEnv = childEnvironment(System.getenv())
+        builder.environment().apply { clear(); putAll(childEnv) }
         builder.redirectInput(File("/dev/null"))
         builder.redirectOutput(ProcessBuilder.Redirect.INHERIT)
         builder.redirectError(ProcessBuilder.Redirect.INHERIT)
@@ -154,7 +183,12 @@ fun main(args: Array<String>) {
         mirror.syncCommit(input.source(), input.commit)
         mirror.openArchive(input.commit)
     }
-    val entrypoint = PodEntrypoint(Path.of(PodPaths.WORK_ROOT), Path.of(PodPaths.KIVRA_DIR), fetcher, ProcessCliProcess)
+    val workRoot = try {
+        PodEntrypoint.prepareWorkRoot(Path.of(PodPaths.WORK_ROOT))
+    } catch (e: IOException) {
+        exitProcess(2)
+    }
+    val entrypoint = PodEntrypoint(workRoot, Path.of(PodPaths.KIVRA_DIR), fetcher, ProcessCliProcess)
     if (args.isEmpty()) exitProcess(2)
     entrypoint.run(args.toList())
     PodEntrypoint.hold()

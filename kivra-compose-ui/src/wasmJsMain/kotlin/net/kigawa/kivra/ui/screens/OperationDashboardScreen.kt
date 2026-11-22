@@ -15,36 +15,40 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import net.kigawa.kivra.ui.NodeKind
+import net.kigawa.kivra.ui.NodeRef
+import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.SelectableText
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiOperation
 
 @Composable
-fun OperationDashboardScreen(operationId: String) {
+fun OperationDashboardScreen(operationId: String, parent: NodeRef? = null, onNavigate: (Route) -> Unit) {
     val loaded = rememberLoad<ApiOperation>(operationId) { ApiClient.getOperation(operationId) }
-    val useMock = loaded.error != null
-    val displayed = if (useMock) {
-        Loaded(mockOperations.find { it.id == operationId } ?: mockOperations.first().copy(id = operationId))
-    } else loaded
+    val children = rememberLoad<List<ApiOperation>>(operationId) { ApiClient.getOperations(operationId) }
 
     DetailPage {
         SelectableText("Operation ダッシュボード", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(16.dp))
-        if (useMock) {
-            SelectableText("モックデータを表示しています。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(8.dp))
-        }
-        LoadedView(displayed) { operation ->
+        LoadedView(loaded) { operation ->
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SelectableText(operation.name, style = MaterialTheme.typography.titleLarge)
                     StatusBadgeInfo(operation.status)
+                    parent?.let { OpDetailRow("親 ${it.kind.label}", it.id) }
                     OpDetailRow("ID", operation.id)
                     OpDetailRow("名前", operation.name)
                     OpDetailRow("説明", operation.description)
                     OpDetailRow("作成日時", operation.createdAt)
                     OpDetailRow("更新日時", operation.updatedAt)
                 }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        SelectableText("子 Operation", style = MaterialTheme.typography.titleLarge)
+        LoadedList(children, emptyText = "子 Operation がありません。") { operations ->
+            operations.forEach { operation ->
+                OperationCard(operation, NodeRef(operationId, NodeKind.OPERATION), onNavigate)
             }
         }
     }

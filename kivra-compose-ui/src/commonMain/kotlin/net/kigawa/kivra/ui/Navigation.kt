@@ -33,7 +33,7 @@ sealed class NavDestination(val route: String, val label: String) {
 
         /** プロジェクト配下の項目(`#/projects/<id>/<route>` で開く)。サイドナビの並び順でもある。 */
         val projectPages: List<NavDestination> by lazy {
-            listOf(Dashboard, Tasks, Goals, Orders, Approvals, Memory, Assignees, ProjectBudget)
+            listOf(Dashboard, Tasks, Goals, Orders, Approvals, Memory, Assignees, ProjectBudget, Operations)
         }
 
         /**
@@ -57,22 +57,16 @@ data class NavSection(val title: String?, val items: List<NavItem>)
 
 /**
  * サイドナビ(docs/design/16-site-structure.md §3)。
- * - 常に: ホーム、プロジェクト一覧。
- * - 常に最後: 「全体」の節(全体の予算・FX、自動化、担当)。
- * プロジェクト配下の項目は、サイドナビには出さない。プロジェクトの一覧から選び、ダッシュボードのリンク([projectLinkTargets])で開く。
+ * ホーム、プロジェクト一覧の 2 項目だけを出す。
+ * 他の項目([globalPages] など)の画面・route・権限はそのまま残す。
  * 権限や API の結果による出し分けは呼び出し側が行う([CallerPermissions.navVisible] など)。
  */
-fun sidebarSections(): List<NavSection> {
+fun sidebarSections(current: Route? = null): List<NavSection> {
     val top = NavSection(
         title = null,
         items = listOf(NavDestination.Home, NavDestination.Projects).map { NavItem(it, Route.Page(it)) },
     )
-    val global = NavSection(
-        title = "全体",
-        items = listOf(NavDestination.Budget, NavDestination.Operations, NavDestination.Autopilot, NavDestination.Assignees)
-            .map { NavItem(it, Route.Page(it)) },
-    )
-    return listOf(top, global)
+    return listOf(top)
 }
 
 /**

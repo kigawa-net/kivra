@@ -146,12 +146,22 @@ private val operatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.auto
 /**
  * An operator's replan of a BLOCKED Task (the goal page's button, `POST /api/selfdev/goals/{id}/replan`). The goal route and a project chat
  * confirmation (ADR 0023, TASK_REPLAN) both run it, so the transition and the audit line are the same. The caller authenticated and passed the
- * GOAL_WRITE check.
+ * GOAL_WRITE check. [viaMcp] marks the audit line with `via=mcp` for the MCP tool `kivra_task_replan` (ADR 0015 amendment 2026-11-19 §10); the
+ * REST line has no `via`, as before.
  */
-internal fun SelfDevOperatorRepository.replanAsOperator(taskId: String, expectedVersion: Long, principal: String): TaskTransition {
+internal fun SelfDevOperatorRepository.replanAsOperator(
+    taskId: String,
+    expectedVersion: Long,
+    principal: String,
+    viaMcp: Boolean = false,
+): TaskTransition {
     val result = replanBlocked(taskId, expectedVersion)
     if (result is TaskTransition.Moved) {
-        operatorLog.info("autopilot operator action: action=REPLAN actor={} taskId={} reason={}", operatorTag(principal), taskId, AutopilotReason.REPLAN_REQUESTED)
+        if (viaMcp) {
+            operatorLog.info("autopilot operator action: action=REPLAN via=mcp actor={} taskId={} reason={}", operatorTag(principal), taskId, AutopilotReason.REPLAN_REQUESTED)
+        } else {
+            operatorLog.info("autopilot operator action: action=REPLAN actor={} taskId={} reason={}", operatorTag(principal), taskId, AutopilotReason.REPLAN_REQUESTED)
+        }
     }
     return result
 }
@@ -176,6 +186,22 @@ internal fun SelfDevOperatorRepository.rejectAsOperator(taskId: String, expected
     val result = skipTask(taskId, expectedVersion)
     if (result is TaskTransition.Moved) {
         operatorLog.info("autopilot operator action: action=TASK_REJECTED actor={} taskId={} result=SKIPPED", operatorTag(principal), taskId)
+    }
+    return result
+}
+
+/**
+ * An operator's requeue of a FAILED or CANCELLED Task (`POST /api/selfdev/tasks/{id}/requeue`, ADR 0011 section 5.4): the Task goes back to
+ * QUEUED with a fresh key, so the dispatcher makes one new Run for it. Kept as a function like approve and reject, so another entry point
+ * (a project chat action) can share the transition and the audit line. The caller passed GOAL_WRITE.
+ */
+internal fun SelfDevOperatorRepository.requeueAsOperator(taskId: String, expectedVersion: Long, principal: String): TaskTransition {
+    val result = requeueTask(taskId, expectedVersion)
+    if (result is TaskTransition.Moved) {
+        operatorLog.info(
+            "autopilot operator action: action=TASK_REQUEUED actor={} taskId={} result=QUEUED reason={}",
+            operatorTag(principal), taskId, AutopilotReason.OPERATOR_REQUEUED,
+        )
     }
     return result
 }
@@ -392,6 +418,23 @@ internal fun Route.configureSelfDevGoalRoutes(deps: SelfDevGoalRouteDeps) {
             is TaskTransition.Moved -> {
                 call.respond(HttpStatusCode.OK, r.row.summary())
             }
+            else -> call.respondTransition(r)
+        }
+    }
+
+    post("/api/selfdev/tasks/{id}/requeue") {
+        val caller = deps.requireOperator(call) ?: return@post
+        val principal = caller.principal
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        val taskId = taskIdOf(call)
+        if (!deps.permit(call, caller, Permission.GOAL_WRITE, "goal.task_requeue", "TASK_REQUEUE", deps.projectOfTask(taskId))) return@post
+        val version = call.readVersion() ?: return@post
+        if (taskId == null) {
+            call.respond(HttpStatusCode.NotFound, GoalError(TASK_NOT_FOUND))
+            return@post
+        }
+        when (val r = deps.operations.requeueAsOperator(taskId, version, principal)) {
+            is TaskTransition.Moved -> call.respond(HttpStatusCode.OK, r.row.summary())
             else -> call.respondTransition(r)
         }
     }

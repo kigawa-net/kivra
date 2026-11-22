@@ -75,7 +75,9 @@ object ApiClient {
 
     private const val OPERATIONS_BASE_PATH = "/api/operations"
 
-    suspend fun getOperations(): List<ApiOperation> = getJson(OPERATIONS_BASE_PATH)
+    /** null は親なしの一覧。親 ID を指定すると、その Project / Operation の子を取得する。 */
+    suspend fun getOperations(parentId: String? = null): List<ApiOperation> =
+        getJson(net.kigawa.kivra.ui.operationsPath(parentId))
 
     suspend fun getOperation(operationId: String): ApiOperation =
         getJson("$OPERATIONS_BASE_PATH/${percentEncode(operationId)}")
@@ -447,6 +449,13 @@ object ApiClient {
      */
     suspend fun rejectGoal(taskId: String, version: Long) =
         postWrite("/api/selfdev/tasks/${percentEncode(taskId)}/reject", VersionRequest(version))
+
+    /**
+     * 失敗・解放されたタスクの再投入。`POST /api/selfdev/tasks/{id}/requeue`、本文 `{"version": n}`。新しい Run が 1 つ作られる(費用が発生する)。
+     * 409 は version の競合、再投入できない状態、または計画が決着済み。403 は権限(GOAL_WRITE)。
+     */
+    suspend fun requeueTask(taskId: String, version: Long) =
+        postWrite("/api/selfdev/tasks/${percentEncode(taskId)}/requeue", VersionRequest(version))
 
     /**
      * 自律運転の状態。`GET /api/selfdev/autopilot`。503 `AUTOPILOT_DISABLED` は無効(節を出さない)、403 は READ の無い利用者。

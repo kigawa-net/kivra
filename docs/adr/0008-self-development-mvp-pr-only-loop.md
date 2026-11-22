@@ -151,3 +151,80 @@ Saga・Dispatch Proof・Recovery Queue・Circuit Breaker・Fortis 移行まで�
 - 将来 Issue 由来のテキストを扱う場合(⑪)は、そのテキストを信頼できない入力として再検討する(`textContent` のみ、長さ制限は維持)。
 - `/api/selfdev/*` の応答には引き続きタイトルを含めない。
 - 本追補は、自己開発の認可・状態・PR の扱いを変えない。
+
+## 追補(2026-11-18): レビューの期限を過ぎた PR は、フラグ有効時に限って kivra が閉じる
+
+### 背景
+
+`PULL_REQUEST` の Run は、レビューの期限(`KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`、既定 7 日)を過ぎると `CANCELLED`(`PR_ABANDONED`)になる。
+しかし、本 ADR の「kivra は PR を閉じない」により、PR は GitHub 上で開いたまま残る。dev では、PR #540(Run 01M7CT4GSRQHWCWK2PCHYA9TDD)が、
+main が同じファイルを変えたため更新されず(`PR_REBASE_OVERLAPPING_PATHS`)、人のレビュー待ちのまま残った。期限で Run が取り消されても、
+開いた PR が残り、人が見るべきものかどうかが分からない。
+
+### 決定(追補)
+
+**ユーザーの決定(2026-11-18)**: 期限切れの PR は kivra が閉じる。本 ADR の「kivra は PR を閉じない」を、次の形に限って変更する。
+
+1. **フラグ**: `KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED`。コードの既定は無効(有効化は k8s のマニフェスト)。無効のときは従来どおり、PR は残る。
+   自己開発が無効のときは読まない。不正値は起動失敗で、値は出さない。
+2. **対象**: 期限で `PR_ABANDONED` になる Run のうち、kivra の App の bot が作り、Run に束縛された PR だけ。マージ済みの PR は閉じない
+   (マージの経路が先に動き、Run の結果を上書きしない)。人が作った PR、束縛の無い PR、人が閉じた PR は触らない。kivra はマージしない、は変えない。
+3. **順序は GitHub が先**: 閉じる → Run を取り消す。閉じられなければ Run は取り消さず(`AWAITING_PR_CLOSE`)、次の周期で PR を読み直して再試行する。
+   理由: 先に Run を取り消すと、`CANCELLED` の Run は周期の対象から外れるので、閉じる処理の再試行のために別の仕組み(未処理の一覧と別の worker)が要る。
+   GitHub を先にすれば、既存の周期と lease の中で再試行でき、「Run は取り消されたのに PR が開いたまま」を作らない。閉じる書き込みは、閉じ済みの PR に
+   もう一度送っても害が無い。結果が不明なものは、次の周期の読み直しで閉じ済みかどうかが分かる。
+4. **コメントは 1 回**: 閉じた後に固定の文(Run ID だけを含み、依頼文や変更は含まない)を 1 回だけ付ける。結果が不明なコメントは「付けた」として
+   扱い、二度と付けない(重複より欠落を選ぶ)。コメントの失敗では Run を止めない。
+5. **上限**: 閉じる試行は 1 つの Run につき 5 回。使い切ったら PR を開いたまま Run を取り消す(この追補の前と同じ)。続く拒否(権限など)で
+   Run が待ち続けることを防ぐ。
+6. **記録**: 監査に `PR_ABANDON_CLOSE_ATTEMPTED` / `PR_ABANDON_CLOSED` / `PR_ABANDON_COMMENTED` / `PR_ABANDON_CLOSE_GAVE_UP`(PR 番号と固定コードだけ)。
+   これらは Run の行を更新しない(期限の起点を動かさない)。ブランチは消さない。
+7. **書き込みの口は分ける**: 閉じる呼び出し(`PATCH /pulls/{n}`、`state=closed`)は `GitHubPort` に足さず、専用の `PrClosePort` に置く。
+   `GitHubPort` は「close / update / merge / force / delete の操作を持たない」ことをリフレクションのテストで固定しており、`update-branch` も同じ理由で
+   `PrBranchPort` に分けている。コメントは既存の `GitHubPort.createPullRequestComment` を使う。
+
+### 危険と対策
+
+- **人がレビュー中の PR を閉じうる**: 期限は Run の最終更新から数えるので、人がコメントやレビューをしていても閉じる。対策: 既定は無効、期限は
+  環境変数で延ばせる。閉じた PR は人が再オープンでき、ブランチも残る(ただし Run は取り消し済みで、kivra は再オープンした PR を追わない)。
+- **作り直しのループ・費用**: この追補は Run を作り直さない。続きは人か Order・オートパイロットの計画が新しい Run として決める。LLM の費用は増えない。
+- **書き込みの誤り**: 閉じる対象は束縛と作者で二重に確かめる。応答は PR 番号と `closed` を確かめ、違えば失敗として再試行する。
+
+### 結果(追補)
+
+- フラグ有効時、期限切れの Run は、PR を閉じて(コメント付き)から `CANCELLED` になる。運用手順は runbook §4.3a。
+
+## 追補(2026-11-20): マージ後の追加コミットは、Run に記録した head の祖先なら完了を妨げない
+
+### 背景
+
+マージ前に人が PR のブランチへ commit を積むと、PR の最終 head は Run に記録した head と違う。認証器(`PrMergeVerifier`)は
+head の完全一致を求めるので、`MERGE_NOT_VERIFIED code=HEAD_SHA_MISMATCH` で待機が続き、Run は `COMPLETED` にならない。
+実例: Run 01M7T5PRSNTXZE5AJ8D4PJ11WD(PR #581、マージ commit 6d1fed9c)、および PR #529 の古い Run。依存するタスクは塞がったまま。
+
+### 決定(追補)
+
+1. **許すもの**: PR がマージ済みで、記録した head(束縛の head)が、マージ時の PR の head の**祖先**のとき(ブランチは前にだけ進んだ)。
+   GitHub の compare API `GET /compare/{記録した head}...{最終 head}` の `behind_by` が 0 であることで確かめる(記録した head が最終 head に
+   含まれる)。リポジトリ、PR 番号、node id、base、作者(App の bot)の照合は従来どおり。
+2. **許さないもの**: 記録した head が最終 head の祖先でないもの(履歴の書き換え、force-push で記録した commit が消えた、別のブランチへの
+   リベース)。`behind_by` が 0 でない、compare が 404 の定まった答え、形式の不正は、従来どおり `HEAD_SHA_MISMATCH` で待機する。
+   PR が開いているときは、head が動いていても祖先の確認をしない(マージ前の head の変化は従来どおり拒否する)。
+3. **不確かなら閉じる**: compare の一時的な失敗(認証、権限、レート制限、5xx、通信、結果不明)は `AWAITING_MERGE_VERIFICATION` で待ち、
+   次の tick で再試行する。完了はしない。
+4. **記録**: 完了した Run の `RUN_TRANSITION` 監査の payload に `extraCommitsAfterBinding: true` と `mergedHeadSha` を入れる。
+   ログは `run completed with extra commits after the binding` の情報行。`completion_merge_sha` の意味は変えない(マージ commit の SHA)。
+5. **判定の置き場**: 祖先の確認は認証器の実装(`GitHubPrMergeAuthority`)が行い、`ObservedPullRequest.recordedHeadIsAncestor` で報告する。
+   既定は `false`(確認していない、の意味)なので、コアの照合は head が動いたら拒否する。`VerifiedPrMerge.headSha` は記録した head のまま。
+   マージ時の head は `mergedHeadSha` に入る。DB の完了照合(`headSha` が束縛の head と一致すること)は変えない。
+
+### 危険と対策
+
+- **人が積んだ commit の中身は kivra が見ていない**: マージ自体が人の承認に当たる(GitHub 上でマージしたのは人)。kivra は差分を検査せず、
+  PR の作者(App の bot)と束縛の照合だけを続ける。記録した head を含むことは、Run の作業が最終 head に残っていることを示すが、
+  追加の commit が中身を変えていないことは示さない。運用者は監査の `extraCommitsAfterBinding` で該当 Run を確認できる。
+- **記録した head の祖先でも、PR の内容が別物になりうる**: 追加の commit が既存の変更を打ち消す場合も祖先の判定は通る。
+  これは許す。拒否すると人の正当なレビュー後の修正が完了できなくなるため。
+- **compare の誤答**: 応答の `behind_by` が 0 のときだけ祖先と見なす(整数でない値、符号、文字列は形式の不正として拒否)。
+  `ahead_by` は見ない(記録した head と最終 head が同じでないことは、呼び出し前に確かめている)。
+

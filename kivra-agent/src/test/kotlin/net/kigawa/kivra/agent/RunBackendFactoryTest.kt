@@ -14,6 +14,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.agent.docker.DockerRunBackend
 import net.kigawa.kivra.agent.k8s.FakeKubeApi
+import net.kigawa.kivra.agent.k8s.JobRef
 import net.kigawa.kivra.agent.k8s.HttpKubeApi
 import net.kigawa.kivra.agent.k8s.K8S_ATTEMPT_ID
 import net.kigawa.kivra.agent.k8s.K8S_IMAGE
@@ -135,6 +136,19 @@ class RunBackendFactoryTest {
         }
         assertEquals("$K8S_PROXY/anthropic/repo-a", env["ANTHROPIC_BASE_URL"])
         assertEquals(K8sNames.ownerLabel("kivra-agent-pc1"), config.realExecutor!!.k8s!!.ownerLabel)
+    }
+
+    /** A process that was killed in a run leaves its Job. The next process removes it at start, before any attempt is claimed. */
+    @Test
+    fun theStartRemovesTheJobsThatAPreviousProcessLeft() {
+        val api = FakeKubeApi()
+        api.jobs = { listOf(JobRef("job-left", "RUN-OLD")) }
+        val client = KivraAgentClient(fakeKivraHttp(synchronizedList()) { Canned(204) }, KIVRA_URL, FixedTokens())
+
+        executorFor(k8sConfig(), client, kubeApi = { api }, pollMillis = 5)
+
+        assertEquals(listOf("job-left"), api.deleted.toList())
+        assertEquals(0, api.created.size)
     }
 
     private fun attempt() = ClaimedAttempt(

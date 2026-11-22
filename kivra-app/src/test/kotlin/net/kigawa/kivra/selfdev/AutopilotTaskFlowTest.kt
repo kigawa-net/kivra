@@ -1,12 +1,17 @@
 package net.kigawa.kivra.selfdev
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import java.math.BigDecimal
 import java.time.Duration
 import java.time.LocalDate
 import kotlinx.coroutines.runBlocking
+import org.slf4j.LoggerFactory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import net.kigawa.kivra.core.RunId
@@ -22,6 +27,14 @@ import net.kigawa.kivra.db.SelfDevSubmitResult
 import net.kigawa.kivra.db.SelfDevTask
 import net.kigawa.kivra.db.TaskTransition
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.github.GitHubFailureKind
+import net.kigawa.kivra.github.GitHubPort
+import net.kigawa.kivra.github.GitHubResult
+import net.kigawa.kivra.github.RepoRef
+import net.kigawa.kivra.github.RepoTree
+import net.kigawa.kivra.github.TreeEntry
+import net.kigawa.kivra.github.TreeEntryType
+import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.execUpdate
 import net.kigawa.kivra.modelgateway.BudgetController
 import net.kigawa.kivra.modelgateway.BudgetLimit
@@ -110,18 +123,25 @@ class AutopilotTaskFlowTest {
             ledger = net.kigawa.kivra.db.DbRequestLedger(db.database),
         )
 
-        fun planner(approval: AutopilotApproval = AutopilotApproval.REQUIRED) = AutopilotPlanner(
+        fun planner(approval: AutopilotApproval = AutopilotApproval.REQUIRED, repoSizes: PlannerRepoFiles? = null) = AutopilotPlanner(
             operations = ops,
             gateway = gateway,
             config = PlannerConfig(budgetScopes = listOf("tenant"), autopilot = autopilot(approval)),
+            repoSizes = repoSizes,
         )
 
-        fun dispatcher(maxActive: Int = 5, budget: Boolean = true, maxPendingPrs: Int = 3) = AutopilotDispatcher(
+        fun dispatcher(
+            maxActive: Int = 5,
+            budget: Boolean = true,
+            maxPendingPrs: Int = 3,
+            clock: java.time.Clock = java.time.Clock.systemUTC(),
+        ) = AutopilotDispatcher(
             database = db.database,
             runs = db.runs,
             config = autopilot(AutopilotApproval.REQUIRED, maxPendingPrs = maxPendingPrs),
             maxActiveSelfDev = maxActive,
             budgetAllows = { budget },
+            clock = clock,
         )
 
         /** Every task of these tests belongs to one project (ADR 0022 PR-F: a task without one is refused). */
@@ -145,6 +165,43 @@ class AutopilotTaskFlowTest {
 
     private fun task(title: String, paths: String = "\"docs/a.md\"", size: String = "S", deps: String = "[]") =
         """{"title":"$title","body":"body of $title","targetPaths":[$paths],"sizeEstimate":"$size","dependsOn":$deps}"""
+
+    /** Lists [entries] as the base tree, or fails the listing when [entries] is null. Every other GitHub call is the shared fake's. */
+    private class ListedTree(private val entries: List<TreeEntry>?) : GitHubPort by FakeGitHub() {
+        override suspend fun listTree(repo: RepoRef, ref: String): GitHubResult<RepoTree> =
+            entries?.let { GitHubResult.Success(RepoTree("a".repeat(40), it, truncated = false)) }
+                ?: GitHubResult.Failure(GitHubFailureKind.TREE_TRUNCATED, GitHubFailureKind.TREE_TRUNCATED.code)
+    }
+
+    private val bigAndSmall = listOf(
+        TreeEntry("docs/big.md", TreeEntryType.BLOB, "100644", 300L * 1024),
+        TreeEntry("docs/small.md", TreeEntryType.BLOB, "100644", 1024L),
+    )
+
+    @Test
+    fun aPlanThatNamesAnExistingFileOverTheLimitIsRefusedAndTheFlowAsksForAnotherPlan() = TestDb().use { db ->
+        // The first answer names the large file: the check refuses it before anything is stored, and the second answer is planned.
+        val h = Harness(db, listOf(plan(task("Big", paths = "\"docs/big.md\"")), plan(task("Small", paths = "\"docs/small.md\""))))
+        val root = h.submitRoot()
+        val sizes = PlannerRepoFiles(ListedTree(bigAndSmall), RepoRef("kigawa-net", "kivra"), "main")
+
+        val attempt = runBlocking { h.planner(repoSizes = sizes).planTask(root.taskId) }
+
+        assertEquals(PlanAttempt.Proposed(taskCount = 1, queuedCount = 0), attempt)
+        assertEquals(2, h.provider.calls)
+        assertEquals(listOf("Small"), h.planned(root.taskId).map { it.title })
+    }
+
+    @Test
+    fun aPlanIsNotRefusedBySizeWhenTheTreeCannotBeRead() = TestDb().use { db ->
+        // Fail-open, as the Planner's file list: the write-time PatchPolicy still checks the change.
+        val h = Harness(db, listOf(plan(task("Big", paths = "\"docs/big.md\""))))
+        val root = h.submitRoot()
+        val sizes = PlannerRepoFiles(ListedTree(null), RepoRef("kigawa-net", "kivra"), "main")
+
+        assertEquals(PlanAttempt.Proposed(taskCount = 1, queuedCount = 0), runBlocking { h.planner(repoSizes = sizes).planTask(root.taskId) })
+        assertEquals(1, h.provider.calls)
+    }
 
     @Test
     fun plannerWritesPlannedTasksAndTheRootWaitsForApproval() = TestDb().use { db ->
@@ -272,6 +329,28 @@ class AutopilotTaskFlowTest {
     }
 
     @Test
+    fun anAutomaticallyReleasedRunCancelsItsTaskAndCountsTowardTheBreakerButAnOperatorReleaseDoesNot() {
+        for ((reason, counts) in listOf("AUTO_RELEASED_NEEDS_HUMAN" to 1, "AUTO_RELEASED_ORPHAN" to 1, "OPERATOR_RELEASED" to 0)) {
+            TestDb().use { db ->
+                val h = Harness(db, listOf(plan(task("Docs"))))
+                val root = h.submitRoot()
+                runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+                h.dispatcher().tick()
+                val child = h.planned(root.taskId).single()
+                transaction(db.database) {
+                    execUpdate("UPDATE development_runs SET state = 'CANCELLED', state_reason = ? WHERE run_id = ?", reason, child.runId!!)
+                }
+                h.dispatcher().tick()
+
+                val after = h.ops.task(child.taskId)!!
+                assertEquals(TaskState.CANCELLED, after.state, reason)
+                assertEquals(AutopilotReason.RUN_RELEASED, after.stateReason, reason)
+                assertEquals(counts, h.control.read().consecutiveFailures, reason)
+            }
+        }
+    }
+
+    @Test
     fun thePendingPullRequestLimitBlocksAndClearsTheTask() = TestDb().use { db ->
         val h = Harness(db, listOf(plan(task("Docs"))))
         val root = h.submitRoot()
@@ -334,11 +413,30 @@ class AutopilotTaskFlowTest {
         runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
         h.dispatcher().tick()
         val child = h.planned(root.taskId).single()
-        PlanTaskAutoScopeGuard(h.ops).settle(RunId(child.runId!!))
+        val verdict = AutoScopeVerdict.OutOfScope(paths = 1, lines = 201, reason = AutoScopeReason.LINE_COUNT)
+        val events = captureScopeLogs { PlanTaskAutoScopeGuard(h.ops).settle(RunId(child.runId!!), verdict) }
 
         val after = h.ops.task(child.taskId)!!
         assertEquals(TaskState.PENDING_APPROVAL, after.state)
         assertEquals(AutopilotReason.AUTO_SCOPE_EXCEEDED, after.stateReason)
+        // Fixed words and counts only: the run id, the cause code, the path count and the line count.
+        val line = events.single { it.formattedMessage.startsWith("autopilot scope exceeded") }.formattedMessage
+        assertEquals(
+            "autopilot scope exceeded: runId=${child.runId} state=PENDING_APPROVAL reason=AUTO_SCOPE_EXCEEDED " +
+                "cause=LINE_COUNT paths=1 lines=201",
+            line,
+        )
+    }
+
+    private fun captureScopeLogs(block: () -> Unit): List<ILoggingEvent> {
+        val logger = LoggerFactory.getLogger(PlanTaskAutoScopeGuard::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start(); logger.addAppender(it) }
+        try {
+            block()
+        } finally {
+            logger.detachAppender(appender)
+        }
+        return appender.list.toList()
     }
 
     @Test
@@ -355,10 +453,19 @@ class AutopilotTaskFlowTest {
         val inside = PatchSet(listOf(Write("kivra-app/src/main/kotlin/x.kt", "x\n")), "summary")
         val denied = PatchSet(listOf(Write("kivra-app/src/main/kotlin/net/kigawa/kivra/auth/Login.kt", "x\n")), "summary")
 
-        assertEquals(AutoScopeVerdict.InScope, PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, inside) { null })
-        assertEquals(AutoScopeVerdict.OutOfScope(1, 1), PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, denied) { null })
+        assertEquals(
+            AutoScopeVerdict.InScope,
+            PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, inside, { null }, { null }),
+        )
+        assertEquals(
+            AutoScopeVerdict.OutOfScope(1, 1, AutoScopeReason.DENYLIST),
+            PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.FULL).check(runId, denied, { null }, { null }),
+        )
         // The same Run under the stage 2 rule is out of scope: the path is not docs, test sources or README.
-        assertEquals(AutoScopeVerdict.OutOfScope(1, 1), PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.AUTO).check(runId, inside) { null })
+        assertEquals(
+            AutoScopeVerdict.OutOfScope(1, 1, AutoScopeReason.PATH_SCOPE),
+            PlanTaskAutoScopeGuard(h.ops, AutopilotApproval.AUTO).check(runId, inside, { null }, { null }),
+        )
     }
 
     @Test
@@ -502,5 +609,157 @@ class AutopilotTaskFlowTest {
         val failed = h.ops.task(child.taskId)!!
         val requeue = h.ops.moveTask(child.taskId, failed.version, TaskState.QUEUED, AutopilotReason.OPERATOR_REQUEUED)
         assertEquals(TaskTransition.Refused(TransitionRefusal.GUARD_FAILED), requeue)
+    }
+
+    // ---- the waiting summary and the operator's requeue / skip (ADR 0011 addendum 2026-11-18) ----
+
+    private class StepClock(var now: java.time.Instant = java.time.Instant.parse("2026-11-18T00:00:00Z")) : java.time.Clock() {
+        override fun getZone(): java.time.ZoneId = java.time.ZoneOffset.UTC
+        override fun withZone(zone: java.time.ZoneId?): java.time.Clock = this
+        override fun instant(): java.time.Instant = now
+    }
+
+    private fun <T> capturingDispatcherLog(body: (() -> List<String>) -> T): T {
+        val logger = org.slf4j.LoggerFactory.getLogger(AutopilotDispatcher::class.java) as ch.qos.logback.classic.Logger
+        val appender = ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>().apply { start() }
+        logger.addAppender(appender)
+        try {
+            return body { appender.list.map { it.formattedMessage }.filter { it.startsWith("autopilot dispatch waiting") } }
+        } finally {
+            logger.detachAppender(appender)
+        }
+    }
+
+    /** Plans First and Second (Second depends on First), submits First, and fails its Run. Returns (First, Second) after the outcome. */
+    private fun Harness.firstFailed(d: AutopilotDispatcher): Pair<SelfDevTask, SelfDevTask> {
+        val root = submitRoot()
+        runBlocking { planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+        d.tick()
+        val byTitle = planned(root.taskId).associateBy { it.title }
+        val first = byTitle.getValue("First")
+        setRunState(first.runId!!, "FAILED")
+        d.tick()
+        return ops.task(first.taskId)!! to ops.task(byTitle.getValue("Second").taskId)!!
+    }
+
+    @Test
+    fun aTaskLeftWaitingIsSummarisedOnceWhenTheCountsChangeAndAgainAfterTenMinutes() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("First"), task("Second", deps = "[1]"))))
+        val clock = StepClock()
+        val d = h.dispatcher(clock = clock)
+        capturingDispatcherLog { lines ->
+            val root = h.submitRoot()
+            runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+            d.tick()
+            assertEquals(
+                listOf("autopilot dispatch waiting: dependencyPending=1 dependencyFailed=0 orderHeld=0 siblingInFlight=0 refused=0"),
+                lines(),
+            )
+            d.tick()
+            assertEquals(1, lines().size, "the same counts are not logged again within ten minutes")
+
+            val first = h.planned(root.taskId).single { it.title == "First" }
+            h.setRunState(first.runId!!, "FAILED")
+            d.tick()
+            assertEquals("autopilot dispatch waiting: dependencyPending=0 dependencyFailed=1 orderHeld=0 siblingInFlight=0 refused=0", lines().last())
+            d.tick()
+            assertEquals(2, lines().size)
+            clock.now = clock.now.plus(java.time.Duration.ofMinutes(10))
+            d.tick()
+            assertEquals(3, lines().size, "a lasting wait is logged again after ten minutes")
+            // Counts and fixed words only: no task id, title or body.
+            assertTrue(lines().none { it.contains(first.taskId) || it.contains("Second") || it.contains("First") })
+        }
+    }
+
+    @Test
+    fun anOrderHeldTaskIsCountedAsHeld() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("Docs"))))
+        val d = AutopilotDispatcher(
+            database = db.database, runs = db.runs, config = autopilot(AutopilotApproval.REQUIRED), maxActiveSelfDev = 5,
+            budgetAllows = { true }, orderGate = { false },
+        )
+        capturingDispatcherLog { lines ->
+            val root = h.submitRoot()
+            runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+            d.tick()
+            assertEquals(TaskState.QUEUED, h.planned(root.taskId).single().state)
+            assertEquals(listOf("autopilot dispatch waiting: dependencyPending=0 dependencyFailed=0 orderHeld=1 siblingInFlight=0 refused=0"), lines())
+        }
+    }
+
+    @Test
+    fun aRequeuedTaskGetsANewKeyAndExactlyOneNewRunEachTime() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("First"), task("Second", deps = "[1]"))))
+        val d = h.dispatcher()
+        val (first, _) = h.firstFailed(d)
+        assertEquals(TaskState.FAILED, first.state)
+        val failedRun = first.runId!!
+
+        val requeued = assertIs<TaskTransition.Moved>(h.ops.requeueTask(first.taskId, first.version)).row
+        assertEquals(TaskState.QUEUED, requeued.state)
+        assertEquals(AutopilotReason.OPERATOR_REQUEUED, requeued.stateReason)
+        assertEquals("ap:${first.taskId}:a1", requeued.idempotencyKey)
+        assertNull(requeued.runId)
+        // A second request with the same version writes nothing.
+        assertEquals(TaskTransition.StaleVersion, h.ops.requeueTask(first.taskId, first.version))
+
+        d.tick()
+        d.tick()
+        val again = h.ops.task(first.taskId)!!
+        assertEquals(TaskState.SUBMITTED, again.state)
+        assertTrue(again.runId != null && again.runId != failedRun)
+        val runsAfterOne = transaction(db.database) { execQuery("SELECT COUNT(*) FROM development_runs") { it.getInt(1) }.single() }
+        assertEquals(2, runsAfterOne, "one Run per requeue, however many passes")
+
+        // A second failure and a second requeue: another key, another Run.
+        h.setRunState(again.runId!!, "FAILED")
+        d.tick()
+        val failedTwice = h.ops.task(first.taskId)!!
+        assertEquals(TaskState.FAILED, failedTwice.state)
+        assertEquals("ap:${first.taskId}:a2", assertIs<TaskTransition.Moved>(h.ops.requeueTask(first.taskId, failedTwice.version)).row.idempotencyKey)
+        d.tick()
+        val third = h.ops.task(first.taskId)!!.runId
+        assertTrue(third != null && third != again.runId && third != failedRun)
+    }
+
+    @Test
+    fun requeueIsRefusedForATaskThatDidNotFailAPlanRootAndASettledPlan() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("First"), task("Second", deps = "[1]"))))
+        val d = h.dispatcher()
+        val (first, second) = h.firstFailed(d)
+        assertEquals(TaskState.QUEUED, second.state)
+        assertIs<TaskTransition.Refused>(h.ops.requeueTask(second.taskId, second.version))
+        val root = h.ops.task(first.parentTaskId!!)!!
+        assertIs<TaskTransition.Refused>(h.ops.requeueTask(root.taskId, root.version))
+
+        // The operator skips the waiting task: the plan has ended (FAILED + SKIPPED) and settles STOPPED. The FAILED task is then not reopened.
+        assertIs<TaskTransition.Moved>(h.ops.skipTask(second.taskId, second.version))
+        assertEquals(TaskState.STOPPED, h.ops.task(root.taskId)!!.state)
+        val failed = h.ops.task(first.taskId)!!
+        assertIs<TaskTransition.Refused>(h.ops.requeueTask(failed.taskId, failed.version))
+        assertEquals(TaskState.FAILED, h.ops.task(first.taskId)!!.state)
+    }
+
+    @Test
+    fun skipFollowsTheTransitionTable() = TestDb().use { db ->
+        val h = Harness(db, listOf(plan(task("First"), task("Second", deps = "[1]"))))
+        val d = h.dispatcher()
+        val root = h.submitRoot()
+        runBlocking { h.planner(AutopilotApproval.AUTO).planTask(root.taskId) }
+        d.tick()
+        val byTitle = h.planned(root.taskId).associateBy { it.title }
+        val submitted = h.ops.task(byTitle.getValue("First").taskId)!!
+        // SUBMITTED has no edge to SKIPPED: refused, nothing written.
+        assertIs<TaskTransition.Refused>(h.ops.skipTask(submitted.taskId, submitted.version))
+        assertEquals(TaskState.SUBMITTED, h.ops.task(submitted.taskId)!!.state)
+        // A FAILED task and a QUEUED task are skipped (both edges are in the table); the plan then settles.
+        h.setRunState(submitted.runId!!, "FAILED")
+        d.tick()
+        val failed = h.ops.task(submitted.taskId)!!
+        assertEquals(AutopilotReason.OPERATOR_SKIPPED, assertIs<TaskTransition.Moved>(h.ops.skipTask(failed.taskId, failed.version)).row.stateReason)
+        val queued = h.ops.task(byTitle.getValue("Second").taskId)!!
+        assertIs<TaskTransition.Moved>(h.ops.skipTask(queued.taskId, queued.version))
+        assertEquals(TaskState.STOPPED, h.ops.task(root.taskId)!!.state)
     }
 }

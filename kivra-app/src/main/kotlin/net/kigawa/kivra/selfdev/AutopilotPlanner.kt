@@ -121,6 +121,11 @@ class AutopilotPlanner(
     private val nonceSource: () -> String = PlannerPrompt::newNonce,
     /** The repository file list (Issue #293). Null when it is disabled: the prompts are then the ones used before. */
     private val repoFiles: PlannerRepoFiles? = null,
+    /**
+     * The sizes of the base tree's files, for the pre-check of the target paths (ADR 0011 section 3, 追補 2026-11-19). Independent of
+     * [repoFiles]: the check runs also when the list is off. Null: the check is not made.
+     */
+    private val repoSizes: PlannerRepoFiles? = null,
     /** The shadow record of the self-development memory (ADR 0016 P1). Written after the plan or the block is stored. Never read. */
     private val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
     /** The suppression shadow (ADR 0016 P3). Counts after a plan is stored; never changes the plan. */
@@ -140,13 +145,16 @@ class AutopilotPlanner(
 
         // Read once per claim. A failed read gives null, and the Planner works without the list (never a stop).
         val repoList = repoFiles?.list()
-        var rejectedPath: String? = null
+        // Read once per claim too. A failed read gives null, and the check of the target paths is not made (see PlanValidator.isTooLargeToChange).
+        val fileSizes = repoSizes?.fileSizes()
+        var retryDetail: String? = null
         var attempt = 1
         while (true) {
             val response = try {
-                val base = request(fence, attempt, claim.title, claim.body, repoList, rejectedPath)
+                val base = request(fence, attempt, claim.title, claim.body, repoList, retryDetail)
                 // The classifier reads the claim's title and body only (never the repository file list).
                 val routed = router?.let { r -> r.apply(base, r.decide("selfdev.planner", claim.title + "\n" + claim.body, base)) } ?: base
+                logger.info("planner call started: taskId={} attempt={}", taskId, attempt)
                 gateway.invoke(routed)
             } catch (e: CancellationException) {
                 throw e
@@ -161,7 +169,7 @@ class AutopilotPlanner(
 
             val text = response.message.parts.filterIsInstance<Part.Text>().joinToString("") { it.text }
             val digest = sha256Hex(text)
-            when (val check = PlanValidator.validate(text, config.autopilot)) {
+            when (val check = PlanValidator.validate(text, config.autopilot, fileSizes)) {
                 is PlanCheck.Valid -> return commit(taskId, fence, response, digest, check)
                 is PlanCheck.Invalid -> {
                     logger.warn(
@@ -171,8 +179,7 @@ class AutopilotPlanner(
                     // A cut answer would be cut the same way again, so it is not re-sent (as in LlmDeveloper).
                     val retry = attempt < PlannerConfig.MAX_ATTEMPTS && response.finishReason != FinishReason.LENGTH
                     if (!retry) return block(fence, AutopilotReason.PLAN_INVALID)
-                    // Only the path refusal is fed back, and only with the file list enabled (Issue #293).
-                    rejectedPath = if (repoFiles != null && check.reason == PlanRejectReason.PATH_NOT_ALLOWED) check.path else null
+                    retryDetail = retryDetailOf(check)
                     attempt++
                 }
             }
@@ -199,6 +206,19 @@ class AutopilotPlanner(
         }
     }
 
+    /**
+     * The extra note for the next attempt, for the two refusals that naming another path can fix: a path outside the allowlist (only with
+     * the file list enabled, Issue #293), and an existing file that is too large to change (ADR 0011 section 3). Null for the others.
+     */
+    private fun retryDetailOf(check: PlanCheck.Invalid): String? {
+        val path = check.path ?: return null
+        return when (check.reason) {
+            PlanRejectReason.PATH_NOT_ALLOWED -> if (repoFiles != null) PlannerPrompt.pathRetryNote(path) else null
+            PlanRejectReason.FILE_TOO_LARGE -> PlannerPrompt.fileTooLargeRetryNote(path)
+            else -> null
+        }
+    }
+
     /** Blocks the task with a planning-stage reason, fenced by the claim. */
     private fun block(fence: PlanFence, reason: AutopilotReason): PlanAttempt {
         return if (operations.blockPlanning(fence, reason)) {
@@ -217,7 +237,7 @@ class AutopilotPlanner(
         title: String,
         body: String?,
         repoList: String?,
-        rejectedPath: String?,
+        retryDetail: String?,
     ): ModelRequest {
         val nonce = (1..PlannerPrompt.MAX_NONCE_ATTEMPTS)
             .asSequence()
@@ -225,8 +245,8 @@ class AutopilotPlanner(
             .firstOrNull { PlannerPrompt.user(title, body, it, repoList) != null }
             ?: throw IllegalStateException("no usable nonce for the planner prompt")
         val user = checkNotNull(PlannerPrompt.user(title, body, nonce, repoList))
-        val retryNote = if (rejectedPath != null) {
-            PlannerPrompt.RETRY_NOTE + "\n" + PlannerPrompt.pathRetryNote(rejectedPath)
+        val retryNote = if (retryDetail != null) {
+            PlannerPrompt.RETRY_NOTE + "\n" + retryDetail
         } else {
             PlannerPrompt.RETRY_NOTE
         }

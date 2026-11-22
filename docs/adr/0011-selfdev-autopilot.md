@@ -221,7 +221,7 @@ PR E で、§2.9 の PR C への申し送り(1)〜(3)を実装した。V19 の�
 - **投入の直前の Goal の検査**: `QUEUED → SUBMITTING` の CAS と同じトランザクションで、Goal の行をロック(`SELECT ... FOR UPDATE`。中止と一時停止も同じ行を更新する)して読み直す。Goal が `TASKS_QUEUED` / `RUNNING` でなければ投入しない(`GOAL_NOT_DISPATCHABLE`、ログには ID と理由コードだけ)。`SUBMITTING` のまま残ったタスクを再開するときも、同じ検査を行う(ロックは短い。その後に Run を作るまでの間は、§5.4 の「投入中のものには触れない」と同じ扱い)。
 - **中止と投入の競合**: 中止は、未投入のタスク(`QUEUED`)の版を進めるので、Dispatcher の CAS が失敗する。Goal の検査は、一時停止のように、タスクの版を進めない操作への防御である。
 - **投入の主体**: §2.6 の順序(タスク、Goal の承認者、Goal の作成者)。段階 2 の自動承認のタスクは、運用者が計画を承認していればその承認者、していなければ Goal の作成者の名で投入される。
-- **全タスクが終端になった Goal**: `RUNNING` / `TASKS_QUEUED` / `BLOCKED` から、全タスクが `COMPLETED` / `FAILED` / `SKIPPED` になったとき、全部が `COMPLETED` なら `DONE`(`RUNNING` のみ、従来どおり)、そうでなければ `STOPPED` に `TASKS_INCOMPLETE` の理由で進める。`STOPPED` の辺の理由に `TASKS_INCOMPLETE` を足した(表と網羅テストを更新)。`FAILED` と `CANCELLED` は、§2.8 のとおり運用者が再投入できる状態だが、Goal を終わらせる判定では終端として数える(再投入の HTTP 操作は無く、Goal が `STOPPED` になった後に自動で投入されることは無い)。
+- **全タスクが終端になった Goal**: `RUNNING` / `TASKS_QUEUED` / `BLOCKED` から、全タスクが `COMPLETED` / `FAILED` / `SKIPPED` になったとき、全部が `COMPLETED` なら `DONE`(`RUNNING` のみ、従来どおり)、そうでなければ `STOPPED` に `TASKS_INCOMPLETE` の理由で進める。`STOPPED` の辺の理由に `TASKS_INCOMPLETE` を足した(表と網羅テストを更新)。`FAILED` と `CANCELLED` は、§2.8 のとおり運用者が再投入できる状態だが、Goal を終わらせる判定では終端として数える(Goal が `STOPPED` になった後に自動で投入されることは無い。再投入の HTTP 操作は 2026-11-18 の追補で足したが、決着済みの計画のタスクは再投入できない)。
 - **終端化のしかた**: `STOPPED` を「中止」として使うのは、既存の状態の中で表すため(マイグレーションは足さない。`state_reason` は `VARCHAR(64)` で、新しい理由を足すのは Kotlin の列挙だけ)。
 - **残る点(未決)**: 中止された Goal の `SUBMITTING` のタスクは、そのまま残る(§5.4)。運用者が見て判断する。
 
@@ -335,7 +335,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 
 - **自動で解消するもの**(滞留、日次上限、予算の期間): 次の tick で再評価される。運用者の操作は要らない。
 - **手動のもの**(`CIRCUIT_OPEN`、`AUTO_SCOPE_EXCEEDED`): 運用者が理由を確認し、再開する。再開は連続失敗の計数を 0 に戻す(`CIRCUIT_OPEN` のとき)。原因が直っていないまま再開しても、再び 3 件で止まる。`AUTO_SCOPE_EXCEEDED` の再開は、そのタスクを運用者が承認し直すこと(§2.8d)。承認すると、タスクは新しい投入キーで投入され、Goal は再開する。
-- **失敗したタスク**(`FAILED` / `CANCELLED`): 自動で再投入しない。運用者が `再投入`(`QUEUED` に戻す)か `SKIPPED` を選ぶ。自動の再投入は、同じ失敗の繰り返しを招くため採らない。
+- **失敗したタスク**(`FAILED` / `CANCELLED`): 自動で再投入しない。運用者が `再投入`(`QUEUED` に戻す。`POST /api/selfdev/tasks/{id}/requeue`)か `SKIPPED`(`POST /api/selfdev/tasks/{id}/reject`)を選ぶ。自動の再投入は、同じ失敗の繰り返しを招くため採らない(2026-11-18 の追補で HTTP の操作を実装した)。
 - **UNKNOWN の Run**: ADR 0009 の運用者の解放(`release` または `release-unbound-pr`)を使う。解放後、タスクは `CANCELLED` になり、運用者が上の再投入を選ぶ。
 - **Goal の中止**: 残りのタスクを `SKIPPED` にし、既に作られた PR はそのまま残す。PR の扱い(閉じる、残す)は人が決める。kivra は PR を閉じず、マージもしない(ADR 0008、ADR 0009)。
 
@@ -357,7 +357,7 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 
 段階 2 の自動の判定は計画の見積りで行うが、**実際の差分**で再検査する。Run が `PULL_REQUEST` に入ったとき、変更されたパスが段階 2 の範囲を超えていたら、Goal を `BLOCKED(AUTO_SCOPE_EXCEEDED)` にし、運用者に知らせる。PR は残し、マージは人が判断する。PatchPolicy は従来どおり最終ゲートである。
 
-実装(PR F、§2.8d): 再検査は、CLI 経路で PatchPolicy が受理した後、コミットの前に行う。範囲外なら、コミットも PR 作成もしない。Run は既存の `POLICY_REJECTED` で終え、タスクは `PENDING_APPROVAL`(理由 `AUTO_SCOPE_EXCEEDED`)へ、Goal は `BLOCKED`(同じ理由)へ戻す。範囲の判定の条件は、§6.1 の段階 2 と同じ(docs、kivra テストソース、README だけ。denylist に触れない)に加え、変更パスが 3 件以下、変更行が 200 行以下である。運用者が承認したタスクは再検査の対象外である。
+実装(PR F、§2.8d): 再検査は、CLI 経路で PatchPolicy が受理した後、コミットの前に行う。範囲外なら、コミットも PR 作成もしない。Run は既存の `POLICY_REJECTED` で終え、タスクは `PENDING_APPROVAL`(理由 `AUTO_SCOPE_EXCEEDED`)へ、Goal は `BLOCKED`(同じ理由)へ戻す。範囲の判定の条件は、§6.1 の段階 2 と同じ(docs、kivra テストソース、README だけ。denylist に触れない)に加え、変更パスが 3 件以下、変更行が 200 行以下である。変更行は、書き込みの旧内容との差分の追加行数と削除行数の和とする(追補 2026-11-19)。運用者が承認したタスクは再検査の対象外である。
 
 #### 6.3 昇格条件(暫定)
 
@@ -492,3 +492,157 @@ PR D(V19、HTTP、画面)で、本節の判断をした。いずれも §1 と �
 - 段階 2 の差分の再検査で、範囲外の変更が 1 件でも自動で PR になったとき。段階 2 を止め、判定の方法を見直す。
 - 費用の実測が、月次の割当ての 50% を大きく超えたとき。割当てと上限を見直す。
 - 計画の品質(マージされた率)が低い状態が続いたとき。Planner の入力と検証を見直す。
+
+## 追補(2026-11-18): 投入されない理由のログと、運用者の再投入・見送り
+
+### 背景
+
+dev で、`QUEUED` / `AUTO_APPROVED` のタスクが 6 件、何日も Run にならなかった。調べると、どれもガード(ブレーカー・PR 上限・予算・日次上限)の手前で止まっていた。
+
+- 5 件は、依存先が `FAILED`(または依存先の依存先が `QUEUED` のまま)。本文 §5.4 のとおり自動の再投入はしない。
+- 1 件は、order が期限切れで `PAUSED` の order のタスク。
+
+Dispatcher はこれらを何も書かずに飛ばす(`continue`)ので、ログが一切出ず、「動いていない」ように見えた。また、§5.4 の運用者の `再投入` には HTTP の操作が無かった。
+`見送り`(`skipTask`)は、遷移表に `QUEUED` / `FAILED` / `CANCELLED` → `SKIPPED` の辺があるのに、更新の条件が `PENDING_APPROVAL` に固定されていた。このため、後続を進める手段が Goal の中止しか無かった。
+
+### 決定(追補)
+
+**ユーザーの決定(2026-11-18)**: ログと再投入の API を足す。自動の再投入・自動の見送りは足さない(§5.4 のまま)。
+
+1. **待ちの要約のログ**: Dispatcher は、1 回の投入の処理で、次を数える。
+   - 依存先が未完了(`dependencyPending`)
+   - 依存先が `COMPLETED` 以外で終わった(`dependencyFailed`: `FAILED` / `CANCELLED` / `SKIPPED` / `STOPPED`)
+   - order が `ACTIVE` でない(`orderHeld`)
+   - 同じ計画の別タスクが投入中(`siblingInFlight`)
+   - そのほかの投入の拒否(`refused`)
+
+   件数が前回から変わったとき、または 10 分ごとに、`autopilot dispatch waiting: …` を 1 行出す。件数と固定の語だけで、タスクの ID・題名・本文は出さない。起動時には `autopilot dispatcher started` を 1 行出す。
+   兄弟の検査は、日次の枠を取る前に読み取りで行う(`beginSubmission` は従来どおり、親のロックの下で同じ検査をする)。
+2. **見送り**: `skipTask` の更新の条件を「検査した現在の状態」にした。遷移表(`AutopilotStates.kt`)にある辺(`PENDING_APPROVAL` / `QUEUED` / `FAILED` / `CANCELLED` → `SKIPPED`、理由 `OPERATOR_SKIPPED`)だけが通る。辺は足していない。HTTP は既存の `POST /api/selfdev/tasks/{id}/reject`(承認待ちの見送りと共通)。
+3. **再投入**: `POST /api/selfdev/tasks/{id}/requeue`。`FAILED` / `CANCELLED` → `QUEUED`(`OPERATOR_REQUEUED`。遷移表の既存の辺)。
+   - 認可・同一オリジンの検査・版の検査は承認と同じ。権限は `GOAL_WRITE` で、プロジェクトの範囲で検査し、AI の主体は 403。
+   - 監査行は `autopilot operator action: action=TASK_REQUEUED`。関数(`requeueAsOperator`)にしてあり、承認・見送りと同じく、ほかの入口と共有できる。
+   - 拒否する場合: 計画の親、計画が決着済み(`DONE` / `STOPPED`、`reopensUnderClosedPlan`)。
+   - **費用の多重化を防ぐ**:
+     - 版の CAS により、同じ版の 2 回目は何も書かない。
+     - 投入キーを `ap:<taskId>:a<attempts>`(承認のやり直しと同じ方式)に作り直す。`attempts` は投入のたびに増えるので、再投入 1 回につき Run は 1 つになり、同じ再投入の投入をやり直しても同じ Run が返る。
+     - 前の Run の結び付き(`run_id`)は外す。中断した投入を Dispatcher の既存の経路(`run_id IS NULL` の `SUBMITTING`)で拾うため。
+     - `approved_by` は変えない。再投入は承認ではなく、自動承認のタスクの範囲の検査(§6.2)もそのまま効く。
+4. **画面**: タスクの詳細に、`FAILED` / `CANCELLED` なら「再投入」、`QUEUED` / `FAILED` / `CANCELLED` なら「見送る」を出す。計画の親には出さない。権限は承認と同じ。
+   チャットの操作(ADR 0023)には、まだ足していない。
+
+### 結果(追補)
+
+- 投入されない理由が、件数としてログに出る。依存先の失敗で止まった計画は、運用者が再投入か見送りで進められる。運用手順は runbook §7.4。
+- 自動では進まない(§5.4 のまま)。依存先の失敗が続くと、運用者が操作するまで止まる(ログに `dependencyFailed` として出続ける)。
+
+## 追補(2026-11-19): 段階 2 の再検査の行数を差分で数える
+
+### 背景
+
+dev の Run 01M7QSJVDJPGNPAXRF0QZMTR04 が `AUTO_SCOPE_EXCEEDED` で `POLICY_REJECTED` になった。変更は 1 ファイルで、パス数は範囲内だった。原因は、§6.2 の行数が「書き込みの新内容の全行数」だったこと。大きいファイルへの小さな編集でも、全文の書き込みは全行数が上限 200 を超え、範囲外と判定された。また、runbook §7.4b は `paths=` と `lines=` がログに出ると書いていたが、実装は runId と固定文言だけを出していた。
+
+### 決定(追補)
+
+1. **変更行数の定義**: 書き込み 1 件の変更行数は、**旧内容との行の差分の、追加行数と削除行数の和**とする(`git diff --numstat` の `+` と `-` の和と同じ。行は `\n` で区切り、末尾の改行は行を増やさない)。変更の無い全文の書き込みは 0 行である。ファイル全体の和が 200 行以下なら範囲内。
+   - 行の差分は Myers の O((N+M)·D) の貪欲法で求め、距離 D が 200 を超えた時点で打ち切る(記憶は O(200))。
+2. **旧内容**: 旧内容は、Run が `PULL_REQUEST` の前に依拠する base commit(`base.headSha`)のファイルとする。CLI 経路で、リポジトリの読み取り(`RepoReader.readFile`)を使う。変更パスが 3 件以下のときだけ読み、それより多ければ読まない(範囲外のため)。
+3. **fail-closed(修正 #570)**: base tree に存在しない**新規ファイル**のみ新内容の全行数で数える。既存ファイルで次のどれかに該当する場合、削除行を過小評価しないよう変更行数を **201** として範囲外にする。
+   - 旧内容の読み取りが失敗した、または読み取り側の上限(1 MiB)や非 UTF-8 で除外された（symlink・submoduleを含む）
+   - 旧内容と新内容の合計が 2,000,000 文字を超える(差分の計算量の上限)
+   - 差分が 200 行を超えた
+   旧内容が取得できない既存ファイルと新規ファイルは base tree の存在情報で区別する。
+   削除は従来どおり、削除されるファイルのバイト数を上限とする(行数の上限として、常に全行数以上)。
+4. **理由の固定コード**: 範囲外の判定は、最初に失敗した規則を `AutoScopeReason` で返す。`PATH_COUNT`(パス数 > 3)、`DENYLIST`(denylist に触れる)、`PATH_SCOPE`(許可リストの外)、`LINE_COUNT`(変更行 > 200)。この順に判定する。
+5. **ログ**: `autopilot scope exceeded: runId=… state=PENDING_APPROVAL reason=AUTO_SCOPE_EXCEEDED cause=<理由> paths=<件数> lines=<行数>`。パス・内容・差分は出さない。
+
+### 結果(追補)
+
+- 小さな編集で大きなファイルを変えても、範囲内で通る。全文の書き込みで変更が大きい場合は、従来どおり範囲外になる。
+- 範囲の規則(docs・テストソース・README、denylist、3 パス以下、200 行以下)は変えない。変えたのは行数の数え方だけである。
+- 新規ファイルは新内容の全行数で数える。既存ファイルの旧内容取得失敗や計算上限超過は常に範囲外とし、短い新内容で大量削除を隠せないようにする(修正 #570)。
+- 運用手順は runbook §7.4b。
+
+
+## 追補(2026-11-19): 計画の検証で、大きすぎる既存ファイルを名指しした計画を拒否する
+
+### 背景
+
+dev の Run 01M7SHST… は、タスク「docs/runbook-selfdev.md に計画検証失敗時の確認手順を追記する」を実行して失敗した。runbook は約 430 KB あり、
+1 ファイル 200 KiB の上限(PatchPolicy の `maxFileBytes`、kivra-agent の `DiffLimits.maxWriteFileBytes`)を超える。変更は Write(全文)の形で
+書くため、CLI が出す変更は必ず `FILE_TOO_LARGE` で拒否された(過去にも同じ失敗がある)。Planner のプロンプトに「大きいファイルを対象にしない」
+とあったが、検査は無く、効いていなかった。CLI は走ってから落ちるので、費用も無駄になる。
+
+### 決定(追補)
+
+1. **検査の位置**: 計画の検証(`PlanValidator.validate`)の中。計画は保存されず、タスクも作られない。検査は、`targetPaths` の各パスに対して、
+   基底ツリーの既存の通常ファイルのサイズを見る。
+2. **上限**: `PatchPolicyDefaults.MAX_FILE_BYTES`(200 KiB = 204,800 バイト)。PatchPolicyConfig の既定値もこの定数を使う。定数は 1 箇所だけで定義する。
+   kivra-agent は kivra-core に依存しないため、`DiffLimits` は従来どおりの複製のままで、`CodingLimitsContractTest` が同じ値であることを確かめる。
+3. **サイズの出どころ**: Planner が既に使うリポジトリのツリー読み取り(`PlannerRepoFiles` の `listTree`、基底ブランチ、5 分キャッシュ)の、
+   通常ファイル(mode `100644` / `100755`)の `sizeBytes`。ファイル一覧の表示(`KIVRA_SELFDEV_PLANNER_REPO_TREE`)とは独立に、検査のために常に読む。
+   一覧の表示を切っても、検査は止まらない。
+4. **判定**: 既存ファイル(基底ツリーにあるパス)で、サイズが上限を**超える**とき(`>`)だけ拒否する。上限ちょうどは通る。denylist に触れるパスも検査する
+   (そのタスクは承認待ちになり、書き込みは PatchPolicy で同じく拒否されるため)。
+5. **新規ファイル**: 基底ツリーに無いパスは新規なので通す。サイズは無いものとして扱う。
+6. **取得失敗**: ツリーを読めなかった(切り詰め、GitHub の失敗、不明な結果、例外)ときは、検査をしないで計画を通す(fail-open)。一覧の取得失敗と
+   同じ方針で、計画を止めない。書き込みのときの PatchPolicy(`FILE_TOO_LARGE`、fail-closed)が常に働くので、大きいファイルは CLI の経路で止まる。
+   取得に成功した結果だけをキャッシュし、失敗はキャッシュしない。
+7. **理由コード**: `PlanRejectReason.FILE_TOO_LARGE`(固定のコード)。拒否した理由は計画全体(`PLAN_INVALID`)として既存の経路に乗る。パスは
+   Planner 自身の出力なので、再試行の指示文にだけ使う(ログには出さない)。
+8. **再試行**: 1 回目の拒否が `FILE_TOO_LARGE` のとき、2 回目のプロンプトに「そのファイルは 200 KB を超えていて、タスクでは変えられない。
+   別の小さいファイルに書く、または新しいファイルを作る」という指示を足す(従来の `PATH_NOT_ALLOWED` の再試行と同じ経路。Goal の本文は足さない)。
+9. **プロンプト**: 「大きいファイル」の指示を、200 KB(204,800 バイト)を超えるファイルは計画で名指しすると検査で拒否される、という規則に変えた。
+   200 KB 未満の大きいファイル(約 50 KB や 1,000 行)は、従来どおりタスクを分けるよう勧める。
+
+### 結果(追補)
+
+- 上限を超える既存ファイルを名指しした計画は、保存される前に拒否され、Planner は一度だけ、別のファイルを選ぶよう再試行する。CLI は走らない。
+- 検査が通るのは、上限以下の既存ファイル、新規ファイル、ツリーを読めなかった場合である。ツリーを読めなかった場合の大きいファイルは、従来どおり
+  CLI の経路の PatchPolicy で止まる(費用は戻らない)。
+- `PATH_NOT_ALLOWED` と `FILE_TOO_LARGE` の両方を、計画の検証の理由コードとして扱う。理由の列挙は、既存の固定リストに 1 つ足しただけである。
+- 運用の手順は runbook §7.2c。
+
+## 追補(2026-11-19): Planner のファイル一覧から、ゲートウェイの秘密検出に当たるパスを外す
+
+### 背景
+
+dev で、自己開発の計画が全て `BLOCKED(PLAN_CALL_FAILED)` になった。ログは `planner call failed: ... errorKind=POLICY_DENIED errorCode=SECRET_DETECTED
+sendState=NOT_SENT`。直前の `planner repo files: files=853 summarized=false bytes=64018 omittedUnsafe=0` から、ファイル一覧(§3 の
+`PlannerRepoFiles`、Issue #293)の中のパスが原因だと分かった。
+
+原因は 2 つの規則の食い違いである。
+
+- ゲートウェイは、依頼の本文のどこか 1 つでも `SecretScan`(`kivra-model-gateway`、既定の規則、認証情報は束縛しない)に当たると、依頼全体を
+  送らずに拒否する(`SECRET_DETECTED`)。`SecretScan` の候補は `[A-Za-z0-9_+/=-]{32,}` で、`/` を含むので、`docs/adr/` のようなディレクトリ部分が
+  ファイル名と 1 つの並びになる。拡張子の `.` の手前で切れ、英字と数字を両方含み、エントロピーが 4.0 以上なら当たる。語らしさの除外は無い。
+- `kivra-memory` の `SecretFilter` は、別の実装である。語らしい英小文字の長い並びを除外し、候補に `/` を含まない。記憶の保存と表示で使う。
+  原因の調査の初めは `SecretFilter` が使われていると考えたが、ゲートウェイは `SecretFilter` を使わない。
+
+`origin/main` のツリー(1,059 件)では、`SecretScan` の規則に当たるパスは 96 件あった(`docs/adr/` 11 件、`docs/design/` 7 件、
+`kivra-app/src/main/resources/db/migration/` の 57 件、`kivra-agent` の k8s パッケージ、`kivra-app` のテストのクラス名など)。
+一覧に 1 件でも入ると、依頼全体が拒否され、計画は作れない。
+
+### 決定(追補)
+
+1. **除外の判定**: ゲートウェイと同じ `SecretScan` の規則を、`SecretScan.detectsText(text)` として公開する(`detects(req)` と同じ判定。
+   `detects` は、テキスト部分の判定に同じ規則を使う)。二重に規則を書かない。`PlannerRepoFileList` は、既定の `SecretScan()` で判定する。
+   ゲートウェイの既定も `SecretScan()` で、認証情報は束縛しない。
+2. **除外の位置**: `PlannerRepoFileList.render` の中で、許可パスと禁止パスの判定の後、既存の `isSafePath` と並べて判定する。
+   当たるパスは一覧に入れず、`omittedUnsafe` に数える(パス名は出さない)。
+3. **ディレクトリ要約**: 要約の行(`dir/ N files`)も、同じ判定で当たれば落とす。
+4. **安全弁**: 一覧を除いた後も依頼が拒否されるのは、題名・本文(運用者または MCP が書いた文面)か、再試行の文(Planner 自身の出力)が当たる場合だけである。
+   これは `PLAN_CALL_FAILED` のまま残し、ログの `errorCode=SECRET_DETECTED` で見分ける(runbook §7.2b)。新しい理由コード `PLAN_SECRET_DETECTED` は
+   足さない。足すと、`AutopilotReason`、計画段階の `BLOCKED` の辺、チャットと MCP の再計画の集合、UI の `GoalReplanRules` と表示名、
+   ADR と runbook に波及するため、この修正の範囲に入れない。題名・本文の判定は、運用者が文面を直して再計画すれば解消する。
+5. **除外の代償**: 除外したパスは Planner から見えない。そのため、`docs/adr/` の大部分と、マイグレーションファイル(`db/migration/`)は、
+   一覧に出ない。Planner がそれらを名指しすると `PATH_NOT_ALLOWED` で再試行になる。既存の計画の検証は変えない。
+
+### 結果(追補)
+
+- 全ての計画が `PLAN_CALL_FAILED(SECRET_DETECTED)` で止まる、という不具合は解消する(一覧の中のパスは、ゲートウェイの規則に当たらない)。
+- 一覧の中の、ゲートウェイの規則に当たるパスは 0 件になる。除外数は `omittedUnsafe` で確かめられる。
+- 除外により、一覧に出ない既存ファイルがある。見えないファイルを Planner が名指しすると、再試行になる。
+- 根本の改善は、`SecretScan` の候補を `/` で区切ること(ディレクトリ部分を除く)、または語らしさの除外を入れることである。どちらも、
+  ゲートウェイの秘密検出の規則そのものの変更なので、別の決定として扱う。この追補では変えない。
+- 運用の見分け方と手順は runbook §7.2b と §7.2c。

@@ -2,5 +2,12 @@
 # The first process of a k8s Run's Pod (ADR 0010 追補 7). The Job's command is this launcher followed by the CLI argv.
 # It runs net.kigawa.kivra.agent.k8s.pod.PodEntrypointKt from the agent classes in /opt/kivra-agent/lib. No credential is read here.
 # -XX:-UsePerfData: the JVM does not write /tmp/hsperfdata. The heap is small: the CLI is a separate process with its own memory.
+# The JVM prints "Picked up JAVA_TOOL_OPTIONS" to stderr, which would be a non-JSON line in the stream the agent reads from the
+# container's log. The entrypoint gives the value back to the CLI process (ProcessCliProcess.childEnvironment).
+if [ -n "${JAVA_TOOL_OPTIONS:-}" ]; then
+  KIVRA_CHILD_JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS"
+  export KIVRA_CHILD_JAVA_TOOL_OPTIONS
+  unset JAVA_TOOL_OPTIONS
+fi
 exec "${JAVA_HOME:-/opt/java}/bin/java" -XX:-UsePerfData -XX:+UseSerialGC -Xmx256m \
   -cp "/opt/kivra-agent/lib/*" net.kigawa.kivra.agent.k8s.pod.PodEntrypointKt "$@"

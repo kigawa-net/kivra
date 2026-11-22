@@ -210,7 +210,8 @@ private val strictJson = Json { ignoreUnknownKeys = false }
 private val ORDER_ID_SHAPE = Regex("[0-9A-Z]{26}")
 private val DIGEST_SHAPE = Regex("[0-9a-f]{64}")
 private const val LIST_LIMIT = 50
-private const val MAX_TITLE_CODE_POINTS = 200
+/** A root order's title: 1 to this many code points, shared by the REST routes and `/mcp` (`kivra_order_create`). */
+internal const val MAX_TITLE_CODE_POINTS = 200
 /** An order's policy (V58, ADR 0023 追補 7): the limit of the Task body it becomes. Shared by the REST routes and the chat's child order. */
 internal const val MAX_POLICY_CODE_POINTS = 8_000
 private const val MAX_CHILD_KEY_CODE_POINTS = 128
@@ -243,14 +244,13 @@ private suspend fun createOrder(deps: SelfDevOrderRouteDeps, call: ApplicationCa
     if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return
     if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create")) return
     val request = decodeOr<CreateOrderRequest>(call) ?: return
-    val title = validatedText(request.title, MAX_TITLE_CODE_POINTS)
-    val policy = validatedPolicy(request.policy)
-    if (title == null) return call.respond(HttpStatusCode.BadRequest, OrderError(TITLE_INVALID))
-    if (policy == null) return call.respond(HttpStatusCode.BadRequest, OrderError(POLICY_INVALID))
-    val maxCycles = request.maxCycles ?: 1
-    if (maxCycles !in 1..deps.orderSettings.maxCyclesCap) {
-        return call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
+    val fields = when (val check = checkRootOrderFields(request.title, request.policy, request.maxCycles ?: 1, deps.orderSettings.maxCyclesCap)) {
+        is RootOrderCheck.Valid -> check.fields
+        is RootOrderCheck.Invalid -> return call.respond(HttpStatusCode.BadRequest, check.field.restError())
     }
+    val title = fields.title
+    val policy = fields.policy
+    val maxCycles = fields.maxCycles
     val repo = deps.targetRepo ?: return call.respond(HttpStatusCode.ServiceUnavailable, OrderError(ORDERS_DISABLED))
     // The alias (ADR 0022 PR-E) takes the path's project; the body's projectId, when given, must be the same.
     val projectId = when (val scope = pinned?.let { deps.projects.scopeOfPath(it, request.projectId) } ?: deps.projects.scopeOf(request.projectId)) {
@@ -1085,6 +1085,37 @@ private fun OrderCycle.response() = CycleResponse(
     stateReason = stateReason,
     createdAt = createdAt.utc(),
 )
+
+/** The fields of a root order, as the REST route takes them (title, policy, most cycles). Built only by [checkRootOrderFields]. */
+internal class RootOrderFields(val title: String, val policy: String, val maxCycles: Int)
+
+/** The field that failed the root order's checks, with its fixed text (the same text the REST route answers). */
+internal enum class RootOrderField(val text: String) {
+    TITLE(TITLE_INVALID),
+    POLICY(POLICY_INVALID),
+    MAX_CYCLES(MAX_CYCLES_INVALID),
+}
+
+internal sealed interface RootOrderCheck {
+    class Valid(val fields: RootOrderFields) : RootOrderCheck
+    class Invalid(val field: RootOrderField) : RootOrderCheck
+}
+
+/**
+ * The checks of a root order's fields: the title and the policy by their rules ([validatedText], [validatedPolicy]), and the most cycles
+ * in 1 to [maxCyclesCap]. The REST route and `kivra_order_create` both call it, so the limits are one set of rules. The order of the checks
+ * is the REST route's: title, policy, then the cycles.
+ */
+internal fun checkRootOrderFields(rawTitle: String, rawPolicy: String, maxCycles: Int, maxCyclesCap: Int): RootOrderCheck {
+    val title = validatedText(rawTitle, MAX_TITLE_CODE_POINTS) ?: return RootOrderCheck.Invalid(RootOrderField.TITLE)
+    val policy = validatedPolicy(rawPolicy) ?: return RootOrderCheck.Invalid(RootOrderField.POLICY)
+    if (maxCycles !in 1..maxCyclesCap) return RootOrderCheck.Invalid(RootOrderField.MAX_CYCLES)
+    return RootOrderCheck.Valid(RootOrderFields(title, policy, maxCycles))
+}
+
+/** The REST answer of a failed field: the fixed text, and the code for the cycles (as the REST route has always answered). */
+private fun RootOrderField.restError(): OrderError =
+    if (this == RootOrderField.MAX_CYCLES) OrderError(text, MAX_CYCLES_INVALID_CODE) else OrderError(text)
 
 /** Validates a policy: trimmed, 1 to 8000 code points ([MAX_POLICY_CODE_POINTS]), line breaks and tabs allowed, other control characters refused. Null when invalid. */
 internal fun validatedPolicy(raw: String): String? {

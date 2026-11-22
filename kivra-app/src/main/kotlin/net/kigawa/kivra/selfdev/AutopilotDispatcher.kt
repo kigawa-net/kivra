@@ -29,7 +29,8 @@ import org.slf4j.LoggerFactory
  * The periodic loop that submits the autopilot's tasks as Runs (ADR 0011 section 5). One [tick] runs these steps in order, each contained:
  *
  * 1. Records the outcome of every SUBMITTED task whose Run has ended: COMPLETED (PR_MERGED), FAILED (RUN_FAILED, or POLICY_REJECTED when the
- *    Run was refused by the PatchPolicy), CANCELLED (RUN_RELEASED). A failure feeds the circuit breaker. The task's move and the count are one
+ *    Run was refused by the PatchPolicy), CANCELLED (RUN_RELEASED). A failure feeds the circuit breaker; so does a CANCELLED Run that the
+ *    automatic release ended (ADR 0009 追補 2026-11-18). The task's move and the count are one
  *    transaction. The Run itself is never changed here.
  *    Then settles every plan root whose planned tasks have all ended (DONE, or STOPPED with TASKS_INCOMPLETE); a catch-up for the settlement.
  * 2. Stops here while the autopilot is paused (nothing is submitted; no state moves).
@@ -53,7 +54,31 @@ class AutopilotDispatcher(
      * task with no order is allowed. Checked before any guard, so a held task is not blocked, only left QUEUED until its order runs again.
      */
     private val orderGate: (taskId: String) -> Boolean = { true },
+    /** The clock of the waiting summary's 10-minute repeat. */
+    private val clock: java.time.Clock = java.time.Clock.systemUTC(),
 ) {
+    /**
+     * Why the QUEUED tasks of one pass were left QUEUED without a guard (ADR 0011 addendum 2026-11-18). These skips write nothing, so this
+     * summary is the only trace of them. Counts and fixed words only: never a task id list, a title, a body or a reason text.
+     */
+    data class WaitingSummary(
+        /** A dependency has not COMPLETED yet and may still (it is QUEUED, SUBMITTING, SUBMITTED, BLOCKED, ...). */
+        val dependencyPending: Int = 0,
+        /** A dependency ended without COMPLETED (FAILED, CANCELLED, SKIPPED or STOPPED): it waits for an operator (requeue or skip). */
+        val dependencyFailed: Int = 0,
+        /** The task's order, or an ancestor order, is not ACTIVE. */
+        val orderHeld: Int = 0,
+        /** Another planned task of the same plan is SUBMITTING or SUBMITTED (one Run per plan at a time). */
+        val siblingInFlight: Int = 0,
+        /** The submission was refused for another reason (a stale version, a dependency across projects). */
+        val refused: Int = 0,
+    ) {
+        val isEmpty: Boolean get() = this == WaitingSummary()
+    }
+
+    private var lastSummary = WaitingSummary()
+    private var lastSummaryAt: java.time.Instant? = null
+
     private val operations = SelfDevOperatorRepository(database)
     private val control = SelfDevAutopilotControlRepository(database)
 
@@ -70,6 +95,10 @@ class AutopilotDispatcher(
 
     /** Starts the loop in [scope]. It stops when the scope is cancelled (application stop). A failed pass is logged, and the loop goes on. */
     fun start(scope: CoroutineScope): Job = scope.launch {
+        logger.info(
+            "autopilot dispatcher started: intervalSeconds={} batch={} maxPendingPrs={} maxRunsPerDay={}",
+            DISPATCH_INTERVAL.seconds, BATCH, config.maxPendingPrs, config.maxRunsPerDay,
+        )
         while (isActive) {
             try {
                 tick()
@@ -97,7 +126,14 @@ class AutopilotDispatcher(
             val (to, reason, succeeded) = when (run.state) {
                 DevelopmentRunState.COMPLETED -> Triple(TaskState.COMPLETED, AutopilotReason.PR_MERGED, true)
                 DevelopmentRunState.FAILED -> Triple(TaskState.FAILED, failureReasonOf(run.stateReason), false)
-                DevelopmentRunState.CANCELLED -> Triple(TaskState.CANCELLED, AutopilotReason.RUN_RELEASED, null)
+                // An automatic release (ADR 0009 追補 2026-11-18) ends a Run the agent could not finish (its lease ran out, or it asked for a
+                // human). It counts as a failure, so a host fault that repeats opens the breaker instead of cancelling the queue task by task.
+                // An operator's release or a cancel still does not count.
+                DevelopmentRunState.CANCELLED -> Triple(
+                    TaskState.CANCELLED,
+                    AutopilotReason.RUN_RELEASED,
+                    if (run.stateReason in net.kigawa.kivra.db.SELF_DEV_AUTO_RELEASE_REASONS.values) false else null,
+                )
                 else -> continue
             }
             val task = operations.task(submitted.taskId) ?: continue
@@ -138,10 +174,31 @@ class AutopilotDispatcher(
 
     private fun dispatchQueued() {
         val ctl = control.read()
+        var waiting = WaitingSummary()
+        try {
+            dispatchQueuedCounting(ctl) { waiting = it(waiting) }
+        } finally {
+            reportWaiting(waiting)
+        }
+    }
+
+    private fun dispatchQueuedCounting(ctl: AutopilotControl, count: ((WaitingSummary) -> WaitingSummary) -> Unit) {
         for (taskId in operations.queuedTaskIds(BATCH)) {
             val task = operations.task(taskId) ?: continue
-            if (task.state != TaskState.QUEUED || !dependenciesCompleted(task)) continue
-            if (!orderGate(taskId)) continue
+            if (task.state != TaskState.QUEUED) continue
+            when (dependencyState(task)) {
+                DependencyState.COMPLETED -> Unit
+                DependencyState.PENDING -> { count { it.copy(dependencyPending = it.dependencyPending + 1) }; continue }
+                DependencyState.FAILED -> { count { it.copy(dependencyFailed = it.dependencyFailed + 1) }; continue }
+            }
+            if (!orderGate(taskId)) {
+                count { it.copy(orderHeld = it.orderHeld + 1) }
+                continue
+            }
+            if (operations.siblingInFlight(task)) {
+                count { it.copy(siblingInFlight = it.siblingInFlight + 1) }
+                continue
+            }
             val guard = when {
                 ctl.breakerOpen -> AutopilotReason.CIRCUIT_OPEN
                 pendingPrRuns() >= config.maxPendingPrs.toLong() -> AutopilotReason.PENDING_PR_LIMIT
@@ -160,6 +217,7 @@ class AutopilotDispatcher(
             if (begun !is TaskTransition.Moved) {
                 // Refused by the dependency or sibling rule, or moved by someone else: the slot is not used.
                 control.releaseRunSlot()
+                count { it.copy(refused = it.refused + 1) }
                 continue
             }
             submit(begun.row)
@@ -210,11 +268,34 @@ class AutopilotDispatcher(
         }
     }
 
-    /** True when every dependency is COMPLETED (ADR 0011 section 5.1). A task with no dependency is ready. */
-    private fun dependenciesCompleted(task: SelfDevTask): Boolean {
-        if (task.dependencies.isEmpty()) return true
+    private enum class DependencyState { COMPLETED, PENDING, FAILED }
+
+    /**
+     * COMPLETED when every dependency is COMPLETED (ADR 0011 section 5.1; a task with no dependency is ready). FAILED when one ended without
+     * COMPLETED (it is not resubmitted on its own), else PENDING. A missing dependency is PENDING, as before (it is never submitted).
+     */
+    private fun dependencyState(task: SelfDevTask): DependencyState {
+        if (task.dependencies.isEmpty()) return DependencyState.COMPLETED
         val states = operations.statesOf(task.dependencies)
-        return task.dependencies.all { states[it] == TaskState.COMPLETED }
+        if (task.dependencies.all { states[it] == TaskState.COMPLETED }) return DependencyState.COMPLETED
+        return if (task.dependencies.any { states[it] in ENDED_NOT_COMPLETED }) DependencyState.FAILED else DependencyState.PENDING
+    }
+
+    /**
+     * Logs the waiting summary of a pass when it differs from the last one logged, or [WAITING_REPEAT] after it (so a lasting wait is seen
+     * again). Nothing is logged while there is nothing to report and nothing was reported before.
+     */
+    private fun reportWaiting(summary: WaitingSummary) {
+        val now = clock.instant()
+        val due = lastSummaryAt?.let { !now.isBefore(it.plus(WAITING_REPEAT)) } ?: true
+        val changed = summary != lastSummary
+        if (!changed && (summary.isEmpty || !due)) return
+        logger.info(
+            "autopilot dispatch waiting: dependencyPending={} dependencyFailed={} orderHeld={} siblingInFlight={} refused={}",
+            summary.dependencyPending, summary.dependencyFailed, summary.orderHeld, summary.siblingInFlight, summary.refused,
+        )
+        lastSummary = summary
+        lastSummaryAt = now
     }
 
     /** The self-development Runs that wait for a pull request to be merged or closed (ADR 0011 section 5.2). */
@@ -228,6 +309,10 @@ class AutopilotDispatcher(
         val logger = LoggerFactory.getLogger(AutopilotDispatcher::class.java)
         const val BATCH = 20
         val DISPATCH_INTERVAL: Duration = Duration.ofSeconds(10)
+        /** How often a waiting summary that did not change is logged again. */
+        val WAITING_REPEAT: Duration = Duration.ofMinutes(10)
+        /** A dependency in one of these ended without COMPLETED: the dependent waits for an operator. */
+        val ENDED_NOT_COMPLETED = setOf(TaskState.FAILED, TaskState.CANCELLED, TaskState.SKIPPED, TaskState.STOPPED)
         /** The Run state reasons of a refused change: the Run's own (SelfDevRunner) and the developer's (`DEVELOPER_` + its refusal). */
         val POLICY_REJECTED_RUN_REASONS = setOf("POLICY_REJECTED", "DEVELOPER_POLICY_REJECTED")
     }

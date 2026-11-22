@@ -106,6 +106,14 @@ class BudgetStatusRouteTest {
     }
 
     @Test
+    fun `the automatic releases are counted, and absent when there has been none`() = testApplication {
+        val auto = sampleStatus.copy(autoReleasedCount = 3, lastAutoReleaseAt = java.time.LocalDateTime.of(2026, 11, 15, 1, 2, 3))
+        statusApp(FixedView(auto))
+        val body = client.get("/api/admin/budget/status") { header("X-Test-Operator", "alice") }.bodyAsText()
+        assertTrue(body.contains(""""autoReleasedCount":3,"lastAutoReleaseAt":"2026-11-15T01:02:03Z""""), body)
+    }
+
+    @Test
     fun `without a daily limit the response has no daily keys, as before`() = testApplication {
         statusApp(FixedView(sampleStatus))
         val body = client.get("/api/admin/budget/status") { header("X-Test-Operator", "alice") }.bodyAsText()

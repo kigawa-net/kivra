@@ -25,6 +25,7 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import net.kigawa.kivra.db.execUpdate
 import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.auth.OperatorAuth
 import net.kigawa.kivra.auth.OperatorAuthenticator
@@ -206,6 +207,38 @@ class SelfDevGoalRoutesTest {
         assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, "/api/selfdev/tasks/$rejected/reject", """{"version":0}""").status)
         assertEquals(HttpStatusCode.NotFound, send(HttpMethod.Post, "/api/selfdev/tasks/01AAAAAAAAAAAAAAAAAAAAAAAA/approve", """{"version":0}""").status)
         assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/tasks/$approved/approve", """{"version":-1}""").status)
+    }
+
+    @Test
+    fun `requeue moves a FAILED task back to QUEUED once per version, and refuses other states, the AI and unknown ids`() = testApplication {
+        val db = newDb()
+        val operations = setUp(db, enabledAutopilot())
+        val taskId = submit("kq").getValue("taskId").jsonPrimitive.content
+        // A task in TASK_SUBMITTED has no requeue edge.
+        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, "/api/selfdev/tasks/$taskId/requeue", """{"version":0}""").status)
+        // The failed Run of the task (a real row: the task refers to it).
+        val failedRun = db.runs.submitTask(OPERATOR, "run-of-$taskId", "first task", selfDev = true, maxActiveSelfDev = null).run.runId.value
+        org.jetbrains.exposed.sql.transactions.transaction(db.database) {
+            execUpdate(
+                "UPDATE selfdev_tasks SET state = 'FAILED', state_reason = 'RUN_FAILED', attempts = 1, run_id = ? WHERE task_id = ?",
+                failedRun, taskId,
+            )
+        }
+        val version = operations.task(taskId)!!.version
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Post, "/api/selfdev/tasks/$taskId/requeue", """{"version":$version}""", principal = AI).status)
+        assertEquals(HttpStatusCode.Unauthorized, send(HttpMethod.Post, "/api/selfdev/tasks/$taskId/requeue", """{"version":$version}""", principal = null).status)
+        val ok = send(HttpMethod.Post, "/api/selfdev/tasks/$taskId/requeue", """{"version":$version}""")
+        assertEquals(HttpStatusCode.OK, ok.status)
+        val row = operations.task(taskId)!!
+        assertEquals(net.kigawa.kivra.core.autopilot.TaskState.QUEUED, row.state)
+        assertEquals(net.kigawa.kivra.core.autopilot.AutopilotReason.OPERATOR_REQUEUED, row.stateReason)
+        assertEquals("ap:$taskId:a1", row.idempotencyKey)
+        assertEquals(null, row.runId)
+        // The same request again (same version) changes nothing: one requeue, one future Run.
+        assertEquals(HttpStatusCode.Conflict, send(HttpMethod.Post, "/api/selfdev/tasks/$taskId/requeue", """{"version":$version}""").status)
+        assertEquals(row.version, operations.task(taskId)!!.version)
+        assertEquals(HttpStatusCode.NotFound, send(HttpMethod.Post, "/api/selfdev/tasks/01AAAAAAAAAAAAAAAAAAAAAAAA/requeue", """{"version":0}""").status)
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Post, "/api/selfdev/tasks/$taskId/requeue", """{"version":-1}""").status)
     }
 
     @Test

@@ -46,6 +46,13 @@ class K8sJobGuardTest {
         guard.check(golden)
     }
 
+    /** The k8s proxy may be a dotted Service name (kivra#543). The guard must accept what the builder makes for it (it once refused it). */
+    @Test
+    fun aDottedProxyHostBuildsAndPassesTheGuard() {
+        val dotted = "http://kivra-agent-proxy-svc.kigawa-net-kivra-dev-agent.svc:8080"
+        guard.check(K8sJobBuilder(K8sFixture.settings).build(K8sFixture.spec(proxy = dotted)))
+    }
+
     @Test
     fun namedClaudeAccountUsesOnlyItsAllowlistedProxyRoute() {
         val proxy = "http://kivra-agent-proxy.egress.svc:8080"

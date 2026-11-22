@@ -55,7 +55,7 @@ enum class PrFault {
 /** The App bot's numeric user id as the fake reports it for pull requests it creates. */
 const val BOT_USER_ID = 9001L
 
-class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha: String = sha(1)) : GitHubPort {
+class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha: String = sha(1)) : GitHubPort, net.kigawa.kivra.github.PrClosePort {
     private val branches = LinkedHashMap<String, BranchInfo>()
     private val commits = ArrayList<String>()
     private val pulls = ArrayList<PullRequest>()
@@ -298,12 +298,40 @@ class FakeGitHub(val repo: RepoRef = RepoRef("kigawa-net", "kivra"), val baseSha
         touch("createPullRequestComment")
         if (repo != this.repo) return foreign()
         writes += "createPullRequestComment"
+        commentFailure?.let { commentFailure = null; return GitHubResult.Failure(it, it.code) }
         comments += number to body
         if (commentLost) {
             commentLost = false
             return GitHubResult.Unknown("createPullRequestComment", "response lost")
         }
         return GitHubResult.Success(comments.size.toLong())
+    }
+
+    /** The pull request numbers [closePullRequest] was called for, in call order. */
+    val closeCalls = ArrayList<Int>()
+
+    /** The next close fails with this kind and changes nothing when set. Consumed once. */
+    var closeFailure: GitHubFailureKind? = null
+
+    /** The next close closes the pull request but answers UNKNOWN when true (a lost response). Consumed once. */
+    var closeLost: Boolean = false
+
+    /** The next comment post fails with this kind and stores nothing when set. Consumed once. */
+    var commentFailure: GitHubFailureKind? = null
+
+    override suspend fun closePullRequest(repo: RepoRef, number: Int): GitHubResult<Unit> {
+        touch("closePullRequest")
+        if (repo != this.repo) return foreign()
+        writes += "closePullRequest"
+        closeCalls += number
+        closeFailure?.let { closeFailure = null; return GitHubResult.Failure(it, it.code) }
+        if (pulls.none { it.number == number }) return GitHubResult.Failure(GitHubFailureKind.NOT_FOUND, GitHubFailureKind.NOT_FOUND.code)
+        replacePull(number) { if (it.merged) it else it.copy(state = PullRequestState.CLOSED) }
+        if (closeLost) {
+            closeLost = false
+            return GitHubResult.Unknown("closePullRequest", "response lost")
+        }
+        return GitHubResult.Success(Unit)
     }
 
     override suspend fun commitFiles(repo: RepoRef, request: CommitFilesRequest): GitHubResult<CommittedFiles> {

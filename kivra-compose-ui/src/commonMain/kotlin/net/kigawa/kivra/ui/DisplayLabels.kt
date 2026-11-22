@@ -87,6 +87,8 @@ private val RUN_REASONS = mapOf(
     "CODING_ENQUEUE_REFUSED" to "実行の投入が拒否された（Run が見つからない、開発中でない、または入力が不正）",
     "OPERATOR_RELEASED_UNBOUND_PR" to "運用者が解放した（PR と結び付いていない）",
     "OPERATOR_RELEASED_STUCK" to "運用者が解放した（開発が止まっていた）",
+    "AUTO_RELEASED_ORPHAN" to "実行の期限切れ（結果不明）が猶予を過ぎ、自動で解放した（GitHub への書き込みは無い）",
+    "AUTO_RELEASED_NEEDS_HUMAN" to "人の判断が必要と報告された実行が猶予を過ぎ、自動で解放した（GitHub への書き込みは無い）",
 )
 
 private val RUN_ACTIONS = mapOf(

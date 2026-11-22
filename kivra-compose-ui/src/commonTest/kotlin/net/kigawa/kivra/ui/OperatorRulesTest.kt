@@ -143,4 +143,18 @@ class OperatorRulesTest {
             assertTrue(texts.explain.contains("CANCELLED"))
         }
     }
+
+    @Test
+    fun requeueAndSkipOfAStuckTaskAreShownOnlyForTheirStatesAndNeverForAPlanRoot() {
+        assertTrue(canRequeueTask("FAILED", 0))
+        assertTrue(canRequeueTask("CANCELLED", 0))
+        assertFalse(canRequeueTask("QUEUED", 0))
+        assertFalse(canRequeueTask("COMPLETED", 0))
+        assertFalse(canRequeueTask("FAILED", 1))
+        assertTrue(canSkipStuckTask("QUEUED", 0))
+        assertTrue(canSkipStuckTask("FAILED", 0))
+        assertFalse(canSkipStuckTask("SUBMITTED", 0))
+        assertFalse(canSkipStuckTask("PENDING_APPROVAL", 0))
+        assertFalse(canSkipStuckTask("QUEUED", 2))
+    }
 }

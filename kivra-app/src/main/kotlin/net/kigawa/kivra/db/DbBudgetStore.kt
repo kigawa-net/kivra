@@ -333,6 +333,76 @@ class DbBudgetStore(
     }
 
     /**
+     * The UNPRICED and LAPSED reservations whose cost has been unknown for at least [olderThan] (ADR 0003 追補 2026-11-15), oldest first,
+     * at most [limit] keys. The age is counted from the settlement (an UNPRICED commit or booking) or, for a LAPSED reservation, from its
+     * expiry. Each comes with one scope and period of its path (the tenant's when it has one), which an acknowledgement names. Expired
+     * reservations are lapsed first, under the tenant lock, as every operation does.
+     *
+     * A reservation charged 0 yen is never due: its upper bound is not known (for example a CLI estimate booked while the exchange rate was
+     * unusable), so confirming it would hide spend. It stays UNPRICED for an operator's acknowledgement, as before.
+     */
+    fun dueUnpriced(olderThan: Duration, limit: Int): List<DueUnpriced> = transaction(database) {
+        val now = clock.instant()
+        lockTenant()
+        expireDue(now)
+        val cutoff = LocalDateTime.ofInstant(now.minus(olderThan), java.time.ZoneOffset.UTC)
+        val keys = execQuery(
+            """
+            SELECT reservation_key FROM budget_reservations
+             WHERE state IN (?, ?) AND COALESCE(settled_at, expires_at) <= ? AND amount_micro_yen > 0
+             ORDER BY COALESCE(settled_at, expires_at), reservation_key
+             LIMIT ?
+            """.trimIndent(),
+            UNPRICED, LAPSED, cutoff, limit,
+        ) { it.getString(1) }
+        keys.mapNotNull { key ->
+            val scopes = execQuery(
+                "SELECT scope_id, period FROM budget_reservation_scopes WHERE reservation_key = ? ORDER BY scope_id, period",
+                key,
+            ) { it.getString(1) to it.getString(2) }
+            val pick = scopes.firstOrNull { it.first == tenantScope } ?: scopes.firstOrNull() ?: return@mapNotNull null
+            DueUnpriced(key, pick.first, pick.second)
+        }
+    }
+
+    /**
+     * The automatic release of the unpriced reservations older than [grace] (ADR 0003 追補 2026-11-15), at most [limit] per call. Each goes
+     * through [acknowledgeUnpriced], the operator's path, with no actual amount: the charge stays at the reserved amount (the upper bound of
+     * the call), the unpriced count of every scope of its path drops by one, and the audit row names the fixed approver
+     * [AUTO_RELEASE_OPERATOR] and the fixed reason [AUTO_RELEASE_REASON]. Another replica's release of the same key is
+     * [AcknowledgeResult.AlreadyAcknowledged], never a second charge. A key that fails is left for the next call.
+     */
+    fun autoReleaseUnpriced(grace: Duration, limit: Int): AutoReleaseReport {
+        var released = 0
+        var already = 0
+        var failed = 0
+        for (due in dueUnpriced(grace, limit)) {
+            val request = AcknowledgeUnpriced(
+                scopeId = due.scopeId,
+                period = due.period,
+                reservationKey = due.reservationKey,
+                actualAmount = null,
+                evidence = AUTO_RELEASE_EVIDENCE,
+                operatorId = AUTO_RELEASE_OPERATOR,
+                reason = AUTO_RELEASE_REASON,
+            )
+            when (acknowledgeUnpriced(request)) {
+                is AcknowledgeResult.Acknowledged -> released++
+                AcknowledgeResult.AlreadyAcknowledged, AcknowledgeResult.NotUnpriced -> already++
+                else -> failed++
+            }
+        }
+        return AutoReleaseReport(released, already, failed)
+    }
+
+    /** The automatic releases recorded so far (the audit rows of [AUTO_RELEASE_OPERATOR]): their count and the newest one's time. */
+    private fun Transaction.autoReleaseSummary(): Pair<Long, LocalDateTime?> =
+        execQuery(
+            "SELECT COUNT(*), MAX(acknowledged_at) FROM budget_acknowledgements WHERE operator_id = ?",
+            AUTO_RELEASE_OPERATOR,
+        ) { it.getLong(1) to it.getObject(2, LocalDateTime::class.java) }.single()
+
+    /**
      * Read-only snapshot for the operator screen. Amounts and reservation keys only. The committed total and the reserved sum are
      * those of the tenant scope in its current JST month. [BudgetOperatorStatus.cliCommittedJpy] is the part of the charged total
      * whose key is `coding:` (the CLI path). The API path is the rest, so the two always add up to the committed total.
@@ -374,7 +444,10 @@ class DbBudgetStore(
             """.trimIndent(),
             tenantScope, UNPRICED, LAPSED,
         ) { it.getLong(1) }.single()
+        val (autoCount, autoLast) = autoReleaseSummary()
         BudgetOperatorStatus(
+            autoReleasedCount = autoCount,
+            lastAutoReleaseAt = autoLast,
             period = period,
             limitJpy = tenantLimit.hard,
             committedJpy = micro(committed),
@@ -733,6 +806,18 @@ class DbBudgetStore(
         const val CODING_KEY_PREFIX = "coding:"
         /** The most unpriced rows the operator screen lists. The count is still exact. */
         const val UNPRICED_LIST_LIMIT = 100
+
+        /**
+         * The approver of an automatic release (ADR 0003 追補 2026-11-15). A fixed system name, not an operator: an operator's owner key
+         * never starts with `system:`.
+         */
+        const val AUTO_RELEASE_OPERATOR = "system:auto-release"
+
+        /** The fixed reason of an automatic release: the charge is the reserved amount, the upper bound of the call. */
+        const val AUTO_RELEASE_REASON = "AUTO_UPPER_BOUND"
+
+        /** The fixed evidence of an automatic release: the grace period elapsed with the cost still unknown. */
+        const val AUTO_RELEASE_EVIDENCE = "GRACE_ELAPSED"
         const val PERIOD_ALL = "ALL"
 
         /** Appended to the tenant scope id for its daily scope. */
@@ -788,7 +873,20 @@ data class BudgetOperatorStatus(
     val unpriced: List<UnpricedReservation>,
     /** The tenant's daily usage on the current JST day, or null when no daily limit is configured. */
     val daily: DailyBudgetStatus? = null,
+    /** How many unpriced reservations were released automatically (ADR 0003 追補 2026-11-15), all time. */
+    val autoReleasedCount: Long = 0,
+    /** When the newest automatic release was recorded (UTC), or null when there has been none. */
+    val lastAutoReleaseAt: LocalDateTime? = null,
 )
+
+/** An unpriced reservation due for the automatic release, with the scope and period an acknowledgement names. */
+data class DueUnpriced(val reservationKey: String, val scopeId: String, val period: String)
+
+/**
+ * The outcome of one automatic release pass: released now, released before (another replica), and failed (retried next pass). [reasons]
+ * counts the released runs by their fixed state reason (empty when the pass does not release self-development runs by reason).
+ */
+data class AutoReleaseReport(val released: Int, val alreadyReleased: Int, val failed: Int, val reasons: Map<String, Int> = emptyMap())
 
 /** The tenant's daily budget on one JST calendar day (scope `<tenant>:daily`). Amounts in yen. */
 data class DailyBudgetStatus(

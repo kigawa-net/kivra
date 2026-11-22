@@ -47,13 +47,18 @@ enum class PlanRejectReason {
     PATH_COUNT,
     PATH_SHAPE,
     PATH_NOT_ALLOWED,
+    /** A target path is an existing file larger than [PatchPolicyDefaults.MAX_FILE_BYTES] (ADR 0011 section 3, 追補 2026-11-19). */
+    FILE_TOO_LARGE,
     SIZE_ESTIMATE,
     DEPENDENCY,
 }
 
 sealed interface PlanCheck {
     data class Valid(val summary: String?, val tasks: List<NewTask>) : PlanCheck
-    /** [path] is set only for [PlanRejectReason.PATH_NOT_ALLOWED]: the model's own text, for the retry note only (never logged). */
+    /**
+     * [path] is set only for [PlanRejectReason.PATH_NOT_ALLOWED] and [PlanRejectReason.FILE_TOO_LARGE]: the model's own text, for the retry
+     * note only (never logged).
+     */
     data class Invalid(val reason: PlanRejectReason, val path: String? = null) : PlanCheck
 }
 
@@ -116,16 +121,30 @@ object PlanValidator {
     internal fun isFullScopePath(path: String): Boolean = policy.allowsPath(path)
 
     /**
+     * True when [path] is on the denylist (the PatchPolicy denylist and the extra denylist of ADR 0011 section 4). The same under every mode.
+     */
+    internal fun isDenylistedPath(path: String): Boolean = autoPolicy.deniesPath(path)
+
+    /**
      * True when the Planner may name [path] in a task: the same rule as [validate] (the allowlist, and not denylisted). Used to choose the
      * repository files the Planner is shown, so a listed path is always one the validator accepts. It never accepts a path by itself.
      */
     internal fun allowsPlannedPath(path: String): Boolean = policy.allowsPath(path)
 
     /**
+     * True when [path] is an existing file of the base tree that is larger than [PatchPolicyDefaults.MAX_FILE_BYTES]. [fileSizes] maps the
+     * regular files of the base tree to their sizes. A path that is not in the map is new, so it is never too large. Null [fileSizes] (the
+     * tree could not be read) gives false: the check is not made, and the write-time PatchPolicy still is (ADR 0011 section 3).
+     */
+    internal fun isTooLargeToChange(path: String, fileSizes: Map<String, Long>?): Boolean =
+        fileSizes != null && (fileSizes[path] ?: 0L) > PatchPolicyDefaults.MAX_FILE_BYTES
+
+    /**
      * Parses and checks the model's [text]. Returns [PlanCheck.Valid] with the tasks to store, or the first reason it fails.
      * The dependency rule (`dependsOn` names only earlier tasks) also rules out cycles, so no separate cycle check is needed.
+     * [fileSizes] (see [isTooLargeToChange]) is the base tree's file sizes, or null when they are not known.
      */
-    fun validate(text: String, config: AutopilotConfig): PlanCheck {
+    fun validate(text: String, config: AutopilotConfig, fileSizes: Map<String, Long>? = null): PlanCheck {
         val dto = try {
             JSON.decodeFromString(PlanDto.serializer(), text)
         } catch (e: SerializationException) {
@@ -162,6 +181,8 @@ object PlanValidator {
                 } else if (!policy.allowsPath(path)) {
                     return PlanCheck.Invalid(PlanRejectReason.PATH_NOT_ALLOWED, path)
                 }
+                // Checked for a denylisted path too: such a task waits for approval, and its write would be refused the same way.
+                if (isTooLargeToChange(path, fileSizes)) return PlanCheck.Invalid(PlanRejectReason.FILE_TOO_LARGE, path)
             }
             // Stage 2 (ADR 0011 section 6.1): AUTO only, S, at most 3 paths, all in the narrow allowlist, none denylisted.
             // Stage 3 (section 6.1): FULL only, none denylisted, at most 3 paths. The size estimate and the narrow allowlist are not

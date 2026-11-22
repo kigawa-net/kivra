@@ -7,7 +7,6 @@ import java.time.Clock
 import java.time.Duration
 import net.kigawa.kivra.auth.TaskApiIdentity
 import net.kigawa.kivra.db.AuditRepository
-import net.kigawa.kivra.db.DbRequestLedger
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAutopilotControlRepository
@@ -32,15 +31,12 @@ import net.kigawa.kivra.modelgateway.AnthropicWifConfig
 import net.kigawa.kivra.modelgateway.BoundCredentialSource
 import net.kigawa.kivra.modelgateway.BudgetPort
 import net.kigawa.kivra.modelgateway.Capability
-import net.kigawa.kivra.modelgateway.CostConverter
 import net.kigawa.kivra.modelgateway.CredentialBinding
 import net.kigawa.kivra.modelgateway.DataClass
 import net.kigawa.kivra.modelgateway.DifficultyRouter
 import net.kigawa.kivra.modelgateway.DifficultyRoutingSettings
 import net.kigawa.kivra.modelgateway.Lifecycle
 import net.kigawa.kivra.modelgateway.ModelGateway
-import net.kigawa.kivra.modelgateway.ModelProvider
-import net.kigawa.kivra.modelgateway.OpenAiCompatProvider
 import net.kigawa.kivra.modelgateway.ModelRegistry
 import net.kigawa.kivra.modelgateway.RegistryLoader
 import net.kigawa.kivra.modelgateway.StaticKeyAuth
@@ -69,6 +65,7 @@ import net.kigawa.kivra.selfdev.review.PrReviewSettings
 import net.kigawa.kivra.selfdev.review.PrReviewWatch
 import net.kigawa.kivra.selfdev.memory.SelfDevMemoryRecorder
 import net.kigawa.kivra.selfdev.memory.SuppressShadow
+import net.kigawa.kivra.llm.GatewayFactory
 import org.jetbrains.exposed.sql.Database
 
 /** The self-development components built by [buildSelfDev]. Built only when [SelfDevSettings.enabled] is true. */
@@ -110,9 +107,6 @@ private const val PROVIDER_ID = "anthropic"
 private const val ANTHROPIC_HOST = "api.anthropic.com"
 private const val ANTHROPIC_CREDENTIAL_REF = "ANTHROPIC_API_KEY"
 /** The registry adapter name of an on-premises OpenAI-compatible provider (vLLM / Ollama / llama.cpp). */
-private const val OPENAI_ADAPTER = "openai"
-/** The one host an on-premises OpenAI-compatible provider may reach. Required when the registry declares such a provider. */
-private const val ENV_LOCAL_LLM_HOST = "KIVRA_SELFDEV_LOCAL_LLM_HOST"
 private const val DEVELOPER_MAX_OUTPUT_TOKENS = 8_000
 
 /**
@@ -162,7 +156,7 @@ internal fun buildSelfDev(
         )
     }
     val github = HttpGitHubAdapter(githubClient, tokens, githubConfig)
-    prMergeAuthority.install(GitHubPrMergeAuthority(github, botUserId.reveal().toLong()))
+    prMergeAuthority.install(GitHubPrMergeAuthority(github, botUserId.reveal().toLong(), behindBy = github::getBehindBy))
     val reader = GitHubRepoReader(github)
 
     val registry: ModelRegistry = loadRegistry(checkNotNull(settings.modelRegistryPath))
@@ -185,26 +179,15 @@ internal fun buildSelfDev(
             env,
         ),
     )
-    // On-premises OpenAI-compatible providers are registered only when the registry declares one. They carry no credential and
-    // reach only the host given by KIVRA_SELFDEV_LOCAL_LLM_HOST (a trusted binding; the registry cannot change it).
-    val localProviders = registry.providers.values.filter { it.adapter == OPENAI_ADAPTER }
-    check(localProviders.size <= 1) { "at most one openai-adapter provider is supported" }
-    check(localProviders.none { it.id == PROVIDER_ID }) { "an openai-adapter provider must not use the id $PROVIDER_ID" }
-    val localProviderMap: Map<String, ModelProvider> = if (localProviders.isEmpty()) emptyMap() else {
-        val host = checkNotNull(env[ENV_LOCAL_LLM_HOST]?.trim()?.takeIf { it.isNotEmpty() }) {
-            "$ENV_LOCAL_LLM_HOST is required when the registry has an openai-adapter provider"
-        }
-        val localCredentials = BoundCredentialSource(localProviders.map { CredentialBinding(it.id, host, it.credentialRef, null) }, env)
-        val localClient = HttpClient(CIO) { AnthropicProvider.installDefaults(this) }
-        localProviders.associate { it.id to OpenAiCompatProvider(localClient, localCredentials, it.id) }
-    }
-    val gateway = ModelGateway(
+    val localProviders = registry.providers.values.filter { it.adapter == "openai" }
+    val gateway = GatewayFactory.create(
         registry = registry,
-        providers = mapOf<String, ModelProvider>(PROVIDER_ID to AnthropicProvider(anthropicClient, anthropicAuth)) + localProviderMap,
+        anthropicClient = anthropicClient,
+        anthropicAuth = anthropicAuth,
         budget = budget,
-        ledger = DbRequestLedger(database),
-        devAllowInMemoryLedger = false,
-        costConverter = CostConverter(fx),
+        database = database,
+        fx = fx,
+        env = env,
     )
     // The self-development calls' difficulty routing (ADR 0023 追補 2). Off with KIVRA_MODEL_ROUTING_SELFDEV_ENABLED=false; with no
     // on-premises provider in the registry, every call stays as before.
@@ -239,6 +222,18 @@ internal fun buildSelfDev(
     } else {
         null
     }
+    // Off unless KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED=true (ADR 0008 追補 2026-11-18). When off, a timed-out pull request is left open.
+    val abandonCloser = if (settings.prAbandonCloseEnabled) {
+        PrAbandonCloser(
+            repo = config.repo,
+            botUserId = botUserId.reveal().toLong(),
+            github = github,
+            closer = github,
+            runs = DbDevelopmentRunStore(runs),
+        )
+    } else {
+        null
+    }
     // Issue #226: the incident fix. Off unless its switch is exactly true. It needs the autopilot, which plans and dispatches the task it submits;
     // off, the runner gets no origin, so a Run is never marked as a fix.
     val fixSettings = IncidentFixSettings.fromEnv(env)
@@ -263,6 +258,7 @@ internal fun buildSelfDev(
         ),
         prRebaser = prRebaser,
         incidentOrigin = incidentOrigin,
+        abandonCloser = abandonCloser,
     )
     val worker = SelfDevWorker(
         activeRunIds = { runs.activeSelfDevRunIds() },
@@ -272,9 +268,11 @@ internal fun buildSelfDev(
     )
     // Built only when the autopilot is enabled. Nothing about planning exists otherwise (ADR 0011, PR B).
     val planWorker: PlannerWorker? = autopilot.config?.takeIf { autopilot.enabled }?.let { autopilotConfig ->
-        // The Planner's file list reads the same GitHub adapter, on the configured base branch (Issue #293). Off when the switch is off.
-        val repoFiles = if (autopilotConfig.plannerRepoTree) PlannerRepoFiles(github, config.repo, config.baseBranch) else null
-        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevOperatorRepository(database), tenantId, repoFiles, memory, suppress, selfDevRouter)
+        // The Planner's file list reads the same GitHub adapter, on the configured base branch (Issue #293). The list is off when its switch
+        // is off. The file sizes for the target-path pre-check (ADR 0011 section 3) come from the same reader and are always read.
+        val repoTree = PlannerRepoFiles(github, config.repo, config.baseBranch)
+        val repoFiles = if (autopilotConfig.plannerRepoTree) repoTree else null
+        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevOperatorRepository(database), tenantId, repoFiles, repoTree, memory, suppress, selfDevRouter)
     }
     // ADR 0014 S1: the shadow judgement. Built only with the autopilot and its shadow switch on; it reads GitHub and writes the audit only.
     val autoMergeShadow: AutoMergeShadowWatch? = buildAutoMergeShadowWatch(
@@ -353,7 +351,8 @@ internal fun buildSelfDev(
             branchHead = { repo, branch -> github.getBranch(repo, branch).map { it?.headSha } },
             defaultRepo = config.repo,
             baseBranch = config.baseBranch,
-            prefixes = config.contextPathPrefixes,
+            // The chat's own readable paths, so widening them does not change what the Developer is shown (KIVRA_SELFDEV_CONTEXT_PREFIXES).
+            prefixes = chatRepoPrefixes(env) ?: config.contextPathPrefixes,
             maxFileBytes = config.maxContextFileBytes,
         ),
         chatRouter = gateway.let { DifficultyRouter(it, registry, localProviders.firstOrNull()?.id, PROVIDER_ID, DifficultyRoutingSettings.fromEnv(env).chatEnabled) },
@@ -382,6 +381,7 @@ private fun buildPlanWorker(
     operations: SelfDevOperatorRepository,
     tenantId: String,
     repoFiles: PlannerRepoFiles?,
+    repoSizes: PlannerRepoFiles,
     memory: SelfDevMemoryRecorder,
     suppress: SuppressShadow,
     router: DifficultyRouter?,
@@ -394,6 +394,7 @@ private fun buildPlanWorker(
         gateway = gateway,
         config = PlannerConfig(budgetScopes = listOf(tenantId), autopilot = config),
         repoFiles = repoFiles,
+        repoSizes = repoSizes,
         memory = memory,
         suppress = suppress,
         router = router,
@@ -407,3 +408,9 @@ private fun loadRegistry(path: String): ModelRegistry = try {
 } catch (_: Exception) {
     throw IllegalStateException("${SelfDevSettings.ENV_MODEL_REGISTRY_PATH} could not be loaded")
 }
+
+/** `KIVRA_CHAT_REPO_PREFIXES`: the paths the project chat may read (comma separated; a trailing `/` is a directory). Null when unset or blank. */
+internal const val ENV_CHAT_REPO_PREFIXES = "KIVRA_CHAT_REPO_PREFIXES"
+
+internal fun chatRepoPrefixes(env: Map<String, String>): List<String>? =
+    env[ENV_CHAT_REPO_PREFIXES]?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.takeIf { it.isNotEmpty() }

@@ -155,7 +155,7 @@ class McpReadScopeTest {
         return buildMcpRouteDeps(
             McpSettings.fromEnv(e), e, db.runs, repo,
             jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = true, maxActiveSelfDev = 1,
-            orders = McpOrderDeps(SelfDevOrderRepository(db.database), null),
+            orders = McpOrderDeps(SelfDevOrderRepository(db.database), null, projects = ProjectRepository(db.database, clock)),
             guard = guard,
             projects = ProjectRepository(db.database, clock),
         )!!

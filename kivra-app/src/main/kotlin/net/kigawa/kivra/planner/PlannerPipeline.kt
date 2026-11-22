@@ -48,16 +48,16 @@ class PlannerPipeline(
     private val reviewerPipeline: ReviewerPipeline?,
     private val config: PlannerPipelineConfig,
     private val clock: Clock = Clock.systemUTC(),
+    private val stateStore: PlanStateStore = InMemoryPlanStateStore(),
 ) {
     private val logger = LoggerFactory.getLogger(PlannerPipeline::class.java)
-    private val decompositionStates = mutableMapOf<String, DecompositionState>()
 
     /**
      * Check if a task should enter the planning phase.
      * Returns true when the task has no existing plan proposal.
      */
     suspend fun shouldEnterPlanning(taskId: String): Boolean {
-        val state = decompositionStates[taskId]
+        val state = stateStore.getDecompositionState(taskId)
         return state == null || state.planProposal == null
     }
 
@@ -65,7 +65,9 @@ class PlannerPipeline(
      * Get the current decomposition state for a task.
      */
     fun getDecompositionState(taskId: String): DecompositionState {
-        return decompositionStates.getOrPut(taskId) { DecompositionState() }
+        return stateStore.getDecompositionState(taskId) ?: DecompositionState().also {
+            stateStore.saveDecompositionState(taskId, it)
+        }
     }
 
     /**
@@ -75,7 +77,7 @@ class PlannerPipeline(
      * Returns true if the proposal is accepted, false if rejected.
      */
     fun processPlanProposal(taskId: String, proposal: PlanProposal): Boolean {
-        val currentState = decompositionStates[taskId] ?: DecompositionState()
+        val currentState = stateStore.getDecompositionState(taskId) ?: DecompositionState()
         if (currentState.decompositionDepth >= config.maxDecompositionDepth) {
             logger.warn("planner pipeline: taskId={}, decomposition depth limit reached ({})",
                 taskId, config.maxDecompositionDepth)
@@ -102,10 +104,10 @@ class PlannerPipeline(
             logger.warn("planner pipeline: taskId={}, circular dependencies detected", taskId)
             return false
         }
-        decompositionStates[taskId] = currentState.copy(
+        stateStore.saveDecompositionState(taskId, currentState.copy(
             planProposal = proposal,
             decompositionDepth = currentState.decompositionDepth + 1
-        )
+        ))
         logger.info("planner pipeline: taskId={}, accepted plan with {} child tasks",
             taskId, proposal.childTasks.size)
         return true
@@ -117,13 +119,13 @@ class PlannerPipeline(
      * If rejected, the plan is escalated.
      */
     suspend fun processPlanReview(taskId: String, result: ReviewerResult): PlannerPipelineOutcome {
-        val state = decompositionStates[taskId]
+        val state = stateStore.getDecompositionState(taskId)
         if (state == null || state.planProposal == null) {
             return PlannerPipelineOutcome.ERROR_NO_PLAN
         }
         return when (result.verdict) {
             ReviewerVerdict.APPROVE -> {
-                decompositionStates[taskId] = state.copy(planApproved = true)
+                stateStore.saveDecompositionState(taskId, state.copy(planApproved = true))
                 logger.info("planner pipeline: taskId={}, plan approved", taskId)
                 PlannerPipelineOutcome.PLAN_APPROVED
             }
@@ -142,44 +144,37 @@ class PlannerPipeline(
      * Check if all child tasks of a parent task are complete.
      */
     suspend fun areAllChildrenComplete(taskId: String): Boolean {
-        val state = decompositionStates[taskId] ?: return false
+        val state = stateStore.getDecompositionState(taskId) ?: return false
         val childIds = state.childTaskIds.values
         if (childIds.isEmpty()) return false
-        return childIds.all { isChildTaskComplete(it) }
-    }
-
-    private suspend fun isChildTaskComplete(childTaskId: String): Boolean {
-        val entry = decompositionStates.values
-            .flatMap { it.childRunStates.entries }
-            .find { it.key == childTaskId }
-        return entry?.value?.isTerminal ?: false
+        return childIds.all { state.childRunStates[it]?.isTerminal == true }
     }
 
     /**
      * Add a child task to the decomposition state.
      */
     fun addChildTask(taskId: String, childIndex: Int, childTaskId: String) {
-        val state = decompositionStates[taskId] ?: return
-        decompositionStates[taskId] = state.copy(
+        val state = stateStore.getDecompositionState(taskId) ?: return
+        stateStore.saveDecompositionState(taskId, state.copy(
             childTaskIds = state.childTaskIds + (childIndex to childTaskId)
-        )
+        ))
     }
 
     /**
      * Update the run state of a child task.
      */
     fun updateChildRunState(taskId: String, childTaskId: String, state: DevelopmentRunState) {
-        val decState = decompositionStates[taskId] ?: return
-        decompositionStates[taskId] = decState.copy(
+        val decState = stateStore.getDecompositionState(taskId) ?: return
+        stateStore.saveDecompositionState(taskId, decState.copy(
             childRunStates = decState.childRunStates + (childTaskId to state)
-        )
+        ))
     }
 
     /**
      * Get the approved plan for a task. Returns null if not approved.
      */
     fun getApprovedPlan(taskId: String): PlanProposal? {
-        val state = decompositionStates[taskId] ?: return null
+        val state = stateStore.getDecompositionState(taskId) ?: return null
         return if (state.planApproved) state.planProposal else null
     }
 
@@ -188,7 +183,7 @@ class PlannerPipeline(
      * Returns a list of created task IDs, or an empty list if creation failed.
      */
     suspend fun createChildTasks(parentTaskId: String): List<String> {
-        val state = decompositionStates[parentTaskId] ?: return emptyList()
+        val state = stateStore.getDecompositionState(parentTaskId) ?: return emptyList()
         val proposal = state.planProposal ?: return emptyList()
         if (!state.planApproved) {
             logger.warn("planner pipeline: taskId={}, plan not approved, cannot create child tasks", parentTaskId)

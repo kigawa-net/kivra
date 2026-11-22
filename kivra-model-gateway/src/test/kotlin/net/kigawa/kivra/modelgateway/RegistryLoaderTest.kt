@@ -51,6 +51,28 @@ class RegistryLoaderTest {
             maxOutputTokens: 100
     """.trimIndent()
 
+    @Test fun loadsProviderAndPrincipalRateLimits() {
+        val r = RegistryLoader.fromYaml(base.replace("credentialRef: P_KEY", """credentialRef: P_KEY
+    rateLimit: { requestsPerMinute: 60, tokensPerMinute: 10000 }
+    principalRateLimit: { requestsPerMinute: 10 }"""))
+        assertEquals(RateLimit(60, 10000), r.providers.getValue("p").rateLimit)
+        assertEquals(RateLimit(10), r.providers.getValue("p").principalRateLimit)
+    }
+
+    @Test fun malformedRateLimitsFailClosed() {
+        listOf("0", "-1", "1.5", "UNKNOWN").forEach { value ->
+            assertFailsWith<RegistryException> {
+                RegistryLoader.fromYaml(base.replace("credentialRef: P_KEY",
+                    "credentialRef: P_KEY\n    rateLimit: { requestsPerMinute: $value }"))
+            }
+        }
+        listOf("{}", "{ rpm: 1 }", "{ requestsPerMinute: null }", "60").forEach { value ->
+            assertFailsWith<RegistryException> {
+                RegistryLoader.fromYaml(base.replace("credentialRef: P_KEY", "credentialRef: P_KEY\n    rateLimit: $value"))
+            }
+        }
+    }
+
     @Test fun minimalRegistryLoadsWithoutPrice() {
         assertEquals(emptyList(), RegistryLoader.fromYaml(base).models.single().prices)
     }

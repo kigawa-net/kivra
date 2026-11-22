@@ -37,7 +37,12 @@ internal object PodPaths {
     const val KIVRA_DIR = "/work/.kivra"
     const val INPUT = "$KIVRA_DIR/input.json"
     const val RESULT = "$KIVRA_DIR/result.json"
-    const val WORK_ROOT = "/work"
+    /**
+     * The work root of the entrypoint: a subdirectory of the emptyDir `/work`. The work root must be 0700 with no group and no other access
+     * ([net.kigawa.kivra.agent.workdir.WorkDirPreparer]), but the emptyDir itself is root-owned and 2777 under `fsGroup`, which uid 10001
+     * cannot chmod. The entrypoint creates this directory with 0700 ([PodEntrypoint.prepareWorkRoot]). [KIVRA_DIR] stays directly in `/work`.
+     */
+    const val WORK_ROOT = "/work/root"
     const val MIRROR_DIR = "/tmp/mirror"
     const val GIT_BINARY = "/usr/bin/git"
 }

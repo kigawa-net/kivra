@@ -1,5 +1,8 @@
 package net.kigawa.kivra.mcp
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -7,6 +10,7 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.install
@@ -46,12 +50,16 @@ import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.SelfDevAssigneeRepository
 import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevSubmitResult
+import net.kigawa.kivra.db.SelfDevTask
 import net.kigawa.kivra.db.TestDb
+import net.kigawa.kivra.db.execUpdate
 import net.kigawa.kivra.github.RepoRef
 import net.kigawa.kivra.routes.GuardLog
 import net.kigawa.kivra.routes.PermissionGuard
 import net.kigawa.kivra.routes.legacyPermissionGuard
 import net.kigawa.kivra.selfdev.NewTask
+import org.jetbrains.exposed.sql.transactions.transaction
+import org.slf4j.LoggerFactory
 
 /**
  * `kivra_task_list` (ADR 0019 addendum: the cycle tree) on `/mcp`, through the production wiring on H2 with the real repositories and the real
@@ -113,7 +121,7 @@ class McpTaskToolsTest {
         }
     }
 
-    private fun env(goalRead: Boolean, goalText: Boolean): Map<String, String> = mapOf(
+    private fun env(goalRead: Boolean, goalText: Boolean, writeEnabled: Boolean = false): Map<String, String> = mapOf(
         "KIVRA_AUTH_MODE" to "oidc-jwt",
         "KIVRA_OIDC_ISSUER" to OidcTestTokens.ISSUER,
         "KIVRA_OIDC_AUDIENCE" to OidcTestTokens.AUDIENCE,
@@ -124,6 +132,9 @@ class McpTaskToolsTest {
         McpSettings.ENV_ALLOWED_ORIGINS to McpTestTokens.ORIGIN,
         McpSettings.ENV_GOAL_READ_ENABLED to goalRead.toString(),
         McpSettings.ENV_GOAL_TEXT_ENABLED to goalText.toString(),
+        McpSettings.ENV_WRITE_ENABLED to writeEnabled.toString(),
+        // The write rate (default 5 a minute) is raised here: one test makes more writes than that.
+        McpSettings.ENV_WRITE_RATE_PER_MINUTE to "1000",
     )
 
     /** The production wiring as Application builds it. [tasks] is null while the autopilot is off. */
@@ -133,8 +144,9 @@ class McpTaskToolsTest {
         goalRead: Boolean = true,
         goalText: Boolean = false,
         guard: PermissionGuard? = null,
+        writeEnabled: Boolean = false,
     ): McpRouteDeps {
-        val e = env(goalRead, goalText)
+        val e = env(goalRead, goalText, writeEnabled)
         return buildMcpRouteDeps(
             McpSettings.fromEnv(e), e, db.runs, repo,
             jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = true, maxActiveSelfDev = 1,
@@ -161,6 +173,9 @@ class McpTaskToolsTest {
 
     private fun call(name: String, args: String, id: Int = 1) =
         """{"jsonrpc":"2.0","id":$id,"method":"tools/call","params":{"name":"$name","arguments":$args}}"""
+
+    private suspend fun ApplicationTestBuilder.callTool(name: String, args: String, token: String): JsonObject =
+        rpc(call(name, args), token).json()
 
     private suspend fun ApplicationTestBuilder.listed(token: String): List<String> =
         rpc("""{"jsonrpc":"2.0","id":1,"method":"tools/list"}""", token).json()["result"]!!.jsonObject["tools"]!!.jsonArray
@@ -346,6 +361,356 @@ class McpTaskToolsTest {
         assertEquals(200, safeTaskTitle("x".repeat(250)).length)
         val emoji = "😀"
         assertEquals("a".repeat(199) + emoji, safeTaskTitle("a".repeat(199) + emoji + "z"))
+    }
+
+    // ---- the approve and the skip (ADR 0015 amendment 2026-11-19) ---------------------------------------------------
+
+    private val decideScope = SCOPE_SELFDEV_TASK_DECIDE
+    private val decideTools = listOf("kivra_task_approve", "kivra_task_skip", "kivra_task_replan")
+    /** The approve and the skip only: a plan root is refused by GUARD_FAILED for these two, while the replan answers NO_EDGE (see below). */
+    private val rootRefusedTools = listOf("kivra_task_approve", "kivra_task_skip")
+    /** An operator (bob) with the decide scope. */
+    private val decideBob get() = McpTestTokens.token(subject = "sub-bob", scope = "$readScope $decideScope")
+    /** The AI principal (alice) with the same scope: the scope does not make it an operator. */
+    private val decideAi get() = McpTestTokens.token(subject = "sub-alice", scope = "$readScope $decideScope")
+
+    /** The production wiring with the write switch on, and the AI principal of the guard (alice), as the REST routes see it. */
+    private fun decisionDeps(db: TestDb, ops: SelfDevOperatorRepository?): McpRouteDeps =
+        deps(db, ops, writeEnabled = true, guard = legacyPermissionGuard(aliceOwner))
+
+    private fun waitingTask(fx: Fixture): SelfDevTask =
+        fx.ops.childrenOf(fx.root, 10).single { it.state == TaskState.PENDING_APPROVAL }
+
+    private fun queuedTask(fx: Fixture): SelfDevTask =
+        fx.ops.childrenOf(fx.root, 10).single { it.state == TaskState.QUEUED }
+
+    /** The refusal of a tool result: `structuredContent.error.code` (the dispatcher's and the decision tools' shape). */
+    private fun JsonObject.refusalCode(): String = structured()["error"]!!.jsonObject["code"]!!.jsonPrimitive.content
+
+    @Test
+    fun `approve and skip are listed only with the write switch, the autopilot, and their own scope`() = withTestDb { db ->
+        val fx = Fixture(db)
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            assertTrue(listed(decideBob).containsAll(decideTools), "listed with the write switch, the autopilot and the scope")
+            assertFalse(listed(humanToken).any { it in decideTools }, "the read scope lists neither")
+        }
+        testApplication {
+            setUp(deps(db, fx.ops, writeEnabled = false))
+            assertFalse(listed(decideBob).any { it in decideTools }, "not listed without the write switch")
+            for (name in decideTools) {
+                assertEquals(-32602, callTool(name, """{"task_id":"$noSuchTask","version":0}""", decideBob).rpcCode(), name)
+            }
+        }
+        testApplication {
+            setUp(decisionDeps(db, null))
+            assertFalse(listed(decideBob).any { it in decideTools }, "not listed while the autopilot is off")
+        }
+    }
+
+    @Test
+    fun `approve and skip need their own scope - without it 403 insufficient_scope, and nothing is written`() = withTestDb { db ->
+        val fx = Fixture(db)
+        val target = waitingTask(fx)
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            for (name in decideTools) {
+                val response = rpc(call(name, """{"task_id":"${target.taskId}","version":${target.version}}"""), McpTestTokens.token(subject = "sub-bob", scope = readScope))
+                assertEquals(HttpStatusCode.Forbidden, response.status, name)
+                assertTrue(response.headers[HttpHeaders.WWWAuthenticate].orEmpty().contains("scope=\"$decideScope\""), name)
+            }
+        }
+        assertEquals(TaskState.PENDING_APPROVAL, fx.ops.task(target.taskId)!!.state)
+    }
+
+    @Test
+    fun `approve moves a waiting task to QUEUED once per version, also one stopped by the scope check, and skip moves it to SKIPPED`() =
+        withTestDb { db ->
+            val fx = Fixture(db)
+            val target = waitingTask(fx)
+            // The scope check stopped it (AUTO_SCOPE_EXCEEDED). The approve does not check the scope again, so the reason is only a reason here.
+            transaction(db.database) {
+                execUpdate("UPDATE selfdev_tasks SET state_reason = 'AUTO_SCOPE_EXCEEDED' WHERE task_id = ?", target.taskId)
+            }
+            testApplication {
+                setUp(decisionDeps(db, fx.ops))
+                val ok = callTool("kivra_task_approve", """{"task_id":"${target.taskId}","version":${target.version}}""", decideBob)
+                assertFalse(ok.isError(), ok.toString())
+                assertEquals("QUEUED", ok.structured()["state"]!!.jsonPrimitive.content)
+                assertEquals("OPERATOR_APPROVED", ok.structured()["state_reason"]!!.jsonPrimitive.content)
+                assertFalse(ok.toString().contains(childTwoTitle), "the title is not returned")
+                assertEquals(
+                    "STALE_VERSION",
+                    callTool("kivra_task_approve", """{"task_id":"${target.taskId}","version":${target.version}}""", decideBob).refusalCode(),
+                )
+            }
+            val approved = fx.ops.task(target.taskId)!!
+            assertEquals(TaskState.QUEUED, approved.state)
+            assertEquals(bobOwner, approved.approvedBy)
+
+            // A second waiting task, skipped: the same version rule, and the state is SKIPPED with OPERATOR_SKIPPED.
+            val other = (fx.ops.childrenOf(fx.root, 10).single { it.state == TaskState.QUEUED && it.taskId != target.taskId })
+            testApplication {
+                setUp(decisionDeps(db, fx.ops))
+                val skipped = callTool("kivra_task_skip", """{"task_id":"${other.taskId}","version":${other.version}}""", decideBob)
+                assertFalse(skipped.isError(), skipped.toString())
+                assertEquals("SKIPPED", skipped.structured()["state"]!!.jsonPrimitive.content)
+                assertEquals("OPERATOR_SKIPPED", skipped.structured()["state_reason"]!!.jsonPrimitive.content)
+                assertEquals(
+                    "STALE_VERSION",
+                    callTool("kivra_task_skip", """{"task_id":"${other.taskId}","version":${other.version}}""", decideBob).refusalCode(),
+                )
+            }
+            assertEquals(TaskState.SKIPPED, fx.ops.task(other.taskId)!!.state)
+        }
+
+    @Test
+    fun `skip also moves a waiting task to SKIPPED, and the outcome names no title`() = withTestDb { db ->
+        val fx = Fixture(db)
+        val target = waitingTask(fx)
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            val out = callTool("kivra_task_skip", """{"task_id":"${target.taskId}","version":${target.version}}""", decideBob)
+            assertFalse(out.isError(), out.toString())
+            assertEquals("SKIPPED", out.structured()["state"]!!.jsonPrimitive.content)
+            assertFalse(out.toString().contains(childTwoTitle))
+        }
+        assertEquals(TaskState.SKIPPED, fx.ops.task(target.taskId)!!.state)
+    }
+
+    @Test
+    fun `the AI principal is refused approve and skip by the permission, whatever its scopes, and nothing is written`() = withTestDb { db ->
+        val fx = Fixture(db)
+        val target = waitingTask(fx)
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            for (name in decideTools) {
+                val out = callTool(name, """{"task_id":"${target.taskId}","version":${target.version}}""", decideAi)
+                assertTrue(out.isError(), name)
+                assertEquals("forbidden", out.refusalCode(), name)
+            }
+        }
+        val row = fx.ops.task(target.taskId)!!
+        assertEquals(TaskState.PENDING_APPROVAL, row.state)
+        assertEquals(target.version, row.version)
+        assertEquals(null, row.approvedBy)
+    }
+
+    @Test
+    fun `approve and skip refuse bad input before the repository - unknown fields, bad id, missing, string, fraction or negative version`() =
+        withTestDb { db ->
+            val fx = Fixture(db)
+            val target = waitingTask(fx)
+            val bad = listOf(
+                """{"task_id":"${target.taskId}","version":${target.version},"reason":"ok"}""",
+                """{"task_id":"${target.taskId}","version":${target.version},"title":"x"}""",
+                """{"task_id":"not-an-id","version":${target.version}}""",
+                """{"task_id":"${target.taskId}"}""",
+                """{"task_id":"${target.taskId}","version":"${target.version}"}""",
+                """{"task_id":"${target.taskId}","version":1.5}""",
+                """{"task_id":"${target.taskId}","version":-1}""",
+            )
+            testApplication {
+                setUp(decisionDeps(db, fx.ops))
+                for (name in decideTools) {
+                    for (args in bad) assertEquals(-32602, callTool(name, args, decideBob).rpcCode(), "$name refused: $args")
+                }
+            }
+            val row = fx.ops.task(target.taskId)!!
+            assertEquals(TaskState.PENDING_APPROVAL, row.state)
+            assertEquals(target.version, row.version)
+        }
+
+    @Test
+    fun `approve and skip answer a missing task as TASK_NOT_FOUND, and a plan root and a wrong state as a refusal with no write`() = withTestDb { db ->
+        val fx = Fixture(db)
+        val queued = queuedTask(fx)
+        val rootVersion = fx.ops.task(fx.root)!!.version
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            for (name in decideTools) {
+                assertEquals("TASK_NOT_FOUND", callTool(name, """{"task_id":"$noSuchTask","version":0}""", decideBob).refusalCode(), name)
+            }
+            // A plan root is not run itself, so neither decision applies to it (the repository refuses it).
+            for (name in rootRefusedTools) {
+                val refused = callTool(name, """{"task_id":"${fx.root}","version":$rootVersion}""", decideBob)
+                assertTrue(refused.isError(), name)
+                assertEquals("GUARD_FAILED", refused.refusalCode(), name)
+            }
+            // A queued task is not waiting for approval: the approve is refused, and it stays QUEUED.
+            val refusedApprove = callTool("kivra_task_approve", """{"task_id":"${queued.taskId}","version":${queued.version}}""", decideBob)
+            assertTrue(refusedApprove.isError())
+            assertEquals(TaskState.QUEUED, fx.ops.task(queued.taskId)!!.state)
+        }
+        assertEquals(rootVersion, fx.ops.task(fx.root)!!.version)
+    }
+
+    // ---- the replan (ADR 0015 amendment 2026-11-19 §10) -------------------------------------------------------------
+
+    /** Puts the root into BLOCKED with a planning reason, as the planner's block does (the test sets the row; the planner is not run). */
+    private fun blockRoot(db: TestDb, taskId: String, reason: String) {
+        transaction(db.database) {
+            execUpdate("UPDATE selfdev_tasks SET state = 'BLOCKED', state_reason = ? WHERE task_id = ?", reason, taskId)
+        }
+    }
+
+    @Test
+    fun `replan sends a BLOCKED plan back to TASK_SUBMITTED once per version, and names no title or body`() = withTestDb { db ->
+        val fx = Fixture(db)
+        blockRoot(db, fx.root, "PLAN_CALL_FAILED")
+        val blocked = fx.ops.task(fx.root)!!
+        assertEquals(TaskState.BLOCKED, blocked.state)
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            val out = callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":${blocked.version}}""", decideBob)
+            assertFalse(out.isError(), out.toString())
+            assertEquals("TASK_SUBMITTED", out.structured()["state"]!!.jsonPrimitive.content)
+            assertEquals("REPLAN_REQUESTED", out.structured()["state_reason"]!!.jsonPrimitive.content)
+            assertEquals(blocked.version + 1, out.structured()["version"]!!.jsonPrimitive.content.toLong())
+            assertFalse(out.toString().contains(rootMarker), "the title is not returned")
+            assertFalse(out.toString().contains(bodyMarker), "the body is not returned")
+            assertEquals(
+                "STALE_VERSION",
+                callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":${blocked.version}}""", decideBob).refusalCode(),
+            )
+        }
+        val row = fx.ops.task(fx.root)!!
+        assertEquals(TaskState.TASK_SUBMITTED, row.state)
+        assertEquals(blocked.version + 1, row.version)
+    }
+
+    @Test
+    fun `replan refuses a task that is not BLOCKED with NO_EDGE, and a missing one as TASK_NOT_FOUND, with no write`() = withTestDb { db ->
+        val fx = Fixture(db)
+        val rootVersion = fx.ops.task(fx.root)!!.version
+        assertEquals(TaskState.PENDING_APPROVAL, fx.ops.task(fx.root)!!.state)
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            val refused = callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":$rootVersion}""", decideBob)
+            assertTrue(refused.isError())
+            assertEquals("NO_EDGE", refused.refusalCode())
+            assertEquals("TASK_NOT_FOUND", callTool("kivra_task_replan", """{"task_id":"$noSuchTask","version":0}""", decideBob).refusalCode())
+        }
+        val row = fx.ops.task(fx.root)!!
+        assertEquals(TaskState.PENDING_APPROVAL, row.state)
+        assertEquals(rootVersion, row.version)
+    }
+
+    @Test
+    fun `replan of a BLOCKED plan with a budget hold is accepted the same way`() = withTestDb { db ->
+        val fx = Fixture(db)
+        blockRoot(db, fx.root, "PLAN_BUDGET_HOLD")
+        val blocked = fx.ops.task(fx.root)!!
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            val out = callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":${blocked.version}}""", decideBob)
+            assertFalse(out.isError(), out.toString())
+        }
+        assertEquals(TaskState.TASK_SUBMITTED, fx.ops.task(fx.root)!!.state)
+    }
+
+    @Test
+    fun `replan needs its scope, the write switch and the autopilot, and the AI principal is refused`() = withTestDb { db ->
+        val fx = Fixture(db)
+        blockRoot(db, fx.root, "PLAN_INVALID")
+        val blocked = fx.ops.task(fx.root)!!
+        val args = """{"task_id":"${fx.root}","version":${blocked.version}}"""
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            val noScope = rpc(call("kivra_task_replan", args), McpTestTokens.token(subject = "sub-bob", scope = readScope))
+            assertEquals(HttpStatusCode.Forbidden, noScope.status)
+            assertTrue(noScope.headers[HttpHeaders.WWWAuthenticate].orEmpty().contains("scope=\"$decideScope\""))
+            val ai = callTool("kivra_task_replan", args, decideAi)
+            assertTrue(ai.isError())
+            assertEquals("forbidden", ai.refusalCode())
+        }
+        testApplication {
+            setUp(deps(db, fx.ops, writeEnabled = false))
+            assertFalse(listed(decideBob).contains("kivra_task_replan"), "not listed without the write switch")
+        }
+        testApplication {
+            setUp(decisionDeps(db, null))
+            assertFalse(listed(decideBob).contains("kivra_task_replan"), "not listed while the autopilot is off")
+        }
+        assertEquals(TaskState.BLOCKED, fx.ops.task(fx.root)!!.state)
+    }
+
+    @Test
+    fun `replan refuses bad input before the repository`() = withTestDb { db ->
+        val fx = Fixture(db)
+        blockRoot(db, fx.root, "PLAN_CALL_FAILED")
+        val blocked = fx.ops.task(fx.root)!!
+        testApplication {
+            setUp(decisionDeps(db, fx.ops))
+            for (args in listOf(
+                """{"task_id":"${fx.root}","version":${blocked.version},"reason":"retry"}""",
+                """{"task_id":"not-an-id","version":${blocked.version}}""",
+                """{"task_id":"${fx.root}"}""",
+                """{"task_id":"${fx.root}","version":1.5}""",
+            )) {
+                assertEquals(-32602, callTool("kivra_task_replan", args, decideBob).rpcCode(), args)
+            }
+        }
+        assertEquals(TaskState.BLOCKED, fx.ops.task(fx.root)!!.state)
+    }
+
+    @Test
+    fun `the replan writes its operator line with via=mcp and the ids and codes only`() {
+        val logger = LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start() }
+        logger.addAppender(appender)
+        var rootId = ""
+        try {
+            withTestDb { db ->
+                val fx = Fixture(db)
+                rootId = fx.root
+                blockRoot(db, fx.root, "PLAN_CALL_FAILED")
+                testApplication {
+                    setUp(decisionDeps(db, fx.ops))
+                    callTool("kivra_task_replan", """{"task_id":"${fx.root}","version":${fx.ops.task(fx.root)!!.version}}""", decideBob)
+                }
+            }
+        } finally {
+            logger.detachAppender(appender)
+        }
+        val lines = appender.list.map { it.formattedMessage }
+        assertTrue(lines.any { it.contains("action=REPLAN") && it.contains("via=mcp") && it.contains("taskId=$rootId") })
+        val everything = lines.joinToString("\n")
+        for (marker in listOf(rootMarker, bodyMarker, "sub-bob", "sub-alice", bobOwner, aliceOwner)) {
+            assertFalse(everything.contains(marker), "a log line leaked a value: $marker")
+        }
+    }
+
+    @Test
+    fun `the decision logs its operator line with via=mcp and the ids and codes only`() {
+        val logger = LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME) as Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start() }
+        logger.addAppender(appender)
+        var approvedId = ""
+        var skippedId = ""
+        try {
+            withTestDb { db ->
+                val fx = Fixture(db)
+                val waiting = waitingTask(fx)
+                approvedId = waiting.taskId
+                val queued = queuedTask(fx)
+                skippedId = queued.taskId
+                testApplication {
+                    setUp(decisionDeps(db, fx.ops))
+                    callTool("kivra_task_approve", """{"task_id":"$approvedId","version":${waiting.version}}""", decideBob)
+                    callTool("kivra_task_skip", """{"task_id":"$skippedId","version":${queued.version}}""", decideBob)
+                }
+            }
+        } finally {
+            logger.detachAppender(appender)
+        }
+        val lines = appender.list.map { it.formattedMessage }
+        assertTrue(lines.any { it.contains("action=TASK_APPROVED") && it.contains("via=mcp") && it.contains("taskId=$approvedId") })
+        assertTrue(lines.any { it.contains("action=TASK_REJECTED") && it.contains("via=mcp") && it.contains("taskId=$skippedId") })
+        val everything = lines.joinToString("\n")
+        for (marker in listOf(childTwoTitle, bodyMarker, "sub-bob", "sub-alice", bobOwner, aliceOwner)) {
+            assertFalse(everything.contains(marker), "a log line leaked a value: $marker")
+        }
     }
 
     private fun assigneeId(db: TestDb, name: String): String =

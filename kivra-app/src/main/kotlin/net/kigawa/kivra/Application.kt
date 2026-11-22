@@ -225,6 +225,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             autopilot = autopilotSettings,
             memory = memory,
             suppress = suppressShadow,
+            orderSettings = orderSettings,
         )
     } else {
         null

@@ -646,3 +646,30 @@ sendState=NOT_SENT`。直前の `planner repo files: files=853 summarized=false 
 - 根本の改善は、`SecretScan` の候補を `/` で区切ること(ディレクトリ部分を除く)、または語らしさの除外を入れることである。どちらも、
   ゲートウェイの秘密検出の規則そのものの変更なので、別の決定として扱う。この追補では変えない。
 - 運用の見分け方と手順は runbook §7.2b と §7.2c。
+
+## 追補(2026-11-22): 計画の出力に `childOrders` を足す(任意、最大 3 件)
+
+### 1. 決定
+
+- 計画の JSON に任意のキー `childOrders` を足す: `[{"title": 題名, "instruction": 方針, "maxCycles": 整数}]`。キーが無いことは「子の提案が無い」と同じである。
+- 形式は厳密に検査する(既存の `tasks` と同じ): 未知のキー、型の違い(数の文字列、小数、null)は `SCHEMA` で拒否する。`maxCycles` は素の整数だけを受ける。
+- 各項目の規則(題名、方針、`maxCycles` の上限、題名の重複の禁止)は ADR 0015 追補 2026-11-22 のとおり。上限は定数を共有する(`MAX_TITLE_CODE_POINTS`、`MAX_POLICY_CODE_POINTS`、`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`)。
+- `childOrders` は、その計画の order が提案を許される時だけ受け付ける(根の order で、深さの余地がある時)。許されない時に空でない `childOrders` があれば `CHILD_ORDERS_NOT_ALLOWED`。
+- 計画の `tasks` は従来どおり 1 件以上必要である。`childOrders` だけの計画は受け付けない(理由は ADR 0015 追補 2026-11-22 §1)。
+- 検証の理由コードを増やす: `CHILD_ORDERS_NOT_ALLOWED`、`CHILD_ORDER_COUNT`、`CHILD_ORDER_TITLE`、`CHILD_ORDER_INSTRUCTION`、`CHILD_ORDER_MAX_CYCLES`、`CHILD_ORDER_DUPLICATE_TITLE`。理由は固定の列挙で、文面は含まない。
+
+### 2. 永続化
+
+- 計画の確定(`commitPlan`)と同じトランザクションで、`selfdev_order_split_proposals`(V60)に `PROPOSED` の行を書く。古い fence の時は何も書かない。
+- 行は子を作らない。`APPROVED`、`REJECTED`、`EXPIRED` は次の変更で使う。
+
+### 3. 変えなかったこと
+
+- 既存の計画の形式と検査の結果。`childOrders` を含まない計画は、以前と同じ結果になる。
+- 自動の投入の規則(`requiresApproval` と `initialState` の決め方)。`requiresApproval` は引き続きモデルから読まない。
+- 経路の allowlist と denylist。子の提案にはパスが無い。
+
+### 4. 残るリスク
+
+- モデルが提案を多く出しすぎる場合、件数の上限(3)で止まるだけで、提案の質は検査しない。質は運用者が承認の段階で見る(PR2)。
+- 検証が拒否した計画は、既存の再試行(`PLAN_INVALID` まで)に入る。提案の拒否の理由は再試行の文面に出さない。

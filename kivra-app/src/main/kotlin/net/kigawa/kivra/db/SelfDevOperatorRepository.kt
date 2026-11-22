@@ -16,6 +16,7 @@ import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.core.autopilot.TransitionDecision
 import net.kigawa.kivra.core.autopilot.TransitionRefusal
 import net.kigawa.kivra.core.autopilot.checkTaskTransition
+import net.kigawa.kivra.selfdev.NewChildOrder
 import net.kigawa.kivra.selfdev.NewTask
 import net.kigawa.kivra.selfdev.autofix.INCIDENT_FIX_PRINCIPAL
 import net.kigawa.kivra.selfdev.PromotionCounts
@@ -61,6 +62,27 @@ sealed interface PlanCommit {
 
 /** A submitted task whose Run exists, read by the dispatcher for the Run's outcome. */
 data class SubmittedRun(val taskId: String, val runId: String)
+
+/** The order a plan root belongs to (its cycle), read by the Planner for the child-order rules. [parentOrderId] is null for a root order. */
+data class PlanningOrder(val orderId: String, val parentOrderId: String?, val depth: Int)
+
+/** The state of a child order proposal (V60). Only PROPOSED is written so far; the others belong to the operator's approval (PR2). */
+enum class ChildProposalState { PROPOSED, APPROVED, REJECTED, EXPIRED }
+
+/** A stored child order proposal (V60, ADR 0015 addendum 2026-11-22). Its [title] and [instruction] are the Planner's output: data. */
+data class SplitProposal(
+    val proposalId: String,
+    val planId: String,
+    val planTaskId: String,
+    val orderId: String,
+    val ordinal: Int,
+    val title: String,
+    val instruction: String,
+    val maxCycles: Int,
+    val state: ChildProposalState,
+    val createdAt: LocalDateTime,
+    val createdChildOrderId: String?,
+)
 
 sealed interface TaskTransition {
     data class Moved(val row: SelfDevTask) : TaskTransition
@@ -294,12 +316,45 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         ) == 1
     }
 
+    /** The order of a plan root, or null when the task has no order (an operator's own task) or is missing. Read only. */
+    fun planningOrderOf(taskId: String): PlanningOrder? = transaction(database) {
+        execQuery(
+            "SELECT o.order_id, o.parent_order_id, o.depth FROM selfdev_tasks t JOIN selfdev_orders o ON o.order_id = t.order_id WHERE t.task_id = ?",
+            taskId,
+        ) { PlanningOrder(it.getString(1), it.getString(2), it.getInt(3)) }.firstOrNull()
+    }
+
+    /** The child order proposals of [orderId], oldest first, up to [limit] (read only). */
+    fun splitProposalsOf(orderId: String, limit: Int): List<SplitProposal> = transaction(database) {
+        execQuery(
+            "SELECT proposal_id, plan_id, plan_task_id, order_id, ordinal, title, instruction, max_cycles, state, created_at, created_child_order_id " +
+                "FROM selfdev_order_split_proposals WHERE order_id = ? ORDER BY created_at, plan_id, ordinal LIMIT ?",
+            orderId, limit,
+        ) { rs ->
+            SplitProposal(
+                proposalId = rs.getString(1), planId = rs.getString(2), planTaskId = rs.getString(3), orderId = rs.getString(4),
+                ordinal = rs.getInt(5), title = rs.getString(6), instruction = rs.getString(7), maxCycles = rs.getInt(8),
+                state = ChildProposalState.valueOf(rs.getString(9)), createdAt = rs.getObject(10, LocalDateTime::class.java),
+                createdChildOrderId = rs.getString(11),
+            )
+        }
+    }
+
     /**
      * Writes the plan of a claimed task in one transaction (ADR 0011 sections 2.6 and 5.1). Each planned task becomes a row whose
      * parent_task_id is the root, in PENDING_APPROVAL, or in QUEUED when the stage rules approved it (AUTO_APPROVED). The root moves
      * PLANNING -> PENDING_APPROVAL and its revision rises. A fence that no longer matches writes nothing and returns [PlanCommit.Stale].
+     *
+     * [childOrders] are stored as PROPOSED rows of [proposingOrderId] in the same transaction (ADR 0015 addendum 2026-11-22). Nothing is
+     * created: a child order is made only by an operator's act. The plan's id is "{root}:r{revision}".
      */
-    fun commitPlan(fence: PlanFence, tasks: List<NewTask>): PlanCommit = try {
+    fun commitPlan(
+        fence: PlanFence,
+        tasks: List<NewTask>,
+        childOrders: List<NewChildOrder> = emptyList(),
+        proposingOrderId: String? = null,
+    ): PlanCommit = try {
+        require(childOrders.isEmpty() || proposingOrderId != null) { "child order proposals need the order that proposes them" }
         transaction(database) {
             val current = lockTask(fence.taskId) ?: return@transaction PlanCommit.Stale
             if (!fenceMatches(current, fence)) return@transaction PlanCommit.Stale
@@ -325,6 +380,15 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                     JSON.encodeToString(ListSerializer(String.serializer()), dependencies), plan.requiresApproval, current.taskId, now, now,
                     project,
                 )
+            }
+            proposingOrderId?.let { orderId ->
+                val planId = "${fence.taskId}:r$revision"
+                childOrders.forEach { child ->
+                    execUpdate(
+                        "INSERT INTO selfdev_order_split_proposals (proposal_id, plan_id, plan_task_id, order_id, ordinal, title, instruction, max_cycles, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PROPOSED', ?)",
+                        Ulid.generate(clock), planId, fence.taskId, orderId, child.ordinal, child.title, child.instruction, child.maxCycles, now,
+                    )
+                }
             }
             val changed = execUpdate(
                 "UPDATE selfdev_tasks SET state = 'PENDING_APPROVAL', state_reason = NULL, revision = ?, claim_token = NULL, claimed_until = NULL, version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = 'PLANNING' AND claim_token = ?",

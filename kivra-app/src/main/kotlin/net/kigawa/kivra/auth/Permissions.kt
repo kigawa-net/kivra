@@ -26,6 +26,9 @@ enum class Permission {
     /** Create an order, start a cycle, pause, resume, change settings. */
     ORDER_MANAGE,
 
+    /** Assign an order to a project member (ADR 0024). */
+    ORDER_ASSIGN,
+
     /** Request a stop (REST and `kivra_goal_stop`). */
     STOP_REQUEST,
 
@@ -56,6 +59,7 @@ private val OPERATOR_PERMISSIONS = setOf(
     Permission.READ_TEXT,
     Permission.GOAL_STOP,
     Permission.ORDER_MANAGE,
+    Permission.ORDER_ASSIGN,
     Permission.STOP_REQUEST,
     Permission.GOAL_WRITE,
     Permission.SPEND_START,

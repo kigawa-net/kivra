@@ -62,6 +62,8 @@ data class SelfDevOrder(
     val cycleBudgetJpy: Long,
     /** Optional project grouping (V42). Null means unassigned. */
     val projectId: String?,
+    val assigneeId: String? = null,
+    val assignedAt: LocalDateTime? = null,
 )
 
 enum class StopRequestState { PENDING, CONSUMED, REJECTED, CANCELLED, EXPIRED }
@@ -301,6 +303,8 @@ class SelfDevOrderRepository(
     private val stopTtl: Duration = Duration.ofHours(STOP_REQUEST_TTL_HOURS),
 ) {
 
+    val assignments = SelfDevOrderAssignmentRepository(database, clock)
+
     @Volatile
     private var stopRequestListener: StopRequestListener? = null
 
@@ -311,15 +315,22 @@ class SelfDevOrderRepository(
 
     // ---- reads -------------------------------------------------------------------------------------------------------------------
 
-    fun get(orderId: String): SelfDevOrder? = transaction(database) { getIn(orderId) }
+    fun get(orderId: String): SelfDevOrder? = transaction(database) {
+        execQuery("SELECT $ASSIGNED_ORDER_COLUMNS FROM selfdev_orders WHERE order_id = ?", orderId) { it.toAssignedOrder() }.firstOrNull()
+    }
 
     /** The orders, oldest first, narrowed to [project] (ADR 0022 PR-D). The autonomous loops use [activeOrders] and never narrow. */
-    fun list(limit: Int, project: ProjectFilter = ProjectFilter.All): List<SelfDevOrder> = transaction(database) {
+    fun list(limit: Int, project: ProjectFilter = ProjectFilter.All, assigneeId: String? = null, unassigned: Boolean = false): List<SelfDevOrder> = transaction(database) {
         val (cond, params) = project.sql("project_id")
+        val assignmentFilter = when {
+            assigneeId != null -> " AND EXISTS (SELECT 1 FROM selfdev_order_assignments a WHERE a.order_id = selfdev_orders.order_id AND a.unassigned_at IS NULL AND a.assignee_id = ?)"
+            unassigned -> " AND NOT EXISTS (SELECT 1 FROM selfdev_order_assignments a WHERE a.order_id = selfdev_orders.order_id AND a.unassigned_at IS NULL)"
+            else -> ""
+        }
         execQuery(
-            "SELECT $ORDER_COLUMNS FROM selfdev_orders WHERE 1 = 1$cond ORDER BY created_at, order_id LIMIT ?",
-            *(params + limit).toTypedArray(),
-        ) { it.toOrder() }
+            "SELECT $ASSIGNED_ORDER_COLUMNS FROM selfdev_orders WHERE 1 = 1$cond$assignmentFilter ORDER BY created_at, order_id LIMIT ?",
+            *(params + listOfNotNull(assigneeId) + limit).toTypedArray(),
+        ) { it.toAssignedOrder() }
     }
 
     /** ACTIVE orders, for the safety guards. */
@@ -1770,6 +1781,9 @@ class SelfDevOrderRepository(
         const val ORDER_COLUMNS = "order_id, parent_order_id, depth, title, policy, target_repo, max_cycles, cycles_started, " +
             "current_goal_id, consecutive_failed_cycles, state, state_reason, expires_at, created_by, version, created_at, updated_at, " +
             "order_budget_jpy, allocated_jpy, child_count, spent_jpy, cycle_budget_jpy, project_id"
+        const val ASSIGNED_ORDER_COLUMNS = ORDER_COLUMNS + ", " +
+            "(SELECT a.assignee_id FROM selfdev_order_assignments a WHERE a.order_id = selfdev_orders.order_id AND a.unassigned_at IS NULL), " +
+            "(SELECT a.assigned_at FROM selfdev_order_assignments a WHERE a.order_id = selfdev_orders.order_id AND a.unassigned_at IS NULL)"
         const val REQUEST_COLUMNS = "request_id, order_id, requested_by, requester_kind, reason_code, order_version, digest, state, " +
             "decided_by, expires_at, created_at, target_is_root"
 
@@ -1842,3 +1856,5 @@ private fun java.sql.ResultSet.toRequest() = SelfDevOrderStopRequest(
     createdAt = getObject(11, LocalDateTime::class.java),
     targetIsRoot = getInt(12) == 1,
 )
+
+private fun java.sql.ResultSet.toAssignedOrder() = toOrder().copy(assigneeId = getString(24), assignedAt = getObject(25, LocalDateTime::class.java))

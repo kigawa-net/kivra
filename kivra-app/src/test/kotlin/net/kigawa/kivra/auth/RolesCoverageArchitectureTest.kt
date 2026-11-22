@@ -100,6 +100,10 @@ class RolesCoverageArchitectureTest {
         "POST /api/projects/{projectId}/tasks" to Permission.GOAL_WRITE,
         "GET /api/projects/{projectId}/orders" to Permission.READ,
         "POST /api/projects/{projectId}/orders" to Permission.ORDER_MANAGE,
+        "POST /api/projects/{projectId}/orders/{id}/children" to Permission.ORDER_MANAGE,
+        "PUT /api/projects/{projectId}/orders/{orderId}/assignee" to Permission.ORDER_ASSIGN,
+        "DELETE /api/projects/{projectId}/orders/{orderId}/assignee" to Permission.ORDER_ASSIGN,
+        "GET /api/projects/{projectId}/orders/{orderId}/assignments" to Permission.READ,
         "GET /api/projects/{projectId}/approvals" to Permission.STOP_DECIDE,
         // The project chat's action confirm and dismiss (ADR 0023): the permission is the action code's (ORDER_MANAGE for the order codes,
         // GOAL_WRITE for TASK_REPLAN), so the row names the order codes' one and the handler resolves it per code (PER_CODE_PERMISSION_ROUTES).

@@ -70,7 +70,7 @@ fun sidebarSections(current: Route? = null): List<NavSection> {
 }
 
 /**
- * プロジェクトの画面に並べるリンク(ダッシュボード自身を除く[pagesOf])。ダッシュボードの上、または未分類の画面の上に出す。
+ * プロジェクトの画面に並べるリンク(ダッシュボード自身を除く[pagesOf])。未分類の画面の上に出す(プロジェクトのダッシュボードには出さない)。
  * 権限や API の結果による出し分けは呼び出し側が行う。
  */
 fun projectLinkTargets(projectId: String): List<NavItem> =

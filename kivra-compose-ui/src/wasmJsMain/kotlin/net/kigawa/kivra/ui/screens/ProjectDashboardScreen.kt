@@ -50,8 +50,6 @@ import net.kigawa.kivra.ui.api.ApiChatAction
 import net.kigawa.kivra.ui.BACKFILL_DRY_DONE_MESSAGE
 import net.kigawa.kivra.ui.BACKFILL_RUN_DONE_MESSAGE
 import net.kigawa.kivra.ui.NavDestination
-import net.kigawa.kivra.ui.NavItem
-import net.kigawa.kivra.ui.ProjectLinks
 import net.kigawa.kivra.ui.PROJECT_SPEND_NOTE
 import net.kigawa.kivra.ui.REPO_ADDED_MESSAGE
 import net.kigawa.kivra.ui.REPO_EMPTY_MESSAGE
@@ -108,13 +106,11 @@ import net.kigawa.kivra.ui.yenText
 fun ProjectDashboardScreen(
     projectId: String,
     onNavigate: (Route) -> Unit,
-    links: List<NavItem> = emptyList(),
-    approvalsBadge: String? = null,
 ) {
     val loaded = rememberLoad(projectId) { loadProjectDashboard(projectId) }
     DetailPage {
         LoadedView(loaded) { d ->
-            ProjectDashboardBody(projectId, d, onNavigate, links, approvalsBadge)
+            ProjectDashboardBody(projectId, d, onNavigate)
         }
     }
 }
@@ -134,8 +130,6 @@ private fun ProjectDashboardBody(
     projectId: String,
     d: ApiProjectDashboard,
     onNavigate: (Route) -> Unit,
-    links: List<NavItem>,
-    approvalsBadge: String?,
 ) {
     val operator = showsProjectOperator(d.scope)
     SelectableText(d.project.name, style = MaterialTheme.typography.headlineSmall)
@@ -144,9 +138,6 @@ private fun ProjectDashboardBody(
     }
     Spacer(Modifier.height(2.dp))
     SelectableText(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Spacer(Modifier.height(4.dp))
-    // このプロジェクトの項目への入口(サイドナビからはここへ移した)。
-    ProjectLinks(links, approvalsBadge, Route.ProjectPage(projectId, NavDestination.Dashboard), onNavigate)
     Spacer(Modifier.height(8.dp))
 
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {

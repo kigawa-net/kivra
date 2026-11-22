@@ -16,11 +16,12 @@ import (
 )
 
 // WIFConfig: Workload Identity Federation settings. The four IDs are not secret.
-// The Keycloak client secret is read from ClientSecretFile at every Keycloak call.
+// The shared Keycloak client secret comes from the environment or ClientSecretFile.
 type WIFConfig struct {
 	KeycloakTokenURL  string
 	KeycloakClientID  string
 	ClientSecretFile  string
+	clientSecret      string
 	AnthropicTokenURL string
 	FederationRuleID  string
 	OrganizationID    string
@@ -29,6 +30,14 @@ type WIFConfig struct {
 	// KeycloakAllowedIP, when set, is the one address the WIF client may use for the Keycloak host on 443
 	// (split-horizon DNS: the cluster resolves the host to an internal LB). nil means unset.
 	KeycloakAllowedIP net.IP
+}
+
+func (cfg WIFConfig) forAccount(a WIFAccount) WIFConfig {
+	cfg.FederationRuleID = a.FederationRuleID
+	cfg.OrganizationID = a.OrganizationID
+	cfg.ServiceAccountID = a.ServiceAccountID
+	cfg.WorkspaceID = a.WorkspaceID
+	return cfg
 }
 
 const (
@@ -200,14 +209,18 @@ func (w *WIFAuth) exchange(ctx context.Context) (*cachedToken, error) {
 	return &cachedToken{token: out.AccessToken, expiresAt: w.now().Add(time.Duration(out.ExpiresIn) * time.Second)}, nil
 }
 
-// fetchAssertion asks Keycloak for a new client-credentials JWT. The secret is read from the file each time.
+// fetchAssertion asks Keycloak for a new client-credentials JWT. The fallback file is read each time.
 func (w *WIFAuth) fetchAssertion(ctx context.Context) (string, error) {
-	secret, err := readFileTrimmed(w.cfg.ClientSecretFile)
-	if err != nil {
-		if errors.Is(err, errSecretEmpty) {
-			return "", authErr(stageSecretEmpty, 0, errSecretEmpty)
+	secret := w.cfg.clientSecret
+	if secret == "" {
+		var err error
+		secret, err = readFileTrimmed(w.cfg.ClientSecretFile)
+		if err != nil {
+			if errors.Is(err, errSecretEmpty) {
+				return "", authErr(stageSecretEmpty, 0, errSecretEmpty)
+			}
+			return "", authErr(stageSecretUnreadable, 0, errSecretUnreadable)
 		}
-		return "", authErr(stageSecretUnreadable, 0, errSecretUnreadable)
 	}
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")

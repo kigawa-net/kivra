@@ -20,8 +20,8 @@ mock_revoke() {
 json_field() { # json_field <json> <field>  (prints the value, no secrets involved)
   printf '%s' "$1" | sed -n "s/.*\"$2\": *\([0-9]*\).*/\1/p"
 }
-msg_status() { # POST a message with container-supplied auth headers; prints the HTTP status
-  client -o /dev/null -w '%{http_code}' -X POST "$PROXY/anthropic/v1/messages" \
+msg_status() { # msg_status [path]  (POST with container-supplied auth headers)
+  client -o /dev/null -w '%{http_code}' -X POST "$PROXY${1:-/anthropic/v1/messages}" \
     -H "x-api-key: $CONTAINER_KEY" -H "Authorization: Bearer $CONTAINER_AUTH" \
     -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
     -d '{"model":"mock","max_tokens":8,"messages":[{"role":"user","content":"ok"}]}'
@@ -46,9 +46,28 @@ st=$(mock_state)
 check "after revoke + 401: two JWTs and two exchanges in total" sh -c "echo '$st' | grep -q '\"keycloak_jwts_issued\": *2' && echo '$st' | grep -q '\"exchanges\": *2'"
 check "container x-api-key still never reached upstream" sh -c "echo '$st' | grep -q '\"x_api_key_seen\": *0'"
 
+echo "== named Claude accounts"
+code_a=$(msg_status /anthropic/repo-a/v1/messages)
+st=$(mock_state)
+check "repo-a has its own token exchange" [ "$code_a:$(json_field "$st" exchanges)" = "200:3" ]
+code_b=$(msg_status /anthropic/repo-b/v1/messages/count_tokens)
+st=$(mock_state)
+check "repo-b count_tokens has its own token exchange" [ "$code_b:$(json_field "$st" exchanges)" = "200:4" ]
+code_a=$(msg_status /anthropic/repo-a/v1/messages/count_tokens)
+code_b=$(msg_status /anthropic/repo-b/v1/messages)
+code_default=$(msg_status)
+before_denied=$(mock_state)
+check "each route reuses its cached token" [ "$code_a:$code_b:$code_default:$(json_field "$before_denied" exchanges)" = "200:200:200:4" ]
+unknown=$(msg_status /anthropic/unknown/v1/messages)
+malformed=$(msg_status /anthropic/%72epo-a/v1/messages)
+after_denied=$(mock_state)
+check "unknown and malformed account IDs return 403" [ "$unknown:$malformed" = "403:403" ]
+check "denied routes cause no upstream requests or exchanges" [ "$before_denied" = "$after_denied" ]
+check "named routes discard container x-api-key" [ "$(json_field "$after_denied" x_api_key_seen)" = "0" ]
+
 echo "== (b) logs must not contain secret material"
 logs=$(docker logs "${PREFIX}-proxy" 2>&1)
-for marker in "$SECRET_MARKER" "$CONTAINER_KEY" "$CONTAINER_AUTH" "sk-ant-oat01" "eyJmock" "access_token"; do
+for marker in "$SECRET_MARKER" "$CONTAINER_KEY" "$CONTAINER_AUTH" "sk-ant-oat01" "eyJmock" "access_token" "svac_VERIFY" "wrkspc_VERIFY"; do
   if printf '%s' "$logs" | grep -q -- "$marker"; then ko "proxy log contains a secret marker ($marker)"; else ok "proxy log is free of marker: $marker"; fi
 done
 summary

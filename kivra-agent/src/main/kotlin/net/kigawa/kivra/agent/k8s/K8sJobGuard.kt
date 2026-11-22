@@ -249,8 +249,10 @@ class K8sJobGuard(private val settings: K8sSettings) {
         }
         if (values["ANTHROPIC_API_KEY"] != DockerConstants.DUMMY_API_KEY) fail(K8sGuardRule.ENV_NOT_ALLOWED)
         val proxy = values.getValue("HTTPS_PROXY")
-        if (!DockerPatterns.PROXY_URL.matches(proxy) || values["HTTP_PROXY"] != proxy) fail(K8sGuardRule.ENV_NOT_ALLOWED)
-        if (values["ANTHROPIC_BASE_URL"] != proxy + DockerConstants.PROXY_PATH) fail(K8sGuardRule.ENV_NOT_ALLOWED)
+        if (!DockerPatterns.isK8sProxyUrl(proxy) || values["HTTP_PROXY"] != proxy) fail(K8sGuardRule.ENV_NOT_ALLOWED)
+        if (!ProxyEnv.isAllowedAnthropicBaseUrl(values.getValue("ANTHROPIC_BASE_URL"), proxy, settings.allowedAccounts)) {
+            fail(K8sGuardRule.ENV_NOT_ALLOWED)
+        }
         if (values["NO_PROXY"] != DockerConstants.NO_PROXY) fail(K8sGuardRule.ENV_NOT_ALLOWED)
         val javaOptions = try {
             ProxyEnv.k8sJavaToolOptions(proxy)

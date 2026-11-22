@@ -14,6 +14,9 @@ class DockerCommandBuilder(private val settings: DockerSettings) {
         if (spec.image !in settings.allowedImages) throw DockerSpecException("image is not allowed")
         if (spec.network !in settings.allowedNetworks) throw DockerSpecException("network is not allowed")
         if (spec.model !in settings.allowedModels) throw DockerSpecException("model is not allowed")
+        if (!ProxyEnv.isAllowedAccount(spec.claudeAccount, settings.allowedAccounts)) {
+            throw DockerSpecException("claudeAccount is not allowed")
+        }
         val workDir = WorkDirPolicy.validate(spec.workDir, settings.workRoot)
         val proxy = spec.proxyUrl
         return listOf(
@@ -36,7 +39,7 @@ class DockerCommandBuilder(private val settings: DockerSettings) {
             "--label=${DockerConstants.LABEL_AGENT_KEY}=${DockerConstants.LABEL_AGENT_VALUE}",
             "--label=${DockerConstants.LABEL_RUN_KEY}=${spec.runId}",
             "--stop-timeout=${spec.stopTimeoutSeconds}",
-            "--env=ANTHROPIC_BASE_URL=$proxy${DockerConstants.PROXY_PATH}",
+            "--env=ANTHROPIC_BASE_URL=${ProxyEnv.anthropicBaseUrl(proxy, spec.claudeAccount)}",
             "--env=ANTHROPIC_API_KEY=${DockerConstants.DUMMY_API_KEY}",
             "--env=HTTPS_PROXY=$proxy",
             "--env=HTTP_PROXY=$proxy",

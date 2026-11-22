@@ -47,6 +47,37 @@ class K8sJobGuardTest {
     }
 
     @Test
+    fun namedClaudeAccountUsesOnlyItsAllowlistedProxyRoute() {
+        val proxy = "http://kivra-agent-proxy.egress.svc:8080"
+        val settings = K8sSettings(K8S_NAMESPACE, K8S_OWNER, setOf(K8S_IMAGE), allowedAccounts = setOf("repo-a"))
+        val builder = K8sJobBuilder(settings)
+        val manifest = builder.build(K8sFixture.spec(proxy = proxy, claudeAccount = "repo-a"))
+        val env = manifest.container()["env"] as JsonArray
+        assertEquals("$proxy/anthropic/repo-a", env[0].jsonObject["value"]!!.jsonPrimitive.content)
+        assertEquals(golden.container()["command"], manifest.container()["command"])
+        val namedGuard = K8sJobGuard(settings)
+        namedGuard.check(manifest)
+        assertEquals(K8sGuardRule.ENV_NOT_ALLOWED, assertFailsWith<K8sJobRejectedException> { guard.check(manifest) }.rule)
+        for (url in listOf(
+            "$proxy/anthropic",
+            "$proxy/anthropic/repo-b",
+            "$proxy/anthropic/repo-a/../repo-b",
+            "$proxy/anthropic/%72epo-a",
+            "$proxy/anthropic/repo-a#x",
+            "$K8S_PROXY/anthropic/repo-a",
+        )) {
+            val error = assertFailsWith<K8sJobRejectedException> {
+                namedGuard.check(manifest.setContainer("env", 0, "value", value = str(url)))
+            }
+            assertEquals(K8sGuardRule.ENV_NOT_ALLOWED, error.rule, url)
+        }
+        assertFailsWith<K8sSpecException> { builder.build(K8sFixture.spec(claudeAccount = "repo-b")) }
+        assertFailsWith<K8sSpecException> {
+            K8sSettings(K8S_NAMESPACE, K8S_OWNER, setOf(K8S_IMAGE), allowedAccounts = setOf("repo/a"))
+        }
+    }
+
+    @Test
     fun manifestReadBackFromItsTextPasses() {
         val text = Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), golden)
         guard.check(Json.parseToJsonElement(text).jsonObject)

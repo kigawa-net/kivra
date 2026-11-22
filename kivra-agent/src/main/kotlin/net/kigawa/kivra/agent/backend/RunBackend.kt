@@ -62,6 +62,8 @@ class RunSpec(
     val budgetUsd: String,
     /** The most standard output bytes kept and read for this run: the smaller of the server's limit and the agent's. */
     val outputLimitBytes: Int,
+    /** The Claude account from the agent's startup settings, or null for the default route. */
+    val claudeAccount: String? = null,
 ) {
     override fun toString(): String = "RunSpec(runId=$runId, attemptId=$attemptId)"
 }

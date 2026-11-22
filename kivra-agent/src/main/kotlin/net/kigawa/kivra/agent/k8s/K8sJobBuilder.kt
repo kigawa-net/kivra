@@ -33,12 +33,15 @@ class K8sJobBuilder(private val settings: K8sSettings) {
         if (spec.namespace != settings.namespace) throw K8sSpecException("namespace is not allowed")
         if (spec.image !in settings.allowedImages) throw K8sSpecException("image is not allowed")
         if (spec.model !in settings.allowedModels) throw K8sSpecException("model is not allowed")
+        if (!ProxyEnv.isAllowedAccount(spec.claudeAccount, settings.allowedAccounts)) {
+            throw K8sSpecException("claudeAccount is not allowed")
+        }
         val labels = labels(spec)
         val limitMi = K8sQuantities.dockerMemoryToMi(spec.memory)
         val requestMi = minOf(limitMi, K8sConstants.REQUEST_MEMORY_MI)
         val requestCpu = if (BigDecimal(spec.cpus) <= BigDecimal(K8sConstants.REQUEST_CPU)) spec.cpus else K8sConstants.REQUEST_CPU
         val command = CliCommand.argv(spec.maxTurns, spec.model, spec.budgetUsd)
-        val env = envEntries(spec.proxyUrl)
+        val env = envEntries(spec.proxyUrl, spec.claudeAccount)
 
         return buildJsonObject {
             put("apiVersion", K8sConstants.API_VERSION)
@@ -143,11 +146,11 @@ class K8sJobBuilder(private val settings: K8sSettings) {
     )
 
     /**
-     * The env entries in the docker order, with the same values (see `DockerCommandBuilder`). The proxy is the only input, and the
-     * values are built by the same helper as the docker side ([ProxyEnv]).
+     * The env entries in the docker order, with the same values (see `DockerCommandBuilder`). The proxy URL and fixed
+     * Claude account use the same helpers as the docker side ([ProxyEnv]).
      */
-    private fun envEntries(proxy: String): List<Pair<String, String>> = listOf(
-        "ANTHROPIC_BASE_URL" to "$proxy${DockerConstants.PROXY_PATH}",
+    private fun envEntries(proxy: String, claudeAccount: String?): List<Pair<String, String>> = listOf(
+        "ANTHROPIC_BASE_URL" to ProxyEnv.anthropicBaseUrl(proxy, claudeAccount),
         "ANTHROPIC_API_KEY" to DockerConstants.DUMMY_API_KEY,
         "HTTPS_PROXY" to proxy,
         "HTTP_PROXY" to proxy,

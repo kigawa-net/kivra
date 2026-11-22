@@ -46,6 +46,7 @@ internal fun createRunBackend(
             allowedNetworks = setOf(settings.network ?: throw DockerSpecException("network is required")),
             allowedImages = setOf(settings.image),
             allowedModels = setOf(settings.model),
+            allowedAccounts = setOfNotNull(settings.claudeAccount),
         ),
         launcher = launcher,
         pollMillis = pollMillis ?: DockerRunner.DEFAULT_POLL_MILLIS,
@@ -53,9 +54,18 @@ internal fun createRunBackend(
     AgentConfig.Backend.K8S -> {
         val k8s = settings.k8s ?: throw ConfigException("${AgentConfig.ENV_K8S_NAMESPACE} is required for the k8s backend")
         val k8sSettings = try {
-            K8sSettings(k8s.namespace, k8s.ownerLabel, setOf(settings.image), setOf(settings.model))
+            K8sSettings(
+                namespace = k8s.namespace,
+                ownerLabel = k8s.ownerLabel,
+                allowedImages = setOf(settings.image),
+                allowedModels = setOf(settings.model),
+                allowedAccounts = setOfNotNull(settings.claudeAccount),
+            )
         } catch (e: K8sSpecException) {
-            throw ConfigException("the k8s settings are invalid (${AgentConfig.ENV_K8S_NAMESPACE}, ${AgentConfig.ENV_K8S_IMAGE}, ${AgentConfig.ENV_MODEL})")
+            throw ConfigException(
+                "the k8s settings are invalid (${AgentConfig.ENV_K8S_NAMESPACE}, ${AgentConfig.ENV_K8S_IMAGE}, " +
+                    "${AgentConfig.ENV_MODEL}, ${AgentConfig.ENV_CLAUDE_ACCOUNT})",
+            )
         }
         val api = try {
             kubeApi()

@@ -94,6 +94,32 @@ client secret: `/etc/kivra-agent/client-secret`。
 > 採らなかった代案: (a) rootful docker で proxy を動かす(kivra-agent に docker を root 相当で使わせることになる)。
 > (b) systemd の `LoadCredential=` で、権限のある経路から secret を渡す(system unit が要る。user unit で使えるかは未確認)。
 
+### リポジトリごとの Claude アカウント
+
+名前付きアカウントを使う場合は、プロキシに JSON ファイルを読み取り専用で配置し、プロキシから見えるパスを
+`KIVRA_PROXY_WIF_ACCOUNTS_FILE` に指定します。docker の `network/up-proxy.sh` ではホスト上の絶対パスを
+`KIVRA_AGENT_PROXY_ACCOUNTS_FILE` に指定すると、マウントとプロキシ側の環境変数の設定を行います。
+
+```json
+[
+  {
+    "id": "repo-a",
+    "federation_rule_id": "fdrl_EXAMPLE",
+    "organization_id": "00000000-0000-4000-8000-0000000000aa",
+    "service_account_id": "svac_EXAMPLE",
+    "workspace_id": "wrkspc_EXAMPLE"
+  }
+]
+```
+
+名前付きアカウントは全 5 項目が必須です。ID は 1〜63 文字の英小文字・数字・ハイフンで、先頭は英小文字か数字です。
+重複 ID と `sk-ant-` を含む ID は拒否します。レジストリにシークレットは記載しません。共有 Keycloak クライアントシークレットは
+プロキシの `KIVRA_PROXY_KEYCLOAK_CLIENT_SECRET` に設定できます。未指定時は既存の読み取り専用シークレットファイルを使います。
+
+プロキシを再起動し、対象リポジトリの `kivra-agent` の起動環境に `KIVRA_AGENT_CLAUDE_ACCOUNT=repo-a` を設定します。
+`KIVRA_AGENT_REPO` と組にしてエージェント単位で管理します。未指定のエージェントは従来の `/anthropic` を使うので、プロキシには引き続きデフォルトの WIF ID も設定します。
+名前付き経路が 403 を返す場合は、エージェント側の ID、プロキシ側の登録内容、両プロセスへの設定の反映を確認します。
+
 ## 起動手順(kivra-agent ユーザーで)
 
 前提: kivra-agent ユーザー(uid 1001)、ルートレス docker(`DOCKER_HOST=unix:///run/user/1001/docker.sock`)。

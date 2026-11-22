@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,11 +23,69 @@ func (r *recAuth) Invalidate(Credential)                         { r.invalidated
 
 func newAnthropicTestServer(t *testing.T, auth Authorizer, upstream string, logs *[]string) *proxyServer {
 	t.Helper()
-	logf := func(format string, args ...any) { *logs = append(*logs, format) }
+	logf := func(format string, args ...any) { *logs = append(*logs, fmt.Sprintf(format, args...)) }
 	return &proxyServer{
 		connect:   newConnectHandler(&Allowlist{hosts: map[string]bool{}}, logf),
 		anthropic: &anthropicHandler{upstream: upstream, auth: auth, client: http.DefaultClient, logf: logf},
 		logf:      logf,
+	}
+}
+
+func TestAnthropicRoutesNamedAccounts(t *testing.T) {
+	type call struct{ path, key string }
+	calls := make(chan call, 3)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- call{r.URL.RequestURI(), r.Header.Get("X-Api-Key")}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer up.Close()
+	var logs []string
+	srv := newAnthropicTestServer(t, StaticAuth{Key: "fake-default"}, up.URL, &logs)
+	srv.anthropic.accounts = map[string]Authorizer{
+		"repo-a": StaticAuth{Key: "fake-alpha"},
+		"repo-b": StaticAuth{Key: "fake-beta"},
+	}
+	for _, tc := range []struct {
+		path string
+		want call
+	}{
+		{"/anthropic/v1/messages", call{"/v1/messages", "fake-default"}},
+		{"/anthropic/%761/messages", call{"/v1/messages", "fake-default"}},
+		{"/anthropic/repo-a/v1/messages?beta=true", call{"/v1/messages?beta=true", "fake-alpha"}},
+		{"/anthropic/repo-b/v1/messages/count_tokens", call{"/v1/messages/count_tokens", "fake-beta"}},
+	} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tc.path, nil))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("%s: status %d", tc.path, rec.Code)
+		}
+		if got := <-calls; got != tc.want {
+			t.Errorf("%s: upstream request = %+v, want %+v", tc.path, got, tc.want)
+		}
+	}
+	for _, path := range []string{
+		"/anthropic/unknown/v1/messages",
+		"/anthropic/Repo-a/v1/messages",
+		"/anthropic/repo_a/v1/messages",
+		"/anthropic/-repo/v1/messages",
+		"/anthropic/" + strings.Repeat("a", 64) + "/v1/messages",
+		"/anthropic//v1/messages",
+		"/anthropic/%72epo-a/v1/messages",
+		"/anthropic/repo-a%2fv1/messages",
+		"/anthropic/repo-a/v1/files",
+	} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403", path, rec.Code)
+		}
+	}
+	if len(calls) != 0 {
+		t.Fatal("denied requests reached upstream")
+	}
+	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, `account_id="repo-a"`) ||
+		strings.Contains(joined, "fake-") || strings.Contains(joined, "beta=true") {
+		t.Errorf("unexpected logs: %s", joined)
 	}
 }
 
@@ -178,5 +239,45 @@ func TestConfigRequiresWIFIDs(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "=") {
 		t.Fatal("config errors must not echo values")
+	}
+}
+
+func TestConfigLoadsAccountRegistry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	env := map[string]string{
+		accountsFileEnv:                      path,
+		"KIVRA_PROXY_WIF_FEDERATION_RULE_ID": "default-rule",
+		"KIVRA_PROXY_WIF_ORGANIZATION_ID":    "default-org",
+		"KIVRA_PROXY_WIF_SERVICE_ACCOUNT_ID": "default-service",
+	}
+	account := `{"id":"repo-a","federation_rule_id":"rule","organization_id":"org","service_account_id":"svc","workspace_id":"ws"}`
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("[" + account + "]")
+	cfg, err := LoadConfig(func(key string) string { return env[key] })
+	if err != nil || len(cfg.Accounts) != 1 {
+		t.Fatalf("accounts = %v, err = %v", cfg.Accounts, err)
+	}
+	named := cfg.WIF.forAccount(cfg.Accounts[0])
+	if cfg.Accounts[0].ID != "repo-a" || named.FederationRuleID != "rule" || named.OrganizationID != "org" ||
+		named.ServiceAccountID != "svc" || named.WorkspaceID != "ws" || cfg.WIF.FederationRuleID != "default-rule" {
+		t.Fatal("named WIF settings did not override the default IDs independently")
+	}
+	for _, body := range []string{
+		"null", "{}", "[] []",
+		"[" + account + "," + account + "]",
+		"[" + strings.Replace(account, "repo-a", "../repo-a", 1) + "]",
+		"[" + strings.Replace(account, `"ws"`, `""`, 1) + "]",
+		"[" + strings.Replace(account, "workspace_id", "unexpected-marker", 1) + "]",
+	} {
+		write(body)
+		_, err := LoadConfig(func(key string) string { return env[key] })
+		if err == nil || !strings.Contains(err.Error(), accountsFileEnv) || strings.Contains(err.Error(), "unexpected-marker") {
+			t.Errorf("invalid registry accepted or leaked values: %v", err)
+		}
 	}
 }

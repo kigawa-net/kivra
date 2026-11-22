@@ -5,6 +5,7 @@
 #
 # Inputs (none of them is a secret value, except the secret file, which is mounted and never printed):
 #   KIVRA_AGENT_PROXY_ENV_FILE         env file with KIVRA_PROXY_* settings (WIF IDs, URLs). Default /etc/kivra-agent/proxy.env
+#   KIVRA_AGENT_PROXY_ACCOUNTS_FILE    optional host path to the non-secret WIF account registry.
 #   KIVRA_AGENT_KEYCLOAK_SECRET_FILE   host file with the Keycloak client secret (root:kivra-agent 0640). Default /etc/kivra-agent/client-secret.
 #                                      Mounted read-only into the proxy only. Work containers never get it.
 set -euo pipefail
@@ -18,6 +19,15 @@ NAME="${PREFIX}-proxy"
 [ -r "$ENV_FILE" ] || { echo "env file is not readable: $ENV_FILE" >&2; exit 1; }
 [ -r "$SECRET_HOST_FILE" ] || { echo "secret file is not readable: $SECRET_HOST_FILE" >&2; exit 1; }
 
+account_registry_args=()
+if [ -n "${KIVRA_AGENT_PROXY_ACCOUNTS_FILE:-}" ]; then
+  [ -r "$KIVRA_AGENT_PROXY_ACCOUNTS_FILE" ] || { echo "WIF account registry is not readable" >&2; exit 1; }
+  account_registry_args=(
+    -v "$KIVRA_AGENT_PROXY_ACCOUNTS_FILE:/etc/kivra-agent-proxy/accounts.json:ro"
+    -e KIVRA_PROXY_WIF_ACCOUNTS_FILE=/etc/kivra-agent-proxy/accounts.json
+  )
+fi
+
 "$here/create-networks.sh"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" --restart unless-stopped \
@@ -27,6 +37,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   --pids-limit 128 --memory 256m \
   --env-file "$ENV_FILE" \
   -v "$SECRET_HOST_FILE:/run/secrets/keycloak_client_secret:ro" \
+  "${account_registry_args[@]}" \
   "$PROXY_IMAGE" >/dev/null
 docker network connect "${PREFIX}-internal" "$NAME"
 for n in ${KIVRA_AGENT_EXTRA_NETWORKS:-}; do

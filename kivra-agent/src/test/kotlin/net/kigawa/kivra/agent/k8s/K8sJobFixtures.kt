@@ -24,7 +24,8 @@ internal object K8sFixture {
         image: String = K8S_IMAGE,
         proxy: String = K8S_PROXY,
         timeout: Duration = Duration.ofMinutes(30),
-    ): K8sJobSpec = K8sJobSpec(runId, attemptId, namespace, image, proxy, timeout)
+        claudeAccount: String? = null,
+    ): K8sJobSpec = K8sJobSpec(runId, attemptId, namespace, image, proxy, timeout, claudeAccount = claudeAccount)
 
     /** The builder's output for the standard spec. */
     fun golden(): JsonObject = K8sJobBuilder(settings).build(spec())

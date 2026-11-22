@@ -83,6 +83,7 @@ class AgentConfig private constructor(
         const val ENV_K8S_PROXY_URL = "KIVRA_AGENT_K8S_PROXY_URL"
         const val ENV_GIT_BIN = "KIVRA_AGENT_GIT_BIN"
         const val ENV_REPO = "KIVRA_AGENT_REPO"
+        const val ENV_CLAUDE_ACCOUNT = "KIVRA_AGENT_CLAUDE_ACCOUNT"
         const val ENV_MODEL = "KIVRA_AGENT_MODEL"
         const val ENV_MAX_BUDGET_USD = "KIVRA_AGENT_MAX_BUDGET_USD"
         const val ENV_NEW_ERROR_CODES = "KIVRA_AGENT_NEW_ERROR_CODES"
@@ -156,6 +157,10 @@ class AgentConfig private constructor(
             if (!proxyOk) throw ConfigException("$proxyEnv must be http://host:port")
             val model = optional(env, ENV_MODEL) ?: CliCommand.DEFAULT_MODEL
             if (!DockerPatterns.MODEL.matches(model)) throw ConfigException("$ENV_MODEL must be a model id (letters, digits, dots, hyphens)")
+            val claudeAccount = optional(env, ENV_CLAUDE_ACCOUNT)
+            if (claudeAccount != null && !DockerPatterns.ACCOUNT.matches(claudeAccount)) {
+                throw ConfigException("$ENV_CLAUDE_ACCOUNT must be a valid Claude account id")
+            }
             val budgetUsd = budgetUsd(env)
             val repoName = required(env, ENV_REPO)
             val parts = repoName.split('/')
@@ -175,6 +180,7 @@ class AgentConfig private constructor(
                     gitBinary = absolutePath(env, ENV_GIT_BIN),
                     repo = repo,
                     model = model,
+                    claudeAccount = claudeAccount,
                     budgetUsd = budgetUsd,
                     debugKeep = debugKeep(env),
                     newErrorCodes = newErrorCodes(env),
@@ -185,6 +191,7 @@ class AgentConfig private constructor(
                     proxyUrl = proxyUrl,
                     repo = repo,
                     model = model,
+                    claudeAccount = claudeAccount,
                     budgetUsd = budgetUsd,
                     debugKeep = debugKeep(env),
                     newErrorCodes = newErrorCodes(env),

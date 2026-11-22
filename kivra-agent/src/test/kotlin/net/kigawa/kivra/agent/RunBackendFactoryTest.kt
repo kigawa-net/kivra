@@ -9,6 +9,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import net.kigawa.kivra.agent.docker.DockerRunBackend
 import net.kigawa.kivra.agent.k8s.FakeKubeApi
 import net.kigawa.kivra.agent.k8s.HttpKubeApi
@@ -111,7 +114,7 @@ class RunBackendFactoryTest {
      */
     @Test
     fun theBackendAndTheExecutorShareOneInputRegistry() = runBlocking {
-        val config = k8sConfig()
+        val config = k8sConfig(AgentConfig.ENV_CLAUDE_ACCOUNT to "repo-a")
         val api = FakeKubeApi()
         api.pod = { PodState("pod-1", running = false, terminated = true, exitCode = 0) }
         val recorded = synchronizedList()
@@ -123,7 +126,14 @@ class RunBackendFactoryTest {
         assertEquals(1, api.created.size, "the Job of the run is created")
         assertIs<AttemptOutcome.Failed>(outcome)
         assertEquals(1, api.deleted.size, "the Job is deleted after the run")
-        assertTrue(api.created.single().first == K8S_NAMESPACE)
+        val (namespace, manifest) = api.created.single()
+        assertEquals(K8S_NAMESPACE, namespace)
+        val pod = manifest.getValue("spec").jsonObject.getValue("template").jsonObject.getValue("spec").jsonObject
+        val container = pod.getValue("containers").jsonArray.single().jsonObject
+        val env = container.getValue("env").jsonArray.associate {
+            it.jsonObject.getValue("name").jsonPrimitive.content to it.jsonObject.getValue("value").jsonPrimitive.content
+        }
+        assertEquals("$K8S_PROXY/anthropic/repo-a", env["ANTHROPIC_BASE_URL"])
         assertEquals(K8sNames.ownerLabel("kivra-agent-pc1"), config.realExecutor!!.k8s!!.ownerLabel)
     }
 

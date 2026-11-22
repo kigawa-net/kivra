@@ -84,6 +84,14 @@ data class SplitProposal(
     val createdChildOrderId: String?,
 )
 
+/** The outcome of a decision on a proposal (PR2). Moved: this call wrote it; Same: it was already so (an idempotent repeat); Refused: another state. */
+sealed interface SplitProposalMark {
+    data class Moved(val proposal: SplitProposal) : SplitProposalMark
+    data class Same(val proposal: SplitProposal) : SplitProposalMark
+    data class Refused(val proposal: SplitProposal) : SplitProposalMark
+    data object NotFound : SplitProposalMark
+}
+
 sealed interface TaskTransition {
     data class Moved(val row: SelfDevTask) : TaskTransition
     data object NotFound : TaskTransition
@@ -324,12 +332,18 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         ) { PlanningOrder(it.getString(1), it.getString(2), it.getInt(3)) }.firstOrNull()
     }
 
-    /** The child order proposals of [orderId], oldest first, up to [limit] (read only). */
-    fun splitProposalsOf(orderId: String, limit: Int): List<SplitProposal> = transaction(database) {
+    /**
+     * The child order proposals of [orderId], oldest first, up to [limit], only those in [state] when given. The stale PROPOSED rows are
+     * expired first ([expireStaleSplitProposals]), so a read never shows a proposal that can no longer be approved as PROPOSED.
+     */
+    fun splitProposalsOf(orderId: String, limit: Int, state: ChildProposalState? = null): List<SplitProposal> = transaction(database) {
+        expireStaleSplitProposals(orderId)
+        val stateFilter = if (state == null) "" else " AND state = ?"
+        val params = listOfNotNull(orderId, state?.name, limit)
         execQuery(
             "SELECT proposal_id, plan_id, plan_task_id, order_id, ordinal, title, instruction, max_cycles, state, created_at, created_child_order_id " +
-                "FROM selfdev_order_split_proposals WHERE order_id = ? ORDER BY created_at, plan_id, ordinal LIMIT ?",
-            orderId, limit,
+                "FROM selfdev_order_split_proposals WHERE order_id = ?$stateFilter ORDER BY created_at, plan_id, ordinal LIMIT ?",
+            *params.toTypedArray(),
         ) { rs ->
             SplitProposal(
                 proposalId = rs.getString(1), planId = rs.getString(2), planTaskId = rs.getString(3), orderId = rs.getString(4),
@@ -338,6 +352,86 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                 createdChildOrderId = rs.getString(11),
             )
         }
+    }
+
+    /** One proposal of [orderId] by its ID (expired first, as [splitProposalsOf]), or null when it is not one of that order's. Read. */
+    fun splitProposal(orderId: String, proposalId: String): SplitProposal? = transaction(database) {
+        expireStaleSplitProposals(orderId)
+        splitProposalIn(orderId, proposalId)
+    }
+
+    /**
+     * PROPOSED -> REJECTED by an operator (ADR 0015 addendum 2026-11-22 PR2). A repeat of a rejection is [SplitProposalMark.Same]; a proposal
+     * that is APPROVED or EXPIRED is [SplitProposalMark.Refused]. The write is conditional on PROPOSED, so two decisions race safely.
+     */
+    fun rejectSplitProposal(orderId: String, proposalId: String): SplitProposalMark = transaction(database) {
+        expireStaleSplitProposals(orderId)
+        val current = splitProposalIn(orderId, proposalId) ?: return@transaction SplitProposalMark.NotFound
+        if (current.state != ChildProposalState.PROPOSED) {
+            return@transaction if (current.state == ChildProposalState.REJECTED) SplitProposalMark.Same(current) else SplitProposalMark.Refused(current)
+        }
+        val changed = execUpdate(
+            "UPDATE selfdev_order_split_proposals SET state = 'REJECTED' WHERE proposal_id = ? AND order_id = ? AND state = 'PROPOSED'",
+            proposalId, orderId,
+        )
+        val after = splitProposalIn(orderId, proposalId) ?: current
+        when {
+            changed == 1 -> SplitProposalMark.Moved(after)
+            after.state == ChildProposalState.REJECTED -> SplitProposalMark.Same(after)
+            else -> SplitProposalMark.Refused(after)
+        }
+    }
+
+    /**
+     * PROPOSED -> APPROVED, with the created child ([childOrderId]), written after the child is created (ADR 0015 addendum 2026-11-22 PR2).
+     * Conditional on PROPOSED, so of two approvals only one writes; the other sees APPROVED with the same child and is [SplitProposalMark.Same].
+     * An APPROVED proposal with another child, or a REJECTED or EXPIRED one, is [SplitProposalMark.Refused].
+     */
+    fun markSplitProposalApproved(orderId: String, proposalId: String, childOrderId: String): SplitProposalMark = transaction(database) {
+        val current = splitProposalIn(orderId, proposalId) ?: return@transaction SplitProposalMark.NotFound
+        if (current.state != ChildProposalState.PROPOSED) return@transaction sameApproval(current, childOrderId)
+        val changed = execUpdate(
+            "UPDATE selfdev_order_split_proposals SET state = 'APPROVED', created_child_order_id = ? WHERE proposal_id = ? AND order_id = ? AND state = 'PROPOSED'",
+            childOrderId, proposalId, orderId,
+        )
+        val after = splitProposalIn(orderId, proposalId) ?: current
+        if (changed == 1) SplitProposalMark.Moved(after) else sameApproval(after, childOrderId)
+    }
+
+    private fun sameApproval(row: SplitProposal, childOrderId: String): SplitProposalMark =
+        if (row.state == ChildProposalState.APPROVED && row.createdChildOrderId == childOrderId) SplitProposalMark.Same(row) else SplitProposalMark.Refused(row)
+
+    private fun Transaction.splitProposalIn(orderId: String, proposalId: String): SplitProposal? =
+        execQuery(
+            "SELECT proposal_id, plan_id, plan_task_id, order_id, ordinal, title, instruction, max_cycles, state, created_at, created_child_order_id " +
+                "FROM selfdev_order_split_proposals WHERE proposal_id = ? AND order_id = ?",
+            proposalId, orderId,
+        ) { rs ->
+            SplitProposal(
+                proposalId = rs.getString(1), planId = rs.getString(2), planTaskId = rs.getString(3), orderId = rs.getString(4),
+                ordinal = rs.getInt(5), title = rs.getString(6), instruction = rs.getString(7), maxCycles = rs.getInt(8),
+                state = ChildProposalState.valueOf(rs.getString(9)), createdAt = rs.getObject(10, LocalDateTime::class.java),
+                createdChildOrderId = rs.getString(11),
+            )
+        }.firstOrNull()
+
+    /**
+     * Expires the PROPOSED proposals of [orderId] that can no longer be approved (ADR 0015 addendum 2026-11-22 PR2): the order is no longer ACTIVE,
+     * or the plan that proposed them is superseded (the root task's revision has moved past the plan's "r{revision}"). Run lazily on every read
+     * and every decision of the order's proposals, so no background job is needed. An EXPIRED row is never written back to PROPOSED.
+     */
+    private fun Transaction.expireStaleSplitProposals(orderId: String) {
+        execUpdate(
+            """
+            UPDATE selfdev_order_split_proposals SET state = 'EXPIRED'
+            WHERE order_id = ? AND state = 'PROPOSED' AND (
+                EXISTS (SELECT 1 FROM selfdev_orders o WHERE o.order_id = selfdev_order_split_proposals.order_id AND o.state <> 'ACTIVE')
+                OR EXISTS (SELECT 1 FROM selfdev_tasks t WHERE t.task_id = selfdev_order_split_proposals.plan_task_id
+                    AND CONCAT(t.task_id, ':r', t.revision) <> selfdev_order_split_proposals.plan_id)
+            )
+            """.trimIndent(),
+            orderId,
+        )
     }
 
     /**

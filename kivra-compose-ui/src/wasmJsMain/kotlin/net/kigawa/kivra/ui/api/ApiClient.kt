@@ -138,6 +138,21 @@ object ApiClient {
     suspend fun getOrder(orderId: String): ApiOrderDetail =
         getJson("/api/selfdev/orders/${percentEncode(orderId)}")
 
+    /** 子 order の提案の一覧。`GET /api/selfdev/orders/{id}/split-proposals`(読むのは READ)。 */
+    suspend fun getSplitProposals(orderId: String): List<ApiSplitProposal> =
+        getJson("/api/selfdev/orders/${percentEncode(orderId)}/split-proposals")
+
+    /**
+     * 提案の承認。`POST /api/selfdev/orders/{id}/split-proposals/{proposalId}/approve`、本文は空の JSON。子 order は提案の題名・方針・周の上限で
+     * サーバーが作る(画面からは何も送らない)。409 は PROPOSAL_* や上限の code、403 は ORDER_MANAGE の無い利用者。
+     */
+    suspend fun approveSplitProposal(orderId: String, proposalId: String) =
+        postWrite("/api/selfdev/orders/${percentEncode(orderId)}/split-proposals/${percentEncode(proposalId)}/approve", EmptyJsonBody())
+
+    /** 提案の却下。`POST /api/selfdev/orders/{id}/split-proposals/{proposalId}/reject`、本文は空の JSON。 */
+    suspend fun rejectSplitProposal(orderId: String, proposalId: String) =
+        postWrite("/api/selfdev/orders/${percentEncode(orderId)}/split-proposals/${percentEncode(proposalId)}/reject", EmptyJsonBody())
+
     /** order の周の一覧(周番号順)。`GET /api/selfdev/orders/{id}/cycles`。 */
     suspend fun getOrderCycles(orderId: String): List<ApiOrderCycle> =
         getJson("/api/selfdev/orders/${percentEncode(orderId)}/cycles")

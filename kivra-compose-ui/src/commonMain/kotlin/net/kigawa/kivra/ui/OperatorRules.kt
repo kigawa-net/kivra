@@ -95,6 +95,8 @@ enum class OperatorAction {
     CANCEL_STOP,
     EXTEND_ORDER,
     ABANDON_CYCLE,
+    APPROVE_SPLIT,
+    REJECT_SPLIT,
 }
 
 /**
@@ -106,6 +108,7 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
     // 延長は 400 / 409 の機械的なコード(MAX_CYCLES_INVALID など)を表示に対応づける。規則は OrderExtendRules.kt。
     if (action == OperatorAction.EXTEND_ORDER) return extendFailureText(failure, code)
     if (action == OperatorAction.ABANDON_CYCLE) return abandonFailureText(failure, code)
+    if (action == OperatorAction.APPROVE_SPLIT || action == OperatorAction.REJECT_SPLIT) return splitProposalFailureText(failure, code)
     if (action == OperatorAction.RELEASE_RUN && failure == WriteFailure.STALE) releaseConflictText(code)?.let { return it }
     return when (failure) {
         WriteFailure.STALE -> when (action) {
@@ -121,6 +124,8 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             OperatorAction.CANCEL_STOP,
             OperatorAction.EXTEND_ORDER,
             OperatorAction.ABANDON_CYCLE,
+            OperatorAction.APPROVE_SPLIT,
+            OperatorAction.REJECT_SPLIT,
             -> writeFailureText(failure)
         }
         WriteFailure.BAD_REQUEST -> when (action) {
@@ -140,6 +145,8 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             OperatorAction.CANCEL_STOP,
             OperatorAction.EXTEND_ORDER,
             OperatorAction.ABANDON_CYCLE,
+            OperatorAction.APPROVE_SPLIT,
+            OperatorAction.REJECT_SPLIT,
             -> writeFailureText(failure)
         }
         WriteFailure.DISABLED -> when (action) {
@@ -156,6 +163,8 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             OperatorAction.CANCEL_STOP,
             OperatorAction.EXTEND_ORDER,
             OperatorAction.ABANDON_CYCLE,
+            OperatorAction.APPROVE_SPLIT,
+            OperatorAction.REJECT_SPLIT,
             -> writeFailureText(failure)
         }
         else -> writeFailureText(failure)

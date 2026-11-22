@@ -120,7 +120,7 @@ class McpOrderToolsTest {
             McpSettings.fromEnv(e), e, db.runs, repo,
             jwkProvider = OidcTestTokens.jwks(), selfDevEnabled = true, maxActiveSelfDev = 1,
             orders = orders?.let {
-                McpOrderDeps(it, aliceOwner, maxCyclesCap = CYCLE_CAP, targetRepo = targetRepo, projects = ProjectRepository(db.database, java.time.Clock.systemUTC()))
+                McpOrderDeps(it, aliceOwner, maxCyclesCap = CYCLE_CAP, targetRepo = targetRepo, projects = ProjectRepository(db.database, java.time.Clock.systemUTC()), operations = SelfDevOperatorRepository(db.database))
             },
             tasks = tasks,
             projects = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()),
@@ -365,7 +365,8 @@ class McpOrderToolsTest {
 
             val got = callTool("kivra_order_get", """{"order_id":"${root.orderId}"}""", readOnlyToken)
             assertFalse(got.isError())
-            assertEquals(summaryKeys + setOf("pending_stop_request", "cycles"), got.structured().keys)
+            assertEquals(summaryKeys + setOf("pending_stop_request", "cycles", "split_proposals"), got.structured().keys)
+            assertEquals(0, got.structured()["split_proposals"]!!.jsonArray.size)
             val pending = got.structured()["pending_stop_request"]!!.jsonObject
             assertEquals(setOf("request_id", "order_id", "requester_kind", "reason_code", "state", "order_version", "expires_at", "created_at"), pending.keys)
             assertEquals("AI", pending["requester_kind"]!!.jsonPrimitive.content)

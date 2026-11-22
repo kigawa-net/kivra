@@ -1204,3 +1204,20 @@ AI が自分で order を作り続けると、AI が自分の依頼を増やし�
 - 提案の本文は Planner の出力であり、データとして扱う。実行されず、ログにも出さない(ログは計画のダイジェストと件数だけ)。
 - 作成の経路(PR2)が入るまで、提案は運用者の画面にも REST にも出ない。
 - 確認したこと: 検査の単体テスト(`PlanValidatorTest`)、指示の文面(`PlannerPromptTest`)、永続化と計画の確定の同一トランザクション・古い fence・再計画(`SplitProposalRepositoryTest`)、移行の連鎖(`MigrationChainTest`)。確認していないこと: dev の実際の計画での提案の内容の質。
+
+## 追補(2026-11-22 PR2): 提案の承認・却下(運用者の操作)
+
+- 承認は運用者だけが行う(`POST /api/selfdev/orders/{id}/split-proposals/{proposalId}/approve`、ORDER_MANAGE、AI は 403)。承認で子 order を作るのは
+  `createChildAsOperator`(U-19 は変えない。計画の出力から子を直接作る経路は無い)。題名・方針・周の上限は提案の内容、予算は 1,000 円 × 周の上限(チャットと同じ)、
+  冪等キーは `plan-split:{planId}:{ordinal}`。拒否の code は子の作成と同じ(DEPTH_LIMIT など)。
+- 承認の書き込みは二つ: 子を作る(その transaction)、続けて提案を APPROVED にし子の ID を入れる(条件付きの更新)。二つの間で止まっても、同じ
+  キーの再承認は同じ子を返す(Replayed)。二人が同時に承認しても、子は一つだけ作られる。
+- 却下は `POST .../reject`(PROPOSED から REJECTED)。二度目の却下と二度目の承認は、そのときの結果を返す(冪等)。
+- EXPIRED は読むときと決定のときに遅延で付ける(専用の仕事は無い)。失効するのは、親の order が ACTIVE でないとき(一時停止を含む)、または計画が
+  差し替えられたとき(根のタスクの revision が計画の `r{revision}` を超えた)。EXPIRED は戻らない。
+- 409 の code: `PROPOSAL_APPROVED`、`PROPOSAL_REJECTED`、`PROPOSAL_EXPIRED`、`SPLIT_PROPOSAL_STATE_CHANGED`(承認の途中で却下が入った。子は作られており、
+  その ID は運用者のログに出る)。子の作成の拒否は子の作成の API と同じ code。
+- MCP は読みのみ。`kivra_order_get` に `split_proposals`(ID・順番・状態・周の上限・作られた子の ID。題名と方針は返さない)。承認を MCP に出すかは、
+  MCP の scope(Keycloak の client)を変える別の決定として後で決める。
+- UI は詳細画面の「子 order の提案」(ルートの order のみ)。承認・却下は ORDER_MANAGE の利用者にだけ出す。
+- 残るリスク: 承認の途中の却下の窓(上の SPLIT_PROPOSAL_STATE_CHANGED)。一時停止した order の提案は、再開しても戻らず失効のまま。

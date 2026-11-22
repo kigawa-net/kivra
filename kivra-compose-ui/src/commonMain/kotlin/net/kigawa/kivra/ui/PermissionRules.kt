@@ -74,6 +74,9 @@ enum class GatedOperation(val permission: SelfDevPermission) {
     /** 進行中の周の放棄(サーバー: order.cycle.abandon は ORDER_MANAGE。運用者のみ。ADR 0015 追補 2026-11-11)。 */
     ABANDON_CYCLE(SelfDevPermission.ORDER_MANAGE),
 
+    /** 子 order の提案の承認・却下(サーバー: order.split_proposal.approve・reject は ORDER_MANAGE。承認は子を作るので運用者のみ。ADR 0015 追補 2026-11-22)。 */
+    DECIDE_SPLIT_PROPOSAL(SelfDevPermission.ORDER_MANAGE),
+
     /** order の停止要求と、要求の取り消し(app.js: can('STOP_REQUEST') / サーバー: order.stop.request・order.stop.cancel)。 */
     REQUEST_ORDER_STOP(SelfDevPermission.STOP_REQUEST),
 

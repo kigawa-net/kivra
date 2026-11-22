@@ -220,4 +220,62 @@ class SelfDevOrderRoutesTest {
     private fun eventsOfExtend(db: TestDb, orderId: String): Int = transaction(db.database) {
         execQuery("SELECT COUNT(*) FROM selfdev_order_events WHERE order_id = ? AND kind = 'EXTENDED'", orderId) { it.getInt(1) }.single()
     }
+    @Test
+    fun `assign change clear history and filters expose the current assignment only in its project`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db, AI_PRINCIPAL)
+        val order = createdOrder(db, orders)
+        val project = order.projectId!!
+        val first = net.kigawa.kivra.db.assignmentMember(db, project)
+        val second = net.kigawa.kivra.db.assignmentMember(db, project)
+        val path = "/api/projects/$project/orders/${order.orderId}"
+        val body = """{"assignee_id":"$first"}"""
+        assertEquals(HttpStatusCode.Forbidden, send(HttpMethod.Put, "$path/assignee", body, AI_PRINCIPAL).status)
+        val assigned = send(HttpMethod.Put, "$path/assignee", body)
+        assertEquals(HttpStatusCode.OK, assigned.status)
+        assertEquals(first, assigned.obj()["assigneeId"]!!.jsonPrimitive.content)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Put, "$path/assignee", body).status)
+        assertEquals(1, orders.assignments.listForOrder(order.orderId).size)
+        val detail = send(HttpMethod.Get, "/api/selfdev/orders/${order.orderId}", null).obj()
+        assertEquals(first, detail["order"]!!.jsonObject["assigneeId"]!!.jsonPrimitive.content)
+        val filtered = send(HttpMethod.Get, "/api/projects/$project/orders?assignee_id=$first", null)
+        assertEquals(1, Json.parseToJsonElement(filtered.bodyAsText()).let { (it as kotlinx.serialization.json.JsonArray).size })
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Get, "/api/projects/$project/orders?assignee_id=$first&unassigned=true", null).status)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Put, "$path/assignee", """{"assignee_id":"$second"}""").status)
+        val disabled = net.kigawa.kivra.db.assignmentMember(db, project, state = "DISABLED")
+        assertEquals(HttpStatusCode.BadRequest, send(HttpMethod.Put, "$path/assignee", """{"assignee_id":"$disabled"}""").status)
+        assertEquals(second, orders.get(order.orderId)!!.assigneeId)
+        val other = ProjectRepository(db.database, Clock.systemUTC()).create("Other", null).projectId
+        assertEquals(HttpStatusCode.NotFound, send(HttpMethod.Put, "/api/projects/$other/orders/${order.orderId}/assignee", body).status)
+        assertEquals(HttpStatusCode.NotFound, send(HttpMethod.Get, "/api/projects/$other/orders/${order.orderId}/assignments", null).status)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Delete, "$path/assignee", "{}").status)
+        assertEquals(HttpStatusCode.OK, send(HttpMethod.Delete, "$path/assignee", "{}").status)
+        val history = send(HttpMethod.Get, "$path/assignments", null)
+        assertEquals(HttpStatusCode.OK, history.status)
+        val rows = Json.parseToJsonElement(history.bodyAsText()) as kotlinx.serialization.json.JsonArray
+        assertEquals(2, rows.size)
+        assertTrue(rows.all { it.jsonObject["unassignedAt"] != kotlinx.serialization.json.JsonNull })
+        assertTrue(rows.all { it.jsonObject["assignedBy"]!!.jsonPrimitive.content == operatorTag(OPERATOR) })
+        kotlin.test.assertNull(orders.get(order.orderId)!!.assigneeId)
+        val unassigned = send(HttpMethod.Get, "/api/projects/$project/orders?unassigned=true", null)
+        assertEquals(1, (Json.parseToJsonElement(unassigned.bodyAsText()) as kotlinx.serialization.json.JsonArray).size)
+    }
+
+    @Test
+    fun `creation with assignment validates before writing and returns assigned fields`() = testApplication {
+        val db = TestDb().also { openDbs += it }
+        val orders = setUp(db)
+        val project = ProjectRepository(db.database, Clock.systemUTC()).create("Create assignment", null).projectId
+        val valid = net.kigawa.kivra.db.assignmentMember(db, project)
+        val ai = net.kigawa.kivra.db.assignmentMember(db, project, role = "AI")
+        val path = "/api/projects/$project/orders"
+        val invalid = send(HttpMethod.Post, path, """{"title":"title","policy":"policy","assignee_id":"$ai"}""")
+        assertEquals(HttpStatusCode.BadRequest, invalid.status)
+        assertTrue(orders.list(10).isEmpty())
+        val created = send(HttpMethod.Post, path, """{"title":"title","policy":"policy","assignee_id":"$valid"}""")
+        assertEquals(HttpStatusCode.Created, created.status)
+        assertEquals(valid, created.obj()["assigneeId"]!!.jsonPrimitive.content)
+        assertNotNull(created.obj()["assignedAt"])
+    }
+
 }

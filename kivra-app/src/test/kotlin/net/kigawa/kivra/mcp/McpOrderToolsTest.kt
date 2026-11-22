@@ -441,6 +441,29 @@ class McpOrderToolsTest {
 
     private val summaryKeys = setOf(
         "order_id", "parent_order_id", "depth", "state", "state_reason", "cycles_started", "max_cycles", "current_goal_id",
-        "consecutive_failed_cycles", "child_count", "order_budget_jpy", "spent_jpy", "expires_at", "version", "created_at", "updated_at", "project_id",
+        "consecutive_failed_cycles", "child_count", "order_budget_jpy", "spent_jpy", "expires_at", "version", "created_at", "updated_at", "project_id", "assigneeId", "assignedAt",
     )
+    @Test
+    fun `read tools expose assignment ids and timestamps and no assignee display name`() = withTestDb { db ->
+        testApplication {
+            val orders = SelfDevOrderRepository(db.database)
+            val project = net.kigawa.kivra.db.ProjectRepository(db.database, java.time.Clock.systemUTC()).create("Assignments", null).projectId
+            val root = (orders.createRoot(bobOwner, title, policy, "owner/repo", projectId = project) as CreateRootResult.Created).order
+            val member = net.kigawa.kivra.db.assignmentMember(db, project)
+            orders.assignments.assign(root.orderId, member, "012345abcdef")
+            setUp(deps(db, orders))
+            val list = callTool("kivra_order_list", "{}", readOnlyToken).structured()["orders"]!!.jsonArray.single().jsonObject
+            val detail = callTool("kivra_order_get", """{"order_id":"${root.orderId}"}""", readOnlyToken).structured()
+            for (row in listOf(list, detail)) {
+                assertEquals(member, row["assigneeId"]!!.jsonPrimitive.content)
+                assertTrue(row["assignedAt"] is kotlinx.serialization.json.JsonPrimitive)
+                assertFalse(row.toString().contains("Assignment member"))
+            }
+            orders.assignments.unassign(root.orderId, "012345abcdef")
+            val unassigned = callTool("kivra_order_get", """{"order_id":"${root.orderId}"}""", readOnlyToken).structured()
+            assertEquals(JsonNull, unassigned["assigneeId"])
+            assertEquals(JsonNull, unassigned["assignedAt"])
+        }
+    }
+
 }

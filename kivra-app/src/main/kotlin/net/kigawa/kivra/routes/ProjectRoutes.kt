@@ -637,7 +637,7 @@ data class ProjectDrainResponse(val dryRun: Boolean, val targetProjectId: String
 
 /** A member: the assignee's id and display name, its role in the project and its state (ACTIVE or DISABLED). */
 @Serializable
-data class ProjectMemberResponse(val assigneeId: String, val displayName: String, val role: String, val state: String)
+data class ProjectMemberResponse(val assigneeId: String, val displayName: String, val role: String, val state: String, val assignable: Boolean = false)
 
 @Serializable
 data class ProjectMemberRoleResponse(val assigneeId: String, val role: String)
@@ -1010,7 +1010,7 @@ internal fun parseRepoKey(value: String): String? {
     return runCatching { RepoRef(parts[0], parts[1]) }.getOrNull()?.toString()
 }
 
-private fun ProjectMemberRow.toResponse() = ProjectMemberResponse(assigneeId = assigneeId, displayName = displayName, role = role, state = state)
+private fun ProjectMemberRow.toResponse() = ProjectMemberResponse(assigneeId = assigneeId, displayName = displayName, role = role, state = state, assignable = assignable)
 
 private fun ImportAllResult.toResponse(role: String) = ImportAllResponse(
     dryRun = dryRun,

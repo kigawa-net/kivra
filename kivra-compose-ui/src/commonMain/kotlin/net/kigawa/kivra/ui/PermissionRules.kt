@@ -16,6 +16,7 @@ enum class SelfDevPermission {
     READ_TEXT,
     GOAL_STOP,
     ORDER_MANAGE,
+    ORDER_ASSIGN,
     STOP_REQUEST,
     STOP_DECIDE,
     STOP_DECIDE_AUTO,
@@ -55,6 +56,7 @@ enum class GatedOperation(val permission: SelfDevPermission) {
 
     /** order の作成(app.js: can('ORDER_MANAGE') で order-create を出す / サーバー: order.create は ORDER_MANAGE)。 */
     CREATE_ORDER(SelfDevPermission.ORDER_MANAGE),
+    ASSIGN_ORDER(SelfDevPermission.ORDER_ASSIGN),
 
     /** Goal の再計画(app.js: can('GOAL_WRITE') で「再計画する」を出す / サーバー: goal.goal_replan は GOAL_WRITE)。 */
     REPLAN_GOAL(SelfDevPermission.GOAL_WRITE),

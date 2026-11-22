@@ -75,7 +75,7 @@ object ApiClient {
 
     private const val OPERATIONS_BASE_PATH = "/api/operations"
 
-    suspend fun getOperations(): List<ApiOperation> = getJson(OPERATIONS_BASE_PATH)
+    suspend fun getOperations(parentId: String? = null): List<ApiOperation> = getJson(operationsPath(parentId))
 
     suspend fun getOperation(operationId: String): ApiOperation =
         getJson("$OPERATIONS_BASE_PATH/${percentEncode(operationId)}")
@@ -341,14 +341,20 @@ object ApiClient {
      * order の作成(ルートの order)。`POST /api/projects/{projectId}/orders`(別名)、本文 `{title, policy, maxCycles, projectId}`。
      * 冪等キーは送らない(サーバーの本文は厳密で、知らないフィールドは 400 になる)。ルートは複数作れる(2 つ目も受け付ける。ADR 0015 追補 2026-11-11)。
      */
-    suspend fun createOrder(title: String, policy: String, maxCycles: Int, projectId: String) =
-        postWrite(ProjectApi.orderCreate(projectId), CreateOrderBody(title, policy, maxCycles, projectId))
+    suspend fun createOrder(title: String, policy: String, maxCycles: Int, projectId: String, assigneeId: String? = null) =
+        postWrite(ProjectApi.orderCreate(projectId), CreateOrderBody(title, policy, maxCycles, projectId, assigneeId))
 
     /**
      * 呼び出し者の役割と権限。`GET /api/selfdev/me`。どの運用者にも 200 で返る。失敗は [ApiException]
      * (呼び出し側は [net.kigawa.kivra.ui.CallerPermissions.UNKNOWN] として扱う)。
      * 旧 UI の loadMe と同じく quiet。401 でもセッション切れの案内は出さない。
      */
+    suspend fun setOrderAssignee(projectId: String, orderId: String, assigneeId: String?) {
+        val path = "/api/projects/${percentEncode(projectId)}/orders/${percentEncode(orderId)}/assignee"
+        if (assigneeId == null) writeWith(HttpMethod.Delete, path, EmptyJsonBody())
+        else writeWith(HttpMethod.Put, path, OrderAssigneeBody(assigneeId))
+    }
+
     suspend fun getMe(): ApiMe = getJson("/api/selfdev/me", quiet = true)
 
     /**
@@ -856,7 +862,7 @@ object ApiClient {
 @Serializable private class DrainBody(val targetProjectId: String)
 
 /** order の作成の本文(server `CreateOrderRequest`)。冪等キーは持たない(サーバーは知らないフィールドを拒否する)。 */
-@Serializable private class CreateOrderBody(val title: String, val policy: String, val maxCycles: Int, val projectId: String)
+@Serializable private class CreateOrderBody(val title: String, val policy: String, val maxCycles: Int, val projectId: String, @kotlinx.serialization.SerialName("assignee_id") val assigneeId: String? = null)
 
 /** order の停止要求の本文(server `RequestStopRequest`)。フィールドは厳密に検査されるので、この二つだけ送る。 */
 @Serializable private class OrderStopRequest(val version: Long, val reasonCode: String)
@@ -890,3 +896,5 @@ private data class ApiMemoryList(val items: List<ApiMemory>)
 @Serializable
 private class ChatSendMessageRequest(val content: String, val title: String)
 
+
+@Serializable private class OrderAssigneeBody(@kotlinx.serialization.SerialName("assignee_id") val assigneeId: String)

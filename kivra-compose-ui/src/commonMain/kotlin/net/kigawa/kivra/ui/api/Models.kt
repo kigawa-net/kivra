@@ -179,6 +179,8 @@ data class ApiOrder(
     val remainingJpy: Long,
     /** Null means unassigned to a project. */
     val projectId: String? = null,
+    val assigneeId: String? = null,
+    val assignedAt: String? = null,
 )
 
 /**

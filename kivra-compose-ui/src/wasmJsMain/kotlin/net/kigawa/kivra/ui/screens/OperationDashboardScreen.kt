@@ -11,30 +11,34 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import net.kigawa.kivra.ui.Node
+import net.kigawa.kivra.ui.NodeId
+import net.kigawa.kivra.ui.NodeKind
+import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.SelectableText
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiOperation
+import net.kigawa.kivra.ui.asNode
+import net.kigawa.kivra.ui.openRoute
 
 @Composable
-fun OperationDashboardScreen(operationId: String) {
+fun OperationDashboardScreen(operationId: String, onNavigate: (Route) -> Unit, parent: NodeId? = null) {
     val loaded = rememberLoad<ApiOperation>(operationId) { ApiClient.getOperation(operationId) }
-    val useMock = loaded.error != null
-    val displayed = if (useMock) {
-        Loaded(mockOperations.find { it.id == operationId } ?: mockOperations.first().copy(id = operationId))
-    } else loaded
+    val children = rememberLoad<List<ApiOperation>>(operationId) { ApiClient.getOperations(operationId) }
 
     DetailPage {
         SelectableText("Operation ダッシュボード", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(16.dp))
-        if (useMock) {
-            SelectableText("モックデータを表示しています。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(8.dp))
+        parent?.let {
+            TextButton(onClick = { onNavigate(Node(it, it.id).openRoute()) }) { Text("親: ${it.id}") }
         }
-        LoadedView(displayed) { operation ->
+        LoadedView(loaded) { operation ->
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SelectableText(operation.name, style = MaterialTheme.typography.titleLarge)
@@ -45,6 +49,15 @@ fun OperationDashboardScreen(operationId: String) {
                     OpDetailRow("作成日時", operation.createdAt)
                     OpDetailRow("更新日時", operation.updatedAt)
                 }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        SelectableText("子 Operation", style = MaterialTheme.typography.titleMedium)
+        LoadedList(children, emptyText = "子 Operation がありません。") { operations ->
+            operations.forEach { child ->
+                TextButton(onClick = {
+                    onNavigate(child.asNode(NodeId(operationId, NodeKind.OPERATION)).openRoute())
+                }) { Text(child.name) }
             }
         }
     }

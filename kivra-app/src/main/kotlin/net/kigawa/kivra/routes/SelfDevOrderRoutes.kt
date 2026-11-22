@@ -6,6 +6,11 @@ import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
+import io.ktor.server.routing.put
+import io.ktor.server.routing.delete
+import kotlinx.serialization.SerialName
+import net.kigawa.kivra.db.InvalidOrderAssignment
+import net.kigawa.kivra.db.OrderAssignment
 import io.ktor.server.routing.post
 import java.time.ZoneOffset
 import kotlinx.serialization.Serializable
@@ -105,6 +110,7 @@ data class CreateOrderRequest(
     val maxCycles: Int? = null,
     /** The project the root order belongs to (ADR 0022). Required on creation; a child takes its parent's. Checked by the route. */
     val projectId: String? = null,
+    @SerialName("assignee_id") val assigneeId: String? = null,
 )
 
 @Serializable
@@ -126,7 +132,7 @@ data class AbandonCycleRequest(val expectedVersion: Long, val reason: String)
 
 /** A child order (ADR 0015 section 2.7). The same title and policy rules as the root; the budget is whole yen. */
 @Serializable
-data class CreateChildRequest(val title: String, val policy: String, val orderBudgetJpy: Long, val idempotencyKey: String)
+data class CreateChildRequest(val title: String, val policy: String, val orderBudgetJpy: Long, val idempotencyKey: String, @SerialName("assignee_id") val assigneeId: String? = null)
 
 @Serializable
 data class RequestStopRequest(val version: Long, val reasonCode: String)
@@ -158,6 +164,8 @@ data class OrderSummaryResponse(
     val remainingJpy: Long,
     /** Optional project grouping (V42). Null means unassigned. */
     val projectId: String?,
+    val assigneeId: String? = null,
+    val assignedAt: String? = null,
 )
 
 @Serializable
@@ -231,7 +239,13 @@ private suspend fun listOrders(deps: SelfDevOrderRouteDeps, call: ApplicationCal
         is ListScope.Refused -> return call.respond(s.status, OrderError(s.error))
         is ListScope.Filtered -> scope.narrow(s.filter)
     }
-    val rows = deps.orders.list(LIST_LIMIT, project)
+    val assigneeId = call.request.queryParameters["assignee_id"]
+    val unassignedRaw = call.request.queryParameters["unassigned"]
+    if ((assigneeId != null && !ORDER_ID_SHAPE.matches(assigneeId)) ||
+        (unassignedRaw != null && unassignedRaw !in setOf("true", "false")) || (assigneeId != null && unassignedRaw == "true")) {
+        return call.respond(HttpStatusCode.BadRequest, OrderError(INVALID_BODY))
+    }
+    val rows = deps.orders.list(LIST_LIMIT, project, assigneeId, unassignedRaw == "true")
     deps.guard.recordReadShadow(caller.access, rows.map { it.projectId }, "order.list")
     call.respond(rows.map { it.summary() })
 }
@@ -258,9 +272,16 @@ private suspend fun createOrder(deps: SelfDevOrderRouteDeps, call: ApplicationCa
         is ProjectScope.Assigned -> scope.projectId
     }
     if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create", projectId = projectId)) return
-    val created = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles, projectId) as CreateRootResult.Created
+    if (request.assigneeId != null && !deps.permit(call, caller, Permission.ORDER_ASSIGN, "order.create.assign", projectId = projectId)) return
+    val created = try {
+        deps.orders.assignments.atomic {
+            val result = deps.orders.createRoot(caller.principal, title, policy, repo, maxCycles, projectId) as CreateRootResult.Created
+            request.assigneeId?.let { deps.orders.assignments.assign(result.order.orderId, it, operatorTag(caller.principal)) }
+            result
+        }
+    } catch (e: InvalidOrderAssignment) { return call.respondAssignmentError(e) }
     operatorLog.info("order operator action: action=ORDER_CREATED actor={} orderId={} result=ACTIVE", operatorTag(caller.principal), created.order.orderId)
-    call.respond(HttpStatusCode.Created, created.order.summary())
+    call.respond(HttpStatusCode.Created, deps.orders.get(created.order.orderId)!!.summary())
 }
 
 /** GET the pending stop requests of a project: the old route or the alias (the path's project). */
@@ -328,6 +349,36 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
     get("/api/projects/{projectId}/orders") { listOrders(deps, call) }
     post("/api/projects/{projectId}/orders") { createOrder(deps, call) }
 
+    put("/api/projects/{projectId}/orders/{orderId}/assignee") {
+        val caller = deps.caller(call) ?: return@put
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@put
+        if (!deps.permit(call, caller, Permission.ORDER_ASSIGN, "order.assign")) return@put
+        val order = deps.assignmentOrder(call, caller) ?: return@put
+        if (!deps.permit(call, caller, Permission.ORDER_ASSIGN, "order.assign", projectId = order.projectId)) return@put
+        val body = decodeOr<AssignOrderRequest>(call) ?: return@put
+        try {
+            deps.orders.assignments.reassign(order.orderId, body.assigneeId, operatorTag(caller.principal))
+        } catch (e: InvalidOrderAssignment) { return@put call.respondAssignmentError(e) }
+        call.respond(deps.orders.get(order.orderId)!!.summary())
+    }
+    delete("/api/projects/{projectId}/orders/{orderId}/assignee") {
+        val caller = deps.caller(call) ?: return@delete
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@delete
+        if (!deps.permit(call, caller, Permission.ORDER_ASSIGN, "order.unassign")) return@delete
+        val order = deps.assignmentOrder(call, caller) ?: return@delete
+        if (!deps.permit(call, caller, Permission.ORDER_ASSIGN, "order.unassign", projectId = order.projectId)) return@delete
+        if (!call.readEmptyBody()) return@delete
+        deps.orders.assignments.unassign(order.orderId, operatorTag(caller.principal))
+        call.respond(deps.orders.get(order.orderId)!!.summary())
+    }
+    get("/api/projects/{projectId}/orders/{orderId}/assignments") {
+        val caller = deps.caller(call) ?: return@get
+        if (!deps.requireEnabled(call)) return@get
+        if (!deps.permit(call, caller, Permission.READ, "order.assignments")) return@get
+        val order = deps.assignmentOrder(call, caller) ?: return@get
+        call.respond(deps.orders.assignments.listForOrder(order.orderId).map { it.response() })
+    }
+
     get("/api/selfdev/orders/{id}") {
         val caller = deps.caller(call) ?: return@get
         if (!deps.requireEnabled(call)) return@get
@@ -382,28 +433,8 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
         }
     }
 
-    post("/api/selfdev/orders/{id}/children") {
-        val caller = deps.caller(call) ?: return@post
-        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
-        // Only the operator creates a child (ADR 0015 U-19). The AI principal is refused before the body is read.
-        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.child.create")) return@post
-        if (deps.orderSettings.maxDepth < 1) return@post call.respond(HttpStatusCode.Conflict, OrderError(CHILDREN_DISABLED, "CHILDREN_DISABLED"))
-        val request = decodeOr<CreateChildRequest>(call) ?: return@post
-        val title = validatedText(request.title, MAX_TITLE_CODE_POINTS)
-        val policy = validatedPolicy(request.policy)
-        val key = validatedText(request.idempotencyKey, MAX_CHILD_KEY_CODE_POINTS)
-        if (title == null || policy == null || key == null) return@post call.respond(HttpStatusCode.BadRequest, OrderError(CHILD_FIELDS_INVALID))
-        if (request.orderBudgetJpy !in 1..MAX_BUDGET_JPY) return@post call.respond(HttpStatusCode.BadRequest, OrderError(BUDGET_INVALID))
-        // A child's cycle budget is the default (ADR 0015 section 3.2). A child whose budget is below it could never start a cycle.
-        if (request.orderBudgetJpy < DEFAULT_CYCLE_BUDGET_JPY) return@post call.respond(HttpStatusCode.BadRequest, OrderError(BUDGET_BELOW_CYCLE))
-        val parentId = orderIdOf(call) ?: return@post call.respond(HttpStatusCode.Conflict, OrderError(PARENT_NOT_ACTIVE, "PARENT_NOT_ACTIVE"))
-        when (val r = deps.createChildAsOperator(parentId, title, policy, request.orderBudgetJpy, key, caller.principal)) {
-            is ChildCreateResult.Created -> call.respond(HttpStatusCode.Created, r.order.summary())
-            is ChildCreateResult.Replayed -> call.respond(HttpStatusCode.OK, r.order.summary())
-            is ChildCreateResult.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedChildText(r.reason), r.reason.name))
-            ChildCreateResult.KeyConflict -> call.respond(HttpStatusCode.Conflict, OrderError(KEY_CONFLICT, "KEY_CONFLICT"))
-        }
-    }
+    post("/api/selfdev/orders/{id}/children") { createChildOrder(deps, call) }
+    post("/api/projects/{projectId}/orders/{id}/children") { createChildOrder(deps, call) }
 
     post("/api/selfdev/orders/{id}/pause") {
         val caller = deps.caller(call) ?: return@post
@@ -720,16 +751,21 @@ internal fun SelfDevOrderRouteDeps.createChildAsOperator(
     idempotencyKey: String,
     principal: String,
     maxCycles: Int = 1,
-): ChildCreateResult {
+    assigneeId: String? = null,
+): ChildCreateResult = orders.assignments.atomic {
     val limits = ChildLimits(maxDepth = orderSettings.maxDepth, maxChildren = orderSettings.maxChildren, maxTree = orderSettings.maxTree)
     val r = orders.createChild(parentId, title, policy, orderBudgetJpy, idempotencyKey, principal, limits, maxCycles)
     if (r is ChildCreateResult.Created) {
+        assigneeId?.let { orders.assignments.assign(r.order.orderId, it, operatorTag(principal)) }
         operatorLog.info(
             "order operator action: action=CHILD_CREATED actor={} orderId={} parentOrderId={} depth={} result=ACTIVE",
             operatorTag(principal), r.order.orderId, parentId, r.order.depth,
         )
     }
-    return r
+    when (r) {
+        is ChildCreateResult.Created -> r.copy(order = orders.get(r.order.orderId)!!)
+        else -> r
+    }
 }
 
 /** True while the order routes answer (the orders and the autopilot are on): the same condition as each route's 503. */
@@ -1060,6 +1096,8 @@ private fun SelfDevOrder.summary() = OrderSummaryResponse(
     cycleBudgetJpy = cycleBudgetJpy,
     remainingJpy = orderBudgetJpy - spentJpy,
     projectId = projectId,
+    assigneeId = assigneeId,
+    assignedAt = assignedAt?.utc(),
 )
 
 private fun SelfDevOrderStopRequest.response(approverView: Boolean) = StopRequestResponse(
@@ -1093,4 +1131,61 @@ internal fun validatedPolicy(raw: String): String? {
     if (value.codePointCount(0, value.length) > MAX_POLICY_CODE_POINTS) return null
     if (value.any { (it.isISOControl() && it != '\n' && it != '\t') || isBidiControl(it) }) return null
     return value
+}
+
+private suspend fun createChildOrder(deps: SelfDevOrderRouteDeps, call: ApplicationCall) {
+    val caller = deps.caller(call) ?: return
+    if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return
+    // Only the operator creates a child (ADR 0015 U-19). The AI principal is refused before the body is read.
+    if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.child.create")) return
+    if (deps.orderSettings.maxDepth < 1) return call.respond(HttpStatusCode.Conflict, OrderError(CHILDREN_DISABLED, "CHILDREN_DISABLED"))
+    val request = decodeOr<CreateChildRequest>(call) ?: return
+    val title = validatedText(request.title, MAX_TITLE_CODE_POINTS)
+    val policy = validatedPolicy(request.policy)
+    val key = validatedText(request.idempotencyKey, MAX_CHILD_KEY_CODE_POINTS)
+    if (title == null || policy == null || key == null) return call.respond(HttpStatusCode.BadRequest, OrderError(CHILD_FIELDS_INVALID))
+    if (request.orderBudgetJpy !in 1..MAX_BUDGET_JPY) return call.respond(HttpStatusCode.BadRequest, OrderError(BUDGET_INVALID))
+    // A child's cycle budget is the default (ADR 0015 section 3.2). A child whose budget is below it could never start a cycle.
+    if (request.orderBudgetJpy < DEFAULT_CYCLE_BUDGET_JPY) return call.respond(HttpStatusCode.BadRequest, OrderError(BUDGET_BELOW_CYCLE))
+    val parentId = orderIdOf(call) ?: return call.respond(HttpStatusCode.Conflict, OrderError(PARENT_NOT_ACTIVE, "PARENT_NOT_ACTIVE"))
+    val parent = deps.orders.get(parentId)
+    val pinned = call.pathProjectId()
+    if (parent == null || (pinned != null && parent.projectId != pinned) || !deps.guard.readScope(caller.access).sees(parent.projectId)) {
+        return call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+    }
+    if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.child.create", projectId = parent.projectId)) return
+    if (request.assigneeId != null && !deps.permit(call, caller, Permission.ORDER_ASSIGN, "order.child.assign", projectId = parent.projectId)) return
+    val result = try {
+        deps.createChildAsOperator(parentId, title, policy, request.orderBudgetJpy, key, caller.principal, assigneeId = request.assigneeId)
+    } catch (e: InvalidOrderAssignment) { return call.respondAssignmentError(e) }
+    when (val r = result) {
+        is ChildCreateResult.Created -> call.respond(HttpStatusCode.Created, r.order.summary())
+        is ChildCreateResult.Replayed -> call.respond(HttpStatusCode.OK, r.order.summary())
+        is ChildCreateResult.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(refusedChildText(r.reason), r.reason.name))
+        ChildCreateResult.KeyConflict -> call.respond(HttpStatusCode.Conflict, OrderError(KEY_CONFLICT, "KEY_CONFLICT"))
+    }
+}
+
+@Serializable
+private data class AssignOrderRequest(@SerialName("assignee_id") val assigneeId: String)
+
+@Serializable
+private data class AssignmentResponse(val assignmentId: String, val orderId: String, val assigneeId: String,
+    val assignedBy: String, val assignedAt: String, val unassignedAt: String?)
+private fun OrderAssignment.response() = AssignmentResponse(assignmentId, orderId, assigneeId, assignedBy, assignedAt.utc(), unassignedAt?.utc())
+
+private suspend fun ApplicationCall.respondAssignmentError(e: InvalidOrderAssignment) {
+    respond(HttpStatusCode.BadRequest, OrderError("invalid order assignment", e.code))
+}
+
+private suspend fun SelfDevOrderRouteDeps.assignmentOrder(call: ApplicationCall, caller: OrderCaller): SelfDevOrder? {
+    val projectId = call.pathProjectId()
+    val id = call.pathParam("orderId")?.takeIf { ORDER_ID_SHAPE.matches(it) }
+    val order = id?.let { orders.get(it) }
+    if (projectId == null || order == null || order.projectId != projectId || !guard.readScope(caller.access).sees(projectId)) {
+        call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+        return null
+    }
+    guard.recordReadShadow(caller.access, listOf(projectId), "order.assignment")
+    return order
 }

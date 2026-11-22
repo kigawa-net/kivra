@@ -79,13 +79,12 @@ internal val MIGRATION_FILES = mapOf(
     56 to "V56__project_chat_actions.sql",
     57 to "V57__project_chat_action_targets.sql",
     58 to "V58__selfdev_order_policy_8000.sql",
+    59 to "V59__selfdev_order_assignments.sql",
     60 to "V60__project_chat_summaries.sql",
 )
-
 /**
  * Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved; V30 is left
  * for another change, and V31 is the auto-merge pause, ADR 0014 U-10). A change that takes V30 removes it from this set.
- * V59 is skipped until the order assignments migration is included in the chain.
  */
 internal val RESERVED_MIGRATION_VERSIONS: Set<Int> =
     if (59 in MIGRATION_FILES) setOf(22, 30) else setOf(22, 30, 59)

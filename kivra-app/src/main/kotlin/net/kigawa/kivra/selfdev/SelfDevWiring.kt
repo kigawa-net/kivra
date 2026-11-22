@@ -137,6 +137,8 @@ internal fun buildSelfDev(
     memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
     /** The suppression shadow (ADR 0016 P3). Used by the Planner only. */
     suppress: SuppressShadow = SuppressShadow.OFF,
+    /** The orders' settings. The Planner reads the child depth and the cycle cap from it (ADR 0015 addendum 2026-11-22). */
+    orderSettings: OrderSettings = OrderSettings.disabled(),
 ): SelfDevParts {
     val config = checkNotNull(settings.config) { "self-development settings are not enabled" }
     val auth = checkNotNull(settings.githubAuth) { "self-development GitHub authentication is missing" }
@@ -272,7 +274,10 @@ internal fun buildSelfDev(
         // is off. The file sizes for the target-path pre-check (ADR 0011 section 3) come from the same reader and are always read.
         val repoTree = PlannerRepoFiles(github, config.repo, config.baseBranch)
         val repoFiles = if (autopilotConfig.plannerRepoTree) repoTree else null
-        buildPlanWorker(autopilotConfig, registry, gateway, SelfDevOperatorRepository(database), tenantId, repoFiles, repoTree, memory, suppress, selfDevRouter)
+        buildPlanWorker(
+            autopilotConfig, registry, gateway, SelfDevOperatorRepository(database), tenantId, repoFiles, repoTree, memory, suppress, selfDevRouter,
+            orderSettings,
+        )
     }
     // ADR 0014 S1: the shadow judgement. Built only with the autopilot and its shadow switch on; it reads GitHub and writes the audit only.
     val autoMergeShadow: AutoMergeShadowWatch? = buildAutoMergeShadowWatch(
@@ -385,6 +390,7 @@ private fun buildPlanWorker(
     memory: SelfDevMemoryRecorder,
     suppress: SuppressShadow,
     router: DifficultyRouter?,
+    orderSettings: OrderSettings,
 ): PlannerWorker {
     check(registry.models.any { it.id == PLANNER_MODEL_ID && it.lifecycle == Lifecycle.ACTIVE }) {
         "the autopilot planner model is not an active model in the registry"
@@ -392,7 +398,12 @@ private fun buildPlanWorker(
     val planner = AutopilotPlanner(
         operations = operations,
         gateway = gateway,
-        config = PlannerConfig(budgetScopes = listOf(tenantId), autopilot = config),
+        config = PlannerConfig(
+            budgetScopes = listOf(tenantId),
+            autopilot = config,
+            childOrderMaxDepth = orderSettings.maxDepth,
+            childOrderMaxCyclesCap = orderSettings.maxCyclesCap,
+        ),
         repoFiles = repoFiles,
         repoSizes = repoSizes,
         memory = memory,

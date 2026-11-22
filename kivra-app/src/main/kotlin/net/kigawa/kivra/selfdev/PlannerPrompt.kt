@@ -50,8 +50,12 @@ internal object PlannerPrompt {
         return bytes.joinToString("") { "%02x".format(it) }
     }
 
-    /** [repoFiles] adds the rules for the repository file list (Issue #293). Without it, the prompt is the one used before. */
-    fun system(repoFiles: Boolean = false): String = buildString {
+    /**
+     * [repoFiles] adds the rules for the repository file list (Issue #293). Without it, the prompt is the one used before.
+     * [childOrdersMaxCycles] adds the childOrders rules (ADR 0015 addendum 2026-11-22) with this cap. Null (the plan's order may not propose
+     * children) leaves childOrders out of the prompt entirely.
+     */
+    fun system(repoFiles: Boolean = false, childOrdersMaxCycles: Int? = null): String = buildString {
         appendLine("You are the planner of the kivra self-development autopilot. You break one goal into a short ordered list of")
         appendLine("small coding tasks for the kivra repository. You have no tools. You do not run anything.")
         appendLine()
@@ -71,6 +75,18 @@ internal object PlannerPrompt {
         appendLine("- sizeEstimate: \"S\", \"M\" or \"L\".")
         appendLine("- dependsOn: a list of task numbers (1-based integers). Each number must be smaller than the task's own number, and it must")
         appendLine("  name an earlier task in this list. Do not repeat a number, and do not refer to the task itself or a later task.")
+        if (childOrdersMaxCycles != null) {
+            appendLine("- childOrders: optional. Between 0 and $MAX_CHILD_ORDERS entries. Leave the key out, or use [], when there are none.")
+            appendLine("  Each entry proposes one child order: a separate piece of work that a human operator may approve and start later.")
+            appendLine("  A child order is not run by this plan, and it does not change the tasks. Each entry has exactly these keys:")
+            appendLine("""  {"title":"<one line>","instruction":"<the goal, the files, the steps and the acceptance criteria>","maxCycles":1}""")
+            appendLine("  - title: at most $MAX_TITLE_CODE_POINTS characters, one line. Titles are unique within the list.")
+            appendLine("  - instruction: at most $MAX_POLICY_CODE_POINTS characters.")
+            appendLine("  - maxCycles: an integer from 1 to $childOrdersMaxCycles.")
+            appendLine("  Broad, independent workstreams go to childOrders. Small, concrete file changes go to tasks.")
+            appendLine("  Do not duplicate: a workstream that one of the tasks already covers is not also a child order.")
+            appendLine("  Do not put file paths in childOrders. The child order's own planning chooses its files.")
+        }
         appendLine("Use only these keys. Unknown keys are rejected. Do not add any other key.")
         appendLine()
         appendLine("PATHS")
@@ -137,5 +153,8 @@ internal object PlannerPrompt {
     private const val MAX_TITLE_CHARS = PlanValidator.MAX_TITLE_CHARS
     private const val MAX_BODY_CHARS = PlanValidator.MAX_BODY_CHARS
     private const val MAX_PATHS = PlanValidator.MAX_PATHS_PER_TASK
+    private const val MAX_CHILD_ORDERS = PlanValidator.MAX_CHILD_ORDERS
+    private const val MAX_TITLE_CODE_POINTS = net.kigawa.kivra.routes.MAX_TITLE_CODE_POINTS
+    private const val MAX_POLICY_CODE_POINTS = net.kigawa.kivra.routes.MAX_POLICY_CODE_POINTS
     private val ALLOWED_PATTERNS = PatchPolicyDefaults.ALLOWED_PATH_PATTERNS
 }

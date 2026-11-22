@@ -1170,3 +1170,37 @@ AI が自分で order を作り続けると、AI が自分の依頼を増やし�
 
 - 確認(テスト `McpTaskToolsTest`): 正常系(`BLOCKED` から `TASK_SUBMITTED`、版が一つ上がる、題名と本文が返らない)、`BLOCKED` 以外の拒否(`NO_EDGE`、何も書かない)、見つからない Task(`TASK_NOT_FOUND`)、版の不一致、予算の保留の理由での正常系、スコープ不足(403)、AI の拒否、フラグ無効、autopilot 無効、不正な入力、監査の行(`via=mcp`、ID と固定コードだけ)。`RolesCoverageArchitectureTest`(表の行と権限)。
 - 未確認: dev の Keycloak client `kivra-mcp` が `kivra.selfdev.task.decide` を発行するか(承認と見送りと同じ。`kigawa01/k8s-system` の側)。dev での実際の再計画と、再計画後の計画の結果。
+
+## 追補(2026-11-22): Planner は子 order を提案できる(作成は人のまま。U-19 は変えない)
+
+### 1. 決定
+
+- Planner は子 order を**提案**できる。提案は計画の出力 `childOrders`(最大 3 件)として届き、`selfdev_order_split_proposals`(V60)に `PROPOSED` の行として残る。提案は子 order を作らない。
+- 子 order を**作る**のは人(運用者)だけである。§2.7 の U-19 は変えない。計画の出力から子を直接作る経路は作らない。作成の経路(承認 API と UI)は次の変更(PR2)で入れる。
+- 提案の上限: 1 計画につき 3 件。木の上限(子の数 `KIVRA_SELFDEV_ORDER_MAX_CHILDREN`、木全体 `KIVRA_SELFDEV_ORDER_MAX_TREE`、深さ `KIVRA_SELFDEV_ORDER_MAX_DEPTH`)は変えない。作成の時に従来どおり確かめる。
+- 提案の各項目の検査は、order の作成(REST と chat の `order_create_child`)と同じ規則を使う: 題名は `MAX_TITLE_CODE_POINTS`(200)、方針は `MAX_POLICY_CODE_POINTS`(8000)、制御文字の拒否は `validatedText` と `validatedPolicy` の規則のまま。`maxCycles` は `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` 以内。題名は計画の中で重複させない。
+- 提案を出せるのは**根の order の計画だけ**である。子の order の計画は `childOrders` を出せず、出すと `CHILD_ORDERS_NOT_ALLOWED` で拒否される。深さの余地が無い時(`KIVRA_SELFDEV_ORDER_MAX_DEPTH` が 0、または根の深さ + 1 が上限を超える)も同じ。運用者の作ったタスク(order が無い)も対象外。
+- Planner に見せる指示(`PlannerPrompt.system`)は、提案が許される時だけ `childOrders` の説明を含める。許されない時は含めない。
+- 計画が受け付けられるのは、タスクが 1 件以上ある時だけである(従来の最低 1 件の規則を保つ)。`childOrders` だけの計画は、この変更では受け付けない。タスクの無い計画を確定すると、実行するものが無いまま決着するため。運用者の承認の経路ができる PR2 で改める。
+
+### 2. 冪等キー(PR2 のための予約)
+
+- 提案から子を作るとき、作成のキーは `plan-split:{planId}:{ordinal}` とする。`planId` は `"{計画の根のタスク ID}:r{revision}"`(V60 の `plan_id`)。同じ提案の二重作成を、作成の一意キーで防ぐ。この変更はキーを使わない。
+
+### 3. 再帰の規則
+
+- 子の計画は提案を出せない(根だけが提案する)。これで提案は一段目で止まり、孫の提案は作られない。深さ 2 の設定でも同じ。
+- 将来、孫の提案を許すなら、この規則を変える別の決定として書く。
+
+### 4. 変えなかったこと
+
+- U-19(子を作るのは人だけ)。計画の確定は子を作らない。
+- 木の上限、予算の入れ子、親の状態の規則(ADR 0015 §2.7 の作成時の検査)。
+- 停止、承認、再開の規則。
+
+### 5. 残るリスク
+
+- 提案が溜まっても、この変更では消えない。`EXPIRED` の遷移は PR2 で入れる。
+- 提案の本文は Planner の出力であり、データとして扱う。実行されず、ログにも出さない(ログは計画のダイジェストと件数だけ)。
+- 作成の経路(PR2)が入るまで、提案は運用者の画面にも REST にも出ない。
+- 確認したこと: 検査の単体テスト(`PlanValidatorTest`)、指示の文面(`PlannerPromptTest`)、永続化と計画の確定の同一トランザクション・古い fence・再計画(`SplitProposalRepositoryTest`)、移行の連鎖(`MigrationChainTest`)。確認していないこと: dev の実際の計画での提案の内容の質。

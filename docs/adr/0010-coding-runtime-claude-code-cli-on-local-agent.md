@@ -318,3 +318,10 @@ ADR 0010 の決定 3・5・6(docker 引数の不変条件)を、Job のマニフ
 - 範囲: **CONNECT には効かない**(許可リストに `user.kigawa.net` を足さない。足すと Job の Pod がプロキシ経由で社内 LB に届く)。`/anthropic` の経路と Anthropic 側の接続も変えない。
 - NetworkPolicy 側の対応は、kigawa-net-k8s の proxy の egress に `10.0.0.240/32` の TCP 443 だけを足す(CONNECT の経路には効かない)。
 - 実装の詳細は `agent-runtime/proxy/wif.go`(`newWIFHTTPClient`)、運用の注意は `agent-runtime/README.md`。
+
+## 追補 8. リポジトリごとに Claude アカウントを固定する
+
+- 案 A を採る。各リポジトリ用の `kivra-agent` は、起動時に `KIVRA_AGENT_REPO` と `KIVRA_AGENT_CLAUDE_ACCOUNT` を読む。設定したアカウント ID だけを docker と k8s の許可リストに入れる。タスク入力や CLI 引数にアカウント選択を追加しない。
+- 設定した場合、`ANTHROPIC_BASE_URL` は起動設定のプロキシ URL に `/anthropic/<id>` を付ける。未指定時は `/anthropic` を使う。ガードは HTTP/HTTPS プロキシと同じ接続先および許可リストに対応するパスを検査する。実行コンテナには固定のダミー API キーを渡し、不変条件 4・7 を維持する。
+- プロキシは起動時に非秘密のアカウントレジストリを読み、ID ごとに WIF のサービスアカウントとワークスペースを選び、トークンを個別にキャッシュする。Keycloak クライアントシークレットはプロキシで共有する。Messages と count_tokens の外部パスにある ID は上流への転送時に取り除き、未知の ID と不正なパスは 403 で拒否する。従来パスの WIF 設定は既存の環境変数から読む。
+- パスによる選択は起動した Claude CLI の接続先を固定するためのもの。共有プロキシに直接 HTTP リクエストを送れるクライアントは、登録済みの別の経路にもアクセスできる。

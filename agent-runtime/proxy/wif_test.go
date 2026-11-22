@@ -166,6 +166,46 @@ func TestWIFUsesNewJWTForEveryExchange(t *testing.T) {
 	}
 }
 
+func TestWIFNamedAccountsShareSecretAndKeepSeparateCaches(t *testing.T) {
+	idp := newFakeIdP(t, 3600)
+	cfg := idp.cfg(filepath.Join(t.TempDir(), "missing-secret"))
+	cfg.clientSecret = testSecret
+	defaultAuth := NewWIFAuth(cfg, http.DefaultClient, nil)
+	namedAuth := NewWIFAuth(cfg.forAccount(WIFAccount{
+		ID: "repo-a", FederationRuleID: "named-rule", OrganizationID: "named-org",
+		ServiceAccountID: "named-service", WorkspaceID: "named-workspace",
+	}), http.DefaultClient, nil)
+	authorize := func(auth *WIFAuth) Credential {
+		t.Helper()
+		cred, err := auth.Authorize(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cred
+	}
+	def := authorize(defaultAuth)
+	named := authorize(namedAuth)
+	idp.mu.Lock()
+	body, secret := idp.lastExBody, idp.lastSecret
+	idp.mu.Unlock()
+	var req exchangeRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if secret != testSecret || req.FederationRuleID != "named-rule" || req.OrganizationID != "named-org" ||
+		req.ServiceAccountID != "named-service" || req.WorkspaceID != "named-workspace" {
+		t.Fatal("named exchange did not use the shared secret and named WIF IDs")
+	}
+	if def == named || authorize(defaultAuth) != def || authorize(namedAuth) != named {
+		t.Fatal("accounts must reuse their own credentials")
+	}
+	namedAuth.Invalidate(named)
+	if authorize(namedAuth) == named || authorize(defaultAuth) != def ||
+		namedAuth.ExchangeCount() != 2 || defaultAuth.ExchangeCount() != 1 {
+		t.Fatal("invalidating the named token must refresh only that account")
+	}
+}
+
 func TestWIFRefreshThresholds(t *testing.T) {
 	idp := newFakeIdP(t, 300) // expires in 300 s
 	ck := &clock{t: time.Unix(1_000_000, 0)}

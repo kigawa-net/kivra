@@ -178,6 +178,32 @@ class DockerArgsGuardTest {
     }
 
     @Test
+    fun namedClaudeAccountUsesOnlyItsAllowlistedProxyRoute() {
+        val accountSettings = DockerFixture.settings(fixture.root, allowedAccounts = setOf("repo-a"))
+        val builder = DockerCommandBuilder(accountSettings)
+        val args = builder.build(fixture.spec(claudeAccount = "repo-a"))
+        val baseEnv = "--env=ANTHROPIC_BASE_URL="
+        assertEquals("${baseEnv}$TEST_PROXY/anthropic/repo-a", args.single { it.startsWith(baseEnv) })
+        assertEquals(golden.drop(golden.imageIndex()), args.drop(args.imageIndex()))
+        val namedGuard = DockerArgsGuard(accountSettings)
+        namedGuard.check(args)
+        assertEquals(GuardRule.ENV_REJECTED, rule(args))
+        for (url in listOf(
+            "$TEST_PROXY/anthropic",
+            "$TEST_PROXY/anthropic/repo-b",
+            "$TEST_PROXY/anthropic/repo-a/../repo-b",
+            "$TEST_PROXY/anthropic/%72epo-a",
+            "$TEST_PROXY/anthropic/repo-a?x",
+            "http://other-proxy:8080/anthropic/repo-a",
+        )) {
+            val error = assertFailsWith<DockerArgsRejectedException> { namedGuard.check(args.replacing(baseEnv, "$baseEnv$url")) }
+            assertEquals(GuardRule.ENV_REJECTED, error.rule, url)
+        }
+        assertFailsWith<DockerSpecException> { builder.build(fixture.spec(claudeAccount = "repo-b")) }
+        assertFailsWith<DockerSpecException> { DockerFixture.settings(fixture.root, allowedAccounts = setOf("repo/a")) }
+    }
+
+    @Test
     fun environmentValueWithSecretPrefixAnywhereIsRefused() {
         val leaking = golden.replacing("--env=NO_PROXY=", "--env=NO_PROXY=localhost,sk-ant-api03-EXAMPLE")
         assertEquals(GuardRule.ENV_REJECTED, rule(leaking))

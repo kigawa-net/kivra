@@ -252,6 +252,17 @@ class AgentConfigTest {
     )
 
     @Test
+    fun claudeAccountIsOptionalAndValidatedAtStartup() {
+        val key = AgentConfig.ENV_CLAUDE_ACCOUNT
+        assertNull(AgentConfig.fromEnv(realEnv()).realExecutor!!.claudeAccount)
+        assertEquals("repo-a", AgentConfig.fromEnv(realEnv(key to "repo-a")).realExecutor!!.claudeAccount)
+        for (id in listOf("Repo-a", "-repo", "../repo", "repo%2fa", "repo?a", "a".repeat(64), "sk-ant-example")) {
+            val error = assertFailsWith<ConfigException> { AgentConfig.fromEnv(realEnv(key to id)) }
+            assertEquals("$key must be a valid Claude account id", error.message)
+        }
+    }
+
+    @Test
     fun modelAndBudgetDefaultToHaikuAndFiftyCents() {
         val config = AgentConfig.fromEnv(realEnv())
         assertEquals("claude-haiku-5-5", config.realExecutor!!.model)

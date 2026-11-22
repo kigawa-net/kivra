@@ -1,15 +1,17 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"regexp"
 	"strings"
 )
 
-// Config holds the proxy settings. It is read from environment variables only.
-// Secret values are never stored here: the Keycloak client secret is read from a file at each exchange.
+// Config holds the proxy settings and the optional registry of named WIF accounts.
 type Config struct {
 	Listen        string
 	AuthMode      string // "wif" (production) or "static-test" (tests only: fixed fake key)
@@ -17,6 +19,25 @@ type Config struct {
 	AllowlistFile string
 	StaticKey     string // static-test only: fake key value, sent as x-api-key
 	WIF           WIFConfig
+	Accounts      []WIFAccount
+}
+
+// Keep this pattern in sync with DockerPatterns.ACCOUNT.
+var accountIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+func validAccountID(id string) bool {
+	return accountIDPattern.MatchString(id) && !strings.Contains(id, "sk-ant-")
+}
+
+const accountsFileEnv = "KIVRA_PROXY_WIF_ACCOUNTS_FILE"
+
+// WIFAccount contains only the non-secret settings that vary by account.
+type WIFAccount struct {
+	ID               string `json:"id"`
+	FederationRuleID string `json:"federation_rule_id"`
+	OrganizationID   string `json:"organization_id"`
+	ServiceAccountID string `json:"service_account_id"`
+	WorkspaceID      string `json:"workspace_id"`
 }
 
 // Defaults. The production endpoints are fixed; tests override them through environment variables.
@@ -42,6 +63,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 			KeycloakTokenURL:  orDefault(getenv("KIVRA_PROXY_KEYCLOAK_TOKEN_URL"), defaultKeycloakToken),
 			KeycloakClientID:  orDefault(getenv("KIVRA_PROXY_KEYCLOAK_CLIENT_ID"), defaultClientID),
 			ClientSecretFile:  orDefault(getenv("KIVRA_PROXY_KEYCLOAK_CLIENT_SECRET_FILE"), defaultSecretFile),
+			clientSecret:      getenv("KIVRA_PROXY_KEYCLOAK_CLIENT_SECRET"),
 			AnthropicTokenURL: orDefault(getenv("KIVRA_PROXY_ANTHROPIC_TOKEN_URL"), defaultAnthropicTok),
 			FederationRuleID:  getenv("KIVRA_PROXY_WIF_FEDERATION_RULE_ID"),
 			OrganizationID:    getenv("KIVRA_PROXY_WIF_ORGANIZATION_ID"),
@@ -78,7 +100,47 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	default:
 		return c, errors.New("KIVRA_PROXY_AUTH must be \"wif\" or \"static-test\"")
 	}
+	if path := getenv(accountsFileEnv); path != "" {
+		accounts, err := loadWIFAccounts(path)
+		if err != nil {
+			return c, err
+		}
+		c.Accounts = accounts
+	}
 	return c, nil
+}
+
+func loadWIFAccounts(path string) ([]WIFAccount, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New(accountsFileEnv + " could not be read")
+	}
+	defer f.Close()
+	decoder := json.NewDecoder(f)
+	decoder.DisallowUnknownFields()
+	var accounts []WIFAccount
+	if err := decoder.Decode(&accounts); err != nil || accounts == nil {
+		return nil, errors.New(accountsFileEnv + " must contain a JSON array of WIF accounts")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, errors.New(accountsFileEnv + " must contain one JSON array")
+	}
+	seen := make(map[string]bool, len(accounts))
+	for _, a := range accounts {
+		if !validAccountID(a.ID) {
+			return nil, errors.New(accountsFileEnv + " contains an invalid account id")
+		}
+		if seen[a.ID] {
+			return nil, errors.New(accountsFileEnv + " contains a duplicate account id")
+		}
+		seen[a.ID] = true
+		for _, id := range []string{a.FederationRuleID, a.OrganizationID, a.ServiceAccountID, a.WorkspaceID} {
+			if id == "" || strings.TrimSpace(id) != id {
+				return nil, errors.New(accountsFileEnv + " contains a missing or invalid WIF id")
+			}
+		}
+	}
+	return accounts, nil
 }
 
 func orDefault(v, d string) string {

@@ -34,24 +34,38 @@ var hopByHop = map[string]bool{
 type anthropicHandler struct {
 	upstream string // base URL, e.g. https://api.anthropic.com
 	auth     Authorizer
+	accounts map[string]Authorizer
 	client   *http.Client
 	logf     func(format string, args ...any)
 }
 
 func (h *anthropicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/anthropic")
+	auth := h.auth
+	accountID := ""
+	if !anthropicPaths[path] {
+		id, suffix, _ := strings.Cut(strings.TrimPrefix(path, "/"), "/")
+		if r.URL.RawPath == "" && validAccountID(id) && anthropicPaths["/"+suffix] {
+			accountID, path, auth = id, "/"+suffix, h.accounts[id]
+		}
+	}
 	if r.Method != http.MethodPost || !anthropicPaths[path] {
-		h.logf("deny method=%s path=%s reason=path_not_allowed", r.Method, path)
+		h.logf("deny route=anthropic reason=path_or_method_not_allowed")
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	cred, err := h.auth.Authorize(r.Context())
+	if auth == nil {
+		h.logf("deny route=anthropic reason=unknown_account")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	cred, err := auth.Authorize(r.Context())
 	if err != nil {
 		stage, status := authFailure(err)
 		if status != 0 {
-			h.logf("deny method=%s path=%s reason=authorization_unavailable stage=%s upstream_status=%d", r.Method, path, stage, status)
+			h.logf("deny method=%s path=%s account_id=%q reason=authorization_unavailable stage=%s upstream_status=%d", r.Method, path, accountID, stage, status)
 		} else {
-			h.logf("deny method=%s path=%s reason=authorization_unavailable stage=%s", r.Method, path, stage)
+			h.logf("deny method=%s path=%s account_id=%q reason=authorization_unavailable stage=%s", r.Method, path, accountID, stage)
 		}
 		http.Error(w, "upstream authorization unavailable", http.StatusServiceUnavailable)
 		return
@@ -78,13 +92,13 @@ func (h *anthropicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.client.Do(out)
 	if err != nil {
-		h.logf("error method=%s path=%s reason=upstream_unreachable", r.Method, path)
+		h.logf("error method=%s path=%s account_id=%q reason=upstream_unreachable", r.Method, path, accountID)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized {
-		h.auth.Invalidate(cred)
+		auth.Invalidate(cred)
 	}
 	for k, vs := range resp.Header {
 		if hopByHop[strings.ToLower(k)] {
@@ -96,7 +110,7 @@ func (h *anthropicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	n, _ := copyFlushing(w, resp.Body)
-	h.logf("allow method=%s path=%s status=%d bytes_down=%d", r.Method, path, resp.StatusCode, n)
+	h.logf("allow method=%s path=%s account_id=%q status=%d bytes_down=%d", r.Method, path, accountID, resp.StatusCode, n)
 }
 
 // authFailure returns the fixed stage label and the upstream HTTP status (0 if none) for an Authorize error.

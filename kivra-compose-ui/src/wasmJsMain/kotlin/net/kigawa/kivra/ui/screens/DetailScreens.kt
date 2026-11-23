@@ -641,11 +641,15 @@ fun OrderCyclesScreen(orderId: String, onNavigate: (Route) -> Unit) {
     }
 }
 
-/** 詳細画面の外枠: 縦スクロール付きの本文領域(自律運転の画面も使う)。 */
+/**
+ * 詳細画面の外枠: 本文領域。既定は縦スクロール付き(自律運転の画面も使う)。[scrollable] が false のときは縦スクロールを付けず、
+ * 本文が高さを使い切る(スクロールするかどうかは本文が決める)。
+ */
 @Composable
-internal fun DetailPage(content: @Composable ColumnScope.() -> Unit) {
+internal fun DetailPage(scrollable: Boolean = true, content: @Composable ColumnScope.() -> Unit) {
+    val scroll = rememberScrollState()
     Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        modifier = Modifier.fillMaxSize().then(if (scrollable) Modifier.verticalScroll(scroll) else Modifier).padding(16.dp),
         content = content,
     )
 }

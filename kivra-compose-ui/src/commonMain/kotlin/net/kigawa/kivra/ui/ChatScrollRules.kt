@@ -1,13 +1,13 @@
 package net.kigawa.kivra.ui
 
 /*
- * The scroll rules of the project chat's message list, as pure logic. The list has a fixed height and scrolls inside it.
+ * The scroll rules of the project chat's message list, as pure logic. In the stacked dashboard layout the list has a fixed height and scrolls inside it.
  * It goes to the newest message on the first load and after the user's own send; otherwise only when it is already at or near the bottom,
  * so a background refresh never pulls a reader away from the history they are reading.
  */
 
-/** The chat message list's height (dp). The input box sits below it, always visible. */
-const val CHAT_LIST_HEIGHT_DP = 420
+/** The chat message list's height (dp) in the stacked dashboard layout. The input box sits below it, always visible. */
+const val CHAT_COMPACT_LIST_HEIGHT_DP = 360
 
 /** How close to the bottom (dp) still counts as "at the bottom". */
 const val CHAT_NEAR_BOTTOM_DP = 48

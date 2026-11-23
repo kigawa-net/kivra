@@ -4,7 +4,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -40,7 +47,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
-import net.kigawa.kivra.ui.CHAT_LIST_HEIGHT_DP
+import net.kigawa.kivra.ui.CHAT_COMPACT_LIST_HEIGHT_DP
+import net.kigawa.kivra.ui.DASHBOARD_GAP_DP
+import net.kigawa.kivra.ui.DASHBOARD_SIDE_WIDTH_DP
+import net.kigawa.kivra.ui.isPinnedChatLayout
 import net.kigawa.kivra.ui.CHAT_NEAR_BOTTOM_DP
 import net.kigawa.kivra.ui.ChatStreamEvent
 import net.kigawa.kivra.ui.isNearBottom
@@ -120,7 +130,8 @@ fun ProjectDashboardScreen(
     onNavigate: (Route) -> Unit,
 ) {
     val loaded = rememberLoad(projectId) { loadProjectDashboard(projectId) }
-    DetailPage {
+    // The body scrolls on its own (the chat stays pinned when wide, the whole page scrolls when narrow), so the frame does not.
+    DetailPage(scrollable = false) {
         LoadedView(loaded) { d ->
             ProjectDashboardBody(projectId, d, onNavigate)
         }
@@ -144,88 +155,146 @@ private fun ProjectDashboardBody(
     onNavigate: (Route) -> Unit,
 ) {
     val operator = showsProjectOperator(d.scope)
-    SelectableText(d.project.name, style = MaterialTheme.typography.headlineSmall)
-    d.project.description?.takeIf { it.isNotBlank() }?.let { description ->
-        SelectableText(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-    Spacer(Modifier.height(2.dp))
-    SelectableText(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Spacer(Modifier.height(8.dp))
+    // Wide and tall enough, the chat stays pinned and only the side column scrolls. Otherwise the whole page scrolls and the chat keeps a fixed height.
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val pinned = isPinnedChatLayout(maxWidth.value, maxHeight.value)
+        val pageScroll = rememberScrollState()
+        Column(modifier = Modifier.fillMaxSize().then(if (pinned) Modifier else Modifier.verticalScroll(pageScroll))) {
+            SelectableText(d.project.name, style = MaterialTheme.typography.headlineSmall)
+            d.project.description?.takeIf { it.isNotBlank() }?.let { description ->
+                SelectableText(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Spacer(Modifier.height(2.dp))
+            SelectableText(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
 
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        // 中央：プロジェクトごとのチャット（V53）。kivra Agentへの指示投入用。
-        Column(modifier = Modifier.weight(1f)) {
-            ProjectChatSection(projectId)
+            // 中央：プロジェクトごとのチャット（V53）。右サイド：Run・費用・活動と、運用者の操作。
+            DashboardSplitLayout(
+                pinned = pinned,
+                modifier = if (pinned) Modifier.weight(1f) else Modifier,
+                main = { ProjectChatSection(projectId, pinned) },
+                side = { ProjectDashboardSide(projectId, d, operator, pinned, onNavigate) },
+            )
+        }
+    }
+}
+
+/** The right side: the Run, cost and activity cards, and the operator's actions. Pinned, it scrolls on its own; stacked, the page does. */
+@Composable
+private fun ProjectDashboardSide(
+    projectId: String,
+    d: ApiProjectDashboard,
+    operator: Boolean,
+    pinned: Boolean,
+    onNavigate: (Route) -> Unit,
+) {
+    val sideScroll = rememberScrollState()
+    Column(modifier = Modifier.fillMaxWidth().then(if (pinned) Modifier.fillMaxHeight().verticalScroll(sideScroll) else Modifier)) {
+        // --- Run 関連：状態別件数 + 最近の Run ---
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                SectionTitle("Run の状態別件数")
+                SelectableText(projectTotalText(d.tasks.total))
+                val rows = projectStateRows(d.tasks.byState)
+                if (rows.isEmpty()) {
+                    SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    rows.forEach { (code, count) ->
+                        SelectableText("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+
+                SectionTitle("最近の Run")
+                if (d.recentRuns.isEmpty()) {
+                    SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    d.recentRuns.forEach { run ->
+                        ProjectRunRow(run, showCreator = operator, onClick = { onNavigate(Route.RunDetail(run.runId)) })
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // --- 費用 ---
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                SectionTitle("費用（この Run に紐づく分）")
+                SelectableText(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                DetailRow("確定", yenText(d.spend.committedJpy))
+                DetailRow("予約中", yenText(d.spend.reservedJpy))
+                DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
+                DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
+                DetailRow("合計", yenText(d.spend.totalJpy))
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // --- 最近の活動 ---
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                SectionTitle("最近の活動")
+                if (d.activity.isEmpty()) {
+                    SelectableText("最近の活動はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    d.activity.forEach { event: ApiProjectActivity ->
+                        SelectableText(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
+                    }
+                }
+            }
         }
 
-        // 右サイド：Run・費用・活動と、運用者の操作。
-        Column(modifier = Modifier.width(320.dp)) {
-            // --- Run 関連：状態別件数 + 最近の Run ---
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    SectionTitle("Run の状態別件数")
-                    SelectableText(projectTotalText(d.tasks.total))
-                    val rows = projectStateRows(d.tasks.byState)
-                    if (rows.isEmpty()) {
-                        SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } else {
-                        rows.forEach { (code, count) ->
-                            SelectableText("${projectRunStateText(code)}：$count 件", style = MaterialTheme.typography.bodyMedium)
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
-
-                    SectionTitle("最近の Run")
-                    if (d.recentRuns.isEmpty()) {
-                        SelectableText("Run はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } else {
-                        d.recentRuns.forEach { run ->
-                            ProjectRunRow(run, showCreator = operator, onClick = { onNavigate(Route.RunDetail(run.runId)) })
-                        }
-                    }
-                }
+        if (operator) {
+            // 今月の予算は、プロジェクトの「予算」のページにある(設定と解除もそこで行う)。
+            TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectBudget)) }) {
+                SelectableText("今月の予算を見る（運用者のみ）")
             }
-            Spacer(Modifier.height(12.dp))
+            ProjectOperatorSection(projectId)
+            ProjectDrainSection(projectId, d.project.name, onNavigate)
+        }
+    }
+}
 
-            // --- 費用 ---
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    SectionTitle("費用（この Run に紐づく分）")
-                    SelectableText(PROJECT_SPEND_NOTE, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    DetailRow("確定", yenText(d.spend.committedJpy))
-                    DetailRow("予約中", yenText(d.spend.reservedJpy))
-                    DetailRow("見積もりで計上（確定待ち）", yenText(d.spend.lapsedJpy))
-                    DetailRow("見積もりで計上（金額の確認待ち）", yenText(d.spend.unpricedJpy))
-                    DetailRow("合計", yenText(d.spend.totalJpy))
-                }
+/**
+ * The chat (main) and the side column. Pinned: side by side, both as tall as the space, the side scrolling on its own.
+ * Stacked: one under the other, each sized by its content, and the page scrolls. The children keep their place either way, so the chat's
+ * state survives a resize across the breakpoint.
+ */
+@Composable
+private fun DashboardSplitLayout(
+    pinned: Boolean,
+    modifier: Modifier,
+    main: @Composable () -> Unit,
+    side: @Composable () -> Unit,
+) {
+    Layout(content = { main(); side() }, modifier = modifier) { measurables, constraints ->
+        val mainMeasurable = measurables[0]
+        val sideMeasurable = measurables[1]
+        val gap = DASHBOARD_GAP_DP.dp.roundToPx()
+        if (pinned && constraints.hasBoundedHeight) {
+            val height = constraints.maxHeight
+            val width = constraints.maxWidth
+            val sideWidth = DASHBOARD_SIDE_WIDTH_DP.dp.roundToPx().coerceAtMost(width)
+            val mainWidth = (width - sideWidth - gap).coerceAtLeast(0)
+            val mainPlaceable = mainMeasurable.measure(Constraints.fixed(mainWidth, height))
+            val sidePlaceable = sideMeasurable.measure(Constraints.fixed(sideWidth, height))
+            layout(width, height) {
+                mainPlaceable.place(0, 0)
+                sidePlaceable.place(mainWidth + gap, 0)
             }
-            Spacer(Modifier.height(12.dp))
-
-            // --- 最近の活動 ---
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    SectionTitle("最近の活動")
-                    if (d.activity.isEmpty()) {
-                        SelectableText("最近の活動はありません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } else {
-                        d.activity.forEach { event: ApiProjectActivity ->
-                            SelectableText(projectActivityText(event), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 2.dp))
-                        }
-                    }
-                }
-            }
-
-            if (operator) {
-                // 今月の予算は、プロジェクトの「予算」のページにある(設定と解除もそこで行う)。
-                TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectBudget)) }) {
-                    SelectableText("今月の予算を見る（運用者のみ）")
-                }
-                ProjectOperatorSection(projectId)
-                ProjectDrainSection(projectId, d.project.name, onNavigate)
+        } else {
+            val mainPlaceable = mainMeasurable.measure(Constraints(maxWidth = constraints.maxWidth))
+            val sidePlaceable = sideMeasurable.measure(Constraints(maxWidth = constraints.maxWidth))
+            val height = mainPlaceable.height + gap + sidePlaceable.height
+            layout(constraints.maxWidth, height) {
+                mainPlaceable.place(0, 0)
+                sidePlaceable.place(0, mainPlaceable.height + gap)
             }
         }
     }
 }
+
 /**
  * 運用者だけの「空にして削除」(ADR 0022 PR-H)。移し先を選び、確認（dry-run）の件数を見て、確認ダイアログから空にする(実行)。空になったら
  * 削除できる。判定は運用者の権限と行の状態をサーバーが決める。移し先を変えたら、それまでの確認の結果は捨てる(実行の対象が変わるため)。
@@ -745,7 +814,7 @@ private fun ProjectOperatorSection(projectId: String) {
  * ツールの状況は固定の文言で表示し、提案は下のカードの確定ボタンで運用者が確定する。
  */
 @Composable
-private fun ProjectChatSection(projectId: String) {
+private fun ProjectChatSection(projectId: String, pinned: Boolean) {
     val scope = rememberCoroutineScope()
     val chat = rememberLoad(projectId) { loadChatSession(projectId) }
     // The history read after the last turn. It replaces the first load, so a finished turn is not shown twice.
@@ -800,7 +869,7 @@ private fun ProjectChatSection(projectId: String) {
         }
     }
 
-    // The message list: a fixed height, scrolled inside. The input box below it is always visible.
+    // The message list: pinned, it takes the space the page leaves; stacked, it has a fixed height and scrolls inside. The input box below it is always visible.
     val rows = chatListRows(projectId, session, turn, actionNotice)
     val listState = rememberLazyListState()
     val nearBottomPx = with(LocalDensity.current) { CHAT_NEAR_BOTTOM_DP.dp.roundToPx() }
@@ -824,135 +893,137 @@ private fun ProjectChatSection(projectId: String) {
         listState.scrollToNewest(lastIndex)
     }
 
-    SectionTitle("チャット")
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().height(CHAT_LIST_HEIGHT_DP.dp)) {
-                items(rows, key = { it.key }) { row ->
-                    when (row) {
-                        is ChatListRow.Loading -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                        is ChatListRow.Note -> SelectableText(row.text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        is ChatListRow.Message -> ChatMessageRow(row.msg)
-                        is ChatListRow.Tool -> SelectableText(
-                            row.line,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 8.dp, top = 2.dp),
-                        )
-                        // The open proposals (the server returns them only to an operator who may confirm them; never to the AI or a viewer).
-                        is ChatListRow.Action -> ChatActionCard(
-                            action = row.action,
-                            enabled = !actionBusy && !ApiSession.expired,
-                            onConfirm = { pendingAction = row.action },
-                            onDismiss = { runChatAction(row.action, confirm = false) },
-                        )
-                        is ChatListRow.Notice -> SelectableText(
-                            row.notice.text,
-                            color = if (row.notice.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
+    Column(modifier = if (pinned) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
+        SectionTitle("チャット")
+        Card(modifier = if (pinned) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp).fillMaxWidth().then(if (pinned) Modifier.fillMaxHeight() else Modifier)) {
+                LazyColumn(state = listState, modifier = if (pinned) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().height(CHAT_COMPACT_LIST_HEIGHT_DP.dp)) {
+                    items(rows, key = { it.key }) { row ->
+                        when (row) {
+                            is ChatListRow.Loading -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                            is ChatListRow.Note -> SelectableText(row.text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            is ChatListRow.Message -> ChatMessageRow(row.msg)
+                            is ChatListRow.Tool -> SelectableText(
+                                row.line,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 8.dp, top = 2.dp),
+                            )
+                            // The open proposals (the server returns them only to an operator who may confirm them; never to the AI or a viewer).
+                            is ChatListRow.Action -> ChatActionCard(
+                                action = row.action,
+                                enabled = !actionBusy && !ApiSession.expired,
+                                onConfirm = { pendingAction = row.action },
+                                onDismiss = { runChatAction(row.action, confirm = false) },
+                            )
+                            is ChatListRow.Notice -> SelectableText(
+                                row.notice.text,
+                                color = if (row.notice.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
                     }
                 }
-            }
-            Spacer(Modifier.height(8.dp))
-            // 入力エリア
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = inputText,
-                    onValueChange = { inputText = it },
-                    label = { SelectableText("指示を入力") },
-                    placeholder = { SelectableText("指示を入力...") },
-                    singleLine = true,
-                    enabled = !ApiSession.expired,
-                    modifier = Modifier.weight(1f),
-                )
-                Spacer(Modifier.width(8.dp))
-                Button(
-                    enabled = inputText.isNotBlank() && !ApiSession.expired,
-                    onClick = {
-                        if (submitBlocked(false, ApiSession.expired)) return@Button
-                        // Stop the reply in progress: closing the stream makes the server store the reply so far and stop.
-                        turnJob?.cancel()
-                        sendBusy = true
-                        sendNotice = null
-                        replyNotice = null
-                        val trimmed = inputText.trim()
-                        inputText = ""
-                        turn = ChatTurn(userText = trimmed)
-                        // The user's own send always shows the new message, even when the reader was up in the history.
-                        forceScroll = true
-                        turnJob = scope.launch {
-                            var chatOk = false
-                            var replyFailure: String? = null
-                            try {
+                Spacer(Modifier.height(8.dp))
+                // 入力エリア
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = inputText,
+                        onValueChange = { inputText = it },
+                        label = { SelectableText("指示を入力") },
+                        placeholder = { SelectableText("指示を入力...") },
+                        singleLine = true,
+                        enabled = !ApiSession.expired,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        enabled = inputText.isNotBlank() && !ApiSession.expired,
+                        onClick = {
+                            if (submitBlocked(false, ApiSession.expired)) return@Button
+                            // Stop the reply in progress: closing the stream makes the server store the reply so far and stop.
+                            turnJob?.cancel()
+                            sendBusy = true
+                            sendNotice = null
+                            replyNotice = null
+                            val trimmed = inputText.trim()
+                            inputText = ""
+                            turn = ChatTurn(userText = trimmed)
+                            // The user's own send always shows the new message, even when the reader was up in the history.
+                            forceScroll = true
+                            turnJob = scope.launch {
+                                var chatOk = false
+                                var replyFailure: String? = null
                                 try {
-                                    ApiClient.streamChatReply(projectId, trimmed) { event ->
-                                        when (event) {
-                                            is ChatStreamEvent.User -> chatOk = true
-                                            is ChatStreamEvent.Delta -> turn = turn?.let { it.copy(reply = it.reply + event.text) }
-                                            is ChatStreamEvent.Tool -> turn = turn?.let { it.copy(tools = chatToolLines(it.tools, event)) }
-                                            is ChatStreamEvent.Done -> Unit
-                                            is ChatStreamEvent.Failed -> replyFailure = event.code
+                                    try {
+                                        ApiClient.streamChatReply(projectId, trimmed) { event ->
+                                            when (event) {
+                                                is ChatStreamEvent.User -> chatOk = true
+                                                is ChatStreamEvent.Delta -> turn = turn?.let { it.copy(reply = it.reply + event.text) }
+                                                is ChatStreamEvent.Tool -> turn = turn?.let { it.copy(tools = chatToolLines(it.tools, event)) }
+                                                is ChatStreamEvent.Done -> Unit
+                                                is ChatStreamEvent.Failed -> replyFailure = event.code
+                                            }
                                         }
+                                    } catch (e: ApiException) {
+                                        // 404: the server has no reply service. The message is stored as before, without a reply.
+                                        if (e.status != 404) throw e
+                                        ApiClient.sendChatMessage(projectId, trimmed)
+                                        chatOk = true
                                     }
-                                } catch (e: ApiException) {
-                                    // 404: the server has no reply service. The message is stored as before, without a reply.
-                                    if (e.status != 404) throw e
-                                    ApiClient.sendChatMessage(projectId, trimmed)
-                                    chatOk = true
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    if (!chatOk) sendNotice = ActionNotice("チャットの保存に失敗しました", ok = false)
+                                    else replyFailure = "NETWORK"
                                 }
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                if (!chatOk) sendNotice = ActionNotice("チャットの保存に失敗しました", ok = false)
-                                else replyFailure = "NETWORK"
+                                replyFailure?.let { code -> replyNotice = ActionNotice(chatStreamErrorText(code), ok = false) }
+                                // No Task is submitted from the chat: the reply is the model's, and a Task is created elsewhere.
+                                // The stored history first, then the turn's text goes: no gap in between.
+                                val fresh = try {
+                                    loadChatSession(projectId)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    null
+                                }
+                                if (fresh != null) reloaded = fresh
+                                turn = null
+                                sendBusy = false
                             }
-                            replyFailure?.let { code -> replyNotice = ActionNotice(chatStreamErrorText(code), ok = false) }
-                            // No Task is submitted from the chat: the reply is the model's, and a Task is created elsewhere.
-                            // The stored history first, then the turn's text goes: no gap in between.
-                            val fresh = try {
-                                loadChatSession(projectId)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                null
-                            }
-                            if (fresh != null) reloaded = fresh
-                            turn = null
-                            sendBusy = false
-                        }
-                    },
-                ) {
-                    SelectableText("送信")
+                        },
+                    ) {
+                        SelectableText("送信")
+                    }
+                }
+                replyNotice?.let { n ->
+                    SelectableText(
+                        n.text,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                sendNotice?.let { n ->
+                    SelectableText(
+                        n.text,
+                        color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
                 }
             }
-            replyNotice?.let { n ->
-                SelectableText(
-                    n.text,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-            }
-            sendNotice?.let { n ->
-                SelectableText(
-                    n.text,
-                    color = if (n.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-            }
         }
-    }
-    pendingAction?.let { action ->
-        ReasonDialog(
-            title = CHAT_ACTION_CONFIRM_TITLE,
-            message = chatActionConfirmMessage(action.label, action.code),
-            submitLabel = chatActionConfirmButtonText(action.code),
-            reasonLabel = null,
-            busy = actionBusy,
-            errorText = null,
-            onSubmit = { runChatAction(action, confirm = true) },
-            onDismiss = { if (!actionBusy) pendingAction = null },
-        )
+        pendingAction?.let { action ->
+            ReasonDialog(
+                title = CHAT_ACTION_CONFIRM_TITLE,
+                message = chatActionConfirmMessage(action.label, action.code),
+                submitLabel = chatActionConfirmButtonText(action.code),
+                reasonLabel = null,
+                busy = actionBusy,
+                errorText = null,
+                onSubmit = { runChatAction(action, confirm = true) },
+                onDismiss = { if (!actionBusy) pendingAction = null },
+            )
+        }
     }
 }
 

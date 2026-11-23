@@ -6,42 +6,28 @@ import kotlin.test.assertTrue
 
 class ChatScrollRulesTest {
     @Test
-    fun anEmptyListIsAtTheBottom() {
-        assertTrue(isNearBottom(lastVisibleIndex = -1, itemCount = 0, lastItemBottomPx = 0, viewportEndPx = 0, thresholdPx = 0))
+    fun theNewestItemShownAtTheStartOfAReversedListIsAtTheNewest() {
+        // Item 0 is the newest message; an empty list reports the same position.
+        assertTrue(isAtNewest(firstVisibleIndex = 0, firstVisibleOffsetPx = 0, thresholdPx = 48))
     }
 
     @Test
-    fun theListShowingItsLastItemAtTheEndIsAtTheBottom() {
-        assertTrue(isNearBottom(lastVisibleIndex = 9, itemCount = 10, lastItemBottomPx = 420, viewportEndPx = 420, thresholdPx = 48))
+    fun aNewestItemScrolledUpWithinTheThresholdIsAtTheNewest() {
+        assertTrue(isAtNewest(firstVisibleIndex = 0, firstVisibleOffsetPx = 48, thresholdPx = 48))
     }
 
     @Test
-    fun aShortListThatDoesNotFillTheViewportIsAtTheBottom() {
-        assertTrue(isNearBottom(lastVisibleIndex = 2, itemCount = 3, lastItemBottomPx = 200, viewportEndPx = 420, thresholdPx = 48))
+    fun aNewestItemScrolledUpBeyondTheThresholdIsNotAtTheNewest() {
+        assertFalse(isAtNewest(firstVisibleIndex = 0, firstVisibleOffsetPx = 49, thresholdPx = 48))
     }
 
     @Test
-    fun withinTheThresholdIsNearTheBottom() {
-        assertTrue(isNearBottom(lastVisibleIndex = 9, itemCount = 10, lastItemBottomPx = 460, viewportEndPx = 420, thresholdPx = 48))
+    fun aReaderUpInTheHistoryIsNotAtTheNewest() {
+        assertFalse(isAtNewest(firstVisibleIndex = 5, firstVisibleOffsetPx = 0, thresholdPx = 48))
     }
 
     @Test
-    fun beyondTheThresholdIsNotNearTheBottom() {
-        assertFalse(isNearBottom(lastVisibleIndex = 9, itemCount = 10, lastItemBottomPx = 500, viewportEndPx = 420, thresholdPx = 48))
-    }
-
-    @Test
-    fun aLastItemThatIsNotVisibleIsNotNearTheBottom() {
-        assertFalse(isNearBottom(lastVisibleIndex = 5, itemCount = 10, lastItemBottomPx = 420, viewportEndPx = 420, thresholdPx = 48))
-    }
-
-    @Test
-    fun noVisibleItemInANonEmptyListIsNotNearTheBottom() {
-        assertFalse(isNearBottom(lastVisibleIndex = -1, itemCount = 4, lastItemBottomPx = 0, viewportEndPx = 420, thresholdPx = 48))
-    }
-
-    @Test
-    fun aContentChangeScrollsWhenTheReaderIsAtTheBottom() {
+    fun aContentChangeScrollsWhenTheReaderIsAtTheNewest() {
         assertTrue(shouldAutoScroll(contentChanged = true, nearBottom = true, forceScroll = false))
     }
 
@@ -51,12 +37,44 @@ class ChatScrollRulesTest {
     }
 
     @Test
-    fun aForcedScrollGoesToTheBottomEvenWhenTheReaderIsUpInTheHistory() {
+    fun aForcedScrollGoesToTheNewestEvenWhenTheReaderIsUpInTheHistory() {
         assertTrue(shouldAutoScroll(contentChanged = true, nearBottom = false, forceScroll = true))
     }
 
     @Test
     fun noContentChangeNeverScrolls() {
         assertFalse(shouldAutoScroll(contentChanged = false, nearBottom = true, forceScroll = true))
+    }
+
+    @Test
+    fun aHistoryWithMoreMessagesIsNewer() {
+        assertTrue(isNewerChatHistory(candidateCount = 7, candidateLastId = 70, currentCount = 6, currentLastId = 60))
+    }
+
+    @Test
+    fun aHistoryWithFewerMessagesIsNotNewer() {
+        assertFalse(isNewerChatHistory(candidateCount = 5, candidateLastId = 50, currentCount = 6, currentLastId = 60))
+    }
+
+    @Test
+    fun aHistoryWithTheSameCountAndLaterLastMessageIsNewer() {
+        assertTrue(isNewerChatHistory(candidateCount = 6, candidateLastId = 61, currentCount = 6, currentLastId = 60))
+    }
+
+    @Test
+    fun aHistoryWithTheSameMessagesIsNotNewer() {
+        assertFalse(isNewerChatHistory(candidateCount = 6, candidateLastId = 60, currentCount = 6, currentLastId = 60))
+    }
+
+    @Test
+    fun aTurnsUserTextAlreadyStoredAsTheLastMessageIsEchoed() {
+        assertTrue(isTurnEchoedInHistory(lastStoredRole = "user", lastStoredContent = "hello", turnUserText = "hello"))
+    }
+
+    @Test
+    fun aTurnWhoseUserTextIsNotStoredYetIsNotEchoed() {
+        assertFalse(isTurnEchoedInHistory(lastStoredRole = "assistant", lastStoredContent = "hello", turnUserText = "hello"))
+        assertFalse(isTurnEchoedInHistory(lastStoredRole = "user", lastStoredContent = "earlier", turnUserText = "hello"))
+        assertFalse(isTurnEchoedInHistory(lastStoredRole = null, lastStoredContent = null, turnUserText = "hello"))
     }
 }

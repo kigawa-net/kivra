@@ -1,7 +1,6 @@
 package net.kigawa.kivra.ui.screens
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -31,9 +30,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +44,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import net.kigawa.kivra.ui.ActionNotice
 import net.kigawa.kivra.ui.CHAT_COMPACT_LIST_HEIGHT_DP
@@ -53,7 +53,9 @@ import net.kigawa.kivra.ui.DASHBOARD_SIDE_WIDTH_DP
 import net.kigawa.kivra.ui.isPinnedChatLayout
 import net.kigawa.kivra.ui.CHAT_NEAR_BOTTOM_DP
 import net.kigawa.kivra.ui.ChatStreamEvent
-import net.kigawa.kivra.ui.isNearBottom
+import net.kigawa.kivra.ui.isAtNewest
+import net.kigawa.kivra.ui.isNewerChatHistory
+import net.kigawa.kivra.ui.isTurnEchoedInHistory
 import net.kigawa.kivra.ui.shouldAutoScroll
 import net.kigawa.kivra.ui.chatStreamErrorText
 import net.kigawa.kivra.ui.chatToolLines
@@ -827,7 +829,8 @@ private fun ProjectChatSection(projectId: String, pinned: Boolean) {
     var turnJob by remember { mutableStateOf<Job?>(null) }
     var sendNotice by remember { mutableStateOf<ActionNotice?>(null) }
     var replyNotice by remember { mutableStateOf<ActionNotice?>(null) }
-    val session = reloaded ?: chat.value
+    // The history on screen: the one read after the last turn, or a newer background refresh (the periodic reload) of it.
+    val session = latestChatSession(reloaded, chat.value)
     // The proposals (ADR 0023): confirm after the dialog, dismiss at once. The result is the server's fixed code, made into text.
     var pendingAction by remember { mutableStateOf<ApiChatAction?>(null) }
     var actionBusy by remember { mutableStateOf(false) }
@@ -869,36 +872,46 @@ private fun ProjectChatSection(projectId: String, pinned: Boolean) {
         }
     }
 
-    // The message list: pinned, it takes the space the page leaves; stacked, it has a fixed height and scrolls inside. The input box below it is always visible.
+    // The message list is reversed: item 0 is the newest message, drawn at the bottom, so the first layout already shows it.
+    // Pinned, it takes the space the page leaves; stacked, it has a fixed height and scrolls inside. The input box below it is always visible.
     val rows = chatListRows(projectId, session, turn, actionNotice)
-    val listState = rememberLazyListState()
+    val listState = remember(projectId) { LazyListState() }
     val nearBottomPx = with(LocalDensity.current) { CHAT_NEAR_BOTTOM_DP.dp.roundToPx() }
-    // The next change of the list goes to the newest message whatever the reader's position: the first load and the user's own send.
-    var forceScroll by remember(projectId) { mutableStateOf(true) }
-    val lastIndex = rows.lastIndex
-    LaunchedEffect(lastIndex, turn?.reply?.length, turn?.tools?.size) {
-        if (lastIndex < 0) return@LaunchedEffect
-        val info = listState.layoutInfo
-        // Read before the new rows are laid out: this is where the reader was when the content changed.
-        val lastVisible = info.visibleItemsInfo.lastOrNull()
-        val near = isNearBottom(
-            lastVisibleIndex = lastVisible?.index ?: -1,
-            itemCount = info.totalItemsCount,
-            lastItemBottomPx = lastVisible?.let { it.offset + it.size } ?: 0,
-            viewportEndPx = info.viewportEndOffset,
-            thresholdPx = nearBottomPx,
-        )
-        if (!shouldAutoScroll(contentChanged = true, nearBottom = near, forceScroll = forceScroll)) return@LaunchedEffect
+    // Whether the reader is at the newest message. It is updated only while the reader scrolls: a new message moves the list's
+    // items under the reader, which is not the reader's doing and must not change this.
+    var atNewest by remember(projectId) { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { Triple(listState.isScrollInProgress, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) }
+            .collect { (scrolling, index, offset) -> if (scrolling) atNewest = isAtNewest(index, offset, nearBottomPx) }
+    }
+    // Once per session load, after the list's first layout with its viewport known: show the newest message.
+    LaunchedEffect(projectId) {
+        snapshotFlow { listState.layoutInfo.let { it.totalItemsCount > 0 && it.viewportSize.height > 0 } }.first { it }
+        listState.scrollToItem(0)
+        atNewest = true
+    }
+    // The next change of the list goes to the newest message whatever the reader's position: the user's own send.
+    var forceScroll by remember(projectId) { mutableStateOf(false) }
+    val newestKey = rows.lastOrNull()?.key
+    LaunchedEffect(newestKey, turn?.reply?.length, turn?.tools?.size) {
+        if (newestKey == null) return@LaunchedEffect
+        // A new newest message, or a reply's new text: the list is at the newest only if the reader was there, so the new item stays in view.
+        if (!shouldAutoScroll(contentChanged = true, nearBottom = atNewest, forceScroll = forceScroll)) return@LaunchedEffect
         forceScroll = false
-        listState.scrollToNewest(lastIndex)
+        atNewest = true
+        listState.scrollToItem(0)
     }
 
     Column(modifier = if (pinned) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
         SectionTitle("チャット")
         Card(modifier = if (pinned) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp).fillMaxWidth().then(if (pinned) Modifier.fillMaxHeight() else Modifier)) {
-                LazyColumn(state = listState, modifier = if (pinned) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().height(CHAT_COMPACT_LIST_HEIGHT_DP.dp)) {
-                    items(rows, key = { it.key }) { row ->
+                LazyColumn(
+                    state = listState,
+                    reverseLayout = true,
+                    modifier = if (pinned) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth().height(CHAT_COMPACT_LIST_HEIGHT_DP.dp),
+                ) {
+                    items(rows.asReversed(), key = { it.key }) { row ->
                         when (row) {
                             is ChatListRow.Loading -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                             is ChatListRow.Note -> SelectableText(row.text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1053,7 +1066,11 @@ private fun chatListRows(projectId: String, session: ApiChatSession?, turn: Chat
         else -> session.messages.forEach { add(ChatListRow.Message("m${it.id}", it)) }
     }
     turn?.let { t ->
-        add(ChatListRow.Message("turn-user", ApiChatMessage(id = 0, sessionId = projectId, role = "user", content = t.userText, createdAt = "")))
+        // A refresh may already store the turn's user message: it is drawn once, from the history.
+        val last = session?.messages?.lastOrNull()
+        if (!isTurnEchoedInHistory(last?.role, last?.content, t.userText)) {
+            add(ChatListRow.Message("turn-user", ApiChatMessage(id = 0, sessionId = projectId, role = "user", content = t.userText, createdAt = "")))
+        }
         add(
             ChatListRow.Message(
                 "turn-reply",
@@ -1066,17 +1083,21 @@ private fun chatListRows(projectId: String, session: ApiChatSession?, turn: Chat
     actionNotice?.let { add(ChatListRow.Notice(notice = it)) }
 }
 
-/** Scrolls to the last row, then to its end: a row taller than the viewport is only fully shown once the list stops moving. */
-private suspend fun LazyListState.scrollToNewest(lastIndex: Int) {
-    scrollToItem(lastIndex)
-    var steps = 0
-    while (canScrollForward && steps < MAX_SCROLL_STEPS) {
-        scrollBy(layoutInfo.viewportSize.height.toFloat())
-        steps++
-    }
+/**
+ * The history on screen: the one read after the last turn, or the latest background refresh, whichever has the newer messages.
+ * Taking only the turn's read would hide every later refresh (new messages from other sessions, proposals resolved elsewhere).
+ */
+private fun latestChatSession(reloaded: ApiChatSession?, refreshed: ApiChatSession?): ApiChatSession? {
+    if (reloaded == null) return refreshed
+    if (refreshed == null) return reloaded
+    val reloadedNewer = isNewerChatHistory(
+        candidateCount = reloaded.messageCount,
+        candidateLastId = reloaded.messages.lastOrNull()?.id ?: 0L,
+        currentCount = refreshed.messageCount,
+        currentLastId = refreshed.messages.lastOrNull()?.id ?: 0L,
+    )
+    return if (reloadedNewer) reloaded else refreshed
 }
-
-private const val MAX_SCROLL_STEPS = 200
 
 /**
  * One proposal's card. The label is the server's fixed text. Confirm opens the dialog (the caller); 「提案を閉じる」 only hides the proposal.

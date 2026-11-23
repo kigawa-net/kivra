@@ -233,10 +233,20 @@ internal fun Application.appModule(env: Map<String, String>) {
     // The project chat's AI reply (streamed). It uses the self-development model gateway, so it exists only when self-development is enabled.
     // Without it the chat routes only store the messages, as before.
     val projectChatRepo = net.kigawa.kivra.db.ProjectChatRepository(database)
+    // The chat summary of the older history (ADR 0023 追補 8). Off unless KIVRA_CHAT_SUMMARY_ENABLED=true; an invalid setting fails the startup here.
+    val chatSummary = net.kigawa.kivra.chat.ChatSummarySettings.fromEnv(env)
     // Routing: the difficulty router (ADR 0023 追補) decides EASY (on-premises first, hosted fallback) or HARD (hosted only) per reply.
     val projectChatReply = selfDevParts?.let { parts ->
         parts.gateway?.let { gw ->
-            net.kigawa.kivra.chat.ProjectChatReplier(gw, projectChatRepo, listOf(budgetConfig.tenantId), router = parts.chatRouter)
+            net.kigawa.kivra.chat.ProjectChatReplier(
+                gw, projectChatRepo, listOf(budgetConfig.tenantId), router = parts.chatRouter,
+                summarizer = if (chatSummary.enabled) {
+                    net.kigawa.kivra.chat.GatewayChatSummarizer(gw, listOf(budgetConfig.tenantId), chatSummary.limits)
+                } else {
+                    null
+                },
+                summaryLimits = chatSummary.limits,
+            )
         }
     }
     // The roles (ADR 0020, PR 3a/3b/3c): off by default, and then the assignee store is not created or read. The order routes, the goal and memory routes (3b) and the REST routes of PR 3c (Task API, selfdev, budget and run admin, run views, execution) use the guard.

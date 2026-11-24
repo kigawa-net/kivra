@@ -40,6 +40,13 @@ data class ApiProjectBudget(
     val softExceeded: Boolean,
 )
 
+/** `GET /api/projects/{id}/claude-account` の現在値と、proxy に登録された選択肢。 */
+@Serializable
+data class ApiProjectClaudeAccount(val accountId: String?, val available: List<ApiClaudeAccountOption>)
+
+@Serializable
+data class ApiClaudeAccountOption(val id: String, val label: String)
+
 /** Run の件数(scope の中)。byState は出現した状態だけ。 */
 @Serializable
 data class ApiProjectTaskCounts(val total: Long, val byState: Map<String, Long>)

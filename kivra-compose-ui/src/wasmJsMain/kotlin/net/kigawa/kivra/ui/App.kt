@@ -433,6 +433,7 @@ private fun KivraAppContent(
                                 NavDestination.Memory -> MemoryScreen(r.projectId)
                                 NavDestination.Assignees -> AssigneesScreen(r.projectId)
                                 NavDestination.ProjectBudget -> ProjectBudgetScreen(r.projectId)
+                                NavDestination.ProjectSettings -> ProjectSettingsScreen(r.projectId)
                                 else -> Unit
                             }
                             is Route.ProjectChooser -> ProjectsScreen(

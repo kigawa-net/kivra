@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +30,20 @@ func newAnthropicTestServer(t *testing.T, auth Authorizer, upstream string, logs
 		connect:   newConnectHandler(&Allowlist{hosts: map[string]bool{}}, logf),
 		anthropic: &anthropicHandler{upstream: upstream, auth: auth, client: http.DefaultClient, logf: logf},
 		logf:      logf,
+	}
+}
+
+func TestNoRouteLogStaysOnOneLine(t *testing.T) {
+	var logs bytes.Buffer
+	srv := &proxyServer{logf: log.New(&logs, "", 0).Printf}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/unknown%0aforged", nil))
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status %d, want 403", rec.Code)
+	}
+	got := logs.String()
+	if strings.Count(got, "\n") != 1 || !strings.Contains(got, "reason=no_route") {
+		t.Errorf("log = %q, want one no_route line", got)
 	}
 }
 
@@ -63,29 +79,73 @@ func TestAnthropicRoutesNamedAccounts(t *testing.T) {
 			t.Errorf("%s: upstream request = %+v, want %+v", tc.path, got, tc.want)
 		}
 	}
-	for _, path := range []string{
-		"/anthropic/unknown/v1/messages",
-		"/anthropic/Repo-a/v1/messages",
-		"/anthropic/repo_a/v1/messages",
-		"/anthropic/-repo/v1/messages",
-		"/anthropic/" + strings.Repeat("a", 64) + "/v1/messages",
-		"/anthropic//v1/messages",
-		"/anthropic/%72epo-a/v1/messages",
-		"/anthropic/repo-a%2fv1/messages",
-		"/anthropic/repo-a/v1/files",
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/anthropic/unknown/v1/messages"},
+		{http.MethodPost, "/anthropic/Repo-a/v1/messages"},
+		{http.MethodPost, "/anthropic/repo_a/v1/messages"},
+		{http.MethodPost, "/anthropic/-repo/v1/messages"},
+		{http.MethodPost, "/anthropic/" + strings.Repeat("a", 64) + "/v1/messages"},
+		{http.MethodPost, "/anthropic//v1/messages"},
+		{http.MethodPost, "/anthropic/%72epo-a/v1/messages"},
+		{http.MethodPost, "/anthropic/repo-a%2fv1/messages"},
+		{http.MethodPost, "/anthropic/repo-a/v1/files"},
+		{http.MethodPost, "/anthropic/repo-a/v1/messages/"},
+		{http.MethodPost, "/anthropic/repo-a/"},
+		{http.MethodPost, "/anthropic/repo-a/v1/messages/../messages"},
+		{http.MethodPost, "/anthropic/repo-a/v1/messages/count_tokens/x"},
+		{http.MethodPost, "/anthropic/repo-a%20/v1/messages"},
+		{http.MethodPost, "/anthropic/repo-a%00/v1/messages"},
+		{http.MethodPost, "/anthropic/repo-a%0a/v1/messages"},
+		{http.MethodGet, "/anthropic/repo-a/v1/messages"},
+		{http.MethodPut, "/anthropic/repo-a/v1/messages"},
 	} {
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+		srv.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
 		if rec.Code != http.StatusForbidden {
-			t.Errorf("%s: status %d, want 403", path, rec.Code)
+			t.Errorf("%s %s: status %d, want 403", tc.method, tc.path, rec.Code)
 		}
-	}
-	if len(calls) != 0 {
-		t.Fatal("denied requests reached upstream")
+		if len(calls) != 0 {
+			t.Fatalf("%s %s: denied request reached upstream", tc.method, tc.path)
+		}
 	}
 	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, `account_id="repo-a"`) ||
 		strings.Contains(joined, "fake-") || strings.Contains(joined, "beta=true") {
 		t.Errorf("unexpected logs: %s", joined)
+	}
+}
+
+func TestAnthropicDefaultRouteWithAccountRegistries(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.RequestURI(); got != "/v1/messages" {
+			t.Errorf("upstream path = %q, want /v1/messages", got)
+		}
+		if got := r.Header.Get("X-Api-Key"); got != "fake-default" {
+			t.Errorf("upstream key = %q, want fake-default", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer up.Close()
+
+	for _, tc := range []struct {
+		name     string
+		accounts map[string]Authorizer
+		path     string
+		status   int
+	}{
+		{"empty registry rejects named route", map[string]Authorizer{}, "/anthropic/repo-a/v1/messages", http.StatusForbidden},
+		{"empty registry allows default route", map[string]Authorizer{}, "/anthropic/v1/messages", http.StatusNoContent},
+		{"v1 account preserves default route", map[string]Authorizer{"v1": StaticAuth{Key: "fake-named"}}, "/anthropic/v1/messages", http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs []string
+			srv := newAnthropicTestServer(t, StaticAuth{Key: "fake-default"}, up.URL, &logs)
+			srv.anthropic.accounts = tc.accounts
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tc.path, nil))
+			if rec.Code != tc.status {
+				t.Errorf("%s: status %d, want %d", tc.path, rec.Code, tc.status)
+			}
+		})
 	}
 }
 
@@ -267,17 +327,31 @@ func TestConfigLoadsAccountRegistry(t *testing.T) {
 		named.ServiceAccountID != "svc" || named.WorkspaceID != "ws" || cfg.WIF.FederationRuleID != "default-rule" {
 		t.Fatal("named WIF settings did not override the default IDs independently")
 	}
-	for _, body := range []string{
-		"null", "{}", "[] []",
-		"[" + account + "," + account + "]",
-		"[" + strings.Replace(account, "repo-a", "../repo-a", 1) + "]",
-		"[" + strings.Replace(account, `"ws"`, `""`, 1) + "]",
-		"[" + strings.Replace(account, "workspace_id", "unexpected-marker", 1) + "]",
+	withID := func(id string) string {
+		return "[" + strings.Replace(account, "repo-a", id, 1) + "]"
+	}
+	for _, tc := range []struct {
+		name, body, wantError string
+	}{
+		{"null", "null", "must contain a JSON array"},
+		{"object", "{}", "must contain a JSON array"},
+		{"trailing JSON", "[] []", "must contain one JSON array"},
+		{"duplicate ID", "[" + account + "," + account + "]", "contains a duplicate account id"},
+		{"path in ID", withID("../repo-a"), "contains an invalid account id"},
+		{"sk-ant- in ID", withID("repo-sk-ant-test"), "contains an invalid account id"},
+		{"64-character ID", withID(strings.Repeat("a", 64)), "contains an invalid account id"},
+		{"uppercase ID", withID("Repo-a"), "contains an invalid account id"},
+		{"empty ID", withID(""), "contains an invalid account id"},
+		{"empty workspace_id", "[" + strings.Replace(account, `"ws"`, `""`, 1) + "]", "contains a missing or invalid WIF id"},
+		{"unknown field", "[" + strings.Replace(account, "workspace_id", "unexpected-marker", 1) + "]", "must contain a JSON array"},
 	} {
-		write(body)
-		_, err := LoadConfig(func(key string) string { return env[key] })
-		if err == nil || !strings.Contains(err.Error(), accountsFileEnv) || strings.Contains(err.Error(), "unexpected-marker") {
-			t.Errorf("invalid registry accepted or leaked values: %v", err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			write(tc.body)
+			_, err := LoadConfig(func(key string) string { return env[key] })
+			want := accountsFileEnv + " " + tc.wantError
+			if err == nil || !strings.HasPrefix(err.Error(), want) || strings.Contains(err.Error(), "unexpected-marker") {
+				t.Errorf("error = %v, want prefix %q without config values", err, want)
+			}
+		})
 	}
 }

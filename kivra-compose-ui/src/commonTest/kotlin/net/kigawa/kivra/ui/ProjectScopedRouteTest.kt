@@ -20,6 +20,15 @@ class ProjectScopedRouteTest {
     }
 
     @Test
+    fun projectSettingsHasOnlyAProjectRoute() {
+        val settings = Route.ProjectPage("p1", NavDestination.ProjectSettings)
+        assertEquals("#/projects/p1/settings", settings.toHash())
+        assertEquals(settings, parseRoute(settings.toHash()))
+        assertEquals(Route.Page(NavDestination.Home), parseRoute("#/settings"))
+        assertTrue(parseRoute("#/projects/unassigned/settings") is Route.Invalid)
+    }
+
+    @Test
     fun projectIdAloneOpensTheDashboard() {
         assertEquals(Route.ProjectPage("p1", NavDestination.Dashboard), parseRoute("#/projects/p1"))
     }

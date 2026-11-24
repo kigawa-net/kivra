@@ -247,6 +247,9 @@ private fun ProjectDashboardSide(
             }
         }
 
+        TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectSettings)) }) {
+            SelectableText(NavDestination.ProjectSettings.label)
+        }
         if (operator) {
             // 今月の予算は、プロジェクトの「予算」のページにある(設定と解除もそこで行う)。
             TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectBudget)) }) {

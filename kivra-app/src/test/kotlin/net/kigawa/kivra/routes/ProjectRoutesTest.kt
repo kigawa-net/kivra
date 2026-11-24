@@ -467,6 +467,7 @@ class ProjectRoutesTest {
             "repos" -> assertEquals(RepoAddResult.ADDED, ProjectRepository(database, clock).addRepo(projectId, "kigawa-net/kivra"))
             "members" -> assertEquals(MemberPutResult.CREATED, ProjectMemberRepository(database, clock).put(projectId, newAssignee("member-$projectId"), "OPERATOR"))
             "budget" -> assertNotNull(newDbStore(this, clock).setProjectBudget(projectId, BigDecimal("1000"), BigDecimal("0.8")))
+            "claudeAccount" -> assertTrue(ProjectRepository(database, clock).setClaudeAccount(projectId, "demo-a"))
             "tasks" -> assertIs<SelfDevSubmitResult.Created>(
                 SelfDevOperatorRepository(database).submitTask("1:i:oper", "del-task-$projectId", "Task", null, "kigawa-net/kivra", projectId),
             )
@@ -498,6 +499,7 @@ class ProjectRoutesTest {
     private val childTables = mapOf(
         "repos" to "project_repos", "members" to "project_members", "budget" to "project_budgets", "tasks" to "selfdev_tasks",
         "orders" to "selfdev_orders", "memory" to "selfdev_memory_records", "runs" to "development_runs", "assignees" to "selfdev_assignees",
+        "claudeAccount" to "project_claude_accounts",
     )
 
     @Test
@@ -529,7 +531,7 @@ class ProjectRoutesTest {
                 val json = Json.parseToJsonElement(body).jsonObject
                 assertEquals("PROJECT_NOT_EMPTY", json["error"]!!.jsonPrimitive.content)
                 val counts = json["counts"]!!.jsonObject
-                assertEquals(setOf("repos", "members", "budget", "tasks", "orders", "memory", "runs", "assignees"), counts.keys)
+                assertEquals(childTables.keys, counts.keys)
                 assertTrue(counts[kind]!!.jsonPrimitive.long > 0, "$kind is counted: $body")
                 // The body has counts only: no project id, no repository name.
                 assertFalse(body.contains(id), kind)

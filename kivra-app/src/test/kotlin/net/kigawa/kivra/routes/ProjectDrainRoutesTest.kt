@@ -20,6 +20,7 @@ import java.math.BigDecimal
 import java.time.Clock
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
@@ -186,7 +187,7 @@ class ProjectDrainRoutesTest {
     /** The rows of [project] across the tables a drain moves or removes. */
     private fun TestDb.rowsOf(project: String): Int = listOf(
         "project_repos", "project_members", "project_budgets", "selfdev_tasks", "selfdev_orders",
-        "selfdev_memory_records", "development_runs", "selfdev_assignees",
+        "selfdev_memory_records", "development_runs", "selfdev_assignees", "project_claude_accounts",
     ).sumOf { count(it, "project_id = '$project'") }
 
     private fun TestDb.projectOfRow(table: String, pk: String, id: String): String? = transaction(database) {
@@ -203,6 +204,9 @@ class ProjectDrainRoutesTest {
         val source = db.projectOf("Source")
         val target = db.projectOf("Target")
         val p = db.populate(source, "s")
+        val projects = ProjectRepository(db.database, clock)
+        assertTrue(projects.setClaudeAccount(source, "demo-a"))
+        assertTrue(projects.setClaudeAccount(target, "demo-b"))
         // The target has its own member, budget and task. None of them may change.
         val targetAdmin = db.assignee("target-admin")
         assertEquals(MemberPutResult.CREATED, ProjectMemberRepository(db.database, clock).put(target, targetAdmin, "ADMIN"))
@@ -215,7 +219,7 @@ class ProjectDrainRoutesTest {
             assertEquals(
                 mapOf(
                     "repos" to 1L, "members" to 3L, "budget" to 1L, "tasks" to 2L, "orders" to 1L,
-                    "memory" to 1L, "runs" to 1L, "assignees" to 1L,
+                    "memory" to 1L, "runs" to 1L, "assignees" to 1L, "claudeAccount" to 1L,
                 ),
                 counts(response.bodyAsText()),
             )
@@ -234,6 +238,8 @@ class ProjectDrainRoutesTest {
             assertEquals(target, db.projectOfRow("selfdev_assignees", "assignee_id", p.assignee))
             assertEquals(target, db.projectOfRow("project_repos", "repo_key", "kigawa-net/s"))
             assertEquals(target, db.projectOfRow("selfdev_tasks", "task_id", targetTask))
+            assertNull(projects.claudeAccount(source))
+            assertEquals("demo-b", projects.claudeAccount(target))
             // The target keeps its own member and budget.
             assertEquals("ADMIN", db.roleOf(target, targetAdmin))
             assertEquals(1, db.count("project_budgets", "project_id = '$target' AND monthly_limit_jpy = 500"))

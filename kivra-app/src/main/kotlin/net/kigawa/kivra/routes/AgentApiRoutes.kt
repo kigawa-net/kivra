@@ -94,6 +94,7 @@ data class AgentInputResponse(
     val limits: AgentLimitsResponse,
     val allowedPathPatterns: List<String>,
     val deniedPathPatterns: List<String>,
+    val claudeAccount: String?,
 )
 
 @Serializable
@@ -365,6 +366,7 @@ private fun CodingInput.toResponse(): AgentClaimResponse = AgentClaimResponse(
         ),
         allowedPathPatterns = allowedPathPatterns,
         deniedPathPatterns = deniedPathPatterns,
+        claudeAccount = claudeAccount,
     ),
 )
 

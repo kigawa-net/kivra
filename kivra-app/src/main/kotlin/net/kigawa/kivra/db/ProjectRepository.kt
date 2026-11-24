@@ -2,6 +2,7 @@ package net.kigawa.kivra.db
 
 import java.time.Clock
 import java.time.LocalDateTime
+import net.kigawa.kivra.config.CLAUDE_ACCOUNT_ID_PATTERN
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
@@ -50,8 +51,9 @@ data class ProjectChildCounts(
     val memory: Long,
     val runs: Long,
     val assignees: Long,
+    val claudeAccount: Long,
 ) {
-    val total: Long get() = repos + members + budget + tasks + orders + memory + runs + assignees
+    val total: Long get() = repos + members + budget + tasks + orders + memory + runs + assignees + claudeAccount
 
     /** The kinds in a fixed order, for the API and the audit line. */
     fun toMap(): Map<String, Long> = linkedMapOf(
@@ -63,6 +65,7 @@ data class ProjectChildCounts(
         "memory" to memory,
         "runs" to runs,
         "assignees" to assignees,
+        "claudeAccount" to claudeAccount,
     )
 }
 
@@ -106,7 +109,8 @@ class ProjectRepository(private val database: Database, private val clock: Clock
 
     /**
      * Deletes [projectId] only when no row refers to it (ADR 0022). Nothing is cascaded or unassigned: a repository, a member, a budget,
-     * or a row of tasks, orders, memory, runs or assignees makes the answer [ProjectDeleteResult.NotEmpty], with the count of each kind.
+     * a Claude account setting, or a row of tasks, orders, memory, runs or assignees makes the answer [ProjectDeleteResult.NotEmpty],
+     * with the count of each kind.
      * The project row is locked (FOR UPDATE, as the member writes are) while the counts are read, so a child added by a concurrent write
      * waits for the outcome. The foreign keys stay the last defence: a violation at the delete is [ProjectDeleteResult.NotEmpty] too.
      */
@@ -135,6 +139,32 @@ class ProjectRepository(private val database: Database, private val clock: Clock
     /** List all projects, ordered by name. */
     fun listAll(): List<ProjectRow> = transaction(database) {
         ProjectsTable.selectAll().orderBy(ProjectsTable.name).map { toProject(it) }
+    }
+
+    /** The configured Claude account, or null when there is no setting. */
+    fun claudeAccount(projectId: String): String? = transaction(database) {
+        execQuery("SELECT account_id FROM project_claude_accounts WHERE project_id = ?", projectId) { it.getString(1) }.firstOrNull()
+    }
+
+    /** Sets the account, returning false when the project does not exist. */
+    fun setClaudeAccount(projectId: String, accountId: String): Boolean = transaction(database) {
+        require(CLAUDE_ACCOUNT_ID_PATTERN.matches(accountId)) { "Invalid Claude account ID" }
+        if (!projectRowExists(projectId, lock = true)) return@transaction false
+        execUpdate(
+            """
+            INSERT INTO project_claude_accounts (project_id, account_id, updated_at) VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE account_id = VALUES(account_id), updated_at = VALUES(updated_at)
+            """.trimIndent(),
+            projectId, accountId, utcNow(clock),
+        )
+        true
+    }
+
+    /** Clears the setting, returning false only when the project does not exist. */
+    fun clearClaudeAccount(projectId: String): Boolean = transaction(database) {
+        if (!projectRowExists(projectId, lock = true)) return@transaction false
+        execUpdate("DELETE FROM project_claude_accounts WHERE project_id = ?", projectId)
+        true
     }
 
     /**
@@ -249,6 +279,7 @@ class ProjectRepository(private val database: Database, private val clock: Clock
         memory = countMemoryRecordsOfProject(projectId),
         runs = countOf("SELECT COUNT(*) FROM development_runs WHERE project_id = ?", projectId),
         assignees = countOf("SELECT COUNT(*) FROM selfdev_assignees WHERE project_id = ?", projectId),
+        claudeAccount = countOf("SELECT COUNT(*) FROM project_claude_accounts WHERE project_id = ?", projectId),
     )
 
     private fun Transaction.countOf(sql: String, vararg params: Any?): Long = execQuery(sql, *params) { it.getLong(1) }.first()

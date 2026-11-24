@@ -60,6 +60,7 @@ data class ClaimedAttempt(
     val limits: AgentLimits,
     val allowedPathPatterns: List<String>,
     val deniedPathPatterns: List<String>,
+    val claudeAccount: String? = null,
 )
 
 /** Progress a heartbeat may report. Fixed names, mirroring the server's ProgressPhase. */

@@ -3,6 +3,9 @@ package net.kigawa.kivra.agent.k8s
 import java.time.Duration
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -21,6 +24,26 @@ class K8sJobBuilderTest {
     @Test
     fun builderOutputIsDeterministic() {
         assertEquals(golden, K8sFixture.golden())
+    }
+
+    @Test
+    fun allowlistedAccountsAndTheUnscopedProxyRouteCanCoexist() {
+        val settings = K8sSettings(
+            K8S_NAMESPACE, K8S_OWNER, setOf(K8S_IMAGE),
+            allowedAccounts = setOf("repo-a", "repo-b"),
+            allowUnscopedAccount = true,
+        )
+        val builder = K8sJobBuilder(settings)
+        val guard = K8sJobGuard(settings)
+        for ((account, expected) in listOf("repo-b" to "$K8S_PROXY/anthropic/repo-b", null to "$K8S_PROXY/anthropic")) {
+            val manifest = builder.build(K8sFixture.spec(claudeAccount = account))
+            val pod = manifest.getValue("spec").jsonObject.getValue("template").jsonObject.getValue("spec").jsonObject
+            val container = pod.getValue("containers").jsonArray.single().jsonObject
+            val baseUrl = container.getValue("env").jsonArray.map { it.jsonObject }
+                .single { it.getValue("name").jsonPrimitive.content == "ANTHROPIC_BASE_URL" }
+            assertEquals(expected, baseUrl.getValue("value").jsonPrimitive.content)
+            guard.check(manifest)
+        }
     }
 
     @Test

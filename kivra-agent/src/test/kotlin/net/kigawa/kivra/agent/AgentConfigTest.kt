@@ -254,12 +254,49 @@ class AgentConfigTest {
     @Test
     fun claudeAccountIsOptionalAndValidatedAtStartup() {
         val key = AgentConfig.ENV_CLAUDE_ACCOUNT
-        assertNull(AgentConfig.fromEnv(realEnv()).realExecutor!!.claudeAccount)
-        assertEquals("repo-a", AgentConfig.fromEnv(realEnv(key to "repo-a")).realExecutor!!.claudeAccount)
+        val unset = AgentConfig.fromEnv(realEnv()).realExecutor!!
+        assertNull(unset.claudeAccount)
+        assertTrue(unset.allowedClaudeAccounts.isEmpty())
+        val configured = AgentConfig.fromEnv(realEnv(key to "repo-a")).realExecutor!!
+        assertEquals("repo-a", configured.claudeAccount)
+        assertEquals(setOf("repo-a"), configured.allowedClaudeAccounts)
         for (id in listOf("Repo-a", "-repo", "../repo", "repo%2fa", "repo?a", "a".repeat(64), "sk-ant-example")) {
             val error = assertFailsWith<ConfigException> { AgentConfig.fromEnv(realEnv(key to id)) }
             assertEquals("$key must be a valid Claude account id", error.message)
         }
+    }
+
+    @Test
+    fun allowedClaudeAccountsIgnoreEmptyEntriesAndDuplicates() {
+        val key = AgentConfig.ENV_ALLOWED_CLAUDE_ACCOUNTS
+        val longest = "a".repeat(63)
+        val settings = AgentConfig.fromEnv(realEnv(key to " repo-a,,$longest,repo-a, ")).realExecutor!!
+        assertEquals(setOf("repo-a", longest), settings.allowedClaudeAccounts)
+        assertNull(settings.claudeAccount)
+        assertTrue(AgentConfig.fromEnv(realEnv(key to ", ,")).realExecutor!!.allowedClaudeAccounts.isEmpty())
+    }
+
+    @Test
+    fun allowedClaudeAccountsIncludeTheConfiguredDefault() {
+        val settings = AgentConfig.fromEnv(
+            realEnv(
+                AgentConfig.ENV_CLAUDE_ACCOUNT to "repo-a",
+                AgentConfig.ENV_ALLOWED_CLAUDE_ACCOUNTS to "repo-b,repo-c",
+            ),
+        ).realExecutor!!
+        assertEquals("repo-a", settings.claudeAccount)
+        assertEquals(setOf("repo-a", "repo-b", "repo-c"), settings.allowedClaudeAccounts)
+    }
+
+    @Test
+    fun invalidAllowedClaudeAccountsFailAtStartupWithoutEchoingTheInput() {
+        val key = AgentConfig.ENV_ALLOWED_CLAUDE_ACCOUNTS
+        for (id in listOf("Repo-a", "-repo", "repo/a", "repo b", "a".repeat(64), "sk-ant-example")) {
+            val error = assertFailsWith<ConfigException> { AgentConfig.fromEnv(realEnv(key to "repo-a,$id")) }
+            assertTrue(error.message.orEmpty().startsWith("$key must contain comma-separated Claude account ids"))
+            assertFalse(error.message.orEmpty().contains(id))
+        }
+        assertFailsWith<ConfigException> { AgentConfig.fromEnv(env(key to "Repo-a")) }
     }
 
     @Test

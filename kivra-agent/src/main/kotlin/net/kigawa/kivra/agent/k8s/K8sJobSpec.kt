@@ -24,12 +24,14 @@ class K8sSettings(
     allowedImages: Set<String>,
     allowedModels: Set<String> = setOf(CliCommand.DEFAULT_MODEL),
     allowedAccounts: Set<String> = emptySet(),
+    /** Whether the guard allows the proxy route without an account ID. */
+    val allowUnscopedAccount: Boolean = allowedAccounts.isEmpty(),
 ) {
     val namespace: String = if (K8sNames.isDns1123Label(namespace)) namespace else throw K8sSpecException("namespace is invalid")
     val allowedImages: Set<String> = checkImages(allowedImages)
     val allowedModels: Set<String> = checkModels(allowedModels)
 
-    /** Named Claude accounts allowed by the guard. An empty set selects the default route. */
+    /** Named Claude accounts allowed by the guard. */
     val allowedAccounts: Set<String> = allowedAccounts.toSet().also { accounts ->
         if (accounts.any { !DockerPatterns.ACCOUNT.matches(it) }) {
             throw K8sSpecException("allowedAccounts contains an invalid account id")

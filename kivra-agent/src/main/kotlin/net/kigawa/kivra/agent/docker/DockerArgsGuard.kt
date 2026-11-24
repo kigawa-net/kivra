@@ -250,7 +250,7 @@ class DockerArgsGuard(private val settings: DockerSettings) {
         }
         val proxy = env["HTTPS_PROXY"]
         if (proxy == null || env["HTTP_PROXY"] != proxy) reject(GuardRule.ENV_REJECTED)
-        if (!ProxyEnv.isAllowedAnthropicBaseUrl(env.getValue("ANTHROPIC_BASE_URL"), proxy, settings.allowedAccounts)) {
+        if (!ProxyEnv.isAllowedAnthropicBaseUrl(env.getValue("ANTHROPIC_BASE_URL"), proxy, settings.allowedAccounts, settings.allowUnscopedAccount)) {
             reject(GuardRule.ENV_REJECTED)
         }
         val expectedJavaOptions = try {

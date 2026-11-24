@@ -33,7 +33,7 @@ class K8sJobBuilder(private val settings: K8sSettings) {
         if (spec.namespace != settings.namespace) throw K8sSpecException("namespace is not allowed")
         if (spec.image !in settings.allowedImages) throw K8sSpecException("image is not allowed")
         if (spec.model !in settings.allowedModels) throw K8sSpecException("model is not allowed")
-        if (!ProxyEnv.isAllowedAccount(spec.claudeAccount, settings.allowedAccounts)) {
+        if (!ProxyEnv.isAllowedAccount(spec.claudeAccount, settings.allowedAccounts, settings.allowUnscopedAccount)) {
             throw K8sSpecException("claudeAccount is not allowed")
         }
         val labels = labels(spec)

@@ -84,6 +84,7 @@ class AgentConfig private constructor(
         const val ENV_GIT_BIN = "KIVRA_AGENT_GIT_BIN"
         const val ENV_REPO = "KIVRA_AGENT_REPO"
         const val ENV_CLAUDE_ACCOUNT = "KIVRA_AGENT_CLAUDE_ACCOUNT"
+        const val ENV_ALLOWED_CLAUDE_ACCOUNTS = "KIVRA_AGENT_ALLOWED_CLAUDE_ACCOUNTS"
         const val ENV_MODEL = "KIVRA_AGENT_MODEL"
         const val ENV_MAX_BUDGET_USD = "KIVRA_AGENT_MAX_BUDGET_USD"
         const val ENV_NEW_ERROR_CODES = "KIVRA_AGENT_NEW_ERROR_CODES"
@@ -118,6 +119,7 @@ class AgentConfig private constructor(
                 else -> throw ConfigException("$ENV_EXECUTOR must be stub or real")
             }
             val backend = backend(env)
+            val allowedClaudeAccounts = allowedClaudeAccounts(env)
             return AgentConfig(
                 kivraUrl = kivraUrl,
                 tokenUrl = tokenUrl,
@@ -130,7 +132,7 @@ class AgentConfig private constructor(
                 ),
                 stopFile = stopFile,
                 executorMode = executorMode,
-                realExecutor = if (executorMode == ExecutorMode.REAL) realExecutorSettings(env, clientId, backend) else null,
+                realExecutor = if (executorMode == ExecutorMode.REAL) realExecutorSettings(env, clientId, backend, allowedClaudeAccounts) else null,
                 backend = backend,
             )
         }
@@ -150,7 +152,12 @@ class AgentConfig private constructor(
          * k8s reads the `KIVRA_AGENT_K8S_*` ones (ADR 0010 追補 7, PR 5c). The proxy, the model, the budget and the repository are common.
          * The repository is `owner/repo`.
          */
-        private fun realExecutorSettings(env: Map<String, String>, clientId: String, backend: AgentConfig.Backend): RealExecutorSettings {
+        private fun realExecutorSettings(
+            env: Map<String, String>,
+            clientId: String,
+            backend: AgentConfig.Backend,
+            allowedClaudeAccounts: Set<String>,
+        ): RealExecutorSettings {
             val proxyEnv = if (backend == AgentConfig.Backend.K8S) ENV_K8S_PROXY_URL else ENV_DOCKER_PROXY_URL
             val proxyUrl = required(env, proxyEnv)
             val proxyOk = if (backend == AgentConfig.Backend.K8S) DockerPatterns.isK8sProxyUrl(proxyUrl) else DockerPatterns.PROXY_URL.matches(proxyUrl)
@@ -181,6 +188,7 @@ class AgentConfig private constructor(
                     repo = repo,
                     model = model,
                     claudeAccount = claudeAccount,
+                    allowedClaudeAccounts = allowedClaudeAccounts,
                     budgetUsd = budgetUsd,
                     debugKeep = debugKeep(env),
                     newErrorCodes = newErrorCodes(env),
@@ -192,6 +200,7 @@ class AgentConfig private constructor(
                     repo = repo,
                     model = model,
                     claudeAccount = claudeAccount,
+                    allowedClaudeAccounts = allowedClaudeAccounts,
                     budgetUsd = budgetUsd,
                     debugKeep = debugKeep(env),
                     newErrorCodes = newErrorCodes(env),
@@ -201,6 +210,17 @@ class AgentConfig private constructor(
                         ownerLabel = K8sNames.ownerLabel(clientId),
                     ),
                 )
+            }
+        }
+
+        private fun allowedClaudeAccounts(env: Map<String, String>): Set<String> = buildSet {
+            for (entry in env[ENV_ALLOWED_CLAUDE_ACCOUNTS].orEmpty().split(',')) {
+                val account = entry.trim()
+                if (account.isEmpty()) continue
+                if (!DockerPatterns.ACCOUNT.matches(account)) {
+                    throw ConfigException("$ENV_ALLOWED_CLAUDE_ACCOUNTS must contain comma-separated Claude account ids matching ${DockerPatterns.ACCOUNT.pattern}")
+                }
+                add(account)
             }
         }
 

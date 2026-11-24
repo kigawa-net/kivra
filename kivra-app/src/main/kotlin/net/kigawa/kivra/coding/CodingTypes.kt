@@ -70,6 +70,7 @@ data class CodingInput(
     val allowedPathPatterns: List<String>,
     /** Path patterns the PatchPolicy always refuses, even inside an allowed pattern. */
     val deniedPathPatterns: List<String>,
+    val claudeAccount: String? = null,
 )
 
 /** Progress phases a heartbeat may report. Fixed codes; the agent never sends free text. */

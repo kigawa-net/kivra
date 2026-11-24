@@ -120,6 +120,16 @@ client secret: `/etc/kivra-agent/client-secret`。
 `KIVRA_AGENT_REPO` と組にしてエージェント単位で管理します。未指定のエージェントは従来の `/anthropic` を使うので、プロキシには引き続きデフォルトの WIF ID も設定します。
 名前付き経路が 403 を返す場合は、エージェント側の ID、プロキシ側の登録内容、両プロセスへの設定の反映を確認します。
 
+プロジェクト単位の設定に対応した kivra-app と kivra-agent を使う場合も、上と同じ JSON ファイルに ID ごとの WIF 設定を登録します。
+プロキシは起動時に登録ファイルを読むので、登録を追加したらプロキシを再起動します。その後、対象の
+`kivra-agent` の起動環境に `KIVRA_AGENT_ALLOWED_CLAUDE_ACCOUNTS=repo-a,repo-b` のように許可する ID をカンマ区切りで設定し、エージェントを再起動します。
+エージェントは claim の応答に `claudeAccount` があればその ID を使います。許可集合に無い ID を受け取った attempt は
+`fail` になり、既定のアカウントにはフォールバックしません。`KIVRA_AGENT_CLAUDE_ACCOUNT` は互換のため残します。
+
+ID の包含関係は **プロキシの登録ファイル ⊇ エージェントの許可集合 ⊇ kivra-app の選択肢(`KIVRA_CLAUDE_ACCOUNTS`)** です。
+設定がずれると実行時の失敗につながります。プロキシに未登録の ID で名前付き経路を呼ぶと HTTP 403 になり、
+エージェントの許可集合に無い ID はエージェント側で拒否されます。有効化の順序は [自己開発の運用手順](../docs/runbook-selfdev.md)の §6.6e を参照します。
+
 ## 起動手順(kivra-agent ユーザーで)
 
 前提: kivra-agent ユーザー(uid 1001)、ルートレス docker(`DOCKER_HOST=unix:///run/user/1001/docker.sock`)。

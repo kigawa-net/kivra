@@ -1206,6 +1206,21 @@ curl -H "Authorization: Bearer <JWT>" "https://<kivra-host>/api/selfdev/runs"
 - **後片付け**: 成功、失敗、時間切れ、停止、出力上限のどの終わり方でも Job を delete する。`ttlSecondsAfterFinished`(3600 秒)は取りこぼしの保険。
 - **未確認(実クラスタ)**: NetworkPolicy の強制(§3)、exec readout の WebSocket 経路(§6.6c の既知の制約)、`podPidsLimit`、namespace の PodSecurity `restricted`、プロキシの Service への到達、kigawa-net-k8s の manifest(agent の RBAC、NetworkPolicy、Secret、namespace)、実行イメージの CI(§5 の 1)。
 
+### 6.6e プロジェクト単位の Claude アカウントの有効化(Issue #589、追補 9)
+
+前提: CLI 経路が有効(§1.2.1)で、kivra-app と kivra-agent がプロジェクト単位の Claude アカウントに対応していること。プロジェクト設定は `project_claude_accounts` に保存する。API は `/api/projects/{id}/claude-account` の GET(取得)、PUT(保存)、DELETE(解除)。claim の応答に `claudeAccount` が入ると、エージェントはその ID を使う。
+
+**有効化の順序**:
+
+1. **プロキシに登録する**: [agent-runtime の README](../agent-runtime/README.md)の「リポジトリごとの Claude アカウント」にある書式で、選択肢に出す ID と WIF の設定を JSON ファイルに追加する。docker の `network/up-proxy.sh` を使う場合は、その起動環境にホスト上の絶対パスを `KIVRA_AGENT_PROXY_ACCOUNTS_FILE` で渡す。k8s ではプロキシの Deployment にファイルを読み取り専用でマウントし、コンテナ内のパスを `KIVRA_PROXY_WIF_ACCOUNTS_FILE` に指定する。
+   - ローカル PC の systemd 構成では、`kivra-agent-proxy.service` の drop-in の `[Service]` に `Environment=KIVRA_AGENT_PROXY_ACCOUNTS_FILE=/path/to/accounts.json` を追加し、kivra-agent の user manager で `systemctl --user daemon-reload` を実行する(§6.11)。ファイルは kivra-agent ユーザーから読み取れる場所に置く。
+2. **プロキシを再起動する**: 登録ファイルは起動時に読み込まれる。ローカル PC の systemd 構成では、kivra-agent の user manager で `systemctl --user restart kivra-agent-proxy.service` を実行する。k8s ではプロキシの Deployment を更新または再起動し、起動を確認する。
+3. **エージェントの許可集合を設定する**: 対象プロジェクトの attempt を取得するエージェントの起動環境に、登録済み ID をカンマ区切りで設定する(例: `KIVRA_AGENT_ALLOWED_CLAUDE_ACCOUNTS=repo-a,repo-b`)。ローカル PC では `/etc/kivra-agent/agent.env` を更新して `systemctl --user restart kivra-agent.service` を実行する(§6.11)。k8s ではエージェントの Deployment の環境変数を更新し、反映を確認する。`KIVRA_AGENT_CLAUDE_ACCOUNT` は互換のため残す。
+4. **kivra-app に選択肢を設定する**: `KIVRA_CLAUDE_ACCOUNTS` に `[{"id":"repo-a","label":"Repo A"},{"id":"repo-b","label":"Repo B"}]` のような JSON 配列を設定し、kivra-app を再起動して反映する。`id` は許可済みの ID、`label` は UI に表示する名前。
+5. **UI でプロジェクトのアカウントを選ぶ**: 対象プロジェクトの設定を開き、Claude アカウントの選択肢から使用するアカウントを選んで保存する。設定を開き直し、選んだアカウントが保存されていることを確認する。
+
+- **ID の包含関係**: プロキシの登録ファイル ⊇ エージェントの許可集合 ⊇ kivra-app の選択肢。設定がずれると実行時に失敗する。プロキシに未登録の ID は名前付き経路で HTTP 403 になる。エージェントの許可集合に無い ID は `fail` になり、既定のアカウントにはフォールバックしない。
+
 ### 6.7 CLI の起動、task ファイル、stream-json の解析と分類(PR 7)
 
 コード: `kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/docker/`(`CliCommand.kt`、`TaskFile.kt`、`DockerArgsGuard.kt`)、`kivra-agent/src/main/kotlin/net/kigawa/kivra/agent/claude/`(`StreamJsonParser.kt`、`CliOutcome.kt`)。試験は fake の docker と固定の出力で行い、実際の docker と `claude` は使わない。AgentLoop への接続は PR 9。

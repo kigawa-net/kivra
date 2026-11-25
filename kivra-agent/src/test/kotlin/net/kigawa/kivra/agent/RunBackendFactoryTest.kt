@@ -149,6 +149,42 @@ class RunBackendFactoryTest {
         assertEquals(K8sNames.ownerLabel("kivra-agent-pc1"), config.realExecutor!!.k8s!!.ownerLabel)
     }
 
+    /** An allowed set without a default id: a claim that omits the account uses the conventional /anthropic path. */
+    @Test
+    fun aClaimWithoutAnAccountUsesTheDefaultPathWhenOnlyTheAllowedSetIsConfigured() = runBlocking {
+        val config = k8sConfig(AgentConfig.ENV_ALLOWED_CLAUDE_ACCOUNTS to "repo-b")
+        val api = FakeKubeApi()
+        api.pod = { PodState("pod-1", running = false, terminated = true, exitCode = 0) }
+        val recorded = synchronizedList()
+        val client = KivraAgentClient(fakeKivraHttp(recorded) { Canned(204) }, KIVRA_URL, FixedTokens())
+        val executor = executorFor(config, client, kubeApi = { api }, pollMillis = 5)
+
+        executor.execute(attempt().copy(claudeAccount = null))
+
+        val (_, manifest) = api.created.single()
+        val pod = manifest.getValue("spec").jsonObject.getValue("template").jsonObject.getValue("spec").jsonObject
+        val container = pod.getValue("containers").jsonArray.single().jsonObject
+        val env = container.getValue("env").jsonArray.associate {
+            it.jsonObject.getValue("name").jsonPrimitive.content to it.jsonObject.getValue("value").jsonPrimitive.content
+        }
+        assertEquals("$K8S_PROXY/anthropic", env["ANTHROPIC_BASE_URL"])
+    }
+
+    /** No default id and no allowed set: any claimed account is outside the (empty) set, so no Job is created. */
+    @Test
+    fun anAgentWithoutAnyAccountSettingRefusesAClaimedAccount() = runBlocking {
+        val config = k8sConfig()
+        val api = FakeKubeApi()
+        val recorded = synchronizedList()
+        val client = KivraAgentClient(fakeKivraHttp(recorded) { Canned(204) }, KIVRA_URL, FixedTokens())
+        val executor = executorFor(config, client, kubeApi = { api }, pollMillis = 5)
+
+        val outcome = executor.execute(attempt().copy(claudeAccount = "repo-a"))
+
+        assertIs<AttemptOutcome.Failed>(outcome)
+        assertEquals(emptyList(), api.created)
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
     fun anUnlistedClaimFailsWithoutCreatingAJob() = runTest {

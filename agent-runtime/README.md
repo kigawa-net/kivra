@@ -125,6 +125,7 @@ client secret: `/etc/kivra-agent/client-secret`。
 `kivra-agent` の起動環境に `KIVRA_AGENT_ALLOWED_CLAUDE_ACCOUNTS=repo-a,repo-b` のように許可する ID をカンマ区切りで設定し、エージェントを再起動します。
 エージェントは claim の応答に `claudeAccount` があればその ID を使います。許可集合に無い ID を受け取った attempt は
 `fail` になり、既定のアカウントにはフォールバックしません。`KIVRA_AGENT_CLAUDE_ACCOUNT` は互換のため残します。
+なお、このフォールバック禁止は許可集合の外の ID を受け取った場合の規則で、claim にアカウントが無い場合は従来の既定アカウント(`/anthropic`)を使います。
 
 ID の包含関係は **プロキシの登録ファイル ⊇ エージェントの許可集合 ⊇ kivra-app の選択肢(`KIVRA_CLAUDE_ACCOUNTS`)** です。
 設定がずれると実行時の失敗につながります。プロキシに未登録の ID で名前付き経路を呼ぶと HTTP 403 になり、

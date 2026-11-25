@@ -889,6 +889,8 @@ SELECT auto_merge_paused, paused, breaker_open FROM selfdev_autopilot_control WH
 
 V52 は `selfdev_tasks.project_id` と `selfdev_memory_records.project_id` を NOT NULL にする。NULL の行が 1 つでも残っている間は、V52 は適用されない。起動は止まらず、ログに件数が出る(`project scope contract held at V51: unassigned rows selfdev_tasks=<n> selfdev_memory_records=<n>`)。NULL の行は削除もされず、推測で割り当てられることもない。
 
+**保留は V52 だけでなく V53 以降(最新まで)をすべて止める。** Flyway は版の順に適用するため、V52 を飛ばして後の版だけを適用することはできない。Pod は落ちないが、後の版の表を使う機能が失敗する(例: `selfdev_order_assignments`(V61)を使う order の一覧・詳細、V55〜V57 のチャット、V59 の `plan_state_store`、V60 の `split_proposals`)。確認: `SELECT version, success FROM flyway_schema_history ORDER BY installed_rank DESC LIMIT 3;` の最大が 51 のまま、または起動ログに `project scope contract held at V51` と `V52 and every later migration`。復旧の順序: 下の手順 1〜5 で NULL を 0 にし、旧版の Pod を止めてから新版を起動する。V52〜最新がまとめて適用される。
+
 `selfdev_orders`、`development_runs`、`selfdev_assignees` の `project_id` は NULL 可のまま残す(未分類の行を表すため。V52 の対象ではない)。
 
 **手順(この順に行う)**

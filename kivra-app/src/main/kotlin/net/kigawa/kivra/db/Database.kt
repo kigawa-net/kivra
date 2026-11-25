@@ -76,7 +76,9 @@ fun runMigrations(dataSource: DataSource) {
     if (unassigned.values.any { it > 0 }) {
         migrationLogger.warn(
             "project scope contract held at V{}: unassigned rows tasks={} memory={}. " +
-                "Run the backfill dry-run and the backfill (docs/runbook-selfdev.md 4.20); V52 applies on a later start once both are 0.",
+                "V52 and every later migration (V52..latest) are NOT applied, so order list/detail and other features " +
+                "that use later tables can fail. " +
+                "Run the backfill dry-run and the backfill (docs/runbook-selfdev.md 4.20); they apply on a later start once both are 0.",
             PROJECT_CONTRACT_PREVIOUS_VERSION,
             unassigned.getValue("tasks"),
             unassigned.getValue("memory"),

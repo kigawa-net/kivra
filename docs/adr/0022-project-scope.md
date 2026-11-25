@@ -299,3 +299,11 @@ PR-D3 の「残り」のうち、MCP の読み取り、集計、旧ルートの�
 - **UI。** 自己開発の投入(`ProjectApi.runSubmit`)は、ULID のプロジェクトでは別名 `POST /api/projects/{id}/runs` を使う。未分類は別名が ULID 専用なので旧ルート(サーバーは 400)のまま。画面の「タスク」は従来どおり `GET /api/runs?projectId=`(Task API)を読むので変更はない。
 - **テスト。** `SelfDevRoutesTest`: 別名の投入(body なしで作られ、旧ルートの同じキーで replay される)、body の projectId 不一致は 400・存在しない project は 404 で何も作られない、一覧の絞り込みと旧ルートの `Deprecation` の有無(全体・unassigned・不正値には付かない)、401。`ProjectScopedRoutesTest`: 全体・unassigned・不正値の旧 GET に `Deprecation` が付かないこと(旧テンプレートの期待を更新)。`RolesCoverageArchitectureTest` の表に 2 行。`ProjectApiPathTest` に `runSubmit` のテスト。
 - **構造テストの注意。** `RolesCoverageArchitectureTest` は、登録の本文を次の登録の手前までとして読む。最後の登録は EOF までを読むので、最後に置いた登録の権限の判定が後ろの関数の `Permission` を拾う。`listSelfDevRuns` は `submitSelfDevRun` より前に置いている(この順序を変えると GET の表と一致しなくなる)。
+
+## 追補 2026-11-25: ゲートは V52 以降をすべて止める
+
+- **副作用。** PR-F のゲート(`runMigrations`)は `target = 51` までを適用した後、NULL が 1 件でも残れば `return` する。Flyway は版の順にしか適用できないので、保留されるのは V52 だけでなく V52 から最新(この時点で V61)までのすべてである。ゲートの判定条件は変えていない。
+- **壊れる機能の例。** Pod は落ちないが、後の版の表を参照する SQL が失敗する。`selfdev_order_assignments`(V61、ADR 0024)を使う order の一覧・詳細、V55〜V57 のチャット、V59 の `plan_state_store`、V60 の `split_proposals`。
+- **検知。** 起動ログの `project scope contract held at V51 ... V52 and every later migration ... are NOT applied`(警告)。`SELECT version, success FROM flyway_schema_history ORDER BY installed_rank DESC LIMIT 3;` の最大が 51 のまま。
+- **対処。** runbook 4.20 の手順(NULL の件数確認、backfill のドライラン、backfill、旧版の Pod 停止、新版の起動)。NULL が 0 になれば、次の起動で V52〜最新がまとめて適用される。
+- **警告ログの文言。** 上の影響が分かるように改めた(挙動の変更なし)。マイグレーション V1〜V61 は編集していない。

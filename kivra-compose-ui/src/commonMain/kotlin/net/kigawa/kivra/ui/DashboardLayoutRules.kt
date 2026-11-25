@@ -23,3 +23,7 @@ fun isCompactWidth(widthDp: Float): Boolean = widthDp < DASHBOARD_PINNED_MIN_WID
 /** Whether the chat is pinned beside the side column: wide enough and tall enough. */
 fun isPinnedChatLayout(widthDp: Float, heightDp: Float): Boolean =
     !isCompactWidth(widthDp) && heightDp >= DASHBOARD_PINNED_MIN_HEIGHT_DP
+
+/** ヘッダーに「設定」への導線を出すか。未分類など、設定のページを持たないプロジェクトでは出さない。 */
+fun showsSettingsLink(projectId: String): Boolean =
+    NavDestination.ProjectSettings in pagesOf(projectId)

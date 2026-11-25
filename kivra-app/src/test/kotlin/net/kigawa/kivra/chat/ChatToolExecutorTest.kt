@@ -567,4 +567,26 @@ class ChatToolExecutorTest {
         assertEquals(ChatToolStatus.OK, withCycles.status, withCycles.code)
         assertEquals(2, w.orders.get(withCycles.data["order_id"]!!.jsonPrimitive.content)!!.maxCycles)
     }
+    @Test
+    fun `child creation accepts optional assignment and rejects invalid members without creating a child`() {
+        val w = World()
+        val root = w.root()
+        val member = net.kigawa.kivra.db.assignmentMember(w.db, w.project)
+        w.orders.assignments.assign(root.orderId, member, "012345abcdef")
+        val invalid = net.kigawa.kivra.db.assignmentMember(w.db, w.project, role = "AI")
+        val turn = w.turn()
+        val refused = turn.call(ChatTool.ORDER_CREATE_CHILD, "title" to "Assigned child", "instruction" to "Do work", "assignee_id" to invalid)
+        assertEquals(ChatToolStatus.DENIED, refused.status)
+        assertEquals("ASSIGNEE_AI", refused.code)
+        assertEquals(0, w.orders.get(root.orderId)!!.childCount)
+        val created = turn.call(ChatTool.ORDER_CREATE_CHILD, "title" to "Assigned child", "instruction" to "Do work", "assignee_id" to member)
+        assertEquals(ChatToolStatus.OK, created.status, created.code)
+        val id = created.data["order_id"]!!.jsonPrimitive.content
+        assertEquals(member, w.orders.get(id)!!.assigneeId)
+        assertEquals(net.kigawa.kivra.routes.operatorTag(OPERATOR), w.orders.assignments.getActive(id)!!.assignedBy)
+        val plain = w.turn().call(ChatTool.ORDER_CREATE_CHILD, "title" to "Unassigned child", "instruction" to "Do other work")
+        assertEquals(ChatToolStatus.OK, plain.status, plain.code)
+        assertNull(w.orders.get(plain.data["order_id"]!!.jsonPrimitive.content)!!.assigneeId)
+    }
+
 }

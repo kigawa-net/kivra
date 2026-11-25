@@ -215,14 +215,15 @@ object ChatToolArguments {
      */
     fun isValid(tool: ChatTool, args: Map<String, String>): Boolean {
         val ids = idArgumentsOf(tool)
+        val optionalIds = if (tool == ChatTool.ORDER_CREATE_CHILD) setOf("assignee_id") else emptySet()
         val text = textArgumentsOf(tool)
         val codes = codeArgumentsOf(tool)
         val numbers = numberArgumentsOf(tool)
         val multiline = multilineTextArgumentsOf(tool)
-        if (!args.keys.all { it in ids || it in text || it in codes || it in numbers }) return false
+        if (!args.keys.all { it in ids || it in optionalIds || it in text || it in codes || it in numbers }) return false
         if (tool == ChatTool.PROJECT_UPDATE && args.isEmpty()) return false
         if (!requiredTextArgumentsOf(tool).all { it in args }) return false
-        return ids.all { isId(args[it]) } &&
+        return optionalIds.all { args[it]?.let(::isId) ?: true } && ids.all { isId(args[it]) } &&
             text.all { (name, max) ->
                 val v = args[name]
                 v == null || if (name in multiline) isMultilineText(v, max) else isText(v, max)
@@ -248,7 +249,7 @@ object ChatToolArguments {
     fun schemaOf(tool: ChatTool): JsonObject = buildJsonObject {
         put("type", "object")
         putJsonObject("properties") {
-            idArgumentsOf(tool).forEach { name ->
+            (idArgumentsOf(tool) + if (tool == ChatTool.ORDER_CREATE_CHILD) setOf("assignee_id") else emptySet()).forEach { name ->
                 putJsonObject(name) {
                     put("type", "string")
                     put("pattern", "^[0-9A-HJKMNP-TV-Z]{26}$")

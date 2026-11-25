@@ -82,12 +82,13 @@ internal val MIGRATION_FILES = mapOf(
     58 to "V58__selfdev_order_policy_8000.sql",
     59 to "V59__plan_state_store.sql",
     60 to "V60__selfdev_order_split_proposals.sql",
-    61 to "V61__project_claude_accounts.sql",
+    61 to "V61__selfdev_order_assignments.sql",
+    62 to "V62__project_claude_accounts.sql",
 )
 
 /** The versions applied on the full chain. V22 and V30 are never used on this branch (reserved gaps), so the list skips them. */
 internal val EXPECTED_APPLIED_VERSIONS: List<String> =
-    ((1..21) + (23..29) + (31..61)).map { it.toString() }
+    ((1..21) + (23..29) + (31..62)).map { it.toString() }
 
 /**
  * Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved; V30 is left
@@ -104,8 +105,8 @@ internal val RESERVED_MIGRATION_VERSIONS: Set<Int> = setOf(22, 30)
 class MigrationChainTest {
 
     @Test
-    fun `V61 leaves existing projects unset and enforces the Claude account ID and project foreign key`() =
-        TestDb { ds -> migrateOnly(ds, *MIGRATION_FILES.keys.filter { it < 61 }.toIntArray()) }.use { db ->
+    fun `V62 leaves existing projects unset and enforces the Claude account ID and project foreign key`() =
+        TestDb { ds -> migrateOnly(ds, *MIGRATION_FILES.keys.filter { it < 62 }.toIntArray()) }.use { db ->
             val projects = ProjectRepository(db.database, db.clock)
             val projectId = projects.create("Existing", null).projectId
             runMigrations(db.dataSource)

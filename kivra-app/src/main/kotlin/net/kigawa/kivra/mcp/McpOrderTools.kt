@@ -397,6 +397,8 @@ internal fun SelfDevOrder.summaryJson(): JsonObject = buildJsonObject {
     put("order_budget_jpy", orderBudgetJpy)
     put("spent_jpy", spentJpy)
     put("project_id", projectId)
+    put("assigneeId", assigneeId)
+    put("assignedAt", assignedAt?.utc())
     put("expires_at", expiresAt.utc())
     put("version", version)
     put("created_at", createdAt.utc())

@@ -55,6 +55,10 @@ fun OrdersScreen(projectId: String, onNavigate: (Route) -> Unit) {
         ApiClient.getOrders(projectId)
     }
     val perms = LocalCallerPermissions.current
+    val memberNames = rememberLoad(projectId) {
+        if (isUnassigned(projectId) || !perms.can(GatedOperation.CREATE_ORDER)) emptyList()
+        else ApiClient.getProjectMembers(projectId)
+    }.value.orEmpty().associate { it.assigneeId to it.displayName }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         SelectableText("order", style = MaterialTheme.typography.headlineSmall)
@@ -72,7 +76,7 @@ fun OrdersScreen(projectId: String, onNavigate: (Route) -> Unit) {
             LoadedList(loaded, emptyText = "orderが見つかりません") { orders ->
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
                     items(orderTreeOf(orders), key = { it.order.orderId }) { row ->
-                        OrderCard(row, onClick = { onNavigate(Route.OrderDetail(row.order.orderId)) })
+                        OrderCard(row, onClick = { onNavigate(Route.OrderDetail(row.order.orderId)) }, onChanged = { listReload += 1 }, memberNames = memberNames)
                         HorizontalDivider()
                     }
                 }
@@ -83,8 +87,11 @@ fun OrdersScreen(projectId: String, onNavigate: (Route) -> Unit) {
 
 /** order の一行(旧 UI の ordRow)。字下げは木の深さ(旧 UI の order-level-N と同じく、上限の段まで)。 */
 @Composable
-private fun OrderCard(row: OrderTreeRow, onClick: () -> Unit) {
+private fun OrderCard(row: OrderTreeRow, onClick: () -> Unit, onChanged: () -> Unit, memberNames: Map<String, String>) {
+    var editing by remember { mutableStateOf(false) }
+    val canAssign = LocalCallerPermissions.current.can(GatedOperation.ASSIGN_ORDER)
     val order = row.order
+    if (editing && order.projectId != null) OrderAssignmentDialog(order, onDismiss = { editing = false }, onChanged = onChanged)
     val st = orderStateText(order.state)
     val indent = (row.level.coerceAtMost(ORDER_TREE_MAX_INDENT) * 16).dp
     val reason = order.stateReason?.takeIf { it.isNotEmpty() }?.let { orderCodeText(ORDER_REASONS, it) }
@@ -94,6 +101,9 @@ private fun OrderCard(row: OrderTreeRow, onClick: () -> Unit) {
                 SelectableText("order ${order.orderId}", style = MaterialTheme.typography.titleMedium)
                 AssistChip(onClick = { }, label = { SelectableText("状態: ${st.label}") })
             }
+            Text("担当: " + (memberNames[order.assigneeId] ?: order.assigneeId ?: "未担当"))
+            order.assignedAt?.let { Text("割り当て: ${displayTime(it)}", style = MaterialTheme.typography.bodySmall) }
+            if (canAssign && order.projectId != null) TextButton(onClick = { editing = true }) { Text("担当を変更・解除") }
             Spacer(modifier = Modifier.height(4.dp))
             SelectableText("深さ: ${order.depth} | 子の数: ${order.childCount}",
                 style = MaterialTheme.typography.bodySmall,
@@ -259,4 +269,33 @@ fun ApprovalsScreen(projectId: String) {
             },
         )
     }
+}
+
+@Composable
+private fun OrderAssignmentDialog(order: ApiOrder, onDismiss: () -> Unit, onChanged: () -> Unit) {
+    var selected by remember(order.orderId) { mutableStateOf(order.assigneeId) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("担当を変更・解除") },
+        text = { Column {
+            OrderAssigneePicker(order.projectId!!, selected, !busy) { selected = it }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        } },
+        confirmButton = { TextButton(enabled = !busy && !net.kigawa.kivra.ui.api.ApiSession.expired, onClick = {
+            busy = true
+            scope.launch {
+                try {
+                    ApiClient.setOrderAssignee(order.projectId!!, order.orderId, selected)
+                    onChanged()
+                    onDismiss()
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { error = "担当を更新できませんでした。再読み込みしてお試しください。" }
+                finally { busy = false }
+            }
+        }) { Text("保存") } },
+        dismissButton = { TextButton(enabled = !busy, onClick = onDismiss) { Text("キャンセル") } },
+    )
 }

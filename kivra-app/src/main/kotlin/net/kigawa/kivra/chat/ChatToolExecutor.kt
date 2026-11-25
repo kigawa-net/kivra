@@ -429,6 +429,12 @@ class ChatToolExecutor internal constructor(
         // The REST route's field checks, in code points.
         val title = validatedText(args.getValue("title"), ChatToolArguments.ORDER_TITLE_MAX) ?: return ChatToolOutcome(ChatToolStatus.DENIED, CODE_INVALID_ARGUMENTS)
         val policy = validatedPolicy(args.getValue("instruction")) ?: return ChatToolOutcome(ChatToolStatus.DENIED, CODE_INVALID_ARGUMENTS)
+        val assigneeId = args["assignee_id"]
+        if (assigneeId != null) {
+            if (!allowed(Permission.ORDER_ASSIGN)) return ChatToolOutcome(ChatToolStatus.DENIED, "PERMISSION_DENIED")
+            try { deps.orders.assignments.validate(projectId, assigneeId) }
+            catch (e: net.kigawa.kivra.db.InvalidOrderAssignment) { return ChatToolOutcome(ChatToolStatus.DENIED, e.code) }
+        }
         val maxCycles = args["maxCycles"]?.toInt() ?: 1
         if (maxCycles !in 1..deps.orderSettings.maxCyclesCap) return failed("MAX_CYCLES_INVALID")
         val roots = deps.orders.list(ROOT_SCAN_LIMIT, ProjectFilter.Only(projectId)).filter { it.parentOrderId == null }
@@ -450,7 +456,7 @@ class ChatToolExecutor internal constructor(
         }
         val key = "$AI_CHILD_KEY_PREFIX${net.kigawa.kivra.db.Ulid.generate()}"
         val budget = DEFAULT_CYCLE_BUDGET_JPY * maxCycles
-        return when (val r = deps.createChildAsOperator(parent.orderId, title, policy, budget, key, principal, maxCycles)) {
+        return when (val r = deps.createChildAsOperator(parent.orderId, title, policy, budget, key, principal, maxCycles, assigneeId)) {
             is ChildCreateResult.Created -> ok(buildJsonObject {
                 childCreated = true
                 put("order_id", r.order.orderId)

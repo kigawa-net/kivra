@@ -13,7 +13,7 @@ class PermissionRulesTest {
     private val approver = listOf("READ", "STOP_REQUEST", "STOP_DECIDE")
     private val ai = listOf("READ", "STOP_REQUEST", "SPEND_START")
     private val operator = listOf(
-        "READ", "READ_TEXT", "GOAL_STOP", "ORDER_MANAGE", "STOP_REQUEST", "GOAL_WRITE", "SPEND_START", "BUDGET_OVERRIDE",
+        "READ", "READ_TEXT", "GOAL_STOP", "ORDER_MANAGE", "ORDER_ASSIGN", "STOP_REQUEST", "GOAL_WRITE", "SPEND_START", "BUDGET_OVERRIDE",
     )
     private val admin = operator + listOf("STOP_DECIDE", "ASSIGNEE_MANAGE")
 
@@ -101,6 +101,7 @@ class PermissionRulesTest {
         assertTrue(p.can(GatedOperation.RELEASE_RUN))
         assertTrue(p.can(GatedOperation.ACKNOWLEDGE_BUDGET))
         assertTrue(p.can(GatedOperation.SUBMIT_TASK))
+        assertTrue(p.can(GatedOperation.ASSIGN_ORDER))
         assertTrue(p.can(GatedOperation.CREATE_PROJECT))
         assertTrue(p.can(GatedOperation.READ_MEMORY))
         assertTrue(p.can(GatedOperation.EXTEND_ORDER))

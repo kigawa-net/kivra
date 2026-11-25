@@ -31,3 +31,15 @@ class DashboardLayoutRulesTest {
         assertFalse(isPinnedChatLayout(widthDp = 1400f, heightDp = 479f))
     }
 }
+
+class SettingsLinkRulesTest {
+    @Test
+    fun aRealProjectShowsTheSettingsLink() {
+        assertTrue(showsSettingsLink("01HZXK3V9Q8N5T2R7M4W6Y1B0C"))
+    }
+
+    @Test
+    fun theUnassignedPseudoProjectDoesNot() {
+        assertFalse(showsSettingsLink(UNASSIGNED_PROJECT_ID))
+    }
+}

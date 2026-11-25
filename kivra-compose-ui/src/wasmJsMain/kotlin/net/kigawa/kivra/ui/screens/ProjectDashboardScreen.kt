@@ -51,6 +51,7 @@ import net.kigawa.kivra.ui.CHAT_COMPACT_LIST_HEIGHT_DP
 import net.kigawa.kivra.ui.DASHBOARD_GAP_DP
 import net.kigawa.kivra.ui.DASHBOARD_SIDE_WIDTH_DP
 import net.kigawa.kivra.ui.isPinnedChatLayout
+import net.kigawa.kivra.ui.showsSettingsLink
 import net.kigawa.kivra.ui.CHAT_NEAR_BOTTOM_DP
 import net.kigawa.kivra.ui.ChatStreamEvent
 import net.kigawa.kivra.ui.isAtNewest
@@ -168,6 +169,11 @@ private fun ProjectDashboardBody(
             }
             Spacer(Modifier.height(2.dp))
             SelectableText(projectScopeText(d.scope), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (showsSettingsLink(projectId)) {
+                OutlinedButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectSettings)) }) {
+                    SelectableText(NavDestination.ProjectSettings.label)
+                }
+            }
             Spacer(Modifier.height(8.dp))
 
             // 中央：プロジェクトごとのチャット（V53）。右サイド：Run・費用・活動と、運用者の操作。
@@ -247,9 +253,6 @@ private fun ProjectDashboardSide(
             }
         }
 
-        TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectSettings)) }) {
-            SelectableText(NavDestination.ProjectSettings.label)
-        }
         if (operator) {
             // 今月の予算は、プロジェクトの「予算」のページにある(設定と解除もそこで行う)。
             TextButton(onClick = { onNavigate(Route.ProjectPage(projectId, NavDestination.ProjectBudget)) }) {

@@ -114,3 +114,5 @@ CREATE INDEX ix_order_assignments_assignee ON selfdev_order_assignments (assigne
 - order と assignee の関係が明示され、「誰がどの order を担当するか」を、画面・API・チャットで扱える。
 - 紐付けを別テーブルにしたので、既存の表は変わらない(expand のみ)。履歴が残り、「いつから、誰の指定で」を追える。
 - 担当は情報であり、認可を変えない。権限の境界(ADR 0020)は、そのまま保たれる。
+
+追記(2026-11-25): V61 は expand のみだが、ADR 0022 の project scope のゲート(V52 の保留)が解除されていることが前提である。保留中は V52 以降がすべて適用されないため、`selfdev_order_assignments` が無く、order の一覧・詳細が失敗する。詳細と復旧は ADR 0022 の追補(2026-11-25)と runbook 4.20 を参照する。

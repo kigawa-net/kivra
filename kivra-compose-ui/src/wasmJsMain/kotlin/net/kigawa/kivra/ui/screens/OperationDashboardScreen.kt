@@ -11,38 +11,40 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import net.kigawa.kivra.ui.Node
-import net.kigawa.kivra.ui.NodeId
+import net.kigawa.kivra.ui.NavDestination
 import net.kigawa.kivra.ui.NodeKind
+import net.kigawa.kivra.ui.NodeRef
 import net.kigawa.kivra.ui.Route
 import net.kigawa.kivra.ui.SelectableText
 import net.kigawa.kivra.ui.api.ApiClient
 import net.kigawa.kivra.ui.api.ApiOperation
-import net.kigawa.kivra.ui.asNode
-import net.kigawa.kivra.ui.openRoute
 
 @Composable
-fun OperationDashboardScreen(operationId: String, onNavigate: (Route) -> Unit, parent: NodeId? = null) {
+fun OperationDashboardScreen(operationId: String, parent: NodeRef? = null, onNavigate: (Route) -> Unit) {
     val loaded = rememberLoad<ApiOperation>(operationId) { ApiClient.getOperation(operationId) }
     val children = rememberLoad<List<ApiOperation>>(operationId) { ApiClient.getOperations(operationId) }
 
     DetailPage {
         SelectableText("Operation ダッシュボード", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(16.dp))
-        parent?.let {
-            TextButton(onClick = { onNavigate(Node(it, it.id).openRoute()) }) { Text("親: ${it.id}") }
-        }
         LoadedView(loaded) { operation ->
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SelectableText(operation.name, style = MaterialTheme.typography.titleLarge)
                     StatusBadgeInfo(operation.status)
+                    parent?.let {
+                        TextButton(onClick = {
+                            onNavigate(when (it.kind) {
+                                NodeKind.PROJECT -> Route.ProjectPage(it.id, NavDestination.Dashboard)
+                                NodeKind.OPERATION -> Route.OperationDetail(it.id)
+                            })
+                        }) { SelectableText("親 ${it.kind.label}: ${it.id}") }
+                    }
                     OpDetailRow("ID", operation.id)
                     OpDetailRow("名前", operation.name)
                     OpDetailRow("説明", operation.description)
@@ -52,12 +54,13 @@ fun OperationDashboardScreen(operationId: String, onNavigate: (Route) -> Unit, p
             }
         }
         Spacer(Modifier.height(16.dp))
-        SelectableText("子 Operation", style = MaterialTheme.typography.titleMedium)
+        SelectableText("子 Operation", style = MaterialTheme.typography.titleLarge)
+        TextButton(onClick = { onNavigate(Route.OperationChildren(operationId)) }) {
+            SelectableText("子 Operation 一覧")
+        }
         LoadedList(children, emptyText = "子 Operation がありません。") { operations ->
-            operations.forEach { child ->
-                TextButton(onClick = {
-                    onNavigate(child.asNode(NodeId(operationId, NodeKind.OPERATION)).openRoute())
-                }) { Text(child.name) }
+            operations.forEach { operation ->
+                OperationCard(operation, NodeRef(operationId, NodeKind.OPERATION), onNavigate)
             }
         }
     }

@@ -443,7 +443,7 @@ MCP(ADR 0013 の仕組みを使う):
 - **U-6 周の間隔と 1 日の周の数**。推奨: 間隔は 60 分、1 日は 3 周まで。
 - **U-7 同時に進む周の数**。推奨: 木全体で 1 つ。既存の同時 Run の上限(既定 1)と合わせる。
 - **U-8 段階 3 への昇格の数値**。推奨: ADR 0011 §6.3 と同じ(4 週間、70%)。
-- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけ。作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置く。
+- **U-9 MCP からの操作**。推奨: 読み取りと停止の要求だけ。作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置く。（2026-11-18 の追補 §2 で、延長、再開、タスクの再投入を MCP に出すよう改めた。2026-11-19 の追補 §8 で、タスクの承認と見送りも MCP に出すよう改めた。2026-11-19 の追補 §9 で、根の order の作成も MCP に出すよう改めた。2026-11-19 の追補 §10 で、BLOCKED の計画の再計画も MCP に出すよう改めた。子の作成、一時停止、承認は、なお MCP に出さない。）
 - **U-10 作成の承認**。推奨: ルートの order で `max_cycles` が 2 以上、または既定を超える予算(累計 5,000 円超、1 周 1,000 円超)の場合は、人(ルートの承認者)の承認を要する。`max_cycles` が 1 で既定内なら承認は要らない。
 - **U-11 上限の変更**。推奨: 作成後の変更は認めない。上限を上げるには、承認つきの新しい order を作る。承認つきの更新は採らない。
 - **U-12 既定の上限と閲覧の範囲**。推奨: 総周回 10、期限 14 日、累計 5,000 円、1 周 1,000 円。閲覧は、運用者の全員が一覧を見られ、方針と理由は木の関係者(作成者と承認者)にだけ表示する。
@@ -967,3 +967,257 @@ U-14(有効化された後の起動で、全 `ACTIVE` を `PAUSED(STARTUP_HOLD)`
 - 理由は `payload_json` に先頭の部分しか残らない(上の 2.)。
 - 放棄は、Task の停止(1 つの transaction)と周の閉じ(別の transaction)の 2 段で行う。間に自動の評価が先に周を閉じると、放棄は 409(版の競合)になる。結果は同じ(Task は停止、周は失敗で閉じる)で、二重には数えない。
 - 放棄は連続失敗を 1 増やす。連続失敗が上限の order は自動の開始の対象にならない。
+
+## 追補(2026-11-18): MCP からの order の延長・再開と、タスクの再投入(U-9 の改め)
+
+### 1. 決定
+
+次の 3 つを MCP に出す。どれも REST と同じリポジトリ関数を呼び、規則(状態機械、版の検査、監査、outbox)は重複させない。
+
+| MCP ツール | REST の対応 | スコープ | 権限 |
+|---|---|---|---|
+| `kivra_order_extend` | `POST /api/selfdev/orders/{id}/extend` | `kivra.selfdev.order.manage` | `ORDER_MANAGE` |
+| `kivra_order_resume` | `POST /api/selfdev/orders/{id}/resume` | `kivra.selfdev.order.manage` | `ORDER_MANAGE` |
+| `kivra_task_requeue` | `POST /api/selfdev/tasks/{id}/requeue` | `kivra.selfdev.requeue` | `GOAL_WRITE` |
+
+- 3 つとも `KIVRA_MCP_WRITE_ENABLED=true` のときだけ `tools/list` に出る。`KIVRA_MCP_WRITE_ENABLED` が `false` なら、呼べば未知のツール(-32602)。
+- 専用のスコープを要求する。`kivra.runs.read` と `kivra.selfdev.stop` からは暗黙に付かない。
+- 入力は厳格(未知の項目は拒否)。自由な文字列は受けない。延長の日数と周の数は REST と同じ範囲(日数は 1〜`EXTEND_DAYS_LIMIT`、周の数は 1〜`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`)。
+- 監査の操作者は MCP の主体(所有者のキー)から作る。ログには `via=mcp` と固定のコード、ID だけを出す(`net.kigawa.kivra.selfdev.order.operator`)。
+
+### 2. U-9 を覆した点
+
+U-9(推奨)は、MCP に読み取りと停止の要求だけを置き、作成、子の作成、再開、一時停止、承認は HTTP と UI だけに置くとしていた(§6 の 370 行目も同じ)。本追補は、そのうち **延長と再開** と **タスクの再投入** を MCP に出す。次は U-9 のとおり、引き続き MCP に出さない: 承認、却下、作成、子の作成、周の開始、一時停止、取り消し、周の放棄。（タスクの承認と見送りは、2026-11-19 の §8 で MCP に出した。根の order の作成は §9 で、BLOCKED の計画の再計画は §10 で MCP に出した。order の承認(停止要求の承認)と却下は、引き続き出さない。）
+
+### 3. なぜ許すか
+
+- 自己開発の order は、安全装置(予算、連続失敗、ブレーカー、起動時の保留)で止まることがある。その解除(延長、再開)と、失敗したタスクの再投入は、運用者が人の指示で行う判断である。
+- 運用者の JWT を持たない Claude(MCP のクライアント)から、この判断を人の指示どおりに実行できないと、運用者が UI や API を直接叩くしかなくなる。
+- 承認の経路(`approve`)は MCP に出さない。承認を MCP に出すと、AI のクライアントが承認者になりうる。延長と再開は承認者を必要としない操作で、承認の経路とは分ける。
+
+### 4. 守り方
+
+- **フラグ**: `KIVRA_MCP_WRITE_ENABLED=true` の既存の書き込みの切り替えに従う。切れば 3 つとも一覧から消える。
+- **スコープ**: 専用のスコープ。読み取りのトークンや停止だけのトークンでは呼べない(403 `insufficient_scope`)。
+- **権限**: 既存の権限表のまま。AI の役割(`AI`)は `ORDER_MANAGE` と `GOAL_WRITE` を持たない。AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL`)は、スコープを持っていても、ディスパッチャの権限検査で拒否される(`forbidden`)。ハンドラは、AI かどうかを比べない。
+- **規則**: 状態機械、版の検査(`STALE_VERSION`)、子の order に対する延長の拒否(`NOT_ROOT`)、上限は、すべてリポジトリの規則。MCP はそれを呼ぶだけ。
+- **書き込みの上限**: 既存の書き込みの毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
+
+### 5. 変えなかったもの
+
+- 承認、却下、取り消し、作成、子の作成、周の開始、一時停止、周の放棄は、MCP に出さない。`McpOrderToolsTest` は、それらの名前がツール一覧に無いことを引き続き固定する。
+- ロールとスコープの対応表(`TOKEN_ROLE_SCOPES`)は変えない。AI の役割のトークンに新しいスコープは付かない。
+- Keycloak の client scope は、この repo には無い(`kigawa01/k8s-system` の #280 側)。3 つのスコープを発行するかどうかは、そちらで決める。本追補は、kivra 側の検査だけを定める。
+
+### 6. 残るリスク
+
+- **プロジェクト単位の権限(ADR 0022 PR-D)は、MCP の書き込みでは検査しない**。REST の `checkInProject` は、対象タスクや order のプロジェクトを見る。MCP のディスパッチャは全体の権限だけを検査する。既存の `kivra_order_request_stop` と `kivra_selfdev_start` と同じ水準で、差分として残す。`KIVRA_SELFDEV_PROJECT_MODE=enforce` の環境に出す前に直す必要がある。
+- 運用者の判断を、人が一回ずつ確認する仕組みは無い。スコープを持つ主体は、その権限で延長と再開を行える。
+- 延長の日数と周の数は、MCP の入力が人の指示どおりかを検証できない。監査の行には数値を出さない(REST と同じ)ので、後から見るには DB の `selfdev_order_events` を見る。
+
+### 7. 確認したこと、確認できなかったこと
+
+- 確認: 3 つのツールは REST と同じリポジトリ関数を呼ぶ(`extendByOperator`、`resumeByOperator`、`requeueAsOperator`)。AI の主体は、スコープを持っていても拒否される(テスト)。スコープ不足、フラグ無効、不正な入力、正常系のテストを追加した(`McpOrderToolsTest`)。
+- 未確認: dev の Keycloak client `kivra-mcp` が 3 つのスコープを発行するか(k8s-system の側で確認する)。dev の `kivra/dev/kivra.yaml` は `KIVRA_MCP_WRITE_ENABLED=true`、`KIVRA_SELFDEV_ROLES_MODE=enforce`、`KIVRA_SELFDEV_ORDERS_ENABLED=true`。`KIVRA_SELFDEV_AI_PRINCIPAL` は未設定。
+
+### 8. 2026-11-19: approve と skip を許す理由(タスクの承認と見送り)
+
+#### 8.1 決定
+
+次の 2 つを MCP に出す。どちらも REST と同じリポジトリ関数を呼び、遷移、版の検査、監査の規則は重複させない。
+
+| MCP ツール | REST の対応 | スコープ | 権限 |
+|---|---|---|---|
+| `kivra_task_approve` | `POST /api/selfdev/tasks/{id}/approve`(`approveTask`) | `kivra.selfdev.task.decide` | `GOAL_WRITE` |
+| `kivra_task_skip` | `POST /api/selfdev/tasks/{id}/reject`(`skipTask`) | `kivra.selfdev.task.decide` | `GOAL_WRITE` |
+
+- 見送りの REST は `reject` を選んだ。UI の「見送る」は、承認待ちでも投入待ちでも `reject` を呼ぶ(`ApiClient.rejectGoal`)。`skip` は MCP のツール名だけで、REST の経路は `reject` である。
+- 入力は `task_id` と `version` だけ(厳格。未知の項目は -32602)。出力は ID、固定の状態コード、版、プロジェクト ID で、題名と本文は返さない。
+- `KIVRA_MCP_WRITE_ENABLED=true` かつ autopilot が有効のときだけ `tools/list` に出る。
+- 承認は、差分の再検査(ADR 0011 §6.2、runbook §7.4b)を行わない。`AUTO_SCOPE_EXCEEDED` で止まったタスクも、承認すると `QUEUED` になる。ツールの説明に、その旨を書いた。
+
+#### 8.2 なぜ許すか
+
+- 自己開発の自動運転は、差分の再検査(`AUTO_SCOPE_EXCEEDED`)で承認待ちに戻ることがある。その解除は、承認者(運用者)が人の指示で行う判断である。承認待ちのタスクは `QUEUED` に進むまで投入されない。
+- 運用者の JWT を持たない Claude(MCP のクライアント)から承認できないと、ガードを直した後も、運用者が UI を手で操作するしかなくなる。
+- 見送りは、承認待ちのタスクを実行させない操作で、承認より影響が小さい。同じ理由で一組に入れた。
+
+#### 8.3 守り方
+
+- **フラグ**: `KIVRA_MCP_WRITE_ENABLED=true` と autopilot の両方。切れば 2 つとも一覧から消える。
+- **スコープ**: 専用のスコープ `kivra.selfdev.task.decide`。読み取り、停止、延長、再投入のスコープからは暗黙に付かない(403 `insufficient_scope`)。
+- **権限**: 既存の権限表のまま(`GOAL_WRITE`)。AI の役割(`AI`)は `GOAL_WRITE` を持たないため、AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL`)は、スコープを持っていても、ディスパッチャの権限検査で拒否される(`forbidden`)。
+- **規則**: 承認は `TaskState` の遷移と `OPERATOR_APPROVED`、見送りは `OPERATOR_SKIPPED` の遷移。計画の親(計画の根)は両方とも拒否する(`GUARD_FAILED`)。
+- **監査**: 操作者は MCP の主体(所有者のキー)から作り、`net.kigawa.kivra.selfdev.autopilot.operator` の行に `via=mcp` を付けて出す(`action=TASK_APPROVED` / `action=TASK_REJECTED`)。ログには ID と固定コードだけを出す。REST の行(`via` なし)は変えない。
+- **書き込みの上限**: 既存の書き込みの毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
+
+#### 8.4 範囲外(今回は出さない)
+
+- 却下(goal の `reject`)、goal の中止(`stop`)、タスクの作成と計画。
+- order の承認(停止要求の承認)と却下。
+- 承認の再検査を MCP から省くこと。承認は再検査しない、というのが既存の規則であり、それを変えない。
+
+#### 8.5 残るリスク
+
+- **プロジェクト単位の権限(ADR 0022 PR-D)は、この 2 つでも検査しない**。REST の `checkInProject` は対象タスクのプロジェクトを見るが、MCP のディスパッチャは全体の権限だけを見る。§6 の残るリスクと同じ差分。`KIVRA_SELFDEV_PROJECT_MODE=enforce` の環境に出す前に直す必要がある。
+- 承認の差分は kivra に保存されない(runbook §7.4b)。スコープを持つ主体は、差分を見ずに承認できる。承認の前に計画の内容を確かめるのは、指示を受けた運用者の側の責任になる。
+- 運用者の判断を、人が一回ずつ確認する仕組みは無い(§6 と同じ)。
+
+#### 8.6 確認したこと、確認できなかったこと
+
+- 確認(テスト `McpTaskToolsTest`): 正常系(承認、見送り、`AUTO_SCOPE_EXCEEDED` の承認)、スコープ不足(403)、フラグ無効、不正な入力、AI の拒否、版の不一致、見つからない Task、計画の根と状態が合わない場合の拒否、監査の行(`via=mcp`、ID と固定コードだけ)。
+- 未確認: dev の Keycloak client `kivra-mcp` が `kivra.selfdev.task.decide` を発行するか(`kigawa01/k8s-system` の側で確認する)。承認と見送りの実機での動作。
+
+
+## 追補(2026-11-19): MCP からの根の order の作成(U-9 の改め、U-10 は未決のまま)
+
+### 9.1 決定
+
+`kivra_order_create` を MCP に出す。REST の `POST /api/projects/{projectId}/orders` と同じ検証、同じリポジトリ関数、同じプロジェクトの検査を使う。
+
+| MCP ツール | REST の対応 | スコープ | 権限 |
+|---|---|---|---|
+| `kivra_order_create` | `POST /api/projects/{projectId}/orders` | `kivra.selfdev.order.create` | `ORDER_MANAGE` |
+
+- 入力は厳格(未知の項目は拒否)。`title`(1〜200 字)、`policy`(1〜8000 字、本文)、`project_id`(必須、既存のプロジェクト)、`max_cycles`(任意、1〜`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`、既定 1)。自由な文字列は題名と本文だけ。
+- 検証は `checkRootOrderFields`(`routes/SelfDevOrderRoutes.kt`)を REST と共有する。題名と本文の長さ、制御文字と双方向制御文字の拒否、周の範囲を、一つの関数で決める。
+- 作成は `SelfDevOrderRepository.createRoot`。プロジェクトは `ProjectRepository.scopeOf`、プロジェクトの権限は `PermissionGuard.checkInProject`(ADR 0022 PR-D)で、REST と同じ。
+- 出力は REST の要約と同じ項目。題名と本文は返さない。
+- `KIVRA_MCP_WRITE_ENABLED=true` かつ order が有効のときだけ `tools/list` に出る。
+
+### 9.2 なぜ許すか
+
+- 自己開発の依頼が計画の段階で失敗して止まったとき、運用者は同じ依頼を出し直したい。MCP に作成が無いため、運用者の JWT を持たない Claude からは UI でしか出し直せなかった。
+- 作成は開始ではない。作成した order は周を持たない(`cycles_started` は 0)。ただし `KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED` が有効な環境では、その規則で周が始まりうる(§9.6)。
+
+### 9.3 AI の主体を拒否する理由
+
+AI が自分で order を作り続けると、AI が自分の依頼を増やし続ける自己増殖になる。`ORDER_MANAGE` は AI の役割が持たないので、ディスパッチャの権限検査が AI の主体を拒否する(スコープを持っていても拒否される)。ハンドラは AI かどうかを比べない(§4 の規則)。テストは、AI の主体がスコープを持っても拒否され、何も書かれないことを固定する。
+
+### 9.4 守り方
+
+- **フラグ**: `KIVRA_MCP_WRITE_ENABLED`。切れば一覧から消え、呼べば未知のツール(-32602)。
+- **スコープ**: 専用のスコープ。読み取り、停止、延長、再開、再投入、承認のスコープからは暗黙に付かない(403 `insufficient_scope`)。
+- **権限**: REST と同じ `ORDER_MANAGE`。AI の役割は持たない。
+- **上限**: 題名 200 字、本文 8000 字、周の数 1〜`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`(REST と同じ)。予算と期限は REST の作成に入力が無いので、MCP にも入力を作らない。期限は作成時に既定の 14 日で固定される。
+- **書き込みの上限**: 既存の毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
+- **監査**: `net.kigawa.kivra.selfdev.order.operator` の行に `action=ORDER_CREATED via=mcp actor=... orderId=... result=ACTIVE` を出す。題名、本文、主体の所有者キーは出さない。
+
+### 9.5 読み取り側の判断: order の本文と題名は MCP で返さない
+
+`kivra_order_get` と `kivra_order_list` は、題名と本文(`policy`)を返さない(§1 と ADR 0015 の既存の規則)。`KIVRA_MCP_GOAL_TEXT_ENABLED` の対象を order に広げることは、しない。理由:
+
+- 本文は最大 8000 字の自由な文で、計画の AI のプロンプトとして使われる。外から入りうる文字列であり、読む側の Claude の文脈に入れば、命令として扱われる危険がある(プロンプトインジェクション)。
+- 読めると、その文面をそのまま再投入する経路になる。出し直しに必要な文面は、運用者が手元に持っているものを渡せばよい。
+- 題名だけを返す案は、本文を読めないと出し直しにならず、利点が小さい。`KIVRA_MCP_GOAL_TEXT_ENABLED` の題名(ADR 0019 追補 2026-10-21)は、既存の判断として残す。
+
+### 9.6 残るリスク
+
+- **冪等性が無い**。REST の作成にも鍵が無いため、応答が届かずに再送すると、同じ依頼の根が二つできうる。ツールの説明と runbook に、再試行の前に `kivra_order_list` で確かめるよう書いた。鍵を足すには、スキーマの変更が要る。これは別の判断とする。
+- **U-10(作成の承認)は実装していない**。U-10 の推奨は、`max_cycles` が 2 以上、または既定を超える予算の根には人の承認を要する、というものだった。本追補は承認の経路を作らず、`kivra.selfdev.order.create` を持つ運用者の判断と、上限(周、題名、本文)で守る。人が一回ずつ確かめる仕組みは無い(§6 と同じ)。U-10 を採るには、承認の経路を別に決める必要がある。
+- **自動の周**。`KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED` が有効な環境では、作成した根が自動の周で動きうる。その場合の予算は、既存の周の規則(1 周の既定の予算、日あたりの上限)に従う。
+- **本文は運用者の判断**。本文は、スコープを持つ主体が書く。どの文面を入れるかは、指示を受けた運用者の判断の責任になる。
+- **プロジェクト単位の権限**: 作成だけは REST と同じ `checkInProject` で検査する。延長、再開、再投入、承認、見送りは、§6 と §8.5 の差分のまま残る。
+
+### 9.7 確認したこと、確認できなかったこと
+
+- 確認(テスト `McpOrderToolsTest`): 正常系(REST と同じ項目、題名と本文が返らないこと、行の内容)、スコープ不足(403)、AI の主体の拒否(スコープを持っても)、フラグ無効、不正な入力(未知の項目、型違い、範囲外、長さ、制御文字、双方向制御文字、小数)、プロジェクトが無い場合、対象の未設定、監査の行(ID と固定コードだけ)、検証の共有(`checkRootOrderFields` の境界の答え)。
+- 確認: `RolesCoverageArchitectureTest`(表の行と権限)、`McpRoutesTest`(scopes_supported)、`SelfDevOrderRoutesTest`(REST の作成の答えは変わらない)。
+- 未確認: dev の Keycloak client `kivra-mcp` が `kivra.selfdev.order.create` を発行するか(`kigawa01/k8s-system` の側)。プロジェクト単位の権限が ENFORCE のときの作成の拒否(テストは既定の権限の場合だけ)。dev での実際の作成と、自動の周が無い設定での動作。
+
+
+## 追補(2026-11-19): MCP からの再計画(BLOCKED の計画を戻す、U-9 の改め)
+
+### 10.1 決定
+
+`kivra_task_replan` を MCP に出す。REST の `POST /api/selfdev/goals/{id}/replan`(UI の「再計画」ボタン)と同じリポジトリ関数(`replanBlocked`)を、同じラッパー(`replanAsOperator`)で呼ぶ。遷移、版の検査、規則は重複させない。
+
+| MCP ツール | REST の対応 | スコープ | 権限 |
+|---|---|---|---|
+| `kivra_task_replan` | `POST /api/selfdev/goals/{id}/replan`(`replanAsOperator`) | `kivra.selfdev.task.decide` | `GOAL_WRITE` |
+
+- 入力は `task_id`(ルートの task、つまり goal の ID)と `version` だけ(厳格。未知の項目は -32602)。`version` は `kivra_task_list` の値。
+- 遷移は `BLOCKED` から `TASK_SUBMITTED`(`REPLAN_REQUESTED`)だけ。`BLOCKED` 以外は `NO_EDGE` で拒否し、何も書かない。版が違えば `STALE_VERSION`。
+- 出力は ID、状態、状態の理由、版、プロジェクト ID。題名と本文は返さない。
+- `KIVRA_MCP_WRITE_ENABLED=true` かつ autopilot が有効のときだけ `tools/list` に出る。
+- ツールの説明は、`PLAN_CALL_FAILED`、`PLAN_INVALID`、`PLAN_BUDGET_HOLD` で止まった計画を対象にし、予算の保留は予算が空いてから再計画するよう書く。
+
+### 10.2 なぜ許すか
+
+- BLOCKED の計画を運用者の JWT が無いと再開できないと、`PLAN_CALL_FAILED` のたびに UI の操作が要る。MCP の利用者(運用者のトークンを持つ Claude)が、原因を直した後に自分で戻せるようにする。
+- 再計画は実行ではない。計画の段階に戻すだけで、タスクは投入されない。計画が再び失敗すれば、再び `BLOCKED` で止まる。
+- `kivra_task_approve` と `kivra_task_skip` と同じく、運用者の判断である。
+
+### 10.3 scope を新設しない理由
+
+新しいスコープを足すと、Keycloak の client `kivra-mcp` の変更が要る(`kigawa01/k8s-system` の側)。再計画は承認と見送りと同じ運用者の判断なので、既存の `kivra.selfdev.task.decide` を使う。読み取り、停止、延長、再投入のスコープからは暗黙に付かない。
+
+### 10.4 守り方
+
+- **フラグ**: `KIVRA_MCP_WRITE_ENABLED` と autopilot。切れば一覧から消え、呼べば -32602。
+- **スコープ**: `kivra.selfdev.task.decide`(承認と見送りと共有)。無ければ 403 `insufficient_scope`。
+- **権限**: 既存の権限表のまま(`GOAL_WRITE`)。AI の主体は、スコープを持っていても拒否される(`forbidden`)。ハンドラは AI かどうかを比べない。
+- **監査**: `net.kigawa.kivra.selfdev.autopilot.operator` の行に `via=mcp` を付けて出る(`action=REPLAN via=mcp`)。ID と固定コードだけを出す。REST の行(`via` なし)は変えない。`replanAsOperator` に `viaMcp` の引数を足して、同じ関数の中で行を分けた。
+- **書き込みの上限**: 既存の書き込みの毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
+
+### 10.5 残るリスク
+
+- **プロジェクト単位の権限(ADR 0022 PR-D)は検査しない**。§8.5 と同じ。`KIVRA_SELFDEV_PROJECT_MODE=enforce` の環境に出す前に直す必要がある。
+- **根以外の BLOCKED を指せる**。REST と同じく、`replanBlocked` は根かどうかを見ない。子のタスク(実行中の dispatch guard で BLOCKED になったもの)を指すと、`TASK_SUBMITTED` に戻り、計画の対象になる。運用者が `kivra_task_list` の値で指す前提。ツールの説明は計画の根を前提に書いた。
+- 再計画が計画の失敗を直すわけではない。原因(承認の枠、予算、計画の入力)を直さずに再計画すると、同じ理由で再び `BLOCKED` になる。
+
+### 10.6 確認したこと、確認できなかったこと
+
+- 確認(テスト `McpTaskToolsTest`): 正常系(`BLOCKED` から `TASK_SUBMITTED`、版が一つ上がる、題名と本文が返らない)、`BLOCKED` 以外の拒否(`NO_EDGE`、何も書かない)、見つからない Task(`TASK_NOT_FOUND`)、版の不一致、予算の保留の理由での正常系、スコープ不足(403)、AI の拒否、フラグ無効、autopilot 無効、不正な入力、監査の行(`via=mcp`、ID と固定コードだけ)。`RolesCoverageArchitectureTest`(表の行と権限)。
+- 未確認: dev の Keycloak client `kivra-mcp` が `kivra.selfdev.task.decide` を発行するか(承認と見送りと同じ。`kigawa01/k8s-system` の側)。dev での実際の再計画と、再計画後の計画の結果。
+
+## 追補(2026-11-22): Planner は子 order を提案できる(作成は人のまま。U-19 は変えない)
+
+### 1. 決定
+
+- Planner は子 order を**提案**できる。提案は計画の出力 `childOrders`(最大 3 件)として届き、`selfdev_order_split_proposals`(V60)に `PROPOSED` の行として残る。提案は子 order を作らない。
+- 子 order を**作る**のは人(運用者)だけである。§2.7 の U-19 は変えない。計画の出力から子を直接作る経路は作らない。作成の経路(承認 API と UI)は次の変更(PR2)で入れる。
+- 提案の上限: 1 計画につき 3 件。木の上限(子の数 `KIVRA_SELFDEV_ORDER_MAX_CHILDREN`、木全体 `KIVRA_SELFDEV_ORDER_MAX_TREE`、深さ `KIVRA_SELFDEV_ORDER_MAX_DEPTH`)は変えない。作成の時に従来どおり確かめる。
+- 提案の各項目の検査は、order の作成(REST と chat の `order_create_child`)と同じ規則を使う: 題名は `MAX_TITLE_CODE_POINTS`(200)、方針は `MAX_POLICY_CODE_POINTS`(8000)、制御文字の拒否は `validatedText` と `validatedPolicy` の規則のまま。`maxCycles` は `KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP` 以内。題名は計画の中で重複させない。
+- 提案を出せるのは**根の order の計画だけ**である。子の order の計画は `childOrders` を出せず、出すと `CHILD_ORDERS_NOT_ALLOWED` で拒否される。深さの余地が無い時(`KIVRA_SELFDEV_ORDER_MAX_DEPTH` が 0、または根の深さ + 1 が上限を超える)も同じ。運用者の作ったタスク(order が無い)も対象外。
+- Planner に見せる指示(`PlannerPrompt.system`)は、提案が許される時だけ `childOrders` の説明を含める。許されない時は含めない。
+- 計画が受け付けられるのは、タスクが 1 件以上ある時だけである(従来の最低 1 件の規則を保つ)。`childOrders` だけの計画は、この変更では受け付けない。タスクの無い計画を確定すると、実行するものが無いまま決着するため。運用者の承認の経路ができる PR2 で改める。
+
+### 2. 冪等キー(PR2 のための予約)
+
+- 提案から子を作るとき、作成のキーは `plan-split:{planId}:{ordinal}` とする。`planId` は `"{計画の根のタスク ID}:r{revision}"`(V60 の `plan_id`)。同じ提案の二重作成を、作成の一意キーで防ぐ。この変更はキーを使わない。
+
+### 3. 再帰の規則
+
+- 子の計画は提案を出せない(根だけが提案する)。これで提案は一段目で止まり、孫の提案は作られない。深さ 2 の設定でも同じ。
+- 将来、孫の提案を許すなら、この規則を変える別の決定として書く。
+
+### 4. 変えなかったこと
+
+- U-19(子を作るのは人だけ)。計画の確定は子を作らない。
+- 木の上限、予算の入れ子、親の状態の規則(ADR 0015 §2.7 の作成時の検査)。
+- 停止、承認、再開の規則。
+
+### 5. 残るリスク
+
+- 提案が溜まっても、この変更では消えない。`EXPIRED` の遷移は PR2 で入れる。
+- 提案の本文は Planner の出力であり、データとして扱う。実行されず、ログにも出さない(ログは計画のダイジェストと件数だけ)。
+- 作成の経路(PR2)が入るまで、提案は運用者の画面にも REST にも出ない。
+- 確認したこと: 検査の単体テスト(`PlanValidatorTest`)、指示の文面(`PlannerPromptTest`)、永続化と計画の確定の同一トランザクション・古い fence・再計画(`SplitProposalRepositoryTest`)、移行の連鎖(`MigrationChainTest`)。確認していないこと: dev の実際の計画での提案の内容の質。
+
+## 追補(2026-11-22 PR2): 提案の承認・却下(運用者の操作)
+
+- 承認は運用者だけが行う(`POST /api/selfdev/orders/{id}/split-proposals/{proposalId}/approve`、ORDER_MANAGE、AI は 403)。承認で子 order を作るのは
+  `createChildAsOperator`(U-19 は変えない。計画の出力から子を直接作る経路は無い)。題名・方針・周の上限は提案の内容、予算は 1,000 円 × 周の上限(チャットと同じ)、
+  冪等キーは `plan-split:{planId}:{ordinal}`。拒否の code は子の作成と同じ(DEPTH_LIMIT など)。
+- 承認の書き込みは二つ: 子を作る(その transaction)、続けて提案を APPROVED にし子の ID を入れる(条件付きの更新)。二つの間で止まっても、同じ
+  キーの再承認は同じ子を返す(Replayed)。二人が同時に承認しても、子は一つだけ作られる。
+- 却下は `POST .../reject`(PROPOSED から REJECTED)。二度目の却下と二度目の承認は、そのときの結果を返す(冪等)。
+- EXPIRED は読むときと決定のときに遅延で付ける(専用の仕事は無い)。失効するのは、親の order が ACTIVE でないとき(一時停止を含む)、または計画が
+  差し替えられたとき(根のタスクの revision が計画の `r{revision}` を超えた)。EXPIRED は戻らない。
+- 409 の code: `PROPOSAL_APPROVED`、`PROPOSAL_REJECTED`、`PROPOSAL_EXPIRED`、`SPLIT_PROPOSAL_STATE_CHANGED`(承認の途中で却下が入った。子は作られており、
+  その ID は運用者のログに出る)。子の作成の拒否は子の作成の API と同じ code。
+- MCP は読みのみ。`kivra_order_get` に `split_proposals`(ID・順番・状態・周の上限・作られた子の ID。題名と方針は返さない)。承認を MCP に出すかは、
+  MCP の scope(Keycloak の client)を変える別の決定として後で決める。
+- UI は詳細画面の「子 order の提案」(ルートの order のみ)。承認・却下は ORDER_MANAGE の利用者にだけ出す。
+- 残るリスク: 承認の途中の却下の窓(上の SPLIT_PROPOSAL_STATE_CHANGED)。一時停止した order の提案は、再開しても戻らず失効のまま。

@@ -95,6 +95,26 @@ class ChatHistoryCompactorTest {
     }
 
     @Test
+    fun `turn request prefers rolling compression when both summarizers are present`() = TestDb().use { db ->
+        runBlocking {
+            val chat = ChatFixture(db, this)
+            val messages = chat.append(5) { "会".repeat(1_000) }
+            chat.summaries.upsert(chat.session, messages[1].id, "合意事項")
+            var perTurnCalls = 0
+            val perTurn = object : ChatSummarizer {
+                override suspend fun summarize(input: ChatSummaryInput): ChatSummary {
+                    perTurnCalls++
+                    return ChatSummary("今回の要約", input.omitted)
+                }
+            }
+
+            val request = chat.withCompression(perTurn).turnRequest(chat.session)
+            assertEquals(0, perTurnCalls)
+            assertTrue(request.messages[1].text().contains("合意事項"))
+        }
+    }
+
+    @Test
     fun `gateway failure preserves the former window and retries after ten minutes`() = TestDb().use { db ->
         runBlocking {
             var calls = 0
@@ -241,13 +261,16 @@ class ChatHistoryCompactorTest {
         private val gateway = chatTestGateway(provider)
         private val scopes = listOf(TEST_BUDGET_SCOPE)
         val compactor = ChatHistoryCompactor(gateway, chats, summaries, scopes, scope, clock = db.clock)
-        val replier = ProjectChatReplier(gateway, chats, scopes, compactor = compactor)
+        val replier = withCompression()
 
         init {
             chats.createSession(session, "Chat")
         }
 
         fun off() = ProjectChatReplier(gateway, chats, scopes)
+
+        fun withCompression(summarizer: ChatSummarizer? = null) =
+            ProjectChatReplier(gateway, chats, scopes, summarizer = summarizer, compactor = compactor)
 
         fun append(count: Int, start: Int = 1, body: (Int) -> String = { "m$it" }) =
             (start until start + count).map { chats.appendMessage(session, if (it % 2 == 1) "user" else "assistant", body(it)) }

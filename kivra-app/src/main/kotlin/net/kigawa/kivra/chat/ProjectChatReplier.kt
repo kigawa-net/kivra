@@ -1,11 +1,13 @@
 package net.kigawa.kivra.chat
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -15,6 +17,7 @@ import net.kigawa.kivra.db.ProjectChatRepository
 import net.kigawa.kivra.modelgateway.Capability
 import net.kigawa.kivra.modelgateway.DataClass
 import net.kigawa.kivra.modelgateway.DifficultyRouter
+import net.kigawa.kivra.modelgateway.GatewayException
 import net.kigawa.kivra.modelgateway.GenerationParams
 import net.kigawa.kivra.modelgateway.Message
 import net.kigawa.kivra.modelgateway.ModelEvent
@@ -25,6 +28,7 @@ import net.kigawa.kivra.modelgateway.Part
 import net.kigawa.kivra.modelgateway.Purpose
 import net.kigawa.kivra.modelgateway.Requirements
 import net.kigawa.kivra.modelgateway.Role
+import net.kigawa.kivra.modelgateway.SecretScan
 import net.kigawa.kivra.modelgateway.ToolChoice
 import org.slf4j.LoggerFactory
 import java.util.UUID
@@ -59,9 +63,11 @@ sealed interface ChatReplyEvent {
  * provider, with the hosted provider as its only fallback and only for a failure before any output. Every other case (HARD, or any doubtful
  * or ineligible case) uses the hosted provider only. With no router, every reply is hosted (the chat's allowed providers are the hosted one).
  *
- * The model sees up to [HISTORY_LIMIT] messages of the session, oldest first, starting at a user message. When compression is enabled,
- * the window starts after the summary's coverage and includes the summary in the first user message. The caller stores the current user
- * message and the completed reply.
+ * The model sees the last [HISTORY_LIMIT] messages of the session, oldest first, starting at a user message. The caller stores the user message
+ * before it asks for the reply, so the newest history item is that message. Nothing is stored here: the caller stores the completed reply.
+ * With a [summarizer] (ADR 0023 追補 8), the messages before the newest user message are summarized first, and the model sees the summary, the
+ * preceding assistant message and the newest user message. A failed summary falls back to the raw window. With a [compactor], the model sees
+ * the stored rolling summary and the bounded messages after its coverage. The compactor takes precedence over the per-turn summarizer.
  *
  * The budget scope is the tenant's, the same scope as the developer's, so a chat reply spends the same monthly limit. The principal is a fixed
  * name, not a user identity (it is the audit's "who" of a model call), the same as the developer's. The data class is INTERNAL: the chat text
@@ -81,11 +87,23 @@ class ProjectChatReplier(
      * message is classified and an EASY reply may be served on-premises, with the hosted provider as its fallback (ADR 0023 追補).
      */
     private val router: DifficultyRouter? = null,
+    /**
+     * The summarizer of the older history (ADR 0023 追補 8). Null (the default) means no summary: the model sees the raw window, as before.
+     * With one, every turn with enough history summarizes the older messages first; any failure falls back to the raw window.
+     */
+    private val summarizer: ChatSummarizer? = null,
+    /** The bounds of the summary (the message and character caps, the output cap, the deadline). Used only with a [summarizer]. */
+    private val summaryLimits: ChatSummaryLimits = ChatSummaryLimits(),
+    /** The nonce source of the summary block. Tests inject a fixed one. */
+    private val summaryNonce: () -> String = ChatSummaryPrompt::newNonce,
     private val compactor: ChatHistoryCompactor? = null,
 ) {
     init {
         require(budgetScopes.isNotEmpty()) { "budgetScopes must not be empty" }
     }
+
+    /** The secret filter of the summary's output: a summary that looks like a secret is not sent (the gateway would refuse the whole reply). */
+    private val secretScan = SecretScan()
 
     /**
      * The gateway's events of the reply to the newest message of [sessionId]. The route is decided by [router] from that message (its text
@@ -93,7 +111,7 @@ class ProjectChatReplier(
      * route, budget or policy) is thrown as a GatewayException when the flow is collected.
      */
     fun reply(sessionId: String): Flow<ModelEvent> = flow {
-        val base = request(sessionId)
+        val base = turnRequest(sessionId)
         val r = router
         val newest = chats.recentMessages(sessionId, 1).lastOrNull()
         val req = if (r == null || newest == null || newest.role != ROLE_USER) base
@@ -116,7 +134,7 @@ class ProjectChatReplier(
      */
     fun converse(sessionId: String, runner: ChatToolRunner? = null): Flow<ChatReplyEvent> = flow {
         val tools = runner?.offered.orEmpty()
-        val base = request(sessionId, tools)
+        val base = turnRequest(sessionId, tools)
         val r = router
         val newest = chats.recentMessages(sessionId, 1).lastOrNull()
         // One routing decision for the whole turn, from the newest operator message. With tools the request needs TOOL_CALLING, so the router's
@@ -195,14 +213,81 @@ class ProjectChatReplier(
         emit(if (text.isNotBlank()) ChatReplyEvent.Completed(text.toString()) else ChatReplyEvent.Failed(code))
     }
 
-    /** The request for the reply to [sessionId]'s newest message, hosted only (the router may widen it). Internal: tests check the fields. */
-    internal fun request(sessionId: String, tools: List<ChatTool> = emptyList()): ModelRequest {
-        // A window cut can start with an assistant message; the model's history must start with the user's.
-        val history = compactor?.history(sessionId) ?: chats.recentMessages(sessionId, HISTORY_LIMIT)
-            .dropWhile { it.role != ROLE_USER }
-            .map { it.toMessage() }
-        val systemPrompt = if (compactor == null) SYSTEM_PROMPT else "$SYSTEM_PROMPT\n$SUMMARY_RULE"
-        return ModelRequest(
+    /**
+     * The request for the reply to [sessionId]'s newest message, with rolling compression when configured, or the raw window, hosted only (the router may widen it).
+     * Internal: tests check the fields.
+     */
+    internal fun request(sessionId: String, tools: List<ChatTool> = emptyList()): ModelRequest =
+        compactor?.let { modelRequest(it.history(sessionId), tools, "$SYSTEM_PROMPT\n$SUMMARY_RULE") }
+            ?: requestWith(chats.recentMessages(sessionId, HISTORY_LIMIT), tools, summaryBlock = null)
+
+    /**
+     * The turn's request uses [request] for rolling compression or the raw window. The per-turn
+     * summary is one model call per turn, made before the reply's own calls. It is skipped (raw window) when the session has at most
+     * [SUMMARY_MIN_MESSAGES] messages, when the whole history is shorter than [SUMMARY_MIN_CHARS], when the newest message is not the user's,
+     * and when there is no [summarizer]. Any failure of the summary (a gateway refusal, a timeout, a bad or secret-like summary) is logged with
+     * its fixed code and falls back to the raw window.
+     */
+    internal suspend fun turnRequest(sessionId: String, tools: List<ChatTool> = emptyList()): ModelRequest {
+        if (compactor != null || summarizer == null) return request(sessionId, tools)
+        val recent = chats.recentMessages(sessionId, maxOf(HISTORY_LIMIT, summaryLimits.maxMessages + 1))
+        return requestWith(recent, tools, summaryBlockFor(recent))
+    }
+
+    /** The summary block for [recent] (oldest first, the newest message last), or null for the raw window. */
+    private suspend fun summaryBlockFor(recent: List<ProjectChatMessageRow>): String? {
+        val summarizer = summarizer ?: return null
+        if (recent.size <= SUMMARY_MIN_MESSAGES || recent.last().role != ROLE_USER) return null
+        if (recent.sumOf { it.content.length.toLong() } < SUMMARY_MIN_CHARS) return null
+        val input = selectSummaryInput(recent.dropLast(1), summaryLimits)
+        if (input.messages.isEmpty()) return null
+        val summary = try {
+            withTimeoutOrNull(summaryLimits.timeout) { summarizer.summarize(input) }
+                ?: return skipSummary("TIMEOUT")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: GatewayException) {
+            return skipSummary(e.error.code ?: e.error.kind.name)
+        } catch (e: ChatSummaryFailure) {
+            return skipSummary(e.code)
+        } catch (e: Exception) {
+            return skipSummary(e::class.simpleName ?: "ERROR")
+        }
+        if (summary.text.isBlank()) return skipSummary("EMPTY")
+        if (summary.text.length > summaryLimits.maxOutputChars) return skipSummary("TOO_LONG")
+        if (secretScan.detectsText(summary.text)) return skipSummary("SECRET_IN_SUMMARY")
+        val block = (1..ChatSummaryPrompt.MAX_NONCE_ATTEMPTS).asSequence()
+            .map { ChatSummaryPrompt.replyBlock(summary, summaryNonce()) }
+            .firstOrNull { it != null }
+            ?: return skipSummary("NONCE")
+        log.info("project chat summary used: messages={} omitted={} chars={}", input.messages.size, summary.omitted, summary.text.length)
+        return block
+    }
+
+    private fun skipSummary(code: String): String? {
+        log.warn("project chat summary skipped, the raw window is used: code={}", code)
+        return null
+    }
+
+    /**
+     * The request with [recent] (oldest first) as the history. Without a [summaryBlock], the history is the newest [HISTORY_LIMIT] messages,
+     * starting at a user message. With one, the history is the summary block, then the raw exchange that precedes the newest user message (its
+     * assistant message, if any) verbatim, then the newest user message verbatim: the consent and the question are never only a summary.
+     */
+    private fun requestWith(recent: List<ProjectChatMessageRow>, tools: List<ChatTool>, summaryBlock: String?): ModelRequest {
+        val history: List<Message> = if (summaryBlock == null) {
+            // A window cut can start with an assistant message; the model's history must start with the user's.
+            recent.takeLast(HISTORY_LIMIT).dropWhile { it.role != ROLE_USER }.map { it.toMessage() }
+        } else {
+            val newest = recent.last()
+            val precedingAssistant = recent.getOrNull(recent.size - 2)?.takeIf { it.role == ROLE_ASSISTANT }
+            listOf(Message(Role.USER, summaryBlock)) + listOfNotNull(precedingAssistant?.toMessage()) + newest.toMessage()
+        }
+        return modelRequest(history, tools, SYSTEM_PROMPT)
+    }
+
+    private fun modelRequest(history: List<Message>, tools: List<ChatTool>, systemPrompt: String): ModelRequest =
+        ModelRequest(
             requestId = "$REQUEST_ID_PREFIX${UUID.randomUUID()}",
             principal = CHAT_PRINCIPAL,
             purpose = Purpose.OTHER,
@@ -218,7 +303,6 @@ class ProjectChatReplier(
             // The deadline covers the whole stream, so it is longer than the one-shot default.
             timeout = TIMEOUT,
         )
-    }
 
     internal fun afterReply(sessionId: String, replyId: Long) {
         compactor?.afterReply(sessionId, replyId)
@@ -232,6 +316,12 @@ class ProjectChatReplier(
 
         /** The longest message the reply route accepts. Longer text is refused, so one message cannot grow the prompt without bound. */
         const val CONTENT_MAX = 4_000
+
+        /** A session with at most this many messages is never summarized (ADR 0023 追補 8). */
+        const val SUMMARY_MIN_MESSAGES = 2
+
+        /** A history shorter than this many characters (all its messages, the newest included) is sent raw, not summarized (ADR 0023 追補 8). */
+        const val SUMMARY_MIN_CHARS = 3_000L
 
         /**
          * The output tokens of one round. A plan presented to the operator, and the same plan in full in a child order's instruction (up to

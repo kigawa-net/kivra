@@ -28,6 +28,10 @@ data class ProviderEntry(
     val endpoint: String,
     /** Name (env var / secret ref) of the credential. The value never lives in the registry. */
     val credentialRef: String,
+    /** Optional provider/deployment RPM and TPM; absent means no configured client-side cap. */
+    val rateLimit: RateLimit? = null,
+    /** Independent per-principal RPM/TPM, scoped to this provider. */
+    val principalRateLimit: RateLimit? = null,
 )
 
 enum class Lifecycle { PREVIEW, ACTIVE, DEPRECATED, RETIRED }
@@ -239,7 +243,24 @@ object RegistryLoader {
             enabled = m["enabled"] as? Boolean ?: false,
             endpoint = endpoint,
             credentialRef = req(m, "credentialRef", ctx),
+            rateLimit = rateLimit(m, "rateLimit", ctx),
+            principalRateLimit = rateLimit(m, "principalRateLimit", ctx),
         )
+    }
+
+    private fun rateLimit(m: Map<*, *>, key: String, ctx: String): RateLimit? {
+        val raw = m[key] ?: return null
+        val limits = raw as? Map<*, *> ?: throw RegistryException("$ctx: $key must be a mapping")
+        fun positive(name: String): Long? = limits[name]?.let {
+            it.toString().toLongOrNull()?.takeIf { value -> value > 0 }
+                ?: throw RegistryException("$ctx: $key.$name must be a positive integer")
+        }
+        if (limits.keys.any { it !in setOf("requestsPerMinute", "tokensPerMinute") } || limits.isEmpty())
+            throw RegistryException("$ctx: $key requires requestsPerMinute or tokensPerMinute")
+        val rpm = positive("requestsPerMinute")
+        val tpm = positive("tokensPerMinute")
+        if (rpm == null && tpm == null) throw RegistryException("$ctx: $key requires a non-null limit")
+        return RateLimit(rpm, tpm)
     }
 
     private fun isUnknownPlaceholder(v: Any?): Boolean = v?.toString()?.trim().equals("UNKNOWN", ignoreCase = true)

@@ -79,19 +79,22 @@ internal val MIGRATION_FILES = mapOf(
     56 to "V56__project_chat_actions.sql",
     57 to "V57__project_chat_action_targets.sql",
     58 to "V58__selfdev_order_policy_8000.sql",
-    59 to "V59__selfdev_order_assignments.sql",
-    60 to "V60__project_chat_summaries.sql",
+    59 to "V59__plan_state_store.sql",
+    60 to "V60__selfdev_order_split_proposals.sql",
+    61 to "V61__selfdev_order_assignments.sql",
+    62 to "V62__project_chat_summaries.sql",
 )
+
 /**
  * Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved; V30 is left
  * for another change, and V31 is the auto-merge pause, ADR 0014 U-10). A change that takes V30 removes it from this set.
  */
 internal val RESERVED_MIGRATION_VERSIONS: Set<Int> =
-    if (59 in MIGRATION_FILES) setOf(22, 30) else setOf(22, 30, 59)
+    setOf(22, 30)
 
 /** The versions applied on the full chain. */
 internal val EXPECTED_APPLIED_VERSIONS: List<String> =
-    (1..60).filterNot { it in RESERVED_MIGRATION_VERSIONS }.map { it.toString() }
+    (1..62).filterNot { it in RESERVED_MIGRATION_VERSIONS }.map { it.toString() }
 
 /**
  * Migration chain V1 -> V2 -> ... -> V21 (Issue #88, #94, #53, #100, #112, #26, #56, #229, #277). Runs on H2 by default and on MariaDB with `KIVRA_TEST_DB=mariadb`.
@@ -123,6 +126,7 @@ class MigrationChainTest {
         assertEquals(1, db.tableCount("selfdev_assignee_events"))
         assertEquals(1, db.count("selfdev_memory_quota_lock"))
         assertEquals(1, db.tableCount("selfdev_orders"))
+        assertEquals(1, db.tableCount("selfdev_order_split_proposals"))
         assertEquals(1, db.tableCount("selfdev_order_stop_requests"))
         assertEquals(1, db.tableCount("selfdev_order_events"))
         // selfdev_goals dropped in V40

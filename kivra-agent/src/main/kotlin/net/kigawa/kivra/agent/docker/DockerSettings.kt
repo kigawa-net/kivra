@@ -58,6 +58,16 @@ internal object ProxyEnv {
     /** The k8s variant: the host may be a dotted DNS name (a Service in another namespace, `svc.ns.svc`). The docker side keeps a single label. */
     private val K8S_PROXY = Regex("http://(${DockerPatterns.K8S_HOST}):([0-9]{1,5})")
 
+    fun anthropicBaseUrl(proxyUrl: String, claudeAccount: String?): String =
+        proxyUrl + DockerConstants.PROXY_PATH + (claudeAccount?.let { "/$it" } ?: "")
+
+    fun isAllowedAccount(claudeAccount: String?, allowedAccounts: Set<String>): Boolean =
+        if (claudeAccount == null) allowedAccounts.isEmpty() else claudeAccount in allowedAccounts
+
+    fun isAllowedAnthropicBaseUrl(value: String, proxyUrl: String, allowedAccounts: Set<String>): Boolean =
+        if (allowedAccounts.isEmpty()) value == anthropicBaseUrl(proxyUrl, null)
+        else allowedAccounts.any { value == anthropicBaseUrl(proxyUrl, it) }
+
     fun javaToolOptions(proxyUrl: String): String = options(PROXY.matchEntire(proxyUrl), proxyUrl)
 
     /** Like [javaToolOptions], for a k8s Job: the host may be a dotted DNS name (whole name at most 253 characters). */
@@ -96,6 +106,9 @@ internal object DockerPatterns {
     /** Networks that are never accepted by name: host and container namespaces, none, and the default bridge. */
     val RESERVED_NETWORKS = setOf("host", "none", "bridge", "default")
 
+    /** Keep this in sync with the Go proxy. Exclude values that look like Anthropic credentials. */
+    val ACCOUNT = Regex("(?!.*sk-ant-)[a-z0-9][a-z0-9-]{0,62}")
+
     /** The model id: lowercase letters, digits, dots and hyphens (runbook 6.10b). */
     val MODEL = Regex("[a-z0-9][a-z0-9.-]{0,63}")
 
@@ -132,11 +145,19 @@ class DockerSettings(
     allowedNetworks: Set<String>,
     allowedImages: Set<String>,
     allowedModels: Set<String> = setOf(CliCommand.DEFAULT_MODEL),
+    allowedAccounts: Set<String> = emptySet(),
 ) {
     val workRoot: Path = checkWorkRoot(workRoot)
     val allowedNetworks: Set<String> = checkNetworks(allowedNetworks)
     val allowedImages: Set<String> = checkImages(allowedImages)
     val allowedModels: Set<String> = checkModels(allowedModels)
+
+    /** Named Claude accounts allowed by the guard. An empty set selects the default route. */
+    val allowedAccounts: Set<String> = allowedAccounts.toSet().also { accounts ->
+        if (accounts.any { !DockerPatterns.ACCOUNT.matches(it) }) {
+            throw DockerSpecException("allowedAccounts contains an invalid account id")
+        }
+    }
 
     init {
         if (!dockerBinary.isAbsolute) throw DockerSpecException("dockerBinary must be an absolute path")

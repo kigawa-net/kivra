@@ -284,7 +284,7 @@ private fun KivraAppContent(
                             projects.forEach { project ->
                                 val node = project.asNode()
                                 NavigationDrawerItem(
-                                    selected = route.projectIdOrNull == node.id.id && route !is Route.Page,
+                                    selected = route.projectIdOrNull == node.id && route !is Route.Page,
                                     onClick = { navigate(route.inNodeContext(node)) },
                                     label = { Text(node.name) },
                                 )
@@ -297,7 +297,7 @@ private fun KivraAppContent(
                                     label = { Text(UNASSIGNED_LABEL) },
                                 )
                             }
-                            (sidebarSections() + listOfNotNull(operationSidebarSection(route))).forEach { section ->
+                            sidebarSections(route).forEach { section ->
                                 // 権限と自律運転・API の結果で隠す項目を外し、残りが無い節は見出しごと出さない。
                                 val items = section.items.filter {
                                     perms.navVisible(it.dest) &&
@@ -424,8 +424,8 @@ private fun KivraAppContent(
                                 else -> Unit
                             }
                             is Route.ProjectPage -> when (r.dest) {
-                                NavDestination.Dashboard -> ProjectDashboardScreen(r.projectId, navigate, visibleLinks(r.projectId), approvalsBadgeText(pendingApprovals))
-                                NavDestination.Operations -> OperationsScreen(navigate, NodeId(r.projectId, NodeKind.PROJECT))
+                                NavDestination.Dashboard -> ProjectDashboardScreen(r.projectId, navigate)
+                                NavDestination.Operations -> OperationsScreen(navigate, NodeRef(r.projectId, NodeKind.PROJECT))
                                 NavDestination.Tasks -> TasksScreen(r.projectId, navigate)
                                 NavDestination.Goals -> GoalsScreen(r.projectId, navigate)
                                 NavDestination.Orders -> OrdersScreen(r.projectId, navigate)
@@ -442,10 +442,8 @@ private fun KivraAppContent(
                             )
                             is Route.Legacy -> Unit
                             is Route.RunDetail -> RunDetailScreen(r.runId, navigate)
-                            is Route.OperationChildren -> OperationsScreen(navigate, NodeId(r.parentId, NodeKind.OPERATION))
-                            is Route.OperationDetail -> OperationDashboardScreen(
-                                r.operationId, navigate, r.parentId?.let { NodeId(it, r.parentKind) },
-                            )
+                            is Route.OperationChildren -> OperationsScreen(navigate, NodeRef(r.operationId, NodeKind.OPERATION))
+                            is Route.OperationDetail -> OperationDashboardScreen(r.operationId, r.operationParent, navigate)
                             is Route.GoalDetail -> GoalDetailScreen(r.taskId, navigate)
                             is Route.OrderDetail -> OrderDetailScreen(r.orderId, navigate)
                             is Route.OrderCycles -> OrderCyclesScreen(r.orderId, navigate)

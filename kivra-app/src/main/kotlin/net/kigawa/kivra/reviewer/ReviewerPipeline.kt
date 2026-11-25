@@ -1,6 +1,8 @@
 package net.kigawa.kivra.reviewer
 
 import net.kigawa.kivra.core.DevelopmentRunState
+import net.kigawa.kivra.planner.PlanStateStore
+import net.kigawa.kivra.planner.InMemoryPlanStateStore
 import net.kigawa.kivra.agent.AgentProfile
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import org.slf4j.LoggerFactory
@@ -52,15 +54,9 @@ class ReviewerPipeline(
     private val runRepo: DevelopmentRunRepository,
     private val config: ReviewerPipelineConfig,
     private val clock: Clock = Clock.systemUTC(),
+    private val stateStore: PlanStateStore = InMemoryPlanStateStore(),
 ) {
     private val logger = LoggerFactory.getLogger(ReviewerPipeline::class.java)
-
-    /**
-     * Retrieves or creates the review state for a run.
-     * In a full implementation, this would be persisted in the database.
-     * For now, it's in-memory only (will be persisted in follow-up).
-     */
-    private val reviewStates = mutableMapOf<UUID, ReviewState>()
 
     /**
      * Check if a run should enter the review phase.
@@ -83,7 +79,7 @@ class ReviewerPipeline(
      * Returns true if the run was successfully processed, false if escalation is needed.
      */
     suspend fun processReviewerResult(runId: UUID, result: ReviewerResult): ReviewerPipelineOutcome {
-        val state = reviewStates[runId] ?: ReviewState()
+        val state = stateStore.getReviewState(runId) ?: ReviewState()
         val newRound = state.reviewRound + 1
 
         logger.info(
@@ -105,11 +101,11 @@ class ReviewerPipeline(
         return when (result.verdict) {
             ReviewerVerdict.APPROVE -> {
                 // Update state and return approval outcome
-                reviewStates[runId] = state.copy(
+                stateStore.saveReviewState(runId, state.copy(
                     reviewRound = newRound,
                     previousFindings = findingHashes,
                     lastVerdict = result.verdict
-                )
+                ))
                 ReviewerPipelineOutcome.APPROVED
             }
 
@@ -122,11 +118,11 @@ class ReviewerPipeline(
                     ReviewerPipelineOutcome.ESCALATED_LIMIT_REACHED
                 } else {
                     // Allow another round
-                    reviewStates[runId] = state.copy(
+                    stateStore.saveReviewState(runId, state.copy(
                         reviewRound = newRound,
                         previousFindings = findingHashes,
                         lastVerdict = result.verdict
-                    )
+                    ))
                     ReviewerPipelineOutcome.REQUEST_CHANGES_ACCEPTED
                 }
             }
@@ -144,13 +140,13 @@ class ReviewerPipeline(
     /**
      * Get the current review state for a run.
      */
-    fun getReviewState(runId: UUID): ReviewState? = reviewStates[runId]
+    fun getReviewState(runId: UUID): ReviewState? = stateStore.getReviewState(runId)
 
     /**
      * Check if a run has reached the review limit.
      */
     fun hasReachedLimit(runId: UUID): Boolean {
-        val state = reviewStates[runId] ?: return false
+        val state = stateStore.getReviewState(runId) ?: return false
         return state.reviewRound >= config.maxReviewRounds
     }
 }

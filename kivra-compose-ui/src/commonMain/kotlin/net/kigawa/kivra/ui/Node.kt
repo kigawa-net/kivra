@@ -3,32 +3,48 @@ package net.kigawa.kivra.ui
 import net.kigawa.kivra.ui.api.ApiOperation
 import net.kigawa.kivra.ui.api.ApiProject
 
-/** 種類も含めて識別する。同じ ID の Project と Operation を混同しない。 */
-enum class NodeKind { PROJECT, OPERATION }
+/**
+ * Project と Operation の ID 空間を区別する。
+ * project と operation の総称は unit(ADR 0025)。
+ */
+enum class NodeKind(val label: String) { PROJECT("Project"), OPERATION("Operation") }
 
-data class NodeId(val id: String, val kind: NodeKind) {
+data class NodeRef(val id: String, val kind: NodeKind) {
     init { require(id.isNotBlank()) }
 }
 
-/** API の DTO とは独立した UI のノード。親子はどちらの種類でも、何階層でも表せる。 */
-data class Node(val id: NodeId, val name: String, val parentId: NodeId? = null)
+/** API の DTO を変更せず、どちらの種類も親にも子にもできる UI のノード(unit。ADR 0025)。 */
+data class Node(val ref: NodeRef, val name: String, val parent: NodeRef? = null) {
+    val id: String get() = ref.id
+    val parentId: String? get() = parent?.id
 
-fun ApiOperation.asNode(parentId: NodeId? = null): Node = Node(NodeId(id, NodeKind.OPERATION), name, parentId)
-fun ApiProject.asNode(parentId: NodeId? = null): Node = Node(NodeId(projectId, NodeKind.PROJECT), name, parentId)
-
-fun Node.openRoute(): Route = when (id.kind) {
-    NodeKind.PROJECT -> Route.ProjectPage(id.id, NavDestination.Dashboard)
-    NodeKind.OPERATION -> Route.OperationDetail(id.id, parentId?.id, parentId?.kind ?: NodeKind.OPERATION)
+    fun operationsRoute(): Route = when (ref.kind) {
+        NodeKind.PROJECT -> Route.ProjectPage(id, NavDestination.Operations)
+        NodeKind.OPERATION -> Route.OperationChildren(id)
+    }
 }
 
-fun operationsRouteOf(parent: NodeId?): Route = when (parent?.kind) {
-    null -> Route.Page(NavDestination.Operations)
-    NodeKind.PROJECT -> Route.ProjectPage(parent.id, NavDestination.Operations)
-    NodeKind.OPERATION -> Route.OperationChildren(parent.id)
-}
+fun ApiOperation.asNode(parent: NodeRef? = null): Node = Node(NodeRef(id, NodeKind.OPERATION), name, parent)
+fun ApiProject.asNode(parent: NodeRef? = null): Node = Node(NodeRef(projectId, NodeKind.PROJECT), name, parent)
+
+fun operationRoute(operationId: String, parent: NodeRef?): Route.OperationDetail =
+    Route.OperationDetail(operationId, parent?.id, parent?.kind ?: NodeKind.OPERATION)
+
+/** parentId なしは既存のルート Operation 一覧。絞り込みはサーバーが行う。 */
+fun operationsPath(parentId: String? = null): String =
+    if (parentId == null) "/api/operations" else "/api/operations?parentId=${percentEncode(parentId)}"
+
+/** サイドナビの選択は親の種類と ID も含めて判定する。 */
+val Route.operationParent: NodeRef?
+    get() = when (this) {
+        is Route.OperationDetail -> parentId?.let { NodeRef(it, parentKind) }
+        is Route.OperationChildren -> NodeRef(operationId, NodeKind.OPERATION)
+        is Route.ProjectPage -> if (dest == NavDestination.Operations) NodeRef(projectId, NodeKind.PROJECT) else null
+        else -> null
+    }
 
 /** ノードの切替。Project の既存の画面種別は引き継ぐ。 */
-fun Route.inNodeContext(node: Node): Route = when (node.id.kind) {
-    NodeKind.PROJECT -> inProjectContext(node.id.id)
-    NodeKind.OPERATION -> node.openRoute()
+fun Route.inNodeContext(node: Node): Route = when (node.ref.kind) {
+    NodeKind.PROJECT -> inProjectContext(node.id)
+    NodeKind.OPERATION -> operationRoute(node.id, node.parent)
 }

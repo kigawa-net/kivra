@@ -75,7 +75,9 @@ object ApiClient {
 
     private const val OPERATIONS_BASE_PATH = "/api/operations"
 
-    suspend fun getOperations(parentId: String? = null): List<ApiOperation> = getJson(operationsPath(parentId))
+    /** null は親なしの一覧。親 ID を指定すると、その Project / Operation の子を取得する。 */
+    suspend fun getOperations(parentId: String? = null): List<ApiOperation> =
+        getJson(net.kigawa.kivra.ui.operationsPath(parentId))
 
     suspend fun getOperation(operationId: String): ApiOperation =
         getJson("$OPERATIONS_BASE_PATH/${percentEncode(operationId)}")
@@ -135,6 +137,21 @@ object ApiClient {
     /** order の詳細。`GET /api/selfdev/orders/{id}`。 */
     suspend fun getOrder(orderId: String): ApiOrderDetail =
         getJson("/api/selfdev/orders/${percentEncode(orderId)}")
+
+    /** 子 order の提案の一覧。`GET /api/selfdev/orders/{id}/split-proposals`(読むのは READ)。 */
+    suspend fun getSplitProposals(orderId: String): List<ApiSplitProposal> =
+        getJson("/api/selfdev/orders/${percentEncode(orderId)}/split-proposals")
+
+    /**
+     * 提案の承認。`POST /api/selfdev/orders/{id}/split-proposals/{proposalId}/approve`、本文は空の JSON。子 order は提案の題名・方針・周の上限で
+     * サーバーが作る(画面からは何も送らない)。409 は PROPOSAL_* や上限の code、403 は ORDER_MANAGE の無い利用者。
+     */
+    suspend fun approveSplitProposal(orderId: String, proposalId: String) =
+        postWrite("/api/selfdev/orders/${percentEncode(orderId)}/split-proposals/${percentEncode(proposalId)}/approve", EmptyJsonBody())
+
+    /** 提案の却下。`POST /api/selfdev/orders/{id}/split-proposals/{proposalId}/reject`、本文は空の JSON。 */
+    suspend fun rejectSplitProposal(orderId: String, proposalId: String) =
+        postWrite("/api/selfdev/orders/${percentEncode(orderId)}/split-proposals/${percentEncode(proposalId)}/reject", EmptyJsonBody())
 
     /** order の周の一覧(周番号順)。`GET /api/selfdev/orders/{id}/cycles`。 */
     suspend fun getOrderCycles(orderId: String): List<ApiOrderCycle> =
@@ -453,6 +470,13 @@ object ApiClient {
      */
     suspend fun rejectGoal(taskId: String, version: Long) =
         postWrite("/api/selfdev/tasks/${percentEncode(taskId)}/reject", VersionRequest(version))
+
+    /**
+     * 失敗・解放されたタスクの再投入。`POST /api/selfdev/tasks/{id}/requeue`、本文 `{"version": n}`。新しい Run が 1 つ作られる(費用が発生する)。
+     * 409 は version の競合、再投入できない状態、または計画が決着済み。403 は権限(GOAL_WRITE)。
+     */
+    suspend fun requeueTask(taskId: String, version: Long) =
+        postWrite("/api/selfdev/tasks/${percentEncode(taskId)}/requeue", VersionRequest(version))
 
     /**
      * 自律運転の状態。`GET /api/selfdev/autopilot`。503 `AUTOPILOT_DISABLED` は無効(節を出さない)、403 は READ の無い利用者。

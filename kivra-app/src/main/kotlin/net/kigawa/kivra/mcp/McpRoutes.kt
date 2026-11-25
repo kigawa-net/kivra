@@ -194,7 +194,10 @@ private suspend fun ApplicationCall.respondMetadata(deps: McpRouteDeps, resource
     val body = ProtectedResourceMetadata(
         resource = resource,
         authorizationServers = listOf(deps.issuer),
-        scopesSupported = listOf("kivra.runs.read", "kivra.selfdev.start", "kivra.selfdev.stop"),
+        scopesSupported = listOf(
+            "kivra.runs.read", "kivra.selfdev.start", "kivra.selfdev.stop", SCOPE_SELFDEV_REQUEUE, SCOPE_SELFDEV_ORDER_MANAGE,
+            SCOPE_SELFDEV_TASK_DECIDE, SCOPE_SELFDEV_ORDER_CREATE,
+        ),
         bearerMethodsSupported = listOf("header"),
     )
     respondText(metadataJson.encodeToString(ProtectedResourceMetadata.serializer(), body), ContentType.Application.Json)

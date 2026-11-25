@@ -34,6 +34,7 @@ import net.kigawa.kivra.db.AbandonResult
 import net.kigawa.kivra.db.ChildCreateResult
 import net.kigawa.kivra.db.ChildLimits
 import net.kigawa.kivra.db.DEFAULT_CYCLE_BUDGET_JPY
+import net.kigawa.kivra.db.ChildProposalState
 import net.kigawa.kivra.db.ChildRefusal
 import net.kigawa.kivra.db.CycleStarted
 import net.kigawa.kivra.db.CreateRootResult
@@ -56,6 +57,8 @@ import net.kigawa.kivra.db.SelfDevOperatorRepository
 import net.kigawa.kivra.db.SelfDevOrder
 import net.kigawa.kivra.db.SelfDevOrderRepository
 import net.kigawa.kivra.db.SelfDevOrderStopRequest
+import net.kigawa.kivra.db.SplitProposal
+import net.kigawa.kivra.db.SplitProposalMark
 import net.kigawa.kivra.db.StopEnd
 import net.kigawa.kivra.db.TaskTransition
 import net.kigawa.kivra.selfdev.AutopilotSettings
@@ -203,6 +206,23 @@ data class StopRequestResponse(
 @Serializable
 data class CycleResponse(val cycleNo: Int, val goalId: String, val goalState: String, val stateReason: String?, val createdAt: String)
 
+/**
+ * A child order the Planner proposed (V60, ADR 0015 addendum 2026-11-22 PR2). [title] and [instruction] are the Planner's output: data, shown to
+ * the operator and never executed. [createdChildOrderId] is set once the proposal is APPROVED.
+ */
+@Serializable
+data class SplitProposalResponse(
+    val proposalId: String,
+    val planId: String,
+    val ordinal: Int,
+    val title: String,
+    val instruction: String,
+    val maxCycles: Int,
+    val state: String,
+    val createdAt: String,
+    val createdChildOrderId: String?,
+)
+
 @Serializable
 data class CycleStartedResponse(val orderId: String, val goalId: String, val cycleNo: Int, val version: Long)
 
@@ -218,7 +238,8 @@ private val strictJson = Json { ignoreUnknownKeys = false }
 private val ORDER_ID_SHAPE = Regex("[0-9A-Z]{26}")
 private val DIGEST_SHAPE = Regex("[0-9a-f]{64}")
 private const val LIST_LIMIT = 50
-private const val MAX_TITLE_CODE_POINTS = 200
+/** A root order's title: 1 to this many code points, shared by the REST routes and `/mcp` (`kivra_order_create`). */
+internal const val MAX_TITLE_CODE_POINTS = 200
 /** An order's policy (V58, ADR 0023 追補 7): the limit of the Task body it becomes. Shared by the REST routes and the chat's child order. */
 internal const val MAX_POLICY_CODE_POINTS = 8_000
 private const val MAX_CHILD_KEY_CODE_POINTS = 128
@@ -257,14 +278,13 @@ private suspend fun createOrder(deps: SelfDevOrderRouteDeps, call: ApplicationCa
     if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return
     if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.create")) return
     val request = decodeOr<CreateOrderRequest>(call) ?: return
-    val title = validatedText(request.title, MAX_TITLE_CODE_POINTS)
-    val policy = validatedPolicy(request.policy)
-    if (title == null) return call.respond(HttpStatusCode.BadRequest, OrderError(TITLE_INVALID))
-    if (policy == null) return call.respond(HttpStatusCode.BadRequest, OrderError(POLICY_INVALID))
-    val maxCycles = request.maxCycles ?: 1
-    if (maxCycles !in 1..deps.orderSettings.maxCyclesCap) {
-        return call.respond(HttpStatusCode.BadRequest, OrderError(MAX_CYCLES_INVALID, MAX_CYCLES_INVALID_CODE))
+    val fields = when (val check = checkRootOrderFields(request.title, request.policy, request.maxCycles ?: 1, deps.orderSettings.maxCyclesCap)) {
+        is RootOrderCheck.Valid -> check.fields
+        is RootOrderCheck.Invalid -> return call.respond(HttpStatusCode.BadRequest, check.field.restError())
     }
+    val title = fields.title
+    val policy = fields.policy
+    val maxCycles = fields.maxCycles
     val repo = deps.targetRepo ?: return call.respond(HttpStatusCode.ServiceUnavailable, OrderError(ORDERS_DISABLED))
     // The alias (ADR 0022 PR-E) takes the path's project; the body's projectId, when given, must be the same.
     val projectId = when (val scope = pinned?.let { deps.projects.scopeOfPath(it, request.projectId) } ?: deps.projects.scopeOf(request.projectId)) {
@@ -321,6 +341,7 @@ private const val REASON_INVALID = "reasonCode is not one of the fixed codes"
 private const val DIGEST_INVALID = "digest must be 64 lowercase hex characters"
 private const val STATE_INVALID = "state must be PENDING"
 private const val CHILDREN_DISABLED = "child orders are disabled"
+private const val CHILDREN_DISABLED_TEXT = CHILDREN_DISABLED
 private const val CHILD_FIELDS_INVALID = "title and policy as for an order, and idempotencyKey 1-128 characters without control characters"
 private const val MAX_CYCLES_INVALID = "maxCycles must be a whole number from 1 to the configured cap"
 private const val MAX_CYCLES_INVALID_CODE = "MAX_CYCLES_INVALID"
@@ -328,6 +349,10 @@ private const val BUDGET_INVALID = "orderBudgetJpy must be a whole number of yen
 private const val BUDGET_BELOW_CYCLE = "orderBudgetJpy must be at least the cycle budget of 1000 yen"
 private const val PARENT_NOT_ACTIVE = "the parent order is not active; a child needs an active parent"
 private const val KEY_CONFLICT = "idempotency key was already used with a different request"
+private const val PROPOSAL_NOT_FOUND = "split proposal not found"
+private const val PROPOSAL_STATE_INVALID = "state must be one of PROPOSED, APPROVED, REJECTED, EXPIRED"
+private const val PROPOSAL_STATE_CHANGED = "the proposal changed while its child was made; the child is in the operator log"
+private const val SPLIT_PROPOSAL_STATE_CHANGED = "SPLIT_PROPOSAL_STATE_CHANGED"
 
 private val operatorLog = LoggerFactory.getLogger("net.kigawa.kivra.selfdev.order.operator")
 
@@ -435,6 +460,60 @@ internal fun Route.configureSelfDevOrderRoutes(deps: SelfDevOrderRouteDeps) {
 
     post("/api/selfdev/orders/{id}/children") { createChildOrder(deps, call) }
     post("/api/projects/{projectId}/orders/{id}/children") { createChildOrder(deps, call) }
+
+    // The child order proposals of a root order (ADR 0015 addendum 2026-11-22, PR2). Reading needs READ, as the cycles do. Approving and rejecting
+    // need ORDER_MANAGE: approving creates the child, and only an operator creates one (U-19). The AI principal is refused before anything is read.
+    get("/api/selfdev/orders/{id}/split-proposals") {
+        val caller = deps.caller(call) ?: return@get
+        if (!deps.requireEnabled(call)) return@get
+        if (!deps.permit(call, caller, Permission.READ, "order.split_proposals")) return@get
+        val order = orderIdOf(call)?.let { deps.orders.get(it) }
+        if (order != null) deps.guard.recordReadShadow(caller.access, listOf(order.projectId), "order.split_proposals")
+        if (order == null || !deps.guard.readScope(caller.access).sees(order.projectId)) {
+            return@get call.respond(HttpStatusCode.NotFound, OrderError(ORDER_NOT_FOUND))
+        }
+        val state = call.request.queryParameters["state"]?.let { name ->
+            ChildProposalState.entries.firstOrNull { it.name == name }
+                ?: return@get call.respond(HttpStatusCode.BadRequest, OrderError(PROPOSAL_STATE_INVALID))
+        }
+        call.respond(deps.operations.splitProposalsOf(order.orderId, LIST_LIMIT, state).map { it.response() })
+    }
+
+    post("/api/selfdev/orders/{id}/split-proposals/{proposalId}/approve") {
+        val caller = deps.caller(call) ?: return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        val orderId = orderIdOf(call)
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.split_proposal.approve", projectId = deps.projectOfOrder(orderId))) return@post
+        // Nothing is taken from the body: the title, the instruction and maxCycles are the proposal's (ADR 0015 addendum 2026-11-22).
+        if (!call.readEmptyBody()) return@post
+        val proposalId = proposalIdOf(call)
+        if (orderId == null || proposalId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(PROPOSAL_NOT_FOUND))
+        when (val r = deps.approveSplitProposalAsOperator(orderId, proposalId, caller.principal)) {
+            is SplitApproval.Created -> call.respond(HttpStatusCode.Created, r.order.summary())
+            is SplitApproval.Replayed -> call.respond(HttpStatusCode.OK, r.order.summary())
+            SplitApproval.NotFound -> call.respond(HttpStatusCode.NotFound, OrderError(PROPOSAL_NOT_FOUND))
+            is SplitApproval.Refused -> call.respond(HttpStatusCode.Conflict, OrderError(r.error, r.code))
+        }
+    }
+
+    post("/api/selfdev/orders/{id}/split-proposals/{proposalId}/reject") {
+        val caller = deps.caller(call) ?: return@post
+        if (!call.requireJsonSameOrigin() || !deps.requireEnabled(call)) return@post
+        val orderId = orderIdOf(call)
+        if (!deps.permit(call, caller, Permission.ORDER_MANAGE, "order.split_proposal.reject", projectId = deps.projectOfOrder(orderId))) return@post
+        if (!call.readEmptyBody()) return@post
+        val proposalId = proposalIdOf(call)
+        if (orderId == null || proposalId == null) return@post call.respond(HttpStatusCode.NotFound, OrderError(PROPOSAL_NOT_FOUND))
+        when (val r = deps.operations.rejectSplitProposal(orderId, proposalId)) {
+            is SplitProposalMark.Moved -> {
+                operatorLog.info("order operator action: action=SPLIT_PROPOSAL_REJECTED actor={} orderId={} proposalId={} result=REJECTED", operatorTag(caller.principal), orderId, proposalId)
+                call.respond(r.proposal.response())
+            }
+            is SplitProposalMark.Same -> call.respond(r.proposal.response())
+            is SplitProposalMark.Refused -> proposalRefusal(r.proposal.state).let { call.respond(HttpStatusCode.Conflict, it) }
+            SplitProposalMark.NotFound -> call.respond(HttpStatusCode.NotFound, OrderError(PROPOSAL_NOT_FOUND))
+        }
+    }
 
     post("/api/selfdev/orders/{id}/pause") {
         val caller = deps.caller(call) ?: return@post
@@ -767,6 +846,93 @@ internal fun SelfDevOrderRouteDeps.createChildAsOperator(
         else -> r
     }
 }
+
+/** The outcome of an approval (PR2). [Replayed] is a child made before: an earlier approval, or a repeat after a stop between the two writes. */
+internal sealed interface SplitApproval {
+    data class Created(val order: SelfDevOrder) : SplitApproval
+    data class Replayed(val order: SelfDevOrder) : SplitApproval
+    data object NotFound : SplitApproval
+    data class Refused(val error: String, val code: String?) : SplitApproval
+}
+
+/**
+ * Approves a proposal (ADR 0015 addendum 2026-11-22 PR2). The child is created with the operator's principal by [createChildAsOperator], from the
+ * proposal's own title, instruction and maxCycles, with the key `plan-split:{planId}:{ordinal}` and the budget the chat tool uses
+ * (DEFAULT_CYCLE_BUDGET_JPY per cycle). The child is written in its own transaction; then the proposal is marked APPROVED with the child's ID, as a
+ * conditional write. If the process stops between the two, a repeat finds the same key and gets the same child (Replayed), so no second child is
+ * made. An APPROVED proposal returns its child, so the approval is idempotent.
+ */
+internal fun SelfDevOrderRouteDeps.approveSplitProposalAsOperator(orderId: String, proposalId: String, principal: String): SplitApproval {
+    // The same answer as POST .../children while the children are off (KIVRA_SELFDEV_ORDER_MAX_DEPTH below 1).
+    if (orderSettings.maxDepth < 1) return SplitApproval.Refused(CHILDREN_DISABLED_TEXT, "CHILDREN_DISABLED")
+    val proposal = operations.splitProposal(orderId, proposalId) ?: return SplitApproval.NotFound
+    when (proposal.state) {
+        ChildProposalState.APPROVED -> {
+            val child = proposal.createdChildOrderId?.let { orders.get(it) }
+                ?: return SplitApproval.Refused(PROPOSAL_STATE_CHANGED, SPLIT_PROPOSAL_STATE_CHANGED)
+            return SplitApproval.Replayed(child)
+        }
+        ChildProposalState.REJECTED, ChildProposalState.EXPIRED -> return proposalRefusal(proposal.state).let { SplitApproval.Refused(it.error, it.code) }
+        ChildProposalState.PROPOSED -> Unit
+    }
+    val created = createChildAsOperator(
+        parentId = orderId,
+        title = proposal.title,
+        policy = proposal.instruction,
+        orderBudgetJpy = DEFAULT_CYCLE_BUDGET_JPY * proposal.maxCycles,
+        idempotencyKey = "plan-split:${proposal.planId}:${proposal.ordinal}",
+        principal = principal,
+        maxCycles = proposal.maxCycles,
+    )
+    val child = when (created) {
+        is ChildCreateResult.Created -> created.order
+        is ChildCreateResult.Replayed -> created.order
+        is ChildCreateResult.Refused -> return SplitApproval.Refused(refusedChildText(created.reason), created.reason.name)
+        ChildCreateResult.KeyConflict -> return SplitApproval.Refused(KEY_CONFLICT, "KEY_CONFLICT")
+    }
+    return when (operations.markSplitProposalApproved(orderId, proposalId, child.orderId)) {
+        is SplitProposalMark.Moved -> {
+            operatorLog.info(
+                "order operator action: action=SPLIT_PROPOSAL_APPROVED actor={} orderId={} proposalId={} childOrderId={} result=APPROVED",
+                operatorTag(principal), orderId, proposalId, child.orderId,
+            )
+            if (created is ChildCreateResult.Created) SplitApproval.Created(child) else SplitApproval.Replayed(child)
+        }
+        // A concurrent approval wrote the mark first. Whether this call made the child is still what decides Created or Replayed.
+        is SplitProposalMark.Same -> if (created is ChildCreateResult.Created) SplitApproval.Created(child) else SplitApproval.Replayed(child)
+        // The proposal left PROPOSED while its child was made (a concurrent reject). The child exists; its ID is in the log for the operator.
+        is SplitProposalMark.Refused -> {
+            operatorLog.warn(
+                "order operator action: action=SPLIT_PROPOSAL_APPROVED actor={} orderId={} proposalId={} childOrderId={} result=STATE_CHANGED",
+                operatorTag(principal), orderId, proposalId, child.orderId,
+            )
+            SplitApproval.Refused(PROPOSAL_STATE_CHANGED, SPLIT_PROPOSAL_STATE_CHANGED)
+        }
+        SplitProposalMark.NotFound -> SplitApproval.NotFound
+    }
+}
+
+/** The fixed refusal of a proposal that is not PROPOSED: its text and code (`PROPOSAL_{STATE}`). */
+private fun proposalRefusal(state: ChildProposalState): OrderError = when (state) {
+    ChildProposalState.APPROVED -> OrderError("the proposal was already approved", "PROPOSAL_APPROVED")
+    ChildProposalState.REJECTED -> OrderError("the proposal was rejected", "PROPOSAL_REJECTED")
+    ChildProposalState.EXPIRED -> OrderError("the proposal has expired: its plan was superseded or its order is no longer active", "PROPOSAL_EXPIRED")
+    ChildProposalState.PROPOSED -> OrderError("the proposal is still open", "PROPOSAL_OPEN")
+}
+
+private fun SplitProposal.response() = SplitProposalResponse(
+    proposalId = proposalId,
+    planId = planId,
+    ordinal = ordinal,
+    title = title,
+    instruction = instruction,
+    maxCycles = maxCycles,
+    state = state.name,
+    createdAt = createdAt.utc(),
+    createdChildOrderId = createdChildOrderId,
+)
+
+private fun proposalIdOf(call: ApplicationCall): String? = call.pathParam("proposalId")?.takeIf { ORDER_ID_SHAPE.matches(it) }
 
 /** True while the order routes answer (the orders and the autopilot are on): the same condition as each route's 503. */
 internal fun SelfDevOrderRouteDeps.ordersEnabled(): Boolean = orderSettings.enabled && autopilot.enabled && autopilot.config != null
@@ -1123,6 +1289,37 @@ private fun OrderCycle.response() = CycleResponse(
     stateReason = stateReason,
     createdAt = createdAt.utc(),
 )
+
+/** The fields of a root order, as the REST route takes them (title, policy, most cycles). Built only by [checkRootOrderFields]. */
+internal class RootOrderFields(val title: String, val policy: String, val maxCycles: Int)
+
+/** The field that failed the root order's checks, with its fixed text (the same text the REST route answers). */
+internal enum class RootOrderField(val text: String) {
+    TITLE(TITLE_INVALID),
+    POLICY(POLICY_INVALID),
+    MAX_CYCLES(MAX_CYCLES_INVALID),
+}
+
+internal sealed interface RootOrderCheck {
+    class Valid(val fields: RootOrderFields) : RootOrderCheck
+    class Invalid(val field: RootOrderField) : RootOrderCheck
+}
+
+/**
+ * The checks of a root order's fields: the title and the policy by their rules ([validatedText], [validatedPolicy]), and the most cycles
+ * in 1 to [maxCyclesCap]. The REST route and `kivra_order_create` both call it, so the limits are one set of rules. The order of the checks
+ * is the REST route's: title, policy, then the cycles.
+ */
+internal fun checkRootOrderFields(rawTitle: String, rawPolicy: String, maxCycles: Int, maxCyclesCap: Int): RootOrderCheck {
+    val title = validatedText(rawTitle, MAX_TITLE_CODE_POINTS) ?: return RootOrderCheck.Invalid(RootOrderField.TITLE)
+    val policy = validatedPolicy(rawPolicy) ?: return RootOrderCheck.Invalid(RootOrderField.POLICY)
+    if (maxCycles !in 1..maxCyclesCap) return RootOrderCheck.Invalid(RootOrderField.MAX_CYCLES)
+    return RootOrderCheck.Valid(RootOrderFields(title, policy, maxCycles))
+}
+
+/** The REST answer of a failed field: the fixed text, and the code for the cycles (as the REST route has always answered). */
+private fun RootOrderField.restError(): OrderError =
+    if (this == RootOrderField.MAX_CYCLES) OrderError(text, MAX_CYCLES_INVALID_CODE) else OrderError(text)
 
 /** Validates a policy: trimmed, 1 to 8000 code points ([MAX_POLICY_CODE_POINTS]), line breaks and tabs allowed, other control characters refused. Null when invalid. */
 internal fun validatedPolicy(raw: String): String? {

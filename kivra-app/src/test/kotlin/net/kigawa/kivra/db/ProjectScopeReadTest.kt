@@ -62,8 +62,8 @@ class ProjectScopeReadTest {
 
     @Test
     fun `the task and order lists are narrowed the same way, and an unknown project is an empty list`() = TestDb { dataSource ->
-        // The legacy task needs a nullable project_id, and the order list needs the V59 assignments table.
-        val versions = MIGRATION_FILES.keys.filter { it <= 51 } + 59
+        // The legacy task needs a nullable project_id, and the order list needs the V61 assignments table.
+        val versions = MIGRATION_FILES.keys.filter { it <= 51 } + 61
         migrateOnly(dataSource, *versions.toIntArray())
     }.use { db ->
         val alpha = db.projectA()

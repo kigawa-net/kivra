@@ -15,6 +15,8 @@ import net.kigawa.kivra.auth.RequiredRole
 import net.kigawa.kivra.auth.resolveOperatorVerifier
 import net.kigawa.kivra.auth.resolveTaskApiIdentity
 import net.kigawa.kivra.chat.ChatHistoryCompactor
+import net.kigawa.kivra.chat.ChatSummarySettings
+import net.kigawa.kivra.chat.GatewayChatSummarizer
 import net.kigawa.kivra.chat.ProjectChatReplier
 import net.kigawa.kivra.coding.CodingReconcileWorker
 import net.kigawa.kivra.coding.CodingRuntimeService
@@ -32,6 +34,7 @@ import net.kigawa.kivra.db.ProjectDrainRepository
 import net.kigawa.kivra.db.SqlLeaseStore
 import net.kigawa.kivra.config.BudgetConfig
 import net.kigawa.kivra.config.FushaTaskConfigLoader
+import net.kigawa.kivra.config.AdmissionPolicyConfigLoader
 import net.kigawa.kivra.config.KivraConfig
 import net.kigawa.kivra.config.TaskPollerConfigLoader
 import net.kigawa.kivra.db.DbBudgetStore
@@ -195,6 +198,13 @@ internal fun Application.appModule(env: Map<String, String>) {
     val projectRepo = ProjectRepository(database, java.time.Clock.systemUTC())
     val budgetConfig = BudgetConfig.from(environment.config)
     val budgetStore = DbBudgetStore(database, budgetConfig.tenantId, budgetConfig.tenantLimit(), dailyLimit = budgetConfig.dailyLimit())
+    // The automatic release of unpriced reservations (ADR 0003 追補 2026-11-15). Off unless KIVRA_BUDGET_UNPRICED_AUTO_RELEASE_ENABLED=true;
+    // an invalid setting fails the startup here.
+    val unpricedAutoRelease = net.kigawa.kivra.config.UnpricedAutoReleaseSettings.fromEnv(env)
+    // The automatic release of orphaned UNKNOWN self-development runs (ADR 0009 追補 2026-11-16). Off unless
+    // KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED=true; an invalid setting fails the startup here. Read only with self-development on: while it
+    // is off, no KIVRA_SELFDEV_ variable beyond its switch is read (SelfDevAppWiringTest), and the operator's release stays available.
+    val orphanAutoRelease = if (selfDevSettings.enabled) net.kigawa.kivra.config.SelfDevOrphanAutoReleaseSettings.fromEnv(env) else null
     // Built only when the agent API is enabled. Nothing about the coding runtime is created otherwise. It is shared by the agent API
     // routes and, with KIVRA_SELFDEV_RUNTIME=cli, by the self-development runner (ADR 0010).
     val codingResults = DbCodingResultStore(database)
@@ -221,6 +231,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             autopilot = autopilotSettings,
             memory = memory,
             suppress = suppressShadow,
+            orderSettings = orderSettings,
         )
     } else {
         null
@@ -228,14 +239,23 @@ internal fun Application.appModule(env: Map<String, String>) {
     // The project chat's AI reply (streamed). It uses the self-development model gateway, so it exists only when self-development is enabled.
     // Without it the chat routes only store the messages, as before.
     val projectChatRepo = ProjectChatRepository(database)
+    val chatSummary = ChatSummarySettings.fromEnv(env)
+    val compressionEnabled = env["KIVRA_CHAT_COMPRESSION_ENABLED"]?.trim().toBoolean()
     // Routing: the difficulty router (ADR 0023 追補) decides EASY (on-premises first, hosted fallback) or HARD (hosted only) per reply.
     val projectChatReply = selfDevParts?.let { parts ->
         parts.gateway?.let { gw ->
             val budgetScopes = listOf(budgetConfig.tenantId)
-            val compactor = if (env["KIVRA_CHAT_COMPRESSION_ENABLED"]?.trim().toBoolean()) {
+            val compactor = if (compressionEnabled) {
                 ChatHistoryCompactor(gw, projectChatRepo, ProjectChatSummaryRepository(database), budgetScopes, this)
             } else null
-            ProjectChatReplier(gw, projectChatRepo, budgetScopes, router = parts.chatRouter, compactor = compactor)
+            ProjectChatReplier(
+                gw, projectChatRepo, budgetScopes, router = parts.chatRouter,
+                summarizer = if (compactor == null && chatSummary.enabled) {
+                    GatewayChatSummarizer(gw, budgetScopes, chatSummary.limits)
+                } else null,
+                summaryLimits = chatSummary.limits,
+                compactor = compactor,
+            )
         }
     }
     // The roles (ADR 0020, PR 3a/3b/3c): off by default, and then the assignee store is not created or read. The order routes, the goal and memory routes (3b) and the REST routes of PR 3c (Task API, selfdev, budget and run admin, run views, execution) use the guard.
@@ -335,7 +355,15 @@ internal fun Application.appModule(env: Map<String, String>) {
         tokenAuth = if (rolesSettings.mode == PermissionMode.OFF) null else McpTokenAuth.forDatabase(database, rolesSettings.mode),
         selfDevEnabled = selfDevSettings.enabled, maxActiveSelfDev = selfDevSettings.maxActiveRuns, projects = projectRepo,
         // The order tools serve only while the orders answer (the same condition as the REST routes' requireEnabled).
-        orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let { McpOrderDeps(it, aiPrincipal) },
+        orders = orderRepo?.takeIf { autopilotSettings.config != null }?.let {
+            McpOrderDeps(
+                it, aiPrincipal, orderSettings.maxCyclesCap,
+                // The target and the projects of a new root order: the REST route's (POST /api/projects/{projectId}/orders).
+                targetRepo = selfDevSettings.config?.repo?.let { repo -> "${repo.owner}/${repo.repo}" },
+                projects = projectRepo,
+                operations = SelfDevOperatorRepository(database),
+            )
+        },
         // The cycle tree tool (kivra_task_list) serves only while the autopilot answers, as the REST task routes do.
         tasks = SelfDevOperatorRepository(database).takeIf { autopilotSettings.config != null },
         // Goal tools temporarily removed pending Task model migration (V40)
@@ -354,6 +382,12 @@ internal fun Application.appModule(env: Map<String, String>) {
     selfDevParts?.incidentFix?.start(this)
     // The memory's retention step (ADR 0016 section 9). Started only with the memory switch on.
     memoryRepo?.let { repo -> SelfDevMemoryRetentionWorker({ repo.purgeRetention() }, SelfDevMemoryRetentionWorker.DEFAULT_INTERVAL).start(this) }
+    if (unpricedAutoRelease.enabled) {
+        net.kigawa.kivra.db.UnpricedAutoReleaseWorker(budgetStore::autoReleaseUnpriced, unpricedAutoRelease.grace).start(this)
+    }
+    if (orphanAutoRelease?.enabled == true) {
+        net.kigawa.kivra.db.SelfDevOrphanAutoReleaseWorker(runs::autoReleaseUnknownRuns, orphanAutoRelease.grace).start(this)
+    }
     // ADR 0015 U-14: after the orders are enabled, every ACTIVE order starts paused (STARTUP_HOLD), unless the operator opted into
     // KIVRA_SELFDEV_ORDER_AUTO_RESUME_ON_STARTUP=true (default false). Nothing runs before this.
     orderSettings.startupHold(orderRepo)
@@ -471,7 +505,8 @@ internal fun Application.appModule(env: Map<String, String>) {
         )
         val pollerConfig = TaskPollerConfigLoader.from(environment.config)
         val leaderLeaseRepo = LeaderLeaseRepository(database)
-        val runAdmission = DbRunAdmission(database, runs, audit, policy = null)
+        val admissionPolicy = AdmissionPolicyConfigLoader.from(env)
+        val runAdmission = DbRunAdmission(database, runs, audit, policy = admissionPolicy)
         val defaultProfile = AgentProfile(
             name = "default",
             version = "1",
@@ -537,7 +572,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             leaderLeaseRepo = leaderLeaseRepo,
             runRepo = runs,
             config = requireNotNull(orchestratorSettings.config),
-            policy = null,
+            policy = admissionPolicy,
             outboxPublisher = outboxPublisher,
             agentManager = agentManager,
             reviewerPipeline = reviewerPipeline,

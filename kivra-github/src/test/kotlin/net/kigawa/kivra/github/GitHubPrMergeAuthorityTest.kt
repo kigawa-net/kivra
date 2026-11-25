@@ -20,6 +20,8 @@ import kotlin.test.assertTrue
 private const val HEAD = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
 private const val BASE_SHA = "fedcba9876543210fedcba9876543210fedcba98"
 private const val MERGE = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+/** A later head of the same PR: commits pushed after the binding, so the bound [HEAD] is an ancestor of it. */
+private const val MOVED = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
 private const val SECRET = "ghs_SECRET_TOKEN_VALUE"
 private const val BOT_ID = 9001L
 private val JSON_H = headersOf(HttpHeaders.ContentType, "application/json")
@@ -54,19 +56,24 @@ private fun prJson(
     "head":{"ref":"kivra/run-r1","sha":"$head","repo":{"full_name":"$repo"}},
     "base":{"ref":"$base","sha":"$BASE_SHA","repo":{"id":$repoId,"full_name":"$repo"}}}"""
 
+/** The compare answer for `GET /compare/{bound}...{merged}`: `behind_by` is the commits the bound head has and the merged head lacks. */
+private fun compareJson(behindBy: Int) = """{"status":"ahead","ahead_by":1,"behind_by":$behindBy,"total_commits":1}"""
+
 private class Harness(handler: suspend io.ktor.client.engine.mock.MockRequestHandleScope.(io.ktor.client.request.HttpRequestData) -> io.ktor.client.request.HttpResponseData) {
     val requests = mutableListOf<io.ktor.client.request.HttpRequestData>()
-    val authority = GitHubPrMergeAuthority(
-        HttpGitHubAdapter(
-            githubHttpClient(MockEngine { req -> requests += req; handler(req) }),
-            object : TokenProvider {
-                override suspend fun token() = "tok-$SECRET"
-                override fun invalidate() {}
-            },
-            backoff = {},
-        ),
-        expectedAuthorId = BOT_ID,
+    val adapter = HttpGitHubAdapter(
+        githubHttpClient(MockEngine { req -> requests += req; handler(req) }),
+        object : TokenProvider {
+            override suspend fun token() = "tok-$SECRET"
+            override fun invalidate() {}
+        },
+        backoff = {},
     )
+    val authority = GitHubPrMergeAuthority(adapter, expectedAuthorId = BOT_ID, behindBy = adapter::getBehindBy)
+
+    /** The requests that asked GitHub whether the bound head is an ancestor (the compare endpoint). */
+    val compareRequests: List<io.ktor.client.request.HttpRequestData>
+        get() = requests.filter { it.url.encodedPath.contains("/compare/") }
 }
 
 class GitHubPrMergeAuthorityTest {
@@ -162,5 +169,68 @@ class GitHubPrMergeAuthorityTest {
         val result = h.authority.verifyMerge(BINDING)
         assertFalse(result.toString().contains(SECRET))
         assertIs<PrMergeVerification.Verified>(result)
+    }
+
+    /** A merged PR whose head moved to [MOVED] after the binding, and a compare answer of [compare] (or a failure when null). */
+    private fun movedHeadHarness(
+        pull: String = prJson(head = MOVED),
+        compare: (suspend io.ktor.client.engine.mock.MockRequestHandleScope.() -> io.ktor.client.request.HttpResponseData)? = { respond(compareJson(0), HttpStatusCode.OK, JSON_H) },
+    ) = Harness { req ->
+        if (req.url.encodedPath.contains("/compare/")) {
+            compare?.invoke(this) ?: respond("", HttpStatusCode.NotFound, JSON_H)
+        } else {
+            respond(pull, HttpStatusCode.OK, JSON_H)
+        }
+    }
+
+    @Test
+    fun `a merged PR whose head moved forward past the binding verifies when GitHub says the bound head is its ancestor`() = runTest {
+        val h = movedHeadHarness()
+        val v = assertIs<PrMergeVerification.Verified>(h.authority.verifyMerge(BINDING)).merge
+        assertEquals(HEAD, v.headSha)
+        assertEquals(MOVED, v.mergedHeadSha)
+        assertTrue(v.extraCommitsAfterBinding)
+        assertEquals(MERGE, v.mergeCommitSha)
+        assertEquals(1, h.compareRequests.size)
+        assertTrue(h.compareRequests.single().url.encodedPath.contains("/compare/$HEAD...$MOVED"))
+    }
+
+    @Test
+    fun `a moved head whose bound head is not an ancestor is refused, and a definitive not-found is refused too`() = runTest {
+        val diverged = movedHeadHarness(compare = { respond(compareJson(1), HttpStatusCode.OK, JSON_H) })
+        assertEquals("HEAD_SHA_MISMATCH", assertIs<PrMergeVerification.Refused>(diverged.authority.verifyMerge(BINDING)).reason)
+        // A force push that removed the bound commit: GitHub cannot resolve it, so the compare is a 404.
+        val gone = movedHeadHarness(compare = null)
+        assertEquals("HEAD_SHA_MISMATCH", assertIs<PrMergeVerification.Refused>(gone.authority.verifyMerge(BINDING)).reason)
+        // A count that is not a plain integer is a protocol failure, which is not a proof of ancestry.
+        val malformed = movedHeadHarness(compare = { respond("""{"behind_by":"0"}""", HttpStatusCode.OK, JSON_H) })
+        assertEquals("HEAD_SHA_MISMATCH", assertIs<PrMergeVerification.Refused>(malformed.authority.verifyMerge(BINDING)).reason)
+    }
+
+    @Test
+    fun `an ancestry check that cannot be answered is unavailable, never a merge`() = runTest {
+        val down = movedHeadHarness(compare = { respond("{\"message\":\"Bearer $SECRET\"}", HttpStatusCode.InternalServerError, JSON_H) })
+        val e = assertFailsWith<PrMergeAuthorityUnavailableException> { down.authority.verifyMerge(BINDING) }
+        assertFalse(e.message.orEmpty().contains(SECRET))
+        val io = movedHeadHarness(compare = { throw java.io.IOException("connection reset $SECRET") })
+        assertFailsWith<PrMergeAuthorityUnavailableException> { io.authority.verifyMerge(BINDING) }
+    }
+
+    @Test
+    fun `an open PR with a moved head is refused without asking the ancestry question`() = runTest {
+        val h = movedHeadHarness(pull = prJson(head = MOVED, state = "open", merged = false, mergeSha = null))
+        assertEquals("HEAD_SHA_MISMATCH", assertIs<PrMergeVerification.Refused>(h.authority.verifyMerge(BINDING)).reason)
+        assertEquals(0, h.compareRequests.size)
+    }
+
+    @Test
+    fun `a merged PR whose head did not move asks no ancestry question`() = runTest {
+        val h = Harness { req ->
+            if (req.url.encodedPath.contains("/compare/")) respond(compareJson(0), HttpStatusCode.OK, JSON_H)
+            else respond(prJson(), HttpStatusCode.OK, JSON_H)
+        }
+        val v = assertIs<PrMergeVerification.Verified>(h.authority.verifyMerge(BINDING)).merge
+        assertFalse(v.extraCommitsAfterBinding)
+        assertEquals(0, h.compareRequests.size)
     }
 }

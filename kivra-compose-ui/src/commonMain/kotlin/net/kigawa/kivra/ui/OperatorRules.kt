@@ -63,6 +63,15 @@ fun releasePath(runId: String, kind: ReleaseKind): String {
 /** Goal に中止を出すか。終端でなければ出す(app.js と同じ。計画の親タスクでも出す)。 */
 fun canStopGoal(state: String): Boolean = state !in GOAL_TERMINAL_STATES
 
+/**
+ * 失敗・解放されたタスクの再投入(`POST /api/selfdev/tasks/{id}/requeue`、ADR 0011 追補 2026-11-18)を出すか。計画の親(revision > 0)は出さない。
+ * 計画が決着済みかどうかは画面では分からないので、出すかは状態だけで決め、拒否はサーバーの 409 で伝える。
+ */
+fun canRequeueTask(state: String, revision: Int): Boolean = revision == 0 && state in setOf("FAILED", "CANCELLED")
+
+/** 投入待ち・失敗・解放されたタスクの見送り(`POST /api/selfdev/tasks/{id}/reject`)を出すか。承認待ちの見送りは承認の行が出す。 */
+fun canSkipStuckTask(state: String, revision: Int): Boolean = revision == 0 && state in setOf("QUEUED", "FAILED", "CANCELLED")
+
 /** 実額の入力が形式に合うか。空欄は「実額不明」として許す(送らない)。app.js の budgetFormState と同じ。 */
 fun isValidBudgetActual(raw: String): Boolean {
     val text = raw.trim()
@@ -86,6 +95,8 @@ enum class OperatorAction {
     CANCEL_STOP,
     EXTEND_ORDER,
     ABANDON_CYCLE,
+    APPROVE_SPLIT,
+    REJECT_SPLIT,
 }
 
 /**
@@ -97,6 +108,7 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
     // 延長は 400 / 409 の機械的なコード(MAX_CYCLES_INVALID など)を表示に対応づける。規則は OrderExtendRules.kt。
     if (action == OperatorAction.EXTEND_ORDER) return extendFailureText(failure, code)
     if (action == OperatorAction.ABANDON_CYCLE) return abandonFailureText(failure, code)
+    if (action == OperatorAction.APPROVE_SPLIT || action == OperatorAction.REJECT_SPLIT) return splitProposalFailureText(failure, code)
     if (action == OperatorAction.RELEASE_RUN && failure == WriteFailure.STALE) releaseConflictText(code)?.let { return it }
     return when (failure) {
         WriteFailure.STALE -> when (action) {
@@ -112,6 +124,8 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             OperatorAction.CANCEL_STOP,
             OperatorAction.EXTEND_ORDER,
             OperatorAction.ABANDON_CYCLE,
+            OperatorAction.APPROVE_SPLIT,
+            OperatorAction.REJECT_SPLIT,
             -> writeFailureText(failure)
         }
         WriteFailure.BAD_REQUEST -> when (action) {
@@ -131,6 +145,8 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             OperatorAction.CANCEL_STOP,
             OperatorAction.EXTEND_ORDER,
             OperatorAction.ABANDON_CYCLE,
+            OperatorAction.APPROVE_SPLIT,
+            OperatorAction.REJECT_SPLIT,
             -> writeFailureText(failure)
         }
         WriteFailure.DISABLED -> when (action) {
@@ -147,6 +163,8 @@ fun operatorWriteFailureText(action: OperatorAction, failure: WriteFailure, code
             OperatorAction.CANCEL_STOP,
             OperatorAction.EXTEND_ORDER,
             OperatorAction.ABANDON_CYCLE,
+            OperatorAction.APPROVE_SPLIT,
+            OperatorAction.REJECT_SPLIT,
             -> writeFailureText(failure)
         }
         else -> writeFailureText(failure)

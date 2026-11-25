@@ -32,18 +32,20 @@ internal class DockerFixture {
         network: String = TEST_NETWORK,
         proxy: String = TEST_PROXY,
         timeout: Duration = Duration.ofMinutes(30),
-    ): DockerRunSpec = DockerRunSpec(runId, attemptId, image, workDir, network, proxy, timeout)
+        claudeAccount: String? = null,
+    ): DockerRunSpec = DockerRunSpec(runId, attemptId, image, workDir, network, proxy, timeout, claudeAccount = claudeAccount)
 
     /** The builder's output for the standard spec. Used as the base that the guard tests mutate. */
     fun golden(): List<String> = DockerCommandBuilder(settings).build(spec())
 
     companion object {
-        fun settings(root: Path, dockerHost: String? = TEST_DOCKER_HOST): DockerSettings = DockerSettings(
+        fun settings(root: Path, dockerHost: String? = TEST_DOCKER_HOST, allowedAccounts: Set<String> = emptySet()): DockerSettings = DockerSettings(
             dockerBinary = Path.of("/usr/bin/docker"),
             dockerHost = dockerHost,
             workRoot = root,
             allowedNetworks = setOf(TEST_NETWORK),
             allowedImages = setOf(TEST_IMAGE),
+            allowedAccounts = allowedAccounts,
         )
     }
 }

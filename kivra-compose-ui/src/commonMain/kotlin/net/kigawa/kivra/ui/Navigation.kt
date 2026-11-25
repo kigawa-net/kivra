@@ -52,58 +52,29 @@ sealed class NavDestination(val route: String, val label: String) {
 /** サイドナビの 1 項目。[target] は押したときのルート。 */
 data class NavItem(val dest: NavDestination, val target: Route)
 
-/** 詳細でも所属する一覧を選択する。親付き Operation は全体の一覧と区別する。 */
-fun NavItem.isSelectedBy(current: Route): Boolean = when (val target = target) {
-    is Route.Page -> current.nav == dest && current.projectIdOrNull == null &&
-        current !is Route.OperationChildren &&
-        (current !is Route.OperationDetail || current.parentId == null)
-    is Route.OperationChildren -> current == target ||
-        (current is Route.OperationDetail && current.parentKind == NodeKind.OPERATION && current.parentId == target.parentId)
-    else -> current == target
-}
+fun NavItem.isSelectedBy(current: Route): Boolean =
+    current.nav == dest && current.projectIdOrNull == target.projectIdOrNull && current.operationParent == target.operationParent
 
 /** サイドナビの節。[title] が null の節は見出しを出さない。 */
 data class NavSection(val title: String?, val items: List<NavItem>)
 
 /**
  * サイドナビ(docs/design/16-site-structure.md §3)。
- * - 常に: ホーム、プロジェクト一覧。
- * - 常に最後: 「全体」の節(全体の予算・FX、自動化、担当)。
- * プロジェクト配下の項目は、サイドナビには出さない。プロジェクトの一覧から選び、ダッシュボードのリンク([projectLinkTargets])で開く。
+ * ホーム、プロジェクト一覧の 2 項目だけを出す。
+ * 他の項目([globalPages] など)の画面・route・権限はそのまま残す。
  * 権限や API の結果による出し分けは呼び出し側が行う([CallerPermissions.navVisible] など)。
  */
-fun sidebarSections(): List<NavSection> {
+fun sidebarSections(current: Route? = null): List<NavSection> {
     val top = NavSection(
         title = null,
         items = listOf(NavDestination.Home, NavDestination.Projects).map { NavItem(it, Route.Page(it)) },
     )
-    val global = NavSection(
-        title = "全体",
-        items = listOf(NavDestination.Budget, NavDestination.Operations, NavDestination.Autopilot, NavDestination.Assignees)
-            .map { NavItem(it, Route.Page(it)) },
-    )
-    return listOf(top, global)
+    return listOf(top)
 }
 
 /**
- * プロジェクトの画面に並べるリンク(ダッシュボード自身を除く[pagesOf])。ダッシュボードの上、または未分類の画面の上に出す。
+ * プロジェクトの画面に並べるリンク(ダッシュボード自身を除く[pagesOf])。未分類の画面の上に出す(プロジェクトのダッシュボードには出さない)。
  * 権限や API の結果による出し分けは呼び出し側が行う。
  */
 fun projectLinkTargets(projectId: String): List<NavItem> =
     pagesOf(projectId).filter { it != NavDestination.Dashboard }.map { NavItem(it, Route.ProjectPage(projectId, it)) }
-
-/** 現在の Operation から親と子の一覧へ移動する節。 */
-fun operationSidebarSection(route: Route): NavSection? {
-    val id = when (route) {
-        is Route.OperationDetail -> route.operationId
-        is Route.OperationChildren -> route.parentId
-        else -> return null
-    }
-    val items = mutableListOf(NavItem(NavDestination.Operations, Route.OperationChildren(id)))
-    if (route is Route.OperationDetail && route.parentId != null) {
-        items.add(0, NavItem(NavDestination.Dashboard, Node(
-            NodeId(route.parentId, route.parentKind), route.parentId,
-        ).openRoute()))
-    }
-    return NavSection("Operation: $id", items)
-}

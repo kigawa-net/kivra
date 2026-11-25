@@ -5,7 +5,7 @@
 //     The container's own auth headers are always dropped.
 //   - CONNECT        : HTTPS tunnel to allowlisted hosts only (Gradle and Maven endpoints).
 //
-// Logs contain method, route, decision, destination host, status and byte counts only.
+// Logs include the selected account ID and operational metadata, with no credentials.
 package main
 
 import (
@@ -42,6 +42,7 @@ func run() error {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	var auth Authorizer
+	accounts := make(map[string]Authorizer, len(cfg.Accounts))
 	switch cfg.AuthMode {
 	case "wif":
 		wifClient, err := newWIFHTTPClient(cfg.WIF, client)
@@ -49,18 +50,24 @@ func run() error {
 			return err
 		}
 		auth = NewWIFAuth(cfg.WIF, wifClient, nil)
+		for _, account := range cfg.Accounts {
+			accounts[account.ID] = NewWIFAuth(cfg.WIF.forAccount(account), wifClient, nil)
+		}
 		logf("auth=wif upstream_host=%s", hostOf(cfg.Upstream))
 		if cfg.WIF.KeycloakAllowedIP != nil {
 			logf("auth=wif keycloak_private_ip_exception=enabled")
 		}
 	case "static-test":
 		auth = StaticAuth{Key: cfg.StaticKey}
+		for _, account := range cfg.Accounts {
+			accounts[account.ID] = StaticAuth{Key: cfg.StaticKey}
+		}
 		logf("WARNING auth=static-test (test use only; not for production)")
 	}
 
 	srv := &proxyServer{
 		connect:   newConnectHandler(allow, logf),
-		anthropic: &anthropicHandler{upstream: cfg.Upstream, auth: auth, client: client, logf: logf},
+		anthropic: &anthropicHandler{upstream: cfg.Upstream, auth: auth, accounts: accounts, client: client, logf: logf},
 		logf:      logf,
 	}
 	hs := &http.Server{

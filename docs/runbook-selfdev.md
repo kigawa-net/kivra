@@ -130,6 +130,45 @@ curl -X POST "https://<kivra-host>/api/admin/selfdev/runs/<runId>/release" \
 - 再開時に、ブランチが現在の base の head に無い(base が動いただけでも起きる)。
 - LLM の呼び出し結果が不明。GitHub の書き込みの結果が不明。
 
+#### 4.1a 実行の lease 切れ(`CODING_ORPHANED`)と `CODING_NEEDS_HUMAN` の自動の解放(ADR 0009 追補 2026-11-16、2026-11-18)
+
+**実装済み。既定は無効。** 次の 2 つの理由の `UNKNOWN` の Run を、猶予の後に自動で `CANCELLED` にする。
+
+- `CODING_ORPHANED`: agent が止まって coding attempt の lease が切れた(2026-11-16 から)。
+- `CODING_NEEDS_HUMAN`: agent が attempt を `NEEDS_HUMAN` で fail した(2026-11-18 から)。agent のホスト側の異常(準備の失敗、git・展開・
+  docker の引数の検査、claim のパスのパターンが不正、kivra の 5xx や通信の失敗、その他の例外)か、stub の executor。
+
+ほかの理由の `UNKNOWN`(`PR_NOT_FOUND`、`PR_AMBIGUOUS`、`GITHUB_UNKNOWN_OUTCOME`、`COMMIT_NOT_APPLIED_TWICE`、`DEVELOPER_*`、
+`CODING_QUEUE_EXPIRED`、`CODING_AUTH_REQUIRED` など)は**対象外**で、上の手動の解放を使う。設定(スイッチと猶予)は 2 つの理由で共通で、
+変数名は最初の版の `ORPHAN` のまま。
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED` | `false` | `true` で有効。空・`false` は無効。それ以外の値は起動失敗 |
+| `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_GRACE_SECONDS` | `600` | 最終更新から解放するまでの秒数。60 以上の整数。不正値は起動失敗(値はログに出ない) |
+
+- 対象(すべて満たすもの): 自己開発の Run、状態 `UNKNOWN`・理由 `CODING_ORPHANED` か `CODING_NEEDS_HUMAN`、PR の列が空(束縛なし)、`PATCH_READY` / `PULL_REQUEST` を
+  一度も通っていない(= GitHub に何も書いていない)、`QUEUED` / `CLAIMED` / `RUNNING` の attempt が無い、worker の lease が無い、最終更新から猶予が過ぎた。
+- 動き: 60 秒ごとに、古い順に 1 回 20 件まで。残りは次の回。各 Run は行をロックして条件を確かめ直してから更新する。
+- 記録: 手動の解放と同じく、同じトランザクションで `RUN_RELEASED` の監査と `RunStateChanged` の outbox を書く。操作者は `system:auto-release`、
+  `state_reason` は `AUTO_RELEASED_ORPHAN`(元が `CODING_ORPHANED`)か `AUTO_RELEASED_NEEDS_HUMAN`(元が `CODING_NEEDS_HUMAN`)、
+  監査の `reason` は固定の `GRACE_ELAPSED`。手動の解放と区別するには、`state_reason` か監査の `actor` で絞る。
+- ログ: `selfdev orphan auto release: code=AUTO_RELEASED_ORPHAN released=<件数> alreadyReleased=<件数> failed=<件数>`(2 つの理由の合計。
+  行の形は最初の版のまま。解放した回は INFO、
+  失敗があった回は WARN)。パス全体の失敗は `code=AUTO_RELEASE_FAILED exception=<クラス名>`。Run の id と理由の本文は出さない。失敗した Run は次の回に再試行される。
+  `alreadyReleased` は、候補に挙がったがロックの下では対象外だった件数(別の Pod や運用者が先に解放した、条件が変わった)。
+- 複数の Pod: 状態と版を条件に更新するので、二重に解放しない。
+- 解放は原因を直さない。agent が止まったままなら次の Run も `CODING_ORPHANED` に、ホスト側の異常が残っていれば次の Run も `CODING_NEEDS_HUMAN` になる
+  (agent の状態は §6 を参照)。原因は agent のログ(`executor failed: class=...`、`claim path patterns refused`)で確かめる。
+- オートパイロット: 自動で解放された Run の task は従来どおり `CANCELLED`(`RUN_RELEASED`)になるが、**サーキットブレーカーには失敗として数える**
+  (運用者の解放と中止は数えない)。同じ異常が続くと `KIVRA_SELFDEV_AUTOPILOT_MAX_CONSECUTIVE_FAILURES`(既定 3)回でブレーカーが開き、
+  キューの task が 1 件ずつ取り消されていくことを止める。原因を直してからブレーカーを戻す。Order の周は従来から `CANCELLED` を失敗として数える。
+- 予算: attempt の費用は fail の時点で計上済み(`usage` があればその額、無ければ 1 attempt の予約額を費用不明として計上)。解放は予算に何も書かない
+  (手動の解放と同じ)。費用不明の分は §4.2a で扱う。
+- 止め方: `KIVRA_SELFDEV_ORPHAN_AUTO_RELEASE_ENABLED=false`(またはこの変数を消す)にして再起動する。以後は手動の解放だけになる。解放済みの Run は戻らない。
+- 自己開発が無効(`KIVRA_SELFDEV_ENABLED` が true でない)のときは、この設定を読まず、自動の解放も動かない(無効化したあとの UNKNOWN は手動で解放する)。
+- 有効化は k8s のマニフェストで行う(コードの既定は無効)。
+
 ### 4.1b 束縛の無い PULL_REQUEST の Run を解放する
 
 **実装済み(ADR 0009 追補)。** `POST /api/admin/selfdev/runs/{id}/release-unbound-pr`。`KIVRA_AUTH_MODE` が設定されているときに登録される(`Application.kt`)。§4.1 の解放とは別の経路である。
@@ -224,6 +263,25 @@ curl -X POST "https://<kivra-host>/api/admin/budget/acknowledge" \
   -d '{"scopeId":"<scopeId>","period":"<period>","reservationKey":"<reservationKey>","actualAmountJpy":"0","evidence":"<根拠の参照>","reason":"<理由>"}'
 ```
 
+#### 4.2a 費用不明の予約の自動解除(ADR 0003 追補 2026-11-15)
+
+**実装済み。既定は無効。** 費用不明(UNPRICED・LAPSED)の予約を、猶予の時間が過ぎたら自動で解除する。解除は §4.2 と同じ処理(`acknowledgeUnpriced`)で、実額は「不明」として扱い、**計上額は予約額(その呼び出しの上限額)のまま確定する**(0 円にはしない)。
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `KIVRA_BUDGET_UNPRICED_AUTO_RELEASE_ENABLED` | `false` | `true` で有効。空・`false` は無効。それ以外の値は起動失敗 |
+| `KIVRA_BUDGET_UNPRICED_AUTO_RELEASE_GRACE_SECONDS` | `600` | 費用不明になってから解除するまでの秒数。60 以上の整数。不正値は起動失敗(値はログに出ない) |
+
+- 動き: 60 秒ごとに、費用不明になってから(UNPRICED は確定時刻、LAPSED は予約の期限から)猶予を過ぎた予約を、古い順に 1 回 50 件まで解除する。残りは次の回。
+- 対象: テナント、プロジェクト(`project:<id>`)、日次(`<tenant>:daily`)のどのスコープの予約も対象。1 件の解除で、その予約のすべてのスコープの未価格数が 1 減る。**計上額が 0 円の予約(為替が使えないときの CLI の見積もりなど)は自動では解除しない**(上限額が分からないため)。これは §4.2 の手動解除で扱う。
+- 監査: `budget_acknowledgements` に、承認者 `system:auto-release`、理由 `AUTO_UPPER_BOUND`、根拠 `GRACE_ELAPSED`、`actual_known = false` で残る。手動の解除と区別するには、`operator_id = 'system:auto-release'` で絞る。
+- ログ: `budget unpriced auto release: code=AUTO_UPPER_BOUND released=<件数> alreadyReleased=<件数> failed=<件数>`(解除か失敗があった回だけ)。失敗は `code=AUTO_RELEASE_FAILED exception=<クラス名>`。予約キーと金額は出さない。失敗した予約は次の回に再試行される。
+- 複数の Pod: 各 Pod が動いても、解除はテナントのロックの中で行われ、既に解除された予約は「解除済み」になるだけで、二重に計上しない。
+- 予算への影響: 上限額で計上するので、残枠が足りなくなっても解除は行う。その後の予約は通常の上限で拒否される(`BUDGET`)。予算を静かに超えることは無い。
+- 状態の確認: `GET /api/admin/budget/status` の `autoReleasedCount`(累計の自動解除の件数)と `lastAutoReleaseAt`(直近の自動解除。無ければ項目なし)。画面への表示はまだ無い。
+- 止め方: `KIVRA_BUDGET_UNPRICED_AUTO_RELEASE_ENABLED=false`(またはこの変数を消す)にして再起動する。以後は §4.2 の手動解除だけになる。解除済みの予約は元に戻らない。
+- 有効化は k8s のマニフェストで行う(コードの既定は無効)。
+
 ### 4.3 PR_ABANDONED と、マージ済みの PR
 
 **実装済み(自動)。** `PULL_REQUEST` の Run は、次のいずれかで `CANCELLED` になり、監査の理由コードは `PR_ABANDONED` になる(`selfdev/SelfDevRunner.kt`、`db/DevelopmentRunRepository.kt`)。
@@ -231,7 +289,26 @@ curl -X POST "https://<kivra-host>/api/admin/budget/acknowledge" \
 - PR が閉じられた(マージされずに)。
 - 最終更新から `KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`(既定 7 日)を過ぎた。
 
-kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を記録する手順は無い。
+kivra は PR を閉じない(下の §4.3a を有効にしたときの期限切れを除く)。オペレーターが手動で `PR_ABANDONED` を記録する手順は無い。
+
+#### 4.3a 期限切れの PR を kivra が閉じる(ADR 0008 追補 2026-11-18、既定は無効)
+
+**実装済み。既定は無効。** `KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED=true` のとき、レビューの期限(`KIVRA_SELFDEV_PR_REVIEW_TIMEOUT_DAYS`)を過ぎた Run の PR を、Run を `CANCELLED`(`PR_ABANDONED`)にする前に kivra が閉じる。
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED` | `false` | `true` で有効。空・`false` は無効。それ以外の値は起動失敗(値はメッセージに出ない)。自己開発が有効なときだけ読む |
+
+- 対象: kivra の GitHub App の bot(`KIVRA_SELFDEV_GITHUB_APP_BOT_USER_ID`)が作り、Run に束縛された(PR 番号とリポジトリが一致する)開いている PR だけ。マージ済みの PR は閉じない(マージの経路が先に動き、Run は完了の検証に進む)。人が作った PR、束縛の無い PR、人が既に閉じた PR には何もしない(Run は従来どおり `PR_ABANDONED`)。
+- 閉じ方: PR の状態を closed にする(ブランチは消さない)。閉じた後に、固定のコメントを 1 回だけ付ける: 「レビュー待ちの期限が過ぎたため、kivra がこの PR を閉じました(Run <RunID>)。ブランチは残しています。続ける場合は、新しい Run として依頼してください。」依頼文や変更の内容は入れない。
+- 順序: **GitHub で閉じる → Run を取り消す**。閉じる書き込みが拒否された、または結果が不明なときは、Run は `PULL_REQUEST` のまま `AWAITING_PR_CLOSE`(コードは失敗の種類、または `PR_CLOSE_UNKNOWN`)で待ち、次の周期で PR を読み直してから再試行する。結果が不明だった閉じる処理が実は届いていれば、次の周期で閉じ済みと分かり、二度は送らずに取り消す。
+- コメント: 閉じた後に 1 回だけ。結果が不明なコメントも「付けた」として扱い、二度と付けない。コメントが拒否されても Run は取り消す(コメントは説明のためだけ)。
+- 上限: 閉じる試行は 1 つの Run につき 5 回まで(1 周期 1 回)。使い切ったら、PR は開いたまま Run を取り消す(この機能の前と同じ)。権限が無いなど、続く拒否で Run が待ち続けないため。
+- 監査(`audit_events`、Run の ID で引く。payload は PR 番号と固定コードだけ): `PR_ABANDON_CLOSE_ATTEMPTED`(各試行の前)、`PR_ABANDON_CLOSED`(`{"prNumber":n,"code":"PR_CLOSED_TIMEOUT"}`)、`PR_ABANDON_COMMENTED`(結果不明なら `code` が `PR_COMMENT_UNKNOWN`)、`PR_ABANDON_CLOSE_GAVE_UP`(`PR_CLOSE_GAVE_UP`)。これらの行は Run の更新時刻を動かさない。
+- ログ: `timed-out pull request closed: runId=… prNumber=… code=PR_CLOSED_TIMEOUT`、`… not closed yet: … code=<コード>`、`… left open: … code=PR_CLOSE_GAVE_UP`、`… comment not posted: …`。PR の題名・本文・変更は出さない。
+- App の権限: PR を閉じる書き込み(`PATCH /pulls/{n}`)とコメントには `pull_requests:write` が要る(要求済み)。403 のときは `PERMISSION` で再試行し、5 回で諦める。
+- 止め方: 変数を `false` にして(または消して)再起動する。閉じた PR は戻さない(必要なら人が再オープンする)。
+- 有効化は k8s のマニフェストで行う(コードの既定は無効)。
 
 **マージ済みの PR(ADR 0008 の ⑩、ADR 0011)。** PR を開いた直後に、Run は PR の束縛(binding: リポジトリ、PR 番号、node id、base、kivra が commit した head SHA)を記録する。マージ済みの PR は、binding があれば `TrustedPrMergeAuthority` で検証し、検証に通ったときだけ `COMPLETED` になる(理由 `PR_MERGED`)。検証は GitHub の読み取りだけで行い、PR 本文や人の申告は根拠にしない。kivra は PR をマージも閉じもしない。
 
@@ -242,10 +319,24 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 待機理由と意味:
 
 - `AWAITING_MERGE_VERIFICATION`: 認証器が答えない(未配線、または GitHub の一時的な障害)。自動で再試行する。
+- `AWAITING_PR_CLOSE`: レビューの期限が過ぎ、kivra が PR を閉じようとしているが、まだ閉じられていない(§4.3a。有効時のみ)。自動で再試行し、5 回で諦めて Run を取り消す。
 - `MERGE_NOT_VERIFIED`: 認証器が検証を拒否した。ログの `code` に固定の理由が出る(例: `HEAD_SHA_MISMATCH` は、マージ後に head が変わった、`AUTHOR_MISMATCH` は PR の作者が kivra の App ではない、`MERGE_COMMIT_SHA_MISSING` はマージの SHA が無い)。自動では解決しない。運用者が PR と Run を確認する。
+  - `HEAD_SHA_MISMATCH` のうち、マージ後に人が commit を積んだだけ(記録した head が最終 head の祖先)のものは、§4.3b により自動で完了する(ADR 0008 追補 2026-11-20)。自動で完了しないのは、記録した head が最終 head の祖先でない場合(force-push などで履歴が書き換わった場合)だけ。
 - `BINDING_MISSING`: PR は開いているが binding が無い。binding の記録より前に開かれた Run(既存の占有 Run)がこれに当たる。kivra は binding を自分で組み立てない(GitHub の値から推測しない)ため、完了させない。運用者が確認して解消する。束縛が無い Run は §4.1b で解放する(束縛がある Run は、この待機理由にならない)。
 
 ログは `self-development run waiting: runId=... reason=... code=...` の形で出る(`code` は固定の理由コードだけ)。
+
+#### 4.3b マージ後に人が commit を積んだ PR(ADR 0008 追補 2026-11-20、実装済み・常時有効)
+
+**実装済み。** PR をマージする前に、人が PR のブランチへ commit を積むと、最終 head は Run に記録した head と違う。以前は `MERGE_NOT_VERIFIED code=HEAD_SHA_MISMATCH` で待機が続き、Run は `COMPLETED` にならなかった(例: Run 01M7T5PRSNTXZE5AJ8D4PJ11WD / PR #581)。
+
+- 完了する条件(すべて満たすとき): PR がマージ済み、リポジトリ・PR 番号・node id・base・作者(App の bot)が Run の束縛と一致、記録した head が最終 head の祖先(compare API の `behind_by` が 0)。
+- 完了しない条件: 記録した head が最終 head の祖先でない(履歴の書き換え、force-push で記録した commit が消えた、別のブランチへのリベース)。この場合は従来どおり `HEAD_SHA_MISMATCH` で待機する。運用者が PR と Run を確認する。compare の一時的な失敗は `AWAITING_MERGE_VERIFICATION` で待ち、次の tick で再試行する。
+- 監査: 完了した Run の `RUN_TRANSITION`(`audit_events`、Run の ID で引く)の payload に `"extraCommitsAfterBinding":true` と `"mergedHeadSha"` が入る。ログは `run completed with extra commits after the binding: runId=… prNumber=… boundHead=… mergedHead=…`。
+- 確認の SQL の例: `SELECT run_id, payload FROM audit_events WHERE action = 'RUN_TRANSITION' AND payload LIKE '%extraCommitsAfterBinding%';`
+- 判断の注意: kivra は追加の commit の中身を検査しない。マージ自体が人の承認に当たる。記録した head を含むことは、追加の commit が既存の変更を消していないことを示さない。
+- 有効化・停止の操作は無い(常時有効)。元に戻すには、コードを戻すしかない。
+- 既に `HEAD_SHA_MISMATCH` で待っている Run は、次の tick で再評価される(手動の操作は要らない)。ただし、記録した head が最終 head の祖先でない Run は、引き続き待機する。
 
 ### 4.4 キルスイッチで止める
 
@@ -366,7 +457,9 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 - `behind_by` が整数でない応答、または読めないときは、何もしない(追従しない)。
 
 **再束縛の条件**(すべて満たしたときだけ、Run に保存した head を新しい head に更新する)
-- (a) 新しい head がマージコミットで、親がちょうど 2 つ(異なる 2 つのコミット)で、一方が「旧 head」、もう一方が P。P は「現在の main の先頭」またはその祖先(compare API `main...P` の `ahead_by` が 0)。更新の後に main がさらに進んでも、P が main の履歴にあれば通る。
+- (a) 新しい head が次のどちらかの形。どちらでも P は「現在の main の先頭」またはその祖先(compare API `main...P` の `ahead_by` が 0)。更新の後に main がさらに進んでも、P が main の履歴にあれば通る。
+  - マージコミットで、親がちょうど 2 つ(異なる 2 つのコミット)で、一方が「旧 head」、もう一方が P。
+  - (2026-11-18 追加)親が 1 つ(P)のコミットで、P が旧 head ではない。人がブランチを main の上にリベースして force-push した形(実例: Run 01M7938HHQY5SD2W433XS9506M / PR #529)。差分は (b) で同じく検証するので、PR の変更が 1 行でも違えば通らない。親が main の上に無いもの(旧 head の上にコミットを足した、別のブランチへのリベース)と、複数のコミットに分けたリベース(先頭の親が main に無い)は通らない。
 - (b) PR 自身の差分が、更新の前後で同一。2 段で確かめる。
   - 段 1: 差分は、旧 head と main の merge-base からの差分と、main から新しい head までの差分で、ファイルの一覧、モード、内容のハッシュ(git の blob id)で比べる。一致すれば通す。
   - 段 2(段 1 が一致しないときだけ): main が同じファイルの別の箇所を変えると blob が必ず違うため、変更行を比べる。compare API `GET /compare/{merge-base}...{旧 head}` と `GET /compare/P...{新 head}` の `files` を読み、次をすべて満たすときだけ通す。(i) パスの集合が同じ。(ii) 各ファイルの `status` が `added`、`modified`、`removed` のいずれかで、両側で同じ(`renamed`、`copied` は通さない)。(iii) 各ファイルに `patch` がある(無いのはバイナリや巨大な差分)。(iv) 各ファイルの `+` と `-` の行(`@@` のヘッダーと文脈行を除く。`\ No newline at end of file` は含める)の列が、順序も含めて同じ。(v) ファイルの数が 300 未満。(vi) 変更したパスの mode が、旧 head と新 head の tree で同じ。(vii) patch の合計が 256 KiB 以下。
@@ -384,7 +477,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 **監査ログ**(`audit_events`、Run の ID で引く)
 - `PR_REBASE_ATTEMPTED`: 更新の要求の前に書く。要求の回数は、この行の数で数える(要求が失敗しても数える)。
 - `PR_REBASE_HELD`: 要求のあとに人に残った。理由コードを持つ。
-- `PR_REBASE_REBOUND`: 再束縛した。payload は `{"from": 旧 head の先頭 12 文字, "to": 新 head の先頭 12 文字, "reasonCode": "PR_REBASE_VERIFIED"}`。
+- `PR_REBASE_REBOUND`: 再束縛した。payload は `{"from": 旧 head の先頭 12 文字, "to": 新 head の先頭 12 文字, "reasonCode": "PR_REBASE_VERIFIED"}`。人のリベース(親が 1 つ)を再束縛したときは `reasonCode` が `PR_REBASE_VERIFIED_REBASED`。
 - 題名、本文、パス、ファイルの内容は、監査にも、ログにも出さない。
 
 **人に残るケース**(Run は PULL_REQUEST のまま。`Waiting` の理由コードに出る)
@@ -396,7 +489,7 @@ kivra は PR を閉じない。オペレーターが手動で `PR_ABANDONED` を
 | `GITHUB_PERMISSION` | App に権限が無い(403)。**有効化の前の確認事項**(下記) | App の権限を確認する |
 | `PR_REBASE_NOT_OBSERVED` | 要求は通ったが、新しい head が見えなかった | 後から届いた更新は、次の周期で検証されて再束縛される。届かなければ人が確認する |
 | `PR_REBASE_UPDATE_UNKNOWN` | 要求の応答が不明(再送はしない) | `NOT_OBSERVED` と同じ扱い |
-| `PR_REBASE_PARENTS_MISMATCH` | 新しい head の親が「旧 head と、main の先頭またはその祖先」の組にならない(人の push の可能性を含む) | 人が確認する |
+| `PR_REBASE_PARENTS_MISMATCH` | 新しい head の親が「旧 head と、main の先頭またはその祖先」の組にも、「main の先頭またはその祖先 1 つ」にもならない(人の push の可能性を含む) | 人が確認する。マージ済みなら `MERGE_NOT_VERIFIED code=HEAD_SHA_MISMATCH` で待機が続く。マージされた内容が Run の変更と同じことを確かめたうえで、運用者の判断で扱う |
 | `PR_REBASE_DIFF_CHANGED` | PR の差分が変わった(改ざんの可能性を含む)。段 1 と段 2 の両方で一致しない。再束縛しない | 人が差分を確認する |
 | `PR_REBASE_VERIFY_FAILED` | 読み取りに失敗した(ツリー、または compare API の変更ファイル一覧)、応答の形が不正、またはツリーが切り詰められた | 次の周期で再試行される。続くなら人が確認する |
 | `PR_REBASE_REBIND_FAILED` | 再束縛の DB 書き込みに失敗した(旧 head のまま。同じ transaction で巻き戻る) | DB とログを確認する |
@@ -1514,6 +1607,7 @@ git が失敗したときは、ストリームの終わりを `GIT_FAILED` と�
 - **デプロイ順序**: (1) kivra の対応版(`AgentErrorCode` に `EMPTY_PATCH`、`BUDGET_EXCEEDED`、`OVERLOADED` を受理する版)を先にデプロイする。(2) そのあとで、エージェントを動かす PC の `/etc/kivra-agent/agent.env` に `KIVRA_AGENT_NEW_ERROR_CODES=1` を書き、ユニットを再起動する(§6.11 の `systemctl --user restart kivra-agent.service`)。kivra の対応版より先に `1` にすると、新しいコードが拒否されて `fail` が届かない。
 - 戻し方: 行を消すか `0` にして、ユニットを再起動する。kivra 側のコードは削除しない(旧いエージェントが従来のコードを送り続けるため)。
 - `install.sh` の雛形には `#KIVRA_AGENT_NEW_ERROR_CODES=1` の行を入れてある(既定では無効)。
+- **k8s の agent(dev)**: 2026-11-19 の確認で、dev の `kivra-agent` Deployment(`KIVRA_AGENT_EXECUTOR=real`)には `KIVRA_AGENT_NEW_ERROR_CODES` が無く、既定の `0` で動いていた。その結果、変更が無い結果は `EMPTY_PATCH` ではなく `CLI_NONZERO` で届き、Run の理由は `CODING_CLI_NONZERO` になる(agent のログでは `change set rejected: reasons=EMPTY_PATCH code=CLI_NONZERO`)。kivra の対応版は dev に入っている(image が #231 を含む)ので、Deployment の env に `KIVRA_AGENT_NEW_ERROR_CODES=1` を入れると `CODING_EMPTY_PATCH` になる。Deployment の env は kigawa-net-k8s 側の変更(本リポジトリの外)。
 
 ### 6.11 ローカル PC へのインストールと常駐(PR 10)
 
@@ -1822,6 +1916,11 @@ dev での有効化の手順は §7.5。
 - 出力は JSON 1 個だけ。未知のキー、型違い、件数・長さの超過、依存の誤り、allowlist 外のパスは拒否する。拒否は 1 回だけ再試行する。
 - denylist のパス(`.github/**`、`**/db/migration/**`、`docs/adr/**` など)に触れるタスクは、`auto` でも承認待ちになる。モデルは `requiresApproval` を出せない。
 - 予算が足りない、または UNKNOWN_COST のとき、Goal は `BLOCKED(PLAN_BUDGET_HOLD)`。モデル呼び出しの失敗は `BLOCKED(PLAN_CALL_FAILED)`。検証の失敗は `BLOCKED(PLAN_INVALID)`。
+- `PLAN_CALL_FAILED` の内訳は、ログの `planner call failed: ... errorKind=POLICY_DENIED errorCode=SECRET_DETECTED` で見分ける。
+  ゲートウェイの秘密検出(`SecretScan`、ADR 0011 追補 2026-11-19)が、依頼の文面のどこかを秘密らしいと判定して、呼び出しを送る前に拒否したことを表す。
+  主な原因は、Planner のファイル一覧(§7.2c)の中のパス。一覧からは、同じ判定でゲートウェイが拒否するパスを外すので、この原因は起きない(除外数は
+  `planner repo files: ... omittedUnsafe=` に出る)。それでも出るときは、題名か本文(運用者または MCP が書いた文面)、または再試行の文(Planner 自身の出力)の
+  どこかに、同じ判定に当たる文字列がある。その文字列を取り除いて、再計画(`REPLAN_REQUESTED`)する。パスや本文はログに出ないので、見るのは Goal の画面である。
 - `BLOCKED` の計画段階の Goal は、自動では再試行しない。運用者が再計画する(`BLOCKED → GOAL_SUBMITTED`、理由 `REPLAN_REQUESTED`)。入口は §7.4 の「再計画」(PR D)。
 - ログには Goal の本文、計画、パス、モデルの出力、例外の文を出さない。ID と固定の理由コード、件数、費用、出力のダイジェストの先頭 12 文字だけを出す。
 
@@ -1832,7 +1931,8 @@ dev での有効化の手順は §7.5。
   (20 KB 以上)には、サイズ(KB)を付ける。一覧は、`main` の先頭のツリー(`GitHubPort.listTree`)から作り、5 分キャッシュする。
 - 範囲: 許可パス(`kivra-*/src/**`、`docs/**`、`README.md`)のうち、禁止パス(`PlanValidator` の規則と同じ判定)を除いたファイル。
   シンボリックリンクとサブモジュールは含めない。見えない文字(bidi、ゼロ幅など)や制御文字を含むパス、200 文字を超えるパスは一覧から
-  外す(除去すると別のパスになるため)。
+  外す(除去すると別のパスになるため)。ゲートウェイの秘密検出(`SecretScan`)が拒否するパスも外す(ADR 0011 追補 2026-11-19)。
+  外したパスは `omittedUnsafe` に数える(パス名は出さない)。
 - 大きさ: 一覧が 48 KB を超えるときは、ディレクトリごとの件数の要約に縮める(一覧の先頭に「要約」と明記)。要約では、要約の下の
   ファイルのパスは出さない。既存のファイルを名指ししないタスクは、要約のディレクトリの下に新しいファイルを作るときだけ、親のディレクトリを使う。
 - 環境変数: `KIVRA_SELFDEV_PLANNER_REPO_TREE`。未設定と `true` は有効(既定)、`false` は無効。それ以外の値は起動に失敗する
@@ -1844,6 +1944,31 @@ dev での有効化の手順は §7.5。
   (Planner 自身の出力の文字列。見えない文字を除き、200 文字で切る)と許可パスの規則を足す。Goal の題名と本文は足さない。
   この機能が無効のときは、再試行は今までどおり。
 - ログ: 件数、要約の有無、バイト数、除外数だけを出す。パスの一覧、Goal の本文は出さない。
+- ゲートウェイの秘密検出との関係(ADR 0011 追補 2026-11-19): ゲートウェイは、依頼の本文のどこか 1 つでも秘密らしいと判定すると、依頼全体を
+  送らずに拒否する(`SECRET_DETECTED`)。その判定は `SecretScan`(`kivra-model-gateway`)の規則で、`kivra-memory` の `SecretFilter`(記憶の
+  保存と表示で使う)とは別の実装である。`SecretFilter` は、語らしい英小文字の長い並びを除外するが、`SecretScan` は除外しない。
+  そのため、ファイル一覧の長いパス
+  (例: `docs/adr/0004-budget-port-is-authoritative-budgetcheck-observation-only.md`、テストのクラス名を含むパス)が、前者に当たって
+  全ての計画が `PLAN_CALL_FAILED` になっていた。一覧は、`PlannerRepoFileList` が同じ `SecretScan` の `detectsText` で判定し、当たるパスを外す。
+  一覧のディレクトリ要約の行も、同じ判定で外す。題名・本文・再試行の文は一覧ではないので、この除外の対象ではない。
+
+### 7.2c-2 計画の対象パスの大きさの検査(ADR 0011 追補 2026-11-19)
+
+- 目的: 200 KiB を超える既存ファイルは、Write(全文)の変更が必ず `FILE_TOO_LARGE` で拒否される。そのタスクを CLI に流すと、走ってから落ちて費用が無駄になる。
+  計画の検証で、その計画を保存する前に拒否する。
+- 規則: タスクの `targetPaths` のうち、基底ブランチに既存の通常ファイルで、サイズが **204,800 バイト(200 KiB)を超える**ものが 1 つでもあれば、
+  計画全体を `PLAN_INVALID` として拒否する(理由コード `FILE_TOO_LARGE`)。上限ちょうどは通す。新規ファイル(基底に無いパス)は通す。
+  上限は `PatchPolicyDefaults.MAX_FILE_BYTES`(PatchPolicy の `maxFileBytes` と同じ定数)。
+- サイズの出どころ: `PlannerRepoFiles` のツリー読み取り(5 分キャッシュ、成功だけキャッシュ)。`KIVRA_SELFDEV_PLANNER_REPO_TREE=false` で一覧の表示を切っても、
+  この検査は止まらない(読み取りは行う)。自律運転が無効のときは、何も読まない。
+- 縮退: ツリーを読めなかった(切り詰め、GitHub の失敗、不明な結果、例外)ときは、検査をせずに計画を通す。書き込みのときの PatchPolicy
+  (`FILE_TOO_LARGE`)は常に働く。ログには `reason=` の固定コードだけが出る(`planner repo files unavailable`)。
+- 再試行: 1 回目の拒否が `FILE_TOO_LARGE` のときだけ、2 回目のプロンプトに「そのファイルは 200 KB を超えていて、タスクでは変えられない。
+  別の小さいファイルに書く、または新しいファイルを作る」を足す(パスは Planner 自身の出力の文字列を、見えない文字を除いて 200 文字で切る)。
+  2 回目も拒否なら `BLOCKED(PLAN_INVALID)`。運用者は再計画(`REPLAN_REQUESTED`)で直す。
+- 運用の見分け方: 計画が `PLAN_INVALID` で止まり、ログの理由が `FILE_TOO_LARGE`(`planner output invalid: ... reason=FILE_TOO_LARGE`)なら、
+  名指したファイルが 200 KiB を超えている。そのファイルの変更は、小さいファイルへの分割か、新規ファイルへの変更に直す。ファイルを小さくする変更は、
+  そのファイル自身を全文で書くため、同じ理由で拒否される。人が手で分割する。
 
 ### 7.2d 自己開発の記憶(ADR 0016 P1: 保存のみ、影)
 
@@ -1957,7 +2082,24 @@ dev での有効化の手順は §7.5。
 
 **タスクの失敗で止まった Goal**: 投入したタスクが失敗(`FAILED`)し、残りが見送り(`SKIPPED`)になって、全タスクが終わると、Dispatcher が Goal を `中止` にする(理由は「タスクが完了せずに終わった」。ADR 0011 §2.8)。
 手で止めたのではないので、「中止」の表示を見たら、まず詳細のタスクの状態と、§4.5 の失敗の原因を確かめる。全タスクが `COMPLETED` で終わったときは `完了` になる。
-次のタスクは投入されない。やり直すときは、新しい Goal を出す(`FAILED` のタスクを戻す HTTP の操作は無い)。
+次のタスクは投入されない。やり直すときは、下の「再投入」で `FAILED` のタスクを戻すか、新しい Goal を出す。
+
+**失敗したタスクの再投入と、止まったタスクの見送り(ADR 0011 追補 2026-11-18)**: 計画の途中のタスクが失敗(`FAILED`)や解放(`CANCELLED`)で終わると、
+それに依存する後続のタスクは `投入待ち`(`QUEUED`)のまま止まり、Goal も終わらない(自動の再投入はしない。§2.8)。運用者が次のどちらかを選ぶ。
+
+- **再投入**: `POST /api/selfdev/tasks/{id}/requeue`(`{"version": n}`、権限は承認と同じ `GOAL_WRITE`。AI の主体は 403)。画面ではタスクの詳細の「再投入」。
+  `FAILED` / `CANCELLED` のタスクが `投入待ち`(理由 `OPERATOR_REQUEUED`)に戻り、次の投入で **新しい Run が 1 つ**作られる(**費用が発生する**)。
+  投入キーは `ap:<taskId>:a<回数>` に作り直すので、再投入のたびに別の Run になり、同じ再投入が二重に Run を作ることは無い。同じ `version` で 2 回送ると、2 回目は 409(何も書かない)。
+  前の Run との結び付き(`run_id`)は外れる(前の Run は Run の一覧に残る)。承認者(`approved_by`)は変えない(再投入は承認ではない)。
+  計画が決着済み(Goal が `完了` / `中止`)のときは 409。計画の親(Goal の行)も 409。原因(§4.5、`CODING_CLI_NONZERO` など)を直さずに再投入すると、同じ失敗を繰り返す。
+- **見送り**: `POST /api/selfdev/tasks/{id}/reject`(承認待ちの見送りと同じ操作)。遷移表が許す `承認待ち` / `投入待ち` / `FAILED` / `CANCELLED` のタスクを `見送り`(`OPERATOR_SKIPPED`)にする。
+  投入済み(`SUBMITTED`)などは 409。依存先を見送っても後続は投入されない(依存は `COMPLETED` だけを満たす)ので、後続も見送る。全タスクが終わると、Goal は `中止`(タスクが完了せずに終わった)で決着する。
+- ログ: `autopilot operator action: action=TASK_REQUEUED actor=<ダイジェスト> taskId=… result=QUEUED reason=OPERATOR_REQUEUED`(見送りは `TASK_REJECTED`)。
+
+**投入されずに待っているタスクの見え方(ログ)**: Dispatcher は 10 秒ごとに、ガードの手前で投入しなかった `投入待ち` のタスクを数え、件数が前回から変わったとき、または 10 分ごとに 1 行出す。
+`autopilot dispatch waiting: dependencyPending=<依存先が未完了> dependencyFailed=<依存先が FAILED / CANCELLED / SKIPPED / STOPPED> orderHeld=<order が ACTIVE でない> siblingInFlight=<同じ計画の別タスクが投入中> refused=<その他の拒否>`。
+件数と固定の語だけで、タスクの ID・題名・本文は出ない。`dependencyFailed` が 0 でなければ、上の再投入か見送りが要る。`orderHeld` は order の一時停止・期限切れ(§7 の order の延長と再開)。
+起動時には `autopilot dispatcher started: intervalSeconds=10 batch=20 maxPendingPrs=… maxRunsPerDay=…` が 1 行出る。ガード(ブレーカー、PR 上限、予算、日次上限)に当たったタスクは、従来どおり `BLOCKED` になり、`autopilot dispatch blocked` が出る。
 投入の主体は、タスクを承認した運用者。承認が無い自動承認のタスクは、Goal を作った人の名で投入される(`approved_by` が無いとき)。
 
 **再計画**: Goal が `停止中` で、理由が計画段階(`PLAN_INVALID` / `PLAN_BUDGET_HOLD` / `PLAN_CALL_FAILED`)のときだけ、「再計画する」が出る(`POST .../replan`)。Planner が新しい計画を作る。計画の回数の上限は 3 回。
@@ -1978,18 +2120,18 @@ dev での有効化の手順は §7.5。
 ### 7.4b 段階 2 の差分の再検査と `AUTO_SCOPE_EXCEEDED`(PR F)
 
 `approval = auto` のとき、承認なしで投入されたタスク(`approved_by` が無いタスク)は、コミットの前に、**実際の差分**で再検査される。
-範囲は段階 2 と同じ(`docs/**`、`kivra-*/src/test/**`、`README.md` だけ。denylist に触れない)。加えて、変更パスは 3 件以下、変更行は 200 行以下である。
+範囲は段階 2 と同じ(`docs/**`、`kivra-*/src/test/**`、`README.md` だけ。denylist に触れない)。加えて、変更パスは 3 件以下、変更行は 200 行以下である。変更行は、書き込みごとに旧内容との差分の「追加行数 + 削除行数」で数える(ADR 0011 §6.2 追補 2026-11-19)。小さな編集で大きなファイルを全文書き込みしても、差分が小さければ範囲内になる。新規ファイルのみ新内容の全行数で数える。既存ファイルで旧内容が取得できない場合や差分の計算上限を超えた場合は、変更行数を 201 として範囲外にする(安全側。#570)。
 範囲の外なら、PR は作られず、Run は `POLICY_REJECTED` で終わり、タスクは承認待ち(`PENDING_APPROVAL`、理由 `AUTO_SCOPE_EXCEEDED`)に戻り、Goal は `BLOCKED`(`AUTO_SCOPE_EXCEEDED`)になる。
 
 **運用者の見方**:
 - 画面で Goal の理由が「変更範囲が計画を超えました（運用者の確認が必要）」(`AUTO_SCOPE_EXCEEDED`)なら、この再検査で止まっている。
 - 失敗としては数えない。サーキットブレーカーは動かない。
-- ログには `autopilot scope exceeded: runId=... code=AUTO_SCOPE_EXCEEDED paths=<件数> lines=<行数>` が出る。パスと内容は出ない。差分の中身は、ログからは分からない。
+- ログには `autopilot scope exceeded: runId=... state=PENDING_APPROVAL reason=AUTO_SCOPE_EXCEEDED cause=<理由> paths=<件数> lines=<行数>` が出る。`cause` は `PATH_COUNT`(パス数が 3 を超えた)、`PATH_SCOPE`(許可リストの外)、`DENYLIST`(denylist に触れた)、`LINE_COUNT`(変更行が 200 を超えた)のどれか。`lines` が 201 のときは、差分が 200 を超えたことだけが分かる(正確な件数は出ない)。パスと内容は出ない。差分の中身は、ログからは分からない。
 - 範囲外の差分は、kivra に保存されない(作業ブランチも作られない)。内容を確かめられるのは、coding attempt の出力の保持(§6.12。既定は無効)が有効なときだけである。
 
 **再承認の手順**:
 1. 原因を確かめる。計画(Plan)の対象パスと、Run の失敗の理由(`POLICY_REJECTED`)を見る。このタスクの変更が正当なら、範囲を広げる別の Goal を出すか、手で PR を作る方が安全である(自動の範囲は広げない)。
-2. 承認し直す: 詳細の該当タスクで「承認」(`POST /api/selfdev/tasks/{planId}-{番号}/approve`)。承認すると、タスクは新しい投入キーで `QUEUED` になり、Goal は `BLOCKED` から `RUNNING`(または `TASKS_QUEUED`)へ戻る。次の tick で投入される(新しい Run)。
+2. 承認し直す: 詳細の該当タスクで「承認」(`POST /api/selfdev/tasks/{planId}-{番号}/approve`。MCP の `kivra_task_approve` でも同じ。§8.8b)。承認すると、タスクは新しい投入キーで `QUEUED` になり、Goal は `BLOCKED` から `RUNNING`(または `TASKS_QUEUED`)へ戻る。次の tick で投入される(新しい Run)。
 3. 承認したタスクは、再検査の対象外になる。差分が範囲外でも、承認者の判断でコミットされる。承認の前に、計画の内容を確かめる。
 4. 見送るなら「見送り」(`reject`)。タスクは `SKIPPED` になり、Goal の残りは進む。
 
@@ -2620,7 +2762,7 @@ SELECT kind, COUNT(*) AS n
 - `KIVRA_MCP_ALLOWED_ORIGINS`(任意)。カンマ区切りの `Origin`(例 `https://kivra-dev.kigawa.net`)。`Origin` ヘッダーが付いたリクエストは、一覧に一致する必要がある。`Origin` が無いリクエスト(非ブラウザのクライアント)は通す。
 - `KIVRA_MCP_RATE_PER_MINUTE`(任意、既定 60、1〜6000)。主体(所有者のキー)ごとに、1 分あたりの上限。超えると 429。
 - `KIVRA_AGENT_REQUIRED_ROLE`(任意)。設定されていれば、そのロールを持つトークンは 403(エージェントは MCP の呼び出し元ではない)。`aud` の検査で、エージェントのトークンは既に 401 になる。これは多層防御。
-- `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。order が有効なときは、停止の要求のツール `kivra_order_request_stop` も登録する(§8.8)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
+- `KIVRA_MCP_WRITE_ENABLED`(任意、既定 `false`)。`true` で書き込みのツール `kivra_selfdev_start` を登録する(§8.7)。order が有効なときは、停止の要求のツール `kivra_order_request_stop` も登録する(§8.8)。さらに延長、再開、order の作成、タスクの再投入、タスクの承認と見送りのツールも登録する(§8.8b)。`KIVRA_MCP_ENABLED=true` のときだけ有効にできる。MCP が off のまま `true` にすると起動を止める。
 - `KIVRA_MCP_WRITE_RATE_PER_MINUTE`(任意、既定 5、1〜6000)。書き込みの呼び出しの、主体ごとの 1 分あたりの上限。読み取りの上限(`KIVRA_MCP_RATE_PER_MINUTE`)とは別。超えると 429。書き込みが無効のときは読まれない。
 - `KIVRA_MCP_GOAL_READ_ENABLED`、`KIVRA_MCP_GOAL_STOP_ENABLED`、`KIVRA_MCP_GOAL_SUBMIT_ENABLED`、`KIVRA_MCP_GOAL_TEXT_ENABLED`(任意、既定 `false`)。`KIVRA_MCP_GOAL_TEXT_ENABLED` は題名の読み取り(§8.9 の末尾)。Goal の読み取り、中止、投入のツール(§8.9)。どれも `KIVRA_MCP_ENABLED=true` と オートパイロットが要る。中止と投入は `KIVRA_MCP_WRITE_ENABLED=true` も要る。MCP が off のまま `true` にすると起動を止める。
 - `KIVRA_MCP_GOAL_SUBMIT_DAILY_LIMIT`(任意、既定 10、1〜100)。`kivra_goal_submit` で、運用者 1 人が UTC の 1 日に投入できる Goal の件数。冪等の再送は数えない。
@@ -2720,11 +2862,39 @@ order が有効(`KIVRA_SELFDEV_ORDERS_ENABLED=true` かつ `KIVRA_SELFDEV_AUTOPI
 | `kivra_order_request_stop` | `kivra.selfdev.stop` | `order_id`、`version`(0 以上の整数)、`reason`(`OPERATOR_REQUEST`、`RUNAWAY_SUSPECTED`、`BUDGET_CONCERN`、`SCOPE_CONCERN` のどれか) | 要求の `request_id`、`state`、`reason_code`、`requester_kind`、`order_version`。**`KIVRA_MCP_WRITE_ENABLED=true` のときだけ登録される** |
 
 - 入力は厳格。未知の項目(`policy`、`reason` 以外の自由な文を含む)、列挙外の理由、型違い、負の版は -32602 で、何も書かれない。
-- **停止の要求だけ**。承認、却下、取り消し、作成、周の開始、一時停止、再開は、MCP には無い(ADR 0015 U-9)。承認は REST の `approve` だけで、要求した主体は承認できない(`SAME_PRINCIPAL`。REST は 403)。
+- **停止の要求が基本**。order の承認(停止要求の承認)、却下、取り消し、周の開始、一時停止、子の作成は、MCP には無い(ADR 0015 U-9)。根の作成は §8.8b の `kivra_order_create`(ADR 0015 追補 2026-11-19)。延長と再開は §8.8b のツールで行える(ADR 0015 追補 2026-11-18)。停止要求の承認は REST の `approve` だけで、要求した主体は承認できない(`SAME_PRINCIPAL`。REST は 403)。タスクの承認と見送りは §8.8b のツールで行える(ADR 0015 追補 2026-11-19)。
 - 認可は REST と同じ。MCP の主体(所有者のキー)が `KIVRA_SELFDEV_AI_PRINCIPAL` と一致すれば AI の主体、それ以外は人の運用者。停止の要求は REST と同じく両方ができ、遷移の可否はリポジトリの規則で決まる。
 - 拒否は REST と同じ固定コードを `structuredContent.error.code` に返す(例: `STOP_ALREADY_PENDING`、`STALE_VERSION`、`ORDER_NOT_FOUND`)。理由の文は固定の文だけ。
 - 題名、方針、目標の本文、`digest` は返さない。ログと監査には、固定のコード、ID、主体のハッシュだけが出る(`net.kigawa.kivra.selfdev.order.operator`、`via=mcp`)。
 - 有効化: order と MCP を有効にし、停止の要求も使うなら `KIVRA_MCP_WRITE_ENABLED=true` を加える(dev で先に確かめる)。戻すには該当の変数を `false` にして再起動する。order の状態は DB に残り、起動時に既存の `ACTIVE` は `PAUSED`(`STARTUP_HOLD`)になる。
+
+### 8.8b 運用者の判断のツール(延長、再開、order の作成、タスクの再投入、タスクの承認と見送り、タスクの再計画、ADR 0015 追補 2026-11-18・2026-11-19、既定は無効)
+
+`KIVRA_MCP_WRITE_ENABLED=true` かつ order が有効のとき(延長、再開、作成)、または `KIVRA_MCP_WRITE_ENABLED=true` かつ autopilot が有効なとき(再投入、承認、見送り)に登録する。どれも REST と同じリポジトリ関数を呼ぶ。
+
+| ツール | 必要なスコープ | 入力 | 出力(`structuredContent`) |
+|---|---|---|---|
+| `kivra_order_extend` | `kivra.selfdev.order.manage` | `order_id`、`version`、`add_cycles`(任意、1〜`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`)、`extend_days`(任意、1〜3650)。どちらか一つ以上 | REST の詳細と同じ項目(`order_id`、`state`、`max_cycles`、`version` など)。拒否は `error.code`(`STALE_VERSION`、`ORDER_NOT_FOUND`、`NOT_ROOT`、`TERMINAL` など) |
+| `kivra_order_resume` | `kivra.selfdev.order.manage` | `order_id`、`version` | 同上。`PAUSED` の root と、祖先が有効な order だけ再開できる。拒否は固定のコード |
+| `kivra_order_create` | `kivra.selfdev.order.create` | `title`(1〜200 字)、`policy`(1〜8000 字、本文)、`project_id`(必須、既存のプロジェクト)、`max_cycles`(任意、1〜`KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP`、既定 1) | `order_id`、`state`(`ACTIVE`)、`max_cycles`、`project_id`、`version` など(REST の詳細と同じ項目。題名と本文は返さない)。拒否は `PROJECT_NOT_FOUND`、`ORDERS_DISABLED`、`forbidden` など |
+| `kivra_task_requeue` | `kivra.selfdev.requeue` | `task_id`、`version`(`kivra_task_list` の値) | `task_id`、`state`(`QUEUED`)、`state_reason`、`version`、`project_id`。題名と本文は返さない。拒否は `TASK_NOT_FOUND`、`STALE_VERSION` など |
+| `kivra_task_approve` | `kivra.selfdev.task.decide` | `task_id`、`version`(`kivra_task_list` の値) | 同上(`state` は `QUEUED`)。承認待ち(`PENDING_APPROVAL`、`AUTO_SCOPE_EXCEEDED` を含む)だけ。拒否は `TASK_NOT_FOUND`、`STALE_VERSION`、遷移の拒否の理由コード |
+| `kivra_task_skip` | `kivra.selfdev.task.decide` | `task_id`、`version` | 同上(`state` は `SKIPPED`)。UI の「見送る」と同じ REST(`/reject`)の経路。承認待ち、投入待ち、`FAILED`、`CANCELLED` のタスク |
+| `kivra_task_replan` | `kivra.selfdev.task.decide` | `task_id`(ルートの task、goal の ID)、`version`(`kivra_task_list` の値) | `task_id`、`state`(`TASK_SUBMITTED`)、`state_reason`(`REPLAN_REQUESTED`)、`version`、`project_id`。UI の「再計画」と同じ REST(`/api/selfdev/goals/{id}/replan`)の経路。`BLOCKED` のタスクだけ(`PLAN_CALL_FAILED`、`PLAN_INVALID`、`PLAN_BUDGET_HOLD`)。拒否は `TASK_NOT_FOUND`、`STALE_VERSION`、`NO_EDGE`(`BLOCKED` 以外) |
+
+- `KIVRA_MCP_WRITE_ENABLED=false` のときは一つも出ず、呼べば -32602(未知のツール)。書き込みの毎分の上限(`KIVRA_MCP_WRITE_RATE_PER_MINUTE`)を共有する。
+- スコープが無いトークンは 403 と `insufficient_scope`。読み取りや停止のスコープからは暗黙に付かない。
+- AI の主体(`KIVRA_SELFDEV_AI_PRINCIPAL`)は、スコープを持っていても拒否される(`forbidden`)。AI の役割は `ORDER_MANAGE` と `GOAL_WRITE` を持たないため。
+- 延長の数値は監査の行に出ない。見るには `selfdev_order_events` を見る。
+- `kivra_order_create` の注意: **作成には冪等の鍵が無い**(REST の作成と同じ)。応答が届かずに再送すると、同じ依頼の order が二つできる。再試行の前に `kivra_order_list` で作られたかを確かめる。作成しても周は始まらない(`cycles_started` は 0)。ただし `KIVRA_SELFDEV_ORDER_AUTO_CYCLE_ENABLED` が有効な環境では、その規則で周が始まりうる。本文(`policy`)は運用者が指示した文面をそのまま入れる。MCP では読み返せない(ADR 0015 追補 2026-11-19 §9.5)。
+- 上限: 題名 200 字、本文 8000 字、周の数は REST と同じ。予算と期限は REST の作成に入力が無いので、MCP にも無い(期限は既定の 14 日)。
+- 入力は厳格。未知の項目(`policy`、`reason` など)、型違い、範囲外、小数は -32602 で、何も書かれない。
+- `kivra_task_approve` の注意: **承認は範囲の再検査を行わない**(§7.4b)。`AUTO_SCOPE_EXCEEDED` で止まったタスクを承認すると、差分を確かめないまま `QUEUED` になる。承認の前に、計画の内容と、同じ原因が直っているかを確かめる。
+- 監査: 承認と見送りは、`net.kigawa.kivra.selfdev.autopilot.operator` の行に `via=mcp` を付けて出る(`action=TASK_APPROVED` / `action=TASK_REJECTED`)。
+- `kivra_task_replan` の注意: **予算の保留(`PLAN_BUDGET_HOLD`)の計画は、予算が空いてから再計画する**。空いていないうちに戻すと、同じ保留で再び `BLOCKED` になる。`PLAN_CALL_FAILED` は呼び出しの原因を直してから戻す。再計画はタスクを投入しない(計画の段階に戻すだけ)。根以外の `BLOCKED` も REST と同じく指せるので、対象は `kivra_task_list` の根の ID で確かめる。監査は `action=REPLAN via=mcp`。
+- 注意: プロジェクト単位の権限(ADR 0022 PR-D)は、これらの MCP ツールでは検査されない(ディスパッチャは全体の権限だけを見る)。`KIVRA_SELFDEV_PROJECT_MODE` を enforce にする前に直す。
+- 有効化の順序: dev で `KIVRA_MCP_WRITE_ENABLED=true` は既に有効。スコープ `kivra.selfdev.order.manage`、`kivra.selfdev.requeue`、`kivra.selfdev.task.decide`、`kivra.selfdev.order.create` を Keycloak の client `kivra-mcp` に足す(`kigawa01/k8s-system` 側。この repo には無い)。その後、運用者のトークンで `tools/list` に出ることを確かめる。作成のツールは `kivra.selfdev.order.create` を付けたトークンにだけ出る。
+- 戻す: 該当のスコープを付けない(一覧から消える)、または `KIVRA_MCP_WRITE_ENABLED=false` にして再デプロイする。書き込みのツール全部が止まり、読み取りは残る。作成だけを止めるには、`kivra.selfdev.order.create` を Keycloak の client `kivra-mcp` から外す(トークンの次の発行から効く。既に発行されたトークンは、その有効期限まで使える)。
 
 ### 8.9 Goal のツール(ADR 0019 S1、既定は無効)
 

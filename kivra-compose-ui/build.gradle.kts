@@ -16,7 +16,10 @@ kotlin {
                 outputFileName = "kivra-compose-ui.js"
             }
         }
-        binaries.executable()
+        // 実行可能バイナリ(productionExecutable)は作らない。compose-ui は kivra-web から klib として使われるだけで、
+        // この .js は配信にも Docker にも使われない。作ると build のたびに production の wasm コンパイルと
+        // binaryen の最適化が余計に走り、同じ Kotlin daemon のヒープを圧迫する(test-h2 の OOM)。
+        // テスト用の wasm 実行ファイル(wasmJsTest)は binaries.executable() と無関係に作られる。
     }
 
     sourceSets {

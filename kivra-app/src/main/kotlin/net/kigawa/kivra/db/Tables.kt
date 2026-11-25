@@ -261,3 +261,17 @@ object LeaderLeasesTable : Table("orchestrator_leader_lease") {
     val updatedAt = datetime("updated_at")
     override val primaryKey = PrimaryKey(id)
 }
+
+/** Latest Planner snapshot, keyed by the parent task. */
+object PlanDecompositionStatesTable : Table("plan_decomposition_states") {
+    val taskId = varchar("task_id", 255)
+    val stateJson = text("state_json")
+    override val primaryKey = PrimaryKey(taskId)
+}
+
+/** Latest Reviewer snapshot, keyed by the reviewed run UUID. */
+object PlanReviewStatesTable : Table("plan_review_states") {
+    val runId = varchar("run_id", 36)
+    val stateJson = text("state_json")
+    override val primaryKey = PrimaryKey(runId)
+}

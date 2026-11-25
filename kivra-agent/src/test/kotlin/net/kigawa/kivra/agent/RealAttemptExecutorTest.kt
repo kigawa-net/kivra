@@ -152,6 +152,7 @@ private class World(
         monitorEvents: Boolean = false,
         backend: RunBackend? = null,
         podInputs: AttemptPodInputs = AttemptPodInputs(),
+        claudeAccount: String? = null,
     ): RealAttemptExecutor {
         val settings = RealExecutorSettings(
             dockerBinary = Path.of("/usr/bin/docker"),
@@ -164,6 +165,7 @@ private class World(
             debugKeep = debugKeep,
             newErrorCodes = newErrorCodes,
             monitorEvents = monitorEvents,
+            claudeAccount = claudeAccount,
         )
         return RealAttemptExecutor(
             client = client,
@@ -249,6 +251,18 @@ class RealAttemptExecutorTest {
         assertFalse(run.any { it.startsWith("--privileged") })
         assertEquals(1, run.count { it.startsWith("--mount=") }, "only the work directory is mounted")
         assertTrue(run.any { it.startsWith("--mount=type=bind,source=") && it.endsWith(",target=/work") })
+    }
+
+    @Test
+    fun theDockerExecutorUsesItsConfiguredClaudeAccount() = runBlocking {
+        val world = World(docker = ScriptedDocker(output = { lines(resultLine()) }))
+        world.executor(claudeAccount = "repo-a").execute(world.attempt())
+
+        val run = world.docker.argvs.single { it[1] == "run" }
+        assertEquals(
+            "--env=ANTHROPIC_BASE_URL=$PROXY/anthropic/repo-a",
+            run.single { it.startsWith("--env=ANTHROPIC_BASE_URL=") },
+        )
     }
 
     @Test

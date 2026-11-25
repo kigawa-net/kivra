@@ -125,6 +125,11 @@ class SelfDevRunner(
      * incident issue. Null (the default, and the production value while `KIVRA_SELFDEV_AUTO_FIX_ENABLED` is off) changes nothing.
      */
     private val incidentOrigin: IncidentRunOrigin? = null,
+    /**
+     * Closes the pull request of a run whose review timed out, before the run is abandoned (ADR 0008 追補 2026-11-18). Null (the default,
+     * and the production value while `KIVRA_SELFDEV_PR_ABANDON_CLOSE_ENABLED` is off) leaves the pull request open, as before.
+     */
+    private val abandonCloser: PrAbandonCloser? = null,
 ) {
     init {
         require(config.runtime == SelfDevRuntime.API || coding != null) { "the CLI runtime needs a coding patch source" }
@@ -308,9 +313,10 @@ class SelfDevRunner(
                     // ADR 0011 section 6.2: the actual diff of an auto-approved task is checked again before anything is committed. An
                     // out-of-scope change ends the run as a policy rejection, and the task waits for the operator (not counted as a failure).
                     val guard = autoScope
-                    val scope = guard?.check(run.runId, verdict.patch) { sizes[it] }
+                    val bases = if (guard != null) readBaseContents(verdict.patch, base, entries) else emptyMap()
+                    val scope = guard?.check(run.runId, verdict.patch, { sizes[it] }, { bases[it] })
                     if (guard != null && scope is AutoScopeVerdict.OutOfScope) {
-                        guard.settle(run.runId)
+                        guard.settle(run.runId, scope)
                         Step.Done(persistAdvance(lease, run, DevelopmentRunState.FAILED, POLICY_REJECTED))
                     } else {
                         Step.Go(verdict.patch)
@@ -322,6 +328,25 @@ class SelfDevRunner(
                 }
             }
         }
+    }
+
+    /**
+     * The base content of each written file that exists in the base tree, for the line diff of the re-check (ADR 0011 section 6.2). Read
+     * only when the change set has at most [AutoScopeRule.MAX_PATHS] distinct paths: a larger one is out of scope by its path count, so
+     * there is nothing to diff. A file that is new, excluded by the reader (binary, too large), or whose read fails is left out, and the
+     * guard rejects a known existing file if its base cannot be read (fail-closed). Genuinely new files count their full new content. Logs nothing.
+     */
+    private suspend fun readBaseContents(patch: PatchSet, base: BranchInfo, entries: List<RepoEntry>): Map<String, String> {
+        val paths = patch.files.map { it.path }.distinct()
+        if (paths.size > AutoScopeRule.MAX_PATHS) return emptyMap()
+        val readable = entries.filter { it.readable }.mapTo(HashSet()) { it.path }
+        val out = HashMap<String, String>()
+        for (file in patch.files) {
+            if (file !is Write || file.path !in readable) continue
+            val content = (repoReader.readFile(config.repo, base.headSha, file.path) as? GitHubResult.Success)?.value ?: continue
+            out[file.path] = content
+        }
+        return out
     }
 
     /**
@@ -442,9 +467,15 @@ class SelfDevRunner(
             if (reconcileMergedHead(lease, run, pullRequest)) return Waiting(WaitReason.AWAITING_HUMAN_REVIEW)
             return completeMergedPullRequest(lease, run)
         }
-        val abandoned = pullRequest.state == PullRequestState.CLOSED ||
-            clock.instant().isAfter(run.updatedInstant().plus(config.prReviewTimeout))
+        val timedOut = clock.instant().isAfter(run.updatedInstant().plus(config.prReviewTimeout))
+        val abandoned = pullRequest.state == PullRequestState.CLOSED || timedOut
         if (abandoned) {
+            // ADR 0008 追補 2026-11-18: kivra's own timed-out pull request is closed first; the run is abandoned only once it is closed
+            // (or the closing is not applicable, or gave up). A close that did not land keeps the run, and the next call tries again.
+            if (timedOut && abandonCloser != null) {
+                val outcome = abandonCloser.closeTimedOut(lease, run, pullRequest) { renewOrThrow(lease) }
+                if (outcome is PrAbandonCloser.Outcome.Retry) return Waiting(WaitReason.AWAITING_PR_CLOSE, outcome.code)
+            }
             val closed = runs.closeAbandonedPullRequest(lease, currentVersion(lease))
             return Advanced(run.state, closed.state, PR_ABANDONED)
         }

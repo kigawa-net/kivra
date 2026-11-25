@@ -1,6 +1,7 @@
 package net.kigawa.kivra.selfdev
 
 import java.security.SecureRandom
+import net.kigawa.kivra.core.patch.PatchPolicyDefaults
 
 /*
  * Prompt construction for the autopilot Planner (ADR 0011 section 3). Pure functions, no I/O.
@@ -29,6 +30,17 @@ internal object PlannerPrompt {
             "only the JSON object described in the instructions."
     }
 
+    /**
+     * The note for a retry after a target path that is an existing file larger than the limit (ADR 0011 section 3, 追補 2026-11-19).
+     * [rejectedPath] is the Planner's own output, so it is cut and stripped the same way as in [pathRetryNote].
+     */
+    fun fileTooLargeRetryNote(rejectedPath: String): String {
+        val shown = PlannerRepoFileList.stripForNote(rejectedPath).replace('"', '_').replace('\\', '_')
+        return "The file \"$shown\" in the previous answer is larger than ${PatchPolicyDefaults.MAX_FILE_BYTES / 1024} KB, so a task " +
+            "cannot change it. Write the change to a smaller file instead, or to a new file. Reply again with only the JSON object " +
+            "described in the instructions."
+    }
+
     private val random = SecureRandom()
 
     /** A 128-bit hex nonce. Each request gets a new one. */
@@ -38,8 +50,12 @@ internal object PlannerPrompt {
         return bytes.joinToString("") { "%02x".format(it) }
     }
 
-    /** [repoFiles] adds the rules for the repository file list (Issue #293). Without it, the prompt is the one used before. */
-    fun system(repoFiles: Boolean = false): String = buildString {
+    /**
+     * [repoFiles] adds the rules for the repository file list (Issue #293). Without it, the prompt is the one used before.
+     * [childOrdersMaxCycles] adds the childOrders rules (ADR 0015 addendum 2026-11-22) with this cap. Null (the plan's order may not propose
+     * children) leaves childOrders out of the prompt entirely.
+     */
+    fun system(repoFiles: Boolean = false, childOrdersMaxCycles: Int? = null): String = buildString {
         appendLine("You are the planner of the kivra self-development autopilot. You break one goal into a short ordered list of")
         appendLine("small coding tasks for the kivra repository. You have no tools. You do not run anything.")
         appendLine()
@@ -50,12 +66,27 @@ internal object PlannerPrompt {
         appendLine("""  "targetPaths":["<repo-relative path>"],"sizeEstimate":"S","dependsOn":[]}]}""")
         appendLine("- summary: at most $MAX_SUMMARY_CHARS characters.")
         appendLine("- tasks: between 1 and $MAX_TASKS tasks, in the order they should run.")
+        appendLine("  Every task must change at least one file. A task that only reads, checks, investigates or reports (for example,")
+        appendLine("  \"find out where X is\") is not allowed: the coding step would end with no change, and the task would fail.")
+        appendLine("  Write each task as a concrete change, and name the files it changes.")
         appendLine("- title: at most $MAX_TITLE_CHARS characters, one line.")
         appendLine("- body: at most $MAX_BODY_CHARS characters. The goal, the files to change, and the acceptance criteria.")
         appendLine("- targetPaths: between 1 and $MAX_PATHS paths, repo-relative, with no leading slash and no \"..\".")
         appendLine("- sizeEstimate: \"S\", \"M\" or \"L\".")
         appendLine("- dependsOn: a list of task numbers (1-based integers). Each number must be smaller than the task's own number, and it must")
         appendLine("  name an earlier task in this list. Do not repeat a number, and do not refer to the task itself or a later task.")
+        if (childOrdersMaxCycles != null) {
+            appendLine("- childOrders: optional. Between 0 and $MAX_CHILD_ORDERS entries. Leave the key out, or use [], when there are none.")
+            appendLine("  Each entry proposes one child order: a separate piece of work that a human operator may approve and start later.")
+            appendLine("  A child order is not run by this plan, and it does not change the tasks. Each entry has exactly these keys:")
+            appendLine("""  {"title":"<one line>","instruction":"<the goal, the files, the steps and the acceptance criteria>","maxCycles":1}""")
+            appendLine("  - title: at most $MAX_TITLE_CODE_POINTS characters, one line. Titles are unique within the list.")
+            appendLine("  - instruction: at most $MAX_POLICY_CODE_POINTS characters.")
+            appendLine("  - maxCycles: an integer from 1 to $childOrdersMaxCycles.")
+            appendLine("  Broad, independent workstreams go to childOrders. Small, concrete file changes go to tasks.")
+            appendLine("  Do not duplicate: a workstream that one of the tasks already covers is not also a child order.")
+            appendLine("  Do not put file paths in childOrders. The child order's own planning chooses its files.")
+        }
         appendLine("Use only these keys. Unknown keys are rejected. Do not add any other key.")
         appendLine()
         appendLine("PATHS")
@@ -74,6 +105,9 @@ internal object PlannerPrompt {
         }
         appendLine()
         appendLine("TASK SIZE")
+        appendLine("A file larger than ${PatchPolicyDefaults.MAX_FILE_BYTES / 1024} KB (${PatchPolicyDefaults.MAX_FILE_BYTES} bytes) cannot be")
+        appendLine("changed by a task. A plan that names such a file as a target path is refused by a check, and you are asked again.")
+        appendLine("Do not name such a file. Write the change to another file, or to a new file.")
         appendLine("In one task, do not read or rewrite a whole large file (about 50 KB or 1,000 lines or more). A change to a large")
         appendLine("file is split into several smaller tasks, for example one per feature or one per function.")
         appendLine("Keep the number of files that one task touches small.")
@@ -119,5 +153,8 @@ internal object PlannerPrompt {
     private const val MAX_TITLE_CHARS = PlanValidator.MAX_TITLE_CHARS
     private const val MAX_BODY_CHARS = PlanValidator.MAX_BODY_CHARS
     private const val MAX_PATHS = PlanValidator.MAX_PATHS_PER_TASK
-    private val ALLOWED_PATTERNS = net.kigawa.kivra.core.patch.PatchPolicyDefaults.ALLOWED_PATH_PATTERNS
+    private const val MAX_CHILD_ORDERS = PlanValidator.MAX_CHILD_ORDERS
+    private const val MAX_TITLE_CODE_POINTS = net.kigawa.kivra.routes.MAX_TITLE_CODE_POINTS
+    private const val MAX_POLICY_CODE_POINTS = net.kigawa.kivra.routes.MAX_POLICY_CODE_POINTS
+    private val ALLOWED_PATTERNS = PatchPolicyDefaults.ALLOWED_PATH_PATTERNS
 }

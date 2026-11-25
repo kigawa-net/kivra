@@ -85,6 +85,8 @@ class RealExecutorSettings(
     val monitorEvents: Boolean = false,
     /** The namespace and owner label of the k8s backend (`KIVRA_AGENT_BACKEND=k8s`). Null for docker. */
     val k8s: K8sExecutorSettings? = null,
+    /** The Claude account fixed by the agent's startup configuration. Null selects the default proxy route. */
+    val claudeAccount: String? = null,
 ) {
     override fun toString(): String = "RealExecutorSettings(***)"
 }
@@ -207,6 +209,7 @@ class RealAttemptExecutor(
                 timeout = Duration.ofSeconds(attempt.limits.maxRuntimeSeconds),
                 maxTurns = attempt.limits.maxTurns,
                 model = settings.model,
+                claudeAccount = settings.claudeAccount,
                 budgetUsd = settings.budgetUsd,
                 outputLimitBytes = minOf(attempt.limits.maxOutputBytes, CliOutputLimits.MAX_TOTAL_BYTES).toInt(),
             )

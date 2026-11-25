@@ -58,7 +58,7 @@ sealed interface Route {
         override val nav: NavDestination? get() = Tasks
     }
 
-    /** Operation の詳細。親は Project / Operation のどちらでもよい。 */
+    /** Operation の詳細。親の種類も保持して ID の衝突を避ける。 */
     data class OperationDetail(
         val operationId: String,
         val parentId: String? = null,
@@ -68,7 +68,7 @@ sealed interface Route {
     }
 
     /** Operation 配下の子 Operation 一覧。 */
-    data class OperationChildren(val parentId: String) : Route {
+    data class OperationChildren(val operationId: String) : Route {
         override val nav: NavDestination get() = NavDestination.Operations
     }
 
@@ -126,9 +126,10 @@ private fun projectRoute(projectId: String, rest: List<String>): Route? {
     if (rest.size == 1) {
         return pagesOf(projectId).find { it.route == rest[0] }?.let { Route.ProjectPage(projectId, it) }
     }
-    val detailId = percentDecode(rest[1])?.takeIf { it.isNotBlank() } ?: return null
+    val detailId = percentDecode(rest[1])?.takeIf { it.isNotEmpty() } ?: return null
     return when {
-        rest.size == 2 && rest[0] == "operations" && !isUnassigned(projectId) -> Route.OperationDetail(detailId, projectId, NodeKind.PROJECT)
+        rest.size == 2 && rest[0] == "operations" && !isUnassigned(projectId) && detailId.isNotBlank() ->
+            Route.OperationDetail(detailId, projectId, NodeKind.PROJECT)
         rest.size == 2 && rest[0] == "goals" -> Route.GoalDetail(detailId, projectId)
         rest.size == 2 && rest[0] == "orders" -> Route.OrderDetail(detailId, projectId)
         rest.size == 2 && rest[0] == "runs" -> Route.RunDetail(detailId, projectId)
@@ -139,10 +140,10 @@ private fun projectRoute(projectId: String, rest: List<String>): Route? {
 
 /** プロジェクトを持たない詳細(`#/goals/<id>` など)。旧い形の URL で、同じ画面を開く。 */
 private fun globalDetailRoute(kind: String, id: String, rest: List<String>): Route? = when {
-    kind == "operations" && rest == listOf("operations") -> Route.OperationChildren(id)
-    kind == "operations" && rest.size == 2 && rest[0] == "operations" ->
-        percentDecode(rest[1])?.takeIf { it.isNotBlank() }?.let { Route.OperationDetail(it, id) }
     rest.isEmpty() && kind == "operations" -> Route.OperationDetail(id)
+    rest == listOf("operations") && kind == "operations" -> Route.OperationChildren(id)
+    rest.size == 2 && rest[0] == "operations" && kind == "operations" ->
+        percentDecode(rest[1])?.takeIf { it.isNotBlank() }?.let { Route.OperationDetail(it, id) }
     rest.isEmpty() && kind == "runs" -> Route.RunDetail(id)
     rest.isEmpty() && kind == "goals" -> Route.GoalDetail(id)
     rest.isEmpty() && kind == "orders" -> Route.OrderDetail(id)
@@ -177,7 +178,7 @@ fun Route.toHash(): String = when (this) {
         parentKind == NodeKind.PROJECT -> detailHash(parentId, "operations", operationId)
         else -> "#/operations/${percentEncode(parentId)}/operations/${percentEncode(operationId)}"
     }
-    is Route.OperationChildren -> "#/operations/${percentEncode(parentId)}/operations"
+    is Route.OperationChildren -> "#/operations/${percentEncode(operationId)}/operations"
     is Route.GoalDetail -> detailHash(projectId, "goals", taskId)
     is Route.OrderDetail -> detailHash(projectId, "orders", orderId)
     is Route.OrderCycles -> detailHash(projectId, "orders", orderId) + "/cycles"
@@ -193,7 +194,7 @@ val Route.projectIdOrNull: String?
     get() = when (this) {
         is Route.ProjectPage -> projectId
         is Route.RunDetail -> projectId
-        is Route.OperationDetail -> parentId.takeIf { parentKind == NodeKind.PROJECT }
+        is Route.OperationDetail -> parentId?.takeIf { parentKind == NodeKind.PROJECT }
         is Route.GoalDetail -> projectId
         is Route.OrderDetail -> projectId
         is Route.OrderCycles -> projectId
@@ -249,23 +250,25 @@ fun Route.breadcrumbs(projectName: (String) -> String? = { null }): List<Crumb> 
         is Route.Legacy -> listOf(projectsCrumb, Crumb(dest.label, null))
         is Route.ProjectPage -> projectHead(projectId) + Crumb(dest.label, null)
         is Route.RunDetail -> detail(projectId, Tasks, listOf(Crumb(runId, null)))
+        is Route.OperationDetail -> when {
+            parentId == null -> listOf(
+                Crumb("全体", null),
+                Crumb(NavDestination.Operations.label, Route.Page(NavDestination.Operations)),
+                Crumb(operationId, null),
+            )
+            parentKind == NodeKind.PROJECT -> detail(parentId, NavDestination.Operations, listOf(Crumb(operationId, null)))
+            else -> listOf(
+                Crumb("Operation", Route.Page(NavDestination.Operations)),
+                Crumb(parentId, Route.OperationDetail(parentId)),
+                Crumb("子 Operation", Route.OperationChildren(parentId)),
+                Crumb(operationId, null),
+            )
+        }
         is Route.OperationChildren -> listOf(
-            Crumb(NavDestination.Operations.label, Route.Page(NavDestination.Operations)),
-            Crumb(parentId, Route.OperationDetail(parentId)),
+            Crumb("Operation", Route.Page(NavDestination.Operations)),
+            Crumb(operationId, Route.OperationDetail(operationId)),
             Crumb("子 Operation", null),
         )
-        is Route.OperationDetail -> {
-            val parent = parentId?.let { NodeId(it, parentKind) }
-            val head = when (parent?.kind) {
-                null -> listOf(Crumb("全体", null))
-                NodeKind.PROJECT -> projectHead(parent.id)
-                NodeKind.OPERATION -> listOf(
-                    Crumb(NavDestination.Operations.label, Route.Page(NavDestination.Operations)),
-                    Crumb(parent.id, Route.OperationDetail(parent.id)),
-                )
-            }
-            head + Crumb(NavDestination.Operations.label, operationsRouteOf(parent)) + Crumb(operationId, null)
-        }
         is Route.GoalDetail -> detail(projectId, Goals, listOf(Crumb(taskId, null)))
         is Route.OrderDetail -> detail(projectId, Orders, listOf(Crumb(orderId, null)))
         is Route.OrderCycles -> detail(

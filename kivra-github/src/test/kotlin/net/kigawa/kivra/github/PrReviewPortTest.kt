@@ -70,4 +70,30 @@ class PrReviewPortTest {
         assertIs<GitHubResult.Unknown>(result)
         assertEquals(1, remote.requests.size)
     }
+
+    @Test
+    fun `closing a pull request is one PATCH of its state, checked against the answer`() = runTest {
+        val remote = Remote { respond("""{"number":7,"state":"closed"}""", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
+        assertIs<GitHubResult.Success<Unit>>(adapter(remote, token).closePullRequest(repo, 7))
+        val req = remote.requests.single()
+        assertEquals(HttpMethod.Patch, req.method)
+        assertTrue(req.url.encodedPath.endsWith("/repos/kigawa-net/kivra/pulls/7"), req.url.encodedPath)
+        assertEquals("""{"state":"closed"}""", (req.body as TextContent).text)
+
+        // An answer about another pull request, or one that is still open, is not a success.
+        val other = Remote { respond("""{"number":8,"state":"closed"}""", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
+        assertEquals(GitHubFailureKind.IDENTITY_MISMATCH, assertIs<GitHubResult.Failure>(adapter(other, token).closePullRequest(repo, 7)).kind)
+        val open = Remote { respond("""{"number":7,"state":"open"}""", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json")) }
+        assertEquals(GitHubFailureKind.PROTOCOL, assertIs<GitHubResult.Failure>(adapter(open, token).closePullRequest(repo, 7)).kind)
+    }
+
+    @Test
+    fun `a close whose response fails is unknown and not sent again, and a refusal is a failure`() = runTest {
+        val lost = Remote { respond("", HttpStatusCode.InternalServerError) }
+        assertIs<GitHubResult.Unknown>(adapter(lost, token).closePullRequest(repo, 7))
+        assertEquals(1, lost.requests.size)
+        val forbidden = Remote { respond("""{"message":"Resource not accessible by integration"}""", HttpStatusCode.Forbidden, headersOf(HttpHeaders.ContentType, "application/json")) }
+        assertIs<GitHubResult.Failure>(adapter(forbidden, token).closePullRequest(repo, 7))
+        assertEquals(1, forbidden.requests.size)
+    }
 }

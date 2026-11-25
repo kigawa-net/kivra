@@ -32,6 +32,7 @@ class DockerRunSpec(
     val model: String = CliCommand.DEFAULT_MODEL,
     /** The `--max-budget-usd` of the CLI: a dollar amount in the fixed two-decimal form, from 0.01 to 20.00 (see [DockerPatterns]). */
     val budgetUsd: String = CliCommand.DEFAULT_BUDGET_USD,
+    val claudeAccount: String? = null,
 ) {
     /** `kivra-run-<runId>-<attemptId>`. Validated in [init], so it is safe as a docker name. */
     val containerName: String = "${DockerConstants.CONTAINER_PREFIX}$runId-$attemptId"
@@ -52,6 +53,7 @@ class DockerRunSpec(
         if (stopTimeoutSeconds !in 1..MAX_STOP_TIMEOUT_SECONDS) throw DockerSpecException("stopTimeoutSeconds is out of range")
         if (maxTurns !in 1..CliCommand.MAX_MAX_TURNS) throw DockerSpecException("maxTurns is out of range")
         if (!DockerPatterns.MODEL.matches(model)) throw DockerSpecException("model is invalid")
+        if (claudeAccount != null && !DockerPatterns.ACCOUNT.matches(claudeAccount)) throw DockerSpecException("claudeAccount is invalid")
         if (!DockerPatterns.isBudgetInRange(budgetUsd)) throw DockerSpecException("budgetUsd is out of range")
     }
 

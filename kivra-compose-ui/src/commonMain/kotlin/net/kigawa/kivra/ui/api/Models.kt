@@ -142,6 +142,23 @@ data class ApiCurrentCycle(
     val taskMissing: Boolean = false,
 )
 
+/**
+ * `GET /api/selfdev/orders/{id}/split-proposals` element = server `SplitProposalResponse` (ADR 0015 追補 2026-11-22, PR2). [title] and [instruction]
+ * are the Planner's text: shown as plain text only. [createdChildOrderId] is set once the proposal is APPROVED.
+ */
+@Serializable
+data class ApiSplitProposal(
+    val proposalId: String,
+    val planId: String,
+    val ordinal: Int,
+    val title: String,
+    val instruction: String,
+    val maxCycles: Int,
+    val state: String,
+    val createdAt: String,
+    val createdChildOrderId: String? = null,
+)
+
 /** `GET /api/selfdev/orders/{id}/cycles` element = server `CycleResponse`. [goalId] is the goal the cycle started. */
 @Serializable
 data class ApiOrderCycle(

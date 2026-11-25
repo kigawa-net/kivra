@@ -75,12 +75,18 @@ data class PlannerConfig(
     val maxOutputTokens: Int = DEFAULT_MAX_OUTPUT_TOKENS,
     val callTimeout: Duration = Duration.ofSeconds(120),
     val claimTtl: Duration = Duration.ofSeconds(600),
+    /** The orders' child depth limit (KIVRA_SELFDEV_ORDER_MAX_DEPTH). 0 means no plan may propose a child order (ADR 0015 addendum 2026-11-22). */
+    val childOrderMaxDepth: Int = 0,
+    /** The cycle cap for a proposed child order (KIVRA_SELFDEV_ORDER_MAX_CYCLES_CAP). */
+    val childOrderMaxCyclesCap: Int = 1,
 ) {
     init {
         require(budgetScopes.isNotEmpty()) { "budgetScopes must not be empty" }
         require(maxOutputTokens > 0) { "maxOutputTokens must be positive" }
         require(!callTimeout.isNegative && !callTimeout.isZero) { "callTimeout must be positive" }
         require(claimTtl >= callTimeout.multipliedBy(3)) { "claimTtl must cover the calls it fences" }
+        require(childOrderMaxDepth >= 0) { "childOrderMaxDepth must not be negative" }
+        require(childOrderMaxCyclesCap >= 1) { "childOrderMaxCyclesCap must be at least 1" }
     }
 
     companion object {
@@ -121,6 +127,11 @@ class AutopilotPlanner(
     private val nonceSource: () -> String = PlannerPrompt::newNonce,
     /** The repository file list (Issue #293). Null when it is disabled: the prompts are then the ones used before. */
     private val repoFiles: PlannerRepoFiles? = null,
+    /**
+     * The sizes of the base tree's files, for the pre-check of the target paths (ADR 0011 section 3, 追補 2026-11-19). Independent of
+     * [repoFiles]: the check runs also when the list is off. Null: the check is not made.
+     */
+    private val repoSizes: PlannerRepoFiles? = null,
     /** The shadow record of the self-development memory (ADR 0016 P1). Written after the plan or the block is stored. Never read. */
     private val memory: SelfDevMemoryRecorder = SelfDevMemoryRecorder.OFF,
     /** The suppression shadow (ADR 0016 P3). Counts after a plan is stored; never changes the plan. */
@@ -140,13 +151,19 @@ class AutopilotPlanner(
 
         // Read once per claim. A failed read gives null, and the Planner works without the list (never a stop).
         val repoList = repoFiles?.list()
-        var rejectedPath: String? = null
+        // Read once per claim too. A failed read gives null, and the check of the target paths is not made (see PlanValidator.isTooLargeToChange).
+        val fileSizes = repoSizes?.fileSizes()
+        // The order of the plan root decides whether child orders may be proposed (ADR 0015 addendum 2026-11-22). Read only when children are on.
+        val planningOrder = if (config.childOrderMaxDepth >= 1) operations.planningOrderOf(taskId) else null
+        val childRules = childOrderRulesFor(planningOrder, config.childOrderMaxDepth, config.childOrderMaxCyclesCap)
+        var retryDetail: String? = null
         var attempt = 1
         while (true) {
             val response = try {
-                val base = request(fence, attempt, claim.title, claim.body, repoList, rejectedPath)
+                val base = request(fence, attempt, claim.title, claim.body, repoList, retryDetail, childRules)
                 // The classifier reads the claim's title and body only (never the repository file list).
                 val routed = router?.let { r -> r.apply(base, r.decide("selfdev.planner", claim.title + "\n" + claim.body, base)) } ?: base
+                logger.info("planner call started: taskId={} attempt={}", taskId, attempt)
                 gateway.invoke(routed)
             } catch (e: CancellationException) {
                 throw e
@@ -161,8 +178,8 @@ class AutopilotPlanner(
 
             val text = response.message.parts.filterIsInstance<Part.Text>().joinToString("") { it.text }
             val digest = sha256Hex(text)
-            when (val check = PlanValidator.validate(text, config.autopilot)) {
-                is PlanCheck.Valid -> return commit(taskId, fence, response, digest, check)
+            when (val check = PlanValidator.validate(text, config.autopilot, fileSizes, childRules)) {
+                is PlanCheck.Valid -> return commit(taskId, fence, response, digest, check, planningOrder?.orderId)
                 is PlanCheck.Invalid -> {
                     logger.warn(
                         "planner output invalid: taskId={} attempt={} reason={} outputSha256={} finishReason={}",
@@ -171,24 +188,30 @@ class AutopilotPlanner(
                     // A cut answer would be cut the same way again, so it is not re-sent (as in LlmDeveloper).
                     val retry = attempt < PlannerConfig.MAX_ATTEMPTS && response.finishReason != FinishReason.LENGTH
                     if (!retry) return block(fence, AutopilotReason.PLAN_INVALID)
-                    // Only the path refusal is fed back, and only with the file list enabled (Issue #293).
-                    rejectedPath = if (repoFiles != null && check.reason == PlanRejectReason.PATH_NOT_ALLOWED) check.path else null
+                    retryDetail = retryDetailOf(check)
                     attempt++
                 }
             }
         }
     }
 
-    private fun commit(taskId: String, fence: PlanFence, response: ModelResponse, digest: String, check: PlanCheck.Valid): PlanAttempt {
-        return when (val result = operations.commitPlan(fence, check.tasks)) {
+    private fun commit(
+        taskId: String,
+        fence: PlanFence,
+        response: ModelResponse,
+        digest: String,
+        check: PlanCheck.Valid,
+        proposingOrderId: String?,
+    ): PlanAttempt {
+        return when (val result = operations.commitPlan(fence, check.tasks, check.childOrders, proposingOrderId)) {
             is PlanCommit.Stale -> {
                 logger.warn("planner result discarded: taskId={} reason=PLAN_DISCARDED_STALE", taskId)
                 PlanAttempt.Discarded
             }
             is PlanCommit.Committed -> {
                 logger.info(
-                    "planner proposed: taskId={} revision={} tasks={} queued={} outputSha256={} cost={} currency={}",
-                    taskId, result.revision, result.taskCount, result.queuedCount,
+                    "planner proposed: taskId={} revision={} tasks={} queued={} childProposals={} outputSha256={} cost={} currency={}",
+                    taskId, result.revision, result.taskCount, result.queuedCount, check.childOrders.size,
                     digest.take(DIGEST_PREFIX), response.cost.amount.toPlainString(), response.cost.currency,
                 )
                 // The shadow runs first, so the new plan's own facts are not among the "recent plans" it compares with.
@@ -196,6 +219,19 @@ class AutopilotPlanner(
                 memory.planProposed(taskId, taskId, result.taskCount)
                 PlanAttempt.Proposed(result.taskCount, result.queuedCount)
             }
+        }
+    }
+
+    /**
+     * The extra note for the next attempt, for the two refusals that naming another path can fix: a path outside the allowlist (only with
+     * the file list enabled, Issue #293), and an existing file that is too large to change (ADR 0011 section 3). Null for the others.
+     */
+    private fun retryDetailOf(check: PlanCheck.Invalid): String? {
+        val path = check.path ?: return null
+        return when (check.reason) {
+            PlanRejectReason.PATH_NOT_ALLOWED -> if (repoFiles != null) PlannerPrompt.pathRetryNote(path) else null
+            PlanRejectReason.FILE_TOO_LARGE -> PlannerPrompt.fileTooLargeRetryNote(path)
+            else -> null
         }
     }
 
@@ -217,7 +253,8 @@ class AutopilotPlanner(
         title: String,
         body: String?,
         repoList: String?,
-        rejectedPath: String?,
+        retryDetail: String?,
+        childRules: ChildOrderRules?,
     ): ModelRequest {
         val nonce = (1..PlannerPrompt.MAX_NONCE_ATTEMPTS)
             .asSequence()
@@ -225,8 +262,8 @@ class AutopilotPlanner(
             .firstOrNull { PlannerPrompt.user(title, body, it, repoList) != null }
             ?: throw IllegalStateException("no usable nonce for the planner prompt")
         val user = checkNotNull(PlannerPrompt.user(title, body, nonce, repoList))
-        val retryNote = if (rejectedPath != null) {
-            PlannerPrompt.RETRY_NOTE + "\n" + PlannerPrompt.pathRetryNote(rejectedPath)
+        val retryNote = if (retryDetail != null) {
+            PlannerPrompt.RETRY_NOTE + "\n" + retryDetail
         } else {
             PlannerPrompt.RETRY_NOTE
         }
@@ -235,7 +272,7 @@ class AutopilotPlanner(
             principal = config.principal,
             purpose = Purpose.PLANNING,
             messages = buildList {
-                add(Message(Role.SYSTEM, PlannerPrompt.system(repoFiles = repoList != null)))
+                add(Message(Role.SYSTEM, PlannerPrompt.system(repoFiles = repoList != null, childOrdersMaxCycles = childRules?.maxCyclesCap)))
                 add(Message(Role.USER, user))
                 if (attempt > 1) add(Message(Role.USER, retryNote))
             },

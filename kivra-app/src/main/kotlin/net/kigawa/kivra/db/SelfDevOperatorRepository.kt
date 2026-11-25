@@ -16,6 +16,7 @@ import net.kigawa.kivra.core.autopilot.TaskState
 import net.kigawa.kivra.core.autopilot.TransitionDecision
 import net.kigawa.kivra.core.autopilot.TransitionRefusal
 import net.kigawa.kivra.core.autopilot.checkTaskTransition
+import net.kigawa.kivra.selfdev.NewChildOrder
 import net.kigawa.kivra.selfdev.NewTask
 import net.kigawa.kivra.selfdev.autofix.INCIDENT_FIX_PRINCIPAL
 import net.kigawa.kivra.selfdev.PromotionCounts
@@ -61,6 +62,35 @@ sealed interface PlanCommit {
 
 /** A submitted task whose Run exists, read by the dispatcher for the Run's outcome. */
 data class SubmittedRun(val taskId: String, val runId: String)
+
+/** The order a plan root belongs to (its cycle), read by the Planner for the child-order rules. [parentOrderId] is null for a root order. */
+data class PlanningOrder(val orderId: String, val parentOrderId: String?, val depth: Int)
+
+/** The state of a child order proposal (V60). Only PROPOSED is written so far; the others belong to the operator's approval (PR2). */
+enum class ChildProposalState { PROPOSED, APPROVED, REJECTED, EXPIRED }
+
+/** A stored child order proposal (V60, ADR 0015 addendum 2026-11-22). Its [title] and [instruction] are the Planner's output: data. */
+data class SplitProposal(
+    val proposalId: String,
+    val planId: String,
+    val planTaskId: String,
+    val orderId: String,
+    val ordinal: Int,
+    val title: String,
+    val instruction: String,
+    val maxCycles: Int,
+    val state: ChildProposalState,
+    val createdAt: LocalDateTime,
+    val createdChildOrderId: String?,
+)
+
+/** The outcome of a decision on a proposal (PR2). Moved: this call wrote it; Same: it was already so (an idempotent repeat); Refused: another state. */
+sealed interface SplitProposalMark {
+    data class Moved(val proposal: SplitProposal) : SplitProposalMark
+    data class Same(val proposal: SplitProposal) : SplitProposalMark
+    data class Refused(val proposal: SplitProposal) : SplitProposalMark
+    data object NotFound : SplitProposalMark
+}
 
 sealed interface TaskTransition {
     data class Moved(val row: SelfDevTask) : TaskTransition
@@ -175,6 +205,10 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
     }
 
+    /**
+     * An operator skips a task: any state the transition table lets go to SKIPPED with OPERATOR_SKIPPED (PENDING_APPROVAL, QUEUED, FAILED,
+     * CANCELLED; ADR 0011 section 5.4). The table decides; the update is guarded on the state that was checked. A plan root is refused.
+     */
     fun skipTask(taskId: String, expectedVersion: Long): TaskTransition = transaction(database) {
         val current = lockWithParent(taskId) ?: return@transaction TaskTransition.NotFound
         if (current.version != expectedVersion) return@transaction TaskTransition.StaleVersion
@@ -183,10 +217,35 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         if (decision is TransitionDecision.Refused) return@transaction TaskTransition.Refused(decision.reason)
         val now = utcNow(clock)
         val changed = execUpdate(
-            "UPDATE selfdev_tasks SET state = 'SKIPPED', state_reason = 'OPERATOR_SKIPPED', version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = 'PENDING_APPROVAL'",
-            now, taskId, expectedVersion)
+            "UPDATE selfdev_tasks SET state = 'SKIPPED', state_reason = 'OPERATOR_SKIPPED', version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = ?",
+            now, taskId, expectedVersion, current.state.name)
         if (changed != 1) return@transaction TaskTransition.StaleVersion
         settlePlanOf(current.parentTaskId, now)
+        TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
+    }
+
+    /**
+     * An operator submits a FAILED or CANCELLED task again (ADR 0011 section 5.4): -> QUEUED with OPERATOR_REQUEUED, only on an edge of the
+     * transition table. Refused for a plan root, and when the plan has already settled (DONE or STOPPED, [reopensUnderClosedPlan]).
+     *
+     * Each requeue costs a new Run, so it is guarded twice: the version (a second request with the same version is StaleVersion and writes
+     * nothing), and a fresh idempotency key `ap:<task>:a<attempts>` (the attempts grow with every submission, so each requeue makes exactly
+     * one new Run, and a repeated submission of the same requeue finds that same Run). The previous Run is detached (`run_id` NULL), so an
+     * interrupted submission is picked up again by the dispatcher like a first one. `approved_by` is left as it is: a requeue is not an
+     * approval, and an auto-approved task keeps its scope check.
+     */
+    fun requeueTask(taskId: String, expectedVersion: Long): TaskTransition = transaction(database) {
+        val current = lockWithParent(taskId) ?: return@transaction TaskTransition.NotFound
+        if (current.version != expectedVersion) return@transaction TaskTransition.StaleVersion
+        if (current.isPlanRoot) return@transaction TaskTransition.Refused(TransitionRefusal.GUARD_FAILED)
+        if (reopensUnderClosedPlan(current)) return@transaction TaskTransition.Refused(TransitionRefusal.GUARD_FAILED)
+        val decision = checkTaskTransition(current.state, TaskState.QUEUED, AutopilotReason.OPERATOR_REQUEUED, contextOf(current))
+        if (decision is TransitionDecision.Refused) return@transaction TaskTransition.Refused(decision.reason)
+        val key = "ap:${current.taskId}:a${current.attempts}"
+        val changed = execUpdate(
+            "UPDATE selfdev_tasks SET state = 'QUEUED', state_reason = 'OPERATOR_REQUEUED', idempotency_key = ?, run_id = NULL, version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = ?",
+            key, utcNow(clock), taskId, expectedVersion, current.state.name)
+        if (changed != 1) return@transaction TaskTransition.StaleVersion
         TaskTransition.Moved(taskIn(taskId) ?: error("vanished"))
     }
 
@@ -265,12 +324,131 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         ) == 1
     }
 
+    /** The order of a plan root, or null when the task has no order (an operator's own task) or is missing. Read only. */
+    fun planningOrderOf(taskId: String): PlanningOrder? = transaction(database) {
+        execQuery(
+            "SELECT o.order_id, o.parent_order_id, o.depth FROM selfdev_tasks t JOIN selfdev_orders o ON o.order_id = t.order_id WHERE t.task_id = ?",
+            taskId,
+        ) { PlanningOrder(it.getString(1), it.getString(2), it.getInt(3)) }.firstOrNull()
+    }
+
+    /**
+     * The child order proposals of [orderId], oldest first, up to [limit], only those in [state] when given. The stale PROPOSED rows are
+     * expired first ([expireStaleSplitProposals]), so a read never shows a proposal that can no longer be approved as PROPOSED.
+     */
+    fun splitProposalsOf(orderId: String, limit: Int, state: ChildProposalState? = null): List<SplitProposal> = transaction(database) {
+        expireStaleSplitProposals(orderId)
+        val stateFilter = if (state == null) "" else " AND state = ?"
+        val params = listOfNotNull(orderId, state?.name, limit)
+        execQuery(
+            "SELECT proposal_id, plan_id, plan_task_id, order_id, ordinal, title, instruction, max_cycles, state, created_at, created_child_order_id " +
+                "FROM selfdev_order_split_proposals WHERE order_id = ?$stateFilter ORDER BY created_at, plan_id, ordinal LIMIT ?",
+            *params.toTypedArray(),
+        ) { rs ->
+            SplitProposal(
+                proposalId = rs.getString(1), planId = rs.getString(2), planTaskId = rs.getString(3), orderId = rs.getString(4),
+                ordinal = rs.getInt(5), title = rs.getString(6), instruction = rs.getString(7), maxCycles = rs.getInt(8),
+                state = ChildProposalState.valueOf(rs.getString(9)), createdAt = rs.getObject(10, LocalDateTime::class.java),
+                createdChildOrderId = rs.getString(11),
+            )
+        }
+    }
+
+    /** One proposal of [orderId] by its ID (expired first, as [splitProposalsOf]), or null when it is not one of that order's. Read. */
+    fun splitProposal(orderId: String, proposalId: String): SplitProposal? = transaction(database) {
+        expireStaleSplitProposals(orderId)
+        splitProposalIn(orderId, proposalId)
+    }
+
+    /**
+     * PROPOSED -> REJECTED by an operator (ADR 0015 addendum 2026-11-22 PR2). A repeat of a rejection is [SplitProposalMark.Same]; a proposal
+     * that is APPROVED or EXPIRED is [SplitProposalMark.Refused]. The write is conditional on PROPOSED, so two decisions race safely.
+     */
+    fun rejectSplitProposal(orderId: String, proposalId: String): SplitProposalMark = transaction(database) {
+        expireStaleSplitProposals(orderId)
+        val current = splitProposalIn(orderId, proposalId) ?: return@transaction SplitProposalMark.NotFound
+        if (current.state != ChildProposalState.PROPOSED) {
+            return@transaction if (current.state == ChildProposalState.REJECTED) SplitProposalMark.Same(current) else SplitProposalMark.Refused(current)
+        }
+        val changed = execUpdate(
+            "UPDATE selfdev_order_split_proposals SET state = 'REJECTED' WHERE proposal_id = ? AND order_id = ? AND state = 'PROPOSED'",
+            proposalId, orderId,
+        )
+        val after = splitProposalIn(orderId, proposalId) ?: current
+        when {
+            changed == 1 -> SplitProposalMark.Moved(after)
+            after.state == ChildProposalState.REJECTED -> SplitProposalMark.Same(after)
+            else -> SplitProposalMark.Refused(after)
+        }
+    }
+
+    /**
+     * PROPOSED -> APPROVED, with the created child ([childOrderId]), written after the child is created (ADR 0015 addendum 2026-11-22 PR2).
+     * Conditional on PROPOSED, so of two approvals only one writes; the other sees APPROVED with the same child and is [SplitProposalMark.Same].
+     * An APPROVED proposal with another child, or a REJECTED or EXPIRED one, is [SplitProposalMark.Refused].
+     */
+    fun markSplitProposalApproved(orderId: String, proposalId: String, childOrderId: String): SplitProposalMark = transaction(database) {
+        val current = splitProposalIn(orderId, proposalId) ?: return@transaction SplitProposalMark.NotFound
+        if (current.state != ChildProposalState.PROPOSED) return@transaction sameApproval(current, childOrderId)
+        val changed = execUpdate(
+            "UPDATE selfdev_order_split_proposals SET state = 'APPROVED', created_child_order_id = ? WHERE proposal_id = ? AND order_id = ? AND state = 'PROPOSED'",
+            childOrderId, proposalId, orderId,
+        )
+        val after = splitProposalIn(orderId, proposalId) ?: current
+        if (changed == 1) SplitProposalMark.Moved(after) else sameApproval(after, childOrderId)
+    }
+
+    private fun sameApproval(row: SplitProposal, childOrderId: String): SplitProposalMark =
+        if (row.state == ChildProposalState.APPROVED && row.createdChildOrderId == childOrderId) SplitProposalMark.Same(row) else SplitProposalMark.Refused(row)
+
+    private fun Transaction.splitProposalIn(orderId: String, proposalId: String): SplitProposal? =
+        execQuery(
+            "SELECT proposal_id, plan_id, plan_task_id, order_id, ordinal, title, instruction, max_cycles, state, created_at, created_child_order_id " +
+                "FROM selfdev_order_split_proposals WHERE proposal_id = ? AND order_id = ?",
+            proposalId, orderId,
+        ) { rs ->
+            SplitProposal(
+                proposalId = rs.getString(1), planId = rs.getString(2), planTaskId = rs.getString(3), orderId = rs.getString(4),
+                ordinal = rs.getInt(5), title = rs.getString(6), instruction = rs.getString(7), maxCycles = rs.getInt(8),
+                state = ChildProposalState.valueOf(rs.getString(9)), createdAt = rs.getObject(10, LocalDateTime::class.java),
+                createdChildOrderId = rs.getString(11),
+            )
+        }.firstOrNull()
+
+    /**
+     * Expires the PROPOSED proposals of [orderId] that can no longer be approved (ADR 0015 addendum 2026-11-22 PR2): the order is no longer ACTIVE,
+     * or the plan that proposed them is superseded (the root task's revision has moved past the plan's "r{revision}"). Run lazily on every read
+     * and every decision of the order's proposals, so no background job is needed. An EXPIRED row is never written back to PROPOSED.
+     */
+    private fun Transaction.expireStaleSplitProposals(orderId: String) {
+        execUpdate(
+            """
+            UPDATE selfdev_order_split_proposals SET state = 'EXPIRED'
+            WHERE order_id = ? AND state = 'PROPOSED' AND (
+                EXISTS (SELECT 1 FROM selfdev_orders o WHERE o.order_id = selfdev_order_split_proposals.order_id AND o.state <> 'ACTIVE')
+                OR EXISTS (SELECT 1 FROM selfdev_tasks t WHERE t.task_id = selfdev_order_split_proposals.plan_task_id
+                    AND CONCAT(t.task_id, ':r', t.revision) <> selfdev_order_split_proposals.plan_id)
+            )
+            """.trimIndent(),
+            orderId,
+        )
+    }
+
     /**
      * Writes the plan of a claimed task in one transaction (ADR 0011 sections 2.6 and 5.1). Each planned task becomes a row whose
      * parent_task_id is the root, in PENDING_APPROVAL, or in QUEUED when the stage rules approved it (AUTO_APPROVED). The root moves
      * PLANNING -> PENDING_APPROVAL and its revision rises. A fence that no longer matches writes nothing and returns [PlanCommit.Stale].
+     *
+     * [childOrders] are stored as PROPOSED rows of [proposingOrderId] in the same transaction (ADR 0015 addendum 2026-11-22). Nothing is
+     * created: a child order is made only by an operator's act. The plan's id is "{root}:r{revision}".
      */
-    fun commitPlan(fence: PlanFence, tasks: List<NewTask>): PlanCommit = try {
+    fun commitPlan(
+        fence: PlanFence,
+        tasks: List<NewTask>,
+        childOrders: List<NewChildOrder> = emptyList(),
+        proposingOrderId: String? = null,
+    ): PlanCommit = try {
+        require(childOrders.isEmpty() || proposingOrderId != null) { "child order proposals need the order that proposes them" }
         transaction(database) {
             val current = lockTask(fence.taskId) ?: return@transaction PlanCommit.Stale
             if (!fenceMatches(current, fence)) return@transaction PlanCommit.Stale
@@ -296,6 +474,15 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
                     JSON.encodeToString(ListSerializer(String.serializer()), dependencies), plan.requiresApproval, current.taskId, now, now,
                     project,
                 )
+            }
+            proposingOrderId?.let { orderId ->
+                val planId = "${fence.taskId}:r$revision"
+                childOrders.forEach { child ->
+                    execUpdate(
+                        "INSERT INTO selfdev_order_split_proposals (proposal_id, plan_id, plan_task_id, order_id, ordinal, title, instruction, max_cycles, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PROPOSED', ?)",
+                        Ulid.generate(clock), planId, fence.taskId, orderId, child.ordinal, child.title, child.instruction, child.maxCycles, now,
+                    )
+                }
             }
             val changed = execUpdate(
                 "UPDATE selfdev_tasks SET state = 'PENDING_APPROVAL', state_reason = NULL, revision = ?, claim_token = NULL, claimed_until = NULL, version = version + 1, updated_at = ? WHERE task_id = ? AND version = ? AND state = 'PLANNING' AND claim_token = ?",
@@ -362,6 +549,19 @@ class SelfDevOperatorRepository(private val database: Database, private val cloc
         SelfDevTasksTable.selectAll()
             .where { SelfDevTasksTable.taskId inList ids }
             .associate { it[SelfDevTasksTable.taskId] to TaskState.valueOf(it[SelfDevTasksTable.state]) }
+    }
+
+    /**
+     * True when another planned task of [task]'s plan is SUBMITTING or SUBMITTED (one Run per plan at a time, ADR 0011 section 5.1). A read
+     * for the dispatcher's waiting summary; [beginSubmission] checks the same under the root's lock. A task with no plan root is false.
+     */
+    fun siblingInFlight(task: SelfDevTask): Boolean {
+        val parent = task.parentTaskId ?: return false
+        return transaction(database) {
+            execQuery(
+                "SELECT COUNT(*) FROM selfdev_tasks WHERE parent_task_id = ? AND task_id <> ? AND state IN ('SUBMITTING', 'SUBMITTED')", parent, task.taskId,
+            ) { it.getLong(1) }.single() > 0
+        }
     }
 
     /**

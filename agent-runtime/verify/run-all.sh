@@ -48,11 +48,18 @@ KIVRA_PROXY_WIF_ORGANIZATION_ID=00000000-0000-4000-8000-0000000000aa
 KIVRA_PROXY_WIF_SERVICE_ACCOUNT_ID=svac_VERIFY
 KIVRA_PROXY_WIF_WORKSPACE_ID=wrkspc_VERIFY
 EOF2
+cat > "$tmp/accounts.json" <<'EOF2'
+[
+  {"id":"repo-a","federation_rule_id":"fdrl_VERIFY_A","organization_id":"00000000-0000-4000-8000-0000000000aa","service_account_id":"svac_VERIFY_A","workspace_id":"wrkspc_VERIFY_A"},
+  {"id":"repo-b","federation_rule_id":"fdrl_VERIFY_B","organization_id":"00000000-0000-4000-8000-0000000000bb","service_account_id":"svac_VERIFY_B","workspace_id":"wrkspc_VERIFY_B"}
+]
+EOF2
 docker network inspect "${PREFIX}-upstream" >/dev/null 2>&1 || docker network create --driver bridge --subnet "$UPSTREAM_SUBNET" "${PREFIX}-upstream" >/dev/null || { echo "upstream network failed" >&2; exit 1; }
 docker run -d --name "$MOCK_NAME" --network "${PREFIX}-upstream" -e MOCK_CLIENT_SECRET="$SECRET_VALUE" "$MOCK_IMAGE" >/dev/null \
   || { echo "mock start failed" >&2; exit 1; }
 sleep 2
 KIVRA_AGENT_PROXY_ENV_FILE="$tmp/proxy.env" \
+KIVRA_AGENT_PROXY_ACCOUNTS_FILE="$tmp/accounts.json" \
 KIVRA_AGENT_KEYCLOAK_SECRET_FILE="$tmp/keycloak_client_secret" \
 KIVRA_AGENT_EXTRA_NETWORKS="${PREFIX}-upstream" \
   "$root/network/up-proxy.sh" || { echo "proxy start failed" >&2; exit 1; }

@@ -220,6 +220,7 @@ class K8sRunBackend(
         maxTurns = spec.maxTurns,
         model = spec.model,
         budgetUsd = spec.budgetUsd,
+        claudeAccount = spec.claudeAccount,
     )
 
     /**

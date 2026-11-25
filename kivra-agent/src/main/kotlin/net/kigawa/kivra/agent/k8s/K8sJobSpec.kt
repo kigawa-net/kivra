@@ -23,10 +23,18 @@ class K8sSettings(
     val ownerLabel: String,
     allowedImages: Set<String>,
     allowedModels: Set<String> = setOf(CliCommand.DEFAULT_MODEL),
+    allowedAccounts: Set<String> = emptySet(),
 ) {
     val namespace: String = if (K8sNames.isDns1123Label(namespace)) namespace else throw K8sSpecException("namespace is invalid")
     val allowedImages: Set<String> = checkImages(allowedImages)
     val allowedModels: Set<String> = checkModels(allowedModels)
+
+    /** Named Claude accounts allowed by the guard. An empty set selects the default route. */
+    val allowedAccounts: Set<String> = allowedAccounts.toSet().also { accounts ->
+        if (accounts.any { !DockerPatterns.ACCOUNT.matches(it) }) {
+            throw K8sSpecException("allowedAccounts contains an invalid account id")
+        }
+    }
 
     init {
         if (!K8sNames.isLabelId(ownerLabel)) throw K8sSpecException("ownerLabel is invalid")
@@ -75,6 +83,7 @@ class K8sJobSpec(
     val maxTurns: Int = CliCommand.DEFAULT_MAX_TURNS,
     val model: String = CliCommand.DEFAULT_MODEL,
     val budgetUsd: String = CliCommand.DEFAULT_BUDGET_USD,
+    val claudeAccount: String? = null,
 ) {
     /** The Job name, derived from [runId] and [attemptId] (see [K8sNames.jobName]). */
     val jobName: String = K8sNames.jobName(runId, attemptId)
@@ -95,6 +104,7 @@ class K8sJobSpec(
         if (BigDecimal(cpus) > BigDecimal.valueOf(K8sConstants.MAX_CPU.toLong())) throw K8sSpecException("cpus is out of range")
         if (maxTurns !in 1..CliCommand.MAX_MAX_TURNS) throw K8sSpecException("maxTurns is out of range")
         if (!DockerPatterns.MODEL.matches(model)) throw K8sSpecException("model is invalid")
+        if (claudeAccount != null && !DockerPatterns.ACCOUNT.matches(claudeAccount)) throw K8sSpecException("claudeAccount is invalid")
         if (!DockerPatterns.isBudgetInRange(budgetUsd)) throw K8sSpecException("budgetUsd is out of range")
     }
 

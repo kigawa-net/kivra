@@ -48,11 +48,10 @@ class EmergencyStopRulesTest {
     }
 
     @Test
-    fun autopilotRouteIsInTheGlobalSection() {
+    fun autopilotRouteStillParsesAndIsNotInTheSidebar() {
         assertEquals(Route.Page(NavDestination.Autopilot), parseRoute("#/autopilot"))
         assertEquals("#/autopilot", Route.Page(NavDestination.Autopilot).toHash())
-        val global = sidebarSections().first { it.title == "全体" }
-        assertTrue(global.items.any { it.dest == NavDestination.Autopilot })
+        assertTrue(sidebarSections().flatMap { it.items }.none { it.dest == NavDestination.Autopilot })
     }
 
     @Test
@@ -137,6 +136,7 @@ class EmergencyStopRulesTest {
         assertFalse(v.can(GatedOperation.REQUEST_ORDER_STOP))
         assertFalse(v.can(GatedOperation.EXTEND_ORDER))
         assertFalse(v.can(GatedOperation.ABANDON_CYCLE))
+        assertFalse(v.can(GatedOperation.DECIDE_SPLIT_PROPOSAL))
 
         // 承認者は停止の要求と取り消しはできるが、一時停止・再開・延長(ORDER_MANAGE)はできない。
         val a = enforced(approver)

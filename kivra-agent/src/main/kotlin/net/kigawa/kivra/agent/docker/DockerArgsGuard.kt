@@ -207,10 +207,6 @@ class DockerArgsGuard(private val settings: DockerSettings) {
         when (name) {
             "ANTHROPIC_API_KEY" -> if (value != DockerConstants.DUMMY_API_KEY) reject(GuardRule.ENV_REJECTED)
             "HTTPS_PROXY", "HTTP_PROXY" -> if (!DockerPatterns.PROXY_URL.matches(value)) reject(GuardRule.ENV_REJECTED)
-            "ANTHROPIC_BASE_URL" -> {
-                val proxy = value.removeSuffix(DockerConstants.PROXY_PATH)
-                if (proxy == value || !DockerPatterns.PROXY_URL.matches(proxy)) reject(GuardRule.ENV_REJECTED)
-            }
             "NO_PROXY" -> if (value != DockerConstants.NO_PROXY) reject(GuardRule.ENV_REJECTED)
             "JAVA_TOOL_OPTIONS" -> if (!JAVA_TOOL_OPTIONS_FORMAT.matches(value)) reject(GuardRule.ENV_REJECTED)
         }
@@ -254,7 +250,9 @@ class DockerArgsGuard(private val settings: DockerSettings) {
         }
         val proxy = env["HTTPS_PROXY"]
         if (proxy == null || env["HTTP_PROXY"] != proxy) reject(GuardRule.ENV_REJECTED)
-        if (env["ANTHROPIC_BASE_URL"] != proxy + DockerConstants.PROXY_PATH) reject(GuardRule.ENV_REJECTED)
+        if (!ProxyEnv.isAllowedAnthropicBaseUrl(env.getValue("ANTHROPIC_BASE_URL"), proxy, settings.allowedAccounts)) {
+            reject(GuardRule.ENV_REJECTED)
+        }
         val expectedJavaOptions = try {
             ProxyEnv.javaToolOptions(proxy)
         } catch (e: DockerSpecException) {

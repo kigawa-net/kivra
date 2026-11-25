@@ -2,7 +2,7 @@
 
 - ステータス: 提案(Proposed)。運用者の承認待ち。承認まで実装は始めない(この PR は文書だけ)
 - 日付: 2026-11-17
-- 関連: ADR 0015(order)、ADR 0020(担当とロール。本 ADR の用語整理を参照)、ADR 0022(プロジェクトのスコープ。`project_members`)、ADR 0023(プロジェクトチャット。`order_create_child`)。V59(本 ADR の `selfdev_order_assignments`)
+- 関連: ADR 0015(order)、ADR 0020(担当とロール。本 ADR の用語整理を参照)、ADR 0022(プロジェクトのスコープ。`project_members`)、ADR 0023(プロジェクトチャット。`order_create_child`)。V61(本 ADR の `selfdev_order_assignments`)
 
 ## 背景
 
@@ -14,7 +14,7 @@
 
 order に assignee を割り当てる機能として、**assign** を新設する。order と assignee のエンティティは変えない。紐付けだけを別に持つ。
 
-### 1. DB(Flyway V59、expand のみ。既存の移行は編集しない)
+### 1. DB(Flyway V61、expand のみ。既存の移行は編集しない)
 
 別テーブル `selfdev_order_assignments`。`selfdev_orders` と `selfdev_assignees` には列を足さない。追記専用の履歴とし、現在の担当は「`unassigned_at` が NULL の行」である。
 
@@ -98,12 +98,12 @@ CREATE INDEX ix_order_assignments_assignee ON selfdev_order_assignments (assigne
 
 ## MVP と拡張の区切り
 
-- **MVP**: V59、`OrderAssignment`、REST(作成時の指定、変更・解除、履歴、一覧の絞り込み)、MCP の読み取りの応答、`order_create_child` の `assignee_id`、UI(ドロップダウンと表示)、`ORDER_ASSIGN`、§6 の検証。
+- **MVP**: V61、`OrderAssignment`、REST(作成時の指定、変更・解除、履歴、一覧の絞り込み)、MCP の読み取りの応答、`order_create_child` の `assignee_id`、UI(ドロップダウンと表示)、`ORDER_ASSIGN`、§6 の検証。
 - **拡張**(別の PR・ADR): 複数担当、通知、子 order への継承、MCP とチャットでの変更、AI の担当、担当による絞り込みの画面の強化。
 
 ## 影響を受けるファイル(予定。実装 PR で確定する)
 
-- 新規: `kivra-app/src/main/resources/db/migration/V59__selfdev_order_assignments.sql`、`OrderAssignment` のドメインとリポジトリ(`kivra-core` と `kivra-app`)、割り当ての検証のサービス、REST のルート。
+- 新規: `kivra-app/src/main/resources/db/migration/V61__selfdev_order_assignments.sql`、`OrderAssignment` のドメインとリポジトリ(`kivra-core` と `kivra-app`)、割り当ての検証のサービス、REST のルート。
 - 変更: `auth/Permissions.kt`(`ORDER_ASSIGN`、OPERATOR と ADMIN)、`routes/SelfDevOrderRoutes.kt`(作成の入力、一覧の絞り込み、応答)、MCP の order ツール(応答の項目)、`chat/ProjectChatReplier.kt` と `ChatToolExecutor`(`order_create_child` の `assignee_id`)。
 - UI: `kivra-compose-ui` の `OrderCreateCard`、`OrdersScreen`、API クライアントとモデル。
 - 文書: ADR 0020(権限の表に `ORDER_ASSIGN` の 1 行。追補)。

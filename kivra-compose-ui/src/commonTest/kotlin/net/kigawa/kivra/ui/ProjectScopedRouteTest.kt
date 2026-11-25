@@ -174,13 +174,15 @@ class ProjectScopedRouteTest {
     }
 
     @Test
-    fun sidebarGlobalSectionIncludesOperationsInOrder() {
-        val global = sidebarSections().single { it.title == "全体" }
+    fun sidebarShowsOnlyHomeAndProjectsInOrder() {
+        val sections = sidebarSections()
+        assertEquals(1, sections.size)
+        assertEquals(null, sections.single().title)
         assertEquals(
-            listOf(NavDestination.Budget, NavDestination.Operations, NavDestination.Autopilot, NavDestination.Assignees),
-            global.items.map { it.dest },
+            listOf(NavDestination.Home, NavDestination.Projects),
+            sections.single().items.map { it.dest },
         )
-        assertTrue(global.items.all { it.target == Route.Page(it.dest) })
+        assertTrue(sections.single().items.all { it.target == Route.Page(it.dest) })
     }
 
     @Test

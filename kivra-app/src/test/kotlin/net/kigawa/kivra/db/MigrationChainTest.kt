@@ -1,6 +1,7 @@
 package net.kigawa.kivra.db
 
 import java.nio.file.Files
+import java.sql.SQLException
 import java.time.Duration
 import javax.sql.DataSource
 import kotlin.test.Test
@@ -83,11 +84,12 @@ internal val MIGRATION_FILES = mapOf(
     60 to "V60__selfdev_order_split_proposals.sql",
     61 to "V61__selfdev_order_assignments.sql",
     62 to "V62__task_requests.sql",
+    63 to "V63__project_claude_accounts.sql",
 )
 
 /** The versions applied on the full chain. V22 and V30 are never used on this branch (reserved gaps), so the list skips them. */
 internal val EXPECTED_APPLIED_VERSIONS: List<String> =
-    (1..21).map { it.toString() } + listOf("23", "24", "25", "26", "27", "28", "29", "31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62")
+    ((1..21) + (23..29) + (31..63)).map { it.toString() }
 
 /**
  * Versions left unused on purpose: a migration with one of these numbers is not written on this branch (V22 is reserved; V30 is left
@@ -102,6 +104,33 @@ internal val RESERVED_MIGRATION_VERSIONS: Set<Int> = setOf(22, 30)
  * skips or baselines a history: a mismatch must fail.
  */
 class MigrationChainTest {
+
+    @Test
+    fun `V63 leaves existing projects unset and enforces the Claude account ID and project foreign key`() =
+        TestDb { ds -> migrateOnly(ds, *MIGRATION_FILES.keys.filter { it < 63 }.toIntArray()) }.use { db ->
+            val projects = ProjectRepository(db.database, db.clock)
+            val projectId = projects.create("Existing", null).projectId
+            runMigrations(db.dataSource)
+            assertEquals(EXPECTED_APPLIED_VERSIONS, appliedVersions(db.dataSource))
+            assertNull(projects.claudeAccount(projectId))
+
+            fun insertAccount(id: String, account: String) = transaction(db.database) {
+                execUpdate(
+                    "INSERT INTO project_claude_accounts (project_id, account_id, updated_at) VALUES (?, ?, NOW(6))",
+                    id, account,
+                )
+            }
+
+            for (invalid in listOf("", "-demo", "Demo-a", "demo-a\n", "a".repeat(64))) {
+                assertFailsWith<SQLException> { insertAccount(projectId, invalid) }
+            }
+            assertFailsWith<SQLException> { insertAccount(Ulid.generate(), "demo-a") }
+            assertEquals(1, insertAccount(projectId, "demo-a"))
+            assertFailsWith<SQLException> {
+                transaction(db.database) { execUpdate("DELETE FROM projects WHERE project_id = ?", projectId) }
+            }
+            assertEquals("demo-a", projects.claudeAccount(projectId))
+        }
 
     @Test
     fun `empty database applies V1 to V21, V23, V24, V25, V26 and V27 in order and flyway validate passes`() = TestDb().use { db ->

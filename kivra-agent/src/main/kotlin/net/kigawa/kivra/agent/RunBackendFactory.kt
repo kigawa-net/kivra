@@ -46,7 +46,8 @@ internal fun createRunBackend(
             allowedNetworks = setOf(settings.network ?: throw DockerSpecException("network is required")),
             allowedImages = setOf(settings.image),
             allowedModels = setOf(settings.model),
-            allowedAccounts = setOfNotNull(settings.claudeAccount),
+            allowedAccounts = settings.allowedClaudeAccounts,
+            allowUnscopedAccount = settings.claudeAccount == null,
         ),
         launcher = launcher,
         pollMillis = pollMillis ?: DockerRunner.DEFAULT_POLL_MILLIS,
@@ -59,7 +60,8 @@ internal fun createRunBackend(
                 ownerLabel = k8s.ownerLabel,
                 allowedImages = setOf(settings.image),
                 allowedModels = setOf(settings.model),
-                allowedAccounts = setOfNotNull(settings.claudeAccount),
+                allowedAccounts = settings.allowedClaudeAccounts,
+                allowUnscopedAccount = settings.claudeAccount == null,
             )
         } catch (e: K8sSpecException) {
             throw ConfigException(

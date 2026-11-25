@@ -263,6 +263,19 @@ object ApiClient {
     suspend fun deleteProjectBudget(projectId: String) =
         writeWith(HttpMethod.Delete, "/api/projects/${percentEncode(projectId)}/budget", EmptyJsonBody())
 
+    suspend fun getProjectClaudeAccount(projectId: String): ApiProjectClaudeAccount =
+        getJson("/api/projects/${percentEncode(projectId)}/claude-account")
+
+    suspend fun putProjectClaudeAccount(projectId: String, accountId: String) =
+        writeWith(
+            HttpMethod.Put,
+            "/api/projects/${percentEncode(projectId)}/claude-account",
+            ProjectClaudeAccountBody(accountId),
+        )
+
+    suspend fun deleteProjectClaudeAccount(projectId: String) =
+        writeWith(HttpMethod.Delete, "/api/projects/${percentEncode(projectId)}/claude-account", EmptyJsonBody())
+
     /**
      * 運用者: プロジェクトのメンバーの一覧。`GET /api/projects/{id}/members`(ORDER_MANAGE。403 は運用者でない、404 は無いプロジェクト)。
      */
@@ -883,6 +896,8 @@ object ApiClient {
 
 /** 今月の予算の設定の本文(server `ProjectBudgetInput`)。上限は円の整数、警告の基準は 0 より大きく 1 以下。 */
 @Serializable private class ProjectBudgetBody(val monthlyLimitJpy: Long, val softRatio: Double)
+
+@Serializable private class ProjectClaudeAccountBody(val accountId: String)
 
 @Serializable private class DrainBody(val targetProjectId: String)
 

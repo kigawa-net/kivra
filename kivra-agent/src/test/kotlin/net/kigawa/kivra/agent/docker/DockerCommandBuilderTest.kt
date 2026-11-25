@@ -83,6 +83,25 @@ class DockerCommandBuilderTest {
     }
 
     @Test
+    fun allowlistedAccountsAndTheUnscopedProxyRouteCanCoexist() {
+        val settings = DockerSettings(
+            fixture.settings.dockerBinary, fixture.settings.dockerHost, fixture.root, setOf(TEST_NETWORK), setOf(TEST_IMAGE),
+            allowedAccounts = setOf("repo-a", "repo-b"),
+            allowUnscopedAccount = true,
+        )
+        val builder = DockerCommandBuilder(settings)
+        val guard = DockerArgsGuard(settings)
+        val env = "--env=ANTHROPIC_BASE_URL="
+        val named = builder.build(fixture.spec(claudeAccount = "repo-b"))
+        val unscoped = builder.build(fixture.spec())
+
+        assertEquals("$env$TEST_PROXY/anthropic/repo-b", named.single { it.startsWith(env) })
+        assertEquals("$env$TEST_PROXY/anthropic", unscoped.single { it.startsWith(env) })
+        guard.check(named)
+        guard.check(unscoped)
+    }
+
+    @Test
     fun taskTextFromAClaimedAttemptNeverReachesArguments() {
         val marker = "TASK-MARKER-9d1f --privileged -v /:/host"
         val attempt = ClaimedAttempt(

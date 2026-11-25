@@ -8,7 +8,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 
 /**
  * The rows of each kind that a drain moves (or, for a dry run, would move). [repos] are re-pointed to the target. [members] and [budget]
- * are removed from the source (they are not moved). Counts only: no ids and no names.
+ * and [claudeAccount] are removed from the source. Counts only: no ids and no names.
  */
 data class DrainCounts(
     val repos: Long,
@@ -19,6 +19,7 @@ data class DrainCounts(
     val memory: Long,
     val runs: Long,
     val assignees: Long,
+    val claudeAccount: Long,
 ) {
     /** The kinds in a fixed order, for the API and the audit line. */
     fun toMap(): Map<String, Long> = linkedMapOf(
@@ -30,6 +31,7 @@ data class DrainCounts(
         "memory" to memory,
         "runs" to runs,
         "assignees" to assignees,
+        "claudeAccount" to claudeAccount,
     )
 }
 
@@ -51,8 +53,7 @@ sealed interface ProjectDrainResult {
 /**
  * Empties a project into another one (ADR 0022, the drain). Every row of the source gets the target's id: tasks, orders, memory records,
  * Runs and assignees. The repositories are re-pointed (a repo_key is UNIQUE, so none of them can collide with the target). The source's
- * members and its budget row are removed; the target's members and budget are not touched. Nothing is deleted, so after a drain the
- * source has no rows and `DELETE /api/projects/{id}` succeeds.
+ * members, budget and Claude account setting are removed. After a drain the source has no rows and `DELETE /api/projects/{id}` succeeds.
  *
  * Refused with [ProjectDrainResult.Busy] while the source has a Run that is not terminal, or a RESERVED budget reservation under its scope.
  * A reservation keeps the scopes it was made with, but a Run that is still running would book its later spend to the target, and its
@@ -96,6 +97,7 @@ class ProjectDrainRepository(
         if (activeRuns > 0) throw DrainBlocked(DrainBusy(activeRuns, reservedBudgetOf(from)))
         val repos = moveRepos(from, to)
         val members = execUpdate("DELETE FROM project_members WHERE project_id = ?", from).toLong()
+        val claudeAccount = execUpdate("DELETE FROM project_claude_accounts WHERE project_id = ?", from).toLong()
         val tasks = moveProjectRows("selfdev_tasks", "task_id", from, to, batchSize)
         val orders = moveProjectRows("selfdev_orders", "order_id", from, to, batchSize)
         val memory = moveMemoryRecordsOfProject(from, to, batchSize)
@@ -116,6 +118,7 @@ class ProjectDrainRepository(
             memory = memory,
             runs = runs,
             assignees = assignees,
+            claudeAccount = claudeAccount,
         )
     }
 
@@ -170,6 +173,7 @@ class ProjectDrainRepository(
         memory = countMemoryRecordsOfProject(projectId),
         runs = countOf("SELECT COUNT(*) FROM development_runs WHERE project_id = ?", projectId),
         assignees = countOf("SELECT COUNT(*) FROM selfdev_assignees WHERE project_id = ?", projectId),
+        claudeAccount = countOf("SELECT COUNT(*) FROM project_claude_accounts WHERE project_id = ?", projectId),
     )
 
     private fun Transaction.countOf(sql: String, vararg params: Any?): Long = execQuery(sql, *params) { it.getLong(1) }.first()

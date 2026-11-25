@@ -27,6 +27,8 @@ import java.time.Clock
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -52,6 +54,7 @@ import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingAttemptState
 import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.DbCodingResultStore
+import net.kigawa.kivra.db.ProjectRepository
 import net.kigawa.kivra.db.TestDb
 import net.kigawa.kivra.db.execQuery
 import net.kigawa.kivra.db.execUpdate
@@ -84,12 +87,14 @@ class AgentApiRoutesTest {
     private val pathMarker = ".github/path-marker.yml"
 
     private inner class Env(val db: TestDb, cost: CodingCostPort = UnmeteredCodingCost) {
+        val projects = ProjectRepository(db.database, Clock.systemUTC())
         val service = CodingRuntimeService(
             attempts = CodingAttemptRepository(db.database, audit = db.audit),
             runs = DbCodingRunPort(db.runs, db.leases),
             results = DbCodingResultStore(db.database),
             tasks = CodingTaskSource { it.taskTitle },
             cost = cost,
+            projectClaudeAccount = projects::claudeAccount,
         )
         val agents = AgentIdentity(AgentTestTokens.config(), OidcTestTokens.jwks())
         val operators = OidcJwtVerifier(OidcTestTokens.config, OidcTestTokens.jwks()).asIdentity()
@@ -115,7 +120,7 @@ class AgentApiRoutesTest {
                 configureSelfDevRoutes(
                     SelfDevRouteDeps(
                         env.db.runs, env.operators, RepoRef("kigawa-net", "kivra"), 1, FakeGitHub(),
-                        net.kigawa.kivra.db.ProjectRepository(env.db.database, java.time.Clock.systemUTC()),
+                        env.projects,
                     ),
                 )
                 configureSelfDevAdminRoutes(env.db.runs, env.operators)
@@ -337,6 +342,7 @@ class AgentApiRoutesTest {
             assertEquals(runId, obj["runId"]!!.jsonPrimitive.content)
             assertEquals(1L, obj["generation"]!!.jsonPrimitive.content.toLong())
             val input = obj["input"]!!.jsonObject
+            assertEquals(JsonNull, input["claudeAccount"])
             assertEquals(BASE_SHA, input["baseSha"]!!.jsonPrimitive.content)
             val task = input["task"]!!.jsonObject
             assertEquals("UNTRUSTED", task["trust"]!!.jsonPrimitive.content)
@@ -346,6 +352,28 @@ class AgentApiRoutesTest {
             val next = post(CLAIM, "{}", token = token(agentB))
             assertEquals(HttpStatusCode.NoContent, next.status)
             assertEquals("", next.bodyAsText())
+        }
+    }
+
+    @Test
+    fun `claim reads the account of the run project at claim time and sends null for an unset project`() = TestDb().use { db ->
+        testApplication {
+            val env = Env(db)
+            setUp(env)
+            val configured = env.projects.create("Configured", null).projectId
+            val unset = env.projects.create("Unset", null).projectId
+            for ((projectId, account) in listOf(configured to "demo-a", unset to null)) {
+                val runId = env.newRun()
+                assertTrue(env.projects.assignRunToProject(runId, projectId))
+                env.enqueue(runId)
+                if (account != null) assertTrue(env.projects.setClaudeAccount(projectId, account))
+
+                val response = post(CLAIM, "{}")
+                assertEquals(HttpStatusCode.OK, response.status)
+                val claim = parse(response.bodyAsText())
+                assertEquals(JsonPrimitive(runId), claim["runId"])
+                assertEquals(JsonPrimitive(account), claim["input"]!!.jsonObject["claudeAccount"])
+            }
         }
     }
 

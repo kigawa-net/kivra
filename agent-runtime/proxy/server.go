@@ -22,7 +22,7 @@ func (s *proxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/anthropic" || strings.HasPrefix(r.URL.Path, "/anthropic/"):
 		s.anthropic.ServeHTTP(w, r)
 	default:
-		s.logf("deny method=%s path=%s reason=no_route", r.Method, r.URL.Path)
+		s.logf("deny method=%s path=%q reason=no_route", r.Method, r.URL.Path)
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}
 }

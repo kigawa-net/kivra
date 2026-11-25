@@ -4,7 +4,7 @@ package net.kigawa.kivra.ui
  * 画面の項目(docs/design/16-site-structure.md §2〜3)。
  *
  * - 全体の項目([globalPages]): プロジェクトを持たない。ホーム、プロジェクト一覧、全体の予算・FX、自動化、全体の担当。
- * - プロジェクト配下の項目([projectPages]): `#/projects/<id>/<page>` で開く。ダッシュボード、タスク、開発目標、order、承認、記憶、担当、予算。
+ * - プロジェクト配下の項目([projectPages]): `#/projects/<id>/<page>` で開く。ダッシュボード、タスク、開発目標、order、承認、記憶、担当、予算、設定、Operation。
  *
  * 「担当」は全体(トークンと全プロジェクト横断の管理)とプロジェクト配下(そのプロジェクトのメンバー)の両方にある。
  * 同じ object を使い、どちらかは [Route] の projectId で決める。
@@ -26,6 +26,7 @@ sealed class NavDestination(val route: String, val label: String) {
 
     /** プロジェクトの予算(今月の上限と使用量)。運用者だけが見られる。 */
     object ProjectBudget : NavDestination("budget", "予算")
+    object ProjectSettings : NavDestination("settings", "設定")
 
     companion object {
         /** 全体の項目(route が一意になる。`#/<route>` で開く)。 */
@@ -33,7 +34,7 @@ sealed class NavDestination(val route: String, val label: String) {
 
         /** プロジェクト配下の項目(`#/projects/<id>/<route>` で開く)。サイドナビの並び順でもある。 */
         val projectPages: List<NavDestination> by lazy {
-            listOf(Dashboard, Tasks, Goals, Orders, Approvals, Memory, Assignees, ProjectBudget, Operations)
+            listOf(Dashboard, Tasks, Goals, Orders, Approvals, Memory, Assignees, ProjectBudget, ProjectSettings, Operations)
         }
 
         /**

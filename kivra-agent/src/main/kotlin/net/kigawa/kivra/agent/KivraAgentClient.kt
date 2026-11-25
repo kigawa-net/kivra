@@ -264,6 +264,7 @@ class KivraAgentClient(
             ),
             allowedPathPatterns = input.allowedPathPatterns,
             deniedPathPatterns = input.deniedPathPatterns,
+            claudeAccount = body.claudeAccount,
         )
     }
 
@@ -351,7 +352,13 @@ internal fun Throwable.isTimeout(): Boolean =
     this is HttpRequestTimeoutException || this is ConnectTimeoutException || this is SocketTimeoutException
 
 @Serializable
-private class ClaimBody(val attemptId: String, val runId: String, val generation: Long, val input: InputBody)
+private class ClaimBody(
+    val attemptId: String,
+    val runId: String,
+    val generation: Long,
+    val input: InputBody,
+    val claudeAccount: String? = null,
+)
 
 @Serializable
 private class InputBody(

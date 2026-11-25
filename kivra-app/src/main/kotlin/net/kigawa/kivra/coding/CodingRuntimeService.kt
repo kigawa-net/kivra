@@ -72,6 +72,7 @@ class CodingRuntimeService(
     private val cost: CodingCostPort,
     private val policyConfig: PatchPolicyConfig = PatchPolicyConfig(),
     private val config: CodingRuntimeConfig = CodingRuntimeConfig(),
+    private val projectClaudeAccount: (projectId: String) -> String? = { null },
 ) {
     private val policy = PatchPolicy(policyConfig)
 
@@ -125,8 +126,11 @@ class CodingRuntimeService(
             val title = tasks.title(run)?.takeIf { it.isNotBlank() } ?: continue
             // The Run's project has its own limit (ADR 0022 PR-E). A refusal holds this attempt only: Runs of other projects still go on.
             if (run.projectId != null && cost.claimDenial(run.projectId) != null) continue
+            val claudeAccount = run.projectId?.let(projectClaudeAccount)
             val claimed = attempts.claim(attemptId, agentId, config.leaseTtl)
-            if (claimed is CodingAttemptResult.Ok) return CodingClaimOutcome.Claimed(inputFor(claimed.attempt, title, run.taskBody))
+            if (claimed is CodingAttemptResult.Ok) {
+                return CodingClaimOutcome.Claimed(inputFor(claimed.attempt, title, run.taskBody, claudeAccount))
+            }
         }
         return CodingClaimOutcome.NothingToClaim
     }
@@ -316,7 +320,7 @@ class CodingRuntimeService(
         }
     }
 
-    private fun inputFor(attempt: CodingAttempt, title: String, body: String?): CodingInput = CodingInput(
+    private fun inputFor(attempt: CodingAttempt, title: String, body: String?, claudeAccount: String?): CodingInput = CodingInput(
         runId = attempt.runId,
         attemptId = attempt.attemptId,
         leaseGeneration = attempt.leaseGeneration,
@@ -337,6 +341,7 @@ class CodingRuntimeService(
         limits = limits,
         allowedPathPatterns = policyConfig.allowedPathPatterns,
         deniedPathPatterns = policyConfig.deniedPathPatterns,
+        claudeAccount = claudeAccount,
     )
 
     companion object {

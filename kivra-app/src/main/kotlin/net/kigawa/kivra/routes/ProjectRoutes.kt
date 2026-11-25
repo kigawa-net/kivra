@@ -33,6 +33,8 @@ import net.kigawa.kivra.core.chat.approvalReasonText
 import net.kigawa.kivra.mcp.safeTaskTitle
 import net.kigawa.kivra.db.BackfillReport
 import net.kigawa.kivra.db.ProjectChatActionRepository
+import net.kigawa.kivra.config.ClaudeAccountOption
+import net.kigawa.kivra.config.ClaudeAccountSettings
 import net.kigawa.kivra.db.DbBudgetStore
 import net.kigawa.kivra.db.DevelopmentRunRepository
 import net.kigawa.kivra.db.ProjectBudgetStatus
@@ -112,6 +114,7 @@ internal fun Route.configureProjectRoutes(
     chatReply: ProjectChatReplier? = null,
     /** The tools of the chat's AI (ADR 0023 追補 5), run as the operator who sent the message. Null: the reply has no tool. */
     chatTools: ChatToolDeps? = null,
+    claudeAccounts: ClaudeAccountSettings = ClaudeAccountSettings.EMPTY,
 ) {
     /** The authenticated caller, or null after responding 401. */
     suspend fun ApplicationCall.principalOr401(): String? {
@@ -354,6 +357,42 @@ internal fun Route.configureProjectRoutes(
         }
     }
 
+    route("/api/projects/{projectId}/claude-account") {
+        get {
+            val principal = call.principalOr401() ?: return@get
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_claude_account_get")) return@get
+            val projectId = call.pathParam("projectId") ?: return@get call.respond(HttpStatusCode.NotFound)
+            if (projectRepo.get(projectId) == null || !mayReadProject(principal, projectId, "project_claude_account_get")) {
+                return@get call.respond(HttpStatusCode.NotFound)
+            }
+            call.respond(ProjectClaudeAccountResponse(projectRepo.claudeAccount(projectId), claudeAccounts.available))
+        }
+        put {
+            val principal = call.principalOr401() ?: return@put
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_claude_account_put")) return@put
+            if (!call.requireJsonSameOrigin()) return@put
+            val projectId = call.pathParam("projectId") ?: return@put call.respond(HttpStatusCode.NotFound)
+            if (projectRepo.get(projectId) == null) return@put call.respond(HttpStatusCode.NotFound)
+            val body = runCatching { call.receive<JsonObject>() }.getOrNull()
+            val account = body?.get("accountId") as? JsonPrimitive
+            if (body?.size != 1 || account?.isString != true || !claudeAccounts.contains(account.content)) {
+                return@put call.respond(HttpStatusCode.BadRequest, ProjectError("invalid_account"))
+            }
+            if (!projectRepo.setClaudeAccount(projectId, account.content)) return@put call.respond(HttpStatusCode.NotFound)
+            logClaudeAccountSetting(principal, projectId, account.content)
+            call.respond(HttpStatusCode.NoContent)
+        }
+        delete {
+            val principal = call.principalOr401() ?: return@delete
+            if (!call.permitOr403(principal, Permission.ORDER_MANAGE, "project_claude_account_delete")) return@delete
+            if (!call.requireJsonSameOrigin()) return@delete
+            val projectId = call.pathParam("projectId") ?: return@delete call.respond(HttpStatusCode.NotFound)
+            if (!projectRepo.clearClaudeAccount(projectId)) return@delete call.respond(HttpStatusCode.NotFound)
+            logClaudeAccountSetting(principal, projectId, null)
+            call.respond(HttpStatusCode.NoContent)
+        }
+    }
+
     route("/api/projects/{projectId}") {
         get("dashboard") {
             val principal = call.principalOr401() ?: return@get
@@ -501,8 +540,8 @@ internal fun Route.configureProjectRoutes(
                 }
             }
         }
-        // Empties this project into the target (ADR 0022, the drain): every row moves to the target, the members and the budget row of this
-        // project are removed (the last ADMIN included, the one place where that is allowed), and nothing is deleted. Operators only. A dry run
+        // Empties this project into the target (ADR 0022, the drain). The members, budget and Claude account setting of this
+        // project are removed (the last ADMIN included, the one place where that is allowed). Operators only. A dry run
         // (the default) only counts. Refused with 409 PROJECT_BUSY while this project has a Run that is not terminal, or a reservation in progress.
         post("drain") {
             val principal = call.principalOr401() ?: return@post
@@ -700,6 +739,9 @@ data class ProjectBudgetResponse(
 
 /** The body of `PUT /api/projects/{id}/budget`: the limit in whole yen, and the soft ratio (0 < ratio <= 1; default 0.8). */
 internal data class ProjectBudgetInput(val monthlyLimitJpy: BigDecimal, val softRatio: BigDecimal)
+
+@Serializable
+private data class ProjectClaudeAccountResponse(val accountId: String?, val available: List<ClaudeAccountOption>)
 
 /** The Runs of the dashboard's scope: their total and the count per state (only states that occur). */
 @Serializable
@@ -1073,6 +1115,13 @@ private fun ProjectBudgetStatus.toResponse(): ProjectBudgetResponse {
 
 private val BUDGET_FIELDS = setOf("monthlyLimitJpy", "softRatio")
 private val DEFAULT_SOFT_RATIO = BigDecimal("0.8")
+
+private fun logClaudeAccountSetting(principal: String, projectId: String, accountId: String?) {
+    projectAdminLog.info(
+        "project admin action: action=PROJECT_CLAUDE_ACCOUNT_SET actor={} projectId={} accountId={}",
+        operatorTag(principal), projectId, accountId,
+    )
+}
 
 /**
  * The body of a budget PUT, or null: not an object, an unknown field, a value that is not a JSON number, or a value the store would refuse.

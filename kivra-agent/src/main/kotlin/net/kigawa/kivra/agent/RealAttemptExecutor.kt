@@ -22,6 +22,7 @@ import net.kigawa.kivra.agent.backend.RunResult
 import net.kigawa.kivra.agent.backend.RunSpec
 import net.kigawa.kivra.agent.docker.CliCommand
 import net.kigawa.kivra.agent.docker.CliOutputLimits
+import net.kigawa.kivra.agent.docker.DockerPatterns
 import net.kigawa.kivra.agent.docker.TaskFile
 import net.kigawa.kivra.agent.k8s.PodInputSource
 import net.kigawa.kivra.agent.k8s.pod.PodInput
@@ -85,9 +86,13 @@ class RealExecutorSettings(
     val monitorEvents: Boolean = false,
     /** The namespace and owner label of the k8s backend (`KIVRA_AGENT_BACKEND=k8s`). Null for docker. */
     val k8s: K8sExecutorSettings? = null,
-    /** The Claude account fixed by the agent's startup configuration. Null selects the default proxy route. */
+    /** The fallback Claude account when a claim omits the account. Null selects the default proxy route. */
     val claudeAccount: String? = null,
+    allowedClaudeAccounts: Set<String> = emptySet(),
 ) {
+    /** Named Claude accounts this agent may use, including the configured fallback. */
+    val allowedClaudeAccounts: Set<String> = allowedClaudeAccounts + listOfNotNull(claudeAccount)
+
     override fun toString(): String = "RealExecutorSettings(***)"
 }
 
@@ -136,6 +141,13 @@ class RealAttemptExecutor(
     private val debugKeep: AttemptDebugKeep? = if (settings.debugKeep) AttemptDebugKeep(workRoot).also { it.prune() } else null
 
     override suspend fun execute(attempt: ClaimedAttempt): AttemptOutcome {
+        val claimedAccount = attempt.claudeAccount
+        if (claimedAccount != null && claimedAccount !in settings.allowedClaudeAccounts) {
+            val accountForLog = claimedAccount.takeIf(DockerPatterns.ACCOUNT::matches) ?: "<invalid>"
+            logger.warn("ACCOUNT_NOT_ALLOWED: runId={} attemptId={} claudeAccount={}", attempt.runId, attempt.attemptId, accountForLog)
+            // TODO: Report ACCOUNT_NOT_ALLOWED once the server accepts it as an error code.
+            return AttemptOutcome.Failed(AgentErrorCode.NEEDS_HUMAN)
+        }
         // The claim's patterns are checked before anything runs. Invalid patterns are not guessed at: the attempt is failed as NEEDS_HUMAN.
         val pathRules = try {
             PathRules.fromServer(attempt.allowedPathPatterns, attempt.deniedPathPatterns)
@@ -209,7 +221,7 @@ class RealAttemptExecutor(
                 timeout = Duration.ofSeconds(attempt.limits.maxRuntimeSeconds),
                 maxTurns = attempt.limits.maxTurns,
                 model = settings.model,
-                claudeAccount = settings.claudeAccount,
+                claudeAccount = attempt.claudeAccount ?: settings.claudeAccount,
                 budgetUsd = settings.budgetUsd,
                 outputLimitBytes = minOf(attempt.limits.maxOutputBytes, CliOutputLimits.MAX_TOTAL_BYTES).toInt(),
             )

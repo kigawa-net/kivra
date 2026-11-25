@@ -14,7 +14,7 @@ class DockerCommandBuilder(private val settings: DockerSettings) {
         if (spec.image !in settings.allowedImages) throw DockerSpecException("image is not allowed")
         if (spec.network !in settings.allowedNetworks) throw DockerSpecException("network is not allowed")
         if (spec.model !in settings.allowedModels) throw DockerSpecException("model is not allowed")
-        if (!ProxyEnv.isAllowedAccount(spec.claudeAccount, settings.allowedAccounts)) {
+        if (!ProxyEnv.isAllowedAccount(spec.claudeAccount, settings.allowedAccounts, settings.allowUnscopedAccount)) {
             throw DockerSpecException("claudeAccount is not allowed")
         }
         val workDir = WorkDirPolicy.validate(spec.workDir, settings.workRoot)

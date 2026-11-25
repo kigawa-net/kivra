@@ -153,6 +153,7 @@ private class World(
         backend: RunBackend? = null,
         podInputs: AttemptPodInputs = AttemptPodInputs(),
         claudeAccount: String? = null,
+        allowedClaudeAccounts: Set<String> = emptySet(),
     ): RealAttemptExecutor {
         val settings = RealExecutorSettings(
             dockerBinary = Path.of("/usr/bin/docker"),
@@ -166,6 +167,7 @@ private class World(
             newErrorCodes = newErrorCodes,
             monitorEvents = monitorEvents,
             claudeAccount = claudeAccount,
+            allowedClaudeAccounts = allowedClaudeAccounts,
         )
         return RealAttemptExecutor(
             client = client,
@@ -263,6 +265,16 @@ class RealAttemptExecutorTest {
             "--env=ANTHROPIC_BASE_URL=$PROXY/anthropic/repo-a",
             run.single { it.startsWith("--env=ANTHROPIC_BASE_URL=") },
         )
+    }
+
+    @Test
+    fun theDockerExecutorPrefersTheClaimedClaudeAccount() = runBlocking {
+        val world = World(docker = ScriptedDocker(output = { lines(resultLine()) }))
+        world.executor(claudeAccount = "repo-a", allowedClaudeAccounts = setOf("repo-b"))
+            .execute(world.attempt().copy(claudeAccount = "repo-b"))
+
+        val run = world.docker.argvs.single { it[1] == "run" }
+        assertEquals("--env=ANTHROPIC_BASE_URL=$PROXY/anthropic/repo-b", run.single { it.startsWith("--env=ANTHROPIC_BASE_URL=") })
     }
 
     @Test

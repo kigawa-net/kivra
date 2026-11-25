@@ -33,6 +33,7 @@ class KivraAgentClientTest {
         assertEquals(1800L, attempt.limits.maxRuntimeSeconds)
         assertEquals(listOf("src/**"), attempt.allowedPathPatterns)
         assertEquals(listOf(".github/**"), attempt.deniedPathPatterns)
+        assertNull(attempt.claudeAccount)
 
         val request = recorded.single()
         assertEquals("POST", request.method)
@@ -40,6 +41,20 @@ class KivraAgentClientTest {
         assertEquals(listOf("Bearer tok-1"), request.authorization)
         assertEquals("{}", request.body)
         assertTrue(request.contentType!!.startsWith("application/json"))
+    }
+
+    @Test
+    fun claimReadsClaudeAccountAndIgnoresUnknownFields() = runBlocking {
+        val body = CLAIM_BODY.replaceFirst("{", """{"claudeAccount":"repo-b","futureClaimField":true,""")
+        val result = client(synchronizedList()) { Canned(200, body) }.claim()
+        assertEquals("repo-b", assertIs<ClaimResult.Assigned>(result).attempt.claudeAccount)
+    }
+
+    @Test
+    fun claimAcceptsAnExplicitNullClaudeAccount() = runBlocking {
+        val body = CLAIM_BODY.replaceFirst("{", """{"claudeAccount":null,""")
+        val result = client(synchronizedList()) { Canned(200, body) }.claim()
+        assertNull(assertIs<ClaimResult.Assigned>(result).attempt.claudeAccount)
     }
 
     @Test

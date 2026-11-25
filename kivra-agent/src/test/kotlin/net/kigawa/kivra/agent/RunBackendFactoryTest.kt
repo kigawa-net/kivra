@@ -1,5 +1,8 @@
 package net.kigawa.kivra.agent
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -9,6 +12,10 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -26,6 +33,7 @@ import net.kigawa.kivra.agent.k8s.K8sRunBackend
 import net.kigawa.kivra.agent.k8s.KubeApiException
 import net.kigawa.kivra.agent.k8s.PodState
 import net.kigawa.kivra.agent.workdir.RepoSource
+import org.slf4j.LoggerFactory
 
 /**
  * The k8s wiring of the start (ADR 0010 追補 7 PR 5c): the backend is assembled from valid settings, an agent that is not in the cluster
@@ -115,14 +123,17 @@ class RunBackendFactoryTest {
      */
     @Test
     fun theBackendAndTheExecutorShareOneInputRegistry() = runBlocking {
-        val config = k8sConfig(AgentConfig.ENV_CLAUDE_ACCOUNT to "repo-a")
+        val config = k8sConfig(
+            AgentConfig.ENV_CLAUDE_ACCOUNT to "repo-a",
+            AgentConfig.ENV_ALLOWED_CLAUDE_ACCOUNTS to "repo-b,repo-c",
+        )
         val api = FakeKubeApi()
         api.pod = { PodState("pod-1", running = false, terminated = true, exitCode = 0) }
         val recorded = synchronizedList()
         val client = KivraAgentClient(fakeKivraHttp(recorded) { Canned(204) }, KIVRA_URL, FixedTokens())
         val executor = executorFor(config, client, kubeApi = { api }, pollMillis = 5)
 
-        val outcome = executor.execute(attempt())
+        val outcome = executor.execute(attempt().copy(claudeAccount = "repo-b"))
 
         assertEquals(1, api.created.size, "the Job of the run is created")
         assertIs<AttemptOutcome.Failed>(outcome)
@@ -134,8 +145,89 @@ class RunBackendFactoryTest {
         val env = container.getValue("env").jsonArray.associate {
             it.jsonObject.getValue("name").jsonPrimitive.content to it.jsonObject.getValue("value").jsonPrimitive.content
         }
-        assertEquals("$K8S_PROXY/anthropic/repo-a", env["ANTHROPIC_BASE_URL"])
+        assertEquals("$K8S_PROXY/anthropic/repo-b", env["ANTHROPIC_BASE_URL"])
         assertEquals(K8sNames.ownerLabel("kivra-agent-pc1"), config.realExecutor!!.k8s!!.ownerLabel)
+    }
+
+    /** An allowed set without a default id: a claim that omits the account uses the conventional /anthropic path. */
+    @Test
+    fun aClaimWithoutAnAccountUsesTheDefaultPathWhenOnlyTheAllowedSetIsConfigured() = runBlocking {
+        val config = k8sConfig(AgentConfig.ENV_ALLOWED_CLAUDE_ACCOUNTS to "repo-b")
+        val api = FakeKubeApi()
+        api.pod = { PodState("pod-1", running = false, terminated = true, exitCode = 0) }
+        val recorded = synchronizedList()
+        val client = KivraAgentClient(fakeKivraHttp(recorded) { Canned(204) }, KIVRA_URL, FixedTokens())
+        val executor = executorFor(config, client, kubeApi = { api }, pollMillis = 5)
+
+        executor.execute(attempt().copy(claudeAccount = null))
+
+        val (_, manifest) = api.created.single()
+        val pod = manifest.getValue("spec").jsonObject.getValue("template").jsonObject.getValue("spec").jsonObject
+        val container = pod.getValue("containers").jsonArray.single().jsonObject
+        val env = container.getValue("env").jsonArray.associate {
+            it.jsonObject.getValue("name").jsonPrimitive.content to it.jsonObject.getValue("value").jsonPrimitive.content
+        }
+        assertEquals("$K8S_PROXY/anthropic", env["ANTHROPIC_BASE_URL"])
+    }
+
+    /** No default id and no allowed set: any claimed account is outside the (empty) set, so no Job is created. */
+    @Test
+    fun anAgentWithoutAnyAccountSettingRefusesAClaimedAccount() = runBlocking {
+        val config = k8sConfig()
+        val api = FakeKubeApi()
+        val recorded = synchronizedList()
+        val client = KivraAgentClient(fakeKivraHttp(recorded) { Canned(204) }, KIVRA_URL, FixedTokens())
+        val executor = executorFor(config, client, kubeApi = { api }, pollMillis = 5)
+
+        val outcome = executor.execute(attempt().copy(claudeAccount = "repo-a"))
+
+        assertIs<AttemptOutcome.Failed>(outcome)
+        assertEquals(emptyList(), api.created)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun anUnlistedClaimFailsWithoutCreatingAJob() = runTest {
+        val logger = LoggerFactory.getLogger(RealAttemptExecutor::class.java) as Logger
+        val appender = ListAppender<ILoggingEvent>().apply { start() }
+        logger.addAppender(appender)
+        try {
+            val configs = listOf(
+                k8sConfig(),
+                k8sConfig(AgentConfig.ENV_CLAUDE_ACCOUNT to "repo-a", AgentConfig.ENV_ALLOWED_CLAUDE_ACCOUNTS to "repo-b"),
+            )
+            for (config in configs) {
+                val api = FakeKubeApi()
+                val recorded = synchronizedList()
+                val claim = CLAIM_BODY.replaceFirst("{", """{"claudeAccount":"repo-unlisted",""")
+                var claimServed = false
+                val http = fakeKivraHttp(recorded) {
+                    when (it.path) {
+                        "/api/agent/v1/claim" -> if (claimServed) Canned(204) else Canned(200, claim).also { claimServed = true }
+                        "/api/agent/v1/attempts/att-1/fail" -> Canned(200, """{"attemptId":"att-1","state":"FAILED"}""")
+                        else -> error("unexpected request ${it.path}")
+                    }
+                }
+                val client = KivraAgentClient(http, KIVRA_URL, FixedTokens())
+                val executor = executorFor(config, client, kubeApi = { api })
+                val job = backgroundScope.launch { AgentLoop(config, client, executor).run() }
+                try {
+                    advanceTimeBy(1_000)
+                    assertEquals(emptyList(), api.created)
+                    val fail = recorded.single { it.path.endsWith("/fail") }
+                    assertEquals("""{"generation":3,"errorCode":"NEEDS_HUMAN"}""", fail.body)
+                } finally {
+                    job.cancel()
+                    http.close()
+                }
+            }
+            val deniedLogs = appender.list.map { it.formattedMessage }.filter { it.contains("ACCOUNT_NOT_ALLOWED") }
+            assertEquals(configs.size, deniedLogs.size)
+            assertTrue(deniedLogs.all { it.contains("claudeAccount=repo-unlisted") })
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
+        }
     }
 
     /** A process that was killed in a run leaves its Job. The next process removes it at start, before any attempt is claimed. */

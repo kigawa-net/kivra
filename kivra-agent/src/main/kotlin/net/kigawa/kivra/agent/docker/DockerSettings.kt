@@ -61,12 +61,12 @@ internal object ProxyEnv {
     fun anthropicBaseUrl(proxyUrl: String, claudeAccount: String?): String =
         proxyUrl + DockerConstants.PROXY_PATH + (claudeAccount?.let { "/$it" } ?: "")
 
-    fun isAllowedAccount(claudeAccount: String?, allowedAccounts: Set<String>): Boolean =
-        if (claudeAccount == null) allowedAccounts.isEmpty() else claudeAccount in allowedAccounts
+    fun isAllowedAccount(claudeAccount: String?, allowedAccounts: Set<String>, allowUnscopedAccount: Boolean): Boolean =
+        if (claudeAccount == null) allowUnscopedAccount else claudeAccount in allowedAccounts
 
-    fun isAllowedAnthropicBaseUrl(value: String, proxyUrl: String, allowedAccounts: Set<String>): Boolean =
-        if (allowedAccounts.isEmpty()) value == anthropicBaseUrl(proxyUrl, null)
-        else allowedAccounts.any { value == anthropicBaseUrl(proxyUrl, it) }
+    fun isAllowedAnthropicBaseUrl(value: String, proxyUrl: String, allowedAccounts: Set<String>, allowUnscopedAccount: Boolean): Boolean =
+        (allowUnscopedAccount && value == anthropicBaseUrl(proxyUrl, null)) ||
+            allowedAccounts.any { value == anthropicBaseUrl(proxyUrl, it) }
 
     fun javaToolOptions(proxyUrl: String): String = options(PROXY.matchEntire(proxyUrl), proxyUrl)
 
@@ -146,13 +146,15 @@ class DockerSettings(
     allowedImages: Set<String>,
     allowedModels: Set<String> = setOf(CliCommand.DEFAULT_MODEL),
     allowedAccounts: Set<String> = emptySet(),
+    /** Whether the guard allows the proxy route without an account ID. */
+    val allowUnscopedAccount: Boolean = allowedAccounts.isEmpty(),
 ) {
     val workRoot: Path = checkWorkRoot(workRoot)
     val allowedNetworks: Set<String> = checkNetworks(allowedNetworks)
     val allowedImages: Set<String> = checkImages(allowedImages)
     val allowedModels: Set<String> = checkModels(allowedModels)
 
-    /** Named Claude accounts allowed by the guard. An empty set selects the default route. */
+    /** Named Claude accounts allowed by the guard. */
     val allowedAccounts: Set<String> = allowedAccounts.toSet().also { accounts ->
         if (accounts.any { !DockerPatterns.ACCOUNT.matches(it) }) {
             throw DockerSpecException("allowedAccounts contains an invalid account id")

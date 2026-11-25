@@ -150,6 +150,7 @@ private val logger = LoggerFactory.getLogger("net.kigawa.kivra.Application")
 
 /** [env] is injected for tests. The auth mode is resolved before any database work, so a bad setting fails the startup. */
 internal fun Application.appModule(env: Map<String, String>) {
+    val claudeAccounts = net.kigawa.kivra.config.ClaudeAccountSettings.fromEnv(env)
     val devPreviewEnabled = isDevPreviewEnabled(env)
     val taskApiIdentity = resolveTaskApiIdentity(env)
     // Fail-closed: when the agent API is off, no agent variable beyond the switch is read (PR 4a).
@@ -213,6 +214,7 @@ internal fun Application.appModule(env: Map<String, String>) {
             cost = buildCodingCostLedger(
                 env, agentApiSettings.attemptReserveUsd, budgetStore, budgetConfig.tenantId, database,
             ),
+            projectClaudeAccount = projectRepo::claudeAccount,
         )
     }
     // The run-execution monitor's event log (ADR 0012). Built only with the agent API, like the coding runtime.
@@ -693,6 +695,7 @@ internal fun Application.appModule(env: Map<String, String>) {
                 chatActions = projectChatActions,
                 chatReply = projectChatReply,
                 chatTools = projectChatTools,
+                claudeAccounts = claudeAccounts,
             )
             // The UI calls the Task API, so it is served only when the Task API is enabled.
             configureUiRoutes()

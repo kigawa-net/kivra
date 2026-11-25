@@ -45,6 +45,8 @@ class PermissionsTest {
         Permission.BUDGET_OVERRIDE to "YYNNNN",
         Permission.ASSIGNEE_MANAGE to "YNNNNN",
         Permission.STOP_DECIDE_AUTO to "NNNNNY",
+        Permission.REQUEST_SUBMIT to "YYNYNN",
+        Permission.REQUEST_DECIDE to "YNYNNN",
     )
 
     @Test
@@ -62,7 +64,7 @@ class PermissionsTest {
         assertTrue(Permission.STOP_DECIDE in ROLE_PERMISSIONS.getValue(Role.ADMIN))
         for (r in listOf(Role.OPERATOR, Role.AI, Role.VIEWER, Role.AI_APPROVER)) assertFalse(Permission.STOP_DECIDE in ROLE_PERMISSIONS.getValue(r), "$r")
         assertEquals(
-            setOf(Permission.READ, Permission.STOP_REQUEST, Permission.STOP_DECIDE),
+            setOf(Permission.READ, Permission.STOP_REQUEST, Permission.STOP_DECIDE, Permission.REQUEST_DECIDE),
             ROLE_PERMISSIONS.getValue(Role.APPROVER),
         )
     }
@@ -97,7 +99,8 @@ class PermissionsTest {
         val approverAllowed = Permission.entries - Permission.ASSIGNEE_MANAGE - Permission.STOP_DECIDE_AUTO
         for (p in Permission.entries) {
             assertEquals(p in approverAllowed, allowed(s, approver, p), "approver $p")
-            val human = p != Permission.STOP_DECIDE && p != Permission.ASSIGNEE_MANAGE && p != Permission.STOP_DECIDE_AUTO
+            val human = p != Permission.STOP_DECIDE && p != Permission.ASSIGNEE_MANAGE && p != Permission.STOP_DECIDE_AUTO &&
+                p != Permission.REQUEST_DECIDE
             assertEquals(human, allowed(s, this.human, p), "operator $p")
         }
     }

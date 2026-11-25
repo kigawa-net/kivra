@@ -22,6 +22,7 @@ import net.kigawa.kivra.coding.DbCodingRunPort
 import net.kigawa.kivra.db.AssigneeStoreLookup
 import net.kigawa.kivra.db.ProjectMemberRepository
 import net.kigawa.kivra.db.ProjectMemberStore
+import net.kigawa.kivra.db.TaskRequestRepository
 import net.kigawa.kivra.db.CodingAttemptRepository
 import net.kigawa.kivra.db.CodingMonitorEventRepository
 import net.kigawa.kivra.db.DbCodingResultStore
@@ -69,6 +70,7 @@ import net.kigawa.kivra.routes.isDevPreviewEnabled
 import net.kigawa.kivra.routes.configureKillSwitchRoutes
 import net.kigawa.kivra.routes.configureObservabilityRoutes
 import net.kigawa.kivra.routes.configureTaskApiRoutes
+import net.kigawa.kivra.routes.configureTaskRequestRoutes
 import net.kigawa.kivra.routes.configureOperationApiRoutes
 import net.kigawa.kivra.routes.readOnlyOperationJournal
 import net.kigawa.kivra.routes.configureUiRoutes
@@ -681,6 +683,7 @@ internal fun Application.appModule(env: Map<String, String>) {
         }
         if (taskApiIdentityWithSession != null) {
             configureTaskApiRoutes(runs, taskApiIdentityWithSession, selfDevSettings.config?.repo, permissionGuard, projectRepo)
+            configureTaskRequestRoutes(TaskRequestRepository(database), runs, taskApiIdentityWithSession, permissionGuard, projectRepo)
             configureOperationApiRoutes(runs, readOnlyOperationJournal(database), taskApiIdentityWithSession, permissionGuard)
             configureProjectRoutes(
                 projectRepo, runs, taskApiIdentityWithSession, permissionGuard, selfDevSettings.config?.repo,

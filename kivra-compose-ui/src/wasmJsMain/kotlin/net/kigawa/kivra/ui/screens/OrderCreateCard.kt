@@ -54,6 +54,8 @@ import net.kigawa.kivra.ui.validatedOrderTitle
 internal fun OrderCreateCard(projectId: String, onChanged: () -> Unit) {
     val scope = rememberCoroutineScope()
 
+    var assigneeId by remember(projectId) { mutableStateOf<String?>(null) }
+    val canAssign = net.kigawa.kivra.ui.LocalCallerPermissions.current.can(net.kigawa.kivra.ui.GatedOperation.ASSIGN_ORDER)
     var title by remember { mutableStateOf("") }
     var policy by remember { mutableStateOf("") }
     var maxCycles by remember { mutableStateOf("1") }
@@ -79,7 +81,7 @@ internal fun OrderCreateCard(projectId: String, onChanged: () -> Unit) {
         scope.launch {
             var created = false
             try {
-                ApiClient.createOrder(validTitle, validPolicy, cycles, projectId)
+                ApiClient.createOrder(validTitle, validPolicy, cycles, projectId, assigneeId)
                 created = true
             } catch (e: CancellationException) {
                 throw e
@@ -143,6 +145,7 @@ internal fun OrderCreateCard(projectId: String, onChanged: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(8.dp))
             ProjectFixedLabel(projectId)
+            if (canAssign) OrderAssigneePicker(projectId, assigneeId, !blocked) { assigneeId = it }
             Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = { send() },

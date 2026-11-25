@@ -358,8 +358,15 @@ object ApiClient {
      * order の作成(ルートの order)。`POST /api/projects/{projectId}/orders`(別名)、本文 `{title, policy, maxCycles, projectId}`。
      * 冪等キーは送らない(サーバーの本文は厳密で、知らないフィールドは 400 になる)。ルートは複数作れる(2 つ目も受け付ける。ADR 0015 追補 2026-11-11)。
      */
-    suspend fun createOrder(title: String, policy: String, maxCycles: Int, projectId: String) =
-        postWrite(ProjectApi.orderCreate(projectId), CreateOrderBody(title, policy, maxCycles, projectId))
+    suspend fun createOrder(title: String, policy: String, maxCycles: Int, projectId: String, assigneeId: String? = null) =
+        postWrite(ProjectApi.orderCreate(projectId), CreateOrderBody(title, policy, maxCycles, projectId, assigneeId))
+
+    /** order の担当を設定する(null で解除)。`PUT`/`DELETE /api/projects/{projectId}/orders/{orderId}/assignee`(ADR 0024)。 */
+    suspend fun setOrderAssignee(projectId: String, orderId: String, assigneeId: String?) {
+        val path = "/api/projects/${percentEncode(projectId)}/orders/${percentEncode(orderId)}/assignee"
+        if (assigneeId == null) writeWith(HttpMethod.Delete, path, EmptyJsonBody())
+        else writeWith(HttpMethod.Put, path, OrderAssigneeBody(assigneeId))
+    }
 
     /**
      * 呼び出し者の役割と権限。`GET /api/selfdev/me`。どの運用者にも 200 で返る。失敗は [ApiException]
@@ -880,7 +887,7 @@ object ApiClient {
 @Serializable private class DrainBody(val targetProjectId: String)
 
 /** order の作成の本文(server `CreateOrderRequest`)。冪等キーは持たない(サーバーは知らないフィールドを拒否する)。 */
-@Serializable private class CreateOrderBody(val title: String, val policy: String, val maxCycles: Int, val projectId: String)
+@Serializable private class CreateOrderBody(val title: String, val policy: String, val maxCycles: Int, val projectId: String, @kotlinx.serialization.SerialName("assignee_id") val assigneeId: String? = null)
 
 /** order の停止要求の本文(server `RequestStopRequest`)。フィールドは厳密に検査されるので、この二つだけ送る。 */
 @Serializable private class OrderStopRequest(val version: Long, val reasonCode: String)
@@ -914,3 +921,4 @@ private data class ApiMemoryList(val items: List<ApiMemory>)
 @Serializable
 private class ChatSendMessageRequest(val content: String, val title: String)
 
+@Serializable private class OrderAssigneeBody(@kotlinx.serialization.SerialName("assignee_id") val assigneeId: String)

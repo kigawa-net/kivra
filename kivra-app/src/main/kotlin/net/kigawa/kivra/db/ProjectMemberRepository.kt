@@ -9,7 +9,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 val PROJECT_MEMBER_ROLES: Set<String> = setOf("ADMIN", "OPERATOR", "APPROVER", "AI", "VIEWER")
 
 /** A member of a project: the assignee, its display name, its role in the project and its state (ACTIVE or DISABLED). */
-data class ProjectMemberRow(val assigneeId: String, val displayName: String, val role: String, val state: String)
+data class ProjectMemberRow(val assigneeId: String, val displayName: String, val role: String, val state: String, val assignable: Boolean = state == "ACTIVE" && role != "AI")
 
 /** The result of [ProjectMemberRepository.put]. Only [CREATED] and [UPDATED] write. */
 enum class MemberPutResult { CREATED, UPDATED, UNCHANGED, PROJECT_NOT_FOUND, ASSIGNEE_NOT_FOUND, LAST_ADMIN }
@@ -43,14 +43,14 @@ class ProjectMemberRepository(
     fun list(projectId: String): List<ProjectMemberRow> = transaction(database) {
         execQuery(
             """
-            SELECT a.assignee_id, a.display_name, pm.role, a.state
+            SELECT a.assignee_id, a.display_name, pm.role, a.state, a.role
               FROM project_members pm
               JOIN selfdev_assignees a ON a.assignee_id = pm.assignee_id
              WHERE pm.project_id = ?
              ORDER BY a.created_at, a.assignee_id
             """.trimIndent(),
             projectId,
-        ) { ProjectMemberRow(assigneeId = it.getString(1), displayName = it.getString(2), role = it.getString(3), state = it.getString(4)) }
+        ) { ProjectMemberRow(assigneeId = it.getString(1), displayName = it.getString(2), role = it.getString(3), state = it.getString(4), assignable = it.getString(4) == "ACTIVE" && it.getString(3) != "AI" && it.getString(5) !in setOf("AI", "AI_APPROVER")) }
     }
 
     /** Whether [projectId] exists. Read only. */

@@ -82,6 +82,7 @@ CREATE TABLE selfdev_assignee_events (
 | 運用者の文章を含む読み取り(`READ_TEXT`: Goal の題名、記憶の閲覧) | ○ | ○ | - | - | - |
 | 実行中の Goal の停止(`GOAL_STOP`: `kivra_goal_stop`、Goal の停止ルート) | ○ | ○ | - | - | - |
 | order の作成、周の開始、一時停止、再開、設定の変更 | ○ | ○ | - | - | - |
+| order の割り当て・変更・解除(`ORDER_ASSIGN`、ADR 0024 追補) | ○ | ○ | - | - | - |
 | 停止要求(REST と `kivra_goal_stop`) | ○ | ○ | ○ | ○ | - |
 | 停止の承認・却下(人のみ。AI は不可) | ○(人のみ) | - | ○ | - | - |
 | Goal の投入、計画・タスクの承認、記憶の書き込み | ○ | ○ | - | - | - |

@@ -86,7 +86,7 @@ data class ApiBackfillTable(val table: String, val matched: Long, val updated: L
 
 /** `GET /api/projects/{id}/members`(server `ProjectMemberResponse`)の一人分。state は ACTIVE か DISABLED。 */
 @Serializable
-data class ApiProjectMember(val assigneeId: String, val displayName: String, val role: String, val state: String)
+data class ApiProjectMember(val assigneeId: String, val displayName: String, val role: String, val state: String, val assignable: Boolean = false)
 
 /** `POST /api/projects/{id}/members/import-all`(server `ImportAllResponse`)。件数だけ。 */
 @Serializable

@@ -37,6 +37,7 @@ class PermissionsTest {
         Permission.READ_TEXT to "YYNNNN",
         Permission.GOAL_STOP to "YYNNNN",
         Permission.ORDER_MANAGE to "YYNNNN",
+        Permission.ORDER_ASSIGN to "YYNNNN",
         Permission.STOP_REQUEST to "YYYYNN",
         Permission.STOP_DECIDE to "YNYNNN",
         Permission.GOAL_WRITE to "YYNNNN",

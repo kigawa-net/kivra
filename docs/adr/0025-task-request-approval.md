@@ -1,8 +1,8 @@
 # ADR 0025: 承認フロー付きの Request(「この title のタスクを実行してよいか」の依頼)
 
-- ステータス: 提案(Proposed)。本ブランチで実装する範囲は、本 ADR の「決定」と V61 まで。Compose UI、MCP、チャットは後続。
+- ステータス: 提案(Proposed)。本ブランチで実装する範囲は、本 ADR の「決定」と V62 まで。Compose UI、MCP、チャットは後続。
 - 日付: 2026-11-18
-- 関連: ADR 0008(Task API と PR のみのループ)、ADR 0020(担当と権限。Permission の表)、ADR 0021(停止要求の承認。要求者と決裁者の分離)、ADR 0023(提案の確定と却下。条件付き UPDATE の先例)。V61(`task_requests`、`task_request_events`)
+- 関連: ADR 0008(Task API と PR のみのループ)、ADR 0020(担当と権限。Permission の表)、ADR 0021(停止要求の承認。要求者と決裁者の分離)、ADR 0023(提案の確定と却下。条件付き UPDATE の先例)。V62(`task_requests`、`task_request_events`)
 
 ## 背景
 
@@ -77,7 +77,7 @@
 - 行の種類は `REQUESTED`、`APPROVED`、`REJECTED`、`CANCELLED`、`RUN_LINKED` の固定の 5 つ。`actor_ref` は承認者または依頼者のオーナーキーの SHA-256 先頭 12 桁。自由記述は持たない。`run_id` は `RUN_LINKED` のときだけ入る。
 - 運用者のログ行: `task request action: action=APPROVED actor=<actorRef> requestId=<id> result=...`。オーナーキー、title、理由は出さない。
 
-### 6. データベース(V61、expand のみ)
+### 6. データベース(V62、expand のみ)
 
 - `task_requests`: `request_id` CHAR(26) PK、`project_id` CHAR(26) NOT NULL(FK は `projects`)、`requested_by` VARCHAR(255)、`idempotency_key` VARCHAR(128)、`title` VARCHAR(200)、`state` VARCHAR(16)、`decided_by` VARCHAR(255) NULL、`decided_at` DATETIME(6) NULL、`decision_note` VARCHAR(500) NULL、`run_id` CHAR(26) NULL(FK は `development_runs`)、`created_at` DATETIME(6)。
   - `UNIQUE (requested_by, idempotency_key)`。索引 `(project_id, state, created_at)`。

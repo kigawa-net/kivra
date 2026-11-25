@@ -19,7 +19,7 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 
-/** Exposed definitions mirroring V61__task_requests.sql (ADR 0025). The migration is the source of truth for DDL. */
+/** Exposed definitions mirroring V62__task_requests.sql (ADR 0025). The migration is the source of truth for DDL. */
 object TaskRequestsTable : Table("task_requests") {
     val requestId = char("request_id", 26)
     val projectId = char("project_id", 26)

@@ -134,7 +134,7 @@ data class FlushReport(val flushed: Int, val remaining: Int, val dropped: Int, v
  * Memory is advisory: callers must not make authorization decisions from it.
  */
 class MemoryService(
-    private val provider: MemoryProvider,
+    provider: MemoryProvider?,
     private val queue: WriteQueue = InMemoryWriteQueue(),
     private val audit: MemoryAudit = MemoryAudit.NONE,
     private val clock: Clock = Clock.systemUTC(),
@@ -151,8 +151,17 @@ class MemoryService(
     private val writer: MutationWriter? = null,
     /** Stays DISABLED until recl `recl.memory.v1` is accepted (issue #77 (5)). A DISABLED journal path writes nothing. */
     private val mutationCapability: MutationCapability = MutationCapability.DISABLED,
-) {
+) : AutoCloseable {
+    private val configuredProvider = provider
+    private val provider: MemoryProvider
+        get() = configuredProvider ?: throw MemoryException(MemoryErrorKind.UNAVAILABLE, "no memory provider configured")
+
+    override fun close() { (configuredProvider as? AutoCloseable)?.close() }
+
     init {
+        require(!readTimeout.isNegative && !readTimeout.isZero && readTimeout.toMillis() > 0) { "read timeout must be at least 1 ms" }
+        require(breakerThreshold > 0) { "breaker threshold must be positive" }
+        require(!breakerCooldown.isNegative && !breakerCooldown.isZero) { "breaker cooldown must be positive" }
         require((mutationJournal == null) == (writer == null)) { "mutation journal and writer identity must be given together" }
     }
 
@@ -200,12 +209,16 @@ class MemoryService(
     }
 
     suspend fun recall(q: MemoryQuery, ctx: AccessContext): RecallResult =
-        guardedRead(ctx, "search") { provider.search(q, ctx).map { it.entry } }
+        guardedRead(ctx, "search") {
+            val health = provider.health()
+            if (health == ProviderHealth.DOWN) throw MemoryException(MemoryErrorKind.UNAVAILABLE, "memory provider is DOWN")
+            RecallResult(provider.search(q, ctx).map { it.entry }, degraded = health == ProviderHealth.DEGRADED)
+        }
 
     suspend fun pinned(scopes: List<ScopeRef>, ctx: AccessContext): RecallResult =
-        guardedRead(ctx, "pinned") { provider.pinned(scopes, ctx) }
+        guardedRead(ctx, "pinned") { RecallResult(provider.pinned(scopes, ctx), false) }
 
-    private suspend fun guardedRead(ctx: AccessContext, op: String, block: suspend () -> List<MemoryEntry>): RecallResult {
+    private suspend fun guardedRead(ctx: AccessContext, op: String, block: suspend () -> RecallResult): RecallResult {
         if (isOpen()) {
             audit.record(MemoryAuditEvent(MemoryAuditType.READ_DEGRADED, ctx.executionId, ctx.traceId, mapOf("op" to op, "reason" to "circuit_open")))
             return RecallResult.degraded()
@@ -218,7 +231,7 @@ class MemoryService(
                 RecallResult.degraded()
             } else {
                 onSuccess()
-                RecallResult(r, false)
+                r
             }
         } catch (e: CancellationException) {
             throw e

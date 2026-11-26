@@ -2,6 +2,7 @@ package net.kigawa.kivra
 
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
+import io.ktor.server.application.ApplicationStopped
 import io.ktor.server.application.install
 import io.ktor.server.auth.Authentication
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
@@ -170,6 +171,7 @@ internal fun Application.appModule(env: Map<String, String>) {
     val orderSettings = OrderSettings.fromEnv(env, autopilotSettings, aiPrincipal)
     // Fail-closed: when the MCP endpoint is off (the default), nothing beyond its switch is read and no /mcp route is registered (ADR 0013).
     val mcpSettings = McpSettings.fromEnv(env)
+    val reclSettings = ReclSettings.fromEnv(env)
     val orchestratorSettings = OrchestratorSettings.fromEnv(env)
     val schedulerSettings = SchedulerSettings.fromEnv(env)
     val config = KivraConfig.from(environment.config)
@@ -557,7 +559,13 @@ internal fun Application.appModule(env: Map<String, String>) {
         // TaskPoller and Orchestrator have a circular dependency: the poller needs the sink (Orchestrator),
         // and the Orchestrator needs the poller. Resolve it with a lateinit pattern.
         lateinit var orchestrator: Orchestrator
-        val poller = TaskPoller(fushaAdapter, orchestrator, pollerConfig)
+        val poller = TaskPoller(fushaAdapter, object : net.kigawa.kivra.fusha.poller.TaskEventSink {
+            override suspend fun publish(events: List<net.kigawa.kivra.fusha.poller.TaskPollEvent>) {
+                orchestrator.publish(events)
+            }
+        }, pollerConfig)
+        val reclMemory = ReclWiring.fromEnvironment(reclSettings)
+        monitor.subscribe(ApplicationStopped) { reclMemory?.close() }
         val orchestratorMetrics = OrchestratorMetrics(null) // MetricsRegistry not available here; wired after routing
 
         orchestrator = Orchestrator(
@@ -577,7 +585,8 @@ internal fun Application.appModule(env: Map<String, String>) {
                 reviewerPipeline = reviewerPipeline,
                 config = PlannerPipelineConfig(),
             ),
-            reclContextSearch = ReclContextSearch(provider = null),
+            reclContextSearch = ReclContextSearch(memoryService = reclMemory),
+            memoryScope = net.kigawa.kivra.memory.ScopeRef.tenant(budgetConfig.tenantId),
             reclSummaryWriter = ReclSummaryWriter(provider = null),
             orchestratorMetrics = orchestratorMetrics,
             killSwitch = killSwitch,

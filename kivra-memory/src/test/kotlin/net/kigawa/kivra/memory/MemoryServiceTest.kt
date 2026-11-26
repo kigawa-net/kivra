@@ -25,6 +25,13 @@ class MemoryServiceTest {
     private val q = MemoryQuery("jdk", listOf(T.project))
 
     @Test
+    fun `null provider reads degrade with MEMORY_UNAVAILABLE`() = runTest {
+        val service = MemoryService(null)
+        assertEquals(setOf(ContextWarning.MEMORY_UNAVAILABLE), service.recall(q, ctx).warnings)
+        assertTrue(service.pinned(listOf(T.project), ctx).degraded)
+    }
+
+    @Test
     fun `healthy provider passes through`() = runTest {
         val s = service()
         val saved = assertIs<RememberOutcome.Saved>(s.remember(T.entry(), ctx))
